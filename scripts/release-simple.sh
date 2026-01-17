@@ -41,8 +41,8 @@ rm -f manifest.json.tmp
 
 # Update package.json version (remove v prefix)
 PKG_VERSION=${VERSION#v}
-sed -i.tmp "s/\"version\": \".*\"/\"version\": \"$PKG_VERSION\"/" package.json
-rm -f package.json.tmp
+sed -i.tmp.bak "s/\"version\": \".*$/s/\"version\": \"$PKG_VERSION\"/" package.json
+rm -f package.json.tmp.bak
 
 # Commit version updates
 echo "💾 Committing version updates..."
