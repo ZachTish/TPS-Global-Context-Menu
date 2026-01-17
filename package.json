@@ -6,9 +6,9 @@
   "main": "main.js",
   "type": "module",
   "scripts": {
-    "build": "esbuild src/main.ts --bundle --platform=browser --format=cjs --outfile=build/main.js --external:obsidian --minify && node scripts/copy-files.js",
-    "dev": "esbuild src/main.ts --bundle --platform=browser --format=cjs --outfile=build/main.js --external:obsidian --sourcemap --watch",
-    "watch": "esbuild src/main.ts --bundle --platform=browser --format=cjs --outfile=build/main.js --external:obsidian --sourcemap --watch"
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "version": "node version-bump.mjs && git add manifest.json versions.json"
   },
   "keywords": [
     "obsidian",
@@ -19,8 +19,13 @@
   "author": "Codex",
   "license": "ISC",
   "devDependencies": {
-    "esbuild": "^0.19.3",
     "@types/node": "^20.11.2",
+    "builtin-modules": "3.3.0",
+    "esbuild": "^0.19.3",
+    "obsidian": "latest",
     "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "rrule": "^2.8.1"
   }
 }
