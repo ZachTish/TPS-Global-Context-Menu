@@ -3,11 +3,52 @@ import { TFile, MarkdownView } from 'obsidian';
 /**
  * Plugin settings interface
  */
+export interface CustomProperty {
+  id: string;
+  label: string;
+  key: string;
+  type: 'text' | 'number' | 'datetime' | 'selector' | 'list' | 'recurrence' | 'folder' | 'snooze';
+  options?: string[]; // For selector
+  icon?: string;
+  showInCollapsed?: boolean; // Whether to show this property in the collapsed inline header
+  showInContextMenu?: boolean; // Whether to show this property in the right-click context menu
+}
+
 export interface TPSGlobalContextMenuSettings {
+  enableLogging: boolean;
   enableInLivePreview: boolean;
   enableInPreview: boolean;
   enableInSidePanels: boolean;
+  enableStrictMode: boolean;
+  enableLineItems: boolean; // LINE-ITEMS: Feature flag
   suppressMobileKeyboard: boolean;
+  properties: CustomProperty[];
+
+  // Recurrence settings
+  enableRecurrence: boolean;
+  promptOnRecurrenceEdit: boolean;
+  recurrencePromptTimeout: number; // Minutes
+  recurrenceCompletionStatuses: string[];
+  recurrenceDefaultStatus: string; // Default status for new recurrence instances
+
+  // File naming settings
+
+  enableAutoRename: boolean;
+  autoSaveFolderPath: boolean;
+  folderExclusions: string;
+  checkOpenChecklistItems: boolean;
+
+  // View Mode Settings
+  enableViewModeSwitching: boolean;
+  viewModeFrontmatterKey: string;
+  viewModeIgnoredFolders: string;
+  viewModeRules: { key: string; value: string; mode: string }[];
+
+  // System commands
+  systemCommands: string[];
+
+  // Snooze Settings
+  snoozeOptions: { label: string; minutes: number }[];
 }
 
 /**
@@ -99,6 +140,7 @@ export interface ParsedRecurrence {
 export interface MenuInstances {
   reading?: HTMLElement | null;
   live?: HTMLElement | null;
+  filePath?: string;
 }
 
 /**
