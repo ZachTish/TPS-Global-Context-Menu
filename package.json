@@ -1,0 +1,36 @@
+{
+  "name": "tps-global-context-menu",
+  "version": "0.1.1",
+  "private": true,
+  "description": "Define a single reusable context menu for every note link across the vault.",
+  "main": "main.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
+    "test": "node --test scripts/test-tps-contracts.mjs && node --test scripts/test-gcm-event-service.mjs && node --test scripts/test-identity-service.mjs && node --test scripts/test-identity-migration-service.mjs && node --test scripts/test-card-content-service.mjs && node --test scripts/test-canvas-properties-service.mjs && node --test scripts/test-hide-completed-checkboxes-service.mjs && node --test scripts/test-task-status-checkbox-reconcile-service.mjs && node --test scripts/test-task-line-context-menu-service.mjs && node --test scripts/test-task-api-service.mjs && node --test scripts/test-stable-properties-while-typing.mjs && node --test scripts/test-heading-link-suggest.mjs && node --test scripts/test-auto-pin-active-note-service.mjs && node --test scripts/test-sidebar-open-commands.mjs && node --test scripts/test-settings-normalization.mjs && node --test scripts/test-source-mode-title-rendering.mjs && npm run test:scheduled-format && npm run test:time-tracking",
+    "test:scheduled-format": "node --test scripts/test-scheduled-format.mjs",
+    "test:time-tracking": "node scripts/run-time-tracking-format-test.mjs",
+    "version": "node version-bump.mjs && git add manifest.json versions.json"
+  },
+  "keywords": [
+    "obsidian",
+    "plugin",
+    "tps",
+    "context menu"
+  ],
+  "author": "Codex",
+  "license": "ISC",
+  "devDependencies": {
+    "@types/node": "^20.11.2",
+    "builtin-modules": "3.3.0",
+    "esbuild": "^0.19.3",
+    "obsidian": "latest",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "chrono-node": "^2.9.1",
+    "monkey-around": "^3.0.0",
+    "rrule": "^2.8.1"
+  }
+}

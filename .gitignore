@@ -1,0 +1,11 @@
+node_modules/
+main.js
+*.map
+*.log
+dist/
+build/
+data.json
+data.json.*
+recurrence-session.json
+recurrence-create-state.json
+.DS_Store
