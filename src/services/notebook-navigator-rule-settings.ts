@@ -289,6 +289,7 @@ function normalizeConditionSource(value: unknown): NotebookNavigatorRuleConditio
     value === 'name' ||
     value === 'tag' ||
     value === 'body' ||
+    value === 'checkbox-state' ||
     value === 'date-created' ||
     value === 'date-modified' ||
     value === 'parent-frontmatter' ||

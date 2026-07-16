@@ -47,7 +47,7 @@ test('notebook navigator rules can write icon properties to canvas files', () =>
   assert.match(service, /canvasPropertiesService\.read\(file\)/);
   assert.doesNotMatch(service, /applyRulesToFile\(file: TFile[\s\S]{0,120}file\.extension !== 'md'/);
   assert.match(events, /notebookNavigatorRuleService\.scheduleApply\(file,\s*\{\s*reason: 'create'/);
-  assert.match(events, /notebookNavigatorRuleService\.scheduleApply\(file,\s*\{\s*reason: 'rename'/);
+  assert.match(events, /notebookNavigatorRuleService\.scheduleApply\(liveFile,\s*\{\s*reason: 'rename'/);
   assert.match(main, /No active markdown or canvas file/);
   assert.match(api, /notebookNavigatorRuleService\.canApplyToFile\(file\)/);
 });

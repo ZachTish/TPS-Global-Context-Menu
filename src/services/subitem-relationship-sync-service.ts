@@ -353,7 +353,7 @@ export class SubitemRelationshipSyncService {
       if (next === raw) return;
       if (!this.hasSuspiciousBrokenSubitemLine(raw) && this.hasSuspiciousBrokenSubitemLine(next)) {
         new Notice(`Skipped suspicious subitem body write for "${file.basename}".`);
-        console.warn('[TPS GCM] Refusing to write suspicious broken subitem line', {
+        logger.flowWarn('SubitemRelationship', 'suspicious-body-write-blocked', {
           file: file.path,
           raw,
           next,
@@ -413,7 +413,7 @@ export class SubitemRelationshipSyncService {
 
   private logRetiredAutoRepair(method: string, file: TFile, details?: Record<string, unknown>): void {
     if (!this.plugin.settings.enableLogging) return;
-    console.debug('[TPS GCM] Subitem automatic repair is retired; no write performed.', {
+    logger.flow('SubitemRelationship', 'retired-auto-repair-skipped', {
       method,
       file: file instanceof TFile ? file.path : null,
       ...(details ?? {}),

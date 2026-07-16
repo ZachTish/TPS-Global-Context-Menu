@@ -2,9 +2,14 @@ import { RangeSetBuilder, type Extension } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate, WidgetType } from '@codemirror/view';
 import { Menu, Notice, TFile } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
+import * as logger from '../logger';
 import { ScheduledModal } from '../modals/scheduled-modal';
 import { TextInputModal } from '../modals/text-input-modal';
 import type { CustomProperty } from '../types';
+import {
+  replaceExactLineRevision,
+  type AtomicLineReplacementResult,
+} from '../utils/atomic-line-replacement';
 
 const INLINE_FIELD_RE = /\[([A-Za-z0-9_-]+)::\s*([^\]]*)]/g;
 const HIDDEN_INLINE_METADATA_RE = /(?:\[\^\s*tps-inline:[^\]]+\](?::\s*\S+)?|<span\b[^>]*data-tps-inline-props="[^"]*"[^>]*>\s*<\/span>|<!--\s*tps-inline-props:[\s\S]*?\s*-->|\s*%%\s*tps-inline-props:[\s\S]*?\s*%%)/g;
@@ -351,19 +356,45 @@ export class InlinePropertyDecorationService {
       return;
     }
 
-    const content = await this.plugin.app.vault.cachedRead(targetLine.file);
-    const lines = content.split(/\r?\n/);
-    if (targetLine.lineIndex < 0 || targetLine.lineIndex >= lines.length) return;
-    if (lines[targetLine.lineIndex] !== targetLine.lineText) {
-      const fallbackIndex = lines.findIndex((line) => line === targetLine.lineText);
-      if (fallbackIndex < 0) {
-        new Notice('Could not update inline property because the source line changed.');
-        return;
-      }
-      targetLine.lineIndex = fallbackIndex;
+    const requestedLineIndex = targetLine.lineIndex;
+    let replacement: AtomicLineReplacementResult | null = null;
+    try {
+      await this.plugin.app.vault.process(targetLine.file, (content) => {
+        replacement = replaceExactLineRevision(
+          content,
+          requestedLineIndex,
+          targetLine.lineText,
+          nextLine,
+        );
+        return replacement.content;
+      });
+    } catch (error) {
+      logger.flowError('InlineProperty', 'file-edit:failed', error, {
+        path: targetLine.file.path,
+        requestedLine: requestedLineIndex + 1,
+      });
+      new Notice('Could not update inline property. The note was not changed.');
+      return;
     }
-    lines[targetLine.lineIndex] = nextLine;
-    await this.plugin.app.vault.modify(targetLine.file, lines.join('\n'));
+
+    const settled = replacement as AtomicLineReplacementResult | null;
+    if (!settled || settled.route === 'conflict' || settled.resolvedLineIndex === null) {
+      logger.flowWarn('InlineProperty', 'file-edit:conflict', {
+        path: targetLine.file.path,
+        requestedLine: requestedLineIndex + 1,
+        reason: settled?.conflictReason || 'unresolved',
+      });
+      new Notice('Could not update inline property because the source line changed.');
+      return;
+    }
+
+    targetLine.lineIndex = settled.resolvedLineIndex;
+    logger.flow('InlineProperty', 'file-edit:done', {
+      path: targetLine.file.path,
+      requestedLine: requestedLineIndex + 1,
+      resolvedLine: settled.resolvedLineIndex + 1,
+      route: settled.route,
+    });
   }
 
   private setInlineFieldValue(lineText: string, key: string, value: string | null): string {
@@ -609,7 +640,8 @@ export class InlinePropertyDecorationService {
       const from = lineFrom + match.index;
       const to = from + match[0].length;
       const normalizedKey = propertyKey.toLowerCase();
-      const isReservedMetadata = DEFAULT_INLINE_DENY_KEYS.has(normalizedKey) && normalizedKey.startsWith('tps');
+      const isReservedMetadata = DEFAULT_INLINE_DENY_KEYS.has(normalizedKey)
+        && (normalizedKey.startsWith('tps') || normalizedKey === 'subitemid');
       if (!isReservedMetadata && this.selectionIntersects(view, from, to)) continue;
       const isVisible =
         !isReservedMetadata &&
@@ -644,6 +676,7 @@ export class InlinePropertyDecorationService {
 
   private getInlinePropertyKeys(): Set<string> {
     const keys = new Set<string>();
+    if (this.plugin.settings.showCustomPropertiesInInlineUi === false) return keys;
 
     for (const property of this.plugin.settings.properties || []) {
       const key = this.normalizeInlinePropertyKey(property);
@@ -678,10 +711,14 @@ export class InlinePropertyDecorationService {
   private setRenderedInlineFieldVisibility(field: HTMLElement, key: string, isVisible: boolean): void {
     const classToken = `tps-gcm-rendered-inline-property-chip--${this.toClassToken(key)}`;
     if (isVisible) {
+      field.hidden = false;
+      field.style.removeProperty('display');
       field.classList.add('tps-gcm-rendered-inline-property-chip', classToken);
       field.classList.remove('tps-gcm-hidden-inline-property-rendered');
       field.removeAttribute('aria-hidden');
     } else {
+      field.hidden = true;
+      field.style.setProperty('display', 'none', 'important');
       field.classList.add('tps-gcm-hidden-inline-property-rendered');
       field.classList.remove('tps-gcm-rendered-inline-property-chip', classToken);
       field.setAttribute('aria-hidden', 'true');
@@ -741,6 +778,8 @@ export class InlinePropertyDecorationService {
       range.setEnd(end.node, end.offset);
       const wrapper = document.createElement('span');
       wrapper.className = className;
+      wrapper.hidden = true;
+      wrapper.style.setProperty('display', 'none', 'important');
       wrapper.setAttribute('aria-hidden', 'true');
       wrapper.append(range.extractContents());
       range.insertNode(wrapper);
@@ -830,6 +869,8 @@ export class InlinePropertyDecorationService {
         range.deleteContents();
       } else {
         wrapper.className = 'tps-gcm-hidden-inline-property-rendered';
+        wrapper.hidden = true;
+        wrapper.style.setProperty('display', 'none', 'important');
         wrapper.setAttribute('aria-hidden', 'true');
         wrapper.append(range.extractContents());
       }
@@ -978,6 +1019,8 @@ export class InlinePropertyDecorationService {
 
   private getInlineDateTimePropertyKeys(): Set<string> {
     const keys = new Set<string>();
+    if (this.plugin.settings.showCustomPropertiesInInlineUi === false) return keys;
+
     for (const property of this.plugin.settings.properties || []) {
       const key = this.normalizeInlinePropertyKey(property);
       if (!key) continue;

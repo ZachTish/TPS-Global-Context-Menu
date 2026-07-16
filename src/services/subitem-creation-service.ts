@@ -9,6 +9,10 @@ export interface CreateSubitemOptions {
   seedParentTags?: boolean;
   seedVisualMetadata?: boolean;
   insertParentBodyLink?: boolean;
+  inheritParentTemporalMetadata?: boolean;
+  saveFolderPath?: boolean;
+  targetPath?: string;
+  frontmatterTitle?: string;
 }
 
 export async function promptAndCreateSubitemForParent(
@@ -48,14 +52,30 @@ export async function createSubitemForParentWithTitle(
     return null;
   }
 
-  const folderInput = String(folderPathSelection ?? getDefaultSubitemFolderPath(plugin, parentFile) ?? '/').trim() || '/';
+  const requestedTargetPath = normalizeRequestedMarkdownPath(options?.targetPath);
+  const requestedFolderPath = requestedTargetPath.includes('/')
+    ? requestedTargetPath.slice(0, requestedTargetPath.lastIndexOf('/'))
+    : '';
+  const folderInput = requestedTargetPath
+    ? requestedFolderPath || '/'
+    : String(folderPathSelection ?? getDefaultSubitemFolderPath(plugin, parentFile) ?? '/').trim() || '/';
   const folderPath = folderInput === '/' ? '' : normalizePath(folderInput);
   if (folderPath) {
     await ensureFolderPath(plugin.app, folderPath);
   }
 
-  const targetPath = getUniqueMarkdownPath(plugin.app, folderPath, cleanedTitle);
-  const escapedTitle = cleanedTitle.replace(/"/g, '\\"');
+  const targetPath = requestedTargetPath || getUniqueMarkdownPath(plugin.app, folderPath, cleanedTitle);
+  const existingTarget = plugin.app.vault.getAbstractFileByPath(targetPath);
+  if (existingTarget instanceof TFile) return existingTarget;
+  if (existingTarget) {
+    new Notice('A non-note item already uses the requested task note path.');
+    return null;
+  }
+  const displayTitle = String(options?.frontmatterTitle || cleanedTitle)
+    .replace(/[\r\n]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || cleanedTitle;
+  const escapedTitle = displayTitle.replace(/"/g, '\\"');
   const parentLinkKey = plugin.parentLinkResolutionService.getParentKey();
   const parentLinkValue = buildParentFrontmatterLinkValue(
     plugin.app,
@@ -85,10 +105,10 @@ export async function createSubitemForParentWithTitle(
     `${parentLinkKey}:`,
     `  - "${parentLinkValue}"`,
   ];
-  if (isDailyNoteParent && dailyNoteDateStr) {
-      frontmatterLines.push(`scheduled: ${dailyNoteDateStr}`);
+  if (options?.inheritParentTemporalMetadata !== false && isDailyNoteParent && dailyNoteDateStr) {
+    frontmatterLines.push(`scheduled: ${dailyNoteDateStr}`);
   }
-  if (plugin.settings.autoSaveFolderPath) {
+  if (options?.saveFolderPath === true || (options?.saveFolderPath !== false && plugin.settings.autoSaveFolderPath)) {
     frontmatterLines.push(`folderPath: "${(folderPath || '/').replace(/"/g, '\\"')}"`);
   }
   if (seedVisualMetadata) {
@@ -112,8 +132,10 @@ export async function createSubitemForParentWithTitle(
       .map((line) => line.split(':')[0]?.trim().toLowerCase())
       .filter((key): key is string => Boolean(key)),
   );
-  const inheritedLines = collectInheritedParentFrontmatterLines(parentFrontmatter, beforeInheritedKeys);
-  frontmatterLines.push(...inheritedLines);
+  if (options?.inheritParentTemporalMetadata !== false) {
+    const inheritedLines = collectInheritedParentFrontmatterLines(parentFrontmatter, beforeInheritedKeys);
+    frontmatterLines.push(...inheritedLines);
+  }
   const parentTags = seedParentTags
     ? filterIgnoredSubitemTags(plugin, parseTagInput([parentFrontmatter.tags, parentFrontmatter.tag]))
     : [];
@@ -129,6 +151,14 @@ export async function createSubitemForParentWithTitle(
   try {
     created = await plugin.app.vault.create(targetPath, initialContent);
   } catch (error) {
+    const racedTarget = plugin.app.vault.getAbstractFileByPath(targetPath);
+    if (racedTarget instanceof TFile) {
+      logger.flow('SubitemCreate', 'create:race-recovered', {
+        parentPath: parentFile.path,
+        targetPath,
+      });
+      return racedTarget;
+    }
     logger.error('[TPS GCM] Failed creating subitem:', error);
     new Notice('Failed to create subitem.');
     return null;
@@ -191,6 +221,13 @@ function isMalformedSubitemTitle(title: string): boolean {
   const normalized = String(title || '').trim();
   if (!normalized) return false;
   return /^\[\[+$/.test(normalized);
+}
+
+function normalizeRequestedMarkdownPath(value: string | null | undefined): string {
+  const raw = String(value || '').trim().replace(/^\/+/, '');
+  if (!raw) return '';
+  const normalized = normalizePath(raw);
+  return normalized.toLowerCase().endsWith('.md') ? normalized : `${normalized}.md`;
 }
 
 export function getUniqueMarkdownPath(app: App, folderPath: string, basename: string): string {

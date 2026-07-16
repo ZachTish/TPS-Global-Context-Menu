@@ -13,7 +13,7 @@ import { formatFileWikilink, isLinkListProperty, parseStringListInput } from '..
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { BadgeRenderer, hashStringToHue } from './badge-renderer';
 import { PanelBuilder } from './panel-builder';
-import { MenuBuilder } from './menu-builder';
+import { MenuBuilder, type NativeMenuLabelOptions } from './menu-builder';
 
 export function addSafeClickListener(element: HTMLElement, handler: (e: MouseEvent) => void) {
   element.addEventListener('click', (e) => {
@@ -127,9 +127,9 @@ export class MenuController {
 
   // --- Delegated public API ---
 
-  addToNativeMenu(menu: Menu, files: TFile[]) {
+  addToNativeMenu(menu: Menu, files: TFile[], options: NativeMenuLabelOptions = {}) {
     if (this.plugin.settings.inlineMenuOnly) return;
-    this.menuBuilder.addToNativeMenu(menu, files);
+    this.menuBuilder.addToNativeMenu(menu, files, options);
   }
 
   buildSpecialPanel(files: TFile[], options: BuildPanelOptions = {}): HTMLElement {
@@ -591,11 +591,12 @@ export class MenuController {
           if (clearing) {
             delete entry.frontmatter[key];
             delete entry.frontmatter.timeEstimate;
-            entry.frontmatter.allDay = false;
+            delete entry.frontmatter.allDay;
           } else {
             entry.frontmatter[key] = result.date;
             entry.frontmatter.timeEstimate = result.timeEstimate;
-            entry.frontmatter.allDay = result.allDay;
+            if (result.allDay) entry.frontmatter.allDay = true;
+            else delete entry.frontmatter.allDay;
           }
         });
         await this.afterWholeNotePropertyEdit(files, [key, 'timeEstimate', 'allDay']);

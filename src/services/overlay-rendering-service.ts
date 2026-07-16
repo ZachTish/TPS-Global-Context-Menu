@@ -265,11 +265,7 @@ export class OverlayRenderingService extends Component {
   }
 
   private taskTrace(message: string, details?: Record<string, unknown>): void {
-    if ((window as any).__TPS_TASKTRACE !== true) return;
-    console.log(`[TPS TASKTRACE] [GCM Overlay] ${message}`, {
-      t: Math.round(performance.now()),
-      ...(details || {}),
-    });
+    logger.taskTrace('GCM Overlay', message, details);
   }
 
   private resetPending(): void {

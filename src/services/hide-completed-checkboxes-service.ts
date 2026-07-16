@@ -11,7 +11,8 @@ const EDITING_ROOT_CLASS = 'tps-gcm-completed-checkboxes-editing';
 const HAS_REVEAL_WIDGET_CLASS = 'tps-gcm-completed-checkboxes-has-reveal';
 const HIDE_ALL_TASK_LINES_BODY_CLASS = 'tps-gcm-hide-all-task-lines-reading-mode';
 const TASK_HIDING_EXCLUDED_ROOT_CLASS = 'tps-gcm-task-hiding-excluded';
-const COMPLETED_TASK_RE = /^\s*(?:[-*+]|\d+[.)])\s+\[(?:x|X|-)\](?:\s|$)/;
+const HIDDEN_TASK_DATA_SELECTOR = '[data-task="x"], [data-task="X"], [data-task="-"], [data-task=">"]';
+const COMPLETED_TASK_RE = /^\s*(?:[-*+]|\d+[.)])\s+\[(?:x|X|-|>)\](?:\s|$)/;
 const EDITING_QUIET_WINDOW_MS = 1200;
 type HiddenCompletedLine = { from: number; text: string };
 type TaskVisibilityState = { showCompleted?: boolean; showTasks?: boolean };
@@ -347,7 +348,7 @@ export class HideCompletedCheckboxesService {
     const hasRevealableTasks = revealAllTasks
       ? root.querySelector('li.task-list-item[data-task], li.task-list-item') !== null
       : root.querySelector(
-      'li.task-list-item[data-task="x"], li.task-list-item[data-task="X"], li.task-list-item[data-task="-"], li.task-list-item.is-checked',
+      'li.task-list-item[data-task="x"], li.task-list-item[data-task="X"], li.task-list-item[data-task="-"], li.task-list-item[data-task=">"], li.task-list-item.is-checked',
     ) !== null;
     const revealed = this.getEffectiveRevealState(root, revealAllTasks);
     root.classList.toggle(REVEALED_ROOT_CLASS, revealed);
@@ -392,7 +393,8 @@ export class HideCompletedCheckboxesService {
     root.classList.add(HAS_REVEAL_WIDGET_CLASS);
 
     const wrap = existing ?? document.createElement('div');
-    wrap.className = REVEAL_WIDGET_CLASS;
+    wrap.className = `${REVEAL_WIDGET_CLASS} tps-gcm-hover-element`;
+    wrap.dataset.tpsHoverElement = 'true';
 
     let button = wrap.querySelector('button');
     if (!button) {
@@ -545,8 +547,8 @@ export class HideCompletedCheckboxesService {
 
   private isCompletedTaskLine(line: HTMLElement): boolean {
     if (COMPLETED_TASK_RE.test(line.textContent ?? '')) return true;
-    if (line.matches('[data-task="x"], [data-task="X"], [data-task="-"]')) return true;
-    const task = line.querySelector<HTMLElement>('[data-task="x"], [data-task="X"], [data-task="-"]');
+    if (line.matches(HIDDEN_TASK_DATA_SELECTOR)) return true;
+    const task = line.querySelector<HTMLElement>(HIDDEN_TASK_DATA_SELECTOR);
     if (task) return true;
     if (line.querySelector('[aria-checked="true"]')) return true;
     return false;
@@ -610,9 +612,92 @@ export class HideCompletedCheckboxesService {
     if (!patterns.length) return false;
     const normalizedPath = this.normalizeTaskHidingExclusionValue(file.path);
     const normalizedBasename = this.normalizeTaskHidingExclusionValue(file.basename);
+    const tags = this.getTaskHidingFileTags(file);
+    const cssclasses = this.getTaskHidingFileCssClasses(file);
     return patterns.some((pattern) =>
-      this.plugin.matchesAutoFrontmatterExclusionPattern(normalizedPath, normalizedBasename, pattern),
+      this.matchesTaskHidingExclusionPattern(normalizedPath, normalizedBasename, tags, cssclasses, pattern),
     );
+  }
+
+  private matchesTaskHidingExclusionPattern(
+    normalizedPath: string,
+    normalizedBasename: string,
+    tags: Set<string>,
+    cssclasses: Set<string>,
+    rawPattern: string,
+  ): boolean {
+    const pattern = String(rawPattern || '').trim();
+    if (!pattern) return false;
+    const asLower = pattern.toLowerCase();
+    if (asLower.startsWith('tag:')) {
+      const tag = this.normalizeTaskHidingTagPattern(pattern.slice(4));
+      return tag ? tags.has(tag) : false;
+    }
+    if (asLower.startsWith('#')) {
+      const tag = this.normalizeTaskHidingTagPattern(pattern);
+      return tag ? tags.has(tag) : false;
+    }
+    if (asLower.startsWith('cssclass:')) {
+      const cssclass = this.normalizeTaskHidingExclusionValue(pattern.slice(9));
+      return cssclass ? cssclasses.has(cssclass) : false;
+    }
+    if (asLower.startsWith('class:')) {
+      const cssclass = this.normalizeTaskHidingExclusionValue(pattern.slice(6));
+      return cssclass ? cssclasses.has(cssclass) : false;
+    }
+    return this.plugin.matchesAutoFrontmatterExclusionPattern(normalizedPath, normalizedBasename, pattern);
+  }
+
+  private getTaskHidingFileTags(file: TFile): Set<string> {
+    const cache = this.plugin.app.metadataCache.getFileCache(file);
+    const tags = new Set<string>();
+    for (const tag of cache?.tags ?? []) {
+      this.addTaskHidingTag(tags, tag?.tag);
+    }
+    const frontmatter = cache?.frontmatter as Record<string, unknown> | undefined;
+    this.addTaskHidingTag(tags, frontmatter?.tags);
+    this.addTaskHidingTag(tags, frontmatter?.tag);
+    return tags;
+  }
+
+  private addTaskHidingTag(tags: Set<string>, raw: unknown): void {
+    if (Array.isArray(raw)) {
+      for (const item of raw) this.addTaskHidingTag(tags, item);
+      return;
+    }
+    if (typeof raw !== 'string') return;
+    for (const token of raw.split(/[\s,]+/)) {
+      const normalized = this.normalizeTaskHidingTagPattern(token);
+      if (normalized) tags.add(normalized);
+    }
+  }
+
+  private normalizeTaskHidingTagPattern(value: string): string {
+    return String(value || '')
+      .trim()
+      .replace(/^#+/, '')
+      .replace(/,+$/, '')
+      .toLowerCase();
+  }
+
+  private getTaskHidingFileCssClasses(file: TFile): Set<string> {
+    const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+    const cssclasses = new Set<string>();
+    this.addTaskHidingCssClass(cssclasses, frontmatter?.cssclass);
+    this.addTaskHidingCssClass(cssclasses, frontmatter?.cssclasses);
+    return cssclasses;
+  }
+
+  private addTaskHidingCssClass(cssclasses: Set<string>, raw: unknown): void {
+    if (Array.isArray(raw)) {
+      for (const item of raw) this.addTaskHidingCssClass(cssclasses, item);
+      return;
+    }
+    if (typeof raw !== 'string') return;
+    for (const token of raw.split(/[\s,]+/)) {
+      const normalized = this.normalizeTaskHidingExclusionValue(token);
+      if (normalized) cssclasses.add(normalized);
+    }
   }
 
   private getTaskHidingExclusionPatterns(): string[] {

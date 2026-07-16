@@ -11,6 +11,7 @@ export class StatusChoiceModal extends Modal {
   }
 
   onOpen(): void {
+    this.modalEl.addClass('mod-tps-gcm');
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl('h3', { text: 'All checklist items are resolved' });
@@ -37,4 +38,3 @@ export class StatusChoiceModal extends Modal {
     this.contentEl.empty();
   }
 }
-

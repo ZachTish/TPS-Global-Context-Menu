@@ -20,6 +20,7 @@ type RuleContext = {
   frontmatter: Record<string, unknown> | null;
   tags: string[];
   body?: string;
+  checkboxStates?: string[];
   lineType?: 'note' | 'task';
   relationshipLineage?: RelationshipLineageNode[];
   parent?: {
@@ -137,6 +138,7 @@ export class NotebookNavigatorRuleService {
     const body = await this.readBody(file);
     const changed = await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
       const context = this.buildRuleContext(file, frontmatter, body);
+      this.removeGeneratedBlankNoteTitle(file, frontmatter, body, options);
       const visualOutputs = ruleEngine.resolveVisualOutputs(settings.rules || [], context);
       const desiredIcon = visualOutputs?.icon?.matched
         ? String(visualOutputs.icon.value || '').trim()
@@ -260,12 +262,30 @@ export class NotebookNavigatorRuleService {
     return this.ruleEngine;
   }
 
+  private removeGeneratedBlankNoteTitle(file: TFile, frontmatter: Record<string, unknown>, body: string, options: ApplyOptions): void {
+    if (options.reason !== 'create') return;
+    if (String(body || '').trim()) return;
+    const titleKey = findKeyCaseInsensitive(frontmatter, 'title');
+    if (!titleKey) return;
+    const title = String(frontmatter[titleKey] ?? '').replace(/\s+/g, ' ').trim();
+    const basename = String(file.basename || '').replace(/\s+/g, ' ').trim();
+    if (!title || title !== basename) return;
+    deleteValueCaseInsensitive(frontmatter, 'title');
+  }
+
   private getRuleCandidateFiles(): TFile[] {
     return this.plugin.app.vault.getFiles().filter((file): file is TFile => this.canApplyToFile(file));
   }
 
   private shouldIgnore(file: TFile, options: ApplyOptions): boolean {
     if (!options.bypassCreationGrace && !options.force && Date.now() - file.stat.ctime < 2000) return true;
+    if ((options.reason === 'rename' || this.isAutomaticReason(options.reason)) && this.isNavigationTextInputActive()) {
+      logger.debug('[TPS GCM] Skipping Notebook Navigator rule apply while navigation text input is active', {
+        file: file.path,
+        reason: options.reason || 'scheduled',
+      });
+      return true;
+    }
     if (!options.force && options.reason === 'metadata-change' && this.isActiveFile(file)) {
       logger.debug('[TPS GCM] Skipping metadata-change Notebook Navigator rule apply for active note', {
         file: file.path,
@@ -292,6 +312,27 @@ export class NotebookNavigatorRuleService {
 
   private isAutomaticReason(reason: string | undefined): boolean {
     return reason === 'file-open' || reason === 'metadata-change' || !reason;
+  }
+
+  private isNavigationTextInputActive(): boolean {
+    const active = document.activeElement;
+    if (!(active instanceof HTMLElement)) return false;
+    const isTextInput = active instanceof HTMLInputElement
+      || active instanceof HTMLTextAreaElement
+      || active.getAttribute('contenteditable') === 'true';
+    if (!isTextInput) return false;
+    return !!active.closest([
+      '.workspace-leaf-content[data-type="file-explorer"]',
+      '.nav-files-container',
+      '.nav-file',
+      '.nav-folder',
+      '.tree-item',
+      '.tree-item-self',
+      '.nn-split',
+      '.nn-pane',
+      '.nn-navitem',
+      '.nn-file',
+    ].join(', '));
   }
 
   private wasRecentlyUserEdited(file: TFile): boolean {
@@ -372,6 +413,7 @@ export class NotebookNavigatorRuleService {
       frontmatter,
       tags: this.collectTags(file, frontmatter),
       body,
+      checkboxStates: this.collectCheckboxStates(body),
     };
 
     if (this.getSettings()?.smartSort?.relationshipGrouping === 'children-under-parent') {
@@ -390,6 +432,17 @@ export class NotebookNavigatorRuleService {
       };
     }
     return context;
+  }
+
+  private collectCheckboxStates(body: string): string[] {
+    const states = new Set<string>();
+    const pattern = /^[\t ]*[-*+]\s+\[([^\]\r\n]*)\]/gm;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(body)) !== null) {
+      const marker = String(match[1] || '').trim();
+      states.add(marker || 'open');
+    }
+    return Array.from(states);
   }
 
   private buildRelationshipLineage(file: TFile, frontmatter: Record<string, unknown> | null): RelationshipLineageNode[] {

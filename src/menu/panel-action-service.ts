@@ -18,6 +18,7 @@ import { ConfirmDeleteModal } from '../modals/confirm-delete-modal';
 import { CameraCaptureModal } from '../modals/camera-capture-modal';
 import { TextInputModal } from '../modals/text-input-modal';
 import { getFolderPathOptions, getUniqueMarkdownPath, sanitizeSubitemTitle } from '../services/subitem-creation-service';
+import { getPlainDisplayTitle } from '../utils/display-title';
 
 type ViewMode = 'reading' | 'live' | 'source';
 
@@ -418,8 +419,9 @@ export class PanelActionService {
     }
 
     menu.addItem(item => {
-      item.setTitle('Rename Title')
+      item.setTitle(`Title: ${getPlainDisplayTitle(this.plugin.noteTitleRenderService.getDisplayTitle(file), file.basename) || '(untitled)'}`)
         .setIcon('pencil')
+        .setDisabled(!isMd)
         .onClick(() => {
           void this.promptRenameFile(file);
         });

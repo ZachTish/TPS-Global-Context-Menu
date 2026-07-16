@@ -2,6 +2,7 @@ import { Menu, Setting } from "obsidian";
 import { SortBucket, SortCriteria, RuleCondition, createDefaultSortCriteria } from "../types";
 import {
     CONDITION_SOURCE_OPTIONS,
+    conditionSourceHasField,
     createDefaultCondition,
     getConditionValuePlaceholder,
     getOperatorLabel,
@@ -11,6 +12,7 @@ import {
     parseMappings,
     SORT_SOURCE_OPTIONS,
     SettingsSectionContext,
+    smartOperatorNeedsValue,
     stringifyMappings
 } from "./ui-common";
 import { getValidOperators } from "./operators";
@@ -382,10 +384,7 @@ export class BucketSectionRenderer {
                     return;
                 }
                 liveCondition.source = normalizeConditionSource(sourceSelect.value);
-                if (
-                    liveCondition.source !== "frontmatter" &&
-                    liveCondition.source !== "parent-frontmatter"
-                ) {
+                if (!conditionSourceHasField(liveCondition.source)) {
                     liveCondition.field = "";
                 }
 
@@ -450,10 +449,7 @@ export class BucketSectionRenderer {
             })();
         });
 
-        if (
-            condition.source === "frontmatter" ||
-            condition.source === "parent-frontmatter"
-        ) {
+        if (conditionSourceHasField(condition.source)) {
             const fieldWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
             fieldWrap.createEl("label", { text: "Property" });
             const fieldInput = fieldWrap.createEl("input", {
@@ -480,16 +476,7 @@ export class BucketSectionRenderer {
             });
         }
 
-        const isUnary =
-            condition.operator === "exists" ||
-            condition.operator === "!exists" ||
-            condition.operator === "is-not-empty" ||
-            condition.operator === "has-open-checkboxes" ||
-            condition.operator === "!has-open-checkboxes" ||
-            condition.operator === "is-today" ||
-            condition.operator === "!is-today";
-
-        if (!isUnary) {
+        if (smartOperatorNeedsValue(condition.operator)) {
             const valueWrap = grid.createDiv({ cls: "tps-nn-condition-field tps-nn-condition-field-value" });
             valueWrap.createEl("label", { text: "Value" });
             const valueInput = valueWrap.createEl("input", {
@@ -661,7 +648,7 @@ export class BucketSectionRenderer {
                     return;
                 }
                 liveCriterion.source = normalizeConditionSource(sourceSelect.value);
-                if (liveCriterion.source !== "frontmatter" && liveCriterion.source !== "parent-frontmatter") {
+                if (!conditionSourceHasField(liveCriterion.source)) {
                     liveCriterion.field = "";
                 }
                 await plugin.saveSettings();
@@ -670,7 +657,7 @@ export class BucketSectionRenderer {
             })();
         });
 
-        const hasType = criterion.source === "frontmatter" || criterion.source === "parent-frontmatter";
+        const hasType = conditionSourceHasField(criterion.source);
         const isMetadata =
             criterion.source === "frontmatter" ||
             criterion.source === "parent-frontmatter" ||
@@ -680,6 +667,7 @@ export class BucketSectionRenderer {
             criterion.source === "parent-path" ||
             criterion.source === "tag" ||
             criterion.source === "parent-tag" ||
+            criterion.source === "checkbox-state" ||
             criterion.source === "extension";
 
         if (hasType) {
@@ -708,7 +696,7 @@ export class BucketSectionRenderer {
             });
         }
 
-        if (criterion.source === "frontmatter" || criterion.source === "parent-frontmatter") {
+        if (conditionSourceHasField(criterion.source)) {
             const fieldWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
             fieldWrap.createEl("label", { text: "Field" });
             const fieldInput = fieldWrap.createEl("input", {

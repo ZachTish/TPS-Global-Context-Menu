@@ -14,7 +14,7 @@ export function dailyNoteTaskScheduleInheritanceEnabled(settings: unknown): bool
 
 export function getDailyNoteFolder(app: App): string {
   try {
-    const folder = String((app as any).internalPlugins?.plugins?.['daily-notes']?.instance?.options?.folder || '').trim();
+    const folder = String(getCoreDailyNotesOptions(app)?.folder || '').trim();
     if (folder) return folder;
   } catch {
     // Fall through to the historical plugin default.
@@ -25,8 +25,17 @@ export function getDailyNoteFolder(app: App): string {
 export function getDailyNoteDateFormat(app: App, settings: unknown): string {
   const configured = String((settings as { dailyNoteDateFormat?: string } | null | undefined)?.dailyNoteDateFormat || '').trim();
   if (configured) return configured;
-  const dailyNotesFormat = String((app as any).internalPlugins?.plugins?.['daily-notes']?.instance?.options?.format || '').trim();
+  const dailyNotesFormat = String(getCoreDailyNotesOptions(app)?.format || '').trim();
   return dailyNotesFormat || 'YYYY-MM-DD';
+}
+
+function getCoreDailyNotesOptions(app: App): Record<string, unknown> | null {
+  const internalPlugins = (app as any).internalPlugins;
+  const plugin = internalPlugins?.getPluginById?.('daily-notes')
+    ?? internalPlugins?.plugins?.['daily-notes'];
+  return plugin?.instance?.options && typeof plugin.instance.options === 'object'
+    ? plugin.instance.options
+    : null;
 }
 
 export function parseDailyNoteFileDate(app: App, settings: unknown, file: FileLike): string | null {

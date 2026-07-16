@@ -387,7 +387,8 @@ export class TaskLineDragService {
     if (!host) return null;
     const source = view.getViewData();
     const lines = source.split('\n');
-    const dataLine = Number(host.getAttribute('data-line'));
+    const renderedLine = host.getAttribute('data-line');
+    const dataLine = renderedLine == null || renderedLine.trim() === '' ? Number.NaN : Number(renderedLine);
     if (Number.isFinite(dataLine)) {
       const context = this.contextFromLine(view.file as TFile, dataLine, lines[dataLine] || '');
       if (context) return context;
@@ -395,13 +396,14 @@ export class TaskLineDragService {
 
     const hostText = normalizeTaskText(host.innerText || host.textContent || '');
     if (!hostText) return null;
+    const matches: TaskLineDragContext[] = [];
     for (let index = 0; index < lines.length; index += 1) {
       const context = this.contextFromLine(view.file as TFile, index, lines[index] || '');
       if (!context) continue;
       const lineText = normalizeTaskText(context.title || context.rawLine);
-      if (lineText && (hostText.includes(lineText) || lineText.includes(hostText))) return context;
+      if (lineText && (hostText.includes(lineText) || lineText.includes(hostText))) matches.push(context);
     }
-    return null;
+    return matches.length === 1 ? matches[0] : null;
   }
 
   private contextFromLine(file: TFile, lineNumber: number, rawLine: string): TaskLineDragContext | null {

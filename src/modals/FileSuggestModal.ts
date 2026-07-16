@@ -1,10 +1,11 @@
-import { App, FuzzySuggestModal, TFile } from "obsidian";
+import { App, FuzzySuggestModal, Notice, TFile } from "obsidian";
+import * as logger from '../logger';
 
 export class FileSuggestModal extends FuzzySuggestModal<TFile> {
-    private onChoose: (file: TFile) => void;
+    private onChoose: (file: TFile) => void | Promise<void>;
     private readonly allowedExtensions: Set<string> | null;
 
-    constructor(app: App, onChoose: (file: TFile) => void, options?: { extensions?: string[] }) {
+    constructor(app: App, onChoose: (file: TFile) => void | Promise<void>, options?: { extensions?: string[] }) {
         super(app);
         this.onChoose = onChoose;
         this.allowedExtensions = Array.isArray(options?.extensions) && options.extensions.length > 0
@@ -25,6 +26,9 @@ export class FileSuggestModal extends FuzzySuggestModal<TFile> {
     }
 
     onChooseItem(item: TFile, evt: MouseEvent | KeyboardEvent): void {
-        this.onChoose(item);
+        void Promise.resolve(this.onChoose(item)).catch((error) => {
+            logger.flowError('FileSuggestModal', 'choose:failed', error, { path: item.path });
+            new Notice('Could not complete the file action.');
+        });
     }
 }

@@ -6,6 +6,7 @@ import { resolveCustomProperties } from '../resolve-profiles';
 import { ViewModeService } from '../services/view-mode-service';
 import { isTextListProperty } from '../utils/list-utils';
 import { getEffectivePropertyOptions } from '../utils/property-options';
+import { getPlainDisplayTitle } from '../utils/display-title';
 
 /**
  * Generate a consistent hue (0-360) from a string using a simple hash.
@@ -132,9 +133,10 @@ export class BadgeRenderer {
     const title = document.createElement('span');
     title.className = 'tps-gcm-file-title';
 
-    let displayTitle = fm.title && fm.title !== file.basename
-      ? `${fm.title} (${file.basename})`
-      : (fm.title || file.basename || 'Untitled');
+    const plainFrontmatterTitle = getPlainDisplayTitle(fm.title);
+    let displayTitle = plainFrontmatterTitle && plainFrontmatterTitle !== file.basename
+      ? `${plainFrontmatterTitle} (${file.basename})`
+      : (plainFrontmatterTitle || file.basename || 'Untitled');
 
     if (!FULL_DATE_REGEX.test(displayTitle)) {
       displayTitle = stripDateSuffix(displayTitle);

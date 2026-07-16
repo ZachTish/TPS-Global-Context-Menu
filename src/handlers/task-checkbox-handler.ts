@@ -4,6 +4,7 @@ import type TPSGlobalContextMenuPlugin from '../main';
 import { StatusChoiceModal } from '../modals/status-choice-modal';
 import type { TaskLineContext } from '../services/task-line-context-menu-service';
 import { getCheckboxStateMarker, normalizeCheckboxStateToken } from '../utils/checkbox-state';
+import { findCurrentTaskLineIndex } from '../utils/task-block-move';
 import {
     getTaskDisplayTitle,
     parseTaskLine,
@@ -11,7 +12,10 @@ import {
     updateTaskCompletedDateForCheckboxState,
     updateTaskLineTimestamps,
 } from '../utils/task-line-metadata';
-import { getLinkedSubitemCompleteMarkers } from '../utils/linked-subitem-mapping';
+import {
+    getLinkedSubitemCompleteMarkers,
+    normalizeLinkedSubitemMappings,
+} from '../utils/linked-subitem-mapping';
 
 type TaskCheckboxContext = {
     file: TFile;
@@ -19,14 +23,6 @@ type TaskCheckboxContext = {
     rawLine: string;
     currentToken: string;
 };
-
-const TASK_STATE_OPTIONS = [
-    { token: '[ ]', label: 'Open', icon: 'square' },
-    { token: '[?]', label: 'Question', icon: 'circle-help' },
-    { token: '[-]', label: 'Canceled', icon: 'minus' },
-    { token: '[*]', label: 'Starred', icon: 'asterisk' },
-    { token: '[x]', label: 'Complete', icon: 'check' },
-];
 
 /**
  * Handles note-level checklist follow-up behavior.
@@ -95,16 +91,17 @@ export class TaskCheckboxHandler {
 
     private showTaskStateMenu(context: TaskCheckboxContext, x: number, y: number): void {
         const menu = new Menu();
-        for (const option of TASK_STATE_OPTIONS) {
+        for (const mapping of this.getCheckboxMappings()) {
+            const label = String(mapping.label || mapping.statuses[0] || mapping.checkboxState).trim();
             menu.addItem((item) => {
                 item
-                    .setTitle(`${option.token} ${option.label}`)
-                    .setIcon(option.icon);
-                if (option.token === context.currentToken) {
+                    .setTitle(`${mapping.checkboxState} ${label}`)
+                    .setIcon(mapping.icon || 'square');
+                if (mapping.checkboxState === context.currentToken) {
                     item.setChecked(true);
                 }
                 item.onClick(() => {
-                    void this.setTaskCheckboxState(context, option.token);
+                    void this.setTaskCheckboxState(context, mapping.checkboxState);
                 });
             });
         }
@@ -155,10 +152,14 @@ export class TaskCheckboxHandler {
         const nextMarker = getCheckboxStateMarker(token);
         let updatedLines: string[] | null = null;
         let didWrite = false;
+        let unresolvedWrite = false;
 
         await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(context.file, async (lines) => {
             const lineIndex = this.resolveCurrentTaskLineIndex(lines, context);
-            if (lineIndex < 0) return false;
+            if (lineIndex < 0) {
+                unresolvedWrite = true;
+                return false;
+            }
 
             const currentLine = lines[lineIndex] || '';
             let updatedLine = this.withTaskCheckboxToken(currentLine, token);
@@ -166,6 +167,7 @@ export class TaskCheckboxHandler {
                 completeMarkers: this.getCompleteMarkers(),
             });
             updatedLine = updateTaskLineTimestamps(updatedLine, {
+                enabled: this.plugin.settings.autoSyncFileTimestamps === true,
                 modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
                 format: this.plugin.settings.fileTimestampFormat,
                 markModified: true,
@@ -178,29 +180,61 @@ export class TaskCheckboxHandler {
             return true;
         });
 
+        if (unresolvedWrite) {
+            logger.flowWarn('TaskCheckboxMenu', 'write:unresolved-task', {
+                path: context.file.path,
+                renderedLineNumber: context.lineNumber + 1,
+                nextCheckboxState: token,
+            });
+            new Notice('That task changed before its checkbox could be updated. Refresh and try again.');
+            return;
+        }
         if (!didWrite || !updatedLines) return;
         await this.handleExternalChecklistStateMutation(context.file, previousMarker, nextMarker, updatedLines);
         new Notice(`Set checkbox to ${token}.`);
     }
 
     private resolveCurrentTaskLineIndex(lines: string[], context: TaskCheckboxContext): number {
-        if (
-            typeof lines[context.lineNumber] === 'string' &&
-            lines[context.lineNumber] === context.rawLine
-        ) {
-            return context.lineNumber;
+        const exactMatches = lines.reduce<number[]>((indexes, line, index) => {
+            if (line === context.rawLine && parseTaskLine(line || '')) indexes.push(index);
+            return indexes;
+        }, []);
+        if (exactMatches.length === 1 || exactMatches.includes(context.lineNumber)) {
+            return findCurrentTaskLineIndex(lines, context.lineNumber, context.rawLine, '');
         }
-        const normalizedRaw = this.normalizeTaskText(context.rawLine);
-        return lines.findIndex((line) => parseTaskLine(line || '') && this.normalizeTaskText(line || '') === normalizedRaw);
+        if (exactMatches.length > 1) return -1;
+
+        const title = getTaskDisplayTitle(context.rawLine);
+        const normalizedTitle = this.normalizeTaskText(title);
+        if (!normalizedTitle) return -1;
+        const titleMatches = lines.reduce<number[]>((indexes, line, index) => {
+            if (
+                parseTaskLine(line || '')
+                && this.normalizeTaskText(getTaskDisplayTitle(line || '')) === normalizedTitle
+            ) {
+                indexes.push(index);
+            }
+            return indexes;
+        }, []);
+        if (titleMatches.length !== 1) return -1;
+
+        const resolved = findCurrentTaskLineIndex(lines, context.lineNumber, context.rawLine, title);
+        return resolved === titleMatches[0] ? resolved : -1;
     }
 
     private withTaskCheckboxToken(line: string, token: string): string {
         return setTaskCheckboxToken(line, token);
     }
 
-  private getCompleteMarkers(): string[] {
-    return getLinkedSubitemCompleteMarkers(this.plugin.settings.linkedSubitemCheckboxMappings || []);
-  }
+    private getCheckboxMappings() {
+        return normalizeLinkedSubitemMappings(this.plugin.settings.linkedSubitemCheckboxMappings || [], {
+            enforceStrictDefaults: false,
+        });
+    }
+
+    private getCompleteMarkers(): string[] {
+        return getLinkedSubitemCompleteMarkers(this.getCheckboxMappings());
+    }
 
     private resolveTaskCheckboxContext(targetEl: HTMLElement | null): TaskCheckboxContext | null {
         const checkboxEl = this.resolveTaskCheckboxElement(targetEl);
@@ -265,7 +299,8 @@ export class TaskCheckboxHandler {
         const source = this.getViewSource(view);
         const lines = source.split('\n');
 
-        const dataLine = Number(host.getAttribute('data-line'));
+        const renderedLine = host.getAttribute('data-line');
+        const dataLine = renderedLine == null || renderedLine.trim() === '' ? Number.NaN : Number(renderedLine);
         if (Number.isFinite(dataLine) && dataLine >= 0 && dataLine < lines.length) {
             const rawLine = lines[dataLine] || '';
             const parsed = parseTaskLine(rawLine);
@@ -281,21 +316,22 @@ export class TaskCheckboxHandler {
 
         const hostText = this.normalizeTaskText(host.innerText || host.textContent || '');
         if (!hostText) return null;
+        const matches: TaskCheckboxContext[] = [];
         for (let index = 0; index < lines.length; index += 1) {
             const rawLine = lines[index] || '';
             const parsed = parseTaskLine(rawLine);
             if (!parsed) continue;
             const lineText = this.normalizeTaskText(getTaskDisplayTitle(rawLine) || rawLine);
             if (lineText && (hostText.includes(lineText) || lineText.includes(hostText))) {
-                return {
+                matches.push({
                     file: view.file as TFile,
                     lineNumber: index,
                     rawLine,
                     currentToken: parsed.token,
-                };
+                });
             }
         }
-        return null;
+        return matches.length === 1 ? matches[0] : null;
     }
 
     private getViewSource(view: MarkdownView): string {
@@ -308,7 +344,8 @@ export class TaskCheckboxHandler {
         const parsed = parseTaskLine(value);
         return String(parsed?.body ?? (value || ''))
             .replace(/\s+/g, ' ')
-            .trim();
+            .trim()
+            .toLowerCase();
     }
 
     async handleExternalChecklistStateMutation(

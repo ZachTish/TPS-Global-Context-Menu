@@ -9,6 +9,7 @@ import { resolveCustomProperties } from '../resolve-profiles';
 import { ViewModeService } from './view-mode-service';
 import { isTagListProperty, isTextListProperty, parseStringListInput } from '../utils/list-utils';
 import { mapStatusToSubitemCheckboxState, normalizeLinkedSubitemMappings } from '../utils/linked-subitem-mapping';
+import * as logger from '../logger';
 
 export type SubitemLineKind = 'bare' | 'bullet' | 'checkbox';
 
@@ -160,7 +161,7 @@ export class SubitemLineModelService {
     const pills: PropertyPill[] = [];
     const showInlineProperties = this.plugin.settings.showCustomPropertiesInInlineUi !== false;
     if (!showInlineProperties) {
-      console.debug('[TPS GCM] [DIAG] getPropertyPills skipped', {
+      logger.flow('SubitemLineModel', 'property-pills-skipped', {
         file: file.path,
         lineKind,
         reason: 'showCustomPropertiesInInlineUi-disabled',
@@ -268,7 +269,7 @@ export class SubitemLineModelService {
       }
     }
 
-    console.debug('[TPS GCM] [DIAG] getPropertyPills result', {
+    logger.flow('SubitemLineModel', 'property-pills-result', {
       file: file.path,
       lineKind,
       frontmatterKeys: Object.keys(fm),

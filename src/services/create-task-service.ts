@@ -35,6 +35,7 @@ export class CreateTaskService {
       }
 
       const stampedTaskLine = updateTaskLineTimestamps(taskLine, {
+        enabled: this.plugin.settings.autoSyncFileTimestamps === true,
         createdKey: this.plugin.settings.dateCreatedFrontmatterKey,
         modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
         format: this.plugin.settings.fileTimestampFormat,
@@ -90,9 +91,9 @@ export class CreateTaskService {
     const content = await this.plugin.app.vault.cachedRead(file);
     const lineIndex = content.split(/\r?\n/).findIndex((line) => line.trim() === taskLine.trim());
     const cursorLine = Math.max(0, (lineIndex < 0 ? 0 : lineIndex) - 1);
-    const leaf = this.plugin.app.workspace.getLeaf(false);
-    await leaf.openFile(file, { active: true } as any);
-    const view = leaf.view as any;
+    await this.plugin.openFileInLeaf(file, false, () => this.plugin.app.workspace.getLeaf(false), { revealLeaf: true });
+    const leaf = this.plugin.findOpenLeafForFile(file);
+    const view = leaf?.view as any;
     const editor = view?.editor;
     if (!editor || typeof editor.setCursor !== 'function') return;
     editor.setCursor({ line: cursorLine, ch: 0 });

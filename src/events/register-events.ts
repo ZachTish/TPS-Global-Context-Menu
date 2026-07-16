@@ -602,6 +602,36 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     // ── Vault events ─────────────────────────────────────────────────────────
 
+    const isNavigationTextInputActive = (): boolean => {
+        const active = document.activeElement;
+        if (!(active instanceof HTMLElement)) return false;
+        const isTextInput = active instanceof HTMLInputElement
+            || active instanceof HTMLTextAreaElement
+            || active.getAttribute('contenteditable') === 'true';
+        if (!isTextInput) return false;
+        return !!active.closest([
+            '.workspace-leaf-content[data-type="file-explorer"]',
+            '.nav-files-container',
+            '.nav-file',
+            '.nav-folder',
+            '.tree-item',
+            '.tree-item-self',
+            '.nn-split',
+            '.nn-pane',
+            '.nn-navitem',
+            '.nn-file',
+        ].join(', '));
+    };
+
+    const runAfterNavigationRenameSettles = (callback: () => void, attempt = 0): void => {
+        if (isNavigationTextInputActive()) {
+            if (attempt >= 10) return;
+            window.setTimeout(() => runAfterNavigationRenameSettles(callback, attempt + 1), 300);
+            return;
+        }
+        window.setTimeout(callback, 1200);
+    };
+
     plugin.registerEvent(
         plugin.app.vault.on('create', (file) => {
             if (file instanceof TFile && plugin.canRunBackgroundAutomation()) {
@@ -609,6 +639,16 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                     reason: 'create',
                     force: true,
                 });
+                window.setTimeout(() => {
+                    if (!plugin.canRunBackgroundAutomation()) return;
+                    const liveFile = plugin.app.vault.getFileByPath(file.path);
+                    if (!(liveFile instanceof TFile)) return;
+                    void plugin.notebookNavigatorRuleService.applyRulesToFile(liveFile, {
+                        reason: 'create',
+                        force: true,
+                        bypassCreationGrace: true,
+                    });
+                }, 3800);
             }
             if (file instanceof TFile && file.extension === 'md') {
                 setTimeout(() => {
@@ -617,6 +657,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                         plugin.fileNamingService.syncTitleFromFilename(file, {
                             force: true,
                             onlyIfMissing: true,
+                            onlyIfHasFrontmatter: true,
                             bypassCreationGrace: true,
                         });
                     }
@@ -632,31 +673,32 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     plugin.registerEvent(
         plugin.app.vault.on('rename', (file) => {
             if (file instanceof TFile && plugin.canRunBackgroundAutomation()) {
-                plugin.notebookNavigatorRuleService.scheduleApply(file, {
-                    reason: 'rename',
-                    force: true,
-                    bypassCreationGrace: true,
+                runAfterNavigationRenameSettles(() => {
+                    const liveFile = plugin.app.vault.getFileByPath(file.path);
+                    if (!(liveFile instanceof TFile)) return;
+                    if (!plugin.canRunBackgroundAutomation()) return;
+                    plugin.notebookNavigatorRuleService.scheduleApply(liveFile, {
+                        reason: 'rename',
+                        force: true,
+                        bypassCreationGrace: true,
+                    });
                 });
             }
             if (file instanceof TFile && file.extension === 'md') {
-                overlayRendering.scheduleFileRefresh(file, 'rename', { delayMs: 0 });
-                if (plugin.canRunBackgroundAutomation()) {
-                    void plugin.fileNamingService.syncTitleFromFilename(file, {
-                        force: true,
-                        bypassCreationGrace: true,
-                    });
-                }
-                setTimeout(() => {
+                overlayRendering.scheduleFileRefresh(file, 'rename', { delayMs: 300 });
+                runAfterNavigationRenameSettles(() => {
                     if (!plugin.canRunBackgroundAutomation()) return;
-                    void plugin.fileNamingService.syncTitleFromFilename(file, {
+                    const liveFile = plugin.app.vault.getFileByPath(file.path);
+                    if (!(liveFile instanceof TFile)) return;
+                    void plugin.fileNamingService.syncTitleFromFilename(liveFile, {
                         force: true,
                         bypassCreationGrace: true,
                     });
-                    void plugin.fileNamingService.syncFileTimestamps(file, {
+                    void plugin.fileNamingService.syncFileTimestamps(liveFile, {
                         reason: 'rename',
                         force: true,
                     });
-                }, 500);
+                });
             }
         }),
     );
@@ -666,7 +708,9 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     plugin.registerEvent(
         plugin.app.vault.on('delete', (file) => {
             if (file instanceof TFile && file.extension === 'md') {
-                void plugin.bulkEditService.cleanupLinksForDeletedFile(file.path, file.basename);
+                void plugin.bulkEditService.cleanupLinksForDeletedFile(file.path).catch((error) => {
+                    logger.flowError('DeletedLinkCleanup', 'failed', error, { deletedPath: file.path });
+                });
             }
             try {
                 if (document.activeElement instanceof HTMLElement) {

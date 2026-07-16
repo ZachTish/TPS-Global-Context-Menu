@@ -50,12 +50,28 @@ export class FileNamingService {
 
     private isDailyNoteFrontmatter(frontmatter: Record<string, unknown> | undefined | null): boolean {
         if (!frontmatter) return false;
+        if (this.isProcessRunFrontmatter(frontmatter)) return false;
         const tags = this.normalizeFrontmatterStringList((frontmatter as any).tags || (frontmatter as any).tag)
             .map((tag) => tag.replace(/^#/, '').trim().toLowerCase());
         if (tags.some((tag) => tag === 'type/note/daily' || tag === 'dailynote')) return true;
         const types = this.normalizeFrontmatterStringList((frontmatter as any).type || (frontmatter as any).types)
             .map((value) => value.replace(/^#/, '').trim().toLowerCase());
         return types.some((value) => value === 'daily' || value === 'note/daily' || value === 'type/note/daily');
+    }
+
+    private isProcessRunFrontmatter(frontmatter: Record<string, unknown> | undefined | null): boolean {
+        if (!frontmatter) return false;
+        const runKind = this.getFrontmatterStringValueCaseInsensitive(frontmatter, 'runKind').toLowerCase();
+        const workflowKind = this.getFrontmatterStringValueCaseInsensitive(frontmatter, 'workflowKind').toLowerCase();
+        const kind = this.getFrontmatterStringValueCaseInsensitive(frontmatter, 'kind').toLowerCase();
+        const runType = this.getFrontmatterStringValueCaseInsensitive(frontmatter, 'runType').toLowerCase();
+        const workflowType = this.getFrontmatterStringValueCaseInsensitive(frontmatter, 'workflowType').toLowerCase();
+        return runKind === 'run'
+            || workflowKind === 'workflow'
+            || kind === 'workout'
+            || kind === 'workout-plan'
+            || Boolean(runType)
+            || Boolean(workflowType);
     }
 
     private normalizeFrontmatterStringList(value: unknown): string[] {
@@ -134,6 +150,8 @@ export class FileNamingService {
     private async repairDailyNoteScheduled(file: TFile): Promise<boolean> {
         const expectedDate = this.parseDailyNoteBasenameToIso(file.basename);
         if (!expectedDate) return false;
+        const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+        if (this.isProcessRunFrontmatter(frontmatter)) return false;
         const expectedScheduled = `${expectedDate} 00:00:00`;
         if (!(await this.plugin.bulkEditService.canMutateFrontmatterSafely(file))) return false;
 
@@ -313,7 +331,8 @@ export class FileNamingService {
             }
 
             // Populate daily note with scheduled items if applicable
-            if (this.plugin.settings.enableAutoPopulateDailyNotes && this.isDateOnlyBasename(liveFile.basename)) {
+            const frontmatter = this.plugin.app.metadataCache.getFileCache(liveFile)?.frontmatter as Record<string, unknown> | undefined;
+            if (this.plugin.settings.enableAutoPopulateDailyNotes && this.isDateOnlyBasename(liveFile.basename) && !this.isProcessRunFrontmatter(frontmatter)) {
                 await logger.timeAsync('fileNaming:populateDailyNoteWithScheduledItems', { file: liveFile.path }, () =>
                     this.plugin.noteOperationService.populateDailyNoteWithScheduledItems(liveFile)
                 );
@@ -511,7 +530,7 @@ export class FileNamingService {
      */
     async syncTitleFromFilename(
         file: TFile,
-        options: { onlyIfTemplateDerived?: boolean; onlyIfMissing?: boolean; force?: boolean; bypassCreationGrace?: boolean } = {},
+        options: { onlyIfTemplateDerived?: boolean; onlyIfMissing?: boolean; onlyIfHasFrontmatter?: boolean; force?: boolean; bypassCreationGrace?: boolean } = {},
     ): Promise<void> {
         if (!options.force && !this.plugin.settings.autoSyncTitleFromFilename) {
             return;
@@ -582,7 +601,7 @@ export class FileNamingService {
 
     private async syncTitleFromFilenameWithOptions(
         file: TFile,
-        options: { onlyIfTemplateDerived?: boolean; onlyIfMissing?: boolean; force?: boolean; bypassCreationGrace?: boolean },
+        options: { onlyIfTemplateDerived?: boolean; onlyIfMissing?: boolean; onlyIfHasFrontmatter?: boolean; force?: boolean; bypassCreationGrace?: boolean },
     ): Promise<"updated" | "skipped"> {
         if (!options.force && !this.plugin.settings.autoSyncTitleFromFilename) return "skipped";
         if (!this.shouldProcess(file, options)) return "skipped";
@@ -600,6 +619,7 @@ export class FileNamingService {
             const fm = cache?.frontmatter || {};
             const persistedValues = await this.getPersistedFrontmatterStringValues(liveFile, ['title', 'scheduled']);
             const hasPersistedFrontmatter = await this.hasPersistedFrontmatterBlock(liveFile);
+            if (options.onlyIfHasFrontmatter && !hasPersistedFrontmatter) return "skipped";
             const scheduled = hasPersistedFrontmatter
                 ? (persistedValues.has('scheduled') ? persistedValues.get('scheduled') : '')
                 : fm.scheduled;
@@ -609,8 +629,9 @@ export class FileNamingService {
 
             // Date-only files (daily notes) are owned by the Companion
             // plugin for title sync. Skip them here to avoid fighting over title values.
-            if (this.isDateOnlyBasename(rawBasename)) return "skipped";
-            if (this.isDailyNoteFrontmatter(fm)) return "skipped";
+            const isProcessRun = this.isProcessRunFrontmatter(fm);
+            if (this.isDateOnlyBasename(rawBasename) && !isProcessRun) return "skipped";
+            if (this.isDailyNoteFrontmatter(fm) && !isProcessRun) return "skipped";
             if (await this.plugin.bulkEditService.shouldSkipNoteLevelRecurrence(liveFile, scheduled)) return "skipped";
 
             // Avoid writing clearly-stale template-derived titles
@@ -648,6 +669,7 @@ export class FileNamingService {
                 persistedValues.get('title')
                 ?? this.getFrontmatterStringValueCaseInsensitive(fm, 'title')
             ).trim();
+            if (!currentTitle && await this.isBlankGeneratedUntitledNote(liveFile, rawBasename)) return "skipped";
             const templateDerivedTitle = this.isTemplateDerivedTitle(currentTitle, rawBasename);
             if (options.onlyIfMissing && currentTitle && !templateDerivedTitle) {
                 return "skipped";
@@ -730,8 +752,9 @@ export class FileNamingService {
 
         // Date-only files (daily notes) should never be renamed based on
         // title/scheduled logic. Their filename IS the canonical identifier.
-        if (this.isDateOnlyBasename(String(liveFile.basename).trim())) return;
-        if (this.isDailyNoteFrontmatter(fm)) return;
+        const isProcessRun = this.isProcessRunFrontmatter(fm);
+        if (this.isDateOnlyBasename(String(liveFile.basename).trim()) && !isProcessRun) return;
+        if (this.isDailyNoteFrontmatter(fm) && !isProcessRun) return;
 
         const expectedBasename = this.buildExpectedBasename(title, scheduled);
 
@@ -1111,6 +1134,17 @@ export class FileNamingService {
         }
 
         return false;
+    }
+
+    private async isBlankGeneratedUntitledNote(file: TFile, basename: string): Promise<boolean> {
+        if (!/^Untitled(?: \d+)?$/i.test(String(basename || '').trim())) return false;
+        try {
+            const content = await this.plugin.app.vault.cachedRead(file);
+            const body = content.replace(/^\uFEFF?---\s*[\r\n][\s\S]*?[\r\n]---(?:[\r\n]|$)/, '');
+            return body.trim().length === 0;
+        } catch {
+            return false;
+        }
     }
 
     private async yieldToEventLoop(): Promise<void> {

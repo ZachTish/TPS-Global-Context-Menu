@@ -14,7 +14,12 @@ import {
   TASK_RECURRENCE_ID_KEY,
 } from '../utils/task-recurrence';
 import { getLinkedSubitemCompleteMarkers } from '../utils/linked-subitem-mapping';
-import { readInlineFieldValue, setInlineFieldValueOnTaskLine } from '../utils/task-line-metadata';
+import {
+  getTaskDisplayTitle,
+  readInlineFieldValue,
+  setInlineFieldValueOnTaskLine,
+} from '../utils/task-line-metadata';
+import { findCurrentTaskLineIndex } from '../utils/task-block-move';
 import * as logger from '../logger';
 
 type TaskRecurrenceTemplateStore = {
@@ -102,13 +107,51 @@ export class TaskRecurrenceService {
   }
 
   async editTemplateForTaskLine(file: TFile, lineIndex: number, rawLine: string): Promise<void> {
-    let recurrenceTaskId = readInlineFieldValue(rawLine, TASK_RECURRENCE_ID_KEY);
-    let lineForTemplate = rawLine;
-    if (!recurrenceTaskId) {
-      recurrenceTaskId = this.createRecurrenceTaskId(file, lineIndex);
-      lineForTemplate = ensureTaskRecurrenceIdOnLine(rawLine, recurrenceTaskId);
-      await this.writeLineByIndex(file, lineIndex, lineForTemplate);
+    let resolved: { recurrenceTaskId: string; lineForTemplate: string; lineIndex: number } | null = null;
+    try {
+      await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(file, async (lines) => {
+        const currentLineIndex = findCurrentTaskLineIndex(
+          lines,
+          lineIndex,
+          rawLine,
+          getTaskDisplayTitle(rawLine),
+        );
+        if (currentLineIndex < 0) return false;
+        const currentLine = lines[currentLineIndex] || '';
+        let recurrenceTaskId = readInlineFieldValue(currentLine, TASK_RECURRENCE_ID_KEY);
+        if (!recurrenceTaskId) {
+          recurrenceTaskId = this.createRecurrenceTaskId(file, currentLineIndex);
+        }
+        const lineForTemplate = ensureTaskRecurrenceIdOnLine(currentLine, recurrenceTaskId);
+        resolved = { recurrenceTaskId, lineForTemplate, lineIndex: currentLineIndex };
+        if (lineForTemplate === currentLine) return false;
+        lines[currentLineIndex] = lineForTemplate;
+        return true;
+      });
+    } catch (error) {
+      logger.warn('[TaskRecurrence] Template target resolution failed.', {
+        path: file.path,
+        preferredLineIndex: lineIndex,
+        error,
+      });
+      new Notice('Could not update the recurrence template task.');
+      return;
     }
+    if (!resolved) {
+      logger.warn('[TaskRecurrence] Template target was stale or ambiguous.', {
+        path: file.path,
+        preferredLineIndex: lineIndex,
+        title: getTaskDisplayTitle(rawLine) || null,
+      });
+      new Notice('Could not uniquely find the recurrence template task.');
+      return;
+    }
+    const { recurrenceTaskId, lineForTemplate, lineIndex: resolvedLineIndex } = resolved;
+    logger.log('[TaskRecurrence] Template target resolved.', {
+      path: file.path,
+      preferredLineIndex: lineIndex,
+      resolvedLineIndex,
+    });
     const current = await this.getOrCreateTemplateLine(recurrenceTaskId, lineForTemplate);
     new TaskRecurrenceTemplateModal(this.plugin.app, 'Edit task recurrence template', current, async (value) => {
       await this.setTemplateLine(recurrenceTaskId, buildTaskRecurrenceTemplateLine(ensureTaskRecurrenceIdOnLine(value, recurrenceTaskId)));
@@ -209,15 +252,6 @@ export class TaskRecurrenceService {
       hash = ((hash << 5) - hash + base.charCodeAt(index)) | 0;
     }
     return `task-rec-${Math.abs(hash).toString(36)}`;
-  }
-
-  private async writeLineByIndex(file: TFile, lineIndex: number, nextLine: string): Promise<void> {
-    await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(file, async (lines) => {
-      if (lineIndex < 0 || lineIndex >= lines.length) return false;
-      if (lines[lineIndex] === nextLine) return false;
-      lines[lineIndex] = nextLine;
-      return true;
-    });
   }
 
   private getCompleteMarkers(): string[] {

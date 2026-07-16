@@ -13,6 +13,10 @@ import { buildParentFrontmatterLinkValue, buildParentLinkValue, linkValueMatches
 import { findExistingDailyNoteForIsoDate } from '../utils/daily-note-task-schedule';
 import { parseDateFromFilename } from '../utils/daily-file-date';
 import {
+    classifyDeletedMarkdownLink,
+    createDeletedMarkdownLinkContext,
+} from '../utils/deleted-link-cleanup';
+import {
     casefold,
     deleteValueCaseInsensitive,
     findKeyCaseInsensitive,
@@ -30,6 +34,8 @@ export class BulkEditService {
     private recurrenceCreationInProgress: Set<string> = new Set();
     private checkMissingRecurrencesRunning = false;
     private frontmatterWriteChains: Map<string, Promise<void>> = new Map();
+    private deletedLinkCleanupChain: Promise<void> = Promise.resolve();
+    private deletedLinkCleanupPending = 0;
     private malformedFrontmatterWarnedPaths: Set<string> = new Set();
     private checklistHandler: ChecklistHandler;
     private parentLinkHandler: ParentLinkHandler;
@@ -133,6 +139,7 @@ export class BulkEditService {
         if (normalizedFolder !== fileFolder) return false;
 
         const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+        if (this.isProcessRunFrontmatter(frontmatter)) return false;
         const parsedScheduled = scheduled ? window.moment(scheduled) : null;
         const scheduledIso = parsedScheduled?.isValid?.() && parsedScheduled.isValid()
             ? parsedScheduled.format("YYYY-MM-DD")
@@ -198,12 +205,33 @@ export class BulkEditService {
 
     private hasDailyNoteMarker(frontmatter: Record<string, unknown> | undefined): boolean {
         if (!frontmatter) return false;
+        if (this.isProcessRunFrontmatter(frontmatter)) return false;
         const tags = this.normalizeStringList((frontmatter as any).tags || (frontmatter as any).tag)
             .map((tag) => tag.replace(/^#/, "").trim().toLowerCase());
         if (tags.some((tag) => tag === "type/note/daily" || tag === "dailynote")) return true;
         const type = this.normalizeStringList((frontmatter as any).type || (frontmatter as any).types)
             .map((value) => value.replace(/^#/, "").trim().toLowerCase());
         return type.some((value) => value === "daily" || value === "note/daily" || value === "type/note/daily");
+    }
+
+    private isProcessRunFrontmatter(frontmatter: Record<string, unknown> | undefined): boolean {
+        if (!frontmatter) return false;
+        const runKind = this.frontmatterString(frontmatter, "runKind").toLowerCase();
+        const workflowKind = this.frontmatterString(frontmatter, "workflowKind").toLowerCase();
+        const kind = this.frontmatterString(frontmatter, "kind").toLowerCase();
+        const runType = this.frontmatterString(frontmatter, "runType").toLowerCase();
+        const workflowType = this.frontmatterString(frontmatter, "workflowType").toLowerCase();
+        return runKind === "run"
+            || workflowKind === "workflow"
+            || kind === "workout"
+            || kind === "workout-plan"
+            || Boolean(runType)
+            || Boolean(workflowType);
+    }
+
+    private frontmatterString(frontmatter: Record<string, unknown>, key: string): string {
+        const actualKey = findKeyCaseInsensitive(frontmatter, key);
+        return actualKey ? String(frontmatter[actualKey] ?? "").trim() : "";
     }
 
     private normalizeStringList(value: unknown): string[] {
@@ -232,6 +260,7 @@ export class BulkEditService {
     private async isDailyNoteLikeFile(file: TFile): Promise<boolean> {
         const { format } = await this.getDailyNoteSettings();
         const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+        if (this.isProcessRunFrontmatter(frontmatter)) return false;
         if (this.hasDailyNoteMarker(frontmatter)) return true;
         if (parseDateFromFilename(file.basename, format).isValid()) return true;
 
@@ -868,12 +897,22 @@ export class BulkEditService {
     async applyToFiles(files: TFile[], callback: (fm: any, file: TFile) => void): Promise<number> {
         let count = 0;
         const updatedFiles: TFile[] = [];
+        let skippedUnsupported = 0;
+        let skippedUnsafe = 0;
+        let failures = 0;
+        logger.flow('BulkEdit', 'apply:start', { files: files.length });
 
         await runInBatches(files, async (file) => {
             try {
                 const extension = file.extension?.toLowerCase();
-                if (extension !== 'md' && !this.plugin.canvasPropertiesService?.isCanvasFile(file)) return;
-                if (extension === 'md' && !(await this.canMutateFrontmatterSafely(file))) return;
+                if (extension !== 'md' && !this.plugin.canvasPropertiesService?.isCanvasFile(file)) {
+                    skippedUnsupported++;
+                    return;
+                }
+                if (extension === 'md' && !(await this.canMutateFrontmatterSafely(file))) {
+                    skippedUnsafe++;
+                    return;
+                }
                 this.plugin.recurrenceService?.markFileAsModified(file.path);
                 const changed = await this.plugin.frontmatterMutationService.process(file, (fm) => {
                     callback(fm, file);
@@ -882,7 +921,8 @@ export class BulkEditService {
                 updatedFiles.push(file);
                 count++;
             } catch (e) {
-                logger.error(`[TPS GCM] Failed to update ${file.path}:`, e);
+                failures++;
+                logger.flowError('BulkEdit', 'apply:file-failed', e, { path: file.path });
             }
         }, 40);
 
@@ -896,28 +936,35 @@ export class BulkEditService {
             this.notifyFilesChanged(updatedFiles);
         }
 
+        logger.flow('BulkEdit', 'apply:done', {
+            files: files.length,
+            changed: count,
+            skippedUnsupported,
+            skippedUnsafe,
+            failures,
+        });
         return count;
     }
 
     async updateFrontmatter(files: TFile[], updates: Record<string, any>): Promise<number> {
+        logger.flow('BulkEdit', 'frontmatter:update-start', {
+            files: files.length,
+            keys: Object.keys(updates || {}).sort(),
+            status: updates?.status ?? '',
+        });
         const blockedKeys = Object.keys(updates).filter((key) => this.isProtectedIdentityKey(key));
         if (blockedKeys.length > 0) {
             blockedKeys.forEach((key) => delete updates[key]);
             new Notice(`Blocked protected key edit: ${blockedKeys.join(', ')}`);
-            logger.warn('[TPS GCM] Blocked protected identity key edit', { keys: blockedKeys });
+            logger.flowWarn('BulkEdit', 'frontmatter:blocked-protected-keys', { keys: blockedKeys });
             if (Object.keys(updates).length === 0) {
+                logger.flow('BulkEdit', 'frontmatter:update-done', {
+                    files: files.length,
+                    changed: 0,
+                    reason: 'only-protected-keys',
+                });
                 return 0;
             }
-        }
-
-        // Log the operation for debugging
-        const _updateKeys = Object.keys(updates);
-        const _fileLabel = files.length <= 3
-            ? files.map(f => f.basename).join(', ')
-            : `${files[0].basename}… (+${files.length - 1} more)`;
-        logger.log(`[BulkEditService] updateFrontmatter ×${files.length}: [${_updateKeys.join(', ')}] on: ${_fileLabel}`);
-        if (updates.status !== undefined) {
-            logger.log(`[BulkEditService] Status change → "${updates.status}" on: ${_fileLabel}`);
         }
 
         // Checklist Prompt Logic (Single file only to avoid spam)
@@ -928,6 +975,12 @@ export class BulkEditService {
         ) {
             const canProceed = await this.checklistHandler.handleChecklistCompletion(files[0]);
             if (!canProceed) {
+                logger.flow('BulkEdit', 'frontmatter:update-canceled', {
+                    files: files.length,
+                    reason: 'open-checklist-guard',
+                    path: files[0]?.path || '',
+                    status: updates.status,
+                });
                 return 0;
             }
         }
@@ -953,6 +1006,11 @@ export class BulkEditService {
                     const result = await this.plugin.recurrenceService.promptForFrontmatterChange(file, changeDesc);
 
                     if (result === 'cancel') {
+                        logger.flow('BulkEdit', 'frontmatter:update-canceled', {
+                            files: files.length,
+                            reason: 'recurrence-prompt',
+                            path: file.path,
+                        });
                         return 0;
                     }
                 }
@@ -1041,6 +1099,13 @@ export class BulkEditService {
         if (count > 0 && keys.length > 0) {
             void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(files, keys);
         }
+        logger.flow('BulkEdit', 'frontmatter:update-done', {
+            files: files.length,
+            changed: count,
+            keys: Object.keys(updates).sort(),
+            status: updates.status ?? '',
+            recurrenceCandidates: recurrenceCandidates.length,
+        });
         return count;
     }
 
@@ -1923,7 +1988,22 @@ export class BulkEditService {
 
                 // Strip all stale/computed fields so the new instance starts clean.
                 for (const key of Object.keys(fm)) {
-                    if (['sort', 'hidden', 'icon', 'color', 'isrecurrencetemplate', 'completeddate', this.recurrenceLastGeneratedKey.toLowerCase()].includes(key.toLowerCase())) {
+                    if ([
+                        'sort',
+                        'hidden',
+                        'icon',
+                        'color',
+                        'isrecurrencetemplate',
+                        'completeddate',
+                        'endedat',
+                        'durationseconds',
+                        'previouscompleteddate',
+                        'secondssincepreviouscompletion',
+                        'lastcompleteddate',
+                        'lastsessionpath',
+                        'nextelegibledate',
+                        this.recurrenceLastGeneratedKey.toLowerCase(),
+                    ].includes(key.toLowerCase())) {
                         delete fm[key];
                     }
                 }
@@ -1977,6 +2057,9 @@ export class BulkEditService {
             'isrecurrencetemplate', 'recurrencestarted', 'recurrenceends',
             'recurrencetemplate', 'scheduled', 'status', 'completeddate',
             'sort', 'icon', 'color', 'hidden', 'datecreated', 'datemodified',
+            'startedat', 'endedat', 'durationseconds', 'timeestimate',
+            'previouscompleteddate', 'secondssincepreviouscompletion',
+            'lastcompleteddate', 'lastsessionpath', 'nextelegibledate',
         ]);
 
         // Build propagatable update set from the template's frontmatter
@@ -2621,21 +2704,72 @@ export class BulkEditService {
      * Scans all vault markdown files and removes stale parent/child/attachment links
      * that pointed to the given deleted file. Called from the vault delete handler.
      */
-    async cleanupLinksForDeletedFile(deletedPath: string, deletedBasename: string): Promise<void> {
+    async cleanupLinksForDeletedFile(deletedPath: string): Promise<{
+        scannedFiles: number;
+        touchedFiles: number;
+        removedReferences: number;
+        preservedAmbiguousReferences: number;
+    }> {
+        const queuedBehind = this.deletedLinkCleanupPending;
+        this.deletedLinkCleanupPending += 1;
+        if (queuedBehind > 0) {
+            logger.flow('DeletedLinkCleanup', 'queued', { deletedPath, queuedBehind });
+        }
+
+        const run = this.deletedLinkCleanupChain
+            .catch(() => undefined)
+            .then(() => this.runDeletedLinkCleanup(deletedPath));
+        const tracked = run.finally(() => {
+            this.deletedLinkCleanupPending = Math.max(0, this.deletedLinkCleanupPending - 1);
+        });
+        this.deletedLinkCleanupChain = tracked.then(() => undefined, () => undefined);
+        return tracked;
+    }
+
+    private async runDeletedLinkCleanup(deletedPath: string): Promise<{
+        scannedFiles: number;
+        touchedFiles: number;
+        removedReferences: number;
+        preservedAmbiguousReferences: number;
+    }> {
         const parentKey = String(this.plugin.settings.parentLinkFrontmatterKey || 'childOf').trim() || 'childOf';
         const attachmentsKey = 'attachments';
+        const files = this.plugin.app.vault.getMarkdownFiles();
+        const matchContext = createDeletedMarkdownLinkContext(deletedPath, files.map((file) => file.path));
+        const emptyResult = {
+            scannedFiles: files.length,
+            touchedFiles: 0,
+            removedReferences: 0,
+            preservedAmbiguousReferences: 0,
+        };
+        if (!matchContext) {
+            logger.flowWarn('DeletedLinkCleanup', 'skip:invalid-path', { deletedPath });
+            return emptyResult;
+        }
+        const removedReferenceKeys = new Set<string>();
+        const ambiguousReferenceKeys = new Set<string>();
 
-        const isMatch = (linkValue: any): boolean => {
-            if (linkValue == null) return false;
-            const target = extractLinkTarget(String(linkValue));
-            if (!target) return false;
-            const norm = (s: string) => normalizePath(s).toLowerCase();
-            return target === deletedBasename ||
-                norm(target) === norm(deletedPath) ||
-                norm(target) === norm(deletedBasename);
+        const isMatch = (linkValue: unknown, sourcePath: string, pendingRemovedReferences: Set<string>): boolean => {
+            const resolvedFile = resolveLinkValueToFile(this.plugin.app, linkValue, sourcePath);
+            if (resolvedFile && this.plugin.app.vault.getAbstractFileByPath(resolvedFile.path) instanceof TFile) return false;
+            const decision = classifyDeletedMarkdownLink(linkValue, sourcePath, matchContext);
+            const referenceKey = `${sourcePath}\n${String(linkValue ?? '')}`;
+            if (decision === 'ambiguous') {
+                ambiguousReferenceKeys.add(referenceKey);
+                return false;
+            }
+            if (decision === 'match') {
+                pendingRemovedReferences.add(referenceKey);
+                return true;
+            }
+            return false;
         };
 
-        const files = this.plugin.app.vault.getMarkdownFiles();
+        logger.flow('DeletedLinkCleanup', 'start', {
+            deletedPath,
+            scannedFiles: files.length,
+            hasRemainingBasenameMatch: matchContext.hasRemainingBasenameMatch,
+        });
         const touchedFiles: TFile[] = [];
         for (const file of files) {
             const cache = this.plugin.app.metadataCache.getFileCache(file);
@@ -2643,13 +2777,14 @@ export class BulkEditService {
             const hasPk = !!fm && Object.keys(fm).some(k => k.toLowerCase() === parentKey.toLowerCase());
             const hasAk = !!fm && Object.keys(fm).some(k => k.toLowerCase() === attachmentsKey.toLowerCase());
             let frontmatterChanged = false;
+            const frontmatterRemovedReferences = new Set<string>();
 
             if (hasPk || hasAk) {
                 try {
                     await this.plugin.app.fileManager.processFrontMatter(file, (frontmatter) => {
                         // Clean childOf (single parent ref)
                         const pk = Object.keys(frontmatter).find(k => k.toLowerCase() === parentKey.toLowerCase());
-                        if (pk && isMatch(frontmatter[pk])) {
+                        if (pk && isMatch(frontmatter[pk], file.path, frontmatterRemovedReferences)) {
                             delete frontmatter[pk];
                             frontmatterChanged = true;
                         }
@@ -2659,7 +2794,7 @@ export class BulkEditService {
                         if (ak) {
                             const raw = frontmatter[ak];
                             const arr: any[] = Array.isArray(raw) ? raw : (raw != null ? [raw] : []);
-                            const filtered = arr.filter(v => !isMatch(v));
+                            const filtered = arr.filter(v => !isMatch(v, file.path, frontmatterRemovedReferences));
                             if (filtered.length !== arr.length) {
                                 frontmatterChanged = true;
                                 if (filtered.length === 0) delete frontmatter[ak];
@@ -2667,6 +2802,7 @@ export class BulkEditService {
                             }
                         }
                     });
+                    for (const referenceKey of frontmatterRemovedReferences) removedReferenceKeys.add(referenceKey);
                 } catch (err) {
                     logger.warn(`[TPS GCM] cleanupLinksForDeletedFile: failed to clean frontmatter for ${file.path}:`, err);
                 }
@@ -2676,14 +2812,30 @@ export class BulkEditService {
             try {
                 const raw = await this.plugin.app.vault.cachedRead(file);
                 const lines = raw.split('\n');
-                const filtered = lines.filter((line) => {
+                const preflightRemovedReferences = new Set<string>();
+                const preflight = lines.filter((line) => {
                     const parsed = this.plugin.bodySubitemLinkService.parseLine(line);
                     if (!parsed) return true;
-                    return !isMatch(parsed.linkTarget) && !isMatch(parsed.wikilink);
+                    return !isMatch(parsed.linkTarget, file.path, preflightRemovedReferences)
+                        && !isMatch(parsed.wikilink, file.path, preflightRemovedReferences);
                 });
-                if (filtered.length !== lines.length) {
-                    bodyChanged = true;
-                    await this.plugin.app.vault.modify(file, filtered.join('\n'));
+                if (preflight.length !== lines.length) {
+                    const bodyRemovedReferences = new Set<string>();
+                    await this.plugin.app.vault.process(file, (current) => {
+                        const currentLines = current.split('\n');
+                        const filtered = currentLines.filter((line) => {
+                            const parsed = this.plugin.bodySubitemLinkService.parseLine(line);
+                            if (!parsed) return true;
+                            return !isMatch(parsed.linkTarget, file.path, bodyRemovedReferences)
+                                && !isMatch(parsed.wikilink, file.path, bodyRemovedReferences);
+                        });
+                        if (filtered.length === currentLines.length) return current;
+                        bodyChanged = true;
+                        return filtered.join('\n');
+                    });
+                    if (bodyChanged) {
+                        for (const referenceKey of bodyRemovedReferences) removedReferenceKeys.add(referenceKey);
+                    }
                 }
             } catch (err) {
                 logger.warn(`[TPS GCM] cleanupLinksForDeletedFile: failed to clean body links for ${file.path}:`, err);
@@ -2698,6 +2850,17 @@ export class BulkEditService {
             setTimeout(() => touchedFiles.forEach((file) => this.plugin.persistentMenuManager?.refreshMenusForFile(file)), 200);
             this.notifyFilesChanged(touchedFiles);
         }
+        const result = {
+            scannedFiles: files.length,
+            touchedFiles: touchedFiles.length,
+            removedReferences: removedReferenceKeys.size,
+            preservedAmbiguousReferences: ambiguousReferenceKeys.size,
+        };
+        logger.flow('DeletedLinkCleanup', 'done', {
+            deletedPath,
+            ...result,
+        });
+        return result;
     }
 }
 

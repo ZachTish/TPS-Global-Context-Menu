@@ -942,7 +942,7 @@ export class DailyNoteNavManager extends Component {
                     file,
                     false,
                     () => targetLeaf ?? this.plugin.app.workspace.getLeaf(false),
-                    { revealLeaf: true, active: true },
+                    { revealLeaf: true, active: true, reuseLeafIfNoExisting: true },
                 );
                 if (!opened) return;
             } else {

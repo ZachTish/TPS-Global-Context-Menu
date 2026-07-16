@@ -1,4 +1,4 @@
-import { Notice, normalizePath, TFile } from 'obsidian';
+import { Notice, normalizePath, TFile, type WorkspaceLeaf } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
 import type { VaultQueryService } from './services/vault-query-service';
 import type { BodySubitemLink, ResolvedParentLink } from './services/subitem-types';
@@ -7,6 +7,7 @@ import { mergeNormalizedTags, parseTagInput } from './utils/tag-utils';
 import { executeCommandById, getInternalPlugin, getPluginById, hasCommand } from './core';
 import { mapSubitemCheckboxStateToStatus } from './utils/linked-subitem-mapping';
 import { TPS_EVENTS, TPS_LEGACY_EVENTS } from './tps-contracts';
+import { findExistingDailyNoteForIsoDate, getDailyNotePathForIsoDate } from './utils/daily-note-task-schedule';
 
 type ChecklistTaskState = string;
 
@@ -556,6 +557,29 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             version: 1,
             register: (action: any) => plugin.registerExternalAction(action),
         },
+        homeActions: {
+            version: 1,
+            register: (commandId: string, handler: any) => plugin.homeComponentActionService.register(commandId, handler),
+            canExecute: (action: any) => plugin.homeComponentActionService.canExecute(action),
+            execute: (action: any, context: any) => plugin.homeComponentActionService.execute(action, context),
+        },
+        dailyNotes: {
+            version: 1,
+            findForIsoDate: (isoDate: string) => findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, isoDate),
+            pathForIsoDate: (isoDate: string) => getDailyNotePathForIsoDate(plugin.app, plugin.settings, isoDate),
+            ensureForIsoDate: (isoDate: string) => plugin.noteOperationService.ensureDailyNote(`${isoDate} 00:00:00`),
+        },
+        openFileInLeaf: (
+            file: TFile,
+            context: 'tab' | 'split' | 'window' | false,
+            getLeaf: () => WorkspaceLeaf | null,
+            options?: {
+                revealLeaf?: boolean;
+                active?: boolean;
+                ignoreCanvasDragGuard?: boolean;
+                reuseLeafIfNoExisting?: boolean;
+            },
+        ) => plugin.openFileInLeaf(file, context, getLeaf, options),
         status: services.status,
         schedule: services.schedule,
         identity: plugin.identityService,
@@ -565,6 +589,10 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         tasks: plugin.taskApiService,
         ui: {
             shouldForceBaseLinkPreview: () => plugin.settings.enableBasesForcedLinkPreview === true,
+        },
+        diagnostics: {
+            version: 1,
+            getOpenerDecision: (targetPath?: string | null) => plugin.getOpenerDiagnostic(targetPath),
         },
         completedCheckboxes: {
             revealForFile: (filePath: string, lineNumber?: number) =>

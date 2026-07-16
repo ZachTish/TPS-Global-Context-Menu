@@ -64,6 +64,40 @@ export function error(message?: any, ...optionalParams: any[]): void {
 export const debug = log;
 export const info = log;
 
+export function errorSummary(err: unknown): Record<string, unknown> {
+  if (err instanceof Error) {
+    return {
+      name: err.name,
+      message: err.message,
+      stack: err.stack,
+    };
+  }
+  return { message: String(err) };
+}
+
+export function flow(scope: string, event: string, data?: Record<string, unknown>): void {
+  log(`[${scope}] ${event}`, data || {});
+}
+
+export function flowWarn(scope: string, event: string, data?: Record<string, unknown>): void {
+  warn(`[${scope}] ${event}`, data || {});
+}
+
+export function flowError(scope: string, event: string, err: unknown, data?: Record<string, unknown>): void {
+  error(`[${scope}] ${event}`, {
+    ...(data || {}),
+    error: errorSummary(err),
+  });
+}
+
+export function taskTrace(scope: string, event: string, details?: Record<string, unknown>): void {
+  if ((window as any).__TPS_TASKTRACE !== true) return;
+  console.log(`[TPS TASKTRACE] [${scope}] ${event}`, {
+    t: Math.round(performance.now()),
+    ...(details || {}),
+  });
+}
+
 export function perf(label: string, data?: Record<string, unknown>): void {
   log(`[PERF] ${label}`, {
     t: Math.round(performance.now()),

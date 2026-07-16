@@ -32,7 +32,7 @@ export class UnresolvedSubitemModal extends Modal {
 
   onOpen(): void {
     const { contentEl } = this;
-    contentEl.addClass('mod-tps-gcm');
+    this.modalEl.addClass('mod-tps-gcm');
 
     // Title
     contentEl.createEl('h2', { text: 'Unresolved Subitem Links' });

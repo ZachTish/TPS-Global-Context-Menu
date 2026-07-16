@@ -3,6 +3,7 @@ import {
   readInlineFieldValue,
   setInlineFieldValueOnTaskLine,
   setTaskCheckboxToken,
+  stripTaskInlinePropsMetadata,
 } from './task-line-metadata';
 
 export const TASK_RECURRENCE_AFTER_COMPLETION_PREFIX = 'GCM-AFTER-COMPLETION:';
@@ -120,7 +121,7 @@ export function extractTaskRecurrenceRule(rawLine: string): string {
 export function stripTaskRecurrenceInstanceFields(rawLine: string): string {
   return TASK_RECURRENCE_INSTANCE_ONLY_KEYS.reduce(
     (line, key) => setInlineFieldValueOnTaskLine(line, key, null),
-    rawLine,
+    stripTaskInlinePropsMetadata(rawLine),
   );
 }
 

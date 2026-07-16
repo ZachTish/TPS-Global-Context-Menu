@@ -85,8 +85,6 @@
   color: var(--interactive-accent);
 }
 
-/* ── Settings helpers ───────────────────────────────────────────────────── */
-
 /* Remove default border from Setting items used inside a compact rule grid */
 .tps-gcm-no-border {
   border: none !important;

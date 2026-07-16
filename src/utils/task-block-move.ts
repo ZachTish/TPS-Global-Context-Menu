@@ -1,11 +1,13 @@
 import {
-  findAfterFrontmatterIndex,
+  getPlainTaskTitle,
   getTaskDisplayTitle,
   parseTaskLine,
+  readInlineFieldValue,
   setInlineFieldValueOnTaskLine,
   setTaskCheckboxToken,
-  setTaskTitle,
+  stripTaskInlinePropsMetadata,
 } from './task-line-metadata';
+import { MIGRATED_TASK_CHECKBOX, MIGRATED_TO_FIELD } from '../constants/task-migration';
 
 export interface ContentParts {
   lines: string[];
@@ -37,19 +39,41 @@ export function joinContent(lines: string[], newline: string, endsWithNewline: b
 }
 
 export function findCurrentTaskLineIndex(lines: string[], preferredIndex: number, rawLine: string, title: string): number {
-  if (preferredIndex >= 0 && parseTaskLine(lines[preferredIndex] || '')) {
-    if (!rawLine || lines[preferredIndex] === rawLine) return preferredIndex;
+  const sourceRawLine = String(rawLine || '');
+  if (
+    sourceRawLine
+    && preferredIndex >= 0
+    && parseTaskLine(lines[preferredIndex] || '')
+    && lines[preferredIndex] === sourceRawLine
+  ) {
+    return preferredIndex;
   }
-  if (rawLine) {
-    const exact = lines.findIndex((line) => line === rawLine);
-    if (exact >= 0 && parseTaskLine(lines[exact] || '')) return exact;
+
+  if (sourceRawLine) {
+    const exactMatches = findTaskLineIndexes(lines, (line) => line === sourceRawLine);
+    if (exactMatches.length === 1) return exactMatches[0];
   }
-  const normalizedTitle = normalizeTaskText(title);
+
+  let ambiguousIdentity = false;
+  for (const key of ['tpsId', 'subitemId']) {
+    const identity = readInlineFieldValue(sourceRawLine, key);
+    if (!identity) continue;
+    const identityMatches = findTaskLineIndexes(
+      lines,
+      (line) => readInlineFieldValue(line, key) === identity,
+    );
+    if (identityMatches.length === 1) return identityMatches[0];
+    if (identityMatches.length > 1) ambiguousIdentity = true;
+  }
+  if (ambiguousIdentity) return -1;
+
+  const normalizedTitle = normalizeTaskText(getPlainTaskTitle(title));
   if (!normalizedTitle) return -1;
-  return lines.findIndex((line) => {
-    if (!parseTaskLine(line || '')) return false;
-    return normalizeTaskText(getTaskDisplayTitle(line || '')) === normalizedTitle;
-  });
+  const titleMatches = findTaskLineIndexes(
+    lines,
+    (line) => normalizeTaskText(getTaskDisplayTitle(line)) === normalizedTitle,
+  );
+  return titleMatches.length === 1 ? titleMatches[0] : -1;
 }
 
 export function extractTaskBlock(lines: string[], startIndex: number): TaskBlock {
@@ -81,14 +105,11 @@ export function insertTaskBlockAfterFrontmatter(content: string, blockLines: str
   const parts = splitContent(content);
   const cleanBlock = normalizeBlockLines(blockLines);
   if (!cleanBlock.length) return { content, lineIndex: -1 };
-  const insertIndex = findAfterFrontmatterIndex(parts.lines);
-  const before = parts.lines.slice(0, insertIndex);
-  const after = parts.lines.slice(insertIndex);
-  while (after.length > 0 && after[0].trim() === '') after.shift();
-  const lineIndex = before.length > 0 ? before.length + 1 : 0;
-  const nextLines = before.length > 0
-    ? [...before, '', ...cleanBlock, ...(after.length > 0 ? ['', ...after] : [])]
-    : [...cleanBlock, ...(after.length > 0 ? ['', ...after] : [])];
+  const nextLines = [...parts.lines];
+  while (nextLines.length > 0 && nextLines[nextLines.length - 1].trim() === '') nextLines.pop();
+  const lineIndex = nextLines.length;
+  if (nextLines.length > 0) nextLines.push(...cleanBlock);
+  else nextLines.push(...cleanBlock);
   return {
     content: joinContent(nextLines, parts.newline, true),
     lineIndex,
@@ -147,10 +168,15 @@ export function buildDailyNoteScratchpadMovedTaskBlock(
 ): string[] {
   const cleanBlock = normalizeBlockLines(blockLines);
   if (!cleanBlock.length) return cleanBlock;
+  const scratchpadBlock = cleanBlock.map((line) => stripMovedTaskIdentity(line));
+  const migratedLine = setInlineFieldValueOnTaskLine(
+    setTaskCheckboxToken(scratchpadBlock[0], MIGRATED_TASK_CHECKBOX),
+    MIGRATED_TO_FIELD,
+    buildMigratedToLink(details.targetPath),
+  );
   return [
-    setInlineFieldValueOnTaskLine(setTaskCheckboxToken(strikeThroughTaskLine(cleanBlock[0]), '[x]'), 'completedDate', 'null'),
-    ...cleanBlock.slice(1).map(strikeThroughTaskBlockLine),
-    buildMovedCommentLine(cleanBlock[0], details),
+    migratedLine,
+    ...scratchpadBlock.slice(1),
   ];
 }
 
@@ -176,39 +202,24 @@ function normalizeTaskText(value: string): string {
   return String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
-function strikeThroughTaskBlockLine(line: string): string {
-  if (!String(line || '').trim()) return line;
-  if (parseTaskLine(line)) return strikeThroughTaskLine(line);
-  const indent = String(line || '').match(/^[\t ]*/)?.[0] ?? '';
-  const body = String(line || '').slice(indent.length).trimEnd();
-  if (!body.trim()) return line;
-  return `${indent}${strikeThroughText(body)}`;
+function findTaskLineIndexes(lines: string[], predicate: (line: string, index: number) => boolean): number[] {
+  const matches: number[] = [];
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] || '';
+    if (parseTaskLine(line) && predicate(line, index)) matches.push(index);
+  }
+  return matches;
 }
 
-function strikeThroughTaskLine(line: string): string {
-  const title = getTaskDisplayTitle(line);
-  if (!title) return line;
-  return setTaskTitle(line, strikeThroughText(title));
+function stripMovedTaskIdentity(line: string): string {
+  let next = stripTaskInlinePropsMetadata(line);
+  if (!parseTaskLine(next)) return next;
+  next = setInlineFieldValueOnTaskLine(next, 'tpsId', null);
+  next = setInlineFieldValueOnTaskLine(next, 'subitemId', null);
+  return next;
 }
 
-function strikeThroughText(text: string): string {
-  const value = String(text || '').trim();
-  if (!value) return text;
-  if (value.startsWith('~~') && value.endsWith('~~')) return value;
-  return `~~${value}~~`;
-}
-
-function buildMovedCommentLine(sourceLine: string, details: DailyNoteScratchpadMoveDetails): string {
-  const indent = String(sourceLine || '').match(/^[\t ]*/)?.[0] ?? '';
-  const targetPath = String(details.targetPath || 'another file').trim() || 'another file';
-  const movedAt = formatMoveTimestamp(details.movedAt instanceof Date ? details.movedAt : new Date());
-  return `${indent}%% Moved to ${targetPath} on ${movedAt} %%`;
-}
-
-function formatMoveTimestamp(date: Date): string {
-  const pad = (value: number): string => String(value).padStart(2, '0');
-  return [
-    `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`,
-    `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`,
-  ].join(' ');
+function buildMigratedToLink(targetPath?: string): string {
+  const cleanTargetPath = String(targetPath || 'another file').trim() || 'another file';
+  return `[[${cleanTargetPath.replace(/\.md$/i, '')}]]`;
 }

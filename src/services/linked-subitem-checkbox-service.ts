@@ -156,11 +156,7 @@ export class LinkedSubitemCheckboxService {
   }
 
   private taskTrace(message: string, details?: Record<string, unknown>): void {
-    if ((window as any).__TPS_TASKTRACE !== true) return;
-    console.log(`[TPS TASKTRACE] [GCM LinkedSubitems] ${message}`, {
-      t: Math.round(performance.now()),
-      ...(details || {}),
-    });
+    logger.taskTrace('GCM LinkedSubitems', message, details);
   }
 
   ensureForView(view: MarkdownView): void {
@@ -406,14 +402,24 @@ export class LinkedSubitemCheckboxService {
     const statuses = this.getStatusOptions();
     const currentStatus = this.getNormalizedStatus(context.childFile);
     const menu = new Menu();
+    const statusItems: Array<{ item: any; status: string; normalized: string }> = [];
+    const setSelectedStatus = (selectedStatus: string) => {
+      const selectedNormalized = String(selectedStatus || '').trim().toLowerCase();
+      for (const entry of statusItems) {
+        const selected = Boolean(entry.normalized && entry.normalized === selectedNormalized);
+        entry.item.setTitle(selected ? `${entry.status} — Selected` : entry.status);
+        entry.item.setChecked(selected);
+      }
+    };
     for (const status of statuses) {
       menu.addItem((item) => {
         const normalized = String(status || '').trim().toLowerCase();
-        item.setTitle(status);
-        if (normalized && normalized === currentStatus) {
-          item.setChecked(true);
-        }
+        statusItems.push({ item, status, normalized });
+        const selected = Boolean(normalized && normalized === currentStatus);
+        item.setTitle(selected ? `${status} — Selected` : status);
+        item.setChecked(selected);
         item.onClick(() => {
+          setSelectedStatus(status);
           void this.setLinkedSubitemStatus(context.childFile, status);
         });
       });

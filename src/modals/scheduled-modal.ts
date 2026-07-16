@@ -1,4 +1,5 @@
-import { App, Modal, Setting, ToggleComponent, TextComponent } from 'obsidian';
+import { App, Modal, Notice, Setting, ToggleComponent, TextComponent } from 'obsidian';
+import * as logger from '../logger';
 
 export interface ScheduledResult {
     date: string;
@@ -6,37 +7,51 @@ export interface ScheduledResult {
     allDay: boolean;
 }
 
+export interface ScheduledModalOptions {
+    title?: string;
+    fieldLabel?: string;
+    showTimeDetails?: boolean;
+}
+
 export class ScheduledModal extends Modal {
     currentDate: string;
     currentTimeEstimate: number;
     currentAllDay: boolean;
-    onSubmit: (result: ScheduledResult) => void;
+    onSubmit: (result: ScheduledResult) => void | Promise<void>;
+    private readonly options: Required<ScheduledModalOptions>;
+    private submitting = false;
 
     // UI Elements
-    dateComponent: TextComponent;
-    timeEstimateComponent: TextComponent;
-    endTimeComponent: TextComponent;
-    allDayToggle: ToggleComponent;
+    dateComponent?: TextComponent;
+    timeEstimateComponent?: TextComponent;
+    endTimeComponent?: TextComponent;
+    allDayToggle?: ToggleComponent;
 
     constructor(
         app: App,
         currentDate: string,
         currentTimeEstimate: number,
         currentAllDay: boolean,
-        onSubmit: (result: ScheduledResult) => void
+        onSubmit: (result: ScheduledResult) => void | Promise<void>,
+        options: ScheduledModalOptions = {},
     ) {
         super(app);
         this.currentDate = currentDate;
         this.currentTimeEstimate = currentTimeEstimate || 0;
         this.currentAllDay = currentAllDay || false;
         this.onSubmit = onSubmit;
+        this.options = {
+            title: String(options.title || 'Set Scheduled Date'),
+            fieldLabel: String(options.fieldLabel || 'Scheduled'),
+            showTimeDetails: options.showTimeDetails !== false,
+        };
     }
 
     onOpen() {
         this.modalEl.addClass('mod-tps-gcm');
         const { contentEl } = this;
         contentEl.empty();
-        contentEl.createEl('h2', { text: 'Set Scheduled Date' });
+        contentEl.createEl('h2', { text: this.options.title });
 
         // Normalize stored frontmatter dates to datetime-local input shape.
         let initialDate = this.currentDate;
@@ -50,7 +65,7 @@ export class ScheduledModal extends Modal {
 
         // 1. Scheduled Date Input
         new Setting(contentEl)
-            .setName('Scheduled')
+            .setName(this.options.fieldLabel)
             .addText((text) => {
                 text.inputEl.type = 'datetime-local';
                 text.setValue(initialDate);
@@ -61,44 +76,43 @@ export class ScheduledModal extends Modal {
                 text.inputEl.addEventListener('keydown', e => e.stopPropagation());
             });
 
-        // 2. All Day Toggle
-        new Setting(contentEl)
-            .setName('All Day')
-            .addToggle((toggle) => {
-                toggle.setValue(this.currentAllDay);
-                this.allDayToggle = toggle;
-            });
+        if (this.options.showTimeDetails) {
+            // 2. All Day Toggle
+            new Setting(contentEl)
+                .setName('All Day')
+                .addToggle((toggle) => {
+                    toggle.setValue(this.currentAllDay);
+                    this.allDayToggle = toggle;
+                });
 
-        // 3. Time Estimate (Minutes)
-        new Setting(contentEl)
-            .setName('Time Estimate (minutes)')
-            .addText((text) => {
-                text.inputEl.type = 'number';
-                text.setValue(String(this.currentTimeEstimate));
-                this.timeEstimateComponent = text;
+            // 3. Time Estimate (Minutes)
+            new Setting(contentEl)
+                .setName('Time Estimate (minutes)')
+                .addText((text) => {
+                    text.inputEl.type = 'number';
+                    text.setValue(String(this.currentTimeEstimate));
+                    this.timeEstimateComponent = text;
 
-                text.inputEl.addEventListener('input', () => this.recalculateEndTime());
-                text.inputEl.addEventListener('click', e => e.stopPropagation());
-                text.inputEl.addEventListener('keydown', e => e.stopPropagation());
-            });
+                    text.inputEl.addEventListener('input', () => this.recalculateEndTime());
+                    text.inputEl.addEventListener('click', e => e.stopPropagation());
+                    text.inputEl.addEventListener('keydown', e => e.stopPropagation());
+                });
 
-        // 4. End Time (Computed / Editable)
-        new Setting(contentEl)
-            .setName('End Time')
-            .setDesc('Modifying this updates Time Estimate')
-            .addText((text) => {
-                text.inputEl.type = 'datetime-local';
-                this.endTimeComponent = text;
+            // 4. End Time (Computed / Editable)
+            new Setting(contentEl)
+                .setName('End Time')
+                .setDesc('Modifying this updates Time Estimate')
+                .addText((text) => {
+                    text.inputEl.type = 'datetime-local';
+                    this.endTimeComponent = text;
 
-                // Use 'input' for immediate feedback, or 'change' if preferred. 
-                // 'input' is better for responsiveness.
-                text.inputEl.addEventListener('input', () => this.recalculateTimeEstimate());
-                text.inputEl.addEventListener('click', e => e.stopPropagation());
-                text.inputEl.addEventListener('keydown', e => e.stopPropagation());
-            });
+                    text.inputEl.addEventListener('input', () => this.recalculateTimeEstimate());
+                    text.inputEl.addEventListener('click', e => e.stopPropagation());
+                    text.inputEl.addEventListener('keydown', e => e.stopPropagation());
+                });
 
-        // Initial calculation
-        this.recalculateEndTime();
+            this.recalculateEndTime();
+        }
 
         // Footer Actions
         const footer = contentEl.createDiv('tps-gcm-modal-footer');
@@ -110,16 +124,14 @@ export class ScheduledModal extends Modal {
         const clearBtn = footer.createEl('button', { text: 'Clear' });
         clearBtn.classList.add('mod-warning');
         clearBtn.addEventListener('click', () => {
-            this.close();
-            this.onSubmit({ date: '', timeEstimate: 0, allDay: false });
+            void this.submit({ date: '', timeEstimate: 0, allDay: false }, [clearBtn, saveBtn]);
         });
 
         const saveBtn = footer.createEl('button', { text: 'Save' });
         saveBtn.classList.add('mod-cta');
         saveBtn.addEventListener('click', () => {
-            this.close();
             // Normalize datetime-local format to the Obsidian Bases-compatible datetime string.
-            let dateValue = this.dateComponent.getValue();
+            let dateValue = this.dateComponent?.getValue() || '';
             if (dateValue) {
                 // Ensure seconds are present
                 if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(dateValue)) {
@@ -131,12 +143,30 @@ export class ScheduledModal extends Modal {
                     dateValue = dateValue.replace('T', ' ');
                 }
             }
-            this.onSubmit({
+            void this.submit({
                 date: dateValue,
-                timeEstimate: parseInt(this.timeEstimateComponent.getValue()) || 0,
-                allDay: this.allDayToggle.getValue()
-            });
+                timeEstimate: parseInt(this.timeEstimateComponent?.getValue() || String(this.currentTimeEstimate), 10) || 0,
+                allDay: this.allDayToggle?.getValue() ?? this.currentAllDay,
+            }, [clearBtn, saveBtn]);
         });
+    }
+
+    private async submit(result: ScheduledResult, buttons: HTMLButtonElement[]): Promise<void> {
+        if (this.submitting) return;
+        this.submitting = true;
+        buttons.forEach((button) => { button.disabled = true; });
+        try {
+            await this.onSubmit(result);
+            this.close();
+        } catch (error) {
+            logger.flowError('ScheduledModal', 'submit:failed', error, {
+                fieldLabel: this.options.fieldLabel,
+                hasValue: Boolean(result.date),
+            });
+            new Notice(`Could not update ${this.options.fieldLabel.toLowerCase()}.`);
+            this.submitting = false;
+            buttons.forEach((button) => { button.disabled = false; });
+        }
     }
 
     recalculateEndTime() {

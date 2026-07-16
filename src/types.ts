@@ -38,6 +38,39 @@ export type ParentLinkFormat = 'wikilink' | 'markdown-title';
 export type ChecklistPromotionBehavior = 'remove' | 'complete-and-link' | 'link-only';
 export type LinkedSubitemCheckboxStyle = 'native' | 'soft-link' | 'accent';
 export type TimeTrackingStorageMode = 'daily-note' | 'source-note' | 'dedicated-note';
+type ExtensibleLiteral<T extends string> = T | (string & Record<never, never>);
+
+export type TpsRecordKind = 'note' | 'task' | 'project' | 'food' | 'log' | 'workflow' | 'run' | 'workout' | 'workout-plan';
+export type WorkflowRecurrenceMode = 'completion-triggered' | 'scheduled';
+export type WorkflowTemplateKind = 'workflow';
+export type WorkflowRunKind = 'run';
+export type WorkflowRunType = ExtensibleLiteral<'workflow' | 'workout'>;
+
+export interface WorkflowTemplateFrontmatter {
+  kind?: TpsRecordKind;
+  workflowKind?: WorkflowTemplateKind;
+  workflowType?: WorkflowRunType;
+  recurrenceMode?: WorkflowRecurrenceMode;
+  targetGapDays?: number;
+  lastCompletedDate?: string;
+  lastRunPath?: string;
+}
+
+export interface WorkflowRunFrontmatter {
+  kind?: TpsRecordKind;
+  runKind?: WorkflowRunKind;
+  runType?: WorkflowRunType;
+  workflowPath?: string;
+  workflowName?: string;
+  workflowType?: WorkflowRunType;
+  recurrenceMode?: WorkflowRecurrenceMode;
+  startedAt?: string;
+  endedAt?: string;
+  completedDate?: string;
+  previousCompletedDate?: string;
+  secondsSincePreviousCompletion?: number;
+  targetGapDays?: number;
+}
 export interface TimeTrackingPausedSessionState {
   targetId: string;
   targetType: 'note' | 'heading' | 'bullet' | 'task' | 'line';
@@ -128,6 +161,7 @@ export type NotebookNavigatorRuleConditionSource =
   | 'name'
   | 'tag'
   | 'body'
+  | 'checkbox-state'
   | 'date-created'
   | 'date-modified'
   | 'parent-frontmatter'
@@ -221,6 +255,7 @@ export interface RuleEvaluationContext {
   frontmatter: Record<string, unknown> | null;
   tags: string[];
   body?: string;
+  checkboxStates?: string[];
   lineType?: 'note' | 'task';
   relationshipLineage?: RelationshipLineageNode[];
   parent?: {
@@ -270,8 +305,8 @@ export interface NotebookNavigatorRuleSettings {
 }
 
 export const DEFAULT_NOTEBOOK_NAVIGATOR_RULE_SETTINGS: NotebookNavigatorRuleSettings = {
-  enabled: true,
-  autoApplyOnFileOpen: true,
+  enabled: false,
+  autoApplyOnFileOpen: false,
   autoApplyOnMetadataChange: false,
   applyOnStartup: false,
   startupDelayMs: 800,
@@ -388,6 +423,7 @@ export function createDefaultConditionGroup(): ConditionGroup {
 
 export interface TPSGlobalContextMenuSettings {
   enableLogging: boolean;
+  logOpenerDecisions: boolean;
   enableInlinePersistentMenus: boolean;
   enableInLivePreview: boolean;
   enableInPreview: boolean;
@@ -397,6 +433,15 @@ export interface TPSGlobalContextMenuSettings {
   suppressMobileKeyboard: boolean;
   enableCanvasOpenGuard: boolean;
   enableBasesForcedLinkPreview: boolean;
+  collapseHeadingsOnOpen: boolean;
+  homeComponents: HomeComponentId[];
+  homeComponentLayouts: Record<string, HomeComponentLayout>;
+  homeComponentActions: HomeComponentActionMap;
+  homeCalendarBasePath: string;
+  homeFoodBasePath: string;
+  homeWorkoutBasePath: string;
+  homeOpenTasksBasePath: string;
+  homeCaptureInsertPosition: HomeCaptureInsertPosition;
   hideCompletedCheckboxes: boolean;
   hideAllTaskLinesInReadingMode: boolean;
   taskHidingExclusionPatterns: string;
@@ -418,11 +463,8 @@ export interface TPSGlobalContextMenuSettings {
   timeTrackingStorageMode: TimeTrackingStorageMode;
   timeTrackingDedicatedNotePath: string;
   timeTrackingSingleActiveSession: boolean;
+  timeTrackingIgnoreArchivedFiles: boolean;
   timeTrackingPausedSession?: TimeTrackingPausedSessionState | null;
-  enableAutoPinActiveNotes: boolean;
-  autoPinActiveScheduledNotes: boolean;
-  autoPinScheduledDefaultMinutes: number;
-  autoPinFrontmatterRules: string;
 
   // Recurrence settings
   enableRecurrence: boolean;
@@ -597,6 +639,38 @@ export interface BuildPanelOptions {
   recurrenceRoot?: HTMLElement | null;
   closeAfterRecurrence?: boolean;
 }
+
+export type HomeBuiltInComponentId = 'quick-capture' | 'calendar' | 'food-tracker' | 'workout-tracker' | 'open-unscheduled-tasks';
+export type HomeBaseComponent = { type: 'base'; path: string };
+export type HomeCommandComponent = { type: 'command'; commandId: string; title?: string; icon?: string };
+export type HomeComponentId = HomeBuiltInComponentId | HomeBaseComponent | HomeCommandComponent;
+export interface HomeComponentLayout {
+  height?: number;
+  span?: 1 | 2;
+  capturePreviewHeight?: number;
+}
+export type HomeComponentActionTarget = 'home-note' | 'workspace';
+export interface HomeComponentAction {
+  id: string;
+  commandId: string;
+  label?: string;
+  icon?: string;
+  target: HomeComponentActionTarget;
+}
+export type HomeComponentActionMap = Record<string, HomeComponentAction[]>;
+export interface HomeActionContext {
+  source: 'tps-home';
+  dateIso: string;
+  dailyNotePath: string;
+  componentId: string;
+  basePath?: string;
+}
+export interface HomeActionProvider {
+  version?: number;
+  canHandle(commandId: string): boolean;
+  execute(commandId: string, context: HomeActionContext): void | boolean | Promise<void | boolean>;
+}
+export type HomeCaptureInsertPosition = 'top' | 'bottom';
 
 /**
  * Recurrence rule button option

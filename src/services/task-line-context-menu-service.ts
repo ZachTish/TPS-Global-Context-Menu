@@ -1,9 +1,10 @@
-import { App, Menu, Modal, Notice, TFile } from 'obsidian';
+import { App, Menu, Modal, Notice, TFile, setIcon } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { FileSuggestModal } from '../modals/FileSuggestModal';
 import { RecurrenceModal } from '../modals/recurrence-modal';
 import { ScheduledModal } from '../modals/scheduled-modal';
 import { TextInputModal } from '../modals/text-input-modal';
+import { promptNestedLineDelete } from '../modals/nested-line-delete-modal';
 import type { CustomProperty, LinkedSubitemCheckboxMapping } from '../types';
 import {
   buildDailyNoteScratchpadMovedTaskBlock,
@@ -15,14 +16,22 @@ import {
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import {
   addInlineTagToTaskLine,
+  convertTaskLineToBullet,
   getTaskDisplayTitle,
+  getPlainTaskTitle,
+  getTaskSourceTitle,
+  getTaskEditableBody,
+  parseTaskTitleLink,
   parseTaskLine,
   readInlineFieldValue,
   readInlineTags,
+  readTaskAssociatedNotePath,
   removeInlineTagFromTaskLine,
   setInlineFieldValueOnTaskLine,
   setTaskCheckboxToken,
+  setTaskEditableBody,
   setTaskTitle,
+  stripTaskInlinePropsMetadata,
   updateTaskCompletedDateForCheckboxState,
   updateTaskLineTimestamps,
 } from '../utils/task-line-metadata';
@@ -33,6 +42,18 @@ import {
   resolveTaskScheduledValue,
 } from '../utils/daily-note-task-schedule';
 import { getLinkedSubitemCompleteMarkers, mapSubitemCheckboxStateToStatus, normalizeLinkedSubitemMappings } from '../utils/linked-subitem-mapping';
+import * as logger from '../logger';
+import { KeyboardAwareOverlay } from '../utils/mobile-overlay';
+import { getOrderedSelectionRange } from '../utils/ordered-selection';
+import {
+  inspectLineItemDeleteTarget,
+  performLineItemDelete,
+  requestLineItemDelete,
+  type LineItemDeleteTarget,
+} from './line-item-delete-service';
+import type { LineItemDeleteMode } from '../utils/line-item-deletion';
+import { resolveCustomProperties } from '../resolve-profiles';
+import { ViewModeService } from './view-mode-service';
 
 export type TaskLineContext = {
   file: TFile;
@@ -51,33 +72,70 @@ type TaskLineHighlightKind = 'active' | 'selected';
 const KANBAN_TASK_SELECTOR = [
   '[data-tps-gcm-context="kanban-task"]',
   '[data-tps-gcm-context="calendar-task"]',
+  '[data-tps-gcm-context="table-task"]',
   '.tps-kanban-card-task[data-task-path][data-task-line]',
   '.tps-kanban-task-card[data-task-path][data-task-line]',
   '.tps-calendar-task-entry[data-task-path][data-task-line]',
   '.task-list-item',
   'input.task-list-item-checkbox',
-  '[data-task]',
-  'input[type="checkbox"]',
 ].join(', ');
+
+function taskElSurface(element: HTMLElement): string {
+  if (element.closest('.tps-log-base')) return 'tps-table';
+  if (element.closest('.tps-list-native')) return 'tps-list';
+  if (element.closest('.tps-kanban-container')) return 'tps-kanban';
+  if (element.closest('.tps-calendar-entry, .bases-calendar-view')) return 'calendar';
+  if (element.closest('.markdown-source-view')) return 'markdown-editor';
+  if (element.closest('.markdown-reading-view, .markdown-preview-view, .markdown-rendered')) return 'markdown-reading';
+  return 'unknown';
+}
 
 export class TaskLineContextMenuService {
   private selectedTaskContexts = new Map<string, TaskLineContext>();
+  private taskSelectionAnchor: TaskLineContext | null = null;
+  private tpsListSelectionSyncGeneration = 0;
+  private tpsListSelectionOwner: HTMLElement | null = null;
   private activeHighlightEls = new Set<HTMLElement>();
   private selectedHighlightEls = new Set<HTMLElement>();
+  private taskEditorEl: HTMLElement | null = null;
+  private taskEditorOutsideHandler: ((evt: MouseEvent) => void) | null = null;
+  private taskEditorOverlay: KeyboardAwareOverlay | null = null;
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
+  dispose(): void {
+    this.closeTaskEditor();
+    this.clearTaskSelection();
+  }
+
+  async openQuickEditorForElement(taskEl: HTMLElement, sourceEl: HTMLElement | null = taskEl): Promise<boolean> {
+    const context = await this.resolveContext(taskEl, sourceEl);
+    if (!context) {
+      logger.flowWarn('TaskQuickEditor', 'open:unresolved', {
+        path: taskEl.dataset.taskPath || taskEl.dataset.tpsKanbanPath || taskEl.dataset.path || '',
+        lineNumber: taskEl.dataset.taskLine || taskEl.dataset.tpsKanbanLine || '',
+      });
+      new Notice('Could not resolve the task line.');
+      return false;
+    }
+    this.showTaskEditor(context, taskEl);
+    return true;
+  }
+
   handleContextMenu(evt: MouseEvent): boolean {
     const target = evt.target instanceof HTMLElement ? evt.target : null;
-    const pointTaskEl = this.resolveTaskElementAtPoint(evt);
-    const taskEl = pointTaskEl || this.resolveTaskElement(target);
+    if (this.isTaskInteractionBoundary(target) || this.isTaskPropertyTarget(target)) return false;
+    const taskEl = this.resolveTaskElement(target);
     if (!taskEl) return false;
+    const listSelection = taskElSurface(taskEl) === 'tps-list'
+      ? this.routeTpsListSelection(evt, taskEl, true)
+      : null;
 
     evt.preventDefault();
     evt.stopPropagation();
     evt.stopImmediatePropagation();
 
-    void this.resolveContext(taskEl, target || pointTaskEl, { x: evt.clientX, y: evt.clientY }).then((context) => {
+    void (listSelection ?? Promise.resolve()).then(() => this.resolveContext(taskEl, target)).then((context) => {
       if (!context) {
         new Notice('Could not resolve the task line.');
         return;
@@ -88,99 +146,451 @@ export class TaskLineContextMenuService {
   }
 
   handleClick(evt: MouseEvent): boolean {
-    if (!evt.metaKey && !evt.ctrlKey) return false;
     const target = evt.target instanceof HTMLElement ? evt.target : null;
+    if (this.isTaskInteractionBoundary(target)) return false;
     if (target?.matches('input.task-list-item-checkbox, input[type="checkbox"]')) return false;
-    const pointTaskEl = this.resolveTaskElementAtPoint(evt);
-    const taskEl = pointTaskEl || this.resolveTaskElement(target);
+    if (this.isTaskEditorExcludedTarget(target)) return false;
+    const taskEl = this.resolveTaskElement(target);
     if (!taskEl) return false;
+    if (!this.isTaskEditorActivationTarget(target, taskEl)) return false;
+    const surface = taskElSurface(taskEl);
+    if (surface === 'tps-table' && (evt.shiftKey || evt.metaKey || evt.ctrlKey)) return false;
+    const listSelection = surface === 'tps-list' ? this.routeTpsListSelection(evt, taskEl) : null;
+    if (listSelection && (evt.shiftKey || evt.metaKey || evt.ctrlKey)) {
+      evt.preventDefault();
+      evt.stopPropagation();
+      evt.stopImmediatePropagation();
+      void listSelection;
+      return true;
+    }
 
     evt.preventDefault();
     evt.stopPropagation();
     evt.stopImmediatePropagation();
 
-    void this.resolveContext(taskEl, target || pointTaskEl, { x: evt.clientX, y: evt.clientY }).then((context) => {
+    void this.resolveContext(taskEl, target).then(async (context) => {
       if (!context) {
         new Notice('Could not resolve the task line.');
         return;
       }
-      this.toggleSelectedTask(context, taskEl);
+      if (evt.shiftKey && surface === 'tps-list') {
+        await this.selectTaskRange(context, taskEl, surface);
+        return;
+      }
+      if (evt.metaKey || evt.ctrlKey) {
+        this.toggleSelectedTask(context, taskEl, surface);
+        return;
+      }
+      this.taskSelectionAnchor = { ...context };
+      this.showTaskEditor(context, taskEl);
     });
     return true;
+  }
+
+  private routeTpsListSelection(
+    evt: MouseEvent,
+    taskEl: HTMLElement,
+    preserveIfSelected = false,
+  ): Promise<void> | null {
+    const scrollEl = taskEl.closest<HTMLElement>('.tps-list-scroll');
+    const view = (scrollEl as any)?.__tpsListView as {
+      applyTpsListRowSelection?: (
+        event: MouseEvent,
+        target: HTMLElement,
+        preserve?: boolean,
+      ) => Promise<void>;
+    } | undefined;
+    if (typeof view?.applyTpsListRowSelection !== 'function') return null;
+    return view.applyTpsListRowSelection(evt, taskEl, preserveIfSelected);
+  }
+
+  private isTaskEditorExcludedTarget(target: HTMLElement | null): boolean {
+    if (!target) return false;
+    const interactive = target.closest<HTMLElement>(
+      'a, input, textarea, select, [contenteditable="true"], .tps-list-native-property, .metadata-property, .clickable-icon, button',
+    );
+    if (!interactive) return false;
+    return !interactive.matches('.tps-list-native-title-button');
+  }
+
+  private isTaskInteractionBoundary(target: HTMLElement | null): boolean {
+    return Boolean(target?.closest([
+      '.modal',
+      '.modal-container',
+      '.menu',
+      '.popover',
+      '.hover-popover',
+      '.suggestion-container',
+      '.prompt',
+      '.tps-gcm-task-editor-card',
+      '.tps-gcm-base-link-preview',
+      '.tps-home-native-capture-editor',
+    ].join(', ')));
+  }
+
+  private isTaskPropertyTarget(target: HTMLElement | null): boolean {
+    return Boolean(target?.closest([
+      '.tps-list-native-property',
+      '.tps-list-native-property-input',
+      '.metadata-property',
+      '.metadata-container',
+    ].join(', ')));
+  }
+
+  private isTaskEditorActivationTarget(target: HTMLElement | null, taskEl: HTMLElement): boolean {
+    if (!target) return false;
+    if (taskEl.closest('[data-tps-gcm-context="table-task"]')) {
+      return Boolean(target.closest(
+        '.tps-log-base-cell[data-key="title"], .tps-log-base-cell[data-key="line"], .tps-log-base-cell[data-key$=".title"]',
+      ));
+    }
+    if (taskEl.closest('.tps-list-native-row--task')) {
+      return Boolean(target.closest('.tps-list-native-title-button, .tps-list-native-title'));
+    }
+    return true;
+  }
+
+  private showTaskEditor(context: TaskLineContext, anchorEl: HTMLElement): void {
+    this.closeTaskEditor();
+    const card = document.body.createDiv({ cls: 'tps-gcm-task-editor-card' });
+    card.dataset.path = context.file.path;
+    card.dataset.line = String(context.lineNumber);
+    card.setAttribute('role', 'dialog');
+    card.setAttribute('aria-label', `Edit task in ${context.file.basename}`);
+
+    const header = card.createDiv({ cls: 'tps-gcm-task-editor-header' });
+    const headerMain = header.createDiv({ cls: 'tps-gcm-task-editor-header-main' });
+    const icon = headerMain.createSpan({ cls: 'tps-gcm-task-editor-icon' });
+    setIcon(icon, 'square-pen');
+    const heading = headerMain.createDiv({ cls: 'tps-gcm-task-editor-heading' });
+    heading.createDiv({ cls: 'tps-gcm-task-editor-title', text: 'Edit task' });
+    heading.createDiv({
+      cls: 'tps-gcm-task-editor-source',
+      text: `${context.file.basename} · line ${context.lineNumber}`,
+      attr: { title: context.file.path },
+    });
+    const closeButton = header.createEl('button', {
+      cls: 'tps-gcm-task-editor-close clickable-icon',
+      attr: { type: 'button', 'aria-label': 'Close task editor' },
+    });
+    setIcon(closeButton, 'x');
+
+    const editorRow = card.createDiv({ cls: 'tps-gcm-task-editor-row' });
+    const checkboxButton = editorRow.createEl('input', {
+      cls: 'task-list-item-checkbox tps-gcm-task-editor-checkbox',
+      attr: {
+        type: 'checkbox',
+      },
+    });
+    const input = editorRow.createEl('textarea', {
+      cls: 'tps-gcm-task-editor-input',
+      attr: {
+        rows: '4',
+        spellcheck: 'true',
+        'aria-label': 'Task content',
+      },
+    });
+    input.value = getTaskEditableBody(context.rawLine);
+    this.renderTaskEditorCheckbox(checkboxButton, context);
+
+    let checkboxBusy = false;
+    let longPressTimer: number | null = null;
+    let longPressTriggered = false;
+    const clearLongPress = (): void => {
+      if (longPressTimer !== null) window.clearTimeout(longPressTimer);
+      longPressTimer = null;
+    };
+    const openStatusMenu = (): void => {
+      this.showTaskEditorStatusMenu(context, checkboxButton, () => {
+        this.renderTaskEditorCheckbox(checkboxButton, context);
+      });
+    };
+    const toggleCheckbox = async (): Promise<void> => {
+      if (checkboxBusy) return;
+      checkboxBusy = true;
+      checkboxButton.disabled = true;
+      try {
+        const mappings = this.getCheckboxMappings();
+        const marker = parseTaskLine(context.rawLine)?.marker || ' ';
+        const completeMarkers = new Set(this.getCompleteMarkers());
+        const currentIsComplete = completeMarkers.has(marker);
+        const nextMapping = currentIsComplete
+          ? mappings.find((mapping) => mapping.checkboxState === '[ ]')
+          : mappings.find((mapping) => completeMarkers.has(parseTaskLine(`- ${mapping.checkboxState} item`)?.marker || ''));
+        const nextToken = nextMapping?.checkboxState || (currentIsComplete ? '[ ]' : '[x]');
+        const updated = await this.updateTaskLine(context, (line) => setTaskCheckboxToken(line, nextToken), {
+          checkboxMutation: true,
+        });
+        if (!updated) return;
+        logger.flow('TaskQuickEditor', 'status:toggle', {
+          path: context.file.path,
+          lineNumber: context.lineNumber,
+          checkboxState: nextToken,
+        });
+        this.renderTaskEditorCheckbox(checkboxButton, context);
+      } finally {
+        checkboxBusy = false;
+        checkboxButton.disabled = false;
+      }
+    };
+    checkboxButton.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || checkboxBusy) return;
+      clearLongPress();
+      longPressTriggered = false;
+      longPressTimer = window.setTimeout(() => {
+        longPressTimer = null;
+        if (!checkboxButton.isConnected) return;
+        longPressTriggered = true;
+        checkboxButton.addClass('is-long-pressing');
+      }, 500);
+    });
+    checkboxButton.addEventListener('pointerup', () => {
+      const shouldOpen = longPressTriggered;
+      clearLongPress();
+      checkboxButton.removeClass('is-long-pressing');
+      if (shouldOpen) openStatusMenu();
+    });
+    checkboxButton.addEventListener('pointercancel', () => {
+      clearLongPress();
+      longPressTriggered = false;
+      checkboxButton.removeClass('is-long-pressing');
+    });
+    checkboxButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (longPressTriggered) {
+        longPressTriggered = false;
+        return;
+      }
+      void toggleCheckbox();
+    });
+    checkboxButton.addEventListener('contextmenu', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      clearLongPress();
+      longPressTriggered = false;
+      openStatusMenu();
+    });
+
+    const hint = card.createDiv({
+      cls: 'tps-gcm-task-editor-hint',
+      text: 'Edit the task text, tags, and inline properties. ⌘↵ saves.',
+    });
+    const actions = card.createDiv({ cls: 'tps-gcm-task-editor-actions' });
+    const openButton = actions.createEl('button', { text: 'Open in note', attr: { type: 'button' } });
+    const actionSpacer = actions.createDiv({ cls: 'tps-gcm-task-editor-action-spacer' });
+    void actionSpacer;
+    const cancelButton = actions.createEl('button', { text: 'Cancel', attr: { type: 'button' } });
+    const saveButton = actions.createEl('button', {
+      cls: 'mod-cta',
+      text: 'Save',
+      attr: { type: 'button' },
+    });
+
+    let saving = false;
+    const save = async (): Promise<void> => {
+      if (saving) return;
+      const nextBody = input.value.trim();
+      if (!nextBody) {
+        new Notice('Task content cannot be empty.');
+        input.focus();
+        return;
+      }
+      saving = true;
+      input.disabled = true;
+      saveButton.disabled = true;
+      try {
+        const updated = await this.updateTaskLine(context, (line) => setTaskEditableBody(line, nextBody));
+        if (!updated) {
+          saving = false;
+          input.disabled = false;
+          saveButton.disabled = false;
+          input.focus();
+          return;
+        }
+        logger.flow('TaskQuickEditor', 'save', {
+          path: context.file.path,
+          lineNumber: context.lineNumber,
+        });
+        this.closeTaskEditor();
+      } catch (error) {
+        saving = false;
+        input.disabled = false;
+        saveButton.disabled = false;
+        logger.flowError('TaskQuickEditor', 'save-failed', error, {
+          path: context.file.path,
+          lineNumber: context.lineNumber,
+        });
+        new Notice('Could not update the task.');
+        input.focus();
+      }
+    };
+
+    closeButton.addEventListener('click', () => this.closeTaskEditor());
+    cancelButton.addEventListener('click', () => this.closeTaskEditor());
+    saveButton.addEventListener('click', () => void save());
+    openButton.addEventListener('click', () => {
+      this.closeTaskEditor();
+      void this.openTaskLine(context);
+    });
+    input.addEventListener('keydown', (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        this.closeTaskEditor();
+        return;
+      }
+      if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+        event.preventDefault();
+        void save();
+      }
+    });
+
+    this.taskEditorEl = card;
+    this.taskEditorOverlay = new KeyboardAwareOverlay(card, anchorEl, { maxWidth: 480 });
+    this.taskEditorOverlay.connect();
+    this.taskEditorOutsideHandler = (event: MouseEvent) => {
+      const eventTarget = event.target;
+      if (eventTarget instanceof Node && card.contains(eventTarget)) return;
+      this.closeTaskEditor();
+    };
+    window.setTimeout(() => {
+      if (this.taskEditorOutsideHandler) document.addEventListener('mousedown', this.taskEditorOutsideHandler, true);
+      input.focus();
+      input.select();
+      this.taskEditorOverlay?.schedule();
+    }, 0);
+    logger.flow('TaskQuickEditor', 'open', {
+      path: context.file.path,
+      lineNumber: context.lineNumber,
+      surface: taskElSurface(anchorEl),
+    });
+  }
+
+  private closeTaskEditor(): void {
+    this.taskEditorOverlay?.disconnect();
+    this.taskEditorOverlay = null;
+    if (this.taskEditorOutsideHandler) {
+      document.removeEventListener('mousedown', this.taskEditorOutsideHandler, true);
+      this.taskEditorOutsideHandler = null;
+    }
+    this.taskEditorEl?.remove();
+    this.taskEditorEl = null;
+  }
+
+  private renderTaskEditorCheckbox(button: HTMLInputElement, context: TaskLineContext): void {
+    const mapping = this.getCheckboxMappings().find((candidate) => candidate.checkboxState === context.checkboxToken);
+    const status = this.getStatusForCheckboxToken(context.checkboxToken);
+    const marker = parseTaskLine(context.rawLine)?.marker || ' ';
+    const complete = this.getCompleteMarkers().includes(marker);
+    button.checked = complete;
+    button.indeterminate = marker !== ' ' && !complete;
+    button.dataset.checkboxToken = context.checkboxToken;
+    button.dataset.task = marker;
+    button.setAttribute('aria-checked', button.indeterminate ? 'mixed' : String(button.checked));
+    button.setAttr('aria-label', `${status || 'No mapped status'}. Click to toggle; long-press to change status.`);
+    button.setAttr('title', `${status || context.checkboxToken} · Click to toggle · Long-press for status`);
+  }
+
+  private showTaskEditorStatusMenu(
+    context: TaskLineContext,
+    button: HTMLInputElement,
+    onChanged: () => void,
+  ): void {
+    if (!button.isConnected) return;
+    const menu = new Menu();
+    for (const mapping of this.getCheckboxMappings()) {
+      const status = String(mapping.statuses?.[0] || '').trim();
+      const label = String(mapping.label || status || mapping.checkboxState).trim();
+      const selected = mapping.checkboxState === context.checkboxToken;
+      menu.addItem((item) => {
+        item
+          .setTitle(selected ? `${label} — Selected` : label)
+          .setIcon(mapping.icon || 'square')
+          .setChecked(selected)
+          .onClick(() => {
+            void this.updateTaskLine(context, (line) => setTaskCheckboxToken(line, mapping.checkboxState), {
+              checkboxMutation: true,
+            }).then((updated) => {
+              if (!updated) return;
+              logger.flow('TaskQuickEditor', 'status:change', {
+                path: context.file.path,
+                lineNumber: context.lineNumber,
+                checkboxState: mapping.checkboxState,
+                status: status || null,
+              });
+              onChanged();
+            });
+          });
+      });
+    }
+    menu.addSeparator();
+    menu.addItem((item) => {
+      item
+        .setTitle('Bullet — No status')
+        .setIcon('list')
+        .onClick(() => {
+          void this.updateTaskLine(context, (line) => convertTaskLineToBullet(
+            setInlineFieldValueOnTaskLine(line, this.getStatusKey(), null),
+          ), {
+            checkboxMutation: true,
+          }).then((updated) => {
+            if (!updated) return;
+            logger.flow('TaskQuickEditor', 'status:bullet', {
+              path: context.file.path,
+              lineNumber: context.lineNumber,
+            });
+            this.closeTaskEditor();
+          });
+        });
+    });
+    const rect = button.getBoundingClientRect();
+    menu.showAtPosition({ x: rect.left, y: rect.bottom + 6 });
   }
 
   private resolveTaskElement(target: HTMLElement | null): HTMLElement | null {
     if (!target) return null;
     const taskEl = target.closest<HTMLElement>(KANBAN_TASK_SELECTOR);
     if (!taskEl) return null;
-    return taskEl.matches('input.task-list-item-checkbox, input[type="checkbox"]')
-      ? taskEl.closest<HTMLElement>('.task-list-item, [data-task], li, p, div') ?? taskEl
+    return taskEl.matches('input.task-list-item-checkbox')
+      ? taskEl.closest<HTMLElement>('.task-list-item, li, p, div') ?? taskEl
       : taskEl;
-  }
-
-  private resolveTaskElementAtPoint(evt: MouseEvent): HTMLElement | null {
-    const pointTaskEl = this.resolveTaskElementByPointBounds(evt.clientX, evt.clientY);
-    if (pointTaskEl) return pointTaskEl;
-
-    if (typeof document.elementsFromPoint !== 'function') return null;
-    const elements = document.elementsFromPoint(evt.clientX, evt.clientY);
-    for (const element of elements) {
-      if (!(element instanceof HTMLElement)) continue;
-      const taskEl = this.resolveTaskElement(element);
-      if (taskEl) return taskEl;
-    }
-    return null;
-  }
-
-  private resolveTaskElementByPointBounds(clientX: number, clientY: number): HTMLElement | null {
-    const selectors = [
-      '[data-tps-gcm-context="kanban-task"]',
-      '[data-tps-gcm-context="calendar-task"]',
-      '.tps-kanban-card-task[data-task-path][data-task-line]',
-      '.tps-kanban-task-card[data-task-path][data-task-line]',
-      '.tps-calendar-task-entry[data-task-path][data-task-line]',
-      'li.task-list-item',
-      '.cm-line',
-    ];
-    const candidates = Array.from(document.querySelectorAll<HTMLElement>(selectors.join(', ')))
-      .map((element) => ({ element, rect: element.getBoundingClientRect() }))
-      .filter(({ element, rect }) =>
-        rect.width > 0
-        && rect.height > 0
-        && clientX >= rect.left
-        && clientX <= rect.right
-        && clientY >= rect.top
-        && clientY <= rect.bottom
-        && (element.matches('[data-task-path], [data-tps-gcm-context], li.task-list-item, .cm-line')
-          || !!element.querySelector('input.task-list-item-checkbox, input[type="checkbox"]')))
-      .sort((a, b) => (a.rect.width * a.rect.height) - (b.rect.width * b.rect.height));
-
-    for (const { element } of candidates) {
-      const taskEl = this.resolveTaskElement(element);
-      if (taskEl) return taskEl;
-    }
-    return null;
   }
 
   private async resolveContext(
     taskEl: HTMLElement,
     sourceEl: HTMLElement | null = null,
-    point: { x: number; y: number } | null = null,
   ): Promise<TaskLineContext | null> {
+    const metadataHost = sourceEl?.closest<HTMLElement>('[data-task-path], [data-tps-kanban-path], [data-source-path], [data-file-path], [data-path]')
+      || taskEl.closest<HTMLElement>('[data-task-path], [data-tps-kanban-path], [data-source-path], [data-file-path], [data-path]');
     const rawPath =
       taskEl.dataset.taskPath ||
       taskEl.dataset.tpsKanbanPath ||
+      taskEl.dataset.sourcePath ||
+      taskEl.dataset.filePath ||
       taskEl.dataset.path ||
+      metadataHost?.dataset.taskPath ||
+      metadataHost?.dataset.tpsKanbanPath ||
+      metadataHost?.dataset.sourcePath ||
+      metadataHost?.dataset.filePath ||
+      metadataHost?.dataset.path ||
       '';
     const file = rawPath ? this.plugin.app.vault.getFileByPath(rawPath) : this.resolveMarkdownTaskFile(taskEl);
-    if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return null;
+    if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') {
+      logger.flowWarn('TaskLineResolve', 'file:unresolved', {
+        rawPath,
+        surface: taskElSurface(taskEl),
+        hasMetadataHost: !!metadataHost,
+        activePath: this.plugin.app.workspace.getActiveFile()?.path || '',
+      });
+      return null;
+    }
 
     const content = await this.plugin.app.vault.cachedRead(file);
     const lines = content.split(/\r?\n/);
 
     const directTargetTexts = sourceEl && sourceEl !== taskEl ? this.getDirectTaskElementSearchTexts(sourceEl) : [];
     const targetTexts = directTargetTexts.length ? directTargetTexts : this.getTaskElementSearchTexts(taskEl);
-    const candidateIndexes = this.getTaskLineCandidateIndexes(taskEl, lines, file, sourceEl, point);
+    const candidateIndexes = this.getTaskLineCandidateIndexes(taskEl, lines, file, sourceEl);
     for (const candidateIndex of candidateIndexes) {
       const context = this.contextFromLine(file, candidateIndex, lines[candidateIndex] || '', taskEl, lines);
       if (context && this.taskLineMatchesSearchTexts(context.rawLine, targetTexts)) {
@@ -189,7 +599,16 @@ export class TaskLineContextMenuService {
     }
 
     const lineIndex = this.resolveFallbackLineIndex(lines, targetTexts);
-    if (lineIndex < 0) return null;
+    if (lineIndex < 0) {
+      logger.flowWarn('TaskLineResolve', 'line:unresolved', {
+        path: file.path,
+        surface: taskElSurface(taskEl),
+        candidates: candidateIndexes,
+        targetVariants: targetTexts.length,
+        taskCount: lines.filter((line) => !!parseTaskLine(line)).length,
+      });
+      return null;
+    }
     return this.contextFromLine(file, lineIndex, lines[lineIndex] || '', taskEl, lines);
   }
 
@@ -222,7 +641,6 @@ export class TaskLineContextMenuService {
     lines: string[],
     file: TFile,
     sourceEl: HTMLElement | null = null,
-    point: { x: number; y: number } | null = null,
   ): number[] {
     const candidates: number[] = [];
     const add = (value: unknown, oneBased: boolean) => {
@@ -233,17 +651,18 @@ export class TaskLineContextMenuService {
       candidates.push(lineIndex);
     };
 
-    const pointLineIndex = this.resolveRenderedTaskLineIndexByPoint(file, lines, point);
-    if (pointLineIndex != null) add(pointLineIndex, false);
-
     const orderedLineIndex = this.resolveRenderedTaskLineIndexByOrder(taskEl, file, lines);
     if (orderedLineIndex != null) add(orderedLineIndex, false);
 
     const pluginLine =
       sourceEl?.getAttribute('data-task-line') ||
       sourceEl?.getAttribute('data-tps-kanban-line') ||
+      sourceEl?.closest<HTMLElement>('[data-task-line], [data-tps-kanban-line]')?.getAttribute('data-task-line') ||
+      sourceEl?.closest<HTMLElement>('[data-task-line], [data-tps-kanban-line]')?.getAttribute('data-tps-kanban-line') ||
       taskEl.getAttribute('data-task-line') ||
-      taskEl.getAttribute('data-tps-kanban-line');
+      taskEl.getAttribute('data-tps-kanban-line') ||
+      taskEl.closest<HTMLElement>('[data-task-line], [data-tps-kanban-line]')?.getAttribute('data-task-line') ||
+      taskEl.closest<HTMLElement>('[data-task-line], [data-tps-kanban-line]')?.getAttribute('data-tps-kanban-line');
     if (pluginLine != null && pluginLine !== '') {
       add(pluginLine, true);
       add(pluginLine, false);
@@ -258,49 +677,6 @@ export class TaskLineContextMenuService {
     }
 
     return candidates;
-  }
-
-  private resolveRenderedTaskLineIndexByPoint(
-    file: TFile,
-    lines: string[],
-    point: { x: number; y: number } | null,
-  ): number | null {
-    if (!point) return null;
-    const sourceTaskIndexes = lines
-      .map((line, index) => parseTaskLine(line || '') ? index : -1)
-      .filter((index) => index >= 0);
-    if (!sourceTaskIndexes.length) return null;
-
-    for (const leaf of this.plugin.app.workspace.getLeavesOfType('markdown')) {
-      const view = leaf.view as any;
-      if (view?.file?.path !== file.path) continue;
-      const root = view?.previewMode?.containerEl
-        || view?.contentEl
-        || view?.containerEl?.querySelector?.('.markdown-preview-view, .markdown-rendered, .markdown-reading-view, .markdown-source-view');
-      if (!(root instanceof HTMLElement)) continue;
-      const rootRect = root.getBoundingClientRect();
-      if (point.x < rootRect.left || point.x > rootRect.right || point.y < rootRect.top || point.y > rootRect.bottom) continue;
-
-      const rows = Array.from(root.querySelectorAll<HTMLElement>('input.task-list-item-checkbox, input[type="checkbox"]'))
-        .map((checkbox) => {
-          const rect = checkbox.getBoundingClientRect();
-          return { rect, centerY: rect.top + rect.height / 2 };
-        })
-        .filter(({ rect }) => rect.width > 0 && rect.height > 0)
-        .sort((a, b) => a.centerY - b.centerY);
-      if (!rows.length) continue;
-
-      const row = rows.find(({ rect }) => point.y >= rect.top - 8 && point.y <= rect.bottom + 14)
-        || rows
-          .map((candidate, index) => ({ candidate, index, distance: Math.abs(candidate.centerY - point.y) }))
-          .filter(({ distance }) => distance <= 28)
-          .sort((a, b) => a.distance - b.distance)[0]?.candidate;
-      if (!row) continue;
-
-      const ordinal = rows.indexOf(row);
-      return sourceTaskIndexes[ordinal] ?? null;
-    }
-    return null;
   }
 
   private resolveRenderedTaskLineIndexByOrder(taskEl: HTMLElement, file: TFile, lines: string[]): number | null {
@@ -404,11 +780,12 @@ export class TaskLineContextMenuService {
         .filter((index) => index >= 0);
       return taskLineIndexes.length === 1 ? taskLineIndexes[0] : -1;
     }
-    return lines.findIndex((line) => {
+    const matches = lines.reduce<number[]>((indexes, line, index) => {
       const parsed = parseTaskLine(line || '');
-      if (!parsed) return false;
-      return this.taskLineMatchesNormalizedTargets(line || '', normalizedTargets);
-    });
+      if (parsed && this.taskLineMatchesNormalizedTargets(line || '', normalizedTargets)) indexes.push(index);
+      return indexes;
+    }, []);
+    return matches.length === 1 ? matches[0] : -1;
   }
 
   private taskLineMatchesSearchTexts(rawLine: string, targetTexts: string[]): boolean {
@@ -431,24 +808,146 @@ export class TaskLineContextMenuService {
     );
   }
 
-  private toggleSelectedTask(context: TaskLineContext, sourceEl: HTMLElement): void {
+  private toggleSelectedTask(context: TaskLineContext, sourceEl: HTMLElement, surface = taskElSurface(sourceEl)): void {
+    if (surface !== 'tps-list') {
+      this.tpsListSelectionSyncGeneration += 1;
+      this.tpsListSelectionOwner = null;
+    }
     const key = this.getTaskContextKey(context);
     if (this.selectedTaskContexts.has(key)) {
       this.selectedTaskContexts.delete(key);
     } else {
-      for (const [existingKey, existingContext] of this.selectedTaskContexts.entries()) {
-        if (existingContext.file.path !== context.file.path) {
-          this.selectedTaskContexts.delete(existingKey);
+      if (surface !== 'tps-list') {
+        for (const [existingKey, existingContext] of this.selectedTaskContexts.entries()) {
+          if (existingContext.file.path !== context.file.path) {
+            this.selectedTaskContexts.delete(existingKey);
+          }
         }
       }
       this.selectedTaskContexts.set(key, { ...context });
     }
+    this.taskSelectionAnchor = { ...context };
     this.refreshTaskSelectionHighlights(sourceEl);
+    logger.flow('TaskSelection', 'changed', {
+      mode: 'toggle',
+      surface,
+      selectedCount: this.selectedTaskContexts.size,
+    });
+    new Notice(`${this.selectedTaskContexts.size} task${this.selectedTaskContexts.size === 1 ? '' : 's'} selected.`);
+  }
+
+  private async selectTaskRange(
+    context: TaskLineContext,
+    sourceEl: HTMLElement,
+    surface: 'tps-list',
+  ): Promise<void> {
+    const scope = sourceEl.closest<HTMLElement>('.tps-list-native');
+    const anchor = this.taskSelectionAnchor;
+    if (!scope || !anchor) {
+      this.selectedTaskContexts.clear();
+      this.selectedTaskContexts.set(this.getTaskContextKey(context), { ...context });
+      this.taskSelectionAnchor = { ...context };
+      this.refreshTaskSelectionHighlights(sourceEl);
+      logger.flow('TaskSelection', 'changed', { mode: 'range-fallback', surface, selectedCount: 1 });
+      new Notice('1 task selected.');
+      return;
+    }
+
+    const rows = Array.from(scope.querySelectorAll<HTMLElement>(
+      '[data-tps-gcm-context="kanban-task"][data-task-path][data-task-line]',
+    ));
+    const anchorRow = rows.find((row) => row.dataset.taskPath === anchor.file.path && this.highlightHostMatchesContext(row, anchor)) ?? null;
+    const targetRow = rows.find((row) => row === sourceEl || row.contains(sourceEl)) ?? null;
+    if (!anchorRow || !targetRow) {
+      this.selectedTaskContexts.clear();
+      this.selectedTaskContexts.set(this.getTaskContextKey(context), { ...context });
+      this.taskSelectionAnchor = { ...context };
+      this.refreshTaskSelectionHighlights(sourceEl);
+      logger.flow('TaskSelection', 'changed', { mode: 'range-fallback', surface, selectedCount: 1 });
+      new Notice('1 task selected.');
+      return;
+    }
+
+    const rangeRows = getOrderedSelectionRange(rows, anchorRow, targetRow);
+    const resolved = await Promise.all(rangeRows.map((row) => this.resolveContext(row, row)));
+    const contexts = resolved.filter((candidate): candidate is TaskLineContext => candidate != null);
+    this.selectedTaskContexts.clear();
+    for (const candidate of contexts) {
+      this.selectedTaskContexts.set(this.getTaskContextKey(candidate), { ...candidate });
+    }
+    if (this.selectedTaskContexts.size === 0) {
+      this.selectedTaskContexts.set(this.getTaskContextKey(context), { ...context });
+    }
+    this.refreshTaskSelectionHighlights(sourceEl);
+    logger.flow('TaskSelection', 'changed', {
+      mode: 'range',
+      surface,
+      selectedCount: this.selectedTaskContexts.size,
+      visibleRangeCount: rangeRows.length,
+    });
     new Notice(`${this.selectedTaskContexts.size} task${this.selectedTaskContexts.size === 1 ? '' : 's'} selected.`);
   }
 
   private clearTaskSelection(): void {
+    this.tpsListSelectionSyncGeneration += 1;
+    this.tpsListSelectionOwner = null;
     this.selectedTaskContexts.clear();
+    this.taskSelectionAnchor = null;
+    this.refreshTaskSelectionHighlights();
+  }
+
+  refreshSelectionHighlights(): void {
+    this.refreshTaskSelectionHighlights();
+  }
+
+  async syncTpsListSelectionRows(
+    rows: HTMLElement[],
+    anchorRow: HTMLElement | null,
+    owner: HTMLElement,
+  ): Promise<void> {
+    const generation = ++this.tpsListSelectionSyncGeneration;
+    this.tpsListSelectionOwner = owner;
+    const taskRows = rows.filter((row) => row.matches(
+      '[data-tps-gcm-context="kanban-task"][data-task-path][data-task-line]',
+    ));
+    const anchorTaskRow = anchorRow?.matches(
+      '[data-tps-gcm-context="kanban-task"][data-task-path][data-task-line]',
+    ) ? anchorRow : null;
+    const [resolved, anchorContext] = await Promise.all([
+      Promise.all(taskRows.map((row) => this.resolveContext(row, row))),
+      anchorTaskRow ? this.resolveContext(anchorTaskRow, anchorTaskRow) : Promise.resolve(null),
+    ]);
+    if (generation !== this.tpsListSelectionSyncGeneration) return;
+    const contexts = resolved.filter((candidate): candidate is TaskLineContext => candidate != null);
+    this.selectedTaskContexts.clear();
+    for (const context of contexts) {
+      this.selectedTaskContexts.set(this.getTaskContextKey(context), { ...context });
+    }
+
+    this.taskSelectionAnchor = anchorContext ? { ...anchorContext } : null;
+    this.refreshTaskSelectionHighlights(anchorTaskRow ?? undefined);
+    logger.flow('TaskSelection', 'changed', {
+      mode: 'tps-list-sync',
+      selectedCount: this.selectedTaskContexts.size,
+      visibleSelectionCount: rows.length,
+    });
+  }
+
+  reconcileTpsListSelectionRows(
+    rows: HTMLElement[],
+    anchorRow: HTMLElement | null,
+    owner: HTMLElement,
+  ): Promise<void> {
+    if (this.tpsListSelectionOwner !== owner) return Promise.resolve();
+    return this.syncTpsListSelectionRows(rows, anchorRow, owner);
+  }
+
+  releaseTpsListSelection(owner: HTMLElement): void {
+    if (this.tpsListSelectionOwner !== owner) return;
+    this.tpsListSelectionSyncGeneration += 1;
+    this.tpsListSelectionOwner = null;
+    this.selectedTaskContexts.clear();
+    this.taskSelectionAnchor = null;
     this.refreshTaskSelectionHighlights();
   }
 
@@ -501,18 +1000,26 @@ export class TaskLineContextMenuService {
       }
     }
 
+    for (const candidate of Array.from(document.querySelectorAll<HTMLElement>('[data-task-path][data-task-line]'))) {
+      if (candidate.dataset.taskPath !== context.file.path) continue;
+      if (!this.isTaskHighlightElement(candidate)) continue;
+      if (this.highlightHostMatchesContext(candidate, context)) elements.add(candidate);
+    }
+
     return [...elements];
   }
 
   private resolveDirectTaskHighlightHost(sourceEl: HTMLElement): HTMLElement | null {
     const host = sourceEl.closest<HTMLElement>(
-      'li.task-list-item, .task-list-item, .cm-line, .tps-calendar-task-entry[data-task-path][data-task-line], .tps-kanban-card-task[data-task-path][data-task-line], .tps-kanban-task-card[data-task-path][data-task-line], [data-tps-gcm-context="calendar-task"], [data-tps-gcm-context="kanban-task"]',
+      'li.task-list-item, .task-list-item, .cm-line, .tps-calendar-task-entry[data-task-path][data-task-line], .tps-kanban-card-task[data-task-path][data-task-line], .tps-kanban-task-card[data-task-path][data-task-line], [data-tps-gcm-context="calendar-task"], [data-tps-gcm-context="kanban-task"], [data-tps-gcm-context="table-task"]',
     );
     if (!host) return null;
     return this.isTaskHighlightElement(host) ? host : null;
   }
 
   private highlightHostMatchesContext(host: HTMLElement, context: TaskLineContext): boolean {
+    const taskPath = host.dataset.taskPath || host.dataset.tpsKanbanPath;
+    if (taskPath && taskPath !== context.file.path) return false;
     const taskLine = Number(host.getAttribute('data-task-line') || host.getAttribute('data-tps-kanban-line'));
     if (Number.isFinite(taskLine)) {
       const normalized = Math.floor(taskLine);
@@ -572,6 +1079,8 @@ export class TaskLineContextMenuService {
       `[data-tps-gcm-context="calendar-task"][data-task-line="${context.lineIndex}"]`,
       `[data-tps-gcm-context="kanban-task"][data-task-line="${context.lineNumber}"]`,
       `[data-tps-gcm-context="kanban-task"][data-task-line="${context.lineIndex}"]`,
+      `[data-tps-gcm-context="table-task"][data-task-line="${context.lineNumber}"]`,
+      `[data-tps-gcm-context="table-task"][data-task-line="${context.lineIndex}"]`,
     ].join(', ')))
       .filter((element) => this.isTaskHighlightElement(element));
     if (directMatches.length > 0) return directMatches;
@@ -583,13 +1092,13 @@ export class TaskLineContextMenuService {
 
   private getRenderedTaskHighlightElements(previewEl: HTMLElement): HTMLElement[] {
     return Array.from(previewEl.querySelectorAll<HTMLElement>(
-      'li.task-list-item, .task-list-item, .tps-calendar-task-entry[data-task-path][data-task-line], .tps-kanban-card-task[data-task-path][data-task-line], .tps-kanban-task-card[data-task-path][data-task-line], [data-tps-gcm-context="calendar-task"], [data-tps-gcm-context="kanban-task"]',
+      'li.task-list-item, .task-list-item, .tps-calendar-task-entry[data-task-path][data-task-line], .tps-kanban-card-task[data-task-path][data-task-line], .tps-kanban-task-card[data-task-path][data-task-line], [data-tps-gcm-context="calendar-task"], [data-tps-gcm-context="kanban-task"], [data-tps-gcm-context="table-task"]',
     ))
       .filter((element) => this.isTaskHighlightElement(element));
   }
 
   private isTaskHighlightElement(element: HTMLElement): boolean {
-    if (element.matches('.cm-line, li.task-list-item, .tps-calendar-task-entry[data-task-path][data-task-line], .tps-kanban-card-task[data-task-path][data-task-line], .tps-kanban-task-card[data-task-path][data-task-line], [data-tps-gcm-context="calendar-task"], [data-tps-gcm-context="kanban-task"]')) {
+    if (element.matches('.cm-line, li.task-list-item, .tps-calendar-task-entry[data-task-path][data-task-line], .tps-kanban-card-task[data-task-path][data-task-line], .tps-kanban-task-card[data-task-path][data-task-line], [data-tps-gcm-context="calendar-task"], [data-tps-gcm-context="kanban-task"], [data-tps-gcm-context="table-task"]')) {
       return true;
     }
     return element.matches('.task-list-item') && !!element.querySelector('input.task-list-item-checkbox, input[type="checkbox"]');
@@ -613,8 +1122,7 @@ export class TaskLineContextMenuService {
     const key = this.getTaskContextKey(context);
     if (!this.selectedTaskContexts.has(key)) return [context];
     const selected = [...this.selectedTaskContexts.values()]
-      .filter((candidate) => candidate.file.path === context.file.path)
-      .sort((a, b) => a.lineIndex - b.lineIndex);
+      .sort((a, b) => a.file.path.localeCompare(b.file.path) || a.lineIndex - b.lineIndex);
     return selected.length > 0 ? selected : [context];
   }
 
@@ -654,12 +1162,7 @@ export class TaskLineContextMenuService {
 
       subMenu.addSeparator();
       subMenu.addItem((sub: any) => {
-        sub.setTitle('Archive selected in place').setIcon('archive').onClick(() => {
-          void this.archiveSelectedTasks(contexts);
-        });
-      });
-      subMenu.addItem((sub: any) => {
-        sub.setTitle('Move selected to file...').setIcon('file-input').onClick(() => {
+        sub.setTitle('Move selected to note...').setIcon('file-input').onClick(() => {
           this.promptMoveSelectedTasksToFile(contexts);
         });
       });
@@ -679,16 +1182,19 @@ export class TaskLineContextMenuService {
   addTaskLineMenuItems(
     menu: Menu,
     context: TaskLineContext,
-    options: { includeTitle?: boolean; includeStatus?: boolean } = {},
+    options: { includeTitle?: boolean; includeStatus?: boolean; includeNoteActions?: boolean } = {},
   ): void {
     const includeTitle = options.includeTitle !== false;
     const includeStatus = options.includeStatus !== false;
+    const includeNoteActions = options.includeNoteActions !== false;
+    context.title = this.getContextTaskTitle(context);
 
     if (includeTitle) {
       menu.addItem((item) => {
         item
           .setTitle(`Title: ${context.title || '(untitled task)'}`)
           .setIcon('pencil')
+          .setSection('tps-title')
           .onClick(() => this.promptTaskTitle(context));
       });
     }
@@ -704,36 +1210,36 @@ export class TaskLineContextMenuService {
         .setTitle('Open task line')
         .setIcon('list')
         .onClick(() => {
-          void this.openTaskLine(context);
+          this.runTaskMenuAction(context, 'open-task-line', () => this.openTaskLine(context));
         });
     });
+    if (includeNoteActions) {
+      const hasAssociatedNote = Boolean(
+        readTaskAssociatedNotePath(context.rawLine)
+        || parseTaskTitleLink(getTaskSourceTitle(context.rawLine)),
+      );
+      menu.addItem((item) => {
+        item
+          .setTitle(hasAssociatedNote ? 'Open linked note' : 'Create note for task')
+          .setIcon(hasAssociatedNote ? 'file-text' : 'file-plus-2')
+          .onClick(() => {
+            this.runTaskMenuAction(context, 'open-or-create-task-note', () => (
+              this.plugin.dailyInboxLineService.createNoteForLine(context)
+            ));
+          });
+      });
+      menu.addItem((item) => {
+        item
+          .setTitle('Link task to note...')
+          .setIcon('link')
+          .onClick(() => {
+            this.plugin.dailyInboxLineService.promptLinkTaskLineInFile(context);
+          });
+      });
+    }
     menu.addItem((item) => {
       item
-        .setTitle('Link task to note...')
-        .setIcon('link')
-        .onClick(() => {
-          this.plugin.dailyInboxLineService.promptLinkTaskLineInFile(context);
-        });
-    });
-    menu.addItem((item) => {
-      item
-        .setTitle('Transfer item to note...')
-        .setIcon('file-output')
-        .onClick(() => {
-          this.plugin.dailyInboxLineService.promptTransferTaskLine(context);
-        });
-    });
-    menu.addItem((item) => {
-      item
-        .setTitle('Archive item in place')
-        .setIcon('archive')
-        .onClick(() => {
-          void this.plugin.dailyInboxLineService.archiveTaskLine(context);
-        });
-    });
-    menu.addItem((item) => {
-      item
-        .setTitle('Move task to file...')
+        .setTitle('Move task to note...')
         .setIcon('file-input')
         .onClick(() => this.promptMoveTaskToFile(context));
     });
@@ -742,7 +1248,7 @@ export class TaskLineContextMenuService {
         .setTitle('Delete task')
         .setIcon('trash-2')
         .onClick(() => {
-          void this.deleteTask(context);
+          void this.deleteSingleTask(context);
         });
     });
 
@@ -752,11 +1258,13 @@ export class TaskLineContextMenuService {
           .setTitle('Edit recurrence template...')
           .setIcon('copy-check')
           .onClick(() => {
-            void this.plugin.taskRecurrenceService.editTemplateForTaskLine(
-              context.file,
-              context.lineIndex,
-              context.rawLine,
-            );
+            this.runTaskMenuAction(context, 'edit-recurrence-template', () => (
+              this.plugin.taskRecurrenceService.editTemplateForTaskLine(
+                context.file,
+                context.lineIndex,
+                context.rawLine,
+              )
+            ));
           });
       });
     }
@@ -773,18 +1281,35 @@ export class TaskLineContextMenuService {
         .setTitle(current ? `Status: ${current}` : 'Status')
         .setIcon('circle-check');
       const subMenu = (item as any).setSubmenu();
+      const statusItems: Array<{ item: any; mapping: LinkedSubitemCheckboxMapping; label: string }> = [];
+      const setSelectedToken = (token: string) => {
+        context.checkboxToken = token;
+        const selectedStatus = this.getStatusForCheckboxToken(token);
+        item.setTitle(selectedStatus ? `Status: ${selectedStatus}` : 'Status');
+        for (const entry of statusItems) {
+          const selected = entry.mapping.checkboxState === token;
+          entry.item.setTitle(selected ? `${entry.label} — Selected` : entry.label);
+          entry.item.setChecked(selected);
+        }
+      };
 
       for (const mapping of this.getCheckboxMappings()) {
         const status = String(mapping.statuses?.[0] || '').trim();
         const label = String(mapping.label || status || mapping.checkboxState).trim();
         subMenu.addItem((sub: any) => {
+          statusItems.push({ item: sub, mapping, label });
+          const selected = mapping.checkboxState === context.checkboxToken;
           sub
-            .setTitle(label)
+            .setTitle(selected ? `${label} — Selected` : label)
             .setIcon(mapping.icon || 'square');
-          if (mapping.checkboxState === context.checkboxToken) sub.setChecked(true);
+          sub.setChecked(selected);
           sub.onClick(() => {
+            const previousToken = context.checkboxToken;
+            setSelectedToken(mapping.checkboxState);
             void this.updateTaskLine(context, (line) => setTaskCheckboxToken(line, mapping.checkboxState), {
               checkboxMutation: true,
+            }).then((updated) => {
+              if (!updated) setSelectedToken(previousToken);
             });
           });
         });
@@ -802,9 +1327,12 @@ export class TaskLineContextMenuService {
                 new Notice('Use a single checkbox marker, for example ?, *, /, -, x, or blank.');
                 return;
               }
-              await this.updateTaskLine(context, (line) => setTaskCheckboxToken(line, token), {
+              const previousToken = context.checkboxToken;
+              setSelectedToken(token);
+              const updated = await this.updateTaskLine(context, (line) => setTaskCheckboxToken(line, token), {
                 checkboxMutation: true,
               });
+              if (!updated) setSelectedToken(previousToken);
             }).open();
           });
       });
@@ -812,8 +1340,22 @@ export class TaskLineContextMenuService {
   }
 
   private addConfiguredPropertyMenus(menu: Menu, context: TaskLineContext): void {
+    if (this.plugin.settings.showCustomPropertiesInContextMenu === false) return;
     const statusKey = this.getStatusKey().toLowerCase();
-    const properties = (this.plugin.settings.properties || []).filter((property) => this.isTaskMenuProperty(property, statusKey));
+    const frontmatter: Record<string, unknown> = {};
+    for (const property of this.plugin.settings.properties || []) {
+      const key = String(property?.key || '').trim();
+      const value = key ? readInlineFieldValue(context.rawLine, key) : '';
+      if (key && value) frontmatter[key] = value;
+    }
+    const tags = readInlineTags(context.rawLine);
+    if (tags.length > 0) frontmatter.tags = tags;
+    const properties = resolveCustomProperties(
+      this.plugin.settings.properties || [],
+      [{ file: context.file, frontmatter }],
+      new ViewModeService(),
+      'context',
+    ).filter((property) => this.isTaskMenuProperty(property, statusKey));
     for (const property of properties) {
       if (property.type === 'selector') {
         this.addSelectorPropertyMenu(menu, context, property);
@@ -874,6 +1416,10 @@ export class TaskLineContextMenuService {
           const allDay = /^true$/i.test(readInlineFieldValue(context.rawLine, 'allDay'));
           new ScheduledModal(this.plugin.app, current, timeEstimate, allDay, async (result) => {
             await this.applyDatetimePropertyChange(context, property, result);
+          }, isScheduled ? {} : {
+            title: `Set ${property.label || property.key}`,
+            fieldLabel: property.label || property.key,
+            showTimeDetails: false,
           }).open();
         });
     });
@@ -885,7 +1431,7 @@ export class TaskLineContextMenuService {
     result: { date: string; timeEstimate: number; allDay: boolean },
   ): Promise<void> {
     const isScheduled = String(property.key || '').trim().toLowerCase() === 'scheduled';
-    await this.updateTaskLine(context, (line) => {
+    const updated = await this.updateTaskLine(context, (line) => {
       let next = setInlineFieldValueOnTaskLine(line, property.key, result.date || null);
       if (isScheduled) {
         next = setInlineFieldValueOnTaskLine(next, 'timeEstimate', result.date ? String(result.timeEstimate || 0) : null);
@@ -893,6 +1439,7 @@ export class TaskLineContextMenuService {
       }
       return next;
     });
+    if (!updated) return;
 
     if (isScheduled) {
       await this.maybePromptMoveScheduledDailyNoteTask(context, result.date);
@@ -905,15 +1452,14 @@ export class TaskLineContextMenuService {
     if (!sourceDate) return;
     const targetDate = getIsoDateFromScheduledValue(scheduledValue);
     if (!targetDate || targetDate === sourceDate) return;
-    const targetFile = await this.plugin.noteOperationService.ensureDailyNote(targetDate);
-    if (!(targetFile instanceof TFile) || targetFile.path === context.file.path) return;
 
     new DailyNoteTaskMovePromptModal(this.plugin.app, {
-      taskTitle: context.title || 'Task',
+      taskTitle: this.getContextTaskTitle(context) || 'Task',
       sourceDate,
       targetDate,
-      targetFile,
       onMove: async () => {
+        const targetFile = await this.plugin.noteOperationService.ensureDailyNote(targetDate);
+        if (!(targetFile instanceof TFile) || targetFile.path === context.file.path) return;
         await this.moveTaskToFile(context, targetFile);
       },
     }).open();
@@ -934,7 +1480,14 @@ export class TaskLineContextMenuService {
             if (!next) return;
             await this.updateTaskLine(context, (line) => isTags
               ? addInlineTagToTaskLine(line, next)
-              : setInlineFieldValueOnTaskLine(line, property.key, this.joinUnique([...current, next])));
+              : setInlineFieldValueOnTaskLine(
+                line,
+                property.key,
+                this.joinUnique([
+                  ...this.parseListValue(readInlineFieldValue(line, property.key)),
+                  next,
+                ]),
+              ));
           }).open();
         });
       });
@@ -944,7 +1497,14 @@ export class TaskLineContextMenuService {
           sub.setTitle(`Remove ${value}`).setIcon('x').onClick(() => {
             void this.updateTaskLine(context, (line) => isTags
               ? removeInlineTagFromTaskLine(line, value)
-              : setInlineFieldValueOnTaskLine(line, property.key, this.joinUnique(current.filter((itemValue) => itemValue !== value))));
+              : setInlineFieldValueOnTaskLine(
+                line,
+                property.key,
+                this.joinUnique(
+                  this.parseListValue(readInlineFieldValue(line, property.key))
+                    .filter((itemValue) => itemValue !== value),
+                ),
+              ));
           });
         });
       }
@@ -985,17 +1545,20 @@ export class TaskLineContextMenuService {
       const subMenu = (item as any).setSubmenu();
       subMenu.addItem((sub: any) => {
         sub.setTitle('Start timer').setIcon('play').onClick(() => {
-          void this.startTaskTimer(context);
+          this.runTaskMenuAction(context, 'start-timer', () => this.startTaskTimer(context));
         });
       });
       subMenu.addItem((sub: any) => {
         sub.setTitle('Add manual session').setIcon('clock').onClick(() => {
-          void this.plugin.timeTrackingService.promptAddManualSession({
-            file: context.file,
-            type: 'task',
-            lineNumber: context.lineIndex,
-            title: context.title || context.file.basename,
-          });
+          this.runTaskMenuAction(context, 'add-manual-session', () => (
+            this.plugin.timeTrackingService.promptAddManualSession({
+              file: context.file,
+              type: 'task',
+              lineNumber: context.lineIndex,
+              rawLine: context.rawLine,
+              title: this.getContextTaskTitle(context) || context.file.basename,
+            })
+          ));
         });
       });
     });
@@ -1003,10 +1566,8 @@ export class TaskLineContextMenuService {
 
   private startTaskTimer(context: TaskLineContext, mode?: 'overwrite' | 'duplicate'): Promise<void> | void {
     if (!mode && this.shouldPromptForTimedCalendarTask(context)) {
-      new TaskTimerScheduledConflictModal(this.plugin.app, context.title || context.file.basename, {
-        overwrite: () => {
-          void this.startTaskTimer(context, 'overwrite');
-        },
+      new TaskTimerScheduledConflictModal(this.plugin.app, this.getContextTaskTitle(context) || context.file.basename, {
+        overwrite: () => this.startTaskTimer(context, 'overwrite'),
         duplicate: async () => {
           const duplicateContext = await this.duplicateTaskBelowForTimer(context);
           if (duplicateContext) {
@@ -1021,7 +1582,8 @@ export class TaskLineContextMenuService {
       file: context.file,
       type: 'task',
       lineNumber: context.lineIndex,
-      title: context.title || context.file.basename,
+      rawLine: context.rawLine,
+      title: this.getContextTaskTitle(context) || context.file.basename,
     }).then(() => undefined);
   }
 
@@ -1033,17 +1595,26 @@ export class TaskLineContextMenuService {
   private async duplicateTaskBelowForTimer(context: TaskLineContext): Promise<TaskLineContext | null> {
     const duplicateLine = this.buildTimerDuplicateTaskLine(context);
     let insertedIndex = -1;
-    await this.plugin.app.vault.process(context.file, (content) => {
-      const newline = content.includes('\r\n') ? '\r\n' : '\n';
-      const endsWithNewline = /\r?\n$/.test(content);
-      const lines = content.split(/\r?\n/);
-      if (endsWithNewline) lines.pop();
-      const lineIndex = this.resolveLineIndex(lines, context);
-      if (lineIndex < 0 || !parseTaskLine(lines[lineIndex] || '')) return content;
-      insertedIndex = lineIndex + 1;
-      lines.splice(insertedIndex, 0, duplicateLine);
-      return `${lines.join(newline)}${endsWithNewline ? newline : ''}`;
-    });
+    try {
+      await this.plugin.app.vault.process(context.file, (content) => {
+        const newline = content.includes('\r\n') ? '\r\n' : '\n';
+        const endsWithNewline = /\r?\n$/.test(content);
+        const lines = content.split(/\r?\n/);
+        if (endsWithNewline) lines.pop();
+        const lineIndex = this.resolveLineIndex(lines, context);
+        if (lineIndex < 0 || !parseTaskLine(lines[lineIndex] || '')) return content;
+        insertedIndex = lineIndex + 1;
+        lines.splice(insertedIndex, 0, duplicateLine);
+        return `${lines.join(newline)}${endsWithNewline ? newline : ''}`;
+      });
+    } catch (error) {
+      logger.flowError('TaskLineContextMenu', 'timer-duplicate:failed', error, {
+        path: context.file.path,
+        renderedLineNumber: context.lineIndex + 1,
+      });
+      new Notice('Could not create a new task for the timer.');
+      return null;
+    }
 
     if (insertedIndex < 0) {
       new Notice('Could not create a new task under the scheduled task.');
@@ -1075,24 +1646,54 @@ export class TaskLineContextMenuService {
 
   private buildTimerDuplicateTaskLine(context: TaskLineContext): string {
     let next = setTaskCheckboxToken(context.rawLine, '[ ]');
-    next = setTaskTitle(next, context.title || 'New task');
-    for (const key of ['scheduled', 'timeEstimate', 'allDay', 'end', 'endDate', 'ends', 'duration', 'tpsId', 'subitemId']) {
+    next = setTaskTitle(next, this.getContextTaskTitle(context) || 'New task');
+    for (const key of [
+      'scheduled',
+      'timeEstimate',
+      'allDay',
+      'end',
+      'endDate',
+      'ends',
+      'duration',
+      'completedDate',
+      'recurrence',
+      'recurrenceRule',
+      'recurrenceTaskId',
+      'tpsId',
+      'subitemId',
+    ]) {
       next = setInlineFieldValueOnTaskLine(next, key, null);
     }
-    return next;
+    next = stripTaskInlinePropsMetadata(next);
+    return updateTaskLineTimestamps(next, {
+      enabled: this.plugin.settings.autoSyncFileTimestamps === true,
+      createdKey: this.plugin.settings.dateCreatedFrontmatterKey,
+      modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
+      format: this.plugin.settings.fileTimestampFormat,
+      markCreated: true,
+      markModified: true,
+    });
   }
 
   private promptTaskTitle(context: TaskLineContext): void {
-    new TextInputModal(this.plugin.app, 'Task title', context.title, async (value) => {
+    logger.flow('TaskLineContextMenu', 'rename:prompt', {
+      path: context.file.path,
+      lineNumber: context.lineNumber,
+      surface: context.isCalendarTask ? 'calendar' : 'task-line',
+    });
+    new TextInputModal(this.plugin.app, 'Task title', this.getContextTaskTitle(context), async (value) => {
       await this.updateTaskLine(context, (line) => setTaskTitle(line, value));
     }).open();
   }
 
   private promptInlineValue(context: TaskLineContext, property: CustomProperty, current: string): void {
     new TextInputModal(this.plugin.app, property.label || property.key, current, async (value) => {
-      const next = property.type === 'number' && String(value || '').trim()
-        ? String(Number(value))
-        : String(value || '').trim();
+      const raw = String(value || '').trim();
+      if (property.type === 'number' && raw && !Number.isFinite(Number(raw))) {
+        new Notice(`${property.label || property.key} must be a valid number.`);
+        return;
+      }
+      const next = property.type === 'number' && raw ? String(Number(raw)) : raw;
       await this.updateTaskLine(context, (line) => setInlineFieldValueOnTaskLine(line, property.key, next || null));
     }).open();
   }
@@ -1101,57 +1702,87 @@ export class TaskLineContextMenuService {
     context: TaskLineContext,
     updater: (line: string) => string,
     options: { checkboxMutation?: boolean } = {},
-  ): Promise<void> {
+  ): Promise<boolean> {
+    let resolved = false;
     let changed = false;
     let previousMarker: string | null = null;
     let nextMarker: string | null = null;
     let updatedLines: string[] | null = null;
 
-    await this.plugin.app.vault.process(context.file, (content) => {
-      const newline = content.includes('\r\n') ? '\r\n' : '\n';
-      const endsWithNewline = /\r?\n$/.test(content);
-      const lines = content.split(/\r?\n/);
-      if (endsWithNewline) lines.pop();
-      const lineIndex = this.resolveLineIndex(lines, context);
-      if (lineIndex < 0) return content;
-      const currentLine = lines[lineIndex] || '';
-      const currentParsed = parseTaskLine(currentLine);
-      if (!currentParsed) return content;
-      let nextLine = updater(currentLine);
-      if (nextLine === currentLine) return content;
-      const nextParsed = parseTaskLine(nextLine);
-      if (options.checkboxMutation === true) {
-        nextLine = updateTaskCompletedDateForCheckboxState(nextLine, nextParsed?.marker ?? currentParsed.marker, {
-          completeMarkers: this.getCompleteMarkers(),
+    try {
+      await this.plugin.app.vault.process(context.file, (content) => {
+        const newline = content.includes('\r\n') ? '\r\n' : '\n';
+        const endsWithNewline = /\r?\n$/.test(content);
+        const lines = content.split(/\r?\n/);
+        if (endsWithNewline) lines.pop();
+        const lineIndex = this.resolveLineIndex(lines, context);
+        if (lineIndex < 0) return content;
+        const currentLine = lines[lineIndex] || '';
+        const currentParsed = parseTaskLine(currentLine);
+        if (!currentParsed) return content;
+        resolved = true;
+        let nextLine = updater(currentLine);
+        if (nextLine === currentLine) return content;
+        let nextParsed = parseTaskLine(nextLine);
+        if (options.checkboxMutation === true) {
+          nextLine = updateTaskCompletedDateForCheckboxState(nextLine, nextParsed?.marker ?? currentParsed.marker, {
+            completeMarkers: this.getCompleteMarkers(),
+          });
+          nextParsed = parseTaskLine(nextLine);
+        }
+        nextLine = updateTaskLineTimestamps(nextLine, {
+          enabled: this.plugin.settings.autoSyncFileTimestamps === true,
+          modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
+          format: this.plugin.settings.fileTimestampFormat,
+          markModified: true,
         });
-      }
-      nextLine = updateTaskLineTimestamps(nextLine, {
-        modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
-        format: this.plugin.settings.fileTimestampFormat,
-        markModified: true,
+        lines[lineIndex] = nextLine;
+        context.lineIndex = lineIndex;
+        context.lineNumber = lineIndex + 1;
+        context.rawLine = nextLine;
+        context.title = getTaskDisplayTitle(nextLine);
+        context.checkboxToken = nextParsed?.token || currentParsed.token;
+        previousMarker = currentParsed.marker;
+        nextMarker = nextParsed?.marker ?? null;
+        updatedLines = [...lines];
+        changed = true;
+        return `${lines.join(newline)}${endsWithNewline ? newline : ''}`;
       });
-      lines[lineIndex] = nextLine;
-      context.lineIndex = lineIndex;
-      context.lineNumber = lineIndex + 1;
-      context.rawLine = nextLine;
-      context.title = getTaskDisplayTitle(nextLine);
-      context.checkboxToken = nextParsed?.token || currentParsed.token;
-      previousMarker = currentParsed.marker;
-      nextMarker = nextParsed?.marker ?? currentParsed.marker;
-      updatedLines = [...lines];
-      changed = true;
-      return `${lines.join(newline)}${endsWithNewline ? newline : ''}`;
-    });
+    } catch (error) {
+      logger.flowError('TaskLineContextMenu', 'write:failed', error, {
+        path: context.file.path,
+        renderedLineNumber: context.lineIndex + 1,
+        checkboxMutation: options.checkboxMutation === true,
+      });
+      new Notice('Could not update the task.');
+      return false;
+    }
 
-    if (!changed) return;
+    if (!resolved) {
+      logger.flowWarn('TaskLineContextMenu', 'write:stale-target', {
+        path: context.file.path,
+        renderedLineNumber: context.lineIndex + 1,
+      });
+      new Notice('That task changed before it could be updated. Refresh and try again.');
+      return false;
+    }
+    if (!changed) return true;
 
     if (options.checkboxMutation === true && updatedLines) {
-      await this.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation(
-        context.file,
-        previousMarker,
-        nextMarker,
-        updatedLines,
-      );
+      try {
+        await this.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation(
+          context.file,
+          previousMarker,
+          nextMarker,
+          updatedLines,
+        );
+      } catch (error) {
+        logger.flowError('TaskLineContextMenu', 'write:checkbox-followup-failed', error, {
+          path: context.file.path,
+          lineNumber: context.lineNumber,
+        });
+        new Notice('Task updated, but its follow-up status sync did not finish.');
+      }
     }
     this.plugin.eventService.emitFilesUpdated([context.file.path]);
     this.plugin.overlayRenderingService?.invalidate({
@@ -1162,33 +1793,33 @@ export class TaskLineContextMenuService {
       refreshLivePreviewEditors: true,
       delayMs: 80,
     });
+    logger.flow('TaskLineContextMenu', 'write:done', {
+      path: context.file.path,
+      lineNumber: context.lineNumber,
+      checkboxMutation: options.checkboxMutation === true,
+    });
+    return true;
   }
 
   private async updateTaskLines(
     contexts: TaskLineContext[],
     updater: (line: string, context: TaskLineContext) => string,
     options: { checkboxMutation?: boolean } = {},
-  ): Promise<void> {
+  ): Promise<number> {
     const uniqueContexts = this.getUniqueContexts(contexts);
     const updatedPaths = new Set<string>();
+    let updatedCount = 0;
     for (const context of uniqueContexts) {
-      await this.updateTaskLine(context, (line) => updater(line, context), options);
-      updatedPaths.add(context.file.path);
+      if (await this.updateTaskLine(context, (line) => updater(line, context), options)) {
+        updatedCount += 1;
+        updatedPaths.add(context.file.path);
+      }
     }
     if (updatedPaths.size > 0) {
       this.refreshSelectionAfterWrites(uniqueContexts);
       this.refreshTaskSelectionHighlights();
     }
-  }
-
-  private async archiveSelectedTasks(contexts: TaskLineContext[]): Promise<void> {
-    const uniqueContexts = this.getUniqueContexts(contexts);
-    for (const context of this.getMutationOrderedContexts(uniqueContexts)) {
-      await this.plugin.dailyInboxLineService.archiveTaskLine(context);
-      this.selectedTaskContexts.delete(this.getTaskContextKey(context));
-    }
-    this.refreshTaskSelectionHighlights();
-    new Notice(`Archived ${uniqueContexts.length} tasks.`);
+    return updatedCount;
   }
 
   private promptMoveSelectedTasksToFile(contexts: TaskLineContext[]): void {
@@ -1198,23 +1829,70 @@ export class TaskLineContextMenuService {
         new Notice('Choose a different file when moving selected tasks.');
         return;
       }
+      let movedCount = 0;
       for (const context of this.getMutationOrderedContexts(uniqueContexts)) {
-        await this.moveTaskToFile(context, targetFile);
-        this.selectedTaskContexts.delete(this.getTaskContextKey(context));
+        const selectionKey = this.getTaskContextKey(context);
+        if (await this.moveTaskToFile(context, targetFile)) movedCount += 1;
+        this.selectedTaskContexts.delete(selectionKey);
       }
       this.refreshTaskSelectionHighlights();
-      new Notice(`Moved ${uniqueContexts.length} tasks.`);
+      new Notice(movedCount === uniqueContexts.length
+        ? `Moved ${movedCount} tasks.`
+        : `Moved ${movedCount} of ${uniqueContexts.length} tasks.`);
     }, { extensions: ['md'] }).open();
   }
 
   private async deleteSelectedTasks(contexts: TaskLineContext[]): Promise<void> {
     const uniqueContexts = this.getUniqueContexts(contexts);
-    for (const context of this.getMutationOrderedContexts(uniqueContexts)) {
-      await this.deleteTask(context);
-      this.selectedTaskContexts.delete(this.getTaskContextKey(context));
+    const orderedContexts = this.getMutationOrderedContexts(uniqueContexts);
+    const targets = orderedContexts.map((context) => ({
+      context,
+      target: this.createTaskDeleteTarget(context, 'task-menu-selected'),
+    }));
+    const inspections = new Map<string, Awaited<ReturnType<typeof inspectLineItemDeleteTarget>>>();
+    let nestedContentLineCount = 0;
+    for (const { context, target } of targets) {
+      try {
+        const inspection = await inspectLineItemDeleteTarget(target);
+        inspections.set(this.getTaskContextKey(context), inspection);
+        nestedContentLineCount += inspection?.nestedContentLineCount ?? 0;
+      } catch (error) {
+        logger.flowError('TaskLineContextMenu', 'delete-selected:inspect-failed', error, {
+          path: context.file.path,
+          lineNumber: context.lineNumber,
+        });
+        inspections.set(this.getTaskContextKey(context), null);
+      }
+    }
+
+    let mode: LineItemDeleteMode = 'delete-subtree';
+    if (nestedContentLineCount > 0) {
+      const choice = await promptNestedLineDelete(this.plugin.app, {
+        itemLabel: 'selected task group',
+        nestedContentLineCount,
+      });
+      if (!choice) return;
+      mode = choice;
+    }
+
+    let deletedCount = 0;
+    for (const { context, target } of targets) {
+      const selectionKey = this.getTaskContextKey(context);
+      const inspection = inspections.get(selectionKey);
+      if (!inspection) continue;
+      const result = await performLineItemDelete(target, mode, {
+        refuseUnexpectedNestedContent: inspection.nestedContentLineCount === 0,
+        showNotices: false,
+      });
+      if (result.outcome === 'deleted') {
+        deletedCount += 1;
+        this.selectedTaskContexts.delete(selectionKey);
+      }
     }
     this.refreshTaskSelectionHighlights();
-    new Notice(`Deleted ${uniqueContexts.length} tasks.`);
+    new Notice(deletedCount === uniqueContexts.length
+      ? `Deleted ${deletedCount} tasks.`
+      : `Deleted ${deletedCount} of ${uniqueContexts.length} tasks.`);
   }
 
   private getUniqueContexts(contexts: TaskLineContext[]): TaskLineContext[] {
@@ -1246,52 +1924,150 @@ export class TaskLineContextMenuService {
   }
 
   private promptMoveTaskToFile(context: TaskLineContext): void {
+    const selectionKey = this.getTaskContextKey(context);
     new FileSuggestModal(this.plugin.app, async (targetFile) => {
-      await this.moveTaskToFile(context, targetFile);
+      if (await this.moveTaskToFile(context, targetFile)) {
+        this.selectedTaskContexts.delete(selectionKey);
+        this.refreshTaskSelectionHighlights();
+      }
     }, { extensions: ['md'] }).open();
   }
 
-  private async moveTaskToFile(context: TaskLineContext, targetFile: TFile): Promise<void> {
+  private async deleteSingleTask(context: TaskLineContext): Promise<void> {
+    const selectionKey = this.getTaskContextKey(context);
+    const result = await requestLineItemDelete(this.createTaskDeleteTarget(context, 'task-menu-single'));
+    if (result.outcome !== 'deleted') return;
+    this.selectedTaskContexts.delete(selectionKey);
+    this.refreshTaskSelectionHighlights();
+  }
+
+  private createTaskDeleteTarget(context: TaskLineContext, source: string): LineItemDeleteTarget {
+    return {
+      app: this.plugin.app,
+      file: context.file,
+      lineIndex: context.lineIndex,
+      rawLine: context.rawLine,
+      itemLabel: 'task',
+      source,
+      resolveLineIndex: (lines) => findCurrentTaskLineIndex(
+        lines,
+        context.lineIndex,
+        context.rawLine,
+        context.title,
+      ),
+      onDeleted: () => {
+        this.plugin.eventService.emitFilesUpdated([context.file.path]);
+        this.plugin.overlayRenderingService?.invalidate({
+          reason: 'task-line-context-menu-delete',
+          file: context.file,
+          surfaces: ['menus', 'linked-subitems', 'live-preview-editors'],
+          rebuildInlineSubitems: true,
+          refreshLivePreviewEditors: true,
+          delayMs: 80,
+        });
+      },
+    };
+  }
+
+  private async moveTaskToFile(context: TaskLineContext, targetFile: TFile): Promise<boolean> {
     if (!(targetFile instanceof TFile) || targetFile.extension?.toLowerCase() !== 'md') {
       new Notice('Choose a Markdown file.');
-      return;
+      return false;
     }
 
     const sourceFile = context.file;
-    const sourceContent = await this.plugin.app.vault.cachedRead(sourceFile);
-    const sourceUpdate = this.removeTaskBlockFromContent(sourceContent, context);
-    if (!sourceUpdate.changed) {
-      new Notice('Could not find the task block to move.');
-      return;
+    const sourcePath = sourceFile.path;
+    const initialLineNumber = context.lineNumber;
+    let taskBlockLines: string[] = [];
+    try {
+      await this.plugin.app.vault.process(sourceFile, (content) => {
+        const sourceUpdate = this.removeTaskBlockFromContent(content, context);
+        if (!sourceUpdate.changed) return content;
+        taskBlockLines = sourceUpdate.blockLines;
+        const parts = content.split(/\r?\n/);
+        const resolvedIndex = this.resolveLineIndex(parts, context);
+        if (resolvedIndex >= 0) {
+          context.lineIndex = resolvedIndex;
+          context.lineNumber = resolvedIndex + 1;
+          context.rawLine = parts[resolvedIndex] || context.rawLine;
+          context.title = getTaskDisplayTitle(context.rawLine);
+        }
+        return content;
+      });
+    } catch (error) {
+      logger.flowError('TaskLineContextMenu', 'move:source-read-failed', error, {
+        sourcePath,
+        targetPath: targetFile.path,
+        lineNumber: initialLineNumber,
+      });
+      new Notice('Could not read the task block to move.');
+      return false;
     }
-    const taskBlockLines = sourceUpdate.blockLines;
+    if (taskBlockLines.length === 0) {
+      new Notice('Could not find the task block to move.');
+      return false;
+    }
+    logger.flow('TaskLineContextMenu', 'move:start', {
+      sourcePath,
+      targetPath: targetFile.path,
+      lineNumber: context.lineNumber,
+      blockLines: taskBlockLines.length,
+    });
 
     if (targetFile.path === sourceFile.path) {
       let changed = false;
-      await this.plugin.app.vault.process(sourceFile, (content) => {
-        const update = this.moveTaskBlockWithinContent(content, context);
-        if (!update.changed) return content;
-        context.lineIndex = update.lineIndex;
-        context.lineNumber = update.lineIndex + 1;
-        context.rawLine = update.rawLine || context.rawLine;
-        changed = true;
-        return update.content;
-      });
+      try {
+        await this.plugin.app.vault.process(sourceFile, (content) => {
+          const update = this.moveTaskBlockWithinContent(content, context);
+          if (!update.changed) return content;
+          context.lineIndex = update.lineIndex;
+          context.lineNumber = update.lineIndex + 1;
+          context.rawLine = update.rawLine || context.rawLine;
+          changed = true;
+          return update.content;
+        });
+      } catch (error) {
+        logger.flowError('TaskLineContextMenu', 'move:same-file-failed', error, {
+          sourcePath,
+          lineNumber: initialLineNumber,
+        });
+        new Notice('Could not move the task within this note.');
+        return false;
+      }
       if (!changed) {
         new Notice('Could not move the task line.');
-        return;
+        return false;
       }
       this.notifyTaskMoved([sourceFile.path]);
-      new Notice(`Moved task to the top of ${sourceFile.basename}.`);
-      return;
+      logger.flow('TaskLineContextMenu', 'move:done', {
+        sourcePath,
+        targetPath: targetFile.path,
+        outcome: 'same-file-end',
+      });
+      new Notice(`Moved task to the end of ${sourceFile.basename}.`);
+      return true;
     }
 
     let insertedLineIndex = -1;
-    await this.plugin.app.vault.process(targetFile, (content) => {
-      const inserted = insertTaskBlockAfterFrontmatter(content, taskBlockLines);
-      insertedLineIndex = inserted.lineIndex;
-      return inserted.content;
-    });
+    try {
+      await this.plugin.app.vault.process(targetFile, (content) => {
+        const inserted = insertTaskBlockAfterFrontmatter(content, taskBlockLines);
+        insertedLineIndex = inserted.lineIndex;
+        return inserted.content;
+      });
+    } catch (error) {
+      logger.flowError('TaskLineContextMenu', 'move:target-write-failed', error, {
+        sourcePath,
+        targetPath: targetFile.path,
+        lineNumber: initialLineNumber,
+      });
+      new Notice(`Could not add the task to ${targetFile.basename}.`);
+      return false;
+    }
+    if (insertedLineIndex < 0) {
+      new Notice(`Could not add the task to ${targetFile.basename}.`);
+      return false;
+    }
 
     if (this.isDailyNoteSourceFile(sourceFile)) {
       const scratchpadBlock = buildDailyNoteScratchpadMovedTaskBlock(taskBlockLines, {
@@ -1299,33 +2075,68 @@ export class TaskLineContextMenuService {
         movedAt: new Date(),
       });
       let preserved = false;
-      await this.plugin.app.vault.process(sourceFile, (content) => {
-        const update = replaceTaskBlockInContent(
-          content,
-          context.lineIndex,
-          context.rawLine,
-          context.title,
-          scratchpadBlock,
-        );
-        if (!update.changed) return content;
-        preserved = true;
-        return update.content;
-      });
+      try {
+        await this.plugin.app.vault.process(sourceFile, (content) => {
+          const update = replaceTaskBlockInContent(
+            content,
+            context.lineIndex,
+            context.rawLine,
+            context.title,
+            scratchpadBlock,
+          );
+          if (!update.changed) return content;
+          preserved = true;
+          return update.content;
+        });
+      } catch (error) {
+        logger.flowError('TaskLineContextMenu', 'move:daily-source-mark-failed', error, {
+          sourcePath,
+          targetPath: targetFile.path,
+          lineNumber: initialLineNumber,
+        });
+      }
 
       this.notifyTaskMoved([sourceFile.path, targetFile.path]);
       new Notice(preserved
-        ? `Copied task to ${targetFile.basename}; kept a struck scratchpad record in ${sourceFile.basename}.`
+        ? `Copied task to ${targetFile.basename}; marked the daily-note record as migrated.`
         : `Copied task to ${targetFile.basename}; the original daily-note line changed before it could be marked.`);
-      return;
+      logger.flow('TaskLineContextMenu', 'move:done', {
+        sourcePath,
+        targetPath: targetFile.path,
+        outcome: preserved ? 'daily-note-migrated' : 'daily-note-copied-source-changed',
+      });
+      return preserved;
     }
 
     let removed = false;
-    await this.plugin.app.vault.process(sourceFile, (content) => {
-      const update = this.removeTaskBlockFromContent(content, context);
-      if (!update.changed) return content;
-      removed = true;
-      return update.content;
-    });
+    try {
+      await this.plugin.app.vault.process(sourceFile, (content) => {
+        const update = this.removeTaskBlockFromContent(content, context);
+        if (!update.changed) return content;
+        removed = true;
+        return update.content;
+      });
+    } catch (error) {
+      logger.flowError('TaskLineContextMenu', 'move:source-remove-failed', error, {
+        sourcePath,
+        targetPath: targetFile.path,
+        lineNumber: initialLineNumber,
+      });
+    }
+
+    if (!removed) {
+      const rolledBack = await this.rollbackInsertedTaskBlock(targetFile, insertedLineIndex, taskBlockLines);
+      logger.flowWarn('TaskLineContextMenu', 'move:source-changed', {
+        sourcePath,
+        targetPath: targetFile.path,
+        lineNumber: initialLineNumber,
+        targetRolledBack: rolledBack,
+      });
+      new Notice(rolledBack
+        ? 'The task changed before it could be moved. No copy was left behind.'
+        : `The task changed before it could be removed; check ${targetFile.basename} for a duplicate.`);
+      return false;
+    }
 
     context.file = targetFile;
     context.lineIndex = Math.max(0, insertedLineIndex);
@@ -1333,9 +2144,33 @@ export class TaskLineContextMenuService {
     context.rawLine = taskBlockLines[0] || context.rawLine;
 
     this.notifyTaskMoved([sourceFile.path, targetFile.path]);
-    new Notice(removed
-      ? `Moved task to ${targetFile.basename}.`
-      : `Copied task to ${targetFile.basename}; the original line changed before it could be removed.`);
+    new Notice(`Moved task to ${targetFile.basename}.`);
+    logger.flow('TaskLineContextMenu', 'move:done', {
+      sourcePath,
+      targetPath: targetFile.path,
+      outcome: 'moved',
+    });
+    return true;
+  }
+
+  private async rollbackInsertedTaskBlock(targetFile: TFile, lineIndex: number, blockLines: string[]): Promise<boolean> {
+    const rawLine = blockLines[0] || '';
+    const title = getTaskDisplayTitle(rawLine);
+    let removed = false;
+    try {
+      await this.plugin.app.vault.process(targetFile, (content) => {
+        const update = removeTaskBlockFromContent(content, lineIndex, rawLine, title);
+        if (!update.changed) return content;
+        removed = true;
+        return update.content;
+      });
+    } catch (error) {
+      logger.flowError('TaskLineContextMenu', 'move:rollback-failed', error, {
+        targetPath: targetFile.path,
+        lineNumber: lineIndex + 1,
+      });
+    }
+    return removed;
   }
 
   private isDailyNoteSourceFile(file: TFile): boolean {
@@ -1365,32 +2200,6 @@ export class TaskLineContextMenuService {
     });
   }
 
-  private async deleteTask(context: TaskLineContext): Promise<void> {
-    let changed = false;
-    await this.plugin.app.vault.process(context.file, (content) => {
-      const update = this.removeTaskBlockFromContent(content, context);
-      if (!update.changed) return content;
-      changed = true;
-      return update.content;
-    });
-
-    if (!changed) {
-      new Notice('Could not find the task line to delete.');
-      return;
-    }
-
-    this.plugin.eventService.emitFilesUpdated([context.file.path]);
-    this.plugin.overlayRenderingService?.invalidate({
-      reason: 'task-line-context-menu-delete',
-      file: context.file,
-      surfaces: ['menus', 'linked-subitems', 'live-preview-editors'],
-      rebuildInlineSubitems: true,
-      refreshLivePreviewEditors: true,
-      delayMs: 80,
-    });
-    new Notice('Deleted task.');
-  }
-
   private removeTaskBlockFromContent(content: string, context: TaskLineContext): { content: string; changed: boolean; blockLines: string[] } {
     const update = removeTaskBlockFromContent(content, context.lineIndex, context.rawLine, context.title);
     return {
@@ -1405,7 +2214,22 @@ export class TaskLineContextMenuService {
   }
 
   private async openTaskLine(context: TaskLineContext): Promise<void> {
-    this.plugin.hideCompletedCheckboxesService?.revealCompletedForFile(context.file.path, context.lineIndex);
+    const currentLeaf = this.plugin.findOpenLeafForFile(context.file);
+    const currentEditor = (currentLeaf?.view as any)?.editor;
+    const content = typeof currentEditor?.getValue === 'function'
+      ? currentEditor.getValue()
+      : await this.plugin.app.vault.cachedRead(context.file);
+    const lines = content.split('\n');
+    const lineIndex = this.resolveLineIndex(lines, context);
+    if (lineIndex < 0) {
+      logger.flowWarn('TaskLineContextMenu', 'open-line:stale-target', {
+        path: context.file.path,
+        renderedLineNumber: context.lineIndex + 1,
+      });
+      new Notice('That task line changed before it could be opened. Refresh and try again.');
+      return;
+    }
+    this.plugin.hideCompletedCheckboxesService?.revealCompletedForFile(context.file.path, lineIndex);
     await this.delay(90);
     const opened = await this.plugin.openFileInLeaf(
       context.file,
@@ -1419,13 +2243,30 @@ export class TaskLineContextMenuService {
     const view = leaf?.view as any;
     const editor = view?.editor;
     if (!editor || typeof editor.setCursor !== 'function') return;
-    editor.setCursor({ line: context.lineIndex, ch: 0 });
-    editor.scrollIntoView?.({ from: { line: context.lineIndex, ch: 0 }, to: { line: context.lineIndex + 1, ch: 0 } }, true);
+    editor.setCursor({ line: lineIndex, ch: 0 });
+    editor.scrollIntoView?.({ from: { line: lineIndex, ch: 0 }, to: { line: lineIndex + 1, ch: 0 } }, true);
     editor.focus?.();
   }
 
   private delay(ms: number): Promise<void> {
     return new Promise((resolve) => window.setTimeout(resolve, ms));
+  }
+
+  private runTaskMenuAction(
+    context: TaskLineContext,
+    action: string,
+    work: () => unknown | Promise<unknown>,
+  ): void {
+    void Promise.resolve()
+      .then(work)
+      .catch((error) => {
+        logger.flowError('TaskLineContextMenu', 'action:failed', error, {
+          action,
+          path: context.file.path,
+          renderedLineNumber: context.lineIndex + 1,
+        });
+        new Notice('Could not complete that task action.');
+      });
   }
 
   private isTaskMenuProperty(property: CustomProperty, statusKey: string): boolean {
@@ -1436,6 +2277,10 @@ export class TaskLineContextMenuService {
     if (key === 'title' || id === 'title' || key === 'folderpath' || property.type === 'folder' || property.type === 'snooze') return false;
     if (key === statusKey || id === 'status') return false;
     return true;
+  }
+
+  private getContextTaskTitle(context: TaskLineContext): string {
+    return getTaskDisplayTitle(context.rawLine) || getPlainTaskTitle(context.title) || '';
   }
 
   private getStatusKey(): string {
@@ -1487,6 +2332,7 @@ export class TaskLineContextMenuService {
   private getTaskSearchTextVariants(value: string): string[] {
     const raw = String(value || '').trim();
     if (!raw) return [];
+    const taskTitle = getTaskDisplayTitle(raw);
     const withoutCheckbox = raw
       .replace(/^toggle task:\s*/i, '')
       .replace(/^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]*\]\s+/, '')
@@ -1499,7 +2345,7 @@ export class TaskLineContextMenuService {
       .replace(/\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+\w+\s+\d{1,2}\s+\d{4}\b/gi, ' ')
       .replace(/\s+/g, ' ')
       .trim();
-    return [raw, withoutCheckbox, withoutInlineFields].filter(Boolean);
+    return [raw, taskTitle, withoutCheckbox, withoutInlineFields].filter(Boolean);
   }
 
   private normalizeTaskText(value: string): string {
@@ -1512,7 +2358,7 @@ class TaskTimerScheduledConflictModal extends Modal {
     app: App,
     private readonly taskTitle: string,
     private readonly callbacks: {
-      overwrite: () => void;
+      overwrite: () => Promise<void> | void;
       duplicate: () => Promise<void> | void;
     },
   ) {
@@ -1531,17 +2377,29 @@ class TaskTimerScheduledConflictModal extends Modal {
     const buttonRow = contentEl.createDiv({ cls: 'tps-gcm-confirm-buttons' });
     buttonRow.createEl('button', { text: 'Overwrite time', cls: 'mod-warning' }).addEventListener('click', () => {
       this.close();
-      this.callbacks.overwrite();
+      this.runAction('overwrite', this.callbacks.overwrite);
     });
     buttonRow.createEl('button', { text: 'Create new task', cls: 'mod-cta' }).addEventListener('click', () => {
       this.close();
-      void this.callbacks.duplicate();
+      this.runAction('duplicate', this.callbacks.duplicate);
     });
     buttonRow.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.close());
   }
 
   onClose(): void {
     this.contentEl.empty();
+  }
+
+  private runAction(action: string, callback: () => Promise<void> | void): void {
+    void Promise.resolve()
+      .then(callback)
+      .catch((error) => {
+        logger.flowError('TaskTimerScheduledConflictModal', 'action:failed', error, {
+          action,
+          taskTitle: this.taskTitle,
+        });
+        new Notice('Could not start the task timer.');
+      });
   }
 }
 
@@ -1552,7 +2410,6 @@ class DailyNoteTaskMovePromptModal extends Modal {
       taskTitle: string;
       sourceDate: string;
       targetDate: string;
-      targetFile: TFile;
       onMove: () => Promise<void> | void;
     },
   ) {
@@ -1568,13 +2425,21 @@ class DailyNoteTaskMovePromptModal extends Modal {
       text: `"${this.options.taskTitle}" is in the ${this.options.sourceDate} Daily Note, but it is now scheduled for ${this.options.targetDate}.`,
     });
     contentEl.createEl('p', {
-      text: `Move the full task block to ${this.options.targetFile.basename}, or keep it in the current note with the explicit scheduled value.`,
+      text: `Move the full task block to the ${this.options.targetDate} Daily Note, or keep it in the current note with the explicit scheduled value.`,
     });
 
     const buttonRow = contentEl.createDiv({ cls: 'tps-gcm-confirm-buttons' });
     buttonRow.createEl('button', { text: 'Move task', cls: 'mod-cta' }).addEventListener('click', () => {
       this.close();
-      void this.options.onMove();
+      void Promise.resolve()
+        .then(this.options.onMove)
+        .catch((error) => {
+          logger.flowError('DailyNoteTaskMovePromptModal', 'move:failed', error, {
+            sourceDate: this.options.sourceDate,
+            targetDate: this.options.targetDate,
+          });
+          new Notice('Could not move the task to its scheduled Daily Note.');
+        });
     });
     buttonRow.createEl('button', { text: 'Keep here' }).addEventListener('click', () => this.close());
   }

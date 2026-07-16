@@ -16,6 +16,7 @@ export const CONDITION_SOURCE_OPTIONS: Array<{ value: RuleConditionSource; label
   { value: "name", label: "File name" },
   { value: "tag", label: "Tag" },
   { value: "body", label: "Body text" },
+  { value: "checkbox-state", label: "Checkbox state" },
   { value: "date-created", label: "Created date" },
   { value: "date-modified", label: "Modified date" },
   { value: "parent-frontmatter", label: "Parent property" },
@@ -33,6 +34,7 @@ export const SORT_SOURCE_OPTIONS: Array<{ value: RuleConditionSource; label: str
   { value: "parent-path", label: "Parent folder path" },
   { value: "tag", label: "Tag" },
   { value: "parent-tag", label: "Parent tag" },
+  { value: "checkbox-state", label: "Checkbox state" },
   { value: "extension", label: "File extension" },
   { value: "date-created", label: "Created date" },
   { value: "date-modified", label: "Modified date" }
@@ -138,6 +140,7 @@ export function normalizeConditionSource(value: string): RuleConditionSource {
     value === "name" ||
     value === "tag" ||
     value === "body" ||
+    value === "checkbox-state" ||
     value === "date-created" ||
     value === "date-modified" ||
     value === "parent-frontmatter" ||
@@ -160,6 +163,22 @@ export function getSourceLabel(source: RuleConditionSource): string {
 
 export function getOperatorLabel(operator: string): string {
   return OPERATOR_LABELS[operator as SmartRuleOperator] ?? operator;
+}
+
+export function conditionSourceHasField(source: RuleConditionSource): boolean {
+  return source === "frontmatter" || source === "parent-frontmatter";
+}
+
+export function smartOperatorNeedsValue(operator: SmartRuleOperator): boolean {
+  return !(
+    operator === "exists" ||
+    operator === "!exists" ||
+    operator === "is-not-empty" ||
+    operator === "has-open-checkboxes" ||
+    operator === "!has-open-checkboxes" ||
+    operator === "is-today" ||
+    operator === "!is-today"
+  );
 }
 
 export function createDefaultCondition(source: RuleConditionSource = "frontmatter"): RuleCondition {
@@ -203,6 +222,9 @@ export function getConditionValuePlaceholder(condition: RuleCondition): string {
 
   if (condition.source === "tag") {
     return "hide";
+  }
+  if (condition.source === "checkbox-state") {
+    return "open, x, -, /";
   }
   if (condition.source === "parent-tag") {
     return "hide";

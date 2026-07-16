@@ -5,6 +5,8 @@ import { test } from 'node:test';
 const leafResolverSource = readFileSync(new URL('../src/services/leaf-resolver.ts', import.meta.url), 'utf8');
 const noteTitleSource = readFileSync(new URL('../src/services/note-title-render-service.ts', import.meta.url), 'utf8');
 const persistentMenuSource = readFileSync(new URL('../src/menu/persistent-menu-manager.ts', import.meta.url), 'utf8');
+const menuBuilderSource = readFileSync(new URL('../src/menu/menu-builder.ts', import.meta.url), 'utf8');
+const panelActionSource = readFileSync(new URL('../src/menu/panel-action-service.ts', import.meta.url), 'utf8');
 
 test('strict source mode is detected separately from live preview', () => {
   assert.match(leafResolverSource, /export function isStrictSourceMode\(view: MarkdownView\): boolean/);
@@ -26,6 +28,46 @@ test('frontmatter title rendering restores filename in strict source mode', () =
   assert.match(noteTitleSource, /this\.setInlineTitleText\(titleEl, file\.basename\);/);
   assert.match(noteTitleSource, /delete titleEl\.dataset\.tpsGcmRenderedTitle/);
   assert.match(noteTitleSource, /titleEl\.removeClass\('tps-gcm-inline-title-frontmatter'\)/);
+});
+
+test('inline title activation intercepts markdown title clicks without waiting for rendered-title refresh', () => {
+  const activationSource = noteTitleSource.slice(
+    noteTitleSource.indexOf('handleInlineTitleActivation'),
+    noteTitleSource.indexOf('handleInlineTitleKeydown'),
+  );
+
+  assert.doesNotMatch(activationSource, /tps-gcm-inline-title-frontmatter/);
+  assert.match(activationSource, /event instanceof MouseEvent && event\.button !== 0/);
+  assert.match(activationSource, /event instanceof PointerEvent && event\.button !== 0/);
+  assert.match(noteTitleSource, /event\.preventDefault\(\);/);
+  assert.match(noteTitleSource, /void this\.promptRenameTitle\(file\);/);
+});
+
+test('note menus show one plain clickable title row across native and panel surfaces', () => {
+  assert.match(noteTitleSource, /const display = getPlainDisplayTitle\(rawTitle, file\.basename\)/);
+  assert.match(menuBuilderSource, /setTitle\(`Title: \$\{displayTitle\}`\)/);
+  assert.match(menuBuilderSource, /setSection\('tps-title'\)/);
+  assert.match(menuBuilderSource, /void this\.promptRenameFile\(file\)/);
+  assert.match(menuBuilderSource, /if \(String\(prop\.key \|\| ''\).*=== 'title'.*return;/);
+  assert.match(panelActionSource, /setTitle\(`Title: \$\{getPlainDisplayTitle/);
+  assert.doesNotMatch(panelActionSource, /setTitle\('Rename Title'\)/);
+  assert.match(noteTitleSource, /'NoteTitle', 'rename:prompt'/);
+  assert.match(noteTitleSource, /'NoteTitle', 'rename:done'/);
+});
+
+test('focused inline title is not rewritten during active native title editing', () => {
+  assert.match(noteTitleSource, /document\.activeElement instanceof HTMLElement && titleEl\.contains\(document\.activeElement\)/);
+  assert.match(noteTitleSource, /if \(document\.activeElement instanceof HTMLElement && titleEl\.contains\(document\.activeElement\)\) return;/);
+});
+
+test('generated Untitled frontmatter title can be cleared with Backspace', () => {
+  assert.match(noteTitleSource, /handleInlineTitleKeydown\(event: KeyboardEvent\)/);
+  assert.match(noteTitleSource, /handleInlineTitleKeyup\(event: KeyboardEvent\)/);
+  assert.match(noteTitleSource, /event\.key !== 'Backspace' && event\.key !== 'Delete'/);
+  assert.match(noteTitleSource, /document\.getSelection\(\)/);
+  assert.match(noteTitleSource, /if \(visibleTitle\) return false;/);
+  assert.match(noteTitleSource, /isGeneratedUntitledTitle\(file, visibleTitle\)/);
+  assert.match(noteTitleSource, /delete frontmatter\[key\]/);
 });
 
 test('title icons are not rendered in strict source mode', () => {

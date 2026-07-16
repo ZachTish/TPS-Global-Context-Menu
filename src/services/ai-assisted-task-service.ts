@@ -127,6 +127,7 @@ export class AiAssistedTaskService {
     }
 
     const taskLine = updateTaskLineTimestamps(this.buildTaskLine(proposal), {
+      enabled: this.plugin.settings.autoSyncFileTimestamps === true,
       createdKey: this.plugin.settings.dateCreatedFrontmatterKey,
       modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
       format: this.plugin.settings.fileTimestampFormat,
@@ -136,7 +137,7 @@ export class AiAssistedTaskService {
     try {
       await this.plugin.app.vault.process(targetFile, (content) => this.insertTaskLine(content, taskLine, proposal));
       new Notice(`Created AI-assisted task in ${targetFile.basename}`);
-      await this.plugin.app.workspace.getLeaf(false).openFile(targetFile, { active: true });
+      await this.plugin.openFileInLeaf(targetFile, false, () => this.plugin.app.workspace.getLeaf(false), { revealLeaf: true });
       return targetFile;
     } catch (error) {
       logger.error('[TPS GCM] Failed to apply AI-assisted task proposal', error);

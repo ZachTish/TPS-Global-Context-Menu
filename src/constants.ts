@@ -1,30 +1,77 @@
 import { DEFAULT_NOTEBOOK_NAVIGATOR_RULE_SETTINGS, TPSGlobalContextMenuSettings } from './types';
+import { MIGRATED_TASK_MAPPING, MIGRATED_TASK_STATUS } from './constants/task-migration';
+
+export const HOME_DAILY_NOTE_FEED_BASE_PATH = 'Daily Note Feed.base';
+export const HOME_DAILY_NOTE_FEED_BASE_CONTENT = `model:
+  version: 1
+  kind: Table
+  columns: []
+pluginVersion: 1.0.0
+filters:
+  and:
+    - file.path == this.file.path
+    - task.path == this.file.path
+views:
+  - type: tps-list
+    name: Daily note
+    createAction: default
+    filters:
+      or:
+        - kind == "task"
+        - kind == "bullet"
+    order:
+      - title
+`;
 
 export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   enableLogging: false,
-  enableInlinePersistentMenus: true,
-  enableInLivePreview: true,
-  enableInPreview: true,
-  enableInSidePanels: true,
+  logOpenerDecisions: false,
+  enableInlinePersistentMenus: false,
+  enableInLivePreview: false,
+  enableInPreview: false,
+  enableInSidePanels: false,
   inlineMenuOnly: false,
   nativeMenuPlacement: 'tps-last',
   suppressMobileKeyboard: true,
   enableCanvasOpenGuard: false,
   enableBasesForcedLinkPreview: false,
+  collapseHeadingsOnOpen: false,
+  homeComponents: [
+    { type: 'base', path: HOME_DAILY_NOTE_FEED_BASE_PATH },
+    'calendar',
+    'open-unscheduled-tasks',
+  ],
+  homeComponentLayouts: {},
+  homeComponentActions: {
+    'base:daily note feed.base': [
+      {
+        id: 'capture',
+        commandId: 'tps-global-context-menu:capture-to-home-note',
+        label: 'Capture',
+        icon: 'send',
+        target: 'home-note',
+      },
+    ],
+  },
+  homeCalendarBasePath: 'home-schedule.base',
+  homeFoodBasePath: 'Food Log.base',
+  homeWorkoutBasePath: 'Activity Log.base',
+  homeOpenTasksBasePath: 'Open Unscheduled Tasks.base',
+  homeCaptureInsertPosition: 'bottom',
   hideCompletedCheckboxes: false,
   hideAllTaskLinesInReadingMode: false,
   taskHidingExclusionPatterns: '',
   persistTaskVisibilityStateToFrontmatter: false,
   taskVisibilityStateFrontmatterKey: 'gcmTaskVisibility',
   properties: [
-    { id: 'status', label: 'Status', key: 'status', type: 'selector', options: ['todo', 'working', 'holding', 'wont-do', 'complete'], icon: 'circle-check', showInCollapsed: true, allowInlineSet: true },
+    { id: 'status', label: 'Status', key: 'status', type: 'selector', options: ['todo', 'working', 'holding', 'wont-do', 'complete', MIGRATED_TASK_STATUS], icon: 'circle-check', showInCollapsed: true, allowInlineSet: true },
     { id: 'priority', label: 'Priority', key: 'priority', type: 'selector', options: ['high', 'medium', 'normal', 'low'], icon: 'flag', showInCollapsed: true, allowInlineSet: true },
     { id: 'tags', label: 'Tags', key: 'tags', type: 'list', listItemType: 'tag', icon: 'tag', showInCollapsed: true, allowInlineSet: true },
     { id: 'recurrence', label: 'Recurrence', key: 'recurrence', type: 'recurrence', icon: 'repeat', showInCollapsed: true, allowInlineSet: true },
     { id: 'scheduled', label: 'Scheduled', key: 'scheduled', type: 'datetime', icon: 'calendar', showInCollapsed: true, allowInlineSet: true },
     { id: 'type', label: 'Folder', key: 'folderPath', type: 'folder', icon: 'folder', showInCollapsed: false, allowInlineSet: false },
   ],
-  showCustomPropertiesInInlineUi: true,
+  showCustomPropertiesInInlineUi: false,
   showCustomPropertiesUnderTitle: false,
   defaultStackedPropertiesClosed: false,
   enableVirtualBaseEmbeds: true,
@@ -33,21 +80,18 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
     { key: 'gcmBaseBottom', placement: 'bottom' },
     { key: 'gcmBaseHover', placement: 'hover' },
   ],
-  showCustomPropertiesInContextMenu: true,
-  inheritNotebookNavigatorTagColors: true,
+  showCustomPropertiesInContextMenu: false,
+  inheritNotebookNavigatorTagColors: false,
   notebookNavigatorRules: DEFAULT_NOTEBOOK_NAVIGATOR_RULE_SETTINGS,
 
   // Time tracking
-  enableTimeTracking: true,
+  enableTimeTracking: false,
   timeTrackingPropertyKey: 'timeTracking',
   timeTrackingStorageMode: 'daily-note',
   timeTrackingDedicatedNotePath: 'Time Tracking.md',
   timeTrackingSingleActiveSession: true,
+  timeTrackingIgnoreArchivedFiles: true,
   timeTrackingPausedSession: null,
-  enableAutoPinActiveNotes: false,
-  autoPinActiveScheduledNotes: true,
-  autoPinScheduledDefaultMinutes: 30,
-  autoPinFrontmatterRules: '',
 
   // Recurrence settings
   enableRecurrence: true,
@@ -99,6 +143,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
     { checkboxState: '[\\]', statuses: ['working'], toggleTargetStatus: 'complete', icon: 'slash', label: 'Working' },
     { checkboxState: '[?]', statuses: ['holding'], toggleTargetStatus: 'todo', icon: 'help-circle', label: 'Holding' },
     { checkboxState: '[-]', statuses: ['wont-do'], toggleTargetStatus: 'todo', icon: 'minus', label: 'Won’t Do' },
+    MIGRATED_TASK_MAPPING,
   ],
   linkedSubitemDefaultOpenState: '[ ]',
   linkedSubitemUncheckedStatuses: ['todo'],
@@ -163,7 +208,7 @@ export const SYSTEM_COMMANDS = [
   { id: 'get-relative-path', label: 'Copy Relative Path', icon: 'link' },
 ] as const;
 
-export const STATUSES = ['todo', 'working', 'holding', 'wont-do', 'complete'] as const;
+export const STATUSES = ['todo', 'working', 'holding', 'wont-do', 'complete', MIGRATED_TASK_STATUS] as const;
 
 /**
  * Available priority levels

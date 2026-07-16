@@ -1,6 +1,7 @@
 import esbuild from "esbuild";
 import process from "process";
 import builtins from "builtin-modules";
+import { runtimeDeployPlugin } from "../deploy-runtime.mjs";
 
 const banner =
     `/*
@@ -11,7 +12,7 @@ if you want to view the source, please visit the github repository of this plugi
 
 const prod = (process.argv[2] === "production");
 
-const context = await esbuild.context({
+const config = {
     banner: {
         js: banner,
     },
@@ -39,11 +40,12 @@ const context = await esbuild.context({
     treeShaking: true,
     outfile: "main.js",
     minify: prod,
-});
+    plugins: [runtimeDeployPlugin("TPS-Global-Context-Menu (Dev)")],
+};
 
 if (prod) {
-    await context.rebuild();
-    process.exit(0);
+    await esbuild.build(config);
 } else {
+    const context = await esbuild.context(config);
     await context.watch();
 }

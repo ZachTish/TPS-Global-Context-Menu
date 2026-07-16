@@ -1,4 +1,4 @@
-import { Menu, setIcon } from 'obsidian';
+import { Menu, Notice, setIcon } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import type { TimeTrackingPausedSessionState } from '../types';
 import type { TimeTrackingSession } from './time-tracking-service';
@@ -113,11 +113,13 @@ export class TimeTrackingStatusBarService {
       },
     });
     mainButton.addEventListener('click', async () => {
+      let opened = false;
       if (state.kind === 'active') {
-        await this.plugin.timeTrackingService.openSessionTarget(state.session.id);
+        opened = await this.plugin.timeTrackingService.openHydratedSessionTarget(state.session);
       } else {
-        await this.plugin.timeTrackingService.openPausedTimerTarget();
+        opened = await this.plugin.timeTrackingService.openPausedTimerTarget();
       }
+      if (!opened) new Notice('Could not open timer target.');
     });
 
     const iconEl = mainButton.createSpan({ cls: 'tps-gcm-time-tracker-icon' });

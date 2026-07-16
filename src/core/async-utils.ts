@@ -1,3 +1,5 @@
+import * as logger from "../logger";
+
 export type MaybePromise = void | Promise<unknown>;
 
 interface RunAsyncActionOptions {
@@ -9,7 +11,7 @@ export function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
 }
 
 export function runAsyncAction(action: () => MaybePromise, options?: RunAsyncActionOptions): void {
-  const onError = options?.onError ?? ((error: unknown) => console.error("[TPS GCM] Unhandled async action error", error));
+  const onError = options?.onError ?? ((error: unknown) => logger.flowError("AsyncAction", "unhandled-error", error));
 
   try {
     const result = action();

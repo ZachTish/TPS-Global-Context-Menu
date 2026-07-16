@@ -21,6 +21,7 @@ import { TextInputModal } from '../modals/text-input-modal';
 import { getCheckboxStateMarker, normalizeCheckboxStateToken } from '../utils/checkbox-state';
 import { getWikilinkDisplayText, isLinkListProperty, parseLinkListInput } from '../utils/list-utils';
 import { extractWebLink } from '../utils/web-link-utils';
+import { getPlainDisplayTitle } from '../utils/display-title';
 
 interface SubitemNode {
   file: TFile;
@@ -84,6 +85,15 @@ interface TPSHealthMetricRenderConfig {
   min?: number;
   max?: number;
   color?: string;
+}
+
+type TPSHealthMetricState = 'good' | 'under' | 'over' | 'neutral';
+
+interface TPSHealthMetricDisplay {
+  state: TPSHealthMetricState;
+  visualPercent: number;
+  labelPercent: string;
+  color: string;
 }
 
 interface TPSHealthApiLike {
@@ -151,6 +161,7 @@ class CreateCustomPropertyModal extends Modal {
   }
 
   onOpen(): void {
+    this.modalEl.addClass('mod-tps-gcm');
     const { contentEl } = this;
     contentEl.empty();
     contentEl.createEl('h2', { text: 'Add property' });
@@ -425,8 +436,8 @@ export class PanelBuilder {
   private async archiveEntries(entries: any[]): Promise<void> {
     const archiveTag = normalizeTagValue(this.plugin.settings.archiveTag || 'archive');
     const archiveFolder = this.plugin.getArchiveFolderPath();
-    if (!archiveTag) {
-      new Notice('Archive tag setting is not configured.');
+    if (!archiveFolder) {
+      new Notice('Archive folder setting is not configured.');
       return;
     }
 
@@ -434,25 +445,86 @@ export class PanelBuilder {
       .map((entry: any) => entry?.file)
       .filter((candidate: unknown): candidate is TFile => candidate instanceof TFile);
 
-    let taggedCount = 0;
-    for (const file of files) {
-      if (archiveFolder && file.path.startsWith(`${archiveFolder}/`)) {
-        taggedCount += 1;
-        continue;
-      }
-      if (file.extension?.toLowerCase() !== 'md') continue;
+    await this.ensureFolderPath(archiveFolder);
 
-      try {
-        await this.app.fileManager.processFrontMatter(file, (frontmatter: any) => {
-          frontmatter.tags = mergeNormalizedTags(frontmatter.tags, archiveTag);
-        });
-        taggedCount += 1;
-      } catch (err) {
-        logger.error('[TPS GCM] Failed adding archive tag', file.path, err);
+    let movedCount = 0;
+    let taggedCount = 0;
+    await this.plugin.runQueuedMove(files, async () => {
+      for (const file of files) {
+        const existing = this.app.vault.getAbstractFileByPath(file.path);
+        const liveFile = existing instanceof TFile ? existing : file;
+        if (this.isPathInFolder(liveFile.path, archiveFolder)) {
+          movedCount += 1;
+          continue;
+        }
+
+        try {
+          if (liveFile.extension?.toLowerCase() === 'md' && archiveTag) {
+            const originalFolder = liveFile.parent?.path ?? '';
+            await this.app.fileManager.processFrontMatter(liveFile, (frontmatter: any) => {
+              frontmatter.tags = mergeNormalizedTags(frontmatter.tags, archiveTag);
+              frontmatter.archiveOriginalFolder = originalFolder;
+            });
+            taggedCount += 1;
+          }
+
+          const targetPath = this.getUniqueArchiveTargetPath(liveFile, archiveFolder);
+          const targetFolder = targetPath.includes('/') ? targetPath.slice(0, targetPath.lastIndexOf('/')) : '';
+          if (targetFolder) {
+            await this.ensureFolderPath(targetFolder);
+          }
+          await this.app.fileManager.renameFile(liveFile, targetPath);
+          movedCount += 1;
+        } catch (err) {
+          logger.error('[TPS GCM] Failed archiving file', liveFile.path, err);
+        }
+      }
+    });
+
+    logger.log('[TPS GCM] Archive menu action complete', { movedCount, taggedCount, archiveFolder });
+    new Notice(movedCount === 1 ? 'Archived 1 file' : `Archived ${movedCount} files`);
+  }
+
+  private isPathInFolder(path: string, folder: string): boolean {
+    const normalizedPath = normalizePath(path);
+    const normalizedFolder = normalizePath(folder).replace(/\/+$/g, '');
+    return normalizedPath === normalizedFolder || normalizedPath.startsWith(`${normalizedFolder}/`);
+  }
+
+  private async ensureFolderPath(folderPath: string): Promise<void> {
+    let current = '';
+    for (const part of normalizePath(folderPath).split('/').filter(Boolean)) {
+      current = current ? `${current}/${part}` : part;
+      const existing = this.app.vault.getAbstractFileByPath(current);
+      if (!existing) {
+        await this.app.vault.createFolder(current);
+      } else if (!(existing instanceof TFolder)) {
+        throw new Error(`Archive folder path conflicts with an existing file: ${current}`);
       }
     }
+  }
 
-    new Notice(taggedCount === 1 ? 'Tagged 1 file for archive' : `Tagged ${taggedCount} files for archive`);
+  private getUniqueArchiveTargetPath(file: TFile, archiveFolder: string): string {
+    const sourceFolder = file.parent?.path ?? '';
+    const relativeFolder = sourceFolder && sourceFolder !== '/'
+      ? sourceFolder
+      : '';
+    const targetFolder = relativeFolder && !this.isPathInFolder(sourceFolder, archiveFolder)
+      ? normalizePath(`${archiveFolder}/${relativeFolder}`)
+      : archiveFolder;
+    const extension = file.extension ? `.${file.extension}` : '';
+    const baseTarget = normalizePath(`${targetFolder}/${file.basename}${extension}`);
+    if (!this.app.vault.getAbstractFileByPath(baseTarget)) {
+      return baseTarget;
+    }
+
+    let counter = 1;
+    let targetPath = '';
+    do {
+      targetPath = normalizePath(`${targetFolder}/${file.basename} ${counter}${extension}`);
+      counter += 1;
+    } while (this.app.vault.getAbstractFileByPath(targetPath));
+    return targetPath;
   }
 
   // --- NEW 2-ROW LAYOUT ---
@@ -735,6 +807,14 @@ export class PanelBuilder {
     menu.addSeparator();
     menu.addItem((item) => {
       item
+        .setTitle('Remove property from file')
+        .setIcon('trash-2')
+        .setDisabled(!String(prop?.key || '').trim())
+        .onClick(() => void this.removePropertyFromFile(prop, file));
+    });
+    menu.addSeparator();
+    menu.addItem((item) => {
+      item
         .setTitle('Add hide rule to property')
         .setIcon('eye-off')
         .onClick(() => void this.updateConfiguredPropertyVisibility(prop, { hidden: true }, file, `${label} hidden`));
@@ -830,6 +910,14 @@ export class PanelBuilder {
     new Notice(notice);
   }
 
+  private async removePropertyFromFile(prop: any, file: TFile): Promise<void> {
+    const key = String(prop?.key || '').trim();
+    if (!key) return;
+    await this.plugin.frontmatterMutationService.deleteKeys([file], [key]);
+    await this.afterStackedPropertyEdit([file], [key]);
+    new Notice(`Removed ${String(prop?.label || key)} from ${file.basename}.`);
+  }
+
   private openCreateCustomPropertyModal(file: TFile, entries: any[]): void {
     new CreateCustomPropertyModal(this.app, this.plugin, async (property, initialValue, shouldWriteValue, isNewProperty) => {
       if (isNewProperty) {
@@ -857,7 +945,18 @@ export class PanelBuilder {
         .onClick(() => this.openCreateCustomPropertyModal(file, entries));
     });
 
-    const properties = (this.plugin.settings.properties || [])
+    const scopedProperties = resolveCustomProperties(
+      (this.plugin.settings.properties || []).map((property) => ({
+        ...property,
+        showWhen: 'always' as const,
+        inlineShowWhen: undefined,
+        contextMenuShowWhen: undefined,
+      })),
+      entries,
+      new ViewModeService(),
+      'any',
+    );
+    const properties = scopedProperties
       .filter((property) => {
         const key = String(property?.key || '').trim();
         if (!key) return false;
@@ -927,13 +1026,17 @@ export class PanelBuilder {
     const propKeyLower = propKey.toLowerCase();
 
     if (propId === 'status' || propKeyLower === 'status') {
-      this.propertyRowService.openStatusSubmenu(anchor, entries, undefined, prop?.options, async (files) => {
+      this.propertyRowService.openStatusSubmenu(anchor, entries, () => {
+        this.refreshStackedPropertyValue(anchor, entries, prop);
+      }, prop?.options, async (files) => {
         for (const file of files) await applyNotebookNavigatorRulesToFile(this.plugin, file);
       });
       return;
     }
     if (propId === 'priority' || propKeyLower === 'priority') {
-      this.propertyRowService.openPrioritySubmenu(anchor, entries, undefined, getEffectivePropertyOptions(this.app, prop), propKey || 'priority');
+      this.propertyRowService.openPrioritySubmenu(anchor, entries, () => {
+        this.refreshStackedPropertyValue(anchor, entries, prop);
+      }, getEffectivePropertyOptions(this.app, prop), propKey || 'priority');
       return;
     }
     if (prop.type === 'datetime' || propKeyLower === 'scheduled' || propKeyLower === 'date') {
@@ -973,20 +1076,35 @@ export class PanelBuilder {
     const current = String(this.getFrontmatterValueCaseInsensitive(entries[0]?.frontmatter || {}, key) ?? '').trim();
     const files = this.filesFromEntries(entries);
     const menu = new Menu();
-    menu.addItem((item) => item.setTitle('(none)').setChecked(!current).onClick(async () => {
-      this.removeEntryFrontmatterValue(entries, key);
-      await this.plugin.bulkEditService.removeFrontmatterKey(files, key);
-      await this.afterStackedPropertyEdit(files, [key]);
-    }));
+    const checkedItems: Array<{ item: any; value: string }> = [];
+    const setCheckedValue = (value: string) => {
+      for (const entry of checkedItems) entry.item.setChecked(entry.value === value);
+      logger.flow('PropertySelector', 'stacked:checked-state', { key, value, files: files.length });
+    };
+    menu.addItem((item) => {
+      checkedItems.push({ item, value: '' });
+      item.setTitle('(none)').setChecked(!current).onClick(async () => {
+        setCheckedValue('');
+        this.removeEntryFrontmatterValue(entries, key);
+        this.refreshStackedPropertyValue(anchor, entries, prop);
+        await this.plugin.bulkEditService.removeFrontmatterKey(files, key);
+        await this.afterStackedPropertyEdit(files, [key], false);
+      });
+    });
     menu.addItem((item) => item.setTitle('Set custom value...').setIcon('pencil').onClick(() => this.openStackedTextEditor(entries, prop)));
     const options = getEffectivePropertyOptions(this.app, prop);
     if (options.length) menu.addSeparator();
     for (const option of options) {
-      menu.addItem((item) => item.setTitle(option).setChecked(current === option).onClick(async () => {
-        this.setEntryFrontmatterValue(entries, key, option);
-        await this.plugin.bulkEditService.updateFrontmatter(files, { [key]: option });
-        await this.afterStackedPropertyEdit(files, [key]);
-      }));
+      menu.addItem((item) => {
+        checkedItems.push({ item, value: option });
+        item.setTitle(option).setChecked(current === option).onClick(async () => {
+          setCheckedValue(option);
+          this.setEntryFrontmatterValue(entries, key, option);
+          this.refreshStackedPropertyValue(anchor, entries, prop);
+          await this.plugin.bulkEditService.updateFrontmatter(files, { [key]: option });
+          await this.afterStackedPropertyEdit(files, [key], false);
+        });
+      });
     }
     const rect = anchor.getBoundingClientRect();
     menu.showAtPosition({ x: rect.left, y: rect.bottom });
@@ -1056,13 +1174,22 @@ export class PanelBuilder {
     }
   }
 
-  private async afterStackedPropertyEdit(files: TFile[], changedKeys: string[]): Promise<void> {
+  private refreshStackedPropertyValue(target: HTMLElement, entries: any[], prop: any): void {
+    target.empty();
+    this.populateStackedPropertyValue(target, entries, prop, (entries?.[0]?.frontmatter || {}) as Record<string, any>);
+  }
+
+  private async afterStackedPropertyEdit(files: TFile[], changedKeys: string[], refreshMenus = true): Promise<void> {
     await Promise.all(files.map((file) => this.plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
       reason: 'whole-note-inline-property-edit',
       force: true,
       bypassCreationGrace: true,
     })));
-    for (const file of files) this.plugin.persistentMenuManager?.refreshMenusForFile(file, true);
+    if (refreshMenus) {
+      for (const file of files) this.plugin.persistentMenuManager?.refreshMenusForFile(file, true);
+    } else {
+      logger.flow('PropertySelector', 'refresh:await-metadata-cache', { files: files.length, changedKeys });
+    }
     void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(files, changedKeys);
   }
 
@@ -1170,11 +1297,12 @@ export class PanelBuilder {
       return properties;
     }
 
+    const configuredKeys = new Set((this.plugin.settings.properties || []).map((prop) => String(prop?.key || '').toLowerCase()).filter(Boolean));
     const existingKeys = new Set(properties.map((prop) => String(prop?.key || '').toLowerCase()).filter(Boolean));
     const next = [...properties];
     for (const config of configs) {
       const key = String(config?.propertyKey || '').trim();
-      if (!key || existingKeys.has(key.toLowerCase())) continue;
+      if (!key || configuredKeys.has(key.toLowerCase()) || existingKeys.has(key.toLowerCase())) continue;
       const raw = this.getFrontmatterValueCaseInsensitive(frontmatter, key);
       if (this.toFiniteNumber(raw) === null) continue;
       next.push({
@@ -1190,18 +1318,19 @@ export class PanelBuilder {
   }
 
   private createHealthMetricPropertyValue(value: number, metric: TPSHealthMetricRenderConfig): HTMLElement {
-    const goal = this.getHealthMetricProgressGoal(metric);
-    const percent = goal > 0 ? Math.max(0, Math.min(100, Math.round((value / goal) * 100))) : 100;
+    const display = this.getHealthMetricDisplay(value, metric);
     const roundedValue = this.roundHealthMetricValue(value);
     const goalText = this.formatHealthMetricGoalText(metric);
+    const stateText = this.formatHealthMetricStateText(display.state);
     const wrapper = document.createElement('span');
-    wrapper.className = 'tps-gcm-health-metric';
-    wrapper.style.setProperty('--tps-gcm-health-progress', `${percent}%`);
-    if (metric.color) wrapper.style.setProperty('--tps-gcm-health-color', metric.color);
-    wrapper.setAttribute('aria-label', `${metric.label}: ${roundedValue} ${metric.unit}${goalText ? ` ${goalText}` : ''}`);
+    wrapper.className = `tps-gcm-health-metric tps-gcm-health-metric--${display.state}`;
+    wrapper.style.setProperty('--tps-gcm-health-progress', `${display.visualPercent}%`);
+    wrapper.style.setProperty('--tps-gcm-health-color', display.color);
+    wrapper.setAttribute('data-tps-health-state', display.state);
+    wrapper.setAttribute('aria-label', `${metric.label}: ${roundedValue} ${metric.unit}${goalText ? ` ${goalText}` : ''}${stateText ? `, ${stateText}` : ''}`);
 
     const ring = wrapper.createSpan({ cls: 'tps-gcm-health-metric-ring' });
-    ring.createSpan({ cls: 'tps-gcm-health-metric-percent', text: `${percent}%` });
+    ring.createSpan({ cls: 'tps-gcm-health-metric-percent', text: display.labelPercent });
 
     const text = wrapper.createSpan({ cls: 'tps-gcm-health-metric-text' });
     text.createSpan({ cls: 'tps-gcm-health-metric-value', text: `${roundedValue}` });
@@ -1209,24 +1338,81 @@ export class PanelBuilder {
     return wrapper;
   }
 
+  private getHealthMetricDisplay(value: number, metric: TPSHealthMetricRenderConfig): TPSHealthMetricDisplay {
+    const min = this.finiteHealthMetricNumber(metric.min);
+    const max = this.finiteHealthMetricNumber(metric.max);
+    const goal = this.getHealthMetricProgressGoal(metric);
+    const percent = goal > 0 ? Math.round((value / goal) * 100) : 0;
+    const state = this.getHealthMetricState(value, metric, min, max);
+    return {
+      state,
+      visualPercent: Math.max(0, Math.min(100, percent)),
+      labelPercent: goal > 0 ? `${percent}%` : '--',
+      color: this.getHealthMetricStateColor(state, metric),
+    };
+  }
+
+  private getHealthMetricState(
+    value: number,
+    metric: TPSHealthMetricRenderConfig,
+    min = this.finiteHealthMetricNumber(metric.min),
+    max = this.finiteHealthMetricNumber(metric.max),
+  ): TPSHealthMetricState {
+    if (metric.kind === 'counter') return 'neutral';
+    const hasMin = min !== null;
+    const hasMax = max !== null;
+    if (hasMin && hasMax) {
+      if (value < Math.min(min, max)) return 'under';
+      if (value > Math.max(min, max)) return 'over';
+      return 'good';
+    }
+    if (hasMax) return value > max ? 'over' : 'good';
+    if (hasMin) return value < min ? 'under' : 'good';
+    return 'neutral';
+  }
+
+  private getHealthMetricStateColor(state: TPSHealthMetricState, metric: TPSHealthMetricRenderConfig): string {
+    if (state === 'good') return 'var(--color-green)';
+    if (state === 'under' || state === 'over') return 'var(--color-red)';
+    return metric.color || 'var(--interactive-accent)';
+  }
+
   private getHealthMetricProgressGoal(metric: TPSHealthMetricRenderConfig): number {
-    if (metric.kind === 'range') return Number.isFinite(metric.max) && Number(metric.max) > 0 ? Number(metric.max) : 0;
-    if (metric.kind === 'max') return Number.isFinite(metric.max) && Number(metric.max) > 0 ? Number(metric.max) : Number(metric.goal) || 0;
+    const min = this.finiteHealthMetricNumber(metric.min);
+    const max = this.finiteHealthMetricNumber(metric.max);
     if (metric.kind === 'counter') return 0;
-    return Number.isFinite(metric.min) && Number(metric.min) > 0 ? Number(metric.min) : Number(metric.goal) || 0;
+    if (min !== null && max !== null) return Math.max(min, max, 0);
+    if (max !== null && max > 0) return max;
+    if (min !== null && min > 0) return min;
+    const goal = this.finiteHealthMetricNumber(metric.goal);
+    return goal && goal > 0 ? goal : 0;
+  }
+
+  private formatHealthMetricStateText(state: TPSHealthMetricState): string {
+    if (state === 'good') return 'in target';
+    if (state === 'under') return 'under target';
+    if (state === 'over') return 'over target';
+    return '';
+  }
+
+  private finiteHealthMetricNumber(value: unknown): number | null {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
   }
 
   private formatHealthMetricGoalText(metric: TPSHealthMetricRenderConfig): string {
     const unit = metric.unit || '';
+    const min = this.finiteHealthMetricNumber(metric.min);
+    const max = this.finiteHealthMetricNumber(metric.max);
     if (metric.kind === 'counter') return unit;
-    if (metric.kind === 'range' && Number.isFinite(metric.min) && Number.isFinite(metric.max)) {
-      return `/ ${this.roundHealthMetricValue(Number(metric.min))}-${this.roundHealthMetricValue(Number(metric.max))} ${unit}`.trim();
+    if (min !== null && max !== null) {
+      return `/ ${this.roundHealthMetricValue(Math.min(min, max))}-${this.roundHealthMetricValue(Math.max(min, max))} ${unit}`.trim();
     }
-    if (metric.kind === 'max' && Number.isFinite(metric.max)) {
-      return `/ max ${this.roundHealthMetricValue(Number(metric.max))} ${unit}`.trim();
+    if (max !== null) {
+      return `/ max ${this.roundHealthMetricValue(max)} ${unit}`.trim();
     }
-    if (Number.isFinite(metric.min)) {
-      return `/ min ${this.roundHealthMetricValue(Number(metric.min))} ${unit}`.trim();
+    if (min !== null) {
+      return `/ min ${this.roundHealthMetricValue(min)} ${unit}`.trim();
     }
     if (Number.isFinite(metric.goal)) return `/ ${this.roundHealthMetricValue(Number(metric.goal))} ${unit}`.trim();
     return unit;
@@ -3438,13 +3624,14 @@ export class PanelBuilder {
   private extractReferenceTargetsFromLine(line: string): Array<{ target: string; start: number; end: number }> {
     const matches: Array<{ target: string; start: number; end: number }> = [];
     const patterns = [
-      /(?<!!)\[\[([^\]]+)\]\]/g,
-      /(?<!!)\[[^\]]*\]\(([^)]+)\)/g,
+      /\[\[([^\]]+)\]\]/g,
+      /\[[^\]]*\]\(([^)]+)\)/g,
     ];
 
     for (const pattern of patterns) {
       let match: RegExpExecArray | null = null;
       while ((match = pattern.exec(line)) !== null) {
+        if (match.index > 0 && line[match.index - 1] === '!') continue;
         const target = String(match[1] || '').trim();
         if (!target) continue;
         matches.push({
@@ -3630,9 +3817,7 @@ export class PanelBuilder {
 
     const frontmatter = (this.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, any>;
     const titleValue = this.getFrontmatterValueCaseInsensitive(frontmatter, 'title');
-    const title = typeof titleValue === 'string' && titleValue.trim()
-      ? titleValue.trim()
-      : file.basename;
+    const title = getPlainDisplayTitle(titleValue, file.basename);
 
     // Cache the result
     this.fileTitleCache.set(file.path, title);

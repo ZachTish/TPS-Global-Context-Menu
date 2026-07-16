@@ -40,5 +40,12 @@ export function getValidOperators(source: string): string[] {
             "has-open-checkboxes", "!has-open-checkboxes"
         ];
     }
+    if (source === "checkbox-state") {
+        return [
+            "is", "!is",
+            "contains", "!contains",
+            "exists", "!exists"
+        ];
+    }
     return base;
 }

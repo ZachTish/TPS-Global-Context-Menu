@@ -2,12 +2,14 @@ import { Menu, Setting, setIcon } from "obsidian";
 import { HideRule, RuleCondition } from "../types";
 import {
     CONDITION_SOURCE_OPTIONS,
+    conditionSourceHasField,
     createDefaultCondition,
     getConditionValuePlaceholder,
     getOperatorLabel,
     normalizeConditionSource,
     normalizeRuleMatchMode,
     normalizeSmartOperator,
+    smartOperatorNeedsValue,
     SettingsSectionContext
 } from "./ui-common";
 import { getValidOperators } from "./operators";
@@ -292,7 +294,7 @@ export class HideSectionRenderer {
                     return;
                 }
                 liveCondition.source = normalizeConditionSource(sourceSelect.value);
-                if (liveCondition.source !== "frontmatter" && liveCondition.source !== "parent-frontmatter") {
+                if (!conditionSourceHasField(liveCondition.source)) {
                     liveCondition.field = "";
                 }
                 void persistRuleChange(false).then(() => refresh());
@@ -333,7 +335,7 @@ export class HideSectionRenderer {
                 void persistRuleChange(true).then(() => refresh());
             });
 
-            if (condition.source === "frontmatter" || condition.source === "parent-frontmatter") {
+            if (conditionSourceHasField(condition.source)) {
                 const fieldWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
                 fieldWrap.createEl("label", { text: "Field" });
                 const fieldInput = fieldWrap.createEl("input", {
@@ -357,16 +359,7 @@ export class HideSectionRenderer {
                 });
             }
 
-            const isUnary =
-                condition.operator === "exists" ||
-                condition.operator === "!exists" ||
-                condition.operator === "is-not-empty" ||
-                condition.operator === "has-open-checkboxes" ||
-                condition.operator === "!has-open-checkboxes" ||
-                condition.operator === "is-today" ||
-                condition.operator === "!is-today";
-
-            if (!isUnary) {
+            if (smartOperatorNeedsValue(condition.operator)) {
                 const valueWrap = grid.createDiv({ cls: "tps-nn-condition-field tps-nn-condition-field-value" });
                 valueWrap.createEl("label", { text: "Value" });
                 const valueInput = valueWrap.createEl("input", {

@@ -1,5 +1,6 @@
 import { Menu } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
+import * as logger from '../logger';
 
 /**
  * Monkey-patches `Menu.prototype.showAtPosition` and `Menu.prototype.showAtMouseEvent`
@@ -165,7 +166,7 @@ export function setupMenuPatch(plugin: TPSGlobalContextMenuPlugin): () => void {
                     : null;
                 const inferredFiles = plugin.contextTargetService.inferNotebookNavigatorCollectionSelection(contextTarget, nativeCount);
                 if (inferredFiles.length === nativeCount) {
-                    console.info('[TPS GCM] Rebuilt Notebook Navigator GCM menu from inferred collection selection', {
+                    logger.flow('MenuPatcher', 'rebuilt-notebook-navigator-menu', {
                         action: key,
                         count: nativeCount,
                     });
@@ -175,7 +176,7 @@ export function setupMenuPatch(plugin: TPSGlobalContextMenuPlugin): () => void {
                     reorderItems(menu);
                     return;
                 }
-                console.warn('[TPS GCM] Notebook Navigator selection count mismatch; preserving native menu only', {
+                logger.flowWarn('MenuPatcher', 'notebook-navigator-selection-count-mismatch', {
                     action: key,
                     gcmCount: tpsCount,
                     notebookNavigatorCount: nativeCount,
@@ -232,6 +233,7 @@ export function setupMenuPatch(plugin: TPSGlobalContextMenuPlugin): () => void {
     };
 
     Menu.prototype.showAtMouseEvent = function (evt) {
+        plugin.foldExpansionContextMenuService?.addMenuItemForTarget(this, evt?.target ?? null, evt ?? null);
         maybeInjectNotebookNavigatorItems(this, evt?.target ?? null);
         reorderItems(this);
         try {

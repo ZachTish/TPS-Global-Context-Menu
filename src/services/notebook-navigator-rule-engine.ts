@@ -530,6 +530,12 @@ export class RuleEngine {
       return context.body ? [context.body] : [];
     }
 
+    if (source === "checkbox-state") {
+      return Array.isArray(context.checkboxStates)
+        ? context.checkboxStates
+        : this.collectCheckboxStates(context.body || "");
+    }
+
     if (source === "parent-name") {
       const parentFile = context.parent?.file;
       if (!parentFile) return [];
@@ -582,6 +588,17 @@ export class RuleEngine {
     }
 
     return this.toComparableValues(this.getFrontmatterValue(context.frontmatter, key));
+  }
+
+  private collectCheckboxStates(body: string): string[] {
+    const states = new Set<string>();
+    const pattern = /^[\t ]*[-*+]\s+\[([^\]\r\n]*)\]/gm;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(body)) !== null) {
+      const marker = String(match[1] || "").trim();
+      states.add(marker || "open");
+    }
+    return Array.from(states);
   }
 
   private matchesConditionGroup(conditions: RuleCondition[], matchMode: "all" | "any", context: RuleEvaluationContext): boolean {

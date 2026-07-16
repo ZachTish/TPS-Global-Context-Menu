@@ -5,6 +5,7 @@ import { getWikilinkDisplayText, isLinkListProperty, isTextListProperty, parseLi
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { TextInputModal } from '../modals/text-input-modal';
 import { extractWebLink } from '../utils/web-link-utils';
+import * as logger from '../logger';
 
 type Delegates = {
   addSafeClickListener: (element: HTMLElement, handler: (e: MouseEvent) => void) => void;
@@ -142,9 +143,10 @@ export class PropertyRowService {
         bypassCreationGrace: true,
       }),
     ));
-    for (const file of files) {
-      this.plugin.persistentMenuManager?.refreshMenusForFile(file, true);
-    }
+    logger.flow('PropertySelector', 'refresh:await-metadata-cache', {
+      files: files.length,
+      changedKeys,
+    });
     void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(files, changedKeys);
   }
 
@@ -200,11 +202,17 @@ export class PropertyRowService {
       const files = this.filesFromEntries(entries);
 
       const menu = new Menu();
+      const checkedItems: Array<{ item: any; value: string }> = [];
+      const setCheckedValue = (value: string) => {
+        for (const entry of checkedItems) entry.item.setChecked(entry.value === value);
+      };
       menu.addItem((item) => {
+        checkedItems.push({ item, value: '' });
         item
           .setTitle("(none)")
           .setChecked(allWithoutKey)
           .onClick(async () => {
+            setCheckedValue('');
             this.removeEntryFrontmatterValue(entries, prop.key);
             updateDisplay();
             await this.plugin.bulkEditService.removeFrontmatterKey(files, prop.key);
@@ -230,10 +238,12 @@ export class PropertyRowService {
       menu.addSeparator();
       getEffectivePropertyOptions(this.app, prop).forEach((opt: string) => {
         menu.addItem((item) => {
+          checkedItems.push({ item, value: opt });
           item
             .setTitle(opt)
             .setChecked(current === opt)
             .onClick(async () => {
+              setCheckedValue(opt);
               this.setEntryFrontmatterValue(entries, prop.key, opt);
               updateDisplay();
               await this.plugin.bulkEditService.updateFrontmatter(files, { [prop.key]: opt });
@@ -542,12 +552,19 @@ export class PropertyRowService {
       return value === '' || value === null || value === undefined;
     });
     const files = this.filesFromEntries(entries);
+    const checkedItems: Array<{ item: any; value: string }> = [];
+    const setCheckedStatus = (value: string) => {
+      for (const entry of checkedItems) entry.item.setChecked(entry.value === value);
+      logger.flow('PropertySelector', 'status:checked-state', { value, files: files.length });
+    };
 
     menu.addItem(item => {
+      checkedItems.push({ item, value: '' });
       item
         .setTitle('(none)')
         .setChecked(allWithoutKey)
         .onClick(async () => {
+          setCheckedStatus('');
           this.removeEntryFrontmatterValue(entries, key);
           if (onUpdate) onUpdate('');
           const updatedCount = await this.plugin.bulkEditService.removeFrontmatterKey(files, key);
@@ -575,10 +592,12 @@ export class PropertyRowService {
     const statuses = overrideOptions && overrideOptions.length > 0 ? overrideOptions : ['todo', 'working', 'holding', 'wont-do', 'complete'];
     statuses.forEach(status => {
       menu.addItem(item => {
+        checkedItems.push({ item, value: status });
         item
           .setTitle(status)
           .setChecked(currentStatus === status)
           .onClick(async () => {
+            setCheckedStatus(status);
             this.setEntryFrontmatterValue(entries, key, status);
             if (onUpdate) onUpdate(status);
             const updatedCount = await this.plugin.bulkEditService.setStatus(files, status);
@@ -606,12 +625,19 @@ export class PropertyRowService {
       return value === '' || value === null || value === undefined;
     });
     const files = this.filesFromEntries(entries);
+    const checkedItems: Array<{ item: any; value: string }> = [];
+    const setCheckedPriority = (value: string) => {
+      for (const entry of checkedItems) entry.item.setChecked(entry.value === value);
+      logger.flow('PropertySelector', 'priority:checked-state', { value, files: files.length });
+    };
 
     menu.addItem(item => {
+      checkedItems.push({ item, value: '' });
       item
         .setTitle('(none)')
         .setChecked(allWithoutKey)
         .onClick(async () => {
+          setCheckedPriority('');
           this.removeEntryFrontmatterValue(entries, key);
           if (onUpdate) onUpdate('');
           await this.plugin.bulkEditService.removeFrontmatterKey(files, key);
@@ -637,10 +663,12 @@ export class PropertyRowService {
     const priorities = overrideOptions && overrideOptions.length > 0 ? overrideOptions : ['high', 'medium', 'normal', 'low'];
     priorities.forEach(priority => {
       menu.addItem(item => {
+        checkedItems.push({ item, value: priority });
         item
           .setTitle(priority)
           .setChecked(currentPrio === priority)
           .onClick(async () => {
+            setCheckedPriority(priority);
             this.setEntryFrontmatterValue(entries, key, priority);
             if (onUpdate) onUpdate(priority);
             await this.plugin.bulkEditService.updateFrontmatter(files, { [key]: priority });

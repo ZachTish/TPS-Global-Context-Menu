@@ -1,4 +1,4 @@
-import { App, Modal, Setting, TextComponent } from 'obsidian';
+import { App, Modal, Notice, Setting, TextComponent } from 'obsidian';
 import { RECURRENCE_OPTIONS, TRACKER_RECURRENCE_RULE } from '../constants';
 import { RRule } from 'rrule';
 import {
@@ -7,16 +7,18 @@ import {
     parseTaskRecurrenceRule,
     parseTaskDate,
 } from '../utils/task-recurrence';
+import * as logger from '../logger';
 
 export class RecurrenceModal extends Modal {
     currentRule: string;
-    onSubmit: (rule: string, endsOn: string | null) => void;
+    onSubmit: (rule: string, endsOn: string | null) => void | Promise<void>;
     previewEl: HTMLElement | null = null;
     startDate: Date;
     private currentEndsOn: string;
     private endsOnValue: string;
+    private submitting = false;
 
-    constructor(app: App, currentRule: string, startDate: Date, currentEndsOn: string, onSubmit: (rule: string, endsOn: string | null) => void) {
+    constructor(app: App, currentRule: string, startDate: Date, currentEndsOn: string, onSubmit: (rule: string, endsOn: string | null) => void | Promise<void>) {
         super(app);
         this.currentRule = currentRule;
         this.startDate = startDate;
@@ -146,8 +148,8 @@ export class RecurrenceModal extends Modal {
                 text.inputEl.addEventListener('keydown', (e) => {
                     e.stopPropagation();
                     if (e.key === 'Enter') {
-                        this.close();
-                        this.onSubmit(ruleInput.getValue(), this.endsOnValue.trim() || null);
+                        e.preventDefault();
+                        void this.submit(ruleInput.getValue(), this.endsOnValue.trim() || null);
                     }
                 });
                 text.inputEl.addEventListener('input', () => {
@@ -191,18 +193,32 @@ export class RecurrenceModal extends Modal {
                 btn.setButtonText('Clear')
                     .setWarning()
                     .onClick(() => {
-                        this.close();
-                        this.onSubmit('', null);
+                        void this.submit('', null);
                     });
             })
             .addButton((btn) => {
                 btn.setButtonText('Save')
                     .setCta()
                     .onClick(() => {
-                        this.close();
-                        this.onSubmit(ruleInput.getValue(), this.endsOnValue.trim() || null);
+                        void this.submit(ruleInput.getValue(), this.endsOnValue.trim() || null);
                     });
             });
+    }
+
+    private async submit(rule: string, endsOn: string | null): Promise<void> {
+        if (this.submitting) return;
+        this.submitting = true;
+        try {
+            await this.onSubmit(rule, endsOn);
+            this.close();
+        } catch (error) {
+            logger.flowError('RecurrenceModal', 'submit:failed', error, {
+                hasRule: Boolean(String(rule || '').trim()),
+                hasEndsOn: Boolean(endsOn),
+            });
+            new Notice('Could not update recurrence.');
+            this.submitting = false;
+        }
     }
 
     onClose() {

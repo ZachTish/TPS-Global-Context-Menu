@@ -1,5 +1,6 @@
 import type { PaneType } from "obsidian";
 import { TFile } from "obsidian";
+import * as logger from "../logger";
 
 export enum OperationType {
   MOVE_FILE = "move-file",
@@ -195,7 +196,7 @@ export class CommandQueueService {
       try {
         listener(type, active);
       } catch (error) {
-        console.error("[TPS GCM] Command queue listener error", error);
+        logger.flowError("CommandQueue", "listener-failed", error, { type, active });
       }
     });
   }

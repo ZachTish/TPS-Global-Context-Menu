@@ -141,6 +141,7 @@ export class TaskApiService {
   async create(input: GcmTaskCreateInput): Promise<GcmTaskMutationResult> {
     const title = String(input.title || '').replace(/\s+/g, ' ').trim();
     if (!title && !String(input.rawLine || '').trim()) {
+      logger.flowWarn('TaskApi', 'create:invalid-input', { hasTitle: !!title, hasRawLine: !!String(input.rawLine || '').trim() });
       return { ok: false, changed: false, task: null, error: 'Task title is required.' };
     }
 
@@ -150,8 +151,22 @@ export class TaskApiService {
         ? this.plugin.app.vault.getFileByPath(normalizePath(input.targetPath))
         : await this.ensureTodayDailyNote();
     if (!(targetFile instanceof TFile) || targetFile.extension !== 'md') {
+      logger.flowWarn('TaskApi', 'create:target-unresolved', {
+        targetPath: input.targetPath || '',
+        hasTargetFile: input.targetFile instanceof TFile,
+      });
       return { ok: false, changed: false, task: null, error: 'Target markdown file could not be resolved.' };
     }
+    const context = {
+      targetPath: targetFile.path,
+      placement: input.placement || 'after-frontmatter',
+      focus: input.focus === true,
+      notice: input.notice !== false,
+      fieldKeys: Object.keys(input.fields || {}).sort(),
+      tags: input.tags?.length || 0,
+      hasRawLine: !!String(input.rawLine || '').trim(),
+    };
+    logger.flow('TaskApi', 'create:start', context);
 
     const line = this.applyTaskInputToLine(
       String(input.rawLine || `- [${this.normalizeMarker(input.checkbox ?? input.status ?? ' ')}] ${title}`).trim(),
@@ -183,25 +198,49 @@ export class TaskApiService {
       this.notifyChanged([targetFile.path], 'task-api-create');
       if (input.notice !== false) new Notice(`Created task in ${targetFile.basename}`);
       if (input.focus === true && task) await this.focusTask(task);
+      logger.flow('TaskApi', 'create:done', {
+        ...context,
+        lineNumber: task?.lineNumber ?? insertedLineNumber,
+        resolved: !!task,
+      });
       return { ok: true, changed: true, task };
     } catch (error) {
-      logger.error('[TPS GCM] Task API create failed', error);
+      logger.flowError('TaskApi', 'create:failed', error, context);
       return { ok: false, changed: false, task: null, error: getErrorMessage(error) };
     }
   }
 
   async update(ref: GcmTaskRef, input: GcmTaskUpdateInput): Promise<GcmTaskMutationResult> {
     const resolved = await this.resolveTask(ref);
-    if (!resolved) return { ok: false, changed: false, task: null, error: 'Task line could not be resolved.' };
+    if (!resolved) {
+      logger.flowWarn('TaskApi', 'update:target-unresolved', this.summarizeRef(ref));
+      return { ok: false, changed: false, task: null, error: 'Task line could not be resolved.' };
+    }
     const before = resolved.record;
     let changed = false;
+    let writeResolved = false;
+    let resolvedLineNumber = before.lineNumber;
     let nextRawLine = before.rawLine;
+    const context = {
+      path: resolved.file.path,
+      lineNumber: before.lineNumber,
+      titleChanged: input.title !== undefined,
+      checkboxChanged: input.checkbox !== undefined,
+      statusChanged: input.status !== undefined,
+      fieldKeys: Object.keys(input.fields || {}).sort(),
+      addTags: input.addTags?.length || 0,
+      removeTags: input.removeTags?.length || 0,
+      replaceTags: input.replaceTags?.length || 0,
+    };
+    logger.flow('TaskApi', 'update:start', context);
 
     try {
       await this.plugin.app.vault.process(resolved.file, (content) => {
         const parts = splitContent(content);
         const index = findCurrentTaskLineIndex(parts.lines, before.lineNumber, before.rawLine, before.title);
         if (index < 0) return content;
+        writeResolved = true;
+        resolvedLineNumber = index;
         const current = parts.lines[index] || '';
         const next = this.applyTaskInputToLine(current, input, { update: true });
         if (next === current) return content;
@@ -211,13 +250,25 @@ export class TaskApiService {
         return joinContent(parts.lines, parts.newline, parts.endsWithNewline);
       });
 
+      if (!writeResolved) {
+        logger.flowWarn('TaskApi', 'update:stale-target', context);
+        return {
+          ok: false,
+          changed: false,
+          task: null,
+          before,
+          error: 'Task line changed before it could be updated.',
+        };
+      }
+
       const task = changed
-        ? await this.get({ path: resolved.file.path, lineNumber: before.lineNumber, rawLine: nextRawLine, title: getTaskDisplayTitle(nextRawLine) })
+        ? await this.get({ path: resolved.file.path, lineNumber: resolvedLineNumber, rawLine: nextRawLine, title: getTaskDisplayTitle(nextRawLine) })
         : before;
       if (changed) this.notifyChanged([resolved.file.path], 'task-api-update');
+      logger.flow('TaskApi', 'update:done', { ...context, changed, resolved: !!task });
       return { ok: true, changed, task, before };
     } catch (error) {
-      logger.error('[TPS GCM] Task API update failed', error);
+      logger.flowError('TaskApi', 'update:failed', error, context);
       return { ok: false, changed: false, task: null, before, error: getErrorMessage(error) };
     }
   }
@@ -234,28 +285,77 @@ export class TaskApiService {
     return this.update(ref, { fields: { scheduled } });
   }
 
+  setField(ref: GcmTaskRef, key: string, value: string | number | boolean | null): Promise<GcmTaskMutationResult> {
+    const cleanKey = String(key || '').trim();
+    if (!cleanKey) {
+      return Promise.resolve({ ok: false, changed: false, task: null, error: 'Field key is required.' });
+    }
+    return this.update(ref, { fields: { [cleanKey]: value } });
+  }
+
+  setFields(ref: GcmTaskRef, fields: Record<string, string | number | boolean | null | undefined>): Promise<GcmTaskMutationResult> {
+    if (!fields || typeof fields !== 'object' || !Object.keys(fields).length) {
+      return Promise.resolve({ ok: false, changed: false, task: null, error: 'At least one field is required.' });
+    }
+    return this.update(ref, { fields });
+  }
+
+  findByField(key: string, value: string | string[] | null, filter: GcmTaskListFilter = {}): Promise<GcmTaskRecord[]> {
+    const cleanKey = String(key || '').trim();
+    if (!cleanKey) return Promise.resolve([]);
+    return this.list({
+      ...filter,
+      fields: {
+        ...filter.fields,
+        [cleanKey]: value,
+      },
+    });
+  }
+
   async move(
     ref: GcmTaskRef,
     target: { targetFile?: TFile; targetPath?: string; line?: number; lineNumber?: number; placement?: 'after-frontmatter' | 'line' },
   ): Promise<GcmTaskMutationResult> {
     const resolved = await this.resolveTask(ref);
-    if (!resolved) return { ok: false, changed: false, task: null, error: 'Task line could not be resolved.' };
+    if (!resolved) {
+      logger.flowWarn('TaskApi', 'move:source-unresolved', this.summarizeRef(ref));
+      return { ok: false, changed: false, task: null, error: 'Task line could not be resolved.' };
+    }
     const targetFile = target.targetFile instanceof TFile
       ? target.targetFile
       : target.targetPath
         ? this.plugin.app.vault.getFileByPath(normalizePath(target.targetPath))
         : resolved.file;
     if (!(targetFile instanceof TFile) || targetFile.extension !== 'md') {
+      logger.flowWarn('TaskApi', 'move:target-unresolved', {
+        ...this.summarizeRef(ref),
+        targetPath: target.targetPath || '',
+        hasTargetFile: target.targetFile instanceof TFile,
+      });
       return { ok: false, changed: false, task: null, before: resolved.record, error: 'Target markdown file could not be resolved.' };
     }
+    const context = {
+      sourcePath: resolved.file.path,
+      targetPath: targetFile.path,
+      lineNumber: resolved.record.lineNumber,
+      placement: target.placement || 'after-frontmatter',
+      sameFile: resolved.file.path === targetFile.path,
+    };
+    logger.flow('TaskApi', 'move:start', context);
 
     try {
       const sourceContent = await this.plugin.app.vault.cachedRead(resolved.file);
       const sourceParts = splitContent(sourceContent);
       const sourceIndex = findCurrentTaskLineIndex(sourceParts.lines, resolved.record.lineNumber, resolved.record.rawLine, resolved.record.title);
-      if (sourceIndex < 0) return { ok: false, changed: false, task: null, before: resolved.record, error: 'Source task moved before it could be edited.' };
+      if (sourceIndex < 0) {
+        logger.flowWarn('TaskApi', 'move:source-line-missing', context);
+        return { ok: false, changed: false, task: null, before: resolved.record, error: 'Source task moved before it could be edited.' };
+      }
       const block = extractTaskBlock(sourceParts.lines, sourceIndex);
-      if (!block.lines.length) return { ok: false, changed: false, task: null, before: resolved.record, error: 'Source task block is empty.' };
+      if (!block.lines.length) {
+        logger.flowWarn('TaskApi', 'move:empty-block', context);
+        return { ok: false, changed: false, task: null, before: resolved.record, error: 'Source task block is empty.' };
+      }
 
       let insertedLineNumber = -1;
       if (resolved.file.path === targetFile.path) {
@@ -298,27 +398,48 @@ export class TaskApiService {
         title: resolved.record.title,
       });
       this.notifyChanged([resolved.file.path, targetFile.path], 'task-api-move');
+      logger.flow('TaskApi', 'move:done', { ...context, insertedLineNumber, blockLines: block.lines.length, resolved: !!task });
       return { ok: true, changed: true, task, before: resolved.record };
     } catch (error) {
-      logger.error('[TPS GCM] Task API move failed', error);
+      logger.flowError('TaskApi', 'move:failed', error, context);
       return { ok: false, changed: false, task: null, before: resolved.record, error: getErrorMessage(error) };
     }
   }
 
   async delete(ref: GcmTaskRef): Promise<GcmTaskMutationResult> {
     const resolved = await this.resolveTask(ref);
-    if (!resolved) return { ok: false, changed: false, task: null, error: 'Task line could not be resolved.' };
+    if (!resolved) {
+      logger.flowWarn('TaskApi', 'delete:target-unresolved', this.summarizeRef(ref));
+      return { ok: false, changed: false, task: null, error: 'Task line could not be resolved.' };
+    }
     let changed = false;
+    const context = {
+      path: resolved.file.path,
+      lineNumber: resolved.record.lineNumber,
+      title: resolved.record.title,
+    };
+    logger.flow('TaskApi', 'delete:start', context);
     try {
       await this.plugin.app.vault.process(resolved.file, (content) => {
         const result = removeTaskBlockFromContent(content, resolved.record.lineNumber, resolved.record.rawLine, resolved.record.title);
         changed = result.changed;
         return result.content;
       });
-      if (changed) this.notifyChanged([resolved.file.path], 'task-api-delete');
+      if (!changed) {
+        logger.flowWarn('TaskApi', 'delete:stale-target', context);
+        return {
+          ok: false,
+          changed: false,
+          task: null,
+          before: resolved.record,
+          error: 'Task line changed before it could be deleted.',
+        };
+      }
+      this.notifyChanged([resolved.file.path], 'task-api-delete');
+      logger.flow('TaskApi', 'delete:done', { ...context, changed });
       return { ok: true, changed, task: null, before: resolved.record };
     } catch (error) {
-      logger.error('[TPS GCM] Task API delete failed', error);
+      logger.flowError('TaskApi', 'delete:failed', error, context);
       return { ok: false, changed: false, task: null, before: resolved.record, error: getErrorMessage(error) };
     }
   }
@@ -357,6 +478,16 @@ export class TaskApiService {
       tags: readInlineTags(rawLine),
       fields,
       blockLineCount,
+    };
+  }
+
+  private summarizeRef(ref: GcmTaskRef): Record<string, unknown> {
+    return {
+      path: ref.path || '',
+      line: ref.line ?? null,
+      lineNumber: ref.lineNumber ?? null,
+      hasRawLine: !!ref.rawLine,
+      title: ref.title || '',
     };
   }
 
@@ -442,6 +573,7 @@ export class TaskApiService {
 
     if (options.create === true) {
       next = updateTaskLineTimestamps(next, {
+        enabled: this.plugin.settings.autoSyncFileTimestamps === true,
         createdKey: this.plugin.settings.dateCreatedFrontmatterKey,
         modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
         format: this.plugin.settings.fileTimestampFormat,
@@ -450,6 +582,7 @@ export class TaskApiService {
       });
     } else if (options.update === true && next !== line) {
       next = updateTaskLineTimestamps(next, {
+        enabled: this.plugin.settings.autoSyncFileTimestamps === true,
         modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
         format: this.plugin.settings.fileTimestampFormat,
         markModified: true,
@@ -535,15 +668,20 @@ export class TaskApiService {
   }
 
   private findInsertedLineIndex(content: string, rawLine: string): number {
-    return content.split(/\r?\n/).findIndex((line) => line.trim() === rawLine.trim());
+    const wanted = rawLine.trim();
+    const lines = content.split(/\r?\n/);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      if (lines[index]?.trim() === wanted) return index;
+    }
+    return -1;
   }
 
   private async focusTask(task: GcmTaskRecord): Promise<void> {
     const file = this.plugin.app.vault.getFileByPath(task.path);
     if (!(file instanceof TFile)) return;
-    const leaf = this.plugin.app.workspace.getLeaf(false);
-    await leaf.openFile(file, { active: true } as any);
-    const editor = (leaf.view as any)?.editor;
+    await this.plugin.openFileInLeaf(file, false, () => this.plugin.app.workspace.getLeaf(false), { revealLeaf: true });
+    const leaf = this.plugin.findOpenLeafForFile(file);
+    const editor = (leaf?.view as any)?.editor;
     if (!editor) return;
     editor.setCursor?.({ line: task.lineNumber, ch: 0 });
     editor.scrollIntoView?.({ from: { line: task.lineNumber, ch: 0 }, to: { line: task.lineNumber, ch: 0 } }, true);

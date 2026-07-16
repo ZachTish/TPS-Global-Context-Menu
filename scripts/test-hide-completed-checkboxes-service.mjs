@@ -64,6 +64,8 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(source, /getRenderedRoots\(\): HTMLElement\[\]/);
   assert.match(source, /\.markdown-preview-view, \.markdown-rendered, \.markdown-reading-view/);
   assert.match(source, /getRevealButtonMount\(root: HTMLElement\): HTMLElement/);
+  assert.match(source, /wrap\.className = `\$\{REVEAL_WIDGET_CLASS\} tps-gcm-hover-element`/);
+  assert.match(source, /wrap\.dataset\.tpsHoverElement = 'true'/);
   assert.match(source, /lastEditorInputAt/);
   assert.match(source, /document\.addEventListener\('keydown', this\.boundMarkEditorInput, true\)/);
   assert.match(source, /document\.addEventListener\('input', this\.boundMarkEditorInput, true\)/);
@@ -93,7 +95,8 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(source, /root\.classList\.add\(HAS_REVEAL_WIDGET_CLASS\)/);
   assert.match(source, /root\.classList\.remove\(HAS_REVEAL_WIDGET_CLASS\)/);
   assert.match(source, /root\.contains\(active\)/);
-  assert.match(source, /line\.matches\('\[data-task="x"\], \[data-task="X"\], \[data-task="-"\]'\)/);
+  assert.match(source, /HIDDEN_TASK_DATA_SELECTOR = '\[data-task="x"\], \[data-task="X"\], \[data-task="-"\], \[data-task=">"\]'/);
+  assert.match(source, /COMPLETED_TASK_RE = \/[^\n]*x\|X\|-\|>/);
   assert.match(source, /line\.querySelector\('\[aria-checked="true"\]'\)/);
   assert.match(source, /private isLivePreviewRoot\(root: HTMLElement\): boolean/);
   assert.match(source, /root\.classList\.contains\('is-source-mode'\)/);
@@ -110,6 +113,7 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(styles, /hide-all-task-lines-reading-mode \.markdown-reading-view li\.task-list-item \{/);
   assert.match(styles, /hide-all-task-lines-reading-mode \.markdown-reading-view\.tps-gcm-completed-checkboxes-revealed li\.task-list-item \{/);
   assert.match(styles, /\.markdown-rendered\.tps-gcm-completed-checkboxes-revealed li\.task-list-item\[data-task="x"\]/);
+  assert.doesNotMatch(styles, /li\.task-list-item\[data-task=">"\]/);
   assert.match(styles, /\.markdown-preview-view \.tps-gcm-completed-checkbox-reveal/);
   assert.match(styles, /\.markdown-reading-view \.tps-gcm-completed-checkbox-reveal/);
   assert.match(styles, /\.markdown-source-view\.mod-cm6\.is-live-preview \{/);
@@ -132,6 +136,10 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(mobileRevealStyles, /min-height: 44px;/);
   assert.match(mobileRevealStyles, /touch-action: manipulation !important;/);
   assert.match(mobileRevealStyles, /pointer-events: auto !important;/);
+  assert.match(styles, /body\.tps-gcm-gesture-collapsed \.tps-gcm-hover-element/);
+  assert.match(styles, /body\.tps-gcm-gesture-collapsed \[data-tps-hover-element="true"\]/);
+  assert.match(styles, /body\.tps-tps-mobile-ui-gesture-hidden \.tps-gcm-hover-element/);
+  assert.match(styles, /body\.tps-tps-mobile-ui-keyboard-hidden \.tps-gcm-hover-element/);
   assert.match(liveRevealStyles, /min-height: 24px;/);
   assert.match(renderedRevealStyles, /min-height: 24px;/);
   assert.doesNotMatch(liveRevealStyles, /height: 0;/);
@@ -160,13 +168,17 @@ test('task reveal state can optionally persist to one frontmatter property', () 
   assert.match(source, /const persisted = revealAllTasks \? state\?\.showTasks : state\?\.showCompleted/);
 });
 
-test('task hiding exclusions bypass completed and all-task hiding by file pattern', () => {
+test('task hiding exclusions bypass completed and all-task hiding by file pattern or identifier', () => {
   assert.match(typesSource, /taskHidingExclusionPatterns: string/);
   assert.match(constantsSource, /taskHidingExclusionPatterns: ''/);
   assert.match(settingsSource, /Task hiding exclusions/);
-  assert.match(settingsSource, /Files or folders where completed\/all-task hiding is disabled/);
+  assert.match(settingsSource, /Files, folders, tags, or cssclasses where completed\/all-task hiding is disabled/);
   assert.match(settingsSource, /name:<basename>/);
   assert.match(settingsSource, /re:<regex>/);
+  assert.match(settingsSource, /#tag/);
+  assert.match(settingsSource, /tag:<tag>/);
+  assert.match(settingsSource, /cssclass:<class>/);
+  assert.match(settingsSource, /#tps\/workout/);
   assert.match(settingsSource, /setValue\(this\.plugin\.settings\.taskHidingExclusionPatterns \?\? ''\)/);
   assert.doesNotMatch(settingsSource, /setValue\(this\.plugin\.settings\.taskHidingExclusionPatterns \?\? 'Inbox\/'\)/);
   assert.match(settingsSource, /this\.plugin\.settings\.taskHidingExclusionPatterns = value/);
@@ -175,6 +187,15 @@ test('task hiding exclusions bypass completed and all-task hiding by file patter
   assert.match(source, /private clearTaskHidingRoot\(root: HTMLElement\): void/);
   assert.match(source, /private isRootTaskHidingExcluded\(root: HTMLElement\): boolean/);
   assert.match(source, /private isTaskHidingExcludedFile\(file: TFile\): boolean/);
+  assert.match(source, /private matchesTaskHidingExclusionPattern\(/);
+  assert.match(source, /asLower\.startsWith\('tag:'\)/);
+  assert.match(source, /asLower\.startsWith\('#'\)/);
+  assert.match(source, /asLower\.startsWith\('cssclass:'\)/);
+  assert.match(source, /private getTaskHidingFileTags\(file: TFile\): Set<string>/);
+  assert.match(source, /cache\?\.tags \?\? \[\]/);
+  assert.match(source, /frontmatter\?\.tags/);
+  assert.match(source, /frontmatter\?\.tag/);
+  assert.match(source, /private getTaskHidingFileCssClasses\(file: TFile\): Set<string>/);
   assert.match(source, /private getTaskHidingExclusionPatterns\(\): string\[\]/);
   assert.match(source, /\.split\(\/\\r\?\\n\|,\/\)/);
   assert.match(source, /this\.plugin\.matchesAutoFrontmatterExclusionPattern\(normalizedPath, normalizedBasename, pattern\)/);

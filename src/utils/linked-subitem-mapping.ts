@@ -1,4 +1,5 @@
 import type { LinkedSubitemCheckboxMapping } from '../types';
+import { MIGRATED_TASK_MAPPING } from '../constants/task-migration';
 
 export interface LinkedSubitemMappingOptions {
   enforceStrictDefaults?: boolean;
@@ -11,6 +12,7 @@ export const DEFAULT_LINKED_SUBITEM_MAPPINGS: LinkedSubitemCheckboxMapping[] = [
   { checkboxState: '[\\]', statuses: ['working'], toggleTargetStatus: 'complete', icon: 'slash', label: 'Working' },
   { checkboxState: '[?]', statuses: ['holding'], toggleTargetStatus: 'todo', icon: 'help-circle', label: 'Holding' },
   { checkboxState: '[-]', statuses: ['wont-do'], toggleTargetStatus: 'todo', icon: 'minus', label: 'Won’t Do' },
+  MIGRATED_TASK_MAPPING,
 ];
 
 function normalizeStatus(value: unknown): string {
@@ -129,9 +131,10 @@ export function mapSubitemCheckboxStateToStatus(
 }
 
 export function getLinkedSubitemCompleteMarkers(mappings: LinkedSubitemCheckboxMapping[]): string[] {
+  const completionStatuses = new Set(['complete', 'wont-do']);
   const mapped = new Set(
     normalizeLinkedSubitemMappings(mappings, { enforceStrictDefaults: false })
-      .filter((entry) => (entry.statuses || []).some((status) => normalizeStatus(status) === 'complete'))
+      .filter((entry) => (entry.statuses || []).some((status) => completionStatuses.has(normalizeStatus(status))))
       .map((entry) => entry.checkboxState.replace(/^\[|\]$/g, '').trim())
       .filter(Boolean),
   );

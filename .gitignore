@@ -8,4 +8,16 @@ data.json
 data.json.*
 recurrence-session.json
 recurrence-create-state.json
+.sync-request.json
+calendar-kanban-sync.json
+overdue-snapshot.json
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+.test/
+coverage/
 .DS_Store

@@ -60,6 +60,8 @@ export class ViewModeManager extends Component {
 
         if (!leaf || !(leaf.view instanceof MarkdownView)) return;
 
+        if (this.plugin.dailyNoteHomeService?.isLivePreviewOverride(leaf)) return;
+
         // Strict view type check to avoid interfering with custom views that inherit from MarkdownView (e.g. Kanban, Excalidraw, Feed Bases)
         if (leaf.view.getViewType() !== 'markdown') return;
 

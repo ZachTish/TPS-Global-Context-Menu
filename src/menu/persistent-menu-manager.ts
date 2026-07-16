@@ -20,6 +20,7 @@ import { resolveCustomProperties } from '../resolve-profiles';
 import { getTaskDisplayTitle, parseTaskLine, readInlineFieldValue } from '../utils/task-line-metadata';
 import { resolveTaskScheduledValue } from '../utils/daily-note-task-schedule';
 import * as logger from '../logger';
+import { KeyboardAwareOverlay } from '../utils/mobile-overlay';
 // scroll-direction hide/reveal is handled inline â€” no gesture-handler import needed.
 
 // Get the LIVE mode constant if available
@@ -37,6 +38,9 @@ type CalendarPopoverItem = {
   color?: string;
   location?: string;
   description?: string;
+  externalKey?: string;
+  uidDayKey?: string;
+  localSlotKey?: string;
 };
 
 type NoteTaskPopoverItem = {
@@ -69,19 +73,6 @@ type CalendarButtonTimerState = {
   activeCount: number;
   lastFetchAt: number;
   fetchInFlight: boolean;
-};
-
-type SwipeGestureState = {
-  container: HTMLElement;
-  startX: number;
-  startY: number;
-  lastY: number;
-  accum: number;
-  axis: null | 'vertical' | 'horizontal';
-  active: boolean;
-      onTouchStart: (event: TouchEvent) => void;
-      onTouchMove: (event: TouchEvent) => void;
-      onTouchEnd: () => void;
 };
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['icon', 'color', 'sort']);
@@ -125,7 +116,6 @@ export class PersistentMenuManager {
   private editableFocused: boolean = false;
   private swipeCollapsed: boolean = false;
   private scrollHideListeners: Map<MarkdownView, { scroller: HTMLElement; listener: () => void; lastTop: number; accum: number }> = new Map();
-  private swipeGestureTracking: Map<MarkdownView, SwipeGestureState> = new Map();
   private topLinkPreviewArmedPath: string | null = null;
   private topLinkPreviewArmedUntil = 0;
   private topLinkPreviewEl: HTMLElement | null = null;
@@ -149,6 +139,7 @@ export class PersistentMenuManager {
   private baseLinkPreviewRenderInFlight = false;
   private baseLinkPreviewSaveInFlight = false;
   private baseLinkPreviewOutsideHandler: ((evt: MouseEvent) => void) | null = null;
+  private baseLinkPreviewOverlay: KeyboardAwareOverlay | null = null;
   private viewModeSignatures: WeakMap<MarkdownView, string> = new WeakMap();
   private topPropertiesPlaceholderTimers: Map<MarkdownView, number> = new Map();
   private postTypingStructuralRefreshTimers: Map<string, number> = new Map();
@@ -2840,12 +2831,17 @@ export class PersistentMenuManager {
     this.baseLinkPreviewLastSavedBody = parts.body;
 
     document.body.appendChild(popover);
-    this.positionBaseLinkEditablePreview(popover, anchorEl);
+    this.baseLinkPreviewOverlay = new KeyboardAwareOverlay(popover, anchorEl, {
+      maxWidth: 620,
+      maxHeight: 560,
+    });
+    this.baseLinkPreviewOverlay.connect();
 
     const component = new Component();
     component.load();
     this.baseLinkPreviewComponent = component;
     await MarkdownRenderer.render(this.plugin.app, parts.body || '\n', bodySizer, file.path, component);
+    this.baseLinkPreviewOverlay?.schedule();
 
     bodySizer.addEventListener('keydown', (evt: KeyboardEvent) => {
       evt.stopPropagation();
@@ -2889,6 +2885,7 @@ export class PersistentMenuManager {
       status.textContent = 'Unsaved changes';
       this.scheduleBaseLinkPreviewBodySave(status);
       this.scheduleBaseLinkPreviewBodyRender();
+      this.baseLinkPreviewOverlay?.schedule();
     });
     sourceEditor.addEventListener('blur', () => {
       void this.flushBaseLinkPreviewBodySave(status, { preserveActiveBlank: false, renderAfterSave: true });
@@ -3360,24 +3357,10 @@ export class PersistentMenuManager {
     }
   }
 
-  private positionBaseLinkEditablePreview(popover: HTMLElement, anchorEl: HTMLElement): void {
-    const rect = anchorEl.getBoundingClientRect();
-    const width = Math.min(620, Math.max(420, window.innerWidth - 24));
-    const height = Math.min(560, Math.max(360, window.innerHeight - 72));
-    const left = Math.max(12, Math.min(rect.left, window.innerWidth - width - 12));
-    const preferredTop = rect.bottom + 10;
-    const flippedTop = rect.top - height - 10;
-    const top = preferredTop + height > window.innerHeight - 12 && flippedTop >= 12
-      ? flippedTop
-      : Math.max(12, Math.min(preferredTop, window.innerHeight - height - 12));
-    popover.style.width = `${width}px`;
-    popover.style.maxHeight = `${height}px`;
-    popover.style.left = `${left}px`;
-    popover.style.top = `${top}px`;
-  }
-
   public hideBaseLinkEditablePreview(): void {
     void this.flushBaseLinkPreviewBodySave();
+    this.baseLinkPreviewOverlay?.disconnect();
+    this.baseLinkPreviewOverlay = null;
     if (this.baseLinkPreviewOutsideHandler) {
       document.removeEventListener('mousedown', this.baseLinkPreviewOutsideHandler, true);
       this.baseLinkPreviewOutsideHandler = null;
@@ -3415,7 +3398,13 @@ export class PersistentMenuManager {
     }
 
     const file = view.file;
-    if (file instanceof TFile && this.fileMatchesIgnoreRules(file, this.plugin.settings.inlineMenu_IgnoreRules)) {
+    const ignoredByInlineRules = file instanceof TFile
+      && this.fileMatchesIgnoreRules(file, this.plugin.settings.inlineMenu_IgnoreRules);
+    const keepStackedPropertiesForIgnoredFile = ignoredByInlineRules
+      && file instanceof TFile
+      && showStackedProperties
+      && this.isTpsHealthFoodPropertyRecord(file);
+    if (ignoredByInlineRules && !keepStackedPropertiesForIgnoredFile) {
       this.clearNativePropertyVisibility(view);
       this.removeTopParentNav(view);
       this.removeBottomParentNav(view);
@@ -3517,6 +3506,23 @@ export class PersistentMenuManager {
 
   private getTopParentNavPlacement(): 'top' | 'bottom' {
     return this.plugin.settings.topParentNavPlacement === 'bottom' ? 'bottom' : 'top';
+  }
+
+  private isTpsHealthFoodPropertyRecord(file: TFile): boolean {
+    const cache = this.plugin.app.metadataCache.getFileCache(file);
+    const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
+    const kind = String(frontmatter.kind || '').trim().toLowerCase();
+    if (kind === 'food') return true;
+
+    const frontmatterTags = Array.isArray(frontmatter.tags)
+      ? frontmatter.tags
+      : typeof frontmatter.tags === 'string'
+        ? frontmatter.tags.split(/[,\s]+/)
+        : [];
+    const bodyTags = (cache?.tags || []).map((entry) => entry?.tag);
+    return [...frontmatterTags, ...bodyTags]
+      .map((tag) => String(tag || '').trim().replace(/^#/, '').toLowerCase())
+      .includes('tps/food');
   }
 
   private ensureBottomParentNav(view: MarkdownView, menuEl?: HTMLElement | null): void {
@@ -4147,6 +4153,14 @@ export class PersistentMenuManager {
     menu.addSeparator();
     menu.addItem((item) => {
       item
+        .setTitle('Remove property from file')
+        .setIcon('trash-2')
+        .setDisabled(!String(property?.key || '').trim())
+        .onClick(() => void this.removePropertyFromFile(property, file));
+    });
+    menu.addSeparator();
+    menu.addItem((item) => {
+      item
         .setTitle('Add hide rule to property')
         .setIcon('eye-off')
         .onClick(() => void this.updateConfiguredProperty(property, { hidden: true }, file, `${label} hidden`));
@@ -4244,6 +4258,16 @@ export class PersistentMenuManager {
     this.scheduleNativePropertyVisibilityForFile(file);
     this.refreshMenusForFile(file, true);
     new Notice(notice);
+  }
+
+  private async removePropertyFromFile(property: any, file: TFile): Promise<void> {
+    const key = String(property?.key || '').trim();
+    if (!key) return;
+    await this.plugin.frontmatterMutationService.deleteKeys([file], [key]);
+    this.scheduleNativePropertyVisibilityForFile(file);
+    this.refreshMenusForFile(file, true);
+    void this.plugin.viewModeManager?.handlePotentialFrontmatterChange([file], [key]);
+    new Notice(`Removed ${String(property?.label || key)} from ${file.basename}.`);
   }
 
   private applyNativePropertyVisibilityIfCurrent(view: MarkdownView, file: TFile): void {
@@ -4570,6 +4594,20 @@ export class PersistentMenuManager {
       const cache = this.plugin.app.metadataCache.getFileCache(file);
       const scheduledTasks = await this.collectScheduledTasksForCalendarItem(file, date, settings);
       for (const task of scheduledTasks) {
+        const localExternal = this.matchExternalEventForTaskMetadata(
+          task.inlineProperties,
+          task.title,
+          task.date,
+          externalEvents,
+          settings,
+        );
+        const externalKey = localExternal
+          ? this.buildExternalEventIdentityKey(localExternal.id, localExternal.sourceUrl)
+          : '';
+        const uid = localExternal
+          ? this.normalizeIdentityValue(localExternal.uid || this.extractUidFromCompositeEventId(localExternal.id))
+          : '';
+        const uidDayKey = uid ? this.buildExternalUidDayKey(uid, localExternal?.sourceUrl, localExternal?.startDate) : '';
         items.push({
           title: task.title,
           subtitle: this.formatCalendarItemTime(task.date, false, 'Scheduled task'),
@@ -4581,18 +4619,13 @@ export class PersistentMenuManager {
           kind: 'task',
           icon: task.completed ? 'square-check' : 'list-checks',
           color: task.completed ? 'var(--text-muted)' : 'var(--interactive-accent)',
+          externalKey,
+          uidDayKey,
+          localSlotKey: this.buildCalendarPopoverLocalSlotKey(task.title, task.date),
         });
 
-        const localExternal = this.matchExternalEventForTaskMetadata(
-          task.inlineProperties,
-          task.title,
-          task.date,
-          externalEvents,
-          settings,
-        );
         if (localExternal) {
-          matchedExternalKeys.add(this.buildExternalEventIdentityKey(localExternal.id, localExternal.sourceUrl));
-          const uid = this.normalizeIdentityValue(localExternal.uid || this.extractUidFromCompositeEventId(localExternal.id));
+          matchedExternalKeys.add(externalKey);
           if (uid) matchedUidDayKeys.add(this.buildExternalUidDayKey(uid, localExternal.sourceUrl, localExternal.startDate));
         }
       }
@@ -4601,16 +4634,6 @@ export class PersistentMenuManager {
       const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
       const localDate = this.getScheduledDateFromFrontmatter(frontmatter);
       if (!localDate || !this.isDateOnSameLocalDay(localDate, date)) continue;
-      items.push({
-        title: this.getFileDisplayTitle(file),
-        subtitle: this.formatCalendarItemTime(localDate),
-        sortTime: localDate.getTime(),
-        file,
-        kind: 'note',
-        icon: this.resolveInlineTitleIconValue(file, frontmatter) || 'file-text',
-        color: this.resolveTitleIconColor(frontmatter, file),
-      });
-
       const localExternal = this.matchExternalEventForLocalFrontmatter(
         frontmatter,
         localDate,
@@ -4618,6 +4641,26 @@ export class PersistentMenuManager {
         settings,
         file,
       );
+      const displayTitle = this.getFileDisplayTitle(file);
+      items.push({
+        title: displayTitle,
+        subtitle: this.formatCalendarItemTime(localDate),
+        sortTime: localDate.getTime(),
+        file,
+        kind: 'note',
+        icon: this.resolveInlineTitleIconValue(file, frontmatter) || 'file-text',
+        color: this.resolveTitleIconColor(frontmatter, file),
+        externalKey: localExternal ? this.buildExternalEventIdentityKey(localExternal.id, localExternal.sourceUrl) : '',
+        uidDayKey: localExternal
+          ? this.buildExternalUidDayKey(
+            this.normalizeIdentityValue(localExternal.uid || this.extractUidFromCompositeEventId(localExternal.id)),
+            localExternal.sourceUrl,
+            localExternal.startDate,
+          )
+          : '',
+        localSlotKey: this.buildCalendarPopoverLocalSlotKey(displayTitle, localDate),
+      });
+
       if (localExternal) {
         matchedExternalKeys.add(this.buildExternalEventIdentityKey(localExternal.id, localExternal.sourceUrl));
         const uid = this.normalizeIdentityValue(localExternal.uid || this.extractUidFromCompositeEventId(localExternal.id));
@@ -4644,10 +4687,70 @@ export class PersistentMenuManager {
         color: this.getExternalCalendarEventColor(calendarBase, event),
         location: event.location,
         description: event.description,
+        externalKey: eventKey,
+        uidDayKey,
+        localSlotKey: this.buildCalendarPopoverLocalSlotKey(event.title, eventStart),
       });
     }
 
-    return items.sort((a, b) => a.sortTime - b.sortTime || a.title.localeCompare(b.title));
+    return this.dedupeCalendarPopoverItems(items)
+      .sort((a, b) => a.sortTime - b.sortTime || a.title.localeCompare(b.title));
+  }
+
+  private dedupeCalendarPopoverItems(items: CalendarPopoverItem[]): CalendarPopoverItem[] {
+    const byKey = new Map<string, CalendarPopoverItem>();
+
+    const consider = (key: string, item: CalendarPopoverItem) => {
+      if (!key) return;
+      const existing = byKey.get(key);
+      if (!existing || this.getCalendarPopoverItemPriority(item) > this.getCalendarPopoverItemPriority(existing)) {
+        byKey.set(key, item);
+      }
+    };
+
+    for (const item of items) {
+      if (item.externalKey) consider(`external:${item.externalKey}`, item);
+      if (item.uidDayKey) consider(`uid-day:${item.uidDayKey}`, item);
+      if (item.kind !== 'external' && item.localSlotKey) consider(`local-slot:${item.localSlotKey}`, item);
+    }
+
+    const winners = new Set(byKey.values());
+    const output: CalendarPopoverItem[] = [];
+    const seen = new Set<string>();
+
+    for (const item of items) {
+      const keys = [
+        item.externalKey ? `external:${item.externalKey}` : '',
+        item.uidDayKey ? `uid-day:${item.uidDayKey}` : '',
+        item.kind !== 'external' && item.localSlotKey ? `local-slot:${item.localSlotKey}` : '',
+      ].filter(Boolean);
+      const hasDedupedKey = keys.length > 0;
+      if (hasDedupedKey && !winners.has(item)) continue;
+
+      const ownKey = keys[0]
+        || `${item.kind || 'note'}:${item.file?.path || ''}:${item.lineNumber ?? ''}:${item.localSlotKey || item.title}`;
+      if (seen.has(ownKey)) continue;
+      seen.add(ownKey);
+      output.push(item);
+    }
+
+    return output;
+  }
+
+  private getCalendarPopoverItemPriority(item: CalendarPopoverItem): number {
+    if (item.kind === 'task') return 30;
+    if (item.kind === 'note') return 20;
+    if (item.kind === 'external') return 10;
+    return 0;
+  }
+
+  private buildCalendarPopoverLocalSlotKey(title: unknown, date: Date): string {
+    if (!date || Number.isNaN(date.getTime())) return '';
+    const normalizedTitle = this.normalizeExternalMatchTitle(title);
+    if (!normalizedTitle) return '';
+    const roundedMinute = new Date(date);
+    roundedMinute.setSeconds(0, 0);
+    return `${this.formatScheduledIsoDate(roundedMinute)}T${String(roundedMinute.getHours()).padStart(2, '0')}:${String(roundedMinute.getMinutes()).padStart(2, '0')}::${normalizedTitle}`;
   }
 
   private async collectScheduledTasksForCalendarItem(
@@ -4977,12 +5080,17 @@ export class PersistentMenuManager {
 
   private normalizeExternalMatchTitle(value: unknown): string {
     return String(value || '')
+      .replace(/%%[\s\S]*?%%/g, ' ')
+      .replace(/\[[A-Za-z0-9_-]+\s*::[^\]]*]/g, ' ')
+      .replace(/\([A-Za-z0-9_-]+\s*::[^)]*\)/g, ' ')
+      .replace(/^\s*[-*]\s+\[[^\]]*]\s*/, ' ')
       .replace(/!?\[([^\]]+)]\([^)]+\)/g, '$1')
       .replace(/!?\[\[([^\]|#]+)(?:[#|][^\]]*)?]]/g, '$1')
       .replace(/@\{[^}]+}/g, '')
       .replace(/@@\{[^}]+}/g, '')
       .replace(/\b\d{4}-\d{2}-\d{2}\b/g, '')
       .replace(/\b\d{1,2}[.:]\d{2}\s*(?:am|pm)?\b/gi, '')
+      .replace(/#[\p{L}\p{N}_/-]+/gu, ' ')
       .replace(/\s+/g, ' ')
       .trim()
       .toLowerCase();
@@ -5804,22 +5912,11 @@ export class PersistentMenuManager {
       this.scrollHideListeners.delete(view);
     }
 
-    const existingTouch = this.swipeGestureTracking.get(view);
-    if (existingTouch) {
-      existingTouch.container.removeEventListener('touchstart', existingTouch.onTouchStart);
-      existingTouch.container.removeEventListener('touchmove', existingTouch.onTouchMove);
-      existingTouch.container.removeEventListener('touchend', existingTouch.onTouchEnd);
-      existingTouch.container.removeEventListener('touchcancel', existingTouch.onTouchEnd);
-      this.swipeGestureTracking.delete(view);
-    }
-
     if (!scroller) return;
 
-    const HIDE_THRESHOLD = 36;
-    const SHOW_THRESHOLD = 6;
-    const TOUCH_MOVE_AXIS_THRESHOLD = 6;
-    const TOUCH_COLLAPSE_TRIGGER = 8;
-    const TOUCH_SHOW_TRIGGER = 10;
+    const isMobile = this.isMobileLayout();
+    const HIDE_THRESHOLD = isMobile ? 96 : 36;
+    const SHOW_THRESHOLD = isMobile ? 64 : 6;
 
     const state = { scroller, lastTop: scroller.scrollTop, accum: 0, listener: () => { } };
 
@@ -5836,7 +5933,7 @@ export class PersistentMenuManager {
         return;
       }
 
-      if (this.swipeCollapsed && delta < 0) {
+      if (!isMobile && this.swipeCollapsed && delta < 0) {
         this.setSwipeCollapsed(false);
         state.accum = 0;
         return;
@@ -5857,88 +5954,8 @@ export class PersistentMenuManager {
       }
     };
 
-    const touchState: SwipeGestureState = {
-      container: scroller,
-      startX: 0,
-      startY: 0,
-      lastY: 0,
-      accum: 0,
-      axis: null,
-      active: false,
-      onTouchStart: (event: TouchEvent) => {
-        if (this.keyboardVisible) return;
-        if (event.touches.length !== 1) {
-          touchState.active = false;
-          return;
-        }
-
-        const touch = event.touches[0];
-        touchState.startX = touch.clientX;
-        touchState.startY = touch.clientY;
-        touchState.lastY = touch.clientY;
-        touchState.accum = 0;
-        touchState.axis = null;
-        touchState.active = true;
-      },
-      onTouchMove: (event: TouchEvent) => {
-        if (!touchState.active || this.keyboardVisible) return;
-        if (event.touches.length !== 1) {
-          touchState.active = false;
-          return;
-        }
-
-        const touch = event.touches[0];
-        const xDelta = touch.clientX - touchState.startX;
-        const yDelta = touch.clientY - touchState.startY;
-        const absX = Math.abs(xDelta);
-        const absY = Math.abs(yDelta);
-
-        if (touchState.axis === null) {
-          if (absY > TOUCH_MOVE_AXIS_THRESHOLD && absY > absX * 1.25) {
-            touchState.axis = 'vertical';
-          } else if (absX > TOUCH_MOVE_AXIS_THRESHOLD && absX > absY * 1.25) {
-            touchState.axis = 'horizontal';
-          }
-        }
-
-        if (touchState.axis === 'horizontal') {
-          return;
-        }
-
-        const delta = touch.clientY - touchState.lastY;
-        touchState.lastY = touch.clientY;
-        if (Math.abs(delta) < 1) return;
-
-        if ((delta > 0 && touchState.accum < 0) || (delta < 0 && touchState.accum > 0)) {
-          touchState.accum = 0;
-        }
-
-        touchState.accum += delta;
-
-        if (!this.swipeCollapsed && touchState.accum >= TOUCH_COLLAPSE_TRIGGER) {
-          this.setSwipeCollapsed(true);
-          touchState.accum = 0;
-          touchState.active = false;
-        } else if (this.swipeCollapsed && touchState.accum <= -TOUCH_SHOW_TRIGGER) {
-          this.setSwipeCollapsed(false);
-          touchState.accum = 0;
-          touchState.active = false;
-        }
-      },
-      onTouchEnd: () => {
-        touchState.active = false;
-        touchState.axis = null;
-        touchState.accum = 0;
-      },
-    };
-
     scroller.addEventListener('scroll', state.listener, { passive: true });
     this.scrollHideListeners.set(view, state);
-    scroller.addEventListener('touchstart', touchState.onTouchStart, { passive: true });
-    scroller.addEventListener('touchmove', touchState.onTouchMove, { passive: true });
-    scroller.addEventListener('touchend', touchState.onTouchEnd, { passive: true });
-    scroller.addEventListener('touchcancel', touchState.onTouchEnd, { passive: true });
-    this.swipeGestureTracking.set(view, touchState);
   }
 
   private releaseSwipeGestureTracking(view: MarkdownView): void {
@@ -5950,14 +5967,6 @@ export class PersistentMenuManager {
     state.scroller.removeEventListener('scroll', state.listener);
     this.scrollHideListeners.delete(view);
 
-    const touchState = this.swipeGestureTracking.get(view);
-    if (touchState) {
-      touchState.container.removeEventListener('touchstart', touchState.onTouchStart);
-      touchState.container.removeEventListener('touchmove', touchState.onTouchMove);
-      touchState.container.removeEventListener('touchend', touchState.onTouchEnd);
-      touchState.container.removeEventListener('touchcancel', touchState.onTouchEnd);
-      this.swipeGestureTracking.delete(view);
-    }
   }
 
   private resolveScrollContainer(view: MarkdownView): HTMLElement | null {

@@ -1,6 +1,6 @@
 import type { LinkedSubitemCheckboxMapping } from '../types';
 import { updateTaskCompletedDateForCheckboxState } from './task-line-metadata';
-import { mapStatusToSubitemCheckboxState } from './linked-subitem-mapping';
+import { getLinkedSubitemCompleteMarkers, mapStatusToSubitemCheckboxState } from './linked-subitem-mapping';
 
 const TASK_LINE_RE = /^(\s*(?:[-*+]|\d+[.)])\s+)\[([^\]\r\n]?)\](\s*)(.*)$/;
 
@@ -37,7 +37,11 @@ export function reconcileTaskStatusLine(
 
   const nextBody = removeInlineField(body, field);
   const withoutStatusLine = `${taskMatch[1]}${checkboxState}${nextBody ? ` ${nextBody}` : ''}`;
-  const nextLine = updateTaskCompletedDateForCheckboxState(withoutStatusLine, checkboxState, options);
+  const completeMarkers = options.completeMarkers ?? getLinkedSubitemCompleteMarkers(mappings);
+  const nextLine = updateTaskCompletedDateForCheckboxState(withoutStatusLine, checkboxState, {
+    ...options,
+    completeMarkers,
+  });
   return {
     changed: nextLine !== rawLine,
     line: nextLine,

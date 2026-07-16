@@ -11,6 +11,13 @@ import { resolveCustomProperties } from '../resolve-profiles';
 import { ViewModeService } from '../services/view-mode-service';
 import { parseLinksFromFrontmatterValue } from '../services/link-target-service';
 import { promptAndCreateSubitemForParent } from '../services/subitem-creation-service';
+import { getPlainDisplayTitle } from '../utils/display-title';
+
+export interface NativeMenuLabelOptions {
+  archiveLabel?: string;
+  deleteLabel?: string;
+  includeTitle?: boolean;
+}
 
 export class MenuBuilder {
   private plugin: TPSGlobalContextMenuPlugin;
@@ -74,10 +81,7 @@ export class MenuBuilder {
   }
 
   private getFileDisplayTitle(file: TFile): string {
-    const frontmatter = (this.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, any>;
-    const titleValue = this.getValueCaseInsensitive(frontmatter, 'title');
-    const title = typeof titleValue === 'string' ? titleValue.trim() : '';
-    return title || file.basename;
+    return getPlainDisplayTitle(this.plugin.noteTitleRenderService.getDisplayTitle(file), file.basename);
   }
 
   private getFileIconMeta(file: TFile): { icon: string; color?: string } {
@@ -464,7 +468,7 @@ export class MenuBuilder {
     await this.plugin.noteTitleRenderService.promptRenameTitle(file);
   }
 
-  addToNativeMenu(menu: Menu, files: TFile[]) {
+  addToNativeMenu(menu: Menu, files: TFile[], options: NativeMenuLabelOptions = {}) {
     // Prevent duplicate additions to the same menu instance
     if ((menu as any)._tpsHandled) return;
     (menu as any)._tpsHandled = true;
@@ -496,6 +500,31 @@ export class MenuBuilder {
 
     const file = entries[0].file;
 
+    if (options.includeTitle !== false) {
+      menu.addItem((item) => {
+        if (entries.length > 1) {
+          item
+            .setTitle(`Title: ${entries.length} items selected`)
+            .setIcon('pencil')
+            .setSection('tps-title')
+            .setDisabled(true);
+          return;
+        }
+        const displayTitle = this.getFileDisplayTitle(file) || '(untitled)';
+        item
+          .setTitle(`Title: ${displayTitle}`)
+          .setIcon('pencil')
+          .setSection('tps-title');
+        if (file.extension?.toLowerCase() !== 'md') {
+          item.setDisabled(true);
+          return;
+        }
+        item.onClick(() => {
+          void this.promptRenameFile(file);
+        });
+      });
+    }
+
     // Handwriting / PDF Integration
     if (file.extension === 'pdf') {
       menu.addItem((item) => {
@@ -519,6 +548,7 @@ export class MenuBuilder {
 
       properties.forEach(prop => {
         if (prop.showInContextMenu === false) return;
+        if (String(prop.key || '').trim().toLowerCase() === 'title' || String(prop.id || '').trim().toLowerCase() === 'title') return;
 
         if (prop.key === 'snooze' || prop.type === 'snooze') {
           menu.addItem((item) => {
@@ -677,13 +707,6 @@ export class MenuBuilder {
             .setSection('tps-props');
 
           const subMenu = (item as any).setSubmenu();
-          subMenu.addItem((sub: any) => {
-            sub.setTitle('Start blank daily timer')
-              .setIcon('play')
-              .onClick(async () => {
-                await this.plugin.timeTrackingService.startBlankDailyTaskTimer();
-              });
-          });
           if (activeTimerCount > 0) {
             subMenu.addItem((sub: any) => {
               sub.setTitle(activeTimerCount > 1 ? `End timer (${activeTimerCount})` : 'End timer')
@@ -692,15 +715,33 @@ export class MenuBuilder {
                   await this.plugin.timeTrackingService.stopActiveTimerForFile(file);
                 });
             });
-          } else {
-            subMenu.addItem((sub: any) => {
-              sub.setTitle('Start timer')
-                .setIcon('play')
+          }
+          subMenu.addItem((sub: any) => {
+            sub.setTitle('Track with task')
+              .setIcon('list-checks');
+            const taskSubMenu = sub.setSubmenu();
+            taskSubMenu.addItem((target: any) => {
+              target.setTitle("Create task in today's daily note")
+                .setIcon('calendar')
                 .onClick(async () => {
-                  await this.plugin.timeTrackingService.startTimer({ file, type: 'note' });
+                  await this.plugin.timeTrackingService.promptStartTaskTimerForNote(file, 'daily-note', this.getFileDisplayTitle(file));
                 });
             });
-          }
+            taskSubMenu.addItem((target: any) => {
+              target.setTitle('Create task in this note')
+                .setIcon('file-text')
+                .onClick(async () => {
+                  await this.plugin.timeTrackingService.promptStartTaskTimerForNote(file, 'source-note', this.getFileDisplayTitle(file));
+                });
+            });
+          });
+          subMenu.addItem((sub: any) => {
+            sub.setTitle('Track with note')
+              .setIcon('file-clock')
+              .onClick(async () => {
+                await this.plugin.timeTrackingService.startTimer({ file, type: 'note' });
+              });
+          });
           subMenu.addItem((sub: any) => {
             sub.setTitle('Add manual session')
               .setIcon('clock')
@@ -719,7 +760,7 @@ export class MenuBuilder {
       menu.addItem((item) => {
         const fileCount = entries.length;
         if (inArchive) {
-          const unarchiveLabel = fileCount > 1 ? `Unarchive (${fileCount} items)` : 'Unarchive';
+          const unarchiveLabel = options.archiveLabel || (fileCount > 1 ? `Unarchive (${fileCount} items)` : 'Unarchive');
           item.setTitle(unarchiveLabel)
             .setIcon('inbox')
             .setSection('tps-delete')
@@ -727,7 +768,7 @@ export class MenuBuilder {
               await this.unarchiveFiles(archiveFiles);
             });
         } else {
-          const archiveLabel = fileCount > 1 ? `Archive (${fileCount} items)` : 'Archive';
+          const archiveLabel = options.archiveLabel || (fileCount > 1 ? `Archive (${fileCount} items)` : 'Archive');
           item.setTitle(archiveLabel)
             .setIcon('archive')
             .setSection('tps-delete')
@@ -740,7 +781,7 @@ export class MenuBuilder {
       // Delete
       menu.addItem((item) => {
         const fileCount = entries.length;
-        const deleteLabel = fileCount > 1 ? `Delete (${fileCount} items)` : 'Delete';
+        const deleteLabel = options.deleteLabel || (fileCount > 1 ? `Delete (${fileCount} items)` : 'Delete');
         item.setTitle(deleteLabel)
           .setIcon('trash')
           .setSection('tps-delete')

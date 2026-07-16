@@ -59,6 +59,12 @@ test('task status reconciliation maps inline status fields into task checkbox ma
     '- [x] Done thing [completedDate:: 2026-06-01 09:00:00]',
   );
   assert.equal(
+    reconcileTaskStatusLine('- [ ] Canceled thing [status:: wont-do]', 'status', mappings, {
+      completedAt: new Date(2026, 5, 3, 14, 5, 6),
+    }).line,
+    '- [-] Canceled thing [completedDate:: 2026-06-03 14:05:06]',
+  );
+  assert.equal(
     reconcileTaskStatusLine('- [x] Reopened [status:: todo] [completedDate:: 2026-06-01 09:00:00]', 'status', mappings).line,
     '- [ ] Reopened',
   );

@@ -212,6 +212,7 @@ export class ContextTargetService {
 
     isManualContextInterceptTarget(target: HTMLElement | null): boolean {
         if (!target) return false;
+        if (target.closest('.tps-home-panel')) return false;
         if (target.closest('[data-tps-calendar-context-owner="true"]')) return false;
         if (target.closest('[data-tps-task-context="true"]')) return false;
         if (this.isNativeMenuManagedTarget(target)) return false;
@@ -255,6 +256,10 @@ export class ContextTargetService {
     private isPropertyFile(file: TFile): boolean {
         const extension = file.extension?.toLowerCase();
         return extension === 'md' || extension === 'canvas';
+    }
+
+    private summarizeFiles(files: TFile[], limit = 5): string[] {
+        return files.slice(0, limit).map((file) => file.path);
     }
 
     resolveMarkdownNoteLinkTarget(target: HTMLElement | null | undefined): TFile | null {
@@ -381,45 +386,68 @@ export class ContextTargetService {
         const allowActiveFileFallback = options?.allowActiveFileFallback !== false;
         const contextInNotebookNavigator = this.isNotebookNavigatorContextTarget(contextEl);
         const kanbanTarget = this.resolveKanbanTarget(contextEl);
+        const normalizedExplicitFiles = (explicitFiles || []).filter(
+            (file): file is TFile => file instanceof TFile,
+        );
+        const finish = (
+            source: string,
+            files: TFile[],
+            data: Record<string, unknown> = {},
+        ): TFile[] => {
+            logger.flow('ContextTarget', 'resolve:done', {
+                source,
+                count: files.length,
+                paths: this.summarizeFiles(files),
+                explicitCount: normalizedExplicitFiles.length,
+                hasEvent: !!evt,
+                hasContextElement: !!contextEl,
+                contextInNotebookNavigator,
+                allowActiveFileFallback,
+                ...data,
+            });
+            return files;
+        };
 
         // 0. Canvas Node Selection (Priority over explicit file if clicking a node)
         if (evt) {
             const canvasFile = this.resolveCanvasTarget(evt);
-            if (canvasFile) return [canvasFile];
+            if (canvasFile) return finish('canvas', [canvasFile]);
         }
 
         if (kanbanTarget) {
-            return [kanbanTarget];
+            return finish('kanban', [kanbanTarget]);
         }
 
         // 1. Explicit files from native menu event
-        const normalizedExplicitFiles = (explicitFiles || []).filter(
-            (file): file is TFile => file instanceof TFile,
-        );
         if (normalizedExplicitFiles.length > 0) {
             if (contextInNotebookNavigator && !this.isNotebookNavigatorFileContextTarget(contextEl)) {
-                logger.log('[Context Target] Ignoring explicit files for non-file Notebook Navigator target');
-                return [];
+                return finish('notebook-navigator-non-file', [], {
+                    ignoredExplicitPaths: this.summarizeFiles(normalizedExplicitFiles),
+                });
             }
             const expanded = this.expandSelection(normalizedExplicitFiles, contextEl);
-            if (expanded.length > 0) return expanded;
-            return normalizedExplicitFiles;
+            if (expanded.length > 0) {
+                return finish(expanded.length > normalizedExplicitFiles.length ? 'explicit-selection' : 'explicit', expanded);
+            }
+            return finish('explicit', normalizedExplicitFiles);
         }
 
         // 2. Click Event Target (Sync Embeds, links, explorer nodes)
         if (contextEl) {
             const embedFile = this.resolveEmbedTarget(contextEl);
-            if (embedFile) return [embedFile];
+            if (embedFile) return finish('embed', [embedFile]);
 
             const explorerPath = this.resolveExplorerPath(contextEl);
             if (explorerPath) {
                 const af = this.app.vault.getAbstractFileByPath(explorerPath);
                 if (af instanceof TFolder) {
-                    return [];
+                    return finish('explorer-folder', [], { explorerPath });
                 }
                 if (af instanceof TFile) {
                     const expanded = this.expandSelection([af], contextEl);
-                    return expanded.length > 0 ? expanded : [af];
+                    return finish(expanded.length > 1 ? 'explorer-selection' : 'explorer', expanded.length > 0 ? expanded : [af], {
+                        explorerPath,
+                    });
                 }
             }
         }
@@ -427,10 +455,10 @@ export class ContextTargetService {
         // 3. Active Leaf Fallback
         if (allowActiveFileFallback) {
             const activeFile = this.app.workspace.getActiveFile();
-            if (activeFile) return [activeFile];
+            if (activeFile) return finish('active-file', [activeFile]);
         }
 
-        return [];
+        return finish('none', []);
     }
 
     /**
@@ -438,14 +466,16 @@ export class ContextTargetService {
      */
     resolveCanvasTarget(evt: MouseEvent | undefined): TFile | null {
         const view = this.app.workspace.getActiveViewOfType(View);
-        logger.log('[Target Service] Checking Canvas Target. View Type:', view?.getViewType());
 
         if (!view || (view.getViewType() !== 'canvas' && view.getViewType() !== 'json')) return null;
 
         if (evt && evt.target instanceof HTMLElement) {
             const inCanvas = evt.target.closest('.canvas-wrapper') || evt.target.closest('.canvas-node');
             if (!inCanvas) {
-                logger.log('[Target Service] Click target not in canvas wrapper/node.');
+                logger.flow('ContextTarget', 'canvas:skip', {
+                    reason: 'click-outside-canvas',
+                    viewType: view.getViewType(),
+                });
                 return null;
             }
             // If the click is inside a specific embed entry (e.g. a calendar event
@@ -454,40 +484,47 @@ export class ContextTargetService {
             // Return null here so resolveTargets falls through to resolveExplorerPath,
             // which knows how to read data-path / data-href from these elements.
             if (evt.target.closest('.tps-calendar-entry, .bases-feed-entry')) {
-                logger.log('[Target Service] Click target inside embed entry — deferring to resolveExplorerPath.');
+                logger.flow('ContextTarget', 'canvas:defer', {
+                    reason: 'embedded-entry',
+                    viewType: view.getViewType(),
+                });
                 return null;
             }
         }
 
         const canvas = (view as any).canvas;
         if (!canvas) {
-            logger.log('[Target Service] No canvas object found on view.');
+            logger.flow('ContextTarget', 'canvas:skip', {
+                reason: 'missing-canvas-object',
+                viewType: view.getViewType(),
+            });
             return null;
         }
 
         const canvasFile = (view as any).file;
         if (canvasFile instanceof TFile && canvasFile.extension?.toLowerCase() === 'canvas') {
-            logger.log('[Target Service] Canvas context target resolved to active canvas file:', canvasFile.path);
             return canvasFile;
         }
 
         const selection = canvas.selection;
-        logger.log('[Target Service] Canvas Selection Size:', selection?.size);
 
         if (selection && selection.size === 1) {
             const node = selection.values().next().value;
-            logger.log('[Target Service] Selected Node:', node);
 
             if (node.file instanceof TFile) {
-                logger.log('[Target Service] Found node.file:', node.file.path);
                 return node.file;
             }
             if (node.filePath) {
                 const file = this.app.vault.getAbstractFileByPath(node.filePath);
-                logger.log('[Target Service] Found node.filePath resolved:', file?.path);
                 if (file instanceof TFile) return file;
             }
 
+        }
+        if (selection?.size) {
+            logger.flow('ContextTarget', 'canvas:unresolved-selection', {
+                selectionSize: selection.size,
+                viewType: view.getViewType(),
+            });
         }
         return null;
     }
@@ -542,7 +579,7 @@ export class ContextTargetService {
             return selection;
         }
 
-        logger.warn('[Context Target] Selection mismatch - falling back to explicit files', {
+        logger.flowWarn('ContextTarget', 'selection:mismatch-fallback', {
             primary: uniquePrimary.map((file) => file.path),
             selection: selection.map((file) => file.path),
         });
@@ -640,16 +677,13 @@ export class ContextTargetService {
             }
         }
 
-        logger.log('[Context Target] getSelectedFiles resolved', {
+        logger.flow('ContextTarget', 'selection:resolved', {
             resolved: resolved.length,
             scope,
             sourceCounts,
+            primaryCount: primaryFiles.length,
+            paths: this.summarizeFiles(resolved),
         });
-        if (scope === 'notebook-navigator') {
-            logger.log(
-                `[Context Target] NN source counts: api=${sourceCounts.nnApi} dom=${sourceCounts.nnDom} storage=${sourceCounts.nnStorage} view=${sourceCounts.nnView} -> resolved=${resolved.length} primary=${primaryFiles.length}`,
-            );
-        }
         return resolved;
     }
 

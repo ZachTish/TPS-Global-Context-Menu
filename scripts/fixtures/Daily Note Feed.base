@@ -1,0 +1,23 @@
+model:
+  version: 1
+  kind: Table
+  columns: []
+pluginVersion: 1.0.0
+filters:
+  and:
+    - file.path == this.file.path
+    - task.path == this.file.path
+views:
+  - type: tps-list
+    name: Daily note
+    filters:
+      or:
+        - kind == "task"
+        - kind == "bullet"
+        - kind == header
+    groupBy:
+      property: tags
+      direction: ASC
+    order:
+      - title
+    createAction: default
