@@ -59,6 +59,18 @@ test('task property rows honor the master switch, context visibility, and date-s
   assert.match(scheduledModalSource, /fieldLabel: String\(options\.fieldLabel/);
 });
 
+test('TPS List and TPS Table task menus expose Tags independently of custom properties', () => {
+  assert.match(menuSource, /const surface = taskElSurface\(taskEl\)/);
+  assert.match(menuSource, /includeTags: surface === 'tps-list' \|\| surface === 'tps-table'/);
+  assert.match(menuSource, /if \(options\.includeTags === true\) \{\s*this\.addInlineTagsMenu\(menu, context\)/);
+  assert.match(menuSource, /setTitle\(current\.length > 0 \? `Tags \(\$\{current\.length\}\)` : 'Tags'\)/);
+  assert.match(menuSource, /setTitle\('Add tag\.\.\.'\)/);
+  assert.match(menuSource, /addInlineTagToTaskLine\(line, tag\)/);
+  assert.match(menuSource, /removeInlineTagFromTaskLine\(line, tag\)/);
+  assert.match(menuSource, /addConfiguredPropertyMenus\(menu, context, options\.includeTags === true\)/);
+  assert.match(menuSource, /excludeTags[\s\S]{0,180}property\.listItemType === 'tag'/);
+});
+
 test('task action modals await writes and report rejected callbacks', () => {
   for (const source of [scheduledModalSource, recurrenceModalSource, textModalSource, fileModalSource]) {
     assert.match(source, /await this\.onSubmit|Promise\.resolve\(this\.onChoose/);

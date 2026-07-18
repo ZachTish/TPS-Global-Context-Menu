@@ -3,9 +3,12 @@ import TPSGlobalContextMenuPlugin from '../main';
 import { TextInputModal } from '../modals/text-input-modal';
 import * as logger from '../logger';
 import {
+  addLogLineTag,
   getLogEntryStableIdentity,
   normalizeInlineKey,
   readInlineFields,
+  readLogLineTags,
+  removeLogLineTag,
   resolveEntryLineNumber,
   setVisibleLineText,
   visibleLineText,
@@ -19,6 +22,7 @@ import { calculateTpsTableTotals, normalizeTotalsRowPosition, type TpsTableTotal
 import { getOrderedSelectionRange, toggleOrderedSelection } from '../utils/ordered-selection';
 import { hashSelectionIdentity } from '../utils/selection-identity';
 import { requestLineItemDelete } from '../services/line-item-delete-service';
+import { normalizeTagValue } from '../utils/tag-utils';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
 
@@ -1205,9 +1209,11 @@ export class TpsTableView extends BasesView {
         .onClick(() => this.promptEntryTitle(entry));
     });
 
+    this.addEntryTagsMenu(menu, entry);
+
     const editableColumns = columns
       .map((column) => ({ ...column, normalized: normalizeInlineKey(column.key) }))
-      .filter((column) => column.normalized && column.normalized !== 'line' && column.normalized !== 'title' && column.normalized !== 'source' && column.normalized !== 'path' && column.normalized !== 'linenumber');
+      .filter((column) => column.normalized && column.normalized !== 'line' && column.normalized !== 'title' && column.normalized !== 'source' && column.normalized !== 'path' && column.normalized !== 'linenumber' && column.normalized !== 'tags');
 
     for (const column of editableColumns) {
       const current = entry.fields[column.normalized] ?? '';
@@ -1261,6 +1267,44 @@ export class TpsTableView extends BasesView {
       if (!title) return;
       await this.updateEntryLine(entry, (line) => setVisibleLineText(line, title));
     }).open();
+  }
+
+  private addEntryTagsMenu(menu: Menu, entry: LogLineEntry): void {
+    const current = readLogLineTags(entry.fields.tags);
+    menu.addItem((item) => {
+      item
+        .setTitle(current.length > 0 ? `Tags (${current.length})` : 'Tags')
+        .setIcon('tag');
+      const subMenu = (item as any).setSubmenu();
+      subMenu.addItem((sub: any) => {
+        sub.setTitle('Add tag...').setIcon('plus').onClick(() => {
+          new TextInputModal(this.plugin.app, 'Tag', '', async (value) => {
+            const tag = normalizeTagValue(String(value || ''));
+            if (!tag) {
+              new Notice('Enter a valid tag.');
+              return;
+            }
+            await this.updateEntryLine(entry, (line) => setInlineFieldValue(
+              line,
+              'tags',
+              addLogLineTag(readInlineFields(line).tags, tag),
+            ));
+          }).open();
+        });
+      });
+      if (current.length > 0) subMenu.addSeparator();
+      for (const tag of current) {
+        subMenu.addItem((sub: any) => {
+          sub.setTitle(`Remove #${tag}`).setIcon('x').onClick(() => {
+            void this.updateEntryLine(entry, (line) => setInlineFieldValue(
+              line,
+              'tags',
+              removeLogLineTag(readInlineFields(line).tags, tag),
+            ));
+          });
+        });
+      }
+    });
   }
 
   private promptEntryField(entry: LogLineEntry, key: string, label: string, current: string): void {
@@ -1390,7 +1434,12 @@ function setInlineFieldValue(line: string, key: string, value: string | null): s
   const escaped = cleanKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   const pattern = new RegExp(`\\[${escaped}\\s*::\\s*(?:\\[\\[[^\\]]+\\]\\]|[^\\]]*)\\]`, 'i');
   if (value === null) {
-    return String(line || '').replace(pattern, '').replace(/\s+(?=-->)/g, ' ').replace(/\s{2,}/g, ' ').trimEnd();
+    return String(line || '')
+      .replace(pattern, '')
+      .replace(/<!--\s*-->/g, '')
+      .replace(/\s+(?=-->)/g, ' ')
+      .replace(/\s{2,}/g, ' ')
+      .trimEnd();
   }
   const nextField = `[${cleanKey}:: ${value}]`;
   if (pattern.test(line)) return String(line || '').replace(pattern, nextField);

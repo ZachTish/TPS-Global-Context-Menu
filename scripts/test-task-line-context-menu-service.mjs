@@ -200,6 +200,10 @@ test('task line metadata helpers edit task text without destroying inline task p
   assert.equal(addInlineTagToTaskLine(line, '#topic/home'), line);
   assert.equal(addInlineTagToTaskLine(line, 'errand'), `${line} #errand`);
   assert.equal(removeInlineTagFromTaskLine(`${line} #errand`, 'topic/home'), '- [ ] bathroom window [priority:: high] [scheduled:: 2026-05-31 09:00:00] #errand');
+  const bulletLine = '- Alpha release [status:: active] #existing';
+  assert.deepEqual(readInlineTags(bulletLine), ['existing']);
+  assert.equal(addInlineTagToTaskLine(bulletLine, '#qa/base'), `${bulletLine} #qa/base`);
+  assert.equal(removeInlineTagFromTaskLine(bulletLine, 'existing'), '- Alpha release [status:: active]');
   assert.equal(
     insertLineAfterFrontmatter('---\ntitle: Target\n---\n\nExisting body\n', '- [ ] moved task'),
     '---\ntitle: Target\n---\n\nExisting body\n- [ ] moved task\n',

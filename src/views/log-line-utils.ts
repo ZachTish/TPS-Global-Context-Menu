@@ -1,4 +1,6 @@
 import { replaceLeadingLinkDisplayTitle } from '../utils/display-title';
+import { parseStringListInput } from '../utils/list-utils';
+import { normalizeTagValue } from '../utils/tag-utils';
 
 export interface LogLineReference {
   lineNumber: number;
@@ -18,6 +20,27 @@ export function readInlineFields(line: string): Record<string, string> {
     fields[normalizeInlineKey(match[1])] = match[2].trim();
   }
   return fields;
+}
+
+export function readLogLineTags(raw: unknown): string[] {
+  return Array.from(new Set(
+    parseStringListInput(raw)
+      .map((tag) => normalizeTagValue(tag))
+      .filter(Boolean),
+  ));
+}
+
+export function addLogLineTag(raw: unknown, tag: string): string {
+  const normalized = normalizeTagValue(tag);
+  const tags = readLogLineTags(raw);
+  if (normalized && !tags.includes(normalized)) tags.push(normalized);
+  return tags.map((value) => `#${value}`).join(', ');
+}
+
+export function removeLogLineTag(raw: unknown, tag: string): string | null {
+  const normalized = normalizeTagValue(tag);
+  const tags = readLogLineTags(raw).filter((value) => value !== normalized);
+  return tags.length > 0 ? tags.map((value) => `#${value}`).join(', ') : null;
 }
 
 export function visibleLineText(line: string): string {

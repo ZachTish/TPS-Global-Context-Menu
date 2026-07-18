@@ -44,6 +44,11 @@ import { TextInputModal } from '../../modals/text-input-modal';
 import { getPlainDisplayTitle } from '../../utils/display-title';
 import { setVisibleLineText, visibleLineText } from '../../views/log-line-utils';
 import { resolveExactLineRevisionIndex, splitLineItemContent } from '../../utils/line-item-deletion';
+import {
+  addInlineTagToTaskLine,
+  readInlineTags,
+  removeInlineTagFromTaskLine,
+} from '../../utils/task-line-metadata';
 
 export const TPS_LIST_VIEW_TYPE = 'tps-list';
 
@@ -775,6 +780,99 @@ export class TpsListView extends BasesView {
     });
   }
 
+  private addBulletLineTagsMenu(menu: Menu, file: TFile, lineIndex: number, rawLine: string): void {
+    const current = readInlineTags(rawLine);
+    menu.addItem((item) => {
+      item
+        .setTitle(current.length > 0 ? `Line tags (${current.length})` : 'Line tags')
+        .setIcon('tag')
+        .setSection('tps-line');
+      (item as any)._isTpsItem = true;
+      const subMenu = (item as any).setSubmenu();
+      subMenu.addItem((sub: any) => {
+        sub.setTitle('Add tag...').setIcon('plus').onClick(() => {
+          new TextInputModal(this.app, 'Tag', '', async (value) => {
+            const tag = String(value || '').trim();
+            if (!tag) return;
+            await this.updateBulletLineTags(file, lineIndex, rawLine, 'add', (line) => (
+              addInlineTagToTaskLine(line, tag)
+            ));
+          }).open();
+        });
+      });
+      if (current.length > 0) subMenu.addSeparator();
+      for (const tag of current) {
+        subMenu.addItem((sub: any) => {
+          sub.setTitle(`Remove #${tag}`).setIcon('x').onClick(() => {
+            void this.updateBulletLineTags(file, lineIndex, rawLine, 'remove', (line) => (
+              removeInlineTagFromTaskLine(line, tag)
+            ));
+          });
+        });
+      }
+    });
+  }
+
+  private async updateBulletLineTags(
+    file: TFile,
+    lineIndex: number,
+    rawLine: string,
+    action: 'add' | 'remove',
+    updater: (line: string) => string,
+  ): Promise<void> {
+    const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
+    try {
+      await this.app.vault.process(file, (content) => {
+        const parts = splitLineItemContent(content);
+        const resolvedIndex = resolveExactLineRevisionIndex(parts.lines, lineIndex, rawLine);
+        if (resolvedIndex < 0) {
+          mutation.outcome = 'stale';
+          return content;
+        }
+        const current = parts.lines[resolvedIndex] || '';
+        const next = updater(current);
+        if (next === current) return content;
+        parts.lines[resolvedIndex] = next;
+        mutation.outcome = 'changed';
+        return `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`;
+      });
+    } catch (error) {
+      flowError('BulletLineMenu', 'tags:failed', error, {
+        action,
+        path: file.path,
+        line: lineIndex + 1,
+      });
+      new Notice('Could not update tags for that line item.');
+      return;
+    }
+
+    if (mutation.outcome === 'stale') {
+      flowWarn('BulletLineMenu', 'tags:stale-target', {
+        action,
+        path: file.path,
+        line: lineIndex + 1,
+      });
+      new Notice('That line item changed before its tags could be updated. Refresh and try again.');
+      return;
+    }
+    if (mutation.outcome !== 'changed') return;
+
+    emitFilesUpdated(this.app, [file.path], 'tps-list');
+    this.getGcmPlugin()?.overlayRenderingService?.invalidate?.({
+      reason: 'tps-list-bullet-tags',
+      file,
+      surfaces: ['menus', 'linked-subitems', 'live-preview-editors'],
+      rebuildInlineSubitems: true,
+      refreshLivePreviewEditors: true,
+      delayMs: 80,
+    });
+    flow('BulletLineMenu', 'tags:done', {
+      action,
+      path: file.path,
+      line: lineIndex + 1,
+    });
+  }
+
   private async openHeadingLineContextMenu(
     event: MouseEvent,
     file: TFile,
@@ -893,6 +991,7 @@ export class TpsListView extends BasesView {
       addLineAction(`Title: ${getPlainDisplayTitle(visibleLineText(rawLine)) || '(empty)'}`, 'pencil', () => {
         this.promptRenderedLineTitle('bullet', file, lineIndex, rawLine);
       }, false, 'tps-title');
+      this.addBulletLineTagsMenu(menu, file, lineIndex, rawLine);
       addLineAction('Edit full line...', 'text-cursor-input', () => {
         this.openBulletLineEditor(event, file, oneBasedLine);
       });
@@ -6604,6 +6703,9 @@ export class TpsListView extends BasesView {
 
     const selectedFiles = this.getSelectedFiles();
     const menu = new Menu();
+    const targets = selectedFiles.length > 0 ? selectedFiles : [entry.file];
+    const menuController = this.getGcmPlugin()?.menuController || this.getGcmApi()?.menuController;
+    menuController?.addToNativeMenu?.(menu, targets, { includeTags: true });
     if (selectedFiles.length > 1) {
       this.app.workspace.trigger('files-menu', menu as any, selectedFiles as any);
     } else {

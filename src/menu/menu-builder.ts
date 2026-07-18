@@ -17,6 +17,7 @@ export interface NativeMenuLabelOptions {
   archiveLabel?: string;
   deleteLabel?: string;
   includeTitle?: boolean;
+  includeTags?: boolean;
 }
 
 export class MenuBuilder {
@@ -549,6 +550,13 @@ export class MenuBuilder {
       properties.forEach(prop => {
         if (prop.showInContextMenu === false) return;
         if (String(prop.key || '').trim().toLowerCase() === 'title' || String(prop.id || '').trim().toLowerCase() === 'title') return;
+        if (
+          options.includeTags === true
+          && (
+            String(prop.key || '').trim().toLowerCase() === 'tags'
+            || prop.listItemType === 'tag'
+          )
+        ) return;
 
         if (prop.key === 'snooze' || prop.type === 'snooze') {
           menu.addItem((item) => {
@@ -636,6 +644,20 @@ export class MenuBuilder {
 
       });
 
+    }
+
+    // Base note rows always expose Tags even when the broader custom-property
+    // context-menu surface is disabled. Skip the configured Tags row above so
+    // this opt-in path remains singular and predictable.
+    if (propertyEntries.length > 0 && options.includeTags === true) {
+      this.addListToMenu(menu, propertyEntries, {
+        id: 'tags',
+        label: 'Tags',
+        key: 'tags',
+        type: 'list',
+        listItemType: 'tag',
+        icon: 'tag',
+      }, 'tps-props');
     }
 
     // Relationship and tracking operations are note actions, not custom properties.

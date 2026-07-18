@@ -1106,6 +1106,7 @@ export class TaskLineContextMenuService {
 
   private showMenu(context: TaskLineContext, taskEl: HTMLElement, x: number, y: number): void {
     const menu = new Menu();
+    const surface = taskElSurface(taskEl);
     const selectedContexts = this.getMenuSelection(context);
     this.setActiveTaskHighlight(selectedContexts, taskEl);
     menu.onHide(() => this.clearActiveTaskHighlight());
@@ -1114,7 +1115,9 @@ export class TaskLineContextMenuService {
       this.addSelectedTaskMenuItems(menu, selectedContexts);
       menu.addSeparator();
     }
-    this.addTaskLineMenuItems(menu, context);
+    this.addTaskLineMenuItems(menu, context, {
+      includeTags: surface === 'tps-list' || surface === 'tps-table',
+    });
     menu.showAtPosition({ x, y });
   }
 
@@ -1182,7 +1185,7 @@ export class TaskLineContextMenuService {
   addTaskLineMenuItems(
     menu: Menu,
     context: TaskLineContext,
-    options: { includeTitle?: boolean; includeStatus?: boolean; includeNoteActions?: boolean } = {},
+    options: { includeTitle?: boolean; includeStatus?: boolean; includeNoteActions?: boolean; includeTags?: boolean } = {},
   ): void {
     const includeTitle = options.includeTitle !== false;
     const includeStatus = options.includeStatus !== false;
@@ -1202,7 +1205,10 @@ export class TaskLineContextMenuService {
     if (includeStatus) {
       this.addTaskStatusMenu(menu, context);
     }
-    this.addConfiguredPropertyMenus(menu, context);
+    if (options.includeTags === true) {
+      this.addInlineTagsMenu(menu, context);
+    }
+    this.addConfiguredPropertyMenus(menu, context, options.includeTags === true);
 
     menu.addSeparator();
     menu.addItem((item) => {
@@ -1274,6 +1280,33 @@ export class TaskLineContextMenuService {
     }
   }
 
+  private addInlineTagsMenu(menu: Menu, context: TaskLineContext): void {
+    const current = readInlineTags(context.rawLine);
+    menu.addItem((item) => {
+      item
+        .setTitle(current.length > 0 ? `Tags (${current.length})` : 'Tags')
+        .setIcon('tag');
+      const subMenu = (item as any).setSubmenu();
+      subMenu.addItem((sub: any) => {
+        sub.setTitle('Add tag...').setIcon('plus').onClick(() => {
+          new TextInputModal(this.plugin.app, 'Tag', '', async (value) => {
+            const tag = String(value || '').trim();
+            if (!tag) return;
+            await this.updateTaskLine(context, (line) => addInlineTagToTaskLine(line, tag));
+          }).open();
+        });
+      });
+      if (current.length > 0) subMenu.addSeparator();
+      for (const tag of current) {
+        subMenu.addItem((sub: any) => {
+          sub.setTitle(`Remove #${tag}`).setIcon('x').onClick(() => {
+            void this.updateTaskLine(context, (line) => removeInlineTagFromTaskLine(line, tag));
+          });
+        });
+      }
+    });
+  }
+
   private addTaskStatusMenu(menu: Menu, context: TaskLineContext): void {
     menu.addItem((item) => {
       const current = this.getStatusForCheckboxToken(context.checkboxToken);
@@ -1339,7 +1372,7 @@ export class TaskLineContextMenuService {
     });
   }
 
-  private addConfiguredPropertyMenus(menu: Menu, context: TaskLineContext): void {
+  private addConfiguredPropertyMenus(menu: Menu, context: TaskLineContext, excludeTags = false): void {
     if (this.plugin.settings.showCustomPropertiesInContextMenu === false) return;
     const statusKey = this.getStatusKey().toLowerCase();
     const frontmatter: Record<string, unknown> = {};
@@ -1355,7 +1388,16 @@ export class TaskLineContextMenuService {
       [{ file: context.file, frontmatter }],
       new ViewModeService(),
       'context',
-    ).filter((property) => this.isTaskMenuProperty(property, statusKey));
+    ).filter((property) => (
+      this.isTaskMenuProperty(property, statusKey)
+      && !(
+        excludeTags
+        && (
+          String(property.key || '').trim().toLowerCase() === 'tags'
+          || property.listItemType === 'tag'
+        )
+      )
+    ));
     for (const property of properties) {
       if (property.type === 'selector') {
         this.addSelectorPropertyMenu(menu, context, property);

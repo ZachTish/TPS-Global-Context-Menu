@@ -8,6 +8,8 @@ import { build } from 'esbuild';
 const viewSource = readFileSync(new URL('../src/tps-list/views/TpsListView.ts', import.meta.url), 'utf8');
 const bridgeSource = readFileSync(new URL('../src/views/tps-list-bridge-view.ts', import.meta.url), 'utf8');
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+const logBaseSource = readFileSync(new URL('../src/views/log-base-view.ts', import.meta.url), 'utf8');
+const menuBuilderSource = readFileSync(new URL('../src/menu/menu-builder.ts', import.meta.url), 'utf8');
 const gcmStyles = readFileSync(new URL('../src/plugin-styles.ts', import.meta.url), 'utf8');
 const kanbanSource = readFileSync(new URL('../../TPS-Kanban (Dev)/src/views/KanbanView.ts', import.meta.url), 'utf8');
 const kanbanMain = readFileSync(new URL('../../TPS-Kanban (Dev)/src/main.ts', import.meta.url), 'utf8');
@@ -110,6 +112,18 @@ async function loadLineItemDeletion() {
 async function loadBulletLineSourceTarget() {
   const result = await build({
     entryPoints: [fileURLToPath(new URL('../src/tps-list/bullet-line-source-target.ts', import.meta.url))],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
+async function loadLogLineUtils() {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/views/log-line-utils.ts', import.meta.url))],
     bundle: true,
     write: false,
     platform: 'node',
@@ -351,6 +365,32 @@ test('TPS List opens plain bullets in the line editor and composes the normal GC
   assert.match(viewSource, /clearRecentContextTarget\?\.\(\)/);
   assert.match(viewSource, /this\.app\.workspace\.trigger\('file-menu', menu as any, menuTarget as any\)/);
   assert.match(viewSource, /\(item as any\)\._isTpsItem = true/);
+});
+
+test('TPS List and TPS Table row menus expose built-in tag actions', async () => {
+  assert.match(viewSource, /this\.addBulletLineTagsMenu\(menu, file, lineIndex, rawLine\)/);
+  assert.match(viewSource, /`Line tags \(\$\{current\.length\}\)` : 'Line tags'/);
+  assert.match(viewSource, /setTitle\('Add tag\.\.\.'\)/);
+  assert.match(viewSource, /addInlineTagToTaskLine\(line, tag\)/);
+  assert.match(logBaseSource, /replace\(\/<!--\\s\*-->\/g, ''\)/);
+  assert.match(viewSource, /removeInlineTagFromTaskLine\(line, tag\)/);
+  assert.match(viewSource, /resolveExactLineRevisionIndex\(parts\.lines, lineIndex, rawLine\)/);
+  assert.match(viewSource, /menuController\?\.addToNativeMenu\?\.\(menu, targets, \{ includeTags: true \}\)/);
+  assert.match(menuBuilderSource, /propertyEntries\.length > 0 && options\.includeTags === true/);
+  assert.match(menuBuilderSource, /label: 'Tags',[\s\S]{0,100}key: 'tags',[\s\S]{0,100}listItemType: 'tag'/);
+  assert.match(logBaseSource, /this\.addEntryTagsMenu\(menu, entry\)/);
+  assert.match(logBaseSource, /setTitle\(current\.length > 0 \? `Tags \(\$\{current\.length\}\)` : 'Tags'\)/);
+  assert.match(logBaseSource, /addLogLineTag\(readInlineFields\(line\)\.tags, tag\)/);
+  assert.match(logBaseSource, /removeLogLineTag\(readInlineFields\(line\)\.tags, tag\)/);
+  assert.match(logBaseSource, /setInlineFieldValue\([\s\S]{0,80}'tags'/);
+  assert.match(logBaseSource, /column\.normalized !== 'linenumber' && column\.normalized !== 'tags'/);
+  assert.doesNotMatch(logBaseSource, /column\.normalized !== 'tag'/);
+
+  const { addLogLineTag, readLogLineTags, removeLogLineTag } = await loadLogLineUtils();
+  assert.deepEqual(readLogLineTags('#Alpha, beta, #alpha'), ['alpha', 'beta']);
+  assert.equal(addLogLineTag('#alpha', 'QA/Base'), '#alpha, #qa/base');
+  assert.equal(removeLogLineTag('#alpha, #qa/base', '#alpha'), '#qa/base');
+  assert.equal(removeLogLineTag('#alpha', 'alpha'), null);
 });
 
 test('bullet source-note resolution prefers explicit record paths and ignores dailyNotePath', async () => {
