@@ -8983,6 +8983,24 @@ export const PLUGIN_STYLES = `
         white-space: nowrap;
       }
 
+      .tps-home-context-capture-section {
+        display: grid;
+        grid-template-columns: auto minmax(0, 1fr);
+        align-items: center;
+        gap: 10px;
+      }
+
+      .tps-home-context-capture-section label {
+        color: var(--text-muted);
+        font-size: var(--font-ui-small);
+        font-weight: var(--font-medium);
+      }
+
+      .tps-home-context-capture-section select {
+        width: 100%;
+        min-width: 0;
+      }
+
       .tps-home-context-capture-input-shell {
         width: 100%;
         padding: 0;
@@ -9058,6 +9076,11 @@ export const PLUGIN_STYLES = `
         .tps-home-context-capture-actions {
           display: grid;
           grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+
+        .tps-home-context-capture-section {
+          grid-template-columns: 1fr;
+          gap: 6px;
         }
 
         .tps-home-context-capture-actions button:last-child {

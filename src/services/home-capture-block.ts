@@ -1,4 +1,5 @@
 import { getMarkdownIndentColumns } from '../tps-list/tps-list-hierarchy';
+import { parseTpsListHeadingLine, type TpsListHeadingLevel } from '../tps-list/heading-line-utils';
 
 export type HomeCaptureInsertPosition = 'top' | 'bottom';
 
@@ -10,6 +11,20 @@ export interface HomeCaptureBlockOptions {
 
 export interface HomeCaptureFormatOptions {
   task?: boolean;
+}
+
+export interface HomeCaptureHeadingTarget {
+  line: number;
+  level: TpsListHeadingLevel;
+  text: string;
+  occurrence: number;
+  matchingCount: number;
+}
+
+export interface HomeCaptureHeadingInsertionResult {
+  content: string;
+  headingLine: number;
+  headingLevel: TpsListHeadingLevel;
 }
 
 export interface HomeCapturePreparedDraft {
@@ -75,6 +90,91 @@ export function insertHomeCaptureBlock(content: string, block: string, options: 
     return insertUnderHeading(content, heading, block, position);
   }
   return insertAtNotePosition(content, block, position);
+}
+
+export function listHomeCaptureHeadings(content: string): HomeCaptureHeadingTarget[] {
+  const lines = String(content || '').replace(/\r\n?/g, '\n').split('\n');
+  const headings: Array<Omit<HomeCaptureHeadingTarget, 'occurrence' | 'matchingCount'>> = [];
+  let inFrontmatter = lines[0]?.trim() === '---';
+  let fence: { marker: '`' | '~'; length: number } | null = null;
+
+  for (let line = 0; line < lines.length; line += 1) {
+    const sourceLine = lines[line] || '';
+    if (inFrontmatter) {
+      if (line > 0 && sourceLine.trim() === '---') inFrontmatter = false;
+      continue;
+    }
+    if (fence) {
+      if (isClosingMarkdownFence(sourceLine, fence)) fence = null;
+      continue;
+    }
+    const openingFence = parseOpeningMarkdownFence(sourceLine);
+    if (openingFence) {
+      fence = openingFence;
+      continue;
+    }
+    const parsed = parseTpsListHeadingLine(sourceLine);
+    if (!parsed) continue;
+    headings.push({ line, level: parsed.headingLevel, text: parsed.text });
+  }
+
+  const totals = new Map<string, number>();
+  for (const heading of headings) {
+    const key = getCaptureHeadingIdentity(heading.level, heading.text);
+    totals.set(key, (totals.get(key) || 0) + 1);
+  }
+  const seen = new Map<string, number>();
+  return headings.map((heading) => {
+    const key = getCaptureHeadingIdentity(heading.level, heading.text);
+    const occurrence = seen.get(key) || 0;
+    seen.set(key, occurrence + 1);
+    return {
+      ...heading,
+      occurrence,
+      matchingCount: totals.get(key) || 1,
+    };
+  });
+}
+
+export function insertHomeCaptureBlockUnderHeading(
+  content: string,
+  block: string,
+  target: HomeCaptureHeadingTarget,
+  position: HomeCaptureInsertPosition = 'bottom',
+): HomeCaptureHeadingInsertionResult | null {
+  const cleanBlock = String(block || '').trimEnd();
+  if (!cleanBlock) return null;
+  const headings = listHomeCaptureHeadings(content);
+  const matches = headings.filter((heading) => (
+    heading.level === target.level && heading.text === target.text
+  ));
+  if (matches.length !== target.matchingCount) return null;
+  const resolved = matches[target.occurrence];
+  if (!resolved) return null;
+  if (target.matchingCount > 1 && resolved.line !== target.line) return null;
+
+  const lines = String(content || '').replace(/\r\n?/g, '\n').split('\n');
+  const nextBoundary = headings.find((heading) => (
+    heading.line > resolved.line && heading.level <= resolved.level
+  ));
+  const sectionEnd = nextBoundary?.line ?? lines.length;
+  let insertAt = position === 'top' ? resolved.line + 1 : sectionEnd;
+  if (position === 'top') {
+    while (insertAt < sectionEnd && !lines[insertAt]?.trim()) insertAt += 1;
+  } else {
+    while (insertAt > resolved.line + 1 && !lines[insertAt - 1]?.trim()) insertAt -= 1;
+  }
+  const blockLines = cleanBlock.split('\n');
+  const previousLine = lines[insertAt - 1] || '';
+  const nextLine = lines[insertAt] || '';
+  const leadingGap = shouldSeparateMarkdownBlocks(previousLine, blockLines[0] || '') ? [''] : [];
+  const trailingGap = shouldSeparateMarkdownBlocks(blockLines[blockLines.length - 1] || '', nextLine) ? [''] : [];
+  lines.splice(insertAt, 0, ...leadingGap, ...blockLines, ...trailingGap);
+  return {
+    content: `${lines.join('\n').replace(/\s+$/u, '')}\n`,
+    headingLine: resolved.line,
+    headingLevel: resolved.level,
+  };
 }
 
 export function prepareHomeCaptureDraft(
@@ -222,6 +322,31 @@ function insertAtNotePosition(content: string, block: string, position: HomeCapt
   while (insertAt < lines.length && lines[insertAt].trim() === '') insertAt += 1;
   lines.splice(insertAt, 0, cleanBlock, '');
   return `${lines.join('\n').replace(/\s+$/u, '')}\n`;
+}
+
+function getCaptureHeadingIdentity(level: TpsListHeadingLevel, text: string): string {
+  return `${level}\u0000${text}`;
+}
+
+function parseOpeningMarkdownFence(line: string): { marker: '`' | '~'; length: number } | null {
+  const match = String(line || '').match(/^ {0,3}(`{3,}|~{3,})/u);
+  if (!match) return null;
+  const token = match[1];
+  return { marker: token[0] as '`' | '~', length: token.length };
+}
+
+function isClosingMarkdownFence(line: string, fence: { marker: '`' | '~'; length: number }): boolean {
+  const match = String(line || '').match(/^ {0,3}(`{3,}|~{3,})[\t ]*$/u);
+  return Boolean(match && match[1][0] === fence.marker && match[1].length >= fence.length);
+}
+
+function shouldSeparateMarkdownBlocks(left: string, right: string): boolean {
+  if (!left.trim() || !right.trim()) return false;
+  return !(isMarkdownListItemLine(left) && isMarkdownListItemLine(right));
+}
+
+function isMarkdownListItemLine(line: string): boolean {
+  return /^\s{0,3}(?:[-+*]|\d+[.)])[\t ]+\S/u.test(String(line || ''));
 }
 
 function escapeRegExp(value: string): string {

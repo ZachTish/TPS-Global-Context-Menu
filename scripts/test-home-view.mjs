@@ -214,7 +214,7 @@ test('TPS Home separates dashboard UI from daily-note capture storage', () => {
   assert.match(captureServiceSource, /formatHomeCaptureBlock/);
   assert.match(captureServiceSource, /validateCaptureValue/);
   assert.match(captureServiceSource, /addHeading: false/);
-  assert.match(captureServiceSource, /headingEnabled: false/);
+  assert.match(captureServiceSource, /listHomeCaptureHeadings/);
   assert.match(captureServiceSource, /homeCaptureInsertPosition/);
   assert.match(captureServiceSource, /showOpenDailyNoteButton\?: boolean/);
   assert.match(captureServiceSource, /Add as an unchecked task/);
@@ -262,7 +262,8 @@ test('TPS Home separates dashboard UI from daily-note capture storage', () => {
   assert.doesNotMatch(viewSource, /private async ensureDailyNote/);
   assert.doesNotMatch(viewSource, /private getDailyNotePath/);
   assert.match(commandSource, /id: 'home-quick-capture'/);
-  assert.match(commandSource, /name: 'Home: Quick capture'/);
+  assert.match(commandSource, /name: "Capture: Today's Daily Note"/);
+  assert.match(commandSource, /id: 'capture-to-current-note'/);
   assert.match(commandSource, /homeCaptureService\.openCaptureModal/);
   assert.match(captureServiceSource, /targetPath: context\.dailyNotePath|context\.dailyNotePath/);
   assert.match(captureServiceSource, /tps-home-context-capture-input/);

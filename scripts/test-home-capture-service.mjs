@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { build } from 'esbuild';
 
 globalThis.__homeCaptureServiceSource = readFileSync(new URL('../src/services/home-capture-service.ts', import.meta.url), 'utf8');
+globalThis.__gcmCommandSource = readFileSync(new URL('../src/commands/register-commands.ts', import.meta.url), 'utf8');
 
 async function loadCaptureServiceModule() {
   const result = await build({
@@ -26,6 +27,9 @@ async function loadCaptureServiceModule() {
                 this.path = path;
                 this.extension = path.includes('.') ? path.split('.').pop() : '';
                 this.basename = path.split('/').pop().replace(/\\.[^.]+$/, '');
+              }
+              static [Symbol.hasInstance](value) {
+                return Boolean(value && typeof value.path === 'string' && typeof value.extension === 'string');
               }
             }
             export class Modal {
@@ -93,7 +97,7 @@ function installMomentStub() {
   globalThis.window = { moment: (value) => (value === undefined ? wrap(fixedNow) : wrap(value)) };
 }
 
-function createPluginHarness({ existingFiles = {}, dailyNotes = {} } = {}) {
+function createPluginHarness({ existingFiles = {}, dailyNotes = {}, activeFilePath = '' } = {}) {
   const files = new Map(Object.entries(existingFiles));
   const folders = new Set();
   const opened = [];
@@ -122,6 +126,7 @@ function createPluginHarness({ existingFiles = {}, dailyNotes = {} } = {}) {
       },
       workspace: {
         getLeaf: () => ({ id: 'leaf' }),
+        getActiveFile: () => activeFilePath ? new FakeFile(activeFilePath) : null,
       },
       metadataCache: {
         getTags: () => ({ '#home': 2, '#health/workout': 1 }),
@@ -140,6 +145,9 @@ function createPluginHarness({ existingFiles = {}, dailyNotes = {} } = {}) {
           return new FakeFile(path);
         },
         async read(file) {
+          return files.get(file.path) || '';
+        },
+        async cachedRead(file) {
           return files.get(file.path) || '';
         },
         async modify(file, content) {
@@ -224,6 +232,87 @@ test('Home capture timestamps every root Markdown line and leaves nested descend
       '',
     ].join('\n'),
   );
+});
+
+test('Home capture writes an explicit current-note target under the selected heading atomically', async () => {
+  installMomentStub();
+  const path = 'Inbox/Current Capture.md';
+  const source = '# Current\n\n## Inbox\n\nExisting\n\n### Nested\n\nNested body\n\n## Later\n';
+  const { plugin, files } = createPluginHarness({ existingFiles: { [path]: source } });
+  const service = new HomeCaptureService(plugin);
+
+  const file = await service.capture('- Added from command', window.moment('2026-07-09'), {
+    targetPath: path,
+    preserveMarkdown: true,
+    headingTarget: { line: 2, level: 2, text: 'Inbox', occurrence: 0, matchingCount: 1 },
+  });
+
+  assert.equal(file.path, path);
+  assert.equal(files.get(path), [
+    '# Current',
+    '',
+    '## Inbox',
+    '',
+    'Existing',
+    '',
+    '### Nested',
+    '',
+    'Nested body',
+    '',
+    '- Added from command 12:34',
+    '',
+    '## Later',
+    '',
+  ].join('\n'));
+  assert.deepEqual(globalThis.__notices.slice(-1), ['Added to Current Capture.']);
+});
+
+test('current-note capture guards non-Markdown state and routes an active Markdown file explicitly', async () => {
+  installMomentStub();
+  globalThis.__notices = [];
+  const unavailable = createPluginHarness({ activeFilePath: 'Attachments/Capture.png' });
+  const unavailableService = new HomeCaptureService(unavailable.plugin);
+  assert.equal(await unavailableService.openCaptureModalForCurrentNote(), false);
+  assert.deepEqual(globalThis.__notices, ['TPS GCM: Open a Markdown note before capturing to the current note.']);
+
+  const path = 'Inbox/Current Capture.md';
+  const available = createPluginHarness({
+    activeFilePath: path,
+    existingFiles: { [path]: '# Current\n\n## Inbox\n' },
+  });
+  const availableService = new HomeCaptureService(available.plugin);
+  const routed = [];
+  availableService.openCaptureModalForTarget = async (file, date, options, targetLabel) => {
+    routed.push({ path: file?.path, date: date.format('YYYY-MM-DD'), options, targetLabel });
+    return true;
+  };
+  assert.equal(await availableService.openCaptureModalForCurrentNote(), true);
+  assert.deepEqual(routed, [{
+    path,
+    date: '2026-07-04',
+    options: {},
+    targetLabel: path,
+  }]);
+});
+
+test('Home capture refuses a stale selected heading without changing the target note', async () => {
+  installMomentStub();
+  const path = 'Inbox/Stale Capture.md';
+  const source = '# Current\n\n## Renamed\n\nExisting\n';
+  const { plugin, files } = createPluginHarness({ existingFiles: { [path]: source } });
+  const service = new HomeCaptureService(plugin);
+
+  const file = await service.capture('- Must not write', window.moment('2026-07-09'), {
+    targetPath: path,
+    preserveMarkdown: true,
+    headingTarget: { line: 2, level: 2, text: 'Inbox', occurrence: 0, matchingCount: 1 },
+  });
+
+  assert.equal(file, null);
+  assert.equal(files.get(path), source);
+  assert.deepEqual(globalThis.__notices.slice(-1), [
+    'The selected heading changed or no longer exists. Nothing was written.',
+  ]);
 });
 
 test('Home capture can write selected-day daily notes as unchecked tasks', async () => {
@@ -399,8 +488,19 @@ test('Home capture exposes the selected daily note and no separate draft note', 
   assert.match(source, /formatCaptureValue/);
   assert.match(source, /getWikilinkSuggestionsBeforeCursor/);
   assert.match(source, /endsWith\('\['\)/);
-  assert.match(source, /new HomeCaptureModal\(this\.plugin, this, date, options\)\.open\(\)/);
+  assert.match(source, /openCaptureModalForCurrentNote/);
+  assert.match(source, /listHomeCaptureHeadings/);
+  assert.match(source, /Capture destination section/);
+  assert.match(source, /headingTarget: selectedHeadingTarget/);
   assert.match(source, /openCaptureModalForContext/);
+});
+
+test('capture commands explicitly distinguish today, current note, and contextual Home targets', () => {
+  const source = globalThis.__gcmCommandSource;
+  assert.match(source, /id: 'home-quick-capture'[\s\S]*name: "Capture: Today's Daily Note"/u);
+  assert.match(source, /id: 'capture-to-current-note'[\s\S]*name: 'Capture: Current note'/u);
+  assert.match(source, /openCaptureModalForCurrentNote\(\)/u);
+  assert.match(source, /id: 'capture-to-home-note'[\s\S]*Home: Capture to selected Daily Note/u);
 });
 
 test('Home selected-day note opens through the shared focused opener', async () => {

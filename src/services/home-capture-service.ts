@@ -5,8 +5,11 @@ import {
   createHomeCaptureRangeSnapshot,
   formatHomeCaptureBlock,
   insertHomeCaptureBlock,
+  insertHomeCaptureBlockUnderHeading,
+  listHomeCaptureHeadings,
   replaceHomeCaptureRangeIfUnchanged,
   resolveHomeCaptureLineRange,
+  type HomeCaptureHeadingTarget,
 } from './home-capture-block';
 import { CaptureMarkdownEditor } from './home-capture-markdown-editor';
 import { formatCaptureMarkdownForWrite } from './home-capture-markdown-core';
@@ -24,6 +27,12 @@ interface HomeCaptureOptions {
   task?: boolean;
   targetPath?: string;
   preserveMarkdown?: boolean;
+  headingTarget?: HomeCaptureHeadingTarget;
+}
+
+interface HomeCaptureModalOptions extends HomeCaptureOptions {
+  headingTargets?: HomeCaptureHeadingTarget[];
+  targetLabel?: string;
 }
 
 interface HomeCaptureEditorHandle {
@@ -55,8 +64,26 @@ export class HomeCaptureService {
     return new HomeCaptureLineEditModal(this.plugin, file, zeroBasedLine, snapshot).openAndWait();
   }
 
-  openCaptureModal(date = getMoment()(), options: HomeCaptureOptions = {}): void {
-    new HomeCaptureModal(this.plugin, this, date, options).open();
+  async openCaptureModal(date = getMoment()(), options: HomeCaptureOptions = {}): Promise<boolean> {
+    const requestedPath = normalizePath(String(options.targetPath || '').trim()).replace(/^\/+/, '');
+    if (requestedPath) {
+      const requested = this.plugin.app.vault.getAbstractFileByPath(requestedPath);
+      if (!(requested instanceof TFile) || requested.extension !== 'md') {
+        new Notice('TPS GCM: The capture target is not an available Markdown note.');
+        return false;
+      }
+      return this.openCaptureModalForTarget(requested, date, options);
+    }
+    return this.openCaptureModalForTarget(this.getDailyNoteFile(date), date, options);
+  }
+
+  async openCaptureModalForCurrentNote(): Promise<boolean> {
+    const file = this.plugin.app.workspace.getActiveFile();
+    if (!(file instanceof TFile) || file.extension !== 'md') {
+      new Notice('TPS GCM: Open a Markdown note before capturing to the current note.');
+      return false;
+    }
+    return this.openCaptureModalForTarget(file, getMoment()(), {}, file.path);
   }
 
   async openCaptureModalForContext(
@@ -81,9 +108,36 @@ export class HomeCaptureService {
       task: options.task === true,
       componentId: context.componentId,
     });
+    return this.openCaptureModalForTarget(target, date, options);
+  }
+
+  private async openCaptureModalForTarget(
+    file: TFile | null,
+    date: any,
+    options: HomeCaptureOptions,
+    targetLabel?: string,
+  ): Promise<boolean> {
+    let headingTargets: HomeCaptureHeadingTarget[] = [];
+    if (file) {
+      try {
+        headingTargets = listHomeCaptureHeadings(await this.plugin.app.vault.cachedRead(file));
+      } catch (error) {
+        logger.flowError('HomeCapture', 'capture-modal:target-read-failed', error, { path: file.path });
+        new Notice('TPS GCM: The capture target could not be read. Nothing was written.');
+        return false;
+      }
+    }
+    logger.flow('HomeCapture', 'capture-modal:open', {
+      path: file?.path ?? null,
+      date: date.format?.('YYYY-MM-DD') ?? null,
+      task: options.task === true,
+      headingCount: headingTargets.length,
+    });
     return new HomeCaptureModal(this.plugin, this, date, {
       ...options,
-      targetPath,
+      targetPath: file?.path,
+      headingTargets,
+      targetLabel,
     }).openAndWait();
   }
 
@@ -237,7 +291,7 @@ export class HomeCaptureService {
         date: date.format?.('YYYY-MM-DD') ?? null,
         task: options.task === true,
       });
-      new Notice('The selected Daily Note no longer exists. Nothing was written.', 8000);
+      new Notice('The capture target no longer exists. Nothing was written.', 8000);
       return null;
     }
     const file = requestedFile instanceof TFile ? requestedFile : await this.ensureDailyNote(date);
@@ -245,12 +299,46 @@ export class HomeCaptureService {
     const block = options.preserveMarkdown === true
       ? formatCaptureMarkdownForWrite(value, timestamp)
       : formatHomeCaptureBlock(value, timestamp, { task: options.task === true });
-    await this.plugin.app.vault.process(file, (current) => {
-      return insertHomeCaptureBlock(current, block, {
-        insertPosition: this.plugin.settings.homeCaptureInsertPosition,
-        addHeading: false,
+    let headingConflict = false;
+    let resolvedHeadingLine: number | null = null;
+    try {
+      await this.plugin.app.vault.process(file, (current) => {
+        if (options.headingTarget) {
+          const inserted = insertHomeCaptureBlockUnderHeading(
+            current,
+            block,
+            options.headingTarget,
+            this.plugin.settings.homeCaptureInsertPosition,
+          );
+          if (!inserted) {
+            headingConflict = true;
+            return current;
+          }
+          resolvedHeadingLine = inserted.headingLine;
+          return inserted.content;
+        }
+        return insertHomeCaptureBlock(current, block, {
+          insertPosition: this.plugin.settings.homeCaptureInsertPosition,
+          addHeading: false,
+        });
       });
-    });
+    } catch (error) {
+      logger.flowError('HomeCapture', 'capture:write-failed', error, {
+        path: file.path,
+        headingSelected: Boolean(options.headingTarget),
+      });
+      new Notice('TPS GCM: Capture could not be saved. Nothing was written.', 8000);
+      return null;
+    }
+    if (headingConflict) {
+      logger.flowWarn('HomeCapture', 'capture:heading-unavailable', {
+        path: file.path,
+        headingLevel: options.headingTarget?.level ?? null,
+        headingLine: options.headingTarget ? options.headingTarget.line + 1 : null,
+      });
+      new Notice('The selected heading changed or no longer exists. Nothing was written.', 8000);
+      return null;
+    }
     logger.flow('HomeCapture', 'capture:written', {
       path: file.path,
       date: date.format('YYYY-MM-DD'),
@@ -258,9 +346,12 @@ export class HomeCaptureService {
       explicitTarget: Boolean(requestedPath),
       format: options.preserveMarkdown === true ? 'markdown' : 'legacy',
       insertPosition: this.plugin.settings.homeCaptureInsertPosition,
-      headingEnabled: false,
+      headingSelected: Boolean(options.headingTarget),
+      headingLevel: options.headingTarget?.level ?? null,
+      headingLine: resolvedHeadingLine === null ? null : resolvedHeadingLine + 1,
     });
-    new Notice(`${options.task === true ? 'Added task' : 'Added'} to ${date.format('YYYY-MM-DD')}.`);
+    const destination = requestedPath ? file.basename : date.format('YYYY-MM-DD');
+    new Notice(`${options.task === true ? 'Added task' : 'Added'} to ${destination}.`);
     return file;
   }
 
@@ -980,7 +1071,7 @@ class HomeCaptureModal extends Modal {
     private readonly plugin: TPSGlobalContextMenuPlugin,
     private readonly captureService: HomeCaptureService,
     private readonly date: any,
-    private readonly options: HomeCaptureOptions,
+    private readonly options: HomeCaptureModalOptions,
   ) {
     super(plugin.app);
   }
@@ -1004,8 +1095,33 @@ class HomeCaptureModal extends Modal {
     contentEl.createEl('h2', { text: this.options.task === true ? 'Add task' : 'Capture' });
     contentEl.createDiv({
       cls: 'tps-home-context-capture-target',
-      text: `${this.date.format('ddd, MMM D YYYY')} · ${this.options.targetPath || 'Daily Note'}`,
+      text: this.options.targetLabel
+        || `${this.date.format('ddd, MMM D YYYY')} · ${this.options.targetPath || 'Daily Note'}`,
     });
+    const headingTargets = this.options.headingTargets || [];
+    let selectedHeadingTarget: HomeCaptureHeadingTarget | undefined;
+    if (headingTargets.length > 0) {
+      const sectionRow = contentEl.createDiv({ cls: 'tps-home-context-capture-section' });
+      sectionRow.createEl('label', { text: 'Place under' });
+      const sectionSelect = sectionRow.createEl('select', {
+        attr: { 'aria-label': 'Capture destination section' },
+      });
+      const noteBody = sectionSelect.createEl('option', { text: 'Note body' });
+      noteBody.value = '';
+      headingTargets.forEach((heading, index) => {
+        const duplicate = heading.matchingCount > 1 ? ` · ${heading.occurrence + 1} of ${heading.matchingCount}` : '';
+        const option = sectionSelect.createEl('option', {
+          text: `H${heading.level} · ${heading.text}${duplicate}`,
+        });
+        option.value = String(index);
+      });
+      sectionSelect.addEventListener('change', () => {
+        const index = Number(sectionSelect.value);
+        selectedHeadingTarget = sectionSelect.value !== '' && Number.isInteger(index)
+          ? headingTargets[index]
+          : undefined;
+      });
+    }
     const inputShell = contentEl.createDiv({ cls: 'tps-home-context-capture-input-shell' });
     const editorHost = inputShell.createDiv({ cls: 'tps-home-context-capture-live-editor' });
     const actions = contentEl.createDiv({ cls: 'tps-home-context-capture-actions' });
@@ -1031,6 +1147,7 @@ class HomeCaptureModal extends Modal {
           task: false,
           targetPath: this.options.targetPath,
           preserveMarkdown: true,
+          headingTarget: selectedHeadingTarget,
         });
         if (!file) return;
         this.saved = true;

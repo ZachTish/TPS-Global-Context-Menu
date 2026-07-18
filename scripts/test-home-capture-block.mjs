@@ -79,6 +79,130 @@ test('insertHomeCaptureBlock inserts at the top of an existing heading after hea
   assert.equal(actual, '# Today\n\n## Capture\n\n- Capture 09:15\n- Existing 08:00\n');
 });
 
+test('capture heading discovery supports H1-H6 while ignoring frontmatter and fenced code', () => {
+  const headings = captureBlock.listHomeCaptureHeadings([
+    '---',
+    '# YAML is not a heading',
+    '---',
+    '# Top ###',
+    '',
+    '```md',
+    '## Backtick fence',
+    '```',
+    '  ## Section',
+    '### Child',
+    '#### Fourth',
+    '##### Fifth',
+    '###### Sixth',
+    '~~~',
+    '## Tilde fence',
+    '~~~',
+    '## Duplicate',
+    '## Duplicate',
+  ].join('\n'));
+
+  assert.deepEqual(headings, [
+    { line: 3, level: 1, text: 'Top', occurrence: 0, matchingCount: 1 },
+    { line: 8, level: 2, text: 'Section', occurrence: 0, matchingCount: 1 },
+    { line: 9, level: 3, text: 'Child', occurrence: 0, matchingCount: 1 },
+    { line: 10, level: 4, text: 'Fourth', occurrence: 0, matchingCount: 1 },
+    { line: 11, level: 5, text: 'Fifth', occurrence: 0, matchingCount: 1 },
+    { line: 12, level: 6, text: 'Sixth', occurrence: 0, matchingCount: 1 },
+    { line: 16, level: 2, text: 'Duplicate', occurrence: 0, matchingCount: 2 },
+    { line: 17, level: 2, text: 'Duplicate', occurrence: 1, matchingCount: 2 },
+  ]);
+});
+
+test('heading-target capture honors nested section boundaries and top or bottom insertion', () => {
+  const source = [
+    '# Root',
+    '',
+    '## Inbox',
+    '',
+    'Intro',
+    '',
+    '### Nested',
+    '',
+    'Nested body',
+    '',
+    '## Later',
+    '',
+    'Later body',
+    '',
+  ].join('\n');
+  const target = captureBlock.listHomeCaptureHeadings(source).find((heading) => heading.text === 'Inbox');
+  assert.ok(target);
+
+  const bottom = captureBlock.insertHomeCaptureBlockUnderHeading(source, '- Captured 09:15\n', target, 'bottom');
+  assert.equal(bottom.headingLine, 2);
+  assert.equal(bottom.headingLevel, 2);
+  assert.equal(bottom.content, [
+    '# Root',
+    '',
+    '## Inbox',
+    '',
+    'Intro',
+    '',
+    '### Nested',
+    '',
+    'Nested body',
+    '',
+    '- Captured 09:15',
+    '',
+    '## Later',
+    '',
+    'Later body',
+    '',
+  ].join('\n'));
+
+  const top = captureBlock.insertHomeCaptureBlockUnderHeading(source, '- Captured 09:15\n', target, 'top');
+  assert.equal(top.content, [
+    '# Root',
+    '',
+    '## Inbox',
+    '',
+    '- Captured 09:15',
+    '',
+    'Intro',
+    '',
+    '### Nested',
+    '',
+    'Nested body',
+    '',
+    '## Later',
+    '',
+    'Later body',
+    '',
+  ].join('\n'));
+});
+
+test('duplicate heading targets fail closed after line shifts or identity changes', () => {
+  const source = '# Root\n\n## Log\n\nFirst\n\n## Log\n\nSecond\n';
+  const targets = captureBlock.listHomeCaptureHeadings(source).filter((heading) => heading.text === 'Log');
+  assert.equal(targets.length, 2);
+  const shifted = `Prelude\n\n${source}`;
+  assert.equal(
+    captureBlock.insertHomeCaptureBlockUnderHeading(shifted, '- Captured 09:15\n', targets[1], 'bottom'),
+    null,
+  );
+  assert.equal(
+    captureBlock.insertHomeCaptureBlockUnderHeading(source.replace(/## Log\n\nSecond/u, '## Renamed\n\nSecond'), '- Capture\n', targets[1]),
+    null,
+  );
+});
+
+test('heading-target capture separates plain Markdown from adjacent section blocks', () => {
+  const source = '# Root\n\n## Inbox\n\nIntro\n\n## Later\n';
+  const target = captureBlock.listHomeCaptureHeadings(source).find((heading) => heading.text === 'Inbox');
+  assert.ok(target);
+
+  const bottom = captureBlock.insertHomeCaptureBlockUnderHeading(source, 'Captured 09:15\n', target, 'bottom');
+  assert.equal(bottom.content, '# Root\n\n## Inbox\n\nIntro\n\nCaptured 09:15\n\n## Later\n');
+
+  const top = captureBlock.insertHomeCaptureBlockUnderHeading(source, 'Captured 09:15\n', target, 'top');
+  assert.equal(top.content, '# Root\n\n## Inbox\n\nCaptured 09:15\n\nIntro\n\n## Later\n');
+});
+
 test('prepareHomeCaptureDraft creates stable bottom and top editor slots', () => {
   const bottom = captureBlock.prepareHomeCaptureDraft('# Today', 'bottom');
   assert.deepEqual(bottom, {

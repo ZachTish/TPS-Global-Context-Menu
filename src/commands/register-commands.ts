@@ -16,9 +16,17 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.addCommand({
         id: 'home-quick-capture',
-        name: 'Home: Quick capture',
+        name: "Capture: Today's Daily Note",
         callback: () => {
-            plugin.homeCaptureService.openCaptureModal();
+            void plugin.homeCaptureService.openCaptureModal();
+        },
+    });
+
+    plugin.addCommand({
+        id: 'capture-to-current-note',
+        name: 'Capture: Current note',
+        callback: () => {
+            void plugin.homeCaptureService.openCaptureModalForCurrentNote();
         },
     });
 
@@ -26,7 +34,7 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
         id: 'capture-to-home-note',
         name: 'Home: Capture to selected Daily Note',
         callback: () => {
-            plugin.homeCaptureService.openCaptureModal();
+            void plugin.homeCaptureService.openCaptureModal();
         },
     });
 
@@ -34,7 +42,7 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
         id: 'add-task-to-home-note',
         name: 'Home: Add task to selected Daily Note',
         callback: () => {
-            plugin.homeCaptureService.openCaptureModal(undefined, { task: true });
+            void plugin.homeCaptureService.openCaptureModal(undefined, { task: true });
         },
     });
 

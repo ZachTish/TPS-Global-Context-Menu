@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.2.0
+
+- The command palette now has explicit `Capture: Today's Daily Note` and `Capture: Current note` commands. The existing Home-only `Home: Capture to selected Daily Note` action remains distinct and continues to target the day selected in TPS Home.
+- When an existing destination note contains Markdown headings, the capture modal offers an optional `Place under` selector. `Note body` remains the default; H1 through H6 destinations are shown in document order, and duplicate same-level headings are numbered so each section can be selected independently.
+- Heading discovery ignores YAML frontmatter and fenced code blocks. The selected heading is re-resolved inside the atomic note mutation, and a renamed, removed, or newly ambiguous heading fails closed without writing to another section. Section insertion includes nested lower-level headings and stops before the next same- or higher-level heading.
+- Capture input still rejects creating Markdown heading lines. This release selects an existing destination section; it does not create or rename headings. Minimum supported Obsidian remains 1.10.0.
+- Validation passed the focused capture/Home suites (58/58), TypeScript, and the complete declared suite (257/257), followed by a separate production-mode test build. Obsidian 1.12.7 was reloaded with `Reload app without saving`; both palette commands exposed the expected H1/H2/H3 destinations, and captures to the selected current-note and Daily Note H2 sections landed after their nested H3 content and before the next H2. Both disposable QA notes were moved directly to `_archive` after verification.
+
 ## 1.1.1
 
 - TPS List and TPS Table task quick editors now show only editable task text and visible `#tags`. Inline `[property:: value]` fields and hidden TPS payload carriers stay out of the capture-style editor while remaining attached to the task line. Save re-reads the current source line inside the existing atomic mutation, so concurrent property or sync-identity updates win over the modal's opening snapshot; an unchanged save leaves the source line byte-for-byte intact.
@@ -79,7 +87,8 @@ Reusable note and task context menu surfaces for the vault, plus inline note chr
 GCM keeps the command palette limited to complete, common actions:
 
 - `Open TPS Home`
-- `Home: Quick capture`
+- `Capture: Today's Daily Note`
+- `Capture: Current note`
 - `Home: Capture to selected Daily Note`
 - `Home: Add task to selected Daily Note`
 - `Create task`
@@ -167,8 +176,9 @@ Agent integrations must not use fuzzy task titles or broad search results as mut
 - Home is date-scoped. Previous/today/next switch the canonical Daily Note backing the dashboard. Embedded Bases receive both the selected date context and that Daily Note as their render source, so `this.file.path` resolves to the selected day while whole-base and active-view filters retain normal ordered AND composition.
 - On mobile, the Home date/navigation controls float above the dashboard content and automatically hide while scrolling down/swiping up, then reappear when scrolling back up.
 - The default capture surface is `Daily Note Feed.base`, a TPS List Base whose whole-base filters scope displayed rows with `file.path == this.file.path` and provide the explicit creation sink `task.path == this.file.path`; its view filter can combine task, bullet, and heading rows. `kind == header`/`heading` includes every Markdown heading, while `kind == h1` through `h6` targets one level. Its explicit `createAction: default` sends pointer, touch, Enter, and Space activation through TPS List's ordered filter-derived creation; with `task` before `bullet`, the current configuration creates a task in the selected Daily Note, while heading filters remain display-only.
-- `Home: Capture to selected Daily Note` opens a focused native textarea modal. The textarea auto-sizes to exactly its typed lines, never owns an internal vertical scroller, and the entire input shell focuses it on pointer/touch. `Add to day` and `Add task` write to the explicit selected Daily Note path. Each top-level submitted line receives the same capture timestamp; indented descendants stay nested and unstamped. The command modal and embedded/mobile formatter share that root-versus-descendant rule.
-- `HomeCaptureService` owns Daily Note resolution, validation, bullet/task formatting, and atomic `vault.process` writes. Contextual Home capture validates the exact target path and fails closed if that file disappeared; it never infers the target from the active workspace file.
+- `Capture: Today's Daily Note`, `Capture: Current note`, and `Home: Capture to selected Daily Note` open the same focused native capture modal. The Home command retains its explicit selected-day target, while the other commands resolve today's configured Daily Note or the active Markdown note respectively. The editor auto-sizes to its typed lines, never owns an internal vertical scroller, and the entire input shell focuses it on pointer/touch. Each top-level submitted line receives the same capture timestamp; indented descendants stay nested and unstamped. The command modal and embedded/mobile formatter share that root-versus-descendant rule.
+- Existing destination notes with Markdown headings expose an optional `Place under` selector with `Note body` plus every H1-H6 section in document order. Duplicate same-level headings are numbered. Heading discovery skips YAML frontmatter and fenced code; the chosen identity is re-resolved inside the atomic write, section ownership includes lower-level nested headings, and a stale or ambiguous choice is refused without changing the note.
+- `HomeCaptureService` owns Daily Note resolution, current-note validation, bullet/task formatting, section selection, and atomic `vault.process` writes. Contextual Home capture validates the exact target path and fails closed if that file disappeared; it never infers the target from the active workspace file.
 - The default Home layout is Daily Note Feed, Calendar, and Open unscheduled tasks. Food and Activity components remain available for an explicit user-added layout. Legacy `quick-capture` settings migrate to the feed Base.
 - TPS Finances is intentionally paused and has no Home component, Base embed, normalization rule, or add-component entry. Its standalone plugin and stored finance data remain untouched so development can resume later without a Home dependency.
 - Layout edits are locked by default. Click the Home edit button to reveal component add/move/remove controls, then click done to return to the normal use surface. Home components opt out of the file-level right-click menu, so embedded Base panels do not expose Archive/Delete as a way to remove dashboard components.
