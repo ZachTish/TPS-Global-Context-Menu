@@ -21,11 +21,19 @@ const captureBlock = await loadCaptureBlockModule();
 test('formatHomeCaptureBlock creates plain and task capture blocks', () => {
   assert.equal(
     captureBlock.formatHomeCaptureBlock('first line\nsecond line', '09:15'),
-    '- first line\n  second line 09:15\n',
+    '- first line 09:15\n- second line 09:15\n',
   );
   assert.equal(
     captureBlock.formatHomeCaptureBlock('first line\nsecond line', '09:15', { task: true }),
-    '- [ ] first line\n  second line 09:15\n',
+    '- [ ] first line 09:15\n- [ ] second line 09:15\n',
+  );
+  assert.equal(
+    captureBlock.formatHomeCaptureBlock('parent\n  child\nsecond root', '09:15'),
+    '- parent 09:15\n    child\n- second root 09:15\n',
+  );
+  assert.equal(
+    captureBlock.formatHomeCaptureBlock('\tfirst\n\t\tchild\n\tsecond', ''),
+    '- first\n  \tchild\n- second\n',
   );
   assert.equal(captureBlock.formatHomeCaptureBlock('   ', '09:15'), '');
 });

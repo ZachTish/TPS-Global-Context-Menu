@@ -88,7 +88,11 @@ test('title and full-body edits normalize leading links and retain their local a
   );
   assert.equal(getTaskSourceTitle(edited), 'Birthday Dinner with cake');
   assert.equal(readTaskAssociatedNotePath(edited), 'Events/Birthday Dinner');
-  assert.equal(readInlineFieldValue(edited, 'parents'), '[[Family/Events]]');
+  assert.equal(
+    readInlineFieldValue(edited, 'parents'),
+    '[[2026-07-13]]',
+    'full-body edits retain the current source property instead of accepting hidden inline-field input',
+  );
   assert.equal(readInlineFieldValue(edited, 'tpsId'), 'item_abc');
   assert.match(edited, /"externalId":"reminders:abc"/u);
   assert.equal((edited.match(/tps-inline-props:/gu) || []).length, 1);

@@ -184,12 +184,46 @@ test('Home capture writes selected-day daily notes through Daily Notes settings'
       'scheduled: 2026-07-08 00:00:00',
       '---',
       '',
-      '- Alpha',
-      '  Beta 12:34',
+      '- Alpha 12:34',
+      '- Beta 12:34',
       '',
     ].join('\n'),
   );
   assert.deepEqual(globalThis.__notices.slice(-1), ['Added to 2026-07-08.']);
+});
+
+test('Home capture timestamps every root Markdown line and leaves nested descendants unstamped', async () => {
+  installMomentStub();
+  const { plugin, files } = createPluginHarness({
+    dailyNotes: {
+      folder: 'Inbox/TPS Home QA',
+      format: 'YYYY-MM-DD',
+    },
+  });
+  const service = new HomeCaptureService(plugin);
+
+  const file = await service.capture(
+    '- First root\n  - Nested child\n    - Nested grandchild\n- [ ] Second root\n\nPlain root',
+    window.moment('2026-07-09'),
+    { preserveMarkdown: true },
+  );
+
+  assert.equal(
+    files.get(file.path),
+    [
+      '---',
+      'scheduled: 2026-07-09 00:00:00',
+      '---',
+      '',
+      '- First root 12:34',
+      '  - Nested child',
+      '    - Nested grandchild',
+      '- [ ] Second root 12:34',
+      '',
+      'Plain root 12:34',
+      '',
+    ].join('\n'),
+  );
 });
 
 test('Home capture can write selected-day daily notes as unchecked tasks', async () => {

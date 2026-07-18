@@ -38,7 +38,15 @@ test('live-editor Markdown writes without adding a second list marker', () => {
   assert.equal(core.formatCaptureMarkdownForWrite('Plain text', '12:34'), 'Plain text 12:34\n');
   assert.equal(
     core.formatCaptureMarkdownForWrite('- One\n- [ ] Two\nPlain', '12:34'),
-    '- One\n- [ ] Two\nPlain 12:34\n',
+    '- One 12:34\n- [ ] Two 12:34\nPlain 12:34\n',
+  );
+  assert.equal(
+    core.formatCaptureMarkdownForWrite('- Parent\n  - Child\n    - Grandchild\n- [ ] Second\n\nPlain', '12:34'),
+    '- Parent 12:34\n  - Child\n    - Grandchild\n- [ ] Second 12:34\n\nPlain 12:34\n',
+  );
+  assert.equal(
+    core.formatCaptureMarkdownForWrite('\t- Parent\n\t\t- Child\n\t- Second\n\t- ', '12:34'),
+    '\t- Parent 12:34\n\t\t- Child\n\t- Second 12:34\n\t- \n',
   );
 });
 

@@ -1,3 +1,5 @@
+import { getMarkdownIndentColumns } from '../tps-list/tps-list-hierarchy';
+
 export type CaptureListKind = 'bullet' | 'task';
 
 export interface CaptureLineMarker {
@@ -51,16 +53,27 @@ export function captureMarkdownHasContent(markdown: string): boolean {
 }
 
 export function formatCaptureMarkdownForWrite(markdown: string, timestamp: string): string {
-  const normalized = String(markdown || '').replace(/\r\n?/g, '\n').trim();
-  if (!normalized) return '';
-  const lines = normalized.split('\n');
-  let finalContentLine = lines.length - 1;
-  while (finalContentLine > 0 && !lines[finalContentLine].trim()) finalContentLine -= 1;
+  const lines = String(markdown || '').replace(/\r\n?/g, '\n').split('\n');
+  while (lines.length > 0 && !lines[0].trim()) lines.shift();
+  while (lines.length > 0 && !lines[lines.length - 1].trim()) lines.pop();
+  if (lines.length === 0) return '';
+  const contentLines = lines.filter(captureLineHasContent);
+  if (contentLines.length === 0) return '';
+  const rootIndent = Math.min(...contentLines.map(getMarkdownIndentColumns));
   const suffix = String(timestamp || '').trim();
-  lines[finalContentLine] = suffix
-    ? `${lines[finalContentLine].trimEnd()} ${suffix}`
-    : lines[finalContentLine].trimEnd();
+  for (let index = 0; index < lines.length; index += 1) {
+    if (!captureLineHasContent(lines[index])) continue;
+    if (getMarkdownIndentColumns(lines[index]) !== rootIndent) continue;
+    lines[index] = suffix
+      ? `${lines[index].trimEnd()} ${suffix}`
+      : lines[index].trimEnd();
+  }
   return `${lines.join('\n')}\n`;
+}
+
+function captureLineHasContent(line: string): boolean {
+  const marker = parseCaptureLineMarker(line);
+  return (marker?.body ?? line).trim().length > 0;
 }
 
 export function toggleCaptureTaskMarker(line: string): string {

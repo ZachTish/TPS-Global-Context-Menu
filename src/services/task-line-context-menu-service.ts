@@ -290,7 +290,8 @@ export class TaskLineContextMenuService {
         'aria-label': 'Task content',
       },
     });
-    input.value = getTaskEditableBody(context.rawLine);
+    const initialBody = getTaskEditableBody(context.rawLine);
+    input.value = initialBody;
     this.renderTaskEditorCheckbox(checkboxButton, context);
 
     let checkboxBusy = false;
@@ -374,7 +375,7 @@ export class TaskLineContextMenuService {
 
     const hint = card.createDiv({
       cls: 'tps-gcm-task-editor-hint',
-      text: 'Edit the task text, tags, and inline properties. ⌘↵ saves.',
+      text: 'Edit task text and tags. Inline properties stay attached. ⌘↵ saves.',
     });
     const actions = card.createDiv({ cls: 'tps-gcm-task-editor-actions' });
     const openButton = actions.createEl('button', { text: 'Open in note', attr: { type: 'button' } });
@@ -394,6 +395,10 @@ export class TaskLineContextMenuService {
       if (!nextBody) {
         new Notice('Task content cannot be empty.');
         input.focus();
+        return;
+      }
+      if (nextBody === initialBody) {
+        this.closeTaskEditor();
         return;
       }
       saving = true;

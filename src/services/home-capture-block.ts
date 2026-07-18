@@ -1,3 +1,5 @@
+import { getMarkdownIndentColumns } from '../tps-list/tps-list-hierarchy';
+
 export type HomeCaptureInsertPosition = 'top' | 'bottom';
 
 export interface HomeCaptureBlockOptions {
@@ -33,10 +35,37 @@ export interface HomeCaptureRangeSnapshot {
 }
 
 export function formatHomeCaptureBlock(text: string, timeLabel: string, options: HomeCaptureFormatOptions = {}): string {
-  const value = String(text || '').trim();
-  if (!value) return '';
+  const lines = String(text || '').replace(/\r\n?/g, '\n').split('\n');
+  while (lines.length > 0 && !lines[0].trim()) lines.shift();
+  while (lines.length > 0 && !lines[lines.length - 1].trim()) lines.pop();
+  if (lines.length === 0) return '';
+  const contentLines = lines.filter((line) => line.trim());
+  if (contentLines.length === 0) return '';
+  const rootIndent = Math.min(...contentLines.map(getMarkdownIndentColumns));
   const marker = options.task === true ? '- [ ] ' : '- ';
-  return `${marker}${value.replace(/\r?\n/g, '\n  ')} ${timeLabel}\n`;
+  const suffix = String(timeLabel || '').trim();
+  const formatted = lines.map((line) => {
+    if (!line.trim()) return '';
+    const dedented = removeMarkdownIndentColumns(line, rootIndent).trimEnd();
+    if (getMarkdownIndentColumns(dedented) > 0) return `  ${dedented}`;
+    return suffix ? `${marker}${dedented} ${suffix}` : `${marker}${dedented}`;
+  });
+  return `${formatted.join('\n')}\n`;
+}
+
+function removeMarkdownIndentColumns(line: string, columnsToRemove: number): string {
+  if (columnsToRemove <= 0) return line;
+  let index = 0;
+  let columns = 0;
+  while (index < line.length && columns < columnsToRemove && (line[index] === ' ' || line[index] === '\t')) {
+    const nextColumns = line[index] === '\t' ? columns + (4 - (columns % 4)) : columns + 1;
+    index += 1;
+    if (nextColumns > columnsToRemove) {
+      return `${' '.repeat(nextColumns - columnsToRemove)}${line.slice(index)}`;
+    }
+    columns = nextColumns;
+  }
+  return line.slice(index);
 }
 
 export function insertHomeCaptureBlock(content: string, block: string, options: HomeCaptureBlockOptions = {}): string {

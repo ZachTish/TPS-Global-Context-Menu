@@ -217,7 +217,7 @@ export class HomeCaptureService {
         preview.classList.toggle('is-empty', !value);
         body.empty();
         if (!value) return;
-        const captureLine = `- ${value.replace(/\r?\n/g, '\n  ')}`;
+        const captureLine = formatHomeCaptureBlock(value, '').trimEnd();
         const rendered = document.createElement('div');
         await MarkdownRenderer.render(this.plugin.app, captureLine, rendered, '', component ?? new Component());
         if (token !== renderToken) return;

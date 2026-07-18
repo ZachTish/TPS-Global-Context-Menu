@@ -126,23 +126,27 @@ export function normalizeTaskAssociatedNotePath(rawValue: unknown): string {
 }
 
 export function getTaskEditableBody(line: string): string {
-  return parseTaskLine(line)?.body ?? '';
+  const parsed = parseTaskLine(line);
+  return parsed ? stripTaskEditorMetadata(parsed.body) : '';
 }
 
 export function setTaskEditableBody(line: string, body: string): string {
   const parsed = parseTaskLine(line);
   if (!parsed) return line;
-  const sourceAssociation = resolveTaskAssociationForEdit(line, body);
-  const cleanBody = String(body || '').replace(/\r?\n/g, ' ').trim();
+  const cleanBody = stripTaskEditorMetadata(
+    String(body || '').replace(/\r?\n/g, ' '),
+  );
   if (!cleanBody) return line;
+  if (cleanBody === stripTaskEditorMetadata(parsed.body)) return line;
+  const sourceAssociation = resolveTaskAssociationForEdit(line, cleanBody);
   const editableLine = `${parsed.prefix}${parsed.token} ${cleanBody}`.trimEnd();
   const editableTitle = getTaskSourceTitle(editableLine);
   const normalizedTitle = normalizeLeadingLinkedTaskTitle(editableTitle);
   let nextLine = editableTitle && normalizedTitle !== editableTitle
     ? replaceTaskTitlePreservingMetadata(editableLine, normalizedTitle)
     : editableLine;
-  for (const metadata of extractProtectedTaskIdentityMetadata(parsed.body)) {
-    if (!nextLine.includes(metadata)) nextLine = `${nextLine.trimEnd()} ${metadata}`;
+  for (const metadata of extractTaskEditorMetadata(parsed.body)) {
+    nextLine = `${nextLine.trimEnd()} ${metadata}`;
   }
   if (sourceAssociation) nextLine = setTaskAssociatedNotePath(nextLine, sourceAssociation);
   return nextLine;
@@ -333,15 +337,26 @@ function extractTpsInlineMetadata(body: string): string[] {
     .filter(Boolean);
 }
 
-function extractProtectedTaskIdentityMetadata(body: string): string[] {
+function extractTaskEditorMetadata(body: string): string[] {
   const source = String(body || '');
-  const ranges: TaskTextRange[] = [
-    ...scanTaskInlineFields(source).filter((field) => ['tpsid', 'subitemid'].includes(field.key.toLowerCase())),
-    ...getTaskInlinePropsMetadataRanges(source),
-  ];
-  return normalizeTaskTextRanges(ranges)
+  return getTaskEditorMetadataRanges(source)
     .map((range) => source.slice(range.start, range.end).trim())
     .filter(Boolean);
+}
+
+function stripTaskEditorMetadata(body: string): string {
+  const source = String(body || '');
+  return removeTaskTextRanges(source, getTaskEditorMetadataRanges(source), ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getTaskEditorMetadataRanges(body: string): TaskTextRange[] {
+  const source = String(body || '');
+  return normalizeTaskTextRanges([
+    ...scanTaskInlineFields(source),
+    ...getTaskInlinePropsMetadataRanges(source),
+  ]);
 }
 
 type TaskTextRange = {

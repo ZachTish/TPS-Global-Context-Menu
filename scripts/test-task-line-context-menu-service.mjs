@@ -186,8 +186,8 @@ test('task line metadata helpers edit task text without destroying inline task p
     `- [ ] new title [tpsId:: item_abc] [scheduled:: 2026-07-11 09:00:00] #inbox ${reminderMetadata}`,
   );
   assert.equal(
-    setTaskEditableBody(reminderLine, 'new body [scheduled:: 2026-07-11 09:00:00] #inbox'),
-    `- [ ] new body [scheduled:: 2026-07-11 09:00:00] #inbox [tpsId:: item_abc] ${reminderMetadata}`,
+    setTaskEditableBody(reminderLine, 'new body #inbox'),
+    `- [ ] new body #inbox [tpsId:: item_abc] [scheduled:: 2026-07-11 09:00:00] ${reminderMetadata}`,
   );
   assert.equal(setTaskCheckboxToken(line, '[\\]'), '- [\\] bathroom window [priority:: high] [scheduled:: 2026-05-31 09:00:00] #topic/home');
   assert.equal(
@@ -367,14 +367,52 @@ test('task note associations use a hidden direct path while keeping the visible 
 test('task quick editor can replace the editable body without changing task structure', async () => {
   const { getTaskEditableBody, setTaskEditableBody } = await importUtility();
   const line = '  - [/] Draft *proposal* #work [priority:: high]';
-  assert.equal(getTaskEditableBody(line), 'Draft *proposal* #work [priority:: high]');
+  assert.equal(getTaskEditableBody(line), 'Draft *proposal* #work');
   assert.equal(
-    setTaskEditableBody(line, 'Review **proposal** #work [priority:: low]'),
-    '  - [/] Review **proposal** #work [priority:: low]',
+    setTaskEditableBody(line, 'Review **proposal** #work'),
+    '  - [/] Review **proposal** #work [priority:: high]',
   );
+  assert.equal(setTaskEditableBody(line, getTaskEditableBody(line)), line, 'a no-op save must preserve exact field positions');
   assert.equal(
     setTaskEditableBody('- [ ] Legacy task [subitemId:: legacy_123]', 'Renamed legacy task'),
     '- [ ] Renamed legacy task [subitemId:: legacy_123]',
+  );
+  const hiddenPayload = '%% tps-inline-props:{"externalId":"sync-current","remindersNotes":""} %%';
+  const protectedLine = `- [ ] Visible #work [priority:: high] [tpsId:: tps_123] [subitemId:: sub_456] ${hiddenPayload}`;
+  assert.equal(getTaskEditableBody(protectedLine), 'Visible #work');
+  const carrierPayload = JSON.stringify({ externalId: 'carrier-current', remindersNotes: '' });
+  const carrierLines = [
+    `- [ ] Visible #work [priority:: high] [tpsInlineProps:: ${encodeURIComponent(carrierPayload)}]`,
+    `- [ ] Visible #work [priority:: high] <!-- tps-inline-props:${carrierPayload} -->`,
+    `- [ ] Visible #work [priority:: high] <span data-tps-inline-props="${encodeURIComponent(carrierPayload)}"></span>`,
+  ];
+  for (const carrierLine of carrierLines) {
+    assert.equal(getTaskEditableBody(carrierLine), 'Visible #work');
+    assert.equal(setTaskEditableBody(carrierLine, 'Updated #work'), carrierLine.replace('Visible #work', 'Updated #work'));
+  }
+  assert.equal(
+    setTaskEditableBody(protectedLine, 'Updated #work'),
+    `- [ ] Updated #work [priority:: high] [tpsId:: tps_123] [subitemId:: sub_456] ${hiddenPayload}`,
+  );
+  assert.equal(
+    setTaskEditableBody(protectedLine, 'Updated %% tps-inline-props:{"externalId":"pasted"} %%'),
+    `- [ ] Updated [priority:: high] [tpsId:: tps_123] [subitemId:: sub_456] ${hiddenPayload}`,
+    'pasted hidden metadata must not replace the current source-line identity payload',
+  );
+  const staleOpeningPayload = '%% tps-inline-props:{"externalId":"sync-opening"} %%';
+  const openingLine = `- [ ] Original [tpsId:: tps_123] ${staleOpeningPayload}`;
+  const currentPayload = '%% tps-inline-props:{"externalId":"sync-current","remindersPriority":2} %%';
+  const currentLine = `- [ ] Original [tpsId:: tps_123] ${currentPayload}`;
+  const editedFromOpeningBody = getTaskEditableBody(openingLine).replace('Original', 'Edited');
+  const concurrentResult = setTaskEditableBody(currentLine, editedFromOpeningBody);
+  assert.match(concurrentResult, /"externalId":"sync-current"/);
+  assert.match(concurrentResult, /"remindersPriority":2/);
+  assert.doesNotMatch(concurrentResult, /sync-opening/);
+  const overlappingMetadata = '- [ ] Visible [notes:: see [priority:: high]] [priority:: high] [priority:: high]';
+  assert.equal(
+    setTaskEditableBody(overlappingMetadata, 'Updated'),
+    '- [ ] Updated [notes:: see [priority:: high]] [priority:: high] [priority:: high]',
+    'edited saves must preserve duplicate and substring-overlapping inline fields in source order',
   );
   assert.equal(setTaskEditableBody(line, '   '), line);
 });
@@ -385,6 +423,8 @@ test('normal task clicks open the exact-line quick editor across task surfaces',
   assert.match(serviceSource, /async openQuickEditorForElement\(taskEl: HTMLElement, sourceEl: HTMLElement \| null = taskEl\)/);
   assert.match(serviceSource, /getTaskEditableBody\(context\.rawLine\)/);
   assert.match(serviceSource, /setTaskEditableBody\(line, nextBody\)/);
+  assert.match(serviceSource, /Inline properties stay attached/);
+  assert.match(serviceSource, /if \(nextBody === initialBody\)/);
   assert.match(serviceSource, /this\.updateTaskLine\(context/);
   assert.match(serviceSource, /TaskQuickEditor', 'open'/);
   assert.match(serviceSource, /TaskQuickEditor', 'save'/);
