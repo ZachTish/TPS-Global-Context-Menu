@@ -33,7 +33,6 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   inlineMenuOnly: false,
   nativeMenuPlacement: 'tps-last',
   suppressMobileKeyboard: true,
-  enableCanvasOpenGuard: false,
   enableBasesForcedLinkPreview: false,
   collapseHeadingsOnOpen: false,
   homeComponents: [

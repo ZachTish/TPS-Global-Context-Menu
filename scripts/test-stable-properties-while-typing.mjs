@@ -13,6 +13,7 @@ const contextTargetSource = readFileSync(new URL('../src/services/context-target
 const virtualBaseEmbedSource = readFileSync(new URL('../src/services/virtual-base-embed-service.ts', import.meta.url), 'utf8');
 const constantsSource = readFileSync(new URL('../src/constants.ts', import.meta.url), 'utf8');
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+const packageSource = readFileSync(new URL('../package.json', import.meta.url), 'utf8');
 const dailyNavSource = readFileSync(new URL('../src/handlers/daily-note-nav-manager.ts', import.meta.url), 'utf8');
 const refreshMenusSource = managerSource.slice(
   managerSource.indexOf('refreshMenusForFile(\n'),
@@ -96,29 +97,23 @@ test('manual file renames force settled title sync from the new basename', () =>
   assert.match(eventSource, /isNavigationTextInputActive/);
 });
 
-test('plugin-owned file opens reuse existing tabs or the current unpinned tab without hijacking native opens', () => {
+test('plugin-owned file opens reuse existing tabs without patching native workspace opens', () => {
   const helperSource = mainSource.slice(
     mainSource.indexOf('async openFileInLeaf('),
     mainSource.indexOf('private isPinnedLeafForDifferentFile'),
-  );
-  const nativeOpenSource = mainSource.slice(
-    mainSource.indexOf('WorkspaceLeaf.prototype.openFile = function'),
-    mainSource.indexOf('WorkspaceLeaf.prototype.open = function'),
   );
   const baseLinkPreviewHandlerSource = mainSource.slice(
     mainSource.indexOf('private registerBasesLinkPreviewHandler('),
     mainSource.indexOf('private isBasesForcedLinkPreviewEnabled('),
   );
-  const nativeBaseOpenSource = mainSource.slice(
-    mainSource.indexOf('private shouldAllowNativeBaseLinkOpen('),
-    mainSource.indexOf('private async openBaseLinkInHoverEditor('),
-  );
-  const nativeSetViewStateSource = mainSource.slice(
-    mainSource.indexOf('WorkspaceLeaf.prototype.setViewState = function'),
-    mainSource.indexOf('if (typeof originalOpenLinkText ==='),
-  );
 
   assert.match(helperSource, /reuseLeafIfNoExisting\?: boolean/);
+  assert.doesNotMatch(mainSource, /WorkspaceLeaf\.prototype\.(?:openFile|open|setViewState)\s*=/);
+  assert.doesNotMatch(mainSource, /workspace\.(?:openLinkText|getLeaf|getUnpinnedLeaf|getRightLeaf|getLeftLeaf|createLeafBySplit|createLeafInParent|splitActiveLeaf|duplicateLeaf|openPopoutLeaf)\s*=\s*function/);
+  assert.equal((mainSource.match(/enableCanvasOpenGuard/g) ?? []).length, 1);
+  assert.match(mainSource, /delete record\.enableCanvasOpenGuard;/);
+  assert.doesNotMatch(mainSource, /ignoreCanvasDragGuard|recentCanvasDragUntil|installCanvasOpenGuard|shouldSuppressOpenForRecentCanvasDrag/);
+  assert.doesNotMatch(packageSource, /monkey-around/);
   assert.match(helperSource, /const liveFile = requestedPath \? this\.app\.vault\.getAbstractFileByPath\(requestedPath\) : null/);
   assert.match(helperSource, /if \(!\(liveFile instanceof TFile\)\)/);
   assert.match(helperSource, /file = liveFile/);
@@ -162,9 +157,6 @@ test('plugin-owned file opens reuse existing tabs or the current unpinned tab wi
   assert.doesNotMatch(mainSource, /detachUnusedDefaultOpenLeaf/);
   assert.doesNotMatch(mainSource, /isMainWorkspaceLeaf/);
   assert.doesNotMatch(mainSource, /workspaceContainsLeaf/);
-  assert.doesNotMatch(nativeOpenSource, /consumeDefaultOpenCreatedLeaf/);
-  assert.doesNotMatch(nativeOpenSource, /rerouteDefaultMarkdownOpen/);
-  assert.match(nativeOpenSource, /return originalLeafOpenFile\.apply\(this, args as any\)/);
   assert.doesNotMatch(mainSource, /Left unrestored markdown leaf attached after same-leaf repair attempt/);
   assert.doesNotMatch(mainSource, /private waitForWorkspaceRender\(delayMs: number\): Promise<void>/);
   assert.match(mainSource, /private getLeafViewStatePath\(leaf: WorkspaceLeaf\): string/);
@@ -206,14 +198,6 @@ test('plugin-owned file opens reuse existing tabs or the current unpinned tab wi
   assert.match(helperSource, /if \(this\.isPinnedLeafForDifferentFile\(leaf, file\)\)/);
   assert.doesNotMatch(helperSource, /await this\.ensureMarkdownLeafRendered\(file, openedLeaf, openActive\)/);
   assert.match(helperSource, /openActive\s*\?\s*await this\.commandQueueService\.executeOpenActiveFile\(file, openFile\)\s*:\s*await this\.commandQueueService\.executeOpenInNewContext\(file, 'tab', openFile\)/);
-  assert.doesNotMatch(nativeOpenSource, /plugin\.shouldRerouteDefaultMarkdownOpen\(this, targetFile, args\[1\]\)/);
-  assert.doesNotMatch(nativeOpenSource, /const rerouteDefaultMarkdownOpen =/);
-  assert.doesNotMatch(nativeOpenSource, /plugin\.detachStaleOpenLeavesForFile\(file\)/);
-  assert.doesNotMatch(nativeOpenSource, /plugin\.defaultMarkdownOpenPromises\.get\(file\.path\)/);
-  assert.doesNotMatch(nativeOpenSource, /plugin\.defaultMarkdownOpenPromises\.set\(file\.path, promise\)/);
-  assert.doesNotMatch(nativeOpenSource, /plugin\.defaultMarkdownOpenPromises\.delete\(file\.path\)/);
-  assert.doesNotMatch(nativeOpenSource, /return pending\.then\(\(\) => focusOpenLeaf\(file\)\)/);
-  assert.match(nativeOpenSource, /return originalLeafOpenFile\.apply\(this, args as any\)/);
   assert.doesNotMatch(mainSource, /const previousActiveLeaf = workspace\.activeLeaf \?\? null/);
   assert.doesNotMatch(mainSource, /const previousMostRecentLeaf = typeof workspace\.getMostRecentLeaf === 'function'/);
   assert.doesNotMatch(mainSource, /const sourceLeaf = plugin\.getDefaultOpenSourceLeaf\(previousActiveLeaf, previousMostRecentLeaf, leaf\)/);
@@ -224,15 +208,7 @@ test('plugin-owned file opens reuse existing tabs or the current unpinned tab wi
   assert.doesNotMatch(mainSource, /workspace\.revealLeaf = function/);
   assert.doesNotMatch(mainSource, /logSuppressedOpen\(\s*'workspace\.setActiveLeaf'/);
   assert.doesNotMatch(mainSource, /logSuppressedOpen\(\s*'workspace\.revealLeaf'/);
-  assert.doesNotMatch(nativeSetViewStateSource, /plugin\.app\.vault\.getAbstractFileByPath\(target\)/);
-  assert.doesNotMatch(nativeSetViewStateSource, /plugin\.shouldRerouteDefaultMarkdownOpen\(this, targetFile, viewState\)/);
-  assert.doesNotMatch(nativeSetViewStateSource, /const reroutedViewState = plugin\.withUnpinnedViewState\(viewState\)/);
-  assert.match(nativeSetViewStateSource, /return originalLeafSetViewState\.apply\(this, args as any\)/);
   assert.doesNotMatch(mainSource, /private withUnpinnedViewState\(viewState: unknown\): unknown/);
-  assert.doesNotMatch(nativeOpenSource, /sourceWasPinned/);
-  assert.doesNotMatch(nativeOpenSource, /plugin\.ensureLeafUnpinned\(leaf\)/);
-  assert.doesNotMatch(nativeOpenSource, /plugin\.ensureLeafPinned\(sourceLeaf\)/);
-  assert.doesNotMatch(nativeOpenSource, /originalLeafOpenFile\.call\(sourceLeaf, sourceFile/);
   assert.match(mainSource, /private getLeafViewStatePath\(leaf: WorkspaceLeaf\): string/);
   assert.doesNotMatch(findOpenLeafSource, /const statePath = this\.getLeafViewStatePath\(leaf\)/);
   assert.doesNotMatch(mainSource, /private shouldRerouteDefaultMarkdownOpen/);
@@ -248,8 +224,8 @@ test('plugin-owned file opens reuse existing tabs or the current unpinned tab wi
   assert.match(baseLinkPreviewHandlerSource, /this\.resolveBasesNoteLinkTarget\(target\)/);
   assert.match(baseLinkPreviewHandlerSource, /openBaseLinkInHoverEditor/);
   assert.match(baseLinkPreviewHandlerSource, /this\.basesLinkPreviewArmedUntil = now \+ 900/);
-  assert.match(nativeBaseOpenSource, /private shouldAllowNativeBaseLinkOpen\(file: TFile\): boolean \{\s*void file;\s*return true;\s*\}/);
-  assert.match(nativeBaseOpenSource, /private interceptNativeBaseLinkOpen\(file: TFile, leaf: WorkspaceLeaf\): boolean \{\s*void file;\s*void leaf;\s*return false;\s*\}/);
+  assert.doesNotMatch(mainSource, /private shouldAllowNativeBaseLinkOpen/);
+  assert.doesNotMatch(mainSource, /private interceptNativeBaseLinkOpen/);
 });
 
 test('mobile gesture collapse keeps persistent note header properties visible', () => {

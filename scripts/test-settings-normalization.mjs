@@ -115,6 +115,7 @@ test('obsolete type-profile settings are stripped without removing record or fol
     assert.match(mainSource, new RegExp(`delete record\\.${key};`));
   }
 
+  assert.match(mainSource, /delete record\.enableCanvasOpenGuard;/);
   assert.match(mainSource, /this\.stripLegacySettingsFields\(this\.settings as unknown as Record<string, unknown>\);/);
   assert.match(mainSource, /async saveSettings\(\): Promise<void> \{[\s\S]*this\.stripLegacySettingsFields\(this\.settings as unknown as Record<string, unknown>\);/);
   assert.match(typesSource, /TpsRecordKind = [^;]*'log'[^;]*'run'/);

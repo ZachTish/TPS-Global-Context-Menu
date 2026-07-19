@@ -431,7 +431,6 @@ export interface TPSGlobalContextMenuSettings {
   inlineMenuOnly: boolean;
   nativeMenuPlacement: 'tps-first' | 'tps-last';
   suppressMobileKeyboard: boolean;
-  enableCanvasOpenGuard: boolean;
   enableBasesForcedLinkPreview: boolean;
   collapseHeadingsOnOpen: boolean;
   homeComponents: HomeComponentId[];

@@ -34,7 +34,6 @@
   },
   "dependencies": {
     "chrono-node": "^2.9.1",
-    "monkey-around": "^3.0.0",
     "rrule": "^2.8.1"
   }
 }

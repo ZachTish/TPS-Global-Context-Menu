@@ -576,7 +576,6 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             options?: {
                 revealLeaf?: boolean;
                 active?: boolean;
-                ignoreCanvasDragGuard?: boolean;
                 reuseLeafIfNoExisting?: boolean;
             },
         ) => plugin.openFileInLeaf(file, context, getLeaf, options),

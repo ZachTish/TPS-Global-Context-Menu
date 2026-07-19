@@ -290,7 +290,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   keyboardVisible = false;
   private archiveSweepTimerId: number | null = null;
   private restoreMenuPatch: (() => void) | null = null;
-  private restoreCanvasOpenGuard: (() => void) | null = null;
   private restoreProcessFrontmatterPatch: (() => void) | null = null;
   private nativeProcessFrontmatterDelegate: ((file: TFile, mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>, options?: unknown) => Promise<unknown>) | null = null;
   private basesPreviewPropertiesObserver: MutationObserver | null = null;
@@ -309,22 +308,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private baseLinkHoverEditorLeaf: WorkspaceLeaf | null = null;
   private baseLinkPreviewSourceLeaf: WorkspaceLeaf | null = null;
   private openingBaseLinkHoverEditorPath: string | null = null;
-  private canvasPointerSession:
-    | {
-        pointerId: number;
-        startX: number;
-        startY: number;
-        moved: boolean;
-      }
-    | null = null;
-  private canvasMouseSession:
-    | {
-        startX: number;
-        startY: number;
-        moved: boolean;
-      }
-    | null = null;
-  private recentCanvasDragUntil = 0;
   taskCheckboxHandler: TaskCheckboxHandler;
   private fileExclusionService: AutoFrontmatterExclusionService;
 
@@ -378,20 +361,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     ];
   }
 
-  private isCanvasOrBasesInteractionTarget(target: EventTarget | null): target is HTMLElement {
-    if (!(target instanceof HTMLElement)) return false;
-    return !!target.closest(
-      [
-        '.canvas-wrapper',
-        '.canvas-node',
-        '.canvas-node-content',
-        '.bases-feed-entry',
-        '.bases-calendar-event-content',
-        '.tps-calendar-entry',
-      ].join(', '),
-    );
-  }
-
   registerExternalAction(action: GcmExternalActionRegistration): () => void {
     const id = String(action?.id || '').trim();
     const pluginId = String(action?.pluginId || '').trim();
@@ -436,21 +405,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       route: created ? 'created' : 'reused',
       refreshed: !created,
     });
-  }
-
-  private suppressCanvasActivationEvent(evt: MouseEvent): boolean {
-    if (!this.shouldSuppressOpenForRecentCanvasDrag()) return false;
-    if (!this.isCanvasOrBasesInteractionTarget(evt.target)) return false;
-
-    evt.preventDefault();
-    evt.stopImmediatePropagation();
-    evt.stopPropagation();
-
-    logger.log('[TPS GCM] Suppressed click activation after recent canvas drag', {
-      eventType: evt.type,
-      target: evt.target instanceof HTMLElement ? evt.target.className : null,
-    });
-    return true;
   }
 
   async onload(): Promise<void> {
@@ -575,9 +529,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.recurrenceService.setup();
 
     this.restoreMenuPatch = setupMenuPatch(this);
-    this.restoreCanvasOpenGuard = this.shouldInstallWorkspaceOpenPatch()
-      ? this.installCanvasOpenGuard()
-      : () => {};
 
     this.injectStyles();
     this.hideCompletedCheckboxesService.attach();
@@ -658,89 +609,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.registerDomEvent(document, 'mousedown', (evt: MouseEvent) => {
       if (evt.button !== 2) return;
       this.contextTargetService.recordContextTarget(evt.target);
-    }, { capture: true });
-
-    this.registerDomEvent(document, 'mousedown', (evt: MouseEvent) => {
-      if (evt.button !== 0) return;
-      if (!this.isCanvasOrBasesInteractionTarget(evt.target)) {
-        this.canvasMouseSession = null;
-        return;
-      }
-      this.canvasMouseSession = {
-        startX: evt.clientX,
-        startY: evt.clientY,
-        moved: false,
-      };
-    }, { capture: true });
-
-    this.registerDomEvent(document, 'pointerdown', (evt: PointerEvent) => {
-      if (evt.button !== 0) return;
-      if (!this.isCanvasOrBasesInteractionTarget(evt.target)) {
-        this.canvasPointerSession = null;
-        return;
-      }
-      this.canvasPointerSession = {
-        pointerId: evt.pointerId,
-        startX: evt.clientX,
-        startY: evt.clientY,
-        moved: false,
-      };
-    }, { capture: true });
-
-    this.registerDomEvent(document, 'pointermove', (evt: PointerEvent) => {
-      const session = this.canvasPointerSession;
-      if (!session || session.pointerId !== evt.pointerId) return;
-      const dx = evt.clientX - session.startX;
-      const dy = evt.clientY - session.startY;
-      if (!session.moved && Math.hypot(dx, dy) >= 6) {
-        session.moved = true;
-        this.markRecentCanvasDrag(1500);
-      }
-    }, { capture: true, passive: true });
-
-    this.registerDomEvent(document, 'mousemove', (evt: MouseEvent) => {
-      const session = this.canvasMouseSession;
-      if (!session || (evt.buttons & 1) === 0) return;
-      const dx = evt.clientX - session.startX;
-      const dy = evt.clientY - session.startY;
-      if (!session.moved && Math.hypot(dx, dy) >= 6) {
-        session.moved = true;
-        this.markRecentCanvasDrag(1500);
-      }
-    }, { capture: true, passive: true });
-
-    const finishCanvasPointerSession = (evt: PointerEvent) => {
-      const session = this.canvasPointerSession;
-      if (!session || session.pointerId !== evt.pointerId) return;
-      if (session.moved) {
-        this.markRecentCanvasDrag(1200);
-      }
-      this.canvasPointerSession = null;
-    };
-
-    const finishCanvasMouseSession = () => {
-      const session = this.canvasMouseSession;
-      if (!session) return;
-      if (session.moved) {
-        this.markRecentCanvasDrag(1200);
-      }
-      this.canvasMouseSession = null;
-    };
-
-    this.registerDomEvent(document, 'pointerup', finishCanvasPointerSession, { capture: true, passive: true });
-    this.registerDomEvent(document, 'pointercancel', finishCanvasPointerSession, { capture: true, passive: true });
-    this.registerDomEvent(document, 'mouseup', finishCanvasMouseSession, { capture: true, passive: true });
-    this.registerDomEvent(document, 'dragstart', (evt: DragEvent) => {
-      if (this.isCanvasOrBasesInteractionTarget(evt.target)) {
-        this.markRecentCanvasDrag(1800);
-      }
-    }, { capture: true });
-    this.registerDomEvent(document, 'dragend', (evt: DragEvent) => {
-      if (this.isCanvasOrBasesInteractionTarget(evt.target)) {
-        this.markRecentCanvasDrag(1400);
-      }
-      this.canvasMouseSession = null;
-      this.canvasPointerSession = null;
     }, { capture: true });
 
     this.registerBasesLinkPreviewHandler();
@@ -1046,10 +914,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     return this.settings.enableBasesForcedLinkPreview === true;
   }
 
-  private shouldInstallWorkspaceOpenPatch(): boolean {
-    return true;
-  }
-
   private getActiveBaseLeafRootForTarget(target: HTMLElement | null): HTMLElement | null {
     if (!target) return null;
     const activeFile = this.app.workspace.getActiveFile();
@@ -1098,17 +962,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       return touch ? { x: touch.clientX, y: touch.clientY } : null;
     }
     return { x: evt.clientX, y: evt.clientY };
-  }
-
-  private shouldAllowNativeBaseLinkOpen(file: TFile): boolean {
-    void file;
-    return true;
-  }
-
-  private interceptNativeBaseLinkOpen(file: TFile, leaf: WorkspaceLeaf): boolean {
-    void file;
-    void leaf;
-    return false;
   }
 
   private async openBaseLinkInHoverEditor(file: TFile, anchorEl: HTMLElement): Promise<boolean> {
@@ -1853,10 +1706,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.closeBaseLinkHoverEditor(getPluginById(this.app, 'obsidian-hover-editor') as any);
     this.workspaceRibbonService?.teardown();
     delete (this as any).api;
-    if (this.restoreCanvasOpenGuard) {
-      this.restoreCanvasOpenGuard();
-      this.restoreCanvasOpenGuard = null;
-    }
     if (this.restoreProcessFrontmatterPatch) {
       this.restoreProcessFrontmatterPatch();
       this.restoreProcessFrontmatterPatch = null;
@@ -2319,6 +2168,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     delete record.subtypeTemplateTag;
     delete record.homeCaptureAddHeading;
     delete record.homeCaptureHeading;
+    delete record.enableCanvasOpenGuard;
   }
 
   createDefaultRule(): IconColorRule {
@@ -2492,287 +2342,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   isInMobileStartupGracePeriod(): boolean {
     return Platform.isMobile && Date.now() - this.startupTimestamp < 45_000;
-  }
-
-  private markRecentCanvasDrag(durationMs: number): void {
-    const until = Date.now() + durationMs;
-    if (until > this.recentCanvasDragUntil) {
-      this.recentCanvasDragUntil = until;
-    }
-  }
-
-  private shouldSuppressOpenForRecentCanvasDrag(): boolean {
-    return this.settings.enableCanvasOpenGuard === true && Date.now() < this.recentCanvasDragUntil;
-  }
-
-  private installCanvasOpenGuard(): () => void {
-    const workspace = this.app.workspace as any;
-    const originalOpenLinkText = workspace.openLinkText?.bind(workspace);
-    const originalGetLeaf = workspace.getLeaf?.bind(workspace);
-    const originalGetUnpinnedLeaf = workspace.getUnpinnedLeaf?.bind(workspace);
-    const originalGetRightLeaf = workspace.getRightLeaf?.bind(workspace);
-    const originalGetLeftLeaf = workspace.getLeftLeaf?.bind(workspace);
-    const originalCreateLeafBySplit = workspace.createLeafBySplit?.bind(workspace);
-    const originalCreateLeafInParent = workspace.createLeafInParent?.bind(workspace);
-    const originalSplitActiveLeaf = workspace.splitActiveLeaf?.bind(workspace);
-    const originalDuplicateLeaf = workspace.duplicateLeaf?.bind(workspace);
-    const originalOpenPopoutLeaf = workspace.openPopoutLeaf?.bind(workspace);
-    const originalLeafOpenFile = WorkspaceLeaf.prototype.openFile;
-    const originalLeafOpen = WorkspaceLeaf.prototype.open;
-    const originalLeafSetViewState = WorkspaceLeaf.prototype.setViewState;
-    const plugin = this;
-
-    const logSuppressedOpen = (
-      source:
-        | 'openLinkText'
-        | 'leaf.openFile'
-        | 'leaf.open'
-        | 'leaf.setViewState'
-        | 'workspace.getLeaf'
-        | 'workspace.getUnpinnedLeaf'
-        | 'workspace.getRightLeaf'
-        | 'workspace.getLeftLeaf'
-        | 'workspace.createLeafBySplit'
-        | 'workspace.createLeafInParent'
-        | 'workspace.splitActiveLeaf'
-        | 'workspace.duplicateLeaf'
-        | 'workspace.openPopoutLeaf',
-      target?: string,
-    ) => {
-      logger.log('[TPS GCM] Suppressed file open during recent canvas drag', {
-        source,
-        target,
-      });
-    };
-
-    const fallbackLeaf = (): WorkspaceLeaf | null => {
-      try {
-        const leaf = (typeof originalGetUnpinnedLeaf === 'function' ? originalGetUnpinnedLeaf() : undefined)
-          ?? (typeof workspace.getLeaf === 'function' ? workspace.getLeaf('tab') : undefined)
-          ?? workspace.activeLeaf;
-        return leaf ?? null;
-      } catch {
-        return workspace.activeLeaf ?? (workspace.getLeaf ? workspace.getLeaf('tab') : null) ?? null;
-      }
-    };
-
-    const leafLooksEmpty = (leaf: WorkspaceLeaf): boolean => {
-      try {
-        const viewState = typeof leaf.getViewState === 'function' ? leaf.getViewState() as any : null;
-        const state = viewState?.state;
-        const path = typeof state?.file === 'string'
-          ? state.file
-          : typeof state?.path === 'string'
-            ? state.path
-            : typeof (leaf as any)?.view?.file?.path === 'string'
-              ? (leaf as any).view.file.path
-              : '';
-        return !path;
-      } catch {
-        return !((leaf as any)?.view?.file?.path);
-      }
-    };
-
-    const cleanupSuppressedLeaf = (leaf: WorkspaceLeaf): void => {
-      if (!leaf || leaf === workspace.activeLeaf) return;
-      if (!leafLooksEmpty(leaf)) return;
-      window.setTimeout(() => {
-        try {
-          if (leaf !== workspace.activeLeaf && leafLooksEmpty(leaf)) {
-            logger.log('[TPS GCM] Left suppressed blank leaf attached after recent canvas drag');
-          }
-        } catch (error) {
-          logger.warn('[TPS GCM] Failed to inspect suppressed leaf', error);
-        }
-      }, 0);
-    };
-
-    if (typeof originalGetLeaf === 'function') {
-      workspace.getLeaf = function (...args: any[]) {
-        const target = args[0];
-        if (
-          plugin.shouldSuppressOpenForRecentCanvasDrag()
-          && (target === true || target === 'tab' || target === 'split' || target === 'window')
-        ) {
-          logSuppressedOpen('workspace.getLeaf', String(target));
-          return fallbackLeaf();
-        }
-        return originalGetLeaf(...args);
-      };
-    }
-
-    if (typeof originalGetUnpinnedLeaf === 'function') {
-      workspace.getUnpinnedLeaf = function (...args: any[]) {
-        if (plugin.shouldSuppressOpenForRecentCanvasDrag()) {
-          logSuppressedOpen('workspace.getUnpinnedLeaf', 'tab');
-          try {
-            const fb = fallbackLeaf();
-            if (fb) return fb;
-          } catch (_e) {
-            // ignore and return safe active leaf below
-          }
-          return workspace.activeLeaf ?? (typeof originalGetLeaf === 'function' ? originalGetLeaf('tab') : null);
-        }
-        return originalGetUnpinnedLeaf(...args);
-      };
-    }
-
-    if (typeof originalGetRightLeaf === 'function') {
-      workspace.getRightLeaf = function (...args: any[]) {
-        if (plugin.shouldSuppressOpenForRecentCanvasDrag() && args[0] === true) {
-          logSuppressedOpen('workspace.getRightLeaf', 'split');
-          return fallbackLeaf();
-        }
-        return originalGetRightLeaf(...args);
-      };
-    }
-
-    if (typeof originalGetLeftLeaf === 'function') {
-      workspace.getLeftLeaf = function (...args: any[]) {
-        if (plugin.shouldSuppressOpenForRecentCanvasDrag() && args[0] === true) {
-          logSuppressedOpen('workspace.getLeftLeaf', 'split');
-          return fallbackLeaf();
-        }
-        return originalGetLeftLeaf(...args);
-      };
-    }
-
-    if (typeof originalCreateLeafBySplit === 'function') {
-      workspace.createLeafBySplit = function (...args: any[]) {
-        if (plugin.shouldSuppressOpenForRecentCanvasDrag()) {
-          logSuppressedOpen('workspace.createLeafBySplit', String(args[1] ?? 'split'));
-          return fallbackLeaf();
-        }
-        return originalCreateLeafBySplit(...args);
-      };
-    }
-
-    if (typeof originalCreateLeafInParent === 'function') {
-      workspace.createLeafInParent = function (...args: any[]) {
-        if (plugin.shouldSuppressOpenForRecentCanvasDrag()) {
-          logSuppressedOpen('workspace.createLeafInParent', 'parent');
-          return fallbackLeaf();
-        }
-        return originalCreateLeafInParent(...args);
-      };
-    }
-
-    if (typeof originalSplitActiveLeaf === 'function') {
-      workspace.splitActiveLeaf = function (...args: any[]) {
-        if (plugin.shouldSuppressOpenForRecentCanvasDrag()) {
-          logSuppressedOpen('workspace.splitActiveLeaf', String(args[0] ?? 'split'));
-          return fallbackLeaf();
-        }
-        return originalSplitActiveLeaf(...args);
-      };
-    }
-
-    if (typeof originalDuplicateLeaf === 'function') {
-      workspace.duplicateLeaf = function (...args: any[]) {
-        if (plugin.shouldSuppressOpenForRecentCanvasDrag()) {
-          logSuppressedOpen('workspace.duplicateLeaf', String(args[1] ?? 'duplicate'));
-          return Promise.resolve(fallbackLeaf());
-        }
-        return originalDuplicateLeaf(...args);
-      };
-    }
-
-    if (typeof originalOpenPopoutLeaf === 'function') {
-      workspace.openPopoutLeaf = function (...args: any[]) {
-        if (plugin.shouldSuppressOpenForRecentCanvasDrag()) {
-          logSuppressedOpen('workspace.openPopoutLeaf', 'window');
-          return fallbackLeaf();
-        }
-        return originalOpenPopoutLeaf(...args);
-      };
-    }
-
-    WorkspaceLeaf.prototype.openFile = function (...args: any[]) {
-      const targetFile = args[0] instanceof TFile ? args[0] as TFile : null;
-      const target = targetFile?.path;
-      if (plugin.shouldSuppressOpenForRecentCanvasDrag()) {
-        logSuppressedOpen('leaf.openFile', target);
-        cleanupSuppressedLeaf(this);
-        return Promise.resolve(undefined as any);
-      }
-      if (targetFile && !plugin.shouldAllowNativeBaseLinkOpen(targetFile) && plugin.interceptNativeBaseLinkOpen(targetFile, this)) {
-        return Promise.resolve(undefined as any);
-      }
-      return originalLeafOpenFile.apply(this, args as any);
-    } as typeof WorkspaceLeaf.prototype.openFile;
-
-    WorkspaceLeaf.prototype.open = function (...args: any[]) {
-      if (plugin.shouldSuppressOpenForRecentCanvasDrag()) {
-        logSuppressedOpen('leaf.open', (args[0] as any)?.getViewType?.() ?? 'view');
-        cleanupSuppressedLeaf(this);
-        return Promise.resolve(this.view);
-      }
-      return originalLeafOpen.apply(this, args as any);
-    } as typeof WorkspaceLeaf.prototype.open;
-
-    WorkspaceLeaf.prototype.setViewState = function (...args: any[]) {
-      const viewState = args[0] as any;
-      const target = typeof viewState?.state?.file === 'string'
-        ? viewState.state.file
-        : typeof viewState?.state?.path === 'string'
-          ? viewState.state.path
-          : typeof viewState?.type === 'string'
-            ? viewState.type
-            : undefined;
-      if (plugin.shouldSuppressOpenForRecentCanvasDrag()) {
-        logSuppressedOpen('leaf.setViewState', target);
-        cleanupSuppressedLeaf(this);
-        return Promise.resolve(undefined as any);
-      }
-      return originalLeafSetViewState.apply(this, args as any);
-    } as typeof WorkspaceLeaf.prototype.setViewState;
-
-    if (typeof originalOpenLinkText === 'function') {
-      workspace.openLinkText = function (...args: any[]) {
-        const target = typeof args[0] === 'string' ? args[0] : undefined;
-        if (plugin.shouldSuppressOpenForRecentCanvasDrag()) {
-          logSuppressedOpen('openLinkText', target);
-          return Promise.resolve(undefined);
-        }
-        return originalOpenLinkText(...args);
-      };
-    }
-
-    return () => {
-      WorkspaceLeaf.prototype.openFile = originalLeafOpenFile;
-      WorkspaceLeaf.prototype.open = originalLeafOpen;
-      WorkspaceLeaf.prototype.setViewState = originalLeafSetViewState;
-      if (typeof originalGetLeaf === 'function') {
-        workspace.getLeaf = originalGetLeaf;
-      }
-      if (typeof originalGetUnpinnedLeaf === 'function') {
-        workspace.getUnpinnedLeaf = originalGetUnpinnedLeaf;
-      }
-      if (typeof originalGetRightLeaf === 'function') {
-        workspace.getRightLeaf = originalGetRightLeaf;
-      }
-      if (typeof originalGetLeftLeaf === 'function') {
-        workspace.getLeftLeaf = originalGetLeftLeaf;
-      }
-      if (typeof originalCreateLeafBySplit === 'function') {
-        workspace.createLeafBySplit = originalCreateLeafBySplit;
-      }
-      if (typeof originalCreateLeafInParent === 'function') {
-        workspace.createLeafInParent = originalCreateLeafInParent;
-      }
-      if (typeof originalSplitActiveLeaf === 'function') {
-        workspace.splitActiveLeaf = originalSplitActiveLeaf;
-      }
-      if (typeof originalDuplicateLeaf === 'function') {
-        workspace.duplicateLeaf = originalDuplicateLeaf;
-      }
-      if (typeof originalOpenPopoutLeaf === 'function') {
-        workspace.openPopoutLeaf = originalOpenPopoutLeaf;
-      }
-      if (typeof originalOpenLinkText === 'function') {
-        workspace.openLinkText = originalOpenLinkText;
-      }
-    };
   }
 
   private installProcessFrontmatterPatch(): () => void {
@@ -3016,7 +2585,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     options?: {
       revealLeaf?: boolean;
       active?: boolean;
-      ignoreCanvasDragGuard?: boolean;
       reuseLeafIfNoExisting?: boolean;
     },
   ): Promise<boolean> {
@@ -3027,13 +2595,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       return false;
     }
     file = liveFile;
-    if (!options?.ignoreCanvasDragGuard && this.shouldSuppressOpenForRecentCanvasDrag()) {
-      logger.log('[TPS GCM] Suppressed openFileInLeaf before context creation', {
-        file: file.path,
-        context,
-      });
-      return false;
-    }
 
     const openActive = options?.active ?? true;
     const revealLeaf = options?.revealLeaf !== false;

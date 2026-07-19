@@ -2663,7 +2663,6 @@ export class PanelBuilder {
         // Single parent: open directly
         void this.plugin.openFileInLeaf(parentFiles[0], false, () => this.app.workspace.getLeaf(false), {
           revealLeaf: true,
-          ignoreCanvasDragGuard: true,
         });
       } else {
         // Multiple parents: show menu
@@ -2676,7 +2675,6 @@ export class PanelBuilder {
               .onClick(() => {
                 void this.plugin.openFileInLeaf(parentFile, false, () => this.app.workspace.getLeaf(false), {
                   revealLeaf: true,
-                  ignoreCanvasDragGuard: true,
                 });
               });
           });

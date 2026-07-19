@@ -221,7 +221,6 @@ export class MenuBuilder {
           .onClick(() => {
             void this.plugin.openFileInLeaf(parentFile, false, () => this.app.workspace.getLeaf(false), {
               revealLeaf: true,
-              ignoreCanvasDragGuard: true,
             });
           });
       });
@@ -279,7 +278,6 @@ export class MenuBuilder {
           .onClick(() => {
             void this.plugin.openFileInLeaf(childFile, false, () => this.app.workspace.getLeaf(false), {
               revealLeaf: true,
-              ignoreCanvasDragGuard: true,
             });
           });
       });

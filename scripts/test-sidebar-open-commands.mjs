@@ -39,10 +39,6 @@ test('daily inbox line commands stay searchable and guard missing editor state a
 });
 
 test('default note opens stay native while plugin-owned opens avoid pinned tabs', () => {
-  const nativeOpenSource = mainSource.slice(
-    mainSource.indexOf('WorkspaceLeaf.prototype.openFile = function'),
-    mainSource.indexOf('WorkspaceLeaf.prototype.open = function'),
-  );
   assert.doesNotMatch(mainSource, /recentNotebookNavigatorOpenUntil/);
   assert.doesNotMatch(mainSource, /source: isRecentNotebookNavigatorOpen \? 'notebook-navigator' : 'occupied-leaf'/);
   assert.doesNotMatch(mainSource, /source: 'occupied-leaf'/);
@@ -55,9 +51,8 @@ test('default note opens stay native while plugin-owned opens avoid pinned tabs'
   assert.doesNotMatch(mainSource, /private isMainWorkspaceLeaf\(leaf: WorkspaceLeaf\): boolean/);
   assert.doesNotMatch(mainSource, /defaultOpenCreatedLeaves/);
   assert.doesNotMatch(mainSource, /defaultMarkdownOpenPromises/);
-  assert.doesNotMatch(nativeOpenSource, /plugin\.consumeDefaultOpenCreatedLeaf\(this, targetFile\)/);
-  assert.doesNotMatch(nativeOpenSource, /plugin\.detachUnusedDefaultOpenLeaf\(this\)/);
-  assert.match(nativeOpenSource, /return originalLeafOpenFile\.apply\(this, args as any\)/);
+  assert.doesNotMatch(mainSource, /WorkspaceLeaf\.prototype\.(?:openFile|open|setViewState)\s*=/);
+  assert.doesNotMatch(mainSource, /workspace\.(?:openLinkText|getLeaf|getUnpinnedLeaf|getRightLeaf|getLeftLeaf|createLeafBySplit|createLeafInParent|splitActiveLeaf|duplicateLeaf|openPopoutLeaf)\s*=\s*function/);
   assert.doesNotMatch(mainSource, /shouldOpenMissingDefaultInNewTab/);
 });
 

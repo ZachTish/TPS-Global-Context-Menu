@@ -282,7 +282,6 @@ export class NoteOperationService {
             await this.app.vault.modify(target, updated);
             await this.plugin.openFileInLeaf(target, false, () => this.app.workspace.getLeaf(false), {
                 revealLeaf: true,
-                ignoreCanvasDragGuard: true,
             });
 
             const archiveResult = await this.archiveSourceNotes(convertedSources, new Set([target.path]));
@@ -323,7 +322,6 @@ export class NoteOperationService {
         if (options.openCreated !== false) {
             await this.plugin.openFileInLeaf(createdFiles[0], false, () => this.app.workspace.getLeaf(false), {
                 revealLeaf: true,
-                ignoreCanvasDragGuard: true,
             });
         }
 

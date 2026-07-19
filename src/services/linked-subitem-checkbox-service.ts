@@ -1618,7 +1618,6 @@ export class LinkedSubitemCheckboxService {
     if (!(file instanceof TFile)) return;
     void this.plugin.openFileInLeaf(file, false, () => this.plugin.app.workspace.getLeaf(false), {
       revealLeaf: true,
-      ignoreCanvasDragGuard: true,
     });
   }
 

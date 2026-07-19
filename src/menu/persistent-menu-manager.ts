@@ -3749,7 +3749,6 @@ export class PersistentMenuManager {
         if (latestParents.length === 1) {
           void this.plugin.openFileInLeaf(latestParents[0], false, () => this.plugin.app.workspace.getLeaf(false), {
             revealLeaf: true,
-            ignoreCanvasDragGuard: true,
           });
           return;
         }
@@ -3762,7 +3761,6 @@ export class PersistentMenuManager {
               .onClick(() => {
                 void this.plugin.openFileInLeaf(parentFile, false, () => this.plugin.app.workspace.getLeaf(false), {
                   revealLeaf: true,
-                  ignoreCanvasDragGuard: true,
                 });
               });
           });
