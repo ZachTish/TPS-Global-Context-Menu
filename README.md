@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## Install with BRAT
+
+BRAT 2.2.0 or newer can install and update this private repository from `ZachTish/TPS-Global-Context-Menu`. In BRAT, configure a fine-grained GitHub token that grants this repository `Contents: Read-only`, add that repository path as a beta plugin, and track `Latest` to receive the highest semantic-version release. Store the token only through Obsidian SecretStorage/BRAT settings; never commit it to this repository or the vault.
+
+Release `1.2.1` is BRAT-ready: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
 ## 1.2.1
 
 - Mobile Live Preview and Reading mode now reconcile the note title icon after every delayed and recurring title refresh. If Obsidian mounts or replaces the inline-title node after the first render, GCM recreates exactly one icon in the current title instead of retaining a disconnected element. Mobile-style inline titles outside the usual mode container are supported, while strict Source mode and the `Inline persistent UI` master switch still suppress the icon as configured.
