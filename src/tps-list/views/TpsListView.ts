@@ -49,6 +49,12 @@ import {
   readInlineTags,
   removeInlineTagFromTaskLine,
 } from '../../utils/task-line-metadata';
+import {
+  getSourceNoteGroupValue,
+  getTpsBaseGroupLaneId,
+  isSourceNoteGroupProperty,
+  resolveTpsBaseGroupDescriptor,
+} from '../../views/base-row-grouping';
 
 export const TPS_LIST_VIEW_TYPE = 'tps-list';
 
@@ -64,6 +70,7 @@ type TaskRenderItem = {
   file: TFile;
   task: OpenTaskSubitem;
   laneId: string;
+  laneLabel?: string;
 };
 
 type TpsListRowItem =
@@ -2164,19 +2171,16 @@ export class TpsListView extends BasesView {
   }
 
   /**
-   * Returns the raw frontmatter key name for the view's groupBy property.
-   *
-   * The .base file stores groupBy.property as either a plain name ("status")
-   * or a BasesPropertyId ("note.status"). Only 'note' (user/frontmatter) props
-   * support write-back; 'file' and 'formula' props are read-only.
-   *
-   * Falls back to scanning allProperties vs. entry values if config is opaque.
+   * Returns the grouping property used by synthesized TPS List rows.
+   * Plain and `note.*` properties keep their legacy writable inline-field
+   * behavior; source-note properties retain their full read-only property ID.
    */
   private getGroupByPropName(): string | null {
     // Primary: read from the internal config (works when Bases exposes groupBy)
-    const raw = (this.config as any)?.groupBy?.property as string | undefined;
+    const raw = resolveTpsBaseGroupDescriptor(this.getConfigValue('groupBy'))?.property;
     if (raw) {
       if (raw.toLowerCase() === 'file.tags') return 'tags';
+      if (isSourceNoteGroupProperty(raw)) return raw;
       const dot = raw.indexOf('.');
       if (dot === -1) return raw;                    // plain "status"
       const prefix = raw.slice(0, dot);
@@ -2200,6 +2204,7 @@ export class TpsListView extends BasesView {
           const dot = propId.indexOf('.');
           const prefix = dot !== -1 ? propId.slice(0, dot) : '';
           if (propId.toLowerCase() === 'file.tags') return 'tags';
+          if (isSourceNoteGroupProperty(propId)) return propId;
           if (prefix === 'file' || prefix === 'formula') return null;
           return dot !== -1 ? propId.slice(dot + 1) : propId;
         }
@@ -2212,7 +2217,7 @@ export class TpsListView extends BasesView {
   private getGroupByPropId(propName: string | null): string | null {
     if (!propName) return null;
 
-    const raw = (this.config as any)?.groupBy?.property as string | undefined;
+    const raw = resolveTpsBaseGroupDescriptor(this.getConfigValue('groupBy'))?.property;
     if (raw) {
       if (raw.includes('.')) return raw;
       return `note.${raw}`;
@@ -2253,14 +2258,14 @@ export class TpsListView extends BasesView {
   }
 
   private getSourceGroupsForRender(propId: string | null, listGrouping: boolean): BasesEntryGroup[] {
-    const nativeGroups: BasesEntryGroup[] = (listGrouping && propId)
+    const rawNativeGroups: BasesEntryGroup[] = (listGrouping && propId)
       ? this.buildMultiValueGroups(propId)
       : (this.data?.groupedData ?? []);
+    const nativeGroups = rawNativeGroups.filter((group) => Array.isArray(group?.entries));
 
     const groupedEntries = nativeGroups.flatMap((group) => group.entries ?? []);
     const nativeEntries: BasesEntry[] = groupedEntries.length ? groupedEntries : (this.data?.data ?? []);
     const fallbackEntries = this.getFallbackNoteEntriesFromBaseFilters();
-    if (!fallbackEntries.length && this.groupsContainEntries(nativeGroups)) return nativeGroups;
 
     const entriesByPath = new Map<string, BasesEntry>();
     for (const entry of nativeEntries) {
@@ -2269,6 +2274,12 @@ export class TpsListView extends BasesView {
     for (const entry of fallbackEntries) {
       if (entry?.file?.path && !entriesByPath.has(entry.file.path)) entriesByPath.set(entry.file.path, entry);
     }
+    if (propId && isSourceNoteGroupProperty(propId)) {
+      return entriesByPath.size
+        ? this.groupEntriesBySourceNote(Array.from(entriesByPath.values()), propId)
+        : nativeGroups;
+    }
+    if (!fallbackEntries.length && this.groupsContainEntries(nativeGroups)) return nativeGroups;
     if (entriesByPath.size) {
       return this.includeNativeEmptyGroups(
         this.groupEntriesByProperty(Array.from(entriesByPath.values()), propId),
@@ -2279,7 +2290,7 @@ export class TpsListView extends BasesView {
   }
 
   private groupsContainEntries(groups: BasesEntryGroup[]): boolean {
-    return groups.some((group) => group.entries.length > 0);
+    return groups.some((group) => (group.entries ?? []).length > 0);
   }
 
   private includeNativeEmptyGroups(groups: BasesEntryGroup[], nativeGroups: BasesEntryGroup[]): BasesEntryGroup[] {
@@ -2321,6 +2332,8 @@ export class TpsListView extends BasesView {
 
   private getFallbackNoteValue(file: TFile, propId: string): unknown {
     const raw = String(propId || '').trim();
+    const sourceNoteValue = getSourceNoteGroupValue(file, raw);
+    if (sourceNoteValue !== undefined) return sourceNoteValue;
     const lower = raw.toLowerCase();
     if (lower === 'file.name' || lower === 'name') return file.name;
     if (lower === 'file.basename' || lower === 'basename' || lower === 'title') return file.basename;
@@ -2524,12 +2537,24 @@ export class TpsListView extends BasesView {
       } as unknown as BasesEntryGroup];
     }
 
+    return this.groupEntriesByValue(entries, (entry) => entry.getValue(propId as any));
+  }
+
+  private groupEntriesBySourceNote(entries: BasesEntry[], propId: string): BasesEntryGroup[] {
+    return this.groupEntriesByValue(entries, (entry) => getSourceNoteGroupValue(entry.file, propId));
+  }
+
+  private groupEntriesByValue(
+    entries: BasesEntry[],
+    getValue: (entry: BasesEntry) => unknown,
+  ): BasesEntryGroup[] {
+
     const byKey = new Map<string, BasesEntry[]>();
     const keyLabel = new Map<string, string>();
     const ungrouped: BasesEntry[] = [];
 
     for (const entry of entries) {
-      const values = this.extractGroupValues(entry.getValue(propId as any));
+      const values = this.extractGroupValues(getValue(entry));
       if (!values.length) {
         ungrouped.push(entry);
         continue;
@@ -3079,9 +3104,18 @@ export class TpsListView extends BasesView {
       for (const task of this.getAllLineItemsForFile(file, taskFilter)) {
         if (!this.taskMatchesRootFilter(task, taskFilter, file)) continue;
         if (!this.taskMatchesSearchQuery(file, task, searchQuery)) continue;
-        for (const laneId of this.getTaskLaneIds(task, propName)) {
+        for (const laneId of this.getTaskLaneIds(task, propName, file)) {
           const laneTasks = tasksByLane.get(laneId) ?? [];
-          laneTasks.push({ file, task, laneId });
+          const propId = this.getGroupByPropId(propName) ?? propName;
+          const sourceLabel = isSourceNoteGroupProperty(propId)
+            ? getSourceNoteGroupValue(file, propId)
+            : undefined;
+          laneTasks.push({
+            file,
+            task,
+            laneId,
+            ...(sourceLabel ? { laneLabel: sourceLabel } : {}),
+          });
           tasksByLane.set(laneId, laneTasks);
         }
       }
@@ -3841,7 +3875,16 @@ export class TpsListView extends BasesView {
     return actual === expected || (includeDescendants && actual.startsWith(`${expected}/`));
   }
 
-  private getTaskLaneIds(task: OpenTaskSubitem, propName: string | null): string[] {
+  private getTaskLaneIds(
+    task: OpenTaskSubitem,
+    propName: string | null,
+    file: TFile | null = null,
+  ): string[] {
+    const propId = this.getGroupByPropId(propName) ?? propName;
+    if (isSourceNoteGroupProperty(propId)) {
+      const sourceNoteValue = getSourceNoteGroupValue(file, propId);
+      return [getTpsBaseGroupLaneId(sourceNoteValue)];
+    }
     const normalized = this.normalizeInlinePropertyKey(this.getTaskInlinePropertyName(propName));
     if (this.isStatusPropertyName(propName)) {
       if (task.itemKind !== 'task') return ['ungrouped'];
@@ -4179,7 +4222,7 @@ export class TpsListView extends BasesView {
     const laneEl = targetEl.closest('.tps-kanban-lane') as HTMLElement | null;
     if (!laneEl) return;
     const propName = this.getGroupByPropName();
-    if (!propName) return;
+    if (!this.isWritableTaskGroupingProperty(propName)) return;
     const displayLaneId = laneEl.dataset.displayLaneId || '';
     const displayLane = displayLaneId ? this.getCurrentDisplayLaneById(displayLaneId) : null;
     if (!displayLane) return;
@@ -4210,6 +4253,7 @@ export class TpsListView extends BasesView {
   ): void {
     if (event.button !== 0) return;
     if (task.itemKind === 'heading') return;
+    if (!this.isWritableTaskGroupingProperty(propName)) return;
     this.activeTaskPointerDrag = {
       pointerId: event.pointerId,
       itemKind: task.itemKind || 'task',
@@ -4278,7 +4322,7 @@ export class TpsListView extends BasesView {
       ? this.getCurrentDisplayLaneById(displayLaneId)
       : null;
     if (!targetDisplayLane || targetDisplayLane.id === active.displayLane.id) return;
-    if (!active.propName) return;
+    if (!this.isWritableTaskGroupingProperty(active.propName)) return;
 
     const taskFile = this.app.vault.getFileByPath(active.path);
     if (!taskFile) return;
@@ -4761,7 +4805,8 @@ export class TpsListView extends BasesView {
     const nextGroups = [...groups];
     for (const laneId of taskRenderItemsByLane.keys()) {
       if (existingLaneIds.has(laneId)) continue;
-      const synthetic = this.createSyntheticGroupFromLaneId(laneId);
+      const laneLabel = taskRenderItemsByLane.get(laneId)?.[0]?.laneLabel;
+      const synthetic = this.createSyntheticGroupFromLaneId(laneId, laneLabel);
       if (!synthetic) continue;
       nextGroups.push(synthetic);
       existingLaneIds.add(laneId);
@@ -4769,9 +4814,9 @@ export class TpsListView extends BasesView {
     return this.applyManualLaneOrder(nextGroups);
   }
 
-  private createSyntheticGroupFromLaneId(laneId: string): BasesEntryGroup | null {
+  private createSyntheticGroupFromLaneId(laneId: string, laneLabel?: string): BasesEntryGroup | null {
     if (laneId === 'ungrouped') return this.createSyntheticGroup(null);
-    if (laneId.startsWith('key:')) return this.createSyntheticGroup(laneId.slice(4));
+    if (laneId.startsWith('key:')) return this.createSyntheticGroup(laneLabel || laneId.slice(4));
     return null;
   }
 
@@ -5628,9 +5673,7 @@ export class TpsListView extends BasesView {
 
   private getLaneId(group: BasesEntryGroup): string {
     if (!group.hasKey() || group.key == null) return 'ungrouped';
-    const key = String(group.key).trim().toLowerCase();
-    if (!key || key === 'null' || key === 'undefined') return 'ungrouped';
-    return `key:${key}`;
+    return getTpsBaseGroupLaneId(group.key);
   }
 
   private mergeGroupsByLaneId(groups: BasesEntryGroup[]): BasesEntryGroup[] {
@@ -6571,9 +6614,22 @@ export class TpsListView extends BasesView {
       ? this.formatCardPropertyValue(cleanLabel) || cleanLabel
       : 'No value';
     if (!propName) return formattedLabel;
-    const property = this.getFrontmatterPropNameFromId(propName) ?? propName;
+    const propId = this.getGroupByPropId(propName) ?? propName;
+    const displayName = String((this.config as any)?.getDisplayName?.(propId) ?? '').trim();
+    const property = displayName || (isSourceNoteGroupProperty(propId)
+      ? 'Note'
+      : this.getFrontmatterPropNameFromId(propName) ?? propName);
     const cleanProperty = String(property || '').replace(/^note\./, '').trim();
     return [cleanProperty, formattedLabel].filter(Boolean).join(' ');
+  }
+
+  private isWritableTaskGroupingProperty(propName: string | null): propName is string {
+    if (!propName) return false;
+    const propId = this.getGroupByPropId(propName) ?? propName;
+    const normalized = String(propId || '').trim().toLowerCase();
+    return !isSourceNoteGroupProperty(propId)
+      && !normalized.startsWith('file.')
+      && !normalized.startsWith('formula.');
   }
 
   private getSortedListRows(noteItems: LaneRenderItem[], taskItems: TaskRenderItem[]): TpsListDisplayRow[] {

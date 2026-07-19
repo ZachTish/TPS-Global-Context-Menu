@@ -23,6 +23,14 @@ import { getOrderedSelectionRange, toggleOrderedSelection } from '../utils/order
 import { hashSelectionIdentity } from '../utils/selection-identity';
 import { requestLineItemDelete } from '../services/line-item-delete-service';
 import { normalizeTagValue } from '../utils/tag-utils';
+import {
+  getSourceNoteGroupValue,
+  groupTpsBaseRows,
+  isSourceNoteGroupProperty,
+  resolveTpsBaseGroupDescriptor,
+  type TpsBaseGroupDescriptor,
+  type TpsBaseRowGroup,
+} from './base-row-grouping';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
 
@@ -293,9 +301,14 @@ export class TpsTableView extends BasesView {
     }
 
     const columns = this.getColumns(entries);
+    const groupBy = resolveTpsBaseGroupDescriptor(this.getConfigValue('groupBy'));
+    const entryGroups = groupBy
+      ? groupTpsBaseRows(entries, (entry) => this.getEntryValue(entry, groupBy.property), groupBy.direction)
+      : [{ key: null, rows: entries }];
+    const renderedEntries = entryGroups.flatMap((group) => group.rows);
     const totalsPosition = normalizeTotalsRowPosition(this.getConfigValue('totalsRow'));
     this.renderedResultCount = entries.length;
-    this.renderedEntryOrder = entries.map((entry) => entry.selectionId);
+    this.renderedEntryOrder = renderedEntries.map((entry) => entry.selectionId);
     const visibleEntryIds = new Set(this.renderedEntryOrder);
     this.selectedEntryIds = new Set([...this.selectedEntryIds].filter((id) => visibleEntryIds.has(id)));
     if (this.selectionAnchorId && !visibleEntryIds.has(this.selectionAnchorId)) this.selectionAnchorId = null;
@@ -342,12 +355,17 @@ export class TpsTableView extends BasesView {
     const tbody = table.createEl('tbody', { cls: 'tps-log-base-body' });
     let totaledColumns = 0;
     if (totalsPosition === 'top') totaledColumns = this.renderTotalsRow(tbody, entries, columns, totalsPosition);
-    for (const entry of entries) this.renderEntry(tbody, entry, columns);
+    for (const group of entryGroups) {
+      if (groupBy) this.renderGroupRow(tbody, groupBy, group, columns);
+      for (const entry of group.rows) this.renderEntry(tbody, entry, columns);
+    }
     if (totalsPosition === 'bottom') totaledColumns = this.renderTotalsRow(tbody, entries, columns, totalsPosition);
 
     logger.flow('TpsTableView', 'render:done', {
       entries: entries.length,
       columns: columns.length,
+      groupBy: groupBy?.property ?? null,
+      groups: groupBy ? entryGroups.length : 0,
       totalsPosition,
       totaledColumns,
       durationMs: Math.round(performance.now() - start),
@@ -915,6 +933,43 @@ export class TpsTableView extends BasesView {
     }
   }
 
+  private renderGroupRow(
+    parent: HTMLElement,
+    descriptor: TpsBaseGroupDescriptor,
+    group: TpsBaseRowGroup<LogLineEntry>,
+    columns: LogTableColumn[],
+  ): void {
+    const label = this.formatGroupLabel(descriptor.property, group.key);
+    const row = parent.createEl('tr', {
+      cls: 'bases-table-row tps-log-base-group-row',
+      attr: {
+        'data-group-property': descriptor.property,
+        'aria-label': label,
+      },
+    });
+    const cell = row.createEl('th', {
+      cls: 'bases-table-cell tps-log-base-cell tps-log-base-cell--group',
+      attr: {
+        colspan: String(Math.max(1, columns.length)),
+        scope: 'rowgroup',
+      },
+    });
+    const content = cell.createDiv({ cls: 'tps-log-base-group-content' });
+    content.createSpan({ cls: 'tps-log-base-group-label', text: label });
+    content.createSpan({
+      cls: 'tps-log-base-group-count',
+      text: `${group.rows.length} ${group.rows.length === 1 ? 'row' : 'rows'}`,
+    });
+  }
+
+  private formatGroupLabel(property: string, value: string | null): string {
+    const displayName = String((this.config as any)?.getDisplayName?.(property) ?? '').trim();
+    const fallback = isSourceNoteGroupProperty(property)
+      ? 'Note'
+      : property.replace(/^note\./iu, '').replace(/[._-]+/gu, ' ').trim();
+    return `${displayName || fallback || 'Group'} ${value || 'No value'}`;
+  }
+
   private handleEntryClick(evt: MouseEvent, entry: LogLineEntry): void {
     if (evt.defaultPrevented) return;
     if (evt.shiftKey) {
@@ -1068,6 +1123,8 @@ export class TpsTableView extends BasesView {
   }
 
   private getEntryValue(entry: LogLineEntry, key: string): string {
+    const sourceNoteValue = getSourceNoteGroupValue(entry.file, key);
+    if (sourceNoteValue !== undefined) return sourceNoteValue ?? '';
     const normalized = normalizeInlineKey(key);
     if (normalized === 'line' || normalized === 'title') return entry.title;
     if (this.isFileLinkColumn(key)) return entry.file.basename;

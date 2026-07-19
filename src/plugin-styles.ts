@@ -395,6 +395,29 @@ export const PLUGIN_STYLES = `
         box-shadow: inset 0 1px color-mix(in srgb, var(--interactive-accent) 35%, var(--background-modifier-border));
       }
 
+      .tps-log-base-group-row .tps-log-base-cell--group {
+        background: color-mix(in srgb, var(--background-secondary) 88%, var(--background-primary));
+        color: var(--text-normal);
+        border-right: 0;
+        padding-block: 7px;
+        font-weight: 700;
+        text-align: left;
+      }
+
+      .tps-log-base-group-content {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .tps-log-base-group-count {
+        flex: 0 0 auto;
+        color: var(--text-muted);
+        font-size: var(--font-ui-smaller);
+        font-weight: 500;
+      }
+
       .tps-log-base-cell--total-label {
         color: var(--text-muted) !important;
         text-align: left !important;

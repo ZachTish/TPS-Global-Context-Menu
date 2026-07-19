@@ -133,6 +133,50 @@ async function loadLogLineUtils() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
+async function loadBaseRowGrouping() {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/views/base-row-grouping.ts', import.meta.url))],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
+async function loadTpsListViewHarness() {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/tps-list/views/TpsListView.ts', import.meta.url))],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+    plugins: [{
+      name: 'obsidian-stub',
+      setup(builder) {
+        builder.onResolve({ filter: /^obsidian$/ }, () => ({
+          path: 'obsidian',
+          namespace: 'tps-list-test',
+        }));
+        builder.onLoad({ filter: /.*/, namespace: 'tps-list-test' }, () => ({
+          contents: `
+            class Dummy {}
+            const api = new Proxy(
+              { BasesView: Dummy, Modal: Dummy, TFile: Dummy },
+              { get(target, key) { return key in target ? target[key] : Dummy; } },
+            );
+            module.exports = api;
+          `,
+          loader: 'js',
+        }));
+      },
+    }],
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
 test('GCM is the sole TPS List source and runtime owner', () => {
   assert.match(bridgeSource, /new TpsListView/);
   assert.match(viewSource, /export class TpsListView extends BasesView/);
@@ -391,6 +435,135 @@ test('TPS List and TPS Table row menus expose built-in tag actions', async () =>
   assert.equal(addLogLineTag('#alpha', 'QA/Base'), '#alpha, #qa/base');
   assert.equal(removeLogLineTag('#alpha, #qa/base', '#alpha'), '#qa/base');
   assert.equal(removeLogLineTag('#alpha', 'alpha'), null);
+});
+
+test('TPS List and TPS Table group synthesized rows by their containing source note', async () => {
+  const {
+    getSourceNoteGroupValue,
+    getTpsBaseGroupLaneId,
+    groupTpsBaseRows,
+    isSourceNoteGroupProperty,
+    resolveTpsBaseGroupDescriptor,
+  } = await loadBaseRowGrouping();
+  const alpha = {
+    path: 'Projects/Alpha.md',
+    name: 'Alpha.md',
+    basename: 'Alpha',
+    extension: 'md',
+    parent: { path: 'Projects' },
+  };
+  const duplicateAlpha = {
+    path: 'Archive/Alpha.md',
+    name: 'Alpha.md',
+    basename: 'Alpha',
+    extension: 'md',
+    parent: { path: 'Archive' },
+  };
+  const beta = {
+    path: 'Projects/Beta.md',
+    name: 'Beta.md',
+    basename: 'Beta',
+    extension: 'md',
+    parent: { path: 'Projects' },
+  };
+
+  assert.deepEqual(resolveTpsBaseGroupDescriptor({ property: 'file.path', direction: 'DESC' }), {
+    property: 'file.path',
+    direction: 'desc',
+  });
+  assert.equal(isSourceNoteGroupProperty('file.name'), true);
+  assert.equal(isSourceNoteGroupProperty('task.path'), true);
+  assert.equal(isSourceNoteGroupProperty('file.tags'), false);
+  assert.equal(getSourceNoteGroupValue(alpha, 'file.name'), 'Alpha.md');
+  assert.equal(getSourceNoteGroupValue(alpha, 'file.basename'), 'Alpha');
+  assert.equal(getSourceNoteGroupValue(alpha, 'file.path'), 'Projects/Alpha.md');
+  assert.equal(getSourceNoteGroupValue(alpha, 'task.file.path'), 'Projects/Alpha.md');
+  assert.equal(getSourceNoteGroupValue(alpha, 'file.folder'), 'Projects');
+  assert.equal(getTpsBaseGroupLaneId('Projects/Alpha.md'), 'key:projects/alpha.md');
+  assert.equal(getTpsBaseGroupLaneId('projects/alpha.md'), 'key:projects/alpha.md');
+  assert.equal(getTpsBaseGroupLaneId(null), 'ungrouped');
+
+  const rows = [alpha, duplicateAlpha, beta];
+  const nameGroups = groupTpsBaseRows(rows, (row) => getSourceNoteGroupValue(row, 'file.name'), 'asc');
+  assert.deepEqual(nameGroups.map((group) => [group.key, group.rows.length]), [
+    ['Alpha.md', 2],
+    ['Beta.md', 1],
+  ]);
+  const pathGroups = groupTpsBaseRows(rows, (row) => getSourceNoteGroupValue(row, 'file.path'), 'desc');
+  assert.deepEqual(pathGroups.map((group) => group.key), [
+    'Projects/Beta.md',
+    'Projects/Alpha.md',
+    'Archive/Alpha.md',
+  ]);
+
+  assert.match(viewSource, /if \(isSourceNoteGroupProperty\(raw\)\) return raw/);
+  assert.match(viewSource, /this\.getTaskLaneIds\(task, propName, file\)/);
+  assert.match(viewSource, /getSourceNoteGroupValue\(file, propId\)/);
+  assert.match(viewSource, /return \[getTpsBaseGroupLaneId\(sourceNoteValue\)\]/);
+  assert.match(viewSource, /if \(!this\.isWritableTaskGroupingProperty\(propName\)\) return/);
+  assert.match(logBaseSource, /resolveTpsBaseGroupDescriptor\(this\.getConfigValue\('groupBy'\)\)/);
+  assert.match(logBaseSource, /groupTpsBaseRows\(entries/);
+  assert.match(logBaseSource, /tps-log-base-group-row/);
+  assert.match(logBaseSource, /scope: 'rowgroup'/);
+  assert.match(logBaseSource, /this\.renderedEntryOrder = renderedEntries\.map/);
+  assert.doesNotMatch(logBaseSource, /tps-log-base-row tps-log-base-row--group/);
+});
+
+test('task-only source-note grouping keeps synthesized tasks reachable by canonical lane ID', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  view.config = {
+    get: (key) => key === 'groupBy' ? { property: 'file.path', direction: 'ASC' } : undefined,
+  };
+  view.applyManualLaneOrder = (groups) => groups;
+
+  const file = {
+    path: 'Inbox/QA Task Sink.md',
+    name: 'QA Task Sink.md',
+    basename: 'QA Task Sink',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+  };
+  const task = {
+    itemKind: 'task',
+    line: 1,
+    text: 'QA task',
+    checkboxState: '[ ]',
+  };
+  const duplicateFile = {
+    ...file,
+    path: 'Archive/QA Task Sink.md',
+    parent: { path: 'Archive' },
+  };
+
+  assert.equal(view.getGroupByPropName(), 'file.path');
+  assert.equal(view.getGroupByPropId('file.path'), 'file.path');
+  const taskLaneIds = view.getTaskLaneIds(task, 'file.path', file);
+  const tasksByLane = new Map(taskLaneIds.map((laneId) => [
+    laneId,
+    [{ file, task, laneId, laneLabel: file.path }],
+  ]));
+  const groups = view.ensureGroupsForTaskLanes([], tasksByLane);
+  const visibleTasks = groups.flatMap((group) => tasksByLane.get(view.getLaneId(group)) ?? []);
+
+  assert.deepEqual(taskLaneIds, ['key:inbox/qa task sink.md']);
+  assert.deepEqual(groups.map((group) => view.getLaneId(group)), ['key:inbox/qa task sink.md']);
+  assert.equal(groups[0].key, 'Inbox/QA Task Sink.md');
+  assert.equal(visibleTasks.length, 1);
+
+  const nativeEntries = [file, duplicateFile].map((sourceFile) => ({
+    file: sourceFile,
+    getValue: () => 'native value that must not own source grouping',
+  }));
+  const filenameGroups = view.groupEntriesBySourceNote(nativeEntries, 'file.name');
+  const pathGroups = view.groupEntriesBySourceNote(nativeEntries, 'file.path');
+  assert.deepEqual(filenameGroups.map((group) => [group.key, group.entries.length]), [
+    ['QA Task Sink.md', 2],
+  ]);
+  assert.deepEqual(pathGroups.map((group) => group.key), [
+    'Inbox/QA Task Sink.md',
+    'Archive/QA Task Sink.md',
+  ]);
 });
 
 test('bullet source-note resolution prefers explicit record paths and ignores dailyNotePath', async () => {

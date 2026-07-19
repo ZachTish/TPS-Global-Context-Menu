@@ -547,7 +547,7 @@ test('TPS Table supports persistent Shift-click range selection without opening 
   assert.match(logBaseViewSource, /private selectedEntryIds = new Set<string>\(\)/);
   assert.match(logBaseViewSource, /private selectionAnchorId: string \| null = null/);
   assert.match(logBaseViewSource, /private renderedEntryOrder: string\[\] = \[\]/);
-  assert.match(logBaseViewSource, /this\.renderedEntryOrder = entries\.map\(\(entry\) => entry\.selectionId\)/);
+  assert.match(logBaseViewSource, /this\.renderedEntryOrder = renderedEntries\.map\(\(entry\) => entry\.selectionId\)/);
   assert.match(logBaseViewSource, /function getLogEntrySelectionId\(/);
   assert.match(logBaseViewSource, /getLogEntryStableIdentity\(\{ fields \}\)/);
   assert.match(logBaseViewSource, /hashSelectionIdentity\(line\)/);
