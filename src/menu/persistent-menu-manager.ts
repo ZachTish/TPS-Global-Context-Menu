@@ -1238,12 +1238,16 @@ export class PersistentMenuManager {
   private resolveInlineTitleElement(view: MarkdownView): HTMLElement | null {
     const contentRoot = view.contentEl;
     if (!contentRoot) return null;
+    const scopedInlineTitle = () => (
+      contentRoot.querySelector<HTMLElement>(':scope > .inline-title')
+      || contentRoot.querySelector<HTMLElement>('.inline-title')
+    );
 
     const mode = getViewMode(view);
     if (!mode) return null;
     if (mode === 'preview') {
       const previewView = contentRoot.querySelector<HTMLElement>('.markdown-preview-view');
-      if (!previewView) return null;
+      if (!previewView) return scopedInlineTitle();
       const previewSizer =
         previewView.querySelector<HTMLElement>('.markdown-preview-sizer') ||
         previewView;
@@ -1251,6 +1255,9 @@ export class PersistentMenuManager {
         previewSizer.querySelector<HTMLElement>(':scope > .inline-title') ||
         previewSizer.querySelector<HTMLElement>('.inline-title');
       if (inlineTitle) return inlineTitle;
+
+      const mobileInlineTitle = scopedInlineTitle();
+      if (mobileInlineTitle) return mobileInlineTitle;
 
       // Fallback when inline title is disabled: use the first heading as visual title.
       return (
@@ -1261,7 +1268,7 @@ export class PersistentMenuManager {
 
     if (mode === 'source') {
       const sourceView = contentRoot.querySelector<HTMLElement>('.markdown-source-view');
-      if (!sourceView) return null;
+      if (!sourceView) return scopedInlineTitle();
 
       const inlineTitleInSourceView =
         sourceView.querySelector<HTMLElement>('.inline-title') ||
@@ -1288,7 +1295,7 @@ export class PersistentMenuManager {
       const containerEl = (view as any)?.containerEl as HTMLElement | undefined;
       const fallbackInlineTitle =
         containerEl?.querySelector<HTMLElement>('.inline-title') ||
-        contentRoot.querySelector<HTMLElement>('.inline-title');
+        scopedInlineTitle();
       return fallbackInlineTitle || null;
     }
 
@@ -1406,6 +1413,10 @@ export class PersistentMenuManager {
   }
 
   private ensureInlineTitleIcon(view: MarkdownView): void {
+    if (!this.plugin.settings.enableInlinePersistentMenus) {
+      this.removeInlineTitleIcon(view);
+      return;
+    }
     const file = view.file;
     if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') {
       this.removeInlineTitleIcon(view);
@@ -1422,6 +1433,7 @@ export class PersistentMenuManager {
       this.removeInlineTitleIcon(view);
       return;
     }
+    if (document.activeElement instanceof HTMLElement && titleEl.contains(document.activeElement)) return;
 
     const cache = this.plugin.app.metadataCache.getFileCache(file);
     const frontmatter = (cache?.frontmatter || {}) as Record<string, any>;

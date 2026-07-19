@@ -45,6 +45,7 @@ import { getLinkedSubitemCompleteMarkers, mapSubitemCheckboxStateToStatus, norma
 import * as logger from '../logger';
 import { KeyboardAwareOverlay } from '../utils/mobile-overlay';
 import { getOrderedSelectionRange } from '../utils/ordered-selection';
+import { matchTaskHighlightMetadata } from '../utils/task-highlight-metadata';
 import {
   inspectLineItemDeleteTarget,
   performLineItemDelete,
@@ -1023,16 +1024,18 @@ export class TaskLineContextMenuService {
   }
 
   private highlightHostMatchesContext(host: HTMLElement, context: TaskLineContext): boolean {
-    const taskPath = host.dataset.taskPath || host.dataset.tpsKanbanPath;
-    if (taskPath && taskPath !== context.file.path) return false;
-    const taskLine = Number(host.getAttribute('data-task-line') || host.getAttribute('data-tps-kanban-line'));
-    if (Number.isFinite(taskLine)) {
-      const normalized = Math.floor(taskLine);
-      if (normalized === context.lineNumber || normalized === context.lineIndex) return true;
-    }
-
-    const dataLine = Number(host.getAttribute('data-line'));
-    if (Number.isFinite(dataLine) && Math.floor(dataLine) === context.lineIndex) return true;
+    const metadataMatch = matchTaskHighlightMetadata({
+      taskPath: host.dataset.taskPath,
+      tpsKanbanPath: host.dataset.tpsKanbanPath,
+      taskLine: host.getAttribute('data-task-line'),
+      tpsKanbanLine: host.getAttribute('data-tps-kanban-line'),
+      dataLine: host.getAttribute('data-line'),
+    }, {
+      filePath: context.file.path,
+      lineNumber: context.lineNumber,
+      lineIndex: context.lineIndex,
+    });
+    if (metadataMatch != null) return metadataMatch;
 
     const view = this.resolveMarkdownViewForElement(host);
     if (view?.file?.path === context.file.path) {
@@ -1075,19 +1078,13 @@ export class TaskLineContextMenuService {
       `li.task-list-item[data-line="${context.lineIndex}"]`,
       `.task-list-item[data-line="${context.lineIndex}"]`,
       `.tps-calendar-task-entry[data-task-path][data-task-line="${context.lineNumber}"]`,
-      `.tps-calendar-task-entry[data-task-path][data-task-line="${context.lineIndex}"]`,
       `.tps-kanban-card-task[data-task-path][data-task-line="${context.lineNumber}"]`,
-      `.tps-kanban-card-task[data-task-path][data-task-line="${context.lineIndex}"]`,
       `.tps-kanban-task-card[data-task-path][data-task-line="${context.lineNumber}"]`,
-      `.tps-kanban-task-card[data-task-path][data-task-line="${context.lineIndex}"]`,
       `[data-tps-gcm-context="calendar-task"][data-task-line="${context.lineNumber}"]`,
-      `[data-tps-gcm-context="calendar-task"][data-task-line="${context.lineIndex}"]`,
       `[data-tps-gcm-context="kanban-task"][data-task-line="${context.lineNumber}"]`,
-      `[data-tps-gcm-context="kanban-task"][data-task-line="${context.lineIndex}"]`,
       `[data-tps-gcm-context="table-task"][data-task-line="${context.lineNumber}"]`,
-      `[data-tps-gcm-context="table-task"][data-task-line="${context.lineIndex}"]`,
     ].join(', ')))
-      .filter((element) => this.isTaskHighlightElement(element));
+      .filter((element) => this.isTaskHighlightElement(element) && this.highlightHostMatchesContext(element, context));
     if (directMatches.length > 0) return directMatches;
 
     if (typeof context.taskOrdinal !== 'number' || context.taskOrdinal < 0) return [];

@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.2.1
+
+- Mobile Live Preview and Reading mode now reconcile the note title icon after every delayed and recurring title refresh. If Obsidian mounts or replaces the inline-title node after the first render, GCM recreates exactly one icon in the current title instead of retaining a disconnected element. Mobile-style inline titles outside the usual mode container are supported, while strict Source mode and the `Inline persistent UI` master switch still suppress the icon as configured.
+- Task-row highlighting now treats TPS Table, TPS List, Calendar, and Kanban `data-task-line` metadata as one-based and native Obsidian `data-line` metadata as zero-based. An adjacent row can no longer match through the other numbering convention, and explicit path or line mismatches cannot fall through to duplicate-text matching.
+- Long-pressing a TPS Table task synchronizes the Table's selected-row state before handing off to the shared task menu. A previously selected row therefore does not remain highlighted beside the newly pressed row; modifier/range behavior and already-selected multi-row context actions remain intact.
+- This is a backward-compatible patch release. There are no settings or data migrations, and minimum supported Obsidian remains 1.10.0. Mobile device confirmation remains the only platform-specific limitation because the isolated macOS test app cannot emulate Obsidian Mobile's native title remount lifecycle.
+- Validation passed the focused title/highlight/Table/Home suites (81/81), TypeScript, and the complete declared suite (259/259), followed by a separate production-mode test build. Obsidian 1.12.7 was reloaded with `Reload app without saving`; Live Preview-to-Reading title remounts retained the rendered title/icon slot, and adjacent TPS List plus synthetic TPS Table task rows each opened the exact requested task menu without selecting the neighboring source line. The temporary inline-UI setting was restored to its original disabled state, and the disposable task-table note/Base were moved directly to `_archive`.
+
 ## 1.2.0
 
 - The command palette now has explicit `Capture: Today's Daily Note` and `Capture: Current note` commands. The existing Home-only `Home: Capture to selected Daily Note` action remains distinct and continues to target the day selected in TPS Home.

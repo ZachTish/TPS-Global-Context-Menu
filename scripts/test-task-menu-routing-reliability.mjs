@@ -58,10 +58,13 @@ test('TPS Table keeps Health precedence and lets task rows reach the shared task
   );
   const healthIndex = routing.indexOf('handleTpsHealthFoodTableRowContextMenu');
   const taskIndex = routing.indexOf("row.dataset.tpsGcmContext === 'table-task'");
-  const genericIndex = routing.indexOf('__tpsTableView');
+  const selectionSyncIndex = routing.indexOf('applyEntryContextSelection');
+  const taskReturnIndex = routing.indexOf('return false', taskIndex);
+  const genericIndex = routing.indexOf('handleExternalRowContextMenu');
 
   assert.ok(healthIndex >= 0, 'Health handoff must remain present');
   assert.ok(taskIndex > healthIndex, 'Health rows must be handed off before task routing');
-  assert.ok(genericIndex > taskIndex, 'task rows must bypass the generic table record menu');
-  assert.match(routing.slice(taskIndex, genericIndex), /return false/);
+  assert.ok(selectionSyncIndex > taskIndex, 'task rows must synchronize visible table selection before handoff');
+  assert.ok(taskReturnIndex > selectionSyncIndex, 'task selection must synchronize before shared task routing resumes');
+  assert.ok(genericIndex > taskReturnIndex, 'task rows must bypass the generic table record menu');
 });

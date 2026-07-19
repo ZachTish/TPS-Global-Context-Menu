@@ -560,6 +560,9 @@ test('TPS Table supports persistent Shift-click range selection without opening 
   assert.match(logBaseViewSource, /link\.addEventListener\('click', \(event: MouseEvent\) => \{\s*if \(event\.shiftKey \|\| event\.metaKey \|\| event\.ctrlKey\) return;/);
   assert.match(logBaseViewSource, /if \(evt\.shiftKey\) \{\s*evt\.preventDefault\(\);\s*evt\.stopPropagation\(\);\s*this\.selectEntryRange\(entry\.selectionId\);\s*return;/);
   assert.match(logBaseViewSource, /getOrderedSelectionRange\(this\.renderedEntryOrder, this\.selectionAnchorId, id\)/);
+  assert.match(logBaseViewSource, /applyEntryContextSelection\(evt: MouseEvent, row: HTMLElement\): boolean/);
+  assert.match(logBaseViewSource, /const entryId = row\.dataset\.entryId/);
+  assert.match(logBaseViewSource, /else if \(!this\.selectedEntryIds\.has\(entryId\)\) \{\s*this\.selectOnlyEntry\(entryId\)/);
   assert.match(logBaseViewSource, /row\.classList\.toggle\('tps-log-base-row--selected', selected\)/);
   assert.match(logBaseViewSource, /row\.setAttribute\('aria-selected', selected \? 'true' : 'false'\)/);
   assert.match(logBaseViewSource, /void this\.openEntry\(entry\)/);

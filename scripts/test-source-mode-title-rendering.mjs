@@ -77,3 +77,15 @@ test('title icons are not rendered in strict source mode', () => {
   assert.match(persistentMenuSource, /this\.removeInlineTitleIcon\(view\);/);
   assert.match(persistentMenuSource, /private isStrictSourceMode\(view: MarkdownView\): boolean \{\s*return isStrictSourceMode\(view\);\s*\}/);
 });
+
+test('delayed and recurring title refreshes reconcile mobile title-icon remounts', () => {
+  assert.match(noteTitleSource, /private refreshInlineTitleAndIcon\(view: MarkdownView\): void/);
+  assert.match(noteTitleSource, /this\.refreshInlineTitleForView\(view\);\s*this\.plugin\.persistentMenuManager\?\.refreshInlineTitleIcon\(view\);/);
+  assert.match(noteTitleSource, /refreshInlineTitles\(\): void \{[\s\S]*this\.refreshInlineTitleAndIcon\(view\)/);
+  assert.match(noteTitleSource, /window\.setTimeout\(\(\) => this\.refreshInlineTitleAndIcon\(view\), delay\)/);
+  assert.match(persistentMenuSource, /const scopedInlineTitle = \(\) => \(/);
+  assert.match(persistentMenuSource, /if \(!previewView\) return scopedInlineTitle\(\)/);
+  assert.match(persistentMenuSource, /if \(!sourceView\) return scopedInlineTitle\(\)/);
+  assert.match(persistentMenuSource, /document\.activeElement instanceof HTMLElement && titleEl\.contains\(document\.activeElement\)/);
+  assert.match(persistentMenuSource, /private ensureInlineTitleIcon\(view: MarkdownView\): void \{\s*if \(!this\.plugin\.settings\.enableInlinePersistentMenus\) \{\s*this\.removeInlineTitleIcon\(view\);\s*return;/);
+});

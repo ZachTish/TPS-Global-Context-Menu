@@ -939,6 +939,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       row.dataset.tpsGcmContext === 'table-task'
       || (Boolean(row.dataset.taskPath) && Boolean(row.dataset.taskLine))
     ) {
+      const tableView = (row as any).__tpsTableView;
+      tableView?.applyEntryContextSelection?.(evt, row);
       logger.flow('TpsTableView', 'context-menu:task-handoff', {
         path: row.dataset.taskPath || row.dataset.path || '',
         lineNumber: Number(row.dataset.taskLine || row.dataset.line || '0'),

@@ -104,6 +104,18 @@ async function importMobileOverlayUtility() {
   return import(`data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`);
 }
 
+async function importTaskHighlightMetadataUtility() {
+  const build = await esbuild.build({
+    entryPoints: [fileURLToPath(new URL('../src/utils/task-highlight-metadata.ts', import.meta.url))],
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    write: false,
+  });
+  const bundled = build.outputFiles[0].text;
+  return import(`data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`);
+}
+
 async function importCreateTaskUtility() {
   const build = await esbuild.build({
     entryPoints: [fileURLToPath(new URL('../src/utils/create-task-parser.ts', import.meta.url))],
@@ -473,11 +485,28 @@ test('TPS List task titles defer to unified row selection while TPS Table modifi
   assert.match(serviceSource, /releaseTpsListSelection\(owner: HTMLElement\): void/);
   assert.match(serviceSource, /releaseTpsListSelection\(owner: HTMLElement\): void \{\s*if \(this\.tpsListSelectionOwner !== owner\) return;\s*this\.tpsListSelectionSyncGeneration \+= 1;/);
   assert.match(serviceSource, /if \(surface !== 'tps-list'\) \{\s*this\.tpsListSelectionSyncGeneration \+= 1;\s*this\.tpsListSelectionOwner = null;/);
-  assert.match(serviceSource, /if \(taskPath && taskPath !== context\.file\.path\) return false/);
+  assert.match(serviceSource, /matchTaskHighlightMetadata\(\{/);
+  assert.match(serviceSource, /if \(metadataMatch != null\) return metadataMatch/);
   assert.match(serviceSource, /candidate != null/);
   assert.match(serviceSource, /a\.file\.path\.localeCompare\(b\.file\.path\) \|\| a\.lineIndex - b\.lineIndex/);
   assert.match(serviceSource, /refreshSelectionHighlights\(\): void/);
   assert.match(pluginStylesSource, /\[data-tps-gcm-context="table-task"\]\.tps-gcm-task-line-selected/);
+});
+
+test('task highlight metadata keeps TPS task lines one-based and native lines zero-based', async () => {
+  const { matchTaskHighlightMetadata } = await importTaskHighlightMetadataUtility();
+  const context = { filePath: 'Inbox/A.md', lineNumber: 16, lineIndex: 15 };
+
+  assert.equal(matchTaskHighlightMetadata({ taskPath: 'Inbox/A.md', taskLine: '16' }, context), true);
+  assert.equal(matchTaskHighlightMetadata({ taskPath: 'Inbox/A.md', taskLine: '15' }, context), false);
+  assert.equal(matchTaskHighlightMetadata({ tpsKanbanPath: 'Inbox/A.md', tpsKanbanLine: '16' }, context), true);
+  assert.equal(matchTaskHighlightMetadata({ taskLine: '', tpsKanbanLine: '16' }, context), true);
+  assert.equal(matchTaskHighlightMetadata({ taskPath: 'Inbox/A.md', dataLine: '15' }, context), true);
+  assert.equal(matchTaskHighlightMetadata({ taskPath: 'Inbox/A.md', dataLine: '16' }, context), false);
+  assert.equal(matchTaskHighlightMetadata({ taskPath: 'Inbox/B.md', taskLine: '16' }, context), false);
+  assert.equal(matchTaskHighlightMetadata({ taskPath: 'Inbox/A.md', taskLine: 'not-a-line' }, context), false);
+  assert.equal(matchTaskHighlightMetadata({}, { filePath: 'Inbox/A.md', lineNumber: 1, lineIndex: 0 }), null);
+  assert.equal(matchTaskHighlightMetadata({ taskLine: '' }, { filePath: 'Inbox/A.md', lineNumber: 1, lineIndex: 0 }), null);
 });
 
 test('mobile task and note editors share the keyboard-aware overlay contract', async () => {
@@ -669,11 +698,13 @@ test('task menu highlight targets task rows instead of broad rendered note conta
   assert.match(serviceSource, /resolveDirectTaskHighlightHost[\s\S]{0,500}\[data-tps-gcm-context="kanban-task"\]/);
   assert.match(serviceSource, /taskOrdinal\?: number/);
   assert.match(serviceSource, /taskOrdinal: this\.getTaskOrdinal\(lines, lineIndex\)/);
-  assert.match(highlightSource, /\.tps-calendar-task-entry\[data-task-path\]\[data-task-line="\$\{context\.lineIndex\}"\]/);
-  assert.match(highlightSource, /\.tps-kanban-card-task\[data-task-path\]\[data-task-line="\$\{context\.lineIndex\}"\]/);
-  assert.match(highlightSource, /\.tps-kanban-task-card\[data-task-path\]\[data-task-line="\$\{context\.lineIndex\}"\]/);
-  assert.match(highlightSource, /\[data-tps-gcm-context="calendar-task"\]\[data-task-line="\$\{context\.lineIndex\}"\]/);
-  assert.match(highlightSource, /\[data-tps-gcm-context="kanban-task"\]\[data-task-line="\$\{context\.lineIndex\}"\]/);
+  assert.match(highlightSource, /\.tps-calendar-task-entry\[data-task-path\]\[data-task-line="\$\{context\.lineNumber\}"\]/);
+  assert.match(highlightSource, /\.tps-kanban-card-task\[data-task-path\]\[data-task-line="\$\{context\.lineNumber\}"\]/);
+  assert.match(highlightSource, /\.tps-kanban-task-card\[data-task-path\]\[data-task-line="\$\{context\.lineNumber\}"\]/);
+  assert.match(highlightSource, /\[data-tps-gcm-context="calendar-task"\]\[data-task-line="\$\{context\.lineNumber\}"\]/);
+  assert.match(highlightSource, /\[data-tps-gcm-context="kanban-task"\]\[data-task-line="\$\{context\.lineNumber\}"\]/);
+  assert.match(highlightSource, /this\.highlightHostMatchesContext\(element, context\)/);
+  assert.doesNotMatch(highlightSource, /data-task-line="\$\{context\.lineIndex\}"/);
   assert.match(highlightSource, /getRenderedTaskHighlightElements\(previewEl\)\[context\.taskOrdinal\]/);
   assert.doesNotMatch(highlightSource, /includes\(taskText\)|taskText\.includes/);
   assert.doesNotMatch(serviceSource, /resolveDirectTaskHighlightHost[\s\S]{0,500}li, \.cm-line/);

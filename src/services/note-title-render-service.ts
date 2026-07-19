@@ -50,7 +50,7 @@ export class NoteTitleRenderService {
     for (const leaf of this.plugin.app.workspace.getLeavesOfType('markdown')) {
       const view = leaf.view as MarkdownView;
       if (!(view?.file instanceof TFile) || !(view?.contentEl instanceof HTMLElement)) continue;
-      this.refreshInlineTitleForView(view);
+      this.refreshInlineTitleAndIcon(view);
       for (const renderedRoot of Array.from(view.contentEl.querySelectorAll<HTMLElement>(
         '.markdown-preview-view, .markdown-reading-view, .markdown-rendered, .markdown-preview-section',
       ))) {
@@ -60,13 +60,18 @@ export class NoteTitleRenderService {
   }
 
   refreshInlineTitle(view: MarkdownView): void {
-    this.refreshInlineTitleForView(view);
+    this.refreshInlineTitleAndIcon(view);
   }
 
   scheduleInlineTitleRefresh(view: MarkdownView, delays: number[] = [0, 120, 400]): void {
     for (const delay of delays) {
-      window.setTimeout(() => this.refreshInlineTitleForView(view), delay);
+      window.setTimeout(() => this.refreshInlineTitleAndIcon(view), delay);
     }
+  }
+
+  private refreshInlineTitleAndIcon(view: MarkdownView): void {
+    this.refreshInlineTitleForView(view);
+    this.plugin.persistentMenuManager?.refreshInlineTitleIcon(view);
   }
 
   handleInlineTitleActivation(event: MouseEvent | PointerEvent): boolean {

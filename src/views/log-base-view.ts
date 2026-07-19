@@ -985,6 +985,19 @@ export class TpsTableView extends BasesView {
     });
   }
 
+  applyEntryContextSelection(evt: MouseEvent, row: HTMLElement): boolean {
+    const entryId = row.dataset.entryId;
+    if (!entryId) return false;
+    if (evt.shiftKey) {
+      this.selectEntryRange(entryId);
+    } else if (evt.metaKey || evt.ctrlKey) {
+      this.toggleEntrySelection(entryId);
+    } else if (!this.selectedEntryIds.has(entryId)) {
+      this.selectOnlyEntry(entryId);
+    }
+    return true;
+  }
+
   private renderTotalsRow(
     parent: HTMLElement,
     entries: LogLineEntry[],
@@ -1178,13 +1191,7 @@ export class TpsTableView extends BasesView {
     evt.stopPropagation();
     evt.stopImmediatePropagation();
 
-    if (!this.selectedEntryIds.has(entry.selectionId) && !evt.shiftKey && !(evt.metaKey || evt.ctrlKey)) {
-      this.selectOnlyEntry(entry.selectionId);
-    } else if (evt.shiftKey) {
-      this.selectEntryRange(entry.selectionId);
-    } else if (evt.metaKey || evt.ctrlKey) {
-      this.toggleEntrySelection(entry.selectionId);
-    }
+    this.applyEntryContextSelection(evt, row);
 
     const healthApi = this.getHealthFoodLogApi();
     if (isFoodLogEntry(entry) && typeof healthApi?.openFoodLogEntryMenuFromLine === 'function') {
