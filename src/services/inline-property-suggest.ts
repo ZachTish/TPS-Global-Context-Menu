@@ -8,7 +8,10 @@ import {
   TFile,
 } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
+import * as logger from '../logger';
+import { ScheduledModal } from '../modals/scheduled-modal';
 import type { CustomProperty } from '../types';
+import { readInlineFieldValue, setInlineFieldValueOnLine } from '../utils/task-line-metadata';
 
 type InlinePropertySuggestion = {
   label: string;
@@ -101,12 +104,96 @@ export class InlinePropertySuggest extends EditorSuggest<InlinePropertySuggestio
       await this.createInlineProperty(suggestion.key);
     }
 
+    if (this.usesDatePicker(suggestion)) {
+      this.openDatePicker(context, suggestion);
+      return;
+    }
+
     const insertion = `[${suggestion.key}:: ]`;
     context.editor.replaceRange(insertion, context.start, context.end);
     context.editor.setCursor({
       line: context.start.line,
       ch: context.start.ch + insertion.length - 1,
     });
+  }
+
+  private usesDatePicker(suggestion: InlinePropertySuggestion): boolean {
+    return String(suggestion.type || '').trim().toLowerCase() === 'datetime'
+      || String(suggestion.key || '').trim().toLowerCase() === 'scheduled';
+  }
+
+  private openDatePicker(context: EditorSuggestContext, suggestion: InlinePropertySuggestion): void {
+    const editor = context.editor;
+    const lineNumber = context.start.line;
+    const sourceLine = editor.getLine(lineNumber);
+    const isScheduled = String(suggestion.key || '').trim().toLowerCase() === 'scheduled';
+    const currentDate = readInlineFieldValue(sourceLine, suggestion.key);
+    const currentTimeEstimate = isScheduled
+      ? Number.parseInt(readInlineFieldValue(sourceLine, 'timeEstimate') || '0', 10) || 0
+      : 0;
+    const currentAllDay = isScheduled
+      ? /^true$/i.test(readInlineFieldValue(sourceLine, 'allDay'))
+      : false;
+
+    editor.replaceRange('', context.start, context.end);
+    let sourceRevision = editor.getLine(lineNumber);
+    if (context.end.ch === sourceLine.length && sourceRevision !== sourceRevision.trimEnd()) {
+      const trimmedLine = sourceRevision.trimEnd();
+      editor.replaceRange(
+        trimmedLine,
+        { line: lineNumber, ch: 0 },
+        { line: lineNumber, ch: sourceRevision.length },
+      );
+      sourceRevision = trimmedLine;
+    }
+    editor.setCursor({ line: lineNumber, ch: Math.min(context.start.ch, sourceRevision.length) });
+    logger.flow('InlinePropertySuggest', 'datetime-picker:open', {
+      key: suggestion.key,
+      line: lineNumber + 1,
+      scheduledDetails: isScheduled,
+    });
+
+    new ScheduledModal(this.plugin.app, currentDate, currentTimeEstimate, currentAllDay, async (result) => {
+      const currentLine = editor.getLine(lineNumber);
+      if (currentLine !== sourceRevision) {
+        logger.flowWarn('InlinePropertySuggest', 'datetime-picker:conflict', {
+          key: suggestion.key,
+          line: lineNumber + 1,
+        });
+        throw new Error('The source line changed while the date picker was open.');
+      }
+
+      const clearing = !String(result.date || '').trim();
+      let nextLine = setInlineFieldValueOnLine(currentLine, suggestion.key, clearing ? null : result.date);
+      if (isScheduled) {
+        nextLine = setInlineFieldValueOnLine(
+          nextLine,
+          'timeEstimate',
+          clearing ? null : String(result.timeEstimate || 0),
+        );
+        nextLine = setInlineFieldValueOnLine(
+          nextLine,
+          'allDay',
+          clearing || !result.allDay ? null : 'true',
+        );
+      }
+
+      editor.replaceRange(
+        nextLine,
+        { line: lineNumber, ch: 0 },
+        { line: lineNumber, ch: currentLine.length },
+      );
+      editor.setCursor({ line: lineNumber, ch: nextLine.length });
+      logger.flow('InlinePropertySuggest', 'datetime-picker:done', {
+        key: suggestion.key,
+        line: lineNumber + 1,
+        cleared: clearing,
+      });
+    }, isScheduled ? {} : {
+      title: `Set ${suggestion.label || suggestion.key}`,
+      fieldLabel: suggestion.label || suggestion.key,
+      showTimeDetails: false,
+    }).open();
   }
 
   private async createInlineProperty(key: string): Promise<void> {

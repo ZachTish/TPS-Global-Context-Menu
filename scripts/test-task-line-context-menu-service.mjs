@@ -174,6 +174,7 @@ test('task line metadata helpers edit task text without destroying inline task p
     updateTaskCompletedDateForCheckboxState,
     updateTaskLineTimestamps,
     setInlineFieldValueOnTaskLine,
+    setInlineFieldValueOnLine,
     addInlineTagToTaskLine,
     removeInlineTagFromTaskLine,
     readInlineFieldValue,
@@ -208,6 +209,14 @@ test('task line metadata helpers edit task text without destroying inline task p
   );
   assert.equal(readInlineFieldValue(line, 'priority'), 'high');
   assert.equal(setInlineFieldValueOnTaskLine(line, 'priority', 'normal'), '- [ ] bathroom window [scheduled:: 2026-05-31 09:00:00] #topic/home [priority:: normal]');
+  assert.equal(
+    setInlineFieldValueOnLine('  - Nested reminder [scheduled:: 2026-05-31 09:00:00] [status:: active]', 'scheduled', '2026-06-01 10:30:00'),
+    '  - Nested reminder [status:: active] [scheduled:: 2026-06-01 10:30:00]',
+  );
+  assert.equal(
+    setInlineFieldValueOnLine('  - Nested reminder [scheduled:: 2026-05-31 09:00:00] [status:: active]', 'scheduled', null),
+    '  - Nested reminder [status:: active]',
+  );
   assert.deepEqual(readInlineTags(line), ['topic/home']);
   assert.equal(addInlineTagToTaskLine(line, '#topic/home'), line);
   assert.equal(addInlineTagToTaskLine(line, 'errand'), `${line} #errand`);
@@ -1012,13 +1021,26 @@ test('create task command appends to today daily note and does not create task s
   assert.doesNotMatch(createTaskModalSource, /status::/i);
 });
 
-test('inline property suggest can create missing @@ properties before inserting them', () => {
+test('inline property suggest opens date pickers while retaining generic @@ insertion', () => {
   assert.match(inlinePropertySuggestSource, /action\?: 'insert' \| 'create'/);
   assert.match(inlinePropertySuggestSource, /Create "\$\{normalizedCreateKey\}"/);
   assert.match(inlinePropertySuggestSource, /createInlineProperty\(suggestion\.key\)/);
   assert.match(inlinePropertySuggestSource, /this\.plugin\.settings\.properties\.push/);
   assert.match(inlinePropertySuggestSource, /showWhen: 'populated'/);
+  assert.match(inlinePropertySuggestSource, /this\.usesDatePicker\(suggestion\)/);
+  assert.match(inlinePropertySuggestSource, /new ScheduledModal\(/);
+  assert.match(inlinePropertySuggestSource, /context\.end\.ch === sourceLine\.length/);
+  assert.match(inlinePropertySuggestSource, /sourceRevision\.trimEnd\(\)/);
+  assert.match(inlinePropertySuggestSource, /currentLine !== sourceRevision/);
+  assert.match(inlinePropertySuggestSource, /setInlineFieldValueOnLine\([\s\S]*?'timeEstimate'/);
+  assert.match(inlinePropertySuggestSource, /setInlineFieldValueOnLine\([\s\S]*?'allDay'/);
+  assert.match(inlinePropertySuggestSource, /showTimeDetails: false/);
   assert.match(inlinePropertySuggestSource, /const insertion = `\[\$\{suggestion\.key\}:: ]`/);
+  assert.ok(
+    inlinePropertySuggestSource.indexOf('this.usesDatePicker(suggestion)')
+      < inlinePropertySuggestSource.indexOf('const insertion = `[${suggestion.key}:: ]`'),
+    'datetime suggestions must route to the picker before generic text insertion',
+  );
 });
 
 test('health workout inline properties render only compact set metrics', () => {

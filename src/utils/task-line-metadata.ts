@@ -238,6 +238,14 @@ export function setInlineFieldValueOnTaskLine(line: string, key: string, value: 
   return `${parsed.prefix}${parsed.token}${nextBody ? ` ${nextBody}` : ''}`.trimEnd();
 }
 
+export function setInlineFieldValueOnLine(line: string, key: string, value: string | null): string {
+  const source = String(line || '');
+  const cleanKey = String(key || '').trim();
+  if (!cleanKey) return source;
+  const indentation = source.match(/^[\t ]*/u)?.[0] || '';
+  return `${indentation}${setInlineFieldValueOnBody(source.slice(indentation.length), cleanKey, value)}`.trimEnd();
+}
+
 export function readInlineTags(line: string): string[] {
   const body = parseTaskLine(line)?.body ?? String(line || '');
   const tags: string[] = [];
