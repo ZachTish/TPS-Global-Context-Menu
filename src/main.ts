@@ -13,7 +13,6 @@ import { DEFAULT_SETTINGS, HOME_DAILY_NOTE_FEED_BASE_PATH } from './constants';
 import { PLUGIN_STYLES } from './plugin-styles';
 import { MenuController } from './menu/menu-controller';
 import { PersistentMenuManager } from './menu/persistent-menu-manager';
-import { setupMenuPatch } from './menu/menu-patcher';
 import { TPSGlobalContextMenuSettingTab } from './settings-tab';
 import { BulkEditService } from './services/bulk-edit-service';
 import { RecurrenceService } from './services/recurrence-service';
@@ -41,6 +40,7 @@ import { SubitemReferenceIndexService } from './services/subitem-reference-index
 import { TimeTrackingService } from './services/time-tracking-service';
 import { TimeTrackingStatusBarService } from './services/time-tracking-status-bar-service';
 import { NotebookNavigatorRuleService } from './services/notebook-navigator-rule-service';
+import { NotebookNavigatorMenuService } from './services/notebook-navigator-menu-service';
 import { OverlayRenderingService } from './services/overlay-rendering-service';
 import { HideCompletedCheckboxesService } from './services/hide-completed-checkboxes-service';
 import { InlinePropertyDecorationService } from './services/inline-property-decoration-service';
@@ -269,6 +269,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   timeTrackingService: TimeTrackingService;
   timeTrackingStatusBarService: TimeTrackingStatusBarService;
   notebookNavigatorRuleService: NotebookNavigatorRuleService;
+  notebookNavigatorMenuService: NotebookNavigatorMenuService;
   overlayRenderingService: OverlayRenderingService;
   hideCompletedCheckboxesService: HideCompletedCheckboxesService;
   inlinePropertyDecorationService: InlinePropertyDecorationService;
@@ -296,9 +297,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   ignoreNextContext = false;
   keyboardVisible = false;
   private archiveSweepTimerId: number | null = null;
-  private restoreMenuPatch: (() => void) | null = null;
-  private restoreProcessFrontmatterPatch: (() => void) | null = null;
-  private nativeProcessFrontmatterDelegate: ((file: TFile, mutator: (frontmatter: Record<string, unknown>) => void, options?: unknown) => Promise<unknown>) | null = null;
   private basesPreviewPropertiesObserver: MutationObserver | null = null;
   private basesPreviewPropertiesRefreshTimer: number | null = null;
   private basesPreviewPropertiesRetryTimers: number[] = [];
@@ -582,7 +580,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.linkedSubitemCheckboxService = new LinkedSubitemCheckboxService(this);
     this.frontmatterMutationService = new FrontmatterMutationService(this);
     this.sharedServices = createSharedServices(this);
-    this.restoreProcessFrontmatterPatch = this.installProcessFrontmatterPatch();
     this.registerEditorExtension(this.linkedSubitemCheckboxService.getEditorExtension());
     this.registerEditorExtension(this.hideCompletedCheckboxesService.getEditorExtension());
     this.registerEditorExtension(this.inlinePropertyDecorationService.getEditorExtension());
@@ -610,6 +607,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.app.workspace.updateOptions();
 
     this.menuController = new MenuController(this);
+    this.notebookNavigatorMenuService = new NotebookNavigatorMenuService(this);
+    this.addChild(this.notebookNavigatorMenuService);
     this.persistentMenuManager = new PersistentMenuManager(this);
     this.viewModeManager = new ViewModeManager(this);
     this.addChild(this.viewModeManager);
@@ -625,8 +624,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     // Initialize recurrence listener
     this.recurrenceService.setup();
-
-    this.restoreMenuPatch = setupMenuPatch(this);
 
     this.injectStyles();
     this.hideCompletedCheckboxesService.attach();
@@ -1818,14 +1815,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.closeBaseLinkHoverEditor(getPluginById(this.app, 'obsidian-hover-editor') as any);
     this.workspaceRibbonService?.teardown();
     delete (this as any).api;
-    if (this.restoreProcessFrontmatterPatch) {
-      this.restoreProcessFrontmatterPatch();
-      this.restoreProcessFrontmatterPatch = null;
-    }
-    if (this.restoreMenuPatch) {
-      this.restoreMenuPatch();
-      this.restoreMenuPatch = null;
-    }
     this.menuController?.detach();
     this.removeStyles();
     this.persistentMenuManager?.detach();
@@ -2484,41 +2473,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   isInMobileStartupGracePeriod(): boolean {
     return Platform.isMobile && Date.now() - this.startupTimestamp < 45_000;
-  }
-
-  private installProcessFrontmatterPatch(): () => void {
-    const fileManager = this.app.fileManager as any;
-    const original = fileManager.processFrontMatter?.bind(fileManager);
-    if (typeof original !== 'function') {
-      return () => {};
-    }
-    this.nativeProcessFrontmatterDelegate = original;
-
-    const plugin = this;
-    const gcmProcessFrontmatterPatch = async function (
-      file: TFile,
-      mutator: (frontmatter: Record<string, unknown>) => void,
-    ) {
-      return await plugin.frontmatterMutationService.process(file, mutator);
-    };
-    (gcmProcessFrontmatterPatch as any).__tpsGcmFrontmatterPatch = true;
-    fileManager.processFrontMatter = gcmProcessFrontmatterPatch;
-
-    return () => {
-      fileManager.processFrontMatter = original;
-      this.nativeProcessFrontmatterDelegate = null;
-    };
-  }
-
-  async processFrontmatterWithNativeDelegate(
-    file: TFile,
-    mutator: (frontmatter: Record<string, unknown>) => void,
-    options?: unknown,
-  ): Promise<unknown> {
-    if (typeof this.nativeProcessFrontmatterDelegate !== 'function') {
-      throw new Error('Native frontmatter delegate is not available.');
-    }
-    return await this.nativeProcessFrontmatterDelegate(file, mutator, options);
   }
 
   private stopArchiveTagAutomation(): void {

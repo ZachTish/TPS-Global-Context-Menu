@@ -42,6 +42,7 @@ export class MenuController {
   private badgeRenderer: BadgeRenderer;
   public panelBuilder: PanelBuilder;
   private menuBuilder: MenuBuilder;
+  private handledNativeMenus = new WeakSet<Menu>();
 
   constructor(plugin: TPSGlobalContextMenuPlugin) {
     this.plugin = plugin;
@@ -129,7 +130,18 @@ export class MenuController {
 
   addToNativeMenu(menu: Menu, files: TFile[], options: NativeMenuLabelOptions = {}) {
     if (this.plugin.settings.inlineMenuOnly) return;
+    if (this.handledNativeMenus.has(menu)) return;
+    this.handledNativeMenus.add(menu);
     this.menuBuilder.addToNativeMenu(menu, files, options);
+  }
+
+  addToNotebookNavigatorMenu(
+    addItem: Menu['addItem'],
+    files: TFile[],
+    options: NativeMenuLabelOptions = {},
+  ): void {
+    if (this.plugin.settings.inlineMenuOnly) return;
+    this.menuBuilder.addToNativeMenu({ addItem }, files, options);
   }
 
   buildSpecialPanel(files: TFile[], options: BuildPanelOptions = {}): HTMLElement {

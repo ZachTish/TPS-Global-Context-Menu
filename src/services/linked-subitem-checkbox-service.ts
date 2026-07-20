@@ -13,6 +13,41 @@ import { buildLinkedSubitemRow, getIconNameForState } from './linked-subitem-row
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { TextInputModal } from '../modals/text-input-modal';
 import { getCheckboxStateMarker, normalizeCheckboxStateToken } from '../utils/checkbox-state';
+import type { FrontmatterMutationOutcome } from './frontmatter-mutation-outcome';
+
+export type LinkedSubitemToggleResult = 'changed' | 'unchanged' | 'stale' | 'refused';
+
+export function classifyLinkedSubitemToggleOutcome(
+  outcome: FrontmatterMutationOutcome,
+): LinkedSubitemToggleResult {
+  if (outcome === 'changed' || outcome === 'unchanged') return outcome;
+  if (outcome === 'guarded-abort') return 'stale';
+  return 'refused';
+}
+
+export function applyLinkedSubitemStatusToggle(
+  frontmatter: Record<string, unknown>,
+  statusKey: string,
+  displayedStatus: string,
+  nextStatus: string,
+): boolean {
+  const normalizedKey = String(statusKey || '').trim() || 'status';
+  const actualKey = Object.keys(frontmatter)
+    .find((key) => key.toLowerCase() === normalizedKey.toLowerCase());
+  const liveStatus = String(actualKey ? frontmatter[actualKey] ?? '' : '').trim().toLowerCase();
+  const expectedStatus = String(displayedStatus || '').trim().toLowerCase();
+  if (liveStatus !== expectedStatus) return false;
+
+  frontmatter[actualKey || normalizedKey] = nextStatus;
+  return true;
+}
+
+export function readLinkedSubitemRenderedStatusToken(
+  element: Pick<HTMLElement, 'getAttribute'>,
+): string | null {
+  const value = element.getAttribute('data-linked-subitem-status');
+  return value == null ? null : value.trim().toLowerCase();
+}
 
 const VIRTUAL_CHECKBOX_CLASS = 'tps-gcm-linked-subitem-checkbox';
 const CM_WIDGET_CLASS = 'tps-gcm-linked-subitem-cm-widget';
@@ -44,6 +79,7 @@ class LinkedSubitemRowWidget extends WidgetType {
       other.model.childFile.path === this.model.childFile.path &&
       other.model.parentFile.path === this.model.parentFile.path &&
       other.model.checkboxState === this.model.checkboxState &&
+      other.model.renderedStatus === this.model.renderedStatus &&
       other.model.visualState === this.model.visualState &&
       JSON.stringify(other.model.pills) === JSON.stringify(this.model.pills)
     );
@@ -67,12 +103,14 @@ class LinkedSubitemRowWidget extends WidgetType {
     
     // Update checkbox state if changed
     const checkbox = dom.querySelector(`.${VIRTUAL_CHECKBOX_CLASS}`) as HTMLElement | null;
+    dom.dataset.linkedSubitemStatus = this.model.renderedStatus;
     if (checkbox && checkbox.dataset.linkedSubitemState !== this.model.checkboxState) {
       checkbox.dataset.linkedSubitemState = this.model.checkboxState || '[ ]';
       checkbox.className = `${VIRTUAL_CHECKBOX_CLASS} state-${this.model.visualState}`;
       checkbox.innerHTML = '';
       setIcon(checkbox, getIconNameForState(this.model.checkboxState || '[ ]'));
     }
+    if (checkbox) checkbox.dataset.linkedSubitemStatus = this.model.renderedStatus;
     
     return true;
   }
@@ -250,20 +288,20 @@ export class LinkedSubitemCheckboxService {
     evt.stopPropagation();
     evt.stopImmediatePropagation();
 
-    const currentStatus = this.getNormalizedStatus(childFile);
-    const currentState = this.mapStatusToCheckboxState(currentStatus);
-    const nextStatus = this.getToggleTargetForState(currentState, currentStatus);
-    if (!nextStatus) return false;
+    const displayedStatus = readLinkedSubitemRenderedStatusToken(checkboxEl);
+    if (displayedStatus == null) {
+      new Notice(`Couldn’t verify the displayed status for "${childFile.basename}". Try again.`);
+      this.scheduleDecorateForActiveView();
+      return true;
+    }
+    const currentState = this.mapStatusToCheckboxState(displayedStatus);
+    const nextStatus = this.getToggleTargetForState(currentState, displayedStatus);
+    if (!nextStatus) {
+      new Notice(`No toggle target is configured for "${childFile.basename}".`);
+      return true;
+    }
 
-    const statusKey = this.getStatusKey();
-    await this.plugin.app.fileManager.processFrontMatter(childFile, (fm) => {
-      fm[statusKey] = nextStatus;
-    });
-
-    await this.refreshReferencesForChild(childFile);
-    this.scheduleDecorateForActiveView();
-    this.refreshLivePreviewEditors();
-    new Notice(`Set "${childFile.basename}" to ${nextStatus}.`);
+    await this.commitLinkedSubitemToggle(childFile, displayedStatus, nextStatus);
     return true;
   }
 
@@ -288,21 +326,72 @@ export class LinkedSubitemCheckboxService {
     evt.stopPropagation();
     evt.stopImmediatePropagation();
 
-    const currentStatus = this.getNormalizedStatus(childFile);
-    const currentState = this.mapStatusToCheckboxState(currentStatus);
-    const nextStatus = this.getToggleTargetForState(currentState, currentStatus);
-    if (!nextStatus) return false;
+    const displayedStatus = readLinkedSubitemRenderedStatusToken(taskHost);
+    if (displayedStatus == null) {
+      new Notice(`Couldn’t verify the displayed status for "${childFile.basename}". Try again.`);
+      this.scheduleDecorate(view);
+      return true;
+    }
+    const currentState = this.mapStatusToCheckboxState(displayedStatus);
+    const nextStatus = this.getToggleTargetForState(currentState, displayedStatus);
+    if (!nextStatus) {
+      new Notice(`No toggle target is configured for "${childFile.basename}".`);
+      return true;
+    }
 
+    await this.commitLinkedSubitemToggle(childFile, displayedStatus, nextStatus, view);
+    return true;
+  }
+
+  private async commitLinkedSubitemToggle(
+    childFile: TFile,
+    displayedStatus: string,
+    nextStatus: string,
+    view?: MarkdownView,
+  ): Promise<LinkedSubitemToggleResult> {
     const statusKey = this.getStatusKey();
-    await this.plugin.app.fileManager.processFrontMatter(childFile, (fm) => {
-      fm[statusKey] = nextStatus;
+    let outcome: FrontmatterMutationOutcome;
+    try {
+      outcome = await this.plugin.frontmatterMutationService.processGuardedWithOutcome(childFile, (frontmatter) => (
+        applyLinkedSubitemStatusToggle(frontmatter, statusKey, displayedStatus, nextStatus)
+      ));
+    } catch (error) {
+      outcome = 'write-refused';
+      logger.warn('[TPS GCM] Linked subitem status toggle failed', {
+        file: childFile.path,
+        error: logger.errorSummary(error),
+      });
+    }
+
+    const result = classifyLinkedSubitemToggleOutcome(outcome);
+    this.taskTrace('toggle:result', {
+      file: childFile.path,
+      displayedStatus,
+      nextStatus,
+      outcome,
+      result,
     });
 
-    await this.refreshReferencesForChild(childFile);
-    this.scheduleDecorate(view);
-    this.refreshLivePreviewEditors();
-    new Notice(`Set "${childFile.basename}" to ${nextStatus}.`);
-    return true;
+    if (result === 'changed') {
+      try {
+        await this.refreshReferencesForChild(childFile);
+        if (view) this.scheduleDecorate(view);
+        else this.scheduleDecorateForActiveView();
+        this.refreshLivePreviewEditors();
+      } catch (error) {
+        logger.warn('[TPS GCM] Linked subitem status changed but its refresh failed', {
+          file: childFile.path,
+          error: logger.errorSummary(error),
+        });
+      }
+      new Notice(`Set "${childFile.basename}" to ${nextStatus}.`);
+    } else if (result === 'stale') {
+      new Notice(`"${childFile.basename}" changed before it could be toggled. Try again.`);
+    } else if (result === 'refused') {
+      new Notice(`Couldn’t update "${childFile.basename}". Try again.`);
+    }
+
+    return result;
   }
 
   private resolveMarkdownViewForElement(targetEl: HTMLElement): MarkdownView | null {
@@ -592,6 +681,7 @@ export class LinkedSubitemCheckboxService {
     // Remove all marker classes
     previewContainer.querySelectorAll('.tps-gcm-linked-subitem-task').forEach(el => {
       el.classList.remove('tps-gcm-linked-subitem-task', 'is-open', 'is-complete', 'is-canceled');
+      el.removeAttribute('data-linked-subitem-status');
     });
     previewContainer.querySelectorAll('.tps-gcm-linked-subitem-link').forEach(el => {
       el.classList.remove('tps-gcm-linked-subitem-link');
@@ -713,6 +803,7 @@ export class LinkedSubitemCheckboxService {
         
         // Mark the list item as a linked subitem task
         li.classList.add('tps-gcm-linked-subitem-task', model.visualStateClass);
+        li.dataset.linkedSubitemStatus = model.renderedStatus;
         
         // Build the complete row content using shared builder
         const elements = buildLinkedSubitemRow(
@@ -1392,6 +1483,7 @@ export class LinkedSubitemCheckboxService {
               line.from,
               Decoration.line({
                 class: `tps-gcm-linked-subitem-task tps-gcm-linked-subitem-cm-line ${model.visualStateClass}`,
+                attributes: { 'data-linked-subitem-status': model.renderedStatus },
               }),
             );
             

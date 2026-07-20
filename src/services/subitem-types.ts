@@ -26,3 +26,29 @@ export interface ReconcileResult {
   removedParents: number;
   touchedChildren: TFile[];
 }
+
+export type RelationshipSideRemovalOutcome = 'removed' | 'absent' | 'refused';
+
+export type RelationshipUnlinkStatus = 'removed' | 'absent' | 'partial' | 'refused';
+
+export interface RelationshipUnlinkOutcome {
+  status: RelationshipUnlinkStatus;
+  child: RelationshipSideRemovalOutcome;
+  parent: RelationshipSideRemovalOutcome;
+}
+
+export interface AttachmentUnlinkOutcome {
+  status: RelationshipUnlinkStatus;
+  body: RelationshipSideRemovalOutcome;
+  frontmatter: RelationshipSideRemovalOutcome;
+}
+
+export interface RelationshipUnlinkAggregateOutcome {
+  discovery: 'ready' | 'refused';
+  removedCount: number;
+  absentCount: number;
+  partialCount: number;
+  refusedCount: number;
+}
+
+export type MarkdownBodyMutationOutcome = 'changed' | 'unchanged' | 'refused';

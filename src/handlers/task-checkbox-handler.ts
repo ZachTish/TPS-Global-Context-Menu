@@ -481,12 +481,12 @@ export class TaskCheckboxHandler {
         }
 
         try {
-            await this.plugin.bulkEditService.runSerializedFrontmatterWrite(file, async () => {
-                await this.plugin.app.fileManager.processFrontMatter(file, (fm) => {
+            const changed = await this.plugin.bulkEditService.runSerializedFrontmatterWrite(file, async () =>
+                this.plugin.frontmatterMutationService.process(file, (fm) => {
                     fm[propKey] = hasOpenChecklistItem;
-                });
-            });
-            this.rememberChecklistPropertySelfWrite(file.path);
+                }),
+            );
+            if (changed) this.rememberChecklistPropertySelfWrite(file.path);
         } catch (error) {
             logger.warn('[TPS GCM] Failed to write checklist open-item property', { filePath, error });
         }

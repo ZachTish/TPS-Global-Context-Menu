@@ -179,7 +179,7 @@ export async function createSubitemForParentWithTitle(
   }
 
   if (seedParentTags && parentTags.length > 0) {
-    await mergeParentTagsIntoSubitem(plugin.app, created, parentTags);
+    await mergeParentTagsIntoSubitem(plugin, created, parentTags);
   }
 
   // The child was created with its parent link already in frontmatter. Avoid a
@@ -266,24 +266,22 @@ export async function applyNotebookNavigatorRulesToFile(plugin: TPSGlobalContext
   }
 }
 
-async function mergeParentTagsIntoSubitem(app: App, file: TFile, parentTags: string[]): Promise<void> {
+async function mergeParentTagsIntoSubitem(plugin: TPSGlobalContextMenuPlugin, file: TFile, parentTags: string[]): Promise<void> {
   if (parentTags.length === 0) return;
 
   await new Promise((resolve) => setTimeout(resolve, 100));
 
   try {
-    const cache = app.metadataCache.getFileCache(file);
-    const currentFrontmatter = (cache?.frontmatter || {}) as Record<string, any>;
-    const currentTags = parseTagInput([currentFrontmatter.tags, currentFrontmatter.tag]);
-    const mergedTags = mergeNormalizedTags(parentTags, currentTags);
-    const currentTagsStr = JSON.stringify([...currentTags].sort());
-    const mergedTagsStr = JSON.stringify([...mergedTags].sort());
-
-    if (currentTagsStr !== mergedTagsStr) {
-      await app.fileManager.processFrontMatter(file, (fm) => {
-        setFrontmatterValueCaseInsensitive(fm as Record<string, any>, 'tags', mergedTags);
-      });
-    }
+    await plugin.frontmatterMutationService.processGuarded(file, (fm) => {
+      const frontmatter = fm as Record<string, any>;
+      const currentTags = parseTagInput([frontmatter.tags, frontmatter.tag]);
+      const mergedTags = mergeNormalizedTags(parentTags, currentTags);
+      const currentTagsStr = JSON.stringify([...currentTags].sort());
+      const mergedTagsStr = JSON.stringify([...mergedTags].sort());
+      if (currentTagsStr === mergedTagsStr) return false;
+      setFrontmatterValueCaseInsensitive(frontmatter, 'tags', mergedTags);
+      return true;
+    });
   } catch (error) {
     logger.warn('[TPS GCM] Failed merging parent tags into subitem:', file.path, error);
   }

@@ -42,6 +42,7 @@ import { resolveBulletLineSourceTarget } from '../bullet-line-source-target';
 import { requestLineItemDelete } from '../../services/line-item-delete-service';
 import { TextInputModal } from '../../modals/text-input-modal';
 import { getPlainDisplayTitle } from '../../utils/display-title';
+import { isFrontmatterMutationReady } from '../../services/frontmatter-mutation-outcome';
 import { setVisibleLineText, visibleLineText } from '../../views/log-line-utils';
 import { resolveExactLineRevisionIndex, splitLineItemContent } from '../../utils/line-item-deletion';
 import {
@@ -794,7 +795,6 @@ export class TpsListView extends BasesView {
         .setTitle(current.length > 0 ? `Line tags (${current.length})` : 'Line tags')
         .setIcon('tag')
         .setSection('tps-line');
-      (item as any)._isTpsItem = true;
       const subMenu = (item as any).setSubmenu();
       subMenu.addItem((sub: any) => {
         sub.setTitle('Add tag...').setIcon('plus').onClick(() => {
@@ -905,7 +905,6 @@ export class TpsListView extends BasesView {
             .setSection(section)
             .onClick(onClick);
           if (warning) (item as any).setWarning?.(true);
-          (item as any)._isTpsItem = true;
         });
       };
 
@@ -991,7 +990,6 @@ export class TpsListView extends BasesView {
             .setSection(section)
             .onClick(onClick);
           if (warning) (item as any).setWarning?.(true);
-          (item as any)._isTpsItem = true;
         });
       };
 
@@ -7053,15 +7051,20 @@ export class TpsListView extends BasesView {
     const writableProp = this.getFrontmatterPropNameFromId(propName) ?? propName;
     if (!writableProp || span.hasClass('tps-list-native-property--editing')) return;
     this.startListPropertyInput(span, this.stringifyEditablePropertyValue(rawValue), async (nextValue) => {
-      await this.app.fileManager.processFrontMatter(file, (fm) => {
+      const outcome = await this.getGcmPlugin().frontmatterMutationService.processGuardedWithOutcome(file, (fm: Record<string, unknown>) => {
         const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, writableProp) || writableProp;
-        if (!nextValue.trim()) {
+        const normalizedNextValue = nextValue.trim();
+        if ((!normalizedNextValue && !Object.prototype.hasOwnProperty.call(fm, actualKey))
+          || (normalizedNextValue && fm[actualKey] === normalizedNextValue)) return 'unchanged';
+        if (!normalizedNextValue) {
           delete fm[actualKey];
         } else {
-          fm[actualKey] = nextValue.trim();
+          fm[actualKey] = normalizedNextValue;
         }
+        return true;
       });
-      emitFilesUpdated(this.app, [file.path], 'tps-list');
+      if (!isFrontmatterMutationReady(outcome)) throw new Error('Frontmatter property update was not committed');
+      if (outcome === 'changed') emitFilesUpdated(this.app, [file.path], 'tps-list');
       this.render(false);
     });
   }

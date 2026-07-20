@@ -408,7 +408,7 @@ test('TPS List opens plain bullets in the line editor and composes the normal GC
   assert.match(viewSource, /lineService\.createNoteForLine\(context\)/);
   assert.match(viewSource, /clearRecentContextTarget\?\.\(\)/);
   assert.match(viewSource, /this\.app\.workspace\.trigger\('file-menu', menu as any, menuTarget as any\)/);
-  assert.match(viewSource, /\(item as any\)\._isTpsItem = true/);
+  assert.doesNotMatch(viewSource, /_isTpsItem/);
 });
 
 test('TPS List and TPS Table row menus expose built-in tag actions', async () => {

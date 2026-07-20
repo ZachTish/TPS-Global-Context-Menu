@@ -1,9 +1,16 @@
-import { MarkdownView, Notice, TFile } from 'obsidian';
+import { MarkdownView, Notice, TFile, normalizePath } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
-import type { BodySubitemLink, ReconcileResult } from './subitem-types';
-import { resolveLinkTargetToFile } from './link-target-service';
+import type {
+  BodySubitemLink,
+  MarkdownBodyMutationOutcome,
+  ReconcileResult,
+  RelationshipSideRemovalOutcome,
+  RelationshipUnlinkOutcome,
+} from './subitem-types';
+import { normalizeLinkTarget, resolveLinkTargetToFile } from './link-target-service';
 import { getCompatibleMarkdownViewFromLeaf, pickBestMarkdownLeaf } from './leaf-resolver';
 import { mapStatusToSubitemCheckboxState } from '../utils/linked-subitem-mapping';
+import { runFailClosedTwoSidedRemoval } from './relationship-outcome';
 import * as logger from '../logger';
 
 export class SubitemRelationshipSyncService {
@@ -109,9 +116,9 @@ export class SubitemRelationshipSyncService {
 
   async readMarkdownText(file: TFile): Promise<string> {
     if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return '';
-    const openView = this.getOpenMarkdownViewForFile(file);
-    if (openView) {
-      return this.readViewSource(openView) ?? await this.plugin.app.vault.read(file);
+    for (const openView of this.getOpenMarkdownViewsForFile(file)) {
+      const source = this.readViewSource(openView);
+      if (source != null) return source;
     }
     return await this.plugin.app.vault.read(file);
   }
@@ -183,13 +190,18 @@ export class SubitemRelationshipSyncService {
     return changed;
   }
 
-  async unlinkChildFromParent(childFile: TFile, parentFile: TFile): Promise<{ childChanged: boolean; parentChanged: boolean }> {
-    const childChanged = await this.plugin.parentLinkResolutionService.removeParentFromChild(childFile, parentFile);
-    let parentChanged = false;
-    if (parentFile.extension?.toLowerCase() === 'md') {
-      parentChanged = await this.removeBodyLink(parentFile, childFile);
-    }
-    return { childChanged, parentChanged };
+  async unlinkChildFromParent(childFile: TFile, parentFile: TFile): Promise<RelationshipUnlinkOutcome> {
+    const result = await runFailClosedTwoSidedRemoval(
+      () => this.plugin.parentLinkResolutionService.removeParentFromChildWithOutcome(childFile, parentFile),
+      () => parentFile.extension?.toLowerCase() === 'md'
+        ? this.removeBodyLinkWithOutcome(parentFile, childFile)
+        : Promise.resolve('absent'),
+    );
+    return {
+      status: result.status,
+      child: result.first,
+      parent: result.second,
+    };
   }
 
   public async insertBodyLink(parentFile: TFile, childFile: TFile, checkboxState?: string | null): Promise<boolean> {
@@ -319,64 +331,130 @@ export class SubitemRelationshipSyncService {
     return statusValue ? (this.plugin.settings.linkedSubitemDefaultOpenState || '[ ]') : null;
   }
 
-  private async removeBodyLink(parentFile: TFile, childFile: TFile): Promise<boolean> {
-    return await this.mutateMarkdownBody(parentFile, async (lines) => {
-      let changed = false;
+  private async removeBodyLinkWithOutcome(
+    parentFile: TFile,
+    childFile: TFile,
+  ): Promise<RelationshipSideRemovalOutcome> {
+    let relationPresent = false;
+    let relationUnverified = false;
+    const outcome = await this.mutateMarkdownBodyWithOutcome(parentFile, (lines) => {
       for (let index = lines.length - 1; index >= 0; index--) {
         const parsed = this.plugin.bodySubitemLinkService.parseLine(lines[index] || '');
         if (!parsed) continue;
         const resolved = resolveLinkTargetToFile(this.plugin.app, parsed.linkTarget, parentFile.path);
-        if (!(resolved instanceof TFile) || resolved.path !== childFile.path) continue;
+        if (!(resolved instanceof TFile)) {
+          if (this.unresolvedLinkTargetMayReferenceFile(parsed.linkTarget, childFile)) {
+            relationUnverified = true;
+          }
+          continue;
+        }
+        if (resolved.path !== childFile.path) continue;
         lines.splice(index, 1);
-        changed = true;
+        relationPresent = true;
       }
-      return changed;
+      return relationPresent;
     });
+    if (outcome === 'refused' || relationUnverified) return 'refused';
+    return outcome === 'changed' && relationPresent ? 'removed' : 'absent';
+  }
+
+  private unresolvedLinkTargetMayReferenceFile(rawTarget: string, file: TFile): boolean {
+    const normalizedTarget = normalizePath(normalizeLinkTarget(rawTarget)).replace(/\.md$/i, '').toLowerCase();
+    if (!normalizedTarget) return false;
+    const normalizedPath = normalizePath(file.path).replace(/\.md$/i, '').toLowerCase();
+    return normalizedTarget === normalizedPath || normalizedTarget === file.basename.toLowerCase();
   }
 
   async mutateMarkdownBody(
     file: TFile,
     mutator: (lines: string[], raw: string) => boolean | Promise<boolean>,
   ): Promise<boolean> {
-    if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return false;
+    return (await this.mutateMarkdownBodyWithOutcome(file, mutator)) === 'changed';
+  }
 
-    let changed = false;
+  async mutateMarkdownBodyWithOutcome(
+    file: TFile,
+    mutator: (lines: string[], raw: string) => boolean | Promise<boolean>,
+  ): Promise<MarkdownBodyMutationOutcome> {
+    if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return 'refused';
+
+    const mutationState: { outcome: MarkdownBodyMutationOutcome } = { outcome: 'unchanged' };
     const started = performance.now();
     await this.runSerializedBodyMutation(file, async () => {
-      const openViews = this.getOpenMarkdownViewsForFile(file);
-      const raw = await this.readMarkdownText(file);
-      const lines = raw.split('\n');
-      const didChange = await mutator(lines, raw);
-      if (!didChange) return;
-
-      const next = lines.join('\n');
-      if (next === raw) return;
-      if (!this.hasSuspiciousBrokenSubitemLine(raw) && this.hasSuspiciousBrokenSubitemLine(next)) {
-        new Notice(`Skipped suspicious subitem body write for "${file.basename}".`);
-        logger.flowWarn('SubitemRelationship', 'suspicious-body-write-blocked', {
-          file: file.path,
-          raw,
-          next,
-          stack: new Error().stack,
+      try {
+        const editorViews = this.getOpenMarkdownViewsForFile(file).filter((view) => {
+          const editor = view.editor;
+          return typeof editor?.getValue === 'function' && typeof editor?.setValue === 'function';
         });
-        return;
-      }
+        const raw = editorViews.length > 0
+          ? this.readViewSource(editorViews[0])
+          : await this.plugin.app.vault.read(file);
+        if (raw == null) {
+          mutationState.outcome = 'refused';
+          return;
+        }
 
-      if (openViews.length > 0) {
-        await this.writeOpenMarkdownViews(file, next, openViews);
-      } else {
-        await this.plugin.app.vault.modify(file, next);
+        const lines = raw.split('\n');
+        const didChange = await mutator(lines, raw);
+        if (!didChange) return;
+
+        const next = lines.join('\n');
+        if (next === raw) return;
+        if (!this.isBodyMutationSafe(file, raw, next)) {
+          mutationState.outcome = 'refused';
+          return;
+        }
+
+        if (editorViews.length > 0) {
+          mutationState.outcome = await this.writeOpenMarkdownViews(file, next, raw, editorViews)
+            ? 'changed'
+            : 'refused';
+          return;
+        }
+
+        let committed = false;
+        let stale = false;
+        await this.plugin.app.vault.process(file, (current: string) => {
+          if (current !== raw) {
+            stale = true;
+            return current;
+          }
+          committed = true;
+          return next;
+        });
+        mutationState.outcome = committed && !stale ? 'changed' : 'refused';
+        if (stale) {
+          logger.flowWarn('SubitemRelationship', 'stale-closed-note-body-write-refused', { file: file.path });
+        }
+      } catch (error) {
+        mutationState.outcome = 'refused';
+        logger.flowWarn('SubitemRelationship', 'body-write-refused', {
+          file: file.path,
+          error: logger.errorSummary(error),
+        });
       }
-      changed = true;
     });
+    const finalOutcome = mutationState.outcome;
 
     logger.perf('subitemRelationship:mutateMarkdownBody', {
       file: file.path,
-      changed,
+      outcome: finalOutcome,
       durationMs: Math.round(performance.now() - started),
-      stack: changed ? compactStack(new Error().stack) : undefined,
+      stack: finalOutcome === 'changed' ? compactStack(new Error().stack) : undefined,
     });
-    return changed;
+    return finalOutcome;
+  }
+
+  private isBodyMutationSafe(file: TFile, raw: string, next: string): boolean {
+    if (this.hasSuspiciousBrokenSubitemLine(raw) || !this.hasSuspiciousBrokenSubitemLine(next)) return true;
+    new Notice(`Skipped suspicious subitem body write for "${file.basename}".`);
+    logger.flowWarn('SubitemRelationship', 'suspicious-body-write-blocked', {
+      file: file.path,
+      previousLength: raw.length,
+      nextLength: next.length,
+      stack: compactStack(new Error().stack),
+    });
+    return false;
   }
 
   private shouldIgnoreForAutoEmbed(file: TFile): boolean {
@@ -429,21 +507,18 @@ export class SubitemRelationshipSyncService {
       release = resolve;
     });
 
-    this.bodyWriteChains.set(key, previous.then(() => gate).catch(() => gate));
+    const queued = previous.catch(() => undefined).then(() => gate);
+    this.bodyWriteChains.set(key, queued);
 
     try {
-      await previous;
+      await previous.catch(() => undefined);
       await action();
     } finally {
       release();
-      if (this.bodyWriteChains.get(key) === gate) {
+      if (this.bodyWriteChains.get(key) === queued) {
         this.bodyWriteChains.delete(key);
       }
     }
-  }
-
-  private getOpenMarkdownViewForFile(file: TFile): MarkdownView | null {
-    return this.getOpenMarkdownViewsForFile(file)[0] ?? null;
   }
 
   private hasSuspiciousBrokenSubitemLine(text: string): boolean {
@@ -533,37 +608,39 @@ export class SubitemRelationshipSyncService {
     return null;
   }
 
-  private async writeOpenMarkdownViews(file: TFile, next: string, views: MarkdownView[]): Promise<void> {
+  private async writeOpenMarkdownViews(
+    file: TFile,
+    next: string,
+    expected: string,
+    views: MarkdownView[],
+  ): Promise<boolean> {
     const editorViews = views.filter((view) => {
-      const editor = (view as any)?.editor;
-      return typeof editor?.setValue === 'function';
+      const editor = view.editor;
+      return typeof editor?.getValue === 'function' && typeof editor?.setValue === 'function';
     });
 
-    if (editorViews.length === 0) {
-      await this.plugin.app.vault.modify(file, next);
-      return;
+    if (editorViews.length === 0) return false;
+    if (editorViews.some((view) => this.readViewSource(view) !== expected)) {
+      logger.flowWarn('SubitemRelationship', 'stale-open-editor-body-write-refused', { file: file.path });
+      return false;
+    }
+
+    const primaryView = editorViews[0];
+    const canRequestSave = typeof primaryView?.requestSave === 'function';
+    if (!canRequestSave) {
+      logger.flowWarn('SubitemRelationship', 'open-editor-save-unavailable', { file: file.path });
+      return false;
     }
 
     for (const view of editorViews) {
-      const editor = (view as any).editor;
-      editor.setValue(next);
+      view.editor.setValue(next);
     }
 
-    const primaryView = editorViews[0] as any;
     if (typeof primaryView?.requestSave === 'function') {
       primaryView.requestSave();
-      return;
+      return true;
     }
-    if (typeof primaryView?.save === 'function') {
-      try {
-        await primaryView.save(false);
-        return;
-      } catch (error) {
-        // Fall back to direct vault persistence if the live view save path fails.
-      }
-    }
-
-    await this.plugin.app.vault.modify(file, next);
+    return false;
   }
 }
 

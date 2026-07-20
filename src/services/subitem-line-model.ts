@@ -32,6 +32,8 @@ export interface SubitemLineModel {
   kind: SubitemLineKind;
   /** The checkbox state string (e.g., "[ ]", "[x]") if kind is checkbox */
   checkboxState: string | null;
+  /** Normalized child status used to render this model. This is a revision token, not a live read. */
+  renderedStatus: string;
   /** The raw wikilink markup */
   wikilink: string;
   /** The resolved link target path */
@@ -76,6 +78,7 @@ export class SubitemLineModelService {
       parentFile,
       kind: parsed.kind,
       checkboxState,
+      renderedStatus: status,
       wikilink: parsed.wikilink,
       linkTarget: parsed.linkTarget,
       displayLabel: this.getDisplayLabel(parsed.wikilink, childFile),

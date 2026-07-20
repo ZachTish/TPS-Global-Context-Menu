@@ -31,7 +31,7 @@ export class ChecklistHandler {
   /**
    * Scan a file for incomplete checklist items
    */
-  async scanChecklistItems(file: TFile): Promise<string[]> {
+  async scanChecklistItems(file: TFile): Promise<{ ok: true; items: string[] } | { ok: false; items: [] }> {
     try {
       const content = await this.app.vault.read(file);
       const lines = content.split('\n');
@@ -45,29 +45,25 @@ export class ChecklistHandler {
           incompleteItems.push(match[1].trim());
         }
       }
-      return incompleteItems;
+      return { ok: true, items: incompleteItems };
     } catch (error) {
       logger.error(`[TPS GCM] Failed to scan checklist items for ${file.path}:`, error);
-      return [];
+      return { ok: false, items: [] };
     }
   }
 
   /**
    * Update checklist items in a file based on action
    */
-  async updateChecklistItems(file: TFile, action: 'complete' | 'canceled'): Promise<void> {
+  async updateChecklistItems(file: TFile, action: 'complete' | 'canceled'): Promise<boolean> {
     try {
-      let content = await this.app.vault.read(file);
-
-      if (action === 'complete') {
-        content = content.replace(/^(\s*[-*+]\s*)\[ \]/gm, '$1[x]');
-      } else if (action === 'canceled') {
-        content = content.replace(/^(\s*[-*+]\s*)\[ \]/gm, '$1[-]');
-      }
-
-      await this.app.vault.modify(file, content);
+      await this.app.vault.process(file, (content) => action === 'complete'
+        ? content.replace(/^(\s*[-*+]\s*)\[ \]/gm, '$1[x]')
+        : content.replace(/^(\s*[-*+]\s*)\[ \]/gm, '$1[-]'));
+      return true;
     } catch (error) {
       logger.error(`[TPS GCM] Failed to update checklist items for ${file.path}:`, error);
+      return false;
     }
   }
 
@@ -76,8 +72,10 @@ export class ChecklistHandler {
    * Returns true if the status change should proceed, false to abort.
    */
   async handleChecklistCompletion(file: TFile): Promise<boolean> {
+    const scan = await this.scanChecklistItems(file);
+    if (!scan.ok) return false;
     markChecklistCompletionPromptHandled(file);
-    const incompleteItems = await this.scanChecklistItems(file);
+    const incompleteItems = scan.items;
 
     if (incompleteItems.length === 0) {
       return true;
@@ -102,9 +100,9 @@ export class ChecklistHandler {
     }
 
     if (userAction === 'complete') {
-      await this.updateChecklistItems(file, 'complete');
+      if (!(await this.updateChecklistItems(file, 'complete'))) return false;
     } else if (userAction === 'canceled') {
-      await this.updateChecklistItems(file, 'canceled');
+      if (!(await this.updateChecklistItems(file, 'canceled'))) return false;
     }
     // 'ignore' falls through to set status
     return true;

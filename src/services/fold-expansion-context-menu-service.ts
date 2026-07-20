@@ -27,7 +27,6 @@ export class FoldExpansionContextMenuService extends Component {
     if (!context) return;
 
     menu.addItem((item) => {
-      (item as any)._isTpsItem = true;
       item
         .setTitle('Expand all under this line')
         .setIcon('list-tree')

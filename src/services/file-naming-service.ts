@@ -155,17 +155,15 @@ export class FileNamingService {
         const expectedScheduled = `${expectedDate} 00:00:00`;
         if (!(await this.plugin.bulkEditService.canMutateFrontmatterSafely(file))) return false;
 
-        let changed = false;
-        await this.plugin.bulkEditService.runSerializedFrontmatterWrite(file, async () => {
-            await this.plugin.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        return this.plugin.bulkEditService.runSerializedFrontmatterWrite(file, async () =>
+            this.plugin.frontmatterMutationService.processGuarded(file, (frontmatter) => {
                 const currentRaw = String(frontmatter.scheduled ?? '').trim();
                 const currentIso = this.parseScheduledToIso(currentRaw);
-                if (currentIso === expectedDate && currentRaw === expectedScheduled) return;
+                if (currentIso === expectedDate && currentRaw === expectedScheduled) return false;
                 frontmatter.scheduled = expectedScheduled;
-                changed = true;
-            });
-        });
-        return changed;
+                return true;
+            }),
+        );
     }
 
     private titleMatchesScheduledDate(title: string, scheduledDate: any): boolean {
@@ -398,14 +396,15 @@ export class FileNamingService {
 
         if (existingCreated === createdValue && existingModified === modifiedValue) return;
 
-        this.rememberRecentTimestampWrite(liveFile.path);
         try {
-            await this.plugin.bulkEditService.runSerializedFrontmatterWrite(liveFile, async () => {
-                await this.plugin.app.fileManager.processFrontMatter(liveFile, (frontmatter) => {
+            const changed = await this.plugin.bulkEditService.runSerializedFrontmatterWrite(liveFile, async () =>
+                this.plugin.frontmatterMutationService.process(liveFile, (frontmatter) => {
                     this.setFrontmatterValueCaseInsensitive(frontmatter, createdKey, createdValue);
                     this.setFrontmatterValueCaseInsensitive(frontmatter, modifiedKey, modifiedValue);
-                });
-            });
+                }),
+            );
+            if (!changed) return;
+            this.rememberRecentTimestampWrite(liveFile.path);
             if (fingerprint) {
                 this.rememberTimestampWriteState(liveFile.path, fingerprint, modifiedValue);
             }
@@ -497,8 +496,8 @@ export class FileNamingService {
 
         try {
             logger.debug(`[FILE-DRAG] Writing folderPath to frontmatter: ${currentFolder}`);
-            await this.plugin.bulkEditService.runSerializedFrontmatterWrite(liveFile, async () => {
-                await this.plugin.app.fileManager.processFrontMatter(liveFile, (frontmatter) => {
+            const changed = await this.plugin.bulkEditService.runSerializedFrontmatterWrite(liveFile, async () =>
+                this.plugin.frontmatterMutationService.process(liveFile, (frontmatter) => {
                     frontmatter.folderPath = currentFolder;
                     for (const key of Object.keys(frontmatter)) {
                         const normalized = String(key || '').trim().toLowerCase();
@@ -506,8 +505,9 @@ export class FileNamingService {
                             delete frontmatter[key];
                         }
                     }
-                });
-            });
+                }),
+            );
+            if (!changed) return;
             this.rememberRecentFolderPathWrite(liveFile.path, currentFolder);
             logger.debug(`[FILE-DRAG] Frontmatter updated successfully`);
         } catch (error) {
@@ -688,8 +688,8 @@ export class FileNamingService {
                     logger.warn(`[TPS GCM] Skipping title sync due to malformed frontmatter: ${targetFile.path}`);
                     return "skipped";
                 }
-                await this.plugin.bulkEditService.runSerializedFrontmatterWrite(targetFile, async () => {
-                    await this.plugin.app.fileManager.processFrontMatter(targetFile, (frontmatter) => {
+                const changed = await this.plugin.bulkEditService.runSerializedFrontmatterWrite(targetFile, async () =>
+                    this.plugin.frontmatterMutationService.process(targetFile, (frontmatter) => {
                         const existingTitleKeys = Object.keys(frontmatter).filter(
                             (key) => key.trim().toLowerCase() === 'title',
                         );
@@ -702,9 +702,9 @@ export class FileNamingService {
                             }
                         }
                         this.addMeaningfulAliases(frontmatter, [currentTitle, rawBasename], nextTitle);
-                    });
-                });
-                return "updated";
+                    }),
+                );
+                return changed ? "updated" : "skipped";
             }
             return "skipped";
         } catch (error) {

@@ -1,4 +1,4 @@
-import { TFile, Platform, debounce, MarkdownView, WorkspaceLeaf } from 'obsidian';
+import { TFile, Platform, debounce, MarkdownView, Notice, WorkspaceLeaf } from 'obsidian';
 import { resolveLinkValueToFile } from '../handlers/parent-link-format';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { ViewModeService } from '../services/view-mode-service';
@@ -12,6 +12,13 @@ import {
     markChecklistCompletionPromptHandled,
     wasChecklistCompletionPromptRecentlyHandled,
 } from '../handlers/checklist-handler';
+import {
+    applyGuardedChecklistStatusTransition,
+    classifyGuardedStatusWriteOutcome,
+    readChecklistStatus,
+    recoverExternalChecklistCompletionAfterScanFailure,
+    type GuardedStatusWriteResult,
+} from './checklist-status-transition';
 
 /**
  * Registers all workspace and vault event listeners on the given plugin instance.
@@ -30,12 +37,10 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     const checklistCompletionGuard = new ChecklistHandler(plugin.app);
 
     const readConfiguredStatus = (frontmatter: Record<string, any> | null | undefined): string => {
-        if (!frontmatter || typeof frontmatter !== 'object') return '';
         const statusKey = plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status';
-        const actualKey = Object.keys(frontmatter).find((key) => key.toLowerCase() === String(statusKey).toLowerCase());
-        const raw = actualKey ? frontmatter[actualKey] : undefined;
-        const value = Array.isArray(raw) ? raw.find((entry) => String(entry ?? '').trim()) : raw;
-        return plugin.sharedServices?.status?.normalize?.(value) || String(value ?? '').trim().toLowerCase();
+        return readChecklistStatus(frontmatter, String(statusKey), (value) => (
+            plugin.sharedServices?.status?.normalize?.(value) || String(value ?? '').trim().toLowerCase()
+        ));
     };
 
     const isChecklistCompletionStatus = (status: string): boolean => {
@@ -43,26 +48,51 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
         return normalized === 'complete' || normalized === 'completed' || normalized === 'done';
     };
 
-    const writeConfiguredStatus = async (file: TFile, status: string): Promise<void> => {
-        markChecklistCompletionPromptHandled(file);
+    const writeConfiguredStatus = async (
+        file: TFile,
+        status: string,
+        expectedStatus: string,
+    ): Promise<GuardedStatusWriteResult> => {
         const statusKey = plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status';
-        await plugin.app.fileManager.processFrontMatter(file, (frontmatter) => {
-            const actualKey = Object.keys(frontmatter).find((key) => key.toLowerCase() === String(statusKey).toLowerCase()) || statusKey;
-            const completedDateKey = Object.keys(frontmatter).find((key) => key.toLowerCase() === 'completeddate');
-            if (status) {
-                frontmatter[actualKey] = status;
-            } else {
-                delete frontmatter[actualKey];
+        let stale = false;
+        try {
+            const outcome = await plugin.frontmatterMutationService.processGuardedWithOutcome(file, (frontmatter) => {
+                const applied = applyGuardedChecklistStatusTransition(frontmatter, {
+                    statusKey: String(statusKey),
+                    expectedStatus,
+                    targetStatus: status,
+                    normalizeStatus: (value) => (
+                        plugin.sharedServices?.status?.normalize?.(value) || String(value ?? '').trim().toLowerCase()
+                    ),
+                    completedAt: (window as any).moment
+                        ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
+                        : new Date().toISOString().replace('T', ' ').slice(0, 19),
+                });
+                stale = !applied;
+                return applied;
+            });
+            const result = classifyGuardedStatusWriteOutcome(outcome, stale);
+            if (result === 'changed' || result === 'unchanged') {
+                markChecklistCompletionPromptHandled(file);
+                return result;
             }
-            if (isChecklistCompletionStatus(status)) {
-                const now = (window as any).moment
-                    ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
-                    : new Date().toISOString().replace('T', ' ').slice(0, 19);
-                frontmatter[completedDateKey || 'completedDate'] = frontmatter[completedDateKey || 'completedDate'] || now;
-            } else if (completedDateKey) {
-                delete frontmatter[completedDateKey];
-            }
-        });
+            if (result === 'stale') return result;
+            logger.warn('[TPS GCM] Checklist completion status write was refused', {
+                file: file.path,
+                expectedStatus,
+                targetStatus: status,
+                outcome,
+            });
+            return 'refused';
+        } catch (error) {
+            logger.warn('[TPS GCM] Checklist completion status write failed', {
+                file: file.path,
+                expectedStatus,
+                targetStatus: status,
+                error: logger.errorSummary(error),
+            });
+            return 'refused';
+        }
     };
 
     const scheduleExternalChecklistCompletionGuard = (file: TFile, previousStatus: string, currentStatus: string): void => {
@@ -73,29 +103,58 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
         const existing = checklistCompletionGuardTimers.get(file.path);
         if (existing) window.clearTimeout(existing);
-        const timer = window.setTimeout(async () => {
-            checklistCompletionGuardTimers.delete(file.path);
-            const liveFile = plugin.app.vault.getFileByPath(file.path);
-            if (!(liveFile instanceof TFile)) return;
-            const liveStatus = readConfiguredStatus(plugin.app.metadataCache.getFileCache(liveFile)?.frontmatter as Record<string, any> | undefined);
-            if (!isChecklistCompletionStatus(liveStatus)) return;
-            const incompleteItems = await checklistCompletionGuard.scanChecklistItems(liveFile);
-            if (incompleteItems.length === 0) return;
-            const restoreStatus = isChecklistCompletionStatus(previousStatus) ? '' : previousStatus;
-            logger.log('[TPS GCM] External checklist completion guard prompting', {
-                file: liveFile.path,
-                previousStatus,
-                restoreStatus,
-                liveStatus,
-                incompleteItems: incompleteItems.length,
-            });
-            await writeConfiguredStatus(liveFile, restoreStatus);
-            plugin.eventService.emitFilesUpdated([liveFile.path]);
-            void checklistCompletionGuard.handleChecklistCompletion(liveFile).then(async (canProceed) => {
-                if (canProceed) {
-                    await writeConfiguredStatus(liveFile, liveStatus);
+        const timer = window.setTimeout(() => {
+            void (async () => {
+                checklistCompletionGuardTimers.delete(file.path);
+                const liveFile = plugin.app.vault.getFileByPath(file.path);
+                if (!(liveFile instanceof TFile)) return;
+                const liveStatus = readConfiguredStatus(plugin.app.metadataCache.getFileCache(liveFile)?.frontmatter as Record<string, any> | undefined);
+                if (!isChecklistCompletionStatus(liveStatus)) return;
+                const checklistScan = await checklistCompletionGuard.scanChecklistItems(liveFile);
+                if (!checklistScan.ok) {
+                    const recovery = await recoverExternalChecklistCompletionAfterScanFailure({
+                        previousStatus,
+                        liveStatus,
+                        isCompletionStatus: isChecklistCompletionStatus,
+                        writeStatus: (targetStatus, expectedStatus) => (
+                            writeConfiguredStatus(liveFile, targetStatus, expectedStatus)
+                        ),
+                    });
+                    if (recovery.outcome === 'changed') plugin.eventService.emitFilesUpdated([liveFile.path]);
+                    const restored = recovery.outcome === 'changed' || recovery.outcome === 'unchanged';
+                    logger.warn('[TPS GCM] External checklist completion could not be verified', {
+                        file: liveFile.path,
+                        restoreStatus: recovery.restoreStatus,
+                        recoveryOutcome: recovery.outcome,
+                    });
+                    new Notice(restored
+                        ? `Couldn’t verify checklist items in "${liveFile.basename}"; its previous status was restored.`
+                        : `Couldn’t verify checklist items or restore the previous status in "${liveFile.basename}". Review the note before continuing.`);
+                    return;
                 }
-                plugin.eventService.emitFilesUpdated([liveFile.path]);
+                const incompleteItems = checklistScan.items;
+                if (incompleteItems.length === 0) return;
+                const restoreStatus = isChecklistCompletionStatus(previousStatus) ? '' : previousStatus;
+                logger.log('[TPS GCM] External checklist completion guard prompting', {
+                    file: liveFile.path,
+                    previousStatus,
+                    restoreStatus,
+                    liveStatus,
+                    incompleteItems: incompleteItems.length,
+                });
+                const restoreOutcome = await writeConfiguredStatus(liveFile, restoreStatus, liveStatus);
+                if (restoreOutcome === 'stale' || restoreOutcome === 'refused') return;
+                if (restoreOutcome === 'changed') plugin.eventService.emitFilesUpdated([liveFile.path]);
+
+                const canProceed = await checklistCompletionGuard.handleChecklistCompletion(liveFile);
+                if (!canProceed) return;
+                const completionOutcome = await writeConfiguredStatus(liveFile, liveStatus, restoreStatus);
+                if (completionOutcome === 'changed') plugin.eventService.emitFilesUpdated([liveFile.path]);
+            })().catch((error) => {
+                logger.warn('[TPS GCM] External checklist completion guard failed', {
+                    file: file.path,
+                    error: logger.errorSummary(error),
+                });
             });
         }, 250);
         checklistCompletionGuardTimers.set(file.path, timer);
@@ -110,34 +169,36 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.registerEvent(
         plugin.app.workspace.on('file-menu', (menu, file) => {
+            const targetEl = plugin.contextTargetService.consumeRecentContextTarget(1200);
             if (plugin.settings.inlineMenuOnly) return;
-            const targetEl = plugin.contextTargetService.peekRecentContextTarget(1200);
             const linkTarget = plugin.contextTargetService.resolveMarkdownNoteLinkTarget(targetEl);
             if (linkTarget instanceof TFile) {
-                plugin.menuController.addToNativeMenu(menu, [linkTarget]);
+                plugin.menuController.addToNativeMenu(menu, [linkTarget], { includeDelete: false });
                 return;
             }
             if (!plugin.contextTargetService.isNativeMenuManagedTarget(targetEl)) return;
             if (file instanceof TFile) {
-                plugin.menuController.addToNativeMenu(menu, [file]);
+                plugin.menuController.addToNativeMenu(menu, [file], { includeDelete: false });
             }
         }),
     );
 
     plugin.registerEvent(
         plugin.app.workspace.on('files-menu', (menu, files) => {
+            plugin.contextTargetService.clearRecentContextTarget();
             if (plugin.settings.inlineMenuOnly) return;
             const fileList = files.filter((f: any) => f && f.path && typeof f.path === 'string') as TFile[];
             if (fileList.length > 0) {
-                plugin.menuController.addToNativeMenu(menu, fileList);
+                plugin.menuController.addToNativeMenu(menu, fileList, { includeDelete: false });
             }
         }),
     );
 
     plugin.registerEvent(
         plugin.app.workspace.on('editor-menu', (menu, editor, info) => {
+            const targetEl = plugin.contextTargetService.consumeRecentContextTarget(1200);
+            plugin.foldExpansionContextMenuService?.addMenuItemForTarget(menu, targetEl, null);
             if (plugin.settings.inlineMenuOnly) return;
-            const targetEl = plugin.contextTargetService.peekRecentContextTarget(1200);
             const linkTarget = plugin.contextTargetService.resolveMarkdownNoteLinkTarget(targetEl);
             if (linkTarget instanceof TFile) {
                 plugin.menuController.addToNativeMenu(menu, [linkTarget]);
@@ -448,13 +509,31 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
         const completedDateValue = getCompletedDateValue(fm);
 
         if (doneStatuses.has(currentStatus) && (!completedDateValue || (completedDateKey && Array.isArray(fm[completedDateKey])))) {
-            void plugin.app.fileManager.processFrontMatter(file, (fmw) => {
-                setCompletedDateValue(fmw, getCompletedDateValue(fmw) || undefined);
+            void plugin.frontmatterMutationService.processGuarded(file, (fmw) => {
+                const liveStatus = String(fmw.status ?? '').trim().toLowerCase();
+                const liveKey = Object.keys(fmw).find((candidate) => candidate.toLowerCase() === 'completeddate');
+                const liveValue = getCompletedDateValue(fmw);
+                if (!doneStatuses.has(liveStatus) || (liveValue && !(liveKey && Array.isArray(fmw[liveKey])))) return false;
+                setCompletedDateValue(fmw, liveValue || undefined);
+                return true;
+            }).catch((error) => {
+                logger.warn('[TPS GCM] Reactive completed-date write failed', {
+                    file: file.path,
+                    error: logger.errorSummary(error),
+                });
             });
         } else if (!doneStatuses.has(currentStatus) && completedDateValue && currentStatus) {
-            void plugin.app.fileManager.processFrontMatter(file, (fmw) => {
+            void plugin.frontmatterMutationService.processGuarded(file, (fmw) => {
+                const liveStatus = String(fmw.status ?? '').trim().toLowerCase();
                 const key = Object.keys(fmw).find((candidate) => candidate.toLowerCase() === 'completeddate');
-                if (key) delete fmw[key];
+                if (doneStatuses.has(liveStatus) || !liveStatus || !key || !getCompletedDateValue(fmw)) return false;
+                delete fmw[key];
+                return true;
+            }).catch((error) => {
+                logger.warn('[TPS GCM] Reactive completed-date cleanup failed', {
+                    file: file.path,
+                    error: logger.errorSummary(error),
+                });
             });
         }
     }, 400, false);

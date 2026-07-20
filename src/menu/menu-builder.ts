@@ -3,7 +3,7 @@ import TPSGlobalContextMenuPlugin from '../main';
 import { TextInputModal } from '../modals/text-input-modal';
 import { FileSuggestModal } from '../modals/FileSuggestModal';
 import { MultiFileSelectModal } from '../modals/MultiFileSelectModal';
-import { mergeNormalizedTags, normalizeTagValue } from '../utils/tag-utils';
+import { mergeNormalizedTags, normalizeTagList, normalizeTagValue } from '../utils/tag-utils';
 import { isTextListProperty, parseStringListInput } from '../utils/list-utils';
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import * as logger from '../logger';
@@ -12,13 +12,18 @@ import { ViewModeService } from '../services/view-mode-service';
 import { parseLinksFromFrontmatterValue } from '../services/link-target-service';
 import { promptAndCreateSubitemForParent } from '../services/subitem-creation-service';
 import { getPlainDisplayTitle } from '../utils/display-title';
+import { isFrontmatterMutationReady } from '../services/frontmatter-mutation-outcome';
+import { formatSingleRelationshipUnlinkNotice } from '../services/relationship-outcome';
 
 export interface NativeMenuLabelOptions {
   archiveLabel?: string;
   deleteLabel?: string;
   includeTitle?: boolean;
   includeTags?: boolean;
+  includeDelete?: boolean;
 }
+
+export type MenuContributionHost = Pick<Menu, 'addItem'>;
 
 export class MenuBuilder {
   private plugin: TPSGlobalContextMenuPlugin;
@@ -197,8 +202,10 @@ export class MenuBuilder {
         .setIcon('plus')
         .onClick(() => {
           new FileSuggestModal(this.app, async (parentFile: TFile) => {
-            await this.plugin.bulkEditService.linkToParent([file], parentFile);
-            new Notice(`Linked to parent: ${parentFile.basename}`);
+            const linkedCount = await this.plugin.bulkEditService.linkToParent([file], parentFile);
+            new Notice(linkedCount > 0
+              ? `Linked to parent: ${parentFile.basename}`
+              : `No new parent link was added to ${parentFile.basename}.`);
           }, { extensions: ['md', 'base'] }).open();
         });
     });
@@ -229,8 +236,16 @@ export class MenuBuilder {
         sub.setTitle(this.getFileDisplayTitle(parentFile))
           .setIcon('x')
           .onClick(async () => {
-            await this.plugin.bulkEditService.unlinkFromParent(file, parentFile);
-            new Notice(`Removed parent link: ${this.getFileDisplayTitle(parentFile)}`);
+            try {
+              const outcome = await this.plugin.bulkEditService.unlinkFromParentWithOutcome(file, parentFile);
+              new Notice(formatSingleRelationshipUnlinkNotice(
+                outcome.status,
+                `parent link between ${file.basename} and ${this.getFileDisplayTitle(parentFile)}`,
+              ));
+            } catch (error) {
+              logger.warn('[TPS GCM] Parent unlink menu action failed', logger.errorSummary(error));
+              new Notice(`Couldn’t remove parent link: ${this.getFileDisplayTitle(parentFile)}.`);
+            }
           });
       });
     });
@@ -253,8 +268,10 @@ export class MenuBuilder {
         .onClick(() => {
           new MultiFileSelectModal(this.app, async (childFilesToAdd: TFile[]) => {
             if (childFilesToAdd.length > 0) {
-              await this.plugin.bulkEditService.linkChildren(file, childFilesToAdd);
-              new Notice(`Linked ${childFilesToAdd.length} children to this note.`);
+              const linkedCount = await this.plugin.bulkEditService.linkChildren(file, childFilesToAdd);
+              new Notice(linkedCount > 0
+                ? `Linked ${linkedCount} child${linkedCount === 1 ? '' : 'ren'} to this note.`
+                : 'No new child links were added.');
             }
           }).open();
         });
@@ -286,8 +303,16 @@ export class MenuBuilder {
         sub.setTitle(this.getFileDisplayTitle(childFile))
           .setIcon('x')
           .onClick(async () => {
-            await this.plugin.bulkEditService.unlinkFromParent(childFile, file);
-            new Notice(`Removed child link: ${this.getFileDisplayTitle(childFile)}`);
+            try {
+              const outcome = await this.plugin.bulkEditService.unlinkFromParentWithOutcome(childFile, file);
+              new Notice(formatSingleRelationshipUnlinkNotice(
+                outcome.status,
+                `child link between ${this.getFileDisplayTitle(file)} and ${this.getFileDisplayTitle(childFile)}`,
+              ));
+            } catch (error) {
+              logger.warn('[TPS GCM] Child unlink menu action failed', logger.errorSummary(error));
+              new Notice(`Couldn’t remove child link: ${this.getFileDisplayTitle(childFile)}.`);
+            }
           });
       });
     });
@@ -329,7 +354,6 @@ export class MenuBuilder {
     for (const file of files) {
       if (!(file instanceof TFile)) continue;
       if (archiveFolder && file.path.startsWith(`${archiveFolder}/`)) {
-        taggedCount += 1;
         continue;
       }
       if (file.extension?.toLowerCase() !== 'md') continue;
@@ -337,11 +361,18 @@ export class MenuBuilder {
       const originalFolder = file.parent?.path ?? '';
 
       try {
-        await this.app.fileManager.processFrontMatter(file, (frontmatter: any) => {
-          frontmatter.tags = mergeNormalizedTags(frontmatter.tags, archiveTag);
+        const outcome = await this.plugin.frontmatterMutationService.processGuardedWithOutcome(file, (frontmatter: any) => {
+          const nextTags = mergeNormalizedTags(frontmatter.tags, archiveTag);
+          if (JSON.stringify(frontmatter.tags ?? []) === JSON.stringify(nextTags)
+            && frontmatter.archiveOriginalFolder === originalFolder) return 'unchanged';
+          frontmatter.tags = nextTags;
           frontmatter.archiveOriginalFolder = originalFolder;
+          return true;
         });
-        taggedCount += 1;
+        if (outcome === 'changed') taggedCount += 1;
+        else if (!isFrontmatterMutationReady(outcome)) {
+          logger.warn('[TPS GCM] Archive tag write was refused', { file: file.path, outcome });
+        }
       } catch (err) {
         logger.error('[TPS GCM] Failed adding archive tag', file.path, err);
       }
@@ -371,10 +402,9 @@ export class MenuBuilder {
         // Remove tag and restore the original folder.
         if (file.extension?.toLowerCase() === 'md') {
           try {
-            await this.app.fileManager.processFrontMatter(file, (frontmatter: any) => {
+            const outcome = await this.plugin.frontmatterMutationService.processGuardedWithOutcome(file, (frontmatter: any) => {
               if (typeof frontmatter.archiveOriginalFolder === 'string') {
                 originalFolder = frontmatter.archiveOriginalFolder;
-                delete frontmatter.archiveOriginalFolder;
               }
 
               // Fallback for notes archived before archiveOriginalFolder existed.
@@ -395,14 +425,33 @@ export class MenuBuilder {
               }
 
               // Remove archive tag
-              const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags : [];
-              frontmatter.tags = tags.filter((tag: any) => {
-                const normalized = normalizeTagValue(String(tag));
-                return normalized !== archiveTag;
-              });
+              const tagsKey = Object.keys(frontmatter)
+                .find((key) => key.toLowerCase() === 'tags');
+              const tags = normalizeTagList(tagsKey ? frontmatter[tagsKey] : undefined);
+              const filteredTags = tags.filter((tag) =>
+                tag !== archiveTag && !tag.startsWith(`${archiveTag}/`),
+              );
+
+              const hasStoredFolder = Object.prototype.hasOwnProperty.call(frontmatter, 'archiveOriginalFolder');
+              const hasArchiveTag = filteredTags.length !== tags.length;
+              if (!hasStoredFolder && !hasArchiveTag) return 'unchanged';
+
+              delete frontmatter.archiveOriginalFolder;
+              if (hasArchiveTag && tagsKey) {
+                if (filteredTags.length > 0) {
+                  frontmatter[tagsKey] = filteredTags;
+                } else {
+                  delete frontmatter[tagsKey];
+                }
+              }
 
               // No need to log unarchive - the archive entry already tells us the history
+              return true;
             });
+            if (!isFrontmatterMutationReady(outcome)) {
+              logger.warn('[TPS GCM] Unarchive stopped because its frontmatter update was not committed', file.path);
+              continue;
+            }
           } catch (err) {
             logger.error('[TPS GCM] Failed processing frontmatter during unarchive', file.path, err);
             continue;
@@ -467,14 +516,7 @@ export class MenuBuilder {
     await this.plugin.noteTitleRenderService.promptRenameTitle(file);
   }
 
-  addToNativeMenu(menu: Menu, files: TFile[], options: NativeMenuLabelOptions = {}) {
-    // Prevent duplicate additions to the same menu instance
-    if ((menu as any)._tpsHandled) return;
-    (menu as any)._tpsHandled = true;
-
-    // Capture initial item count to allow reordering later
-    const initialItemCount = (menu as any).items ? (menu as any).items.length : 0;
-
+  addToNativeMenu(menu: MenuContributionHost, files: TFile[], options: NativeMenuLabelOptions = {}) {
     // Delegate resolution to service
     const resolvedFiles = this.plugin.contextTargetService.resolveTargets(files);
 
@@ -486,16 +528,6 @@ export class MenuBuilder {
     const markdownEntries = entries.filter(e => e.file.extension?.toLowerCase() === 'md');
     const markdownFiles = this.getPropertyFiles(markdownEntries).filter((candidate) => candidate.extension?.toLowerCase() === 'md');
     const propertyEntries = entries.filter((entry) => this.isPropertyFile(entry.file));
-
-    // Wrap addItem to tag all items added by this plugin
-    const originalAddItem = menu.addItem;
-
-    menu.addItem = (callback: (item: any) => any) => {
-      return originalAddItem.call(menu, (item: any) => {
-        callback(item);
-        (item as any)._isTpsItem = true;
-      });
-    };
 
     const file = entries[0].file;
 
@@ -689,7 +721,9 @@ export class MenuBuilder {
             new MultiFileSelectModal(this.app, async (attachmentFiles: TFile[]) => {
               if (attachmentFiles.length > 0) {
                 const added = await this.plugin.bulkEditService.linkAttachments(file, attachmentFiles);
-                new Notice(`Embedded ${added} attachment(s) in this note.`);
+                new Notice(added > 0
+                  ? `Embedded ${added} attachment${added === 1 ? '' : 's'} in this note.`
+                  : 'No new attachments were embedded.');
               }
             }).open();
           });
@@ -798,8 +832,9 @@ export class MenuBuilder {
         }
       });
 
-      // Delete
-      menu.addItem((item) => {
+      // Host-owned Explorer/Notebook Navigator menus already provide deletion.
+      // GCM contributes its delete action only on surfaces that do not.
+      if (options.includeDelete !== false) menu.addItem((item) => {
         const fileCount = entries.length;
         const deleteLabel = options.deleteLabel || (fileCount > 1 ? `Delete (${fileCount} items)` : 'Delete');
         item.setTitle(deleteLabel)
@@ -828,11 +863,9 @@ export class MenuBuilder {
       });
     }
 
-    // Restore original methods
-    menu.addItem = originalAddItem;
   }
 
-  addSelectorToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
+  addSelectorToMenu(menu: MenuContributionHost, entries: any[], prop: any, sectionId: string) {
     menu.addItem((item) => {
       const allValues = entries.map((e: any) => this.getValueCaseInsensitive(e.frontmatter, prop.key) || '');
       const uniqueValues = new Set(allValues);
@@ -900,7 +933,7 @@ export class MenuBuilder {
     });
   }
 
-  addListToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
+  addListToMenu(menu: MenuContributionHost, entries: any[], prop: any, sectionId: string) {
     menu.addItem((item) => {
       const listValues = this.getValueCaseInsensitive(entries[0].frontmatter, prop.key) || [];
       const items = isTextListProperty(prop)
@@ -966,7 +999,7 @@ export class MenuBuilder {
 
   }
 
-  addDatetimeToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
+  addDatetimeToMenu(menu: MenuContributionHost, entries: any[], prop: any, sectionId: string) {
     const val = this.getValueCaseInsensitive(entries[0].frontmatter, prop.key);
     const isUndefined = !this.plugin.fieldInitializationService.isFieldDefinedForEntries(entries, prop.key);
     const title = isUndefined ? `${prop.label} (create field)` : (val ? `${prop.label}: ${val}` : `Set ${prop.label}...`);
@@ -991,7 +1024,7 @@ export class MenuBuilder {
     });
   }
 
-  addRecurrenceToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
+  addRecurrenceToMenu(menu: MenuContributionHost, entries: any[], prop: any, sectionId: string) {
     menu.addItem((item) => {
       item.setTitle(`${prop.label} (read-only)`)
         .setIcon(prop.icon || 'repeat')
@@ -1000,7 +1033,7 @@ export class MenuBuilder {
     });
   }
 
-  addFolderToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
+  addFolderToMenu(menu: MenuContributionHost, entries: any[], prop: any, sectionId: string) {
     const files = entries.map((e: any) => e.file);
     const inArchive = this.isFileInArchive(files);
 

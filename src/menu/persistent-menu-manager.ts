@@ -21,6 +21,7 @@ import { getTaskDisplayTitle, parseTaskLine, readInlineFieldValue } from '../uti
 import { resolveTaskScheduledValue } from '../utils/daily-note-task-schedule';
 import * as logger from '../logger';
 import { KeyboardAwareOverlay } from '../utils/mobile-overlay';
+import { formatSingleRelationshipUnlinkNotice } from '../services/relationship-outcome';
 // scroll-direction hide/reveal is handled inline â€” no gesture-handler import needed.
 
 // Get the LIVE mode constant if available
@@ -3782,9 +3783,19 @@ export class PersistentMenuManager {
                 : `Break connection with ${this.getFileDisplayTitle(parentFile)}`)
               .setIcon('unlink')
               .onClick(() => {
-                void this.plugin.bulkEditService.unlinkFromParent(file, parentFile).then(() => {
-                  new Notice(`Removed parent link: ${this.getFileDisplayTitle(parentFile)}`);
+                void this.plugin.bulkEditService.unlinkFromParentWithOutcome(file, parentFile).then((outcome) => {
+                  new Notice(formatSingleRelationshipUnlinkNotice(
+                    outcome.status,
+                    `parent link between ${file.basename} and ${this.getFileDisplayTitle(parentFile)}`,
+                  ));
                   this.ensureTopParentNav(view, { force: true });
+                }).catch((error) => {
+                  logger.warn('[TPS GCM] Persistent parent unlink failed', {
+                    child: file.path,
+                    parent: parentFile.path,
+                    error: logger.errorSummary(error),
+                  });
+                  new Notice(`Couldn’t remove parent link: ${this.getFileDisplayTitle(parentFile)}.`);
                 });
               });
           });

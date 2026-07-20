@@ -1,7 +1,9 @@
 import { TFile, normalizePath } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
-import { buildParentFrontmatterLinkValue, resolveLinkValueToFile } from '../handlers/parent-link-format';
-import type { ParentLinkKind, ResolvedParentLink } from './subitem-types';
+import { buildParentFrontmatterLinkValue, extractLinkTarget, resolveLinkValueToFile } from '../handlers/parent-link-format';
+import type { ParentLinkKind, RelationshipSideRemovalOutcome, ResolvedParentLink } from './subitem-types';
+import { didFrontmatterMutationChange, isFrontmatterMutationReady } from './frontmatter-mutation-outcome';
+import * as logger from '../logger';
 
 export class ParentLinkResolutionService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
@@ -23,6 +25,22 @@ export class ParentLinkResolutionService {
 
   getParentsForChild(childFile: TFile): ResolvedParentLink[] {
     const frontmatter = (this.plugin.app.metadataCache.getFileCache(childFile)?.frontmatter || {}) as Record<string, unknown>;
+    return this.resolveParentsFromFrontmatter(childFile, frontmatter);
+  }
+
+  async getParentsForChildAuthoritatively(childFile: TFile): Promise<ResolvedParentLink[] | null> {
+    let parents: ResolvedParentLink[] = [];
+    const outcome = await this.plugin.frontmatterMutationService.processGuardedWithOutcome(childFile, (frontmatter) => {
+      parents = this.resolveParentsFromFrontmatter(childFile, frontmatter as Record<string, unknown>);
+      return 'unchanged';
+    });
+    return isFrontmatterMutationReady(outcome) ? parents : null;
+  }
+
+  private resolveParentsFromFrontmatter(
+    childFile: TFile,
+    frontmatter: Record<string, unknown>,
+  ): ResolvedParentLink[] {
     const values = this.getParentValuesFromFrontmatter(frontmatter);
     const results = new Map<string, ResolvedParentLink>();
     for (const file of this.resolveFilesFromFrontmatterValue(values, childFile.path)) {
@@ -43,12 +61,13 @@ export class ParentLinkResolutionService {
   async addParentToChild(childFile: TFile, parentFile: TFile): Promise<boolean> {
     const key = this.getParentKey();
     const linkValue = buildParentFrontmatterLinkValue(this.plugin.app, parentFile, childFile.path);
-    let changed = false;
 
-    await this.plugin.app.fileManager.processFrontMatter(childFile, (fm) => {
+    let relationAdded = false;
+    const childOutcome = await this.plugin.frontmatterMutationService.processGuardedWithOutcome(childFile, (fm) => {
       const values = this.getParentValuesFromFrontmatter(fm as Record<string, unknown>);
       const existingFiles = this.resolveFilesFromFrontmatterValue(values, childFile.path);
       const alreadyLinked = existingFiles.some((file) => file.path === parentFile.path);
+      relationAdded = !alreadyLinked;
 
       if (!alreadyLinked) values.push(linkValue);
 
@@ -72,15 +91,24 @@ export class ParentLinkResolutionService {
         && existingExactValues.length === deduped.length
         && existingExactValues.every((value, index) => value === deduped[index]);
 
-      if (alreadyLinked && exactUnchanged && !hasAliasKey) return;
+      if (alreadyLinked && exactUnchanged && !hasAliasKey) return 'unchanged';
 
       this.deleteParentAliasKeys(fm as Record<string, unknown>);
       this.setCaseInsensitive(fm as Record<string, unknown>, key, deduped);
-      changed = true;
+      return true;
     });
 
-    const selfChanged = await this.ensureSelfLinkForParent(parentFile);
-    return changed || selfChanged;
+    if (!isFrontmatterMutationReady(childOutcome)) return false;
+    try {
+      await this.ensureSelfLinkForParent(parentFile);
+    } catch (error) {
+      logger.warn('[TPS GCM] Child parent link committed but optional parent self-link failed', {
+        child: childFile.path,
+        parent: parentFile.path,
+        error: logger.errorSummary(error),
+      });
+    }
+    return relationAdded && didFrontmatterMutationChange(childOutcome);
   }
 
   async ensureSelfLinkForParent(parentFile: TFile): Promise<boolean> {
@@ -89,9 +117,8 @@ export class ParentLinkResolutionService {
 
     const key = this.getParentKey();
     const selfLink = buildParentFrontmatterLinkValue(this.plugin.app, parentFile, parentFile.path);
-    let changed = false;
 
-    await this.plugin.app.fileManager.processFrontMatter(parentFile, (fm) => {
+    const outcome = await this.plugin.frontmatterMutationService.processGuardedWithOutcome(parentFile, (fm) => {
       const values = this.getParentValuesFromFrontmatter(fm as Record<string, unknown>);
       const normalizedValues = values.map((value) => {
         const resolved = resolveLinkValueToFile(this.plugin.app, value, parentFile.path);
@@ -114,35 +141,44 @@ export class ParentLinkResolutionService {
       const exactUnchanged = Array.isArray(existingRaw)
         && existingExactValues.length === deduped.length
         && existingExactValues.every((value, index) => value === deduped[index]);
-      if (hasSelf && exactUnchanged && !hasAliasKey) return;
+      if (hasSelf && exactUnchanged && !hasAliasKey) return 'unchanged';
 
       this.deleteParentAliasKeys(fm as Record<string, unknown>);
       this.setCaseInsensitive(fm as Record<string, unknown>, key, deduped);
-      changed = true;
+      return true;
     });
-
-    return changed;
+    return didFrontmatterMutationChange(outcome);
   }
 
   async removeParentFromChild(childFile: TFile, parentFile: TFile): Promise<boolean> {
-    const key = this.getParentKey();
-    let changed = false;
+    return (await this.removeParentFromChildWithOutcome(childFile, parentFile)) === 'removed';
+  }
 
-    await this.plugin.app.fileManager.processFrontMatter(childFile, (fm) => {
+  async removeParentFromChildWithOutcome(
+    childFile: TFile,
+    parentFile: TFile,
+  ): Promise<RelationshipSideRemovalOutcome> {
+    const key = this.getParentKey();
+    let relationPresent = false;
+
+    const outcome = await this.plugin.frontmatterMutationService.processGuardedWithOutcome(childFile, (fm) => {
+      relationPresent = false;
       const values = this.getParentValuesFromFrontmatter(fm as Record<string, unknown>);
-      if (!values.length) return;
+      if (!values.length) return 'unchanged';
+      if (values.some((value) => this.unresolvedValueMayReferenceFile(value, childFile.path, parentFile))) {
+        return false;
+      }
       const filtered = values.filter((value) => !this.valueMatchesFile(value, childFile.path, parentFile));
-      if (filtered.length === values.length) return;
-      changed = true;
+      relationPresent = filtered.length !== values.length;
+      if (!relationPresent) return 'unchanged';
       this.deleteParentAliasKeys(fm as Record<string, unknown>);
-      if (filtered.length === 0) {
-        return;
-      } else {
+      if (filtered.length > 0) {
         (fm as Record<string, unknown>)[key] = filtered;
       }
+      return true;
     });
-
-    return changed;
+    if (!isFrontmatterMutationReady(outcome)) return 'refused';
+    return relationPresent && didFrontmatterMutationChange(outcome) ? 'removed' : 'absent';
   }
 
   resolveFilesFromFrontmatterValue(value: unknown, sourcePath: string): TFile[] {
@@ -228,6 +264,15 @@ export class ParentLinkResolutionService {
       return normalizePath(resolved.path) === normalizePath(targetFile.path);
     }
     return normalizePath(String(value || '')) === normalizePath(targetFile.path);
+  }
+
+  private unresolvedValueMayReferenceFile(value: string, sourcePath: string, targetFile: TFile): boolean {
+    if (resolveLinkValueToFile(this.plugin.app, value, sourcePath) instanceof TFile) return false;
+    const target = extractLinkTarget(value);
+    if (!target) return false;
+    const normalizedTarget = normalizePath(target).replace(/\.md$/i, '').toLowerCase();
+    const normalizedPath = normalizePath(targetFile.path).replace(/\.md$/i, '').toLowerCase();
+    return normalizedTarget === normalizedPath || normalizedTarget === targetFile.basename.toLowerCase();
   }
 
   private setCaseInsensitive(frontmatter: Record<string, unknown>, key: string, value: unknown): void {

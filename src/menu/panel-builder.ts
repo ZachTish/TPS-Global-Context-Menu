@@ -23,6 +23,16 @@ import { getWikilinkDisplayText, isLinkListProperty, parseLinkListInput } from '
 import { extractWebLink } from '../utils/web-link-utils';
 import { getPlainDisplayTitle } from '../utils/display-title';
 import type { TPSHealthUiMetricRenderConfig } from '../tps-health-ui-contract';
+import { isFrontmatterMutationReady } from '../services/frontmatter-mutation-outcome';
+import {
+  formatParentUnlinkAggregateNotice,
+  formatSingleRelationshipUnlinkNotice,
+} from '../services/relationship-outcome';
+import type {
+  AttachmentUnlinkOutcome,
+  RelationshipUnlinkAggregateOutcome,
+  RelationshipUnlinkOutcome,
+} from '../services/subitem-types';
 
 interface SubitemNode {
   file: TFile;
@@ -418,6 +428,36 @@ export class PanelBuilder {
     return this.plugin.app;
   }
 
+  private showParentUnlinkResult(
+    outcome: RelationshipUnlinkOutcome,
+    childFile: TFile,
+    parentFile: TFile,
+  ): void {
+    new Notice(formatSingleRelationshipUnlinkNotice(
+      outcome.status,
+      `parent link between ${childFile.basename} and ${parentFile.basename}`,
+    ));
+  }
+
+  private showParentUnlinkAggregateResult(
+    outcome: RelationshipUnlinkAggregateOutcome,
+    childFile: TFile,
+  ): void {
+    new Notice(formatParentUnlinkAggregateNotice(outcome, childFile.basename));
+  }
+
+  private showAttachmentUnlinkResult(outcome: AttachmentUnlinkOutcome, attachmentFile: TFile): void {
+    new Notice(formatSingleRelationshipUnlinkNotice(
+      outcome.status,
+      `attachment link for ${attachmentFile.basename}`,
+    ));
+  }
+
+  private reportAsyncPanelActionFailure(action: string, error: unknown): void {
+    logger.warn(`[TPS GCM] ${action} failed`, logger.errorSummary(error));
+    new Notice(`${action} failed. No success was reported.`);
+  }
+
   // ... (Archive helpers retained) ...
   private async archiveEntries(entries: any[]): Promise<void> {
     const archiveTag = normalizeTagValue(this.plugin.settings.archiveTag || 'archive');
@@ -440,18 +480,25 @@ export class PanelBuilder {
         const existing = this.app.vault.getAbstractFileByPath(file.path);
         const liveFile = existing instanceof TFile ? existing : file;
         if (this.isPathInFolder(liveFile.path, archiveFolder)) {
-          movedCount += 1;
           continue;
         }
 
         try {
           if (liveFile.extension?.toLowerCase() === 'md' && archiveTag) {
             const originalFolder = liveFile.parent?.path ?? '';
-            await this.app.fileManager.processFrontMatter(liveFile, (frontmatter: any) => {
-              frontmatter.tags = mergeNormalizedTags(frontmatter.tags, archiveTag);
+            const outcome = await this.plugin.frontmatterMutationService.processGuardedWithOutcome(liveFile, (frontmatter: any) => {
+              const nextTags = mergeNormalizedTags(frontmatter.tags, archiveTag);
+              if (JSON.stringify(frontmatter.tags ?? []) === JSON.stringify(nextTags)
+                && frontmatter.archiveOriginalFolder === originalFolder) return 'unchanged';
+              frontmatter.tags = nextTags;
               frontmatter.archiveOriginalFolder = originalFolder;
+              return true;
             });
-            taggedCount += 1;
+            if (!isFrontmatterMutationReady(outcome)) {
+              logger.warn('[TPS GCM] Archive stopped because its frontmatter update was not committed', liveFile.path);
+              continue;
+            }
+            if (outcome === 'changed') taggedCount += 1;
           }
 
           const targetPath = this.getUniqueArchiveTargetPath(liveFile, archiveFolder);
@@ -468,7 +515,9 @@ export class PanelBuilder {
     });
 
     logger.log('[TPS GCM] Archive menu action complete', { movedCount, taggedCount, archiveFolder });
-    new Notice(movedCount === 1 ? 'Archived 1 file' : `Archived ${movedCount} files`);
+    new Notice(movedCount > 0
+      ? (movedCount === 1 ? 'Archived 1 file' : `Archived ${movedCount} files`)
+      : 'No files were archived.');
   }
 
   private isPathInFolder(path: string, folder: string): boolean {
@@ -2286,7 +2335,9 @@ export class PanelBuilder {
           item.setTitle('Embed Note')
             .setIcon('file-text')
             .onClick(() => {
-              void this.actionService.attachExistingNoteAsAttachment(currentFile).then(refreshAttachments);
+              void this.actionService.attachExistingNoteAsAttachment(currentFile)
+                .then(refreshAttachments)
+                .catch((error) => this.reportAsyncPanelActionFailure('Embed note', error));
             });
         });
         menu.showAtMouseEvent(evt);
@@ -2392,10 +2443,11 @@ export class PanelBuilder {
         if (created) {
           await this.refreshSubitemsPanel(rootFile, childrenBody, attachmentBody);
           window.setTimeout(() => {
-            void this.refreshSubitemsPanel(rootFile, childrenBody, attachmentBody);
+            void this.refreshSubitemsPanel(rootFile, childrenBody, attachmentBody)
+              .catch((error) => this.reportAsyncPanelActionFailure('Refresh subitems panel', error));
           }, 220);
         }
-      });
+      }).catch((error) => this.reportAsyncPanelActionFailure('Create linked subitem', error));
     });
     childrenActions.appendChild(addSubitemBtn);
 
@@ -2456,7 +2508,7 @@ export class PanelBuilder {
     this.setupDropZone(attachmentBody, 'attachment', rootFile, getBodyRefs);
 
     // Initial load — fire immediately, then re-fire after a short delay so that any
-    // in-flight metadata cache updates (e.g. from a just-completed processFrontMatter)
+    // in-flight metadata cache updates (e.g. from a just-committed frontmatter mutation)
     // are fully settled before the second render.
     void this.refreshSubitemsPanel(rootFile, childrenBody, attachmentBody);
     window.setTimeout(() => {
@@ -2679,9 +2731,10 @@ export class PanelBuilder {
               .setTitle(`Unlink from "${this.getFileDisplayTitle(parentFile)}"`)
               .setIcon('unlink')
               .onClick(() => {
-                void this.plugin.bulkEditService.unlinkFromParent(rootFile, parentFile).then(() => {
-                  void this.populateParentNavButton(rootFile, container);
-                });
+                void this.plugin.bulkEditService.unlinkFromParentWithOutcome(rootFile, parentFile).then(async (outcome) => {
+                  this.showParentUnlinkResult(outcome, rootFile, parentFile);
+                  await this.populateParentNavButton(rootFile, container);
+                }).catch((error) => this.reportAsyncPanelActionFailure('Unlink from parent', error));
               });
           });
         }
@@ -2691,12 +2744,10 @@ export class PanelBuilder {
             .setTitle('Unlink from all parents')
             .setIcon('unlink-2')
             .onClick(() => {
-              void this.plugin.bulkEditService.unlinkFromAllParents(rootFile).then((count) => {
-                if (count > 0) {
-                  new Notice(`Removed ${count} parent link${count === 1 ? '' : 's'}.`);
-                }
-                void this.populateParentNavButton(rootFile, container);
-              });
+              void this.plugin.bulkEditService.unlinkFromAllParentsWithOutcome(rootFile).then(async (outcome) => {
+                this.showParentUnlinkAggregateResult(outcome, rootFile);
+                await this.populateParentNavButton(rootFile, container);
+              }).catch((error) => this.reportAsyncPanelActionFailure('Unlink from all parents', error));
             });
         });
         menu.showAtPosition({ x: navButton.getBoundingClientRect().left, y: navButton.getBoundingClientRect().bottom });
@@ -2714,9 +2765,10 @@ export class PanelBuilder {
             .setTitle(unlinkTitle)
             .setIcon('unlink')
             .onClick(() => {
-              void this.plugin.bulkEditService.unlinkFromParent(rootFile, parentFile).then(() => {
-                void this.populateParentNavButton(rootFile, container);
-              });
+              void this.plugin.bulkEditService.unlinkFromParentWithOutcome(rootFile, parentFile).then(async (outcome) => {
+                this.showParentUnlinkResult(outcome, rootFile, parentFile);
+                await this.populateParentNavButton(rootFile, container);
+              }).catch((error) => this.reportAsyncPanelActionFailure('Unlink from parent', error));
             });
         });
       }
@@ -2726,12 +2778,10 @@ export class PanelBuilder {
           .setTitle('Unlink from all parents')
           .setIcon('unlink-2')
           .onClick(() => {
-            void this.plugin.bulkEditService.unlinkFromAllParents(rootFile).then((count) => {
-              if (count > 0) {
-                new Notice(`Removed ${count} parent link${count === 1 ? '' : 's'}.`);
-              }
-              void this.populateParentNavButton(rootFile, container);
-            });
+            void this.plugin.bulkEditService.unlinkFromAllParentsWithOutcome(rootFile).then(async (outcome) => {
+              this.showParentUnlinkAggregateResult(outcome, rootFile);
+              await this.populateParentNavButton(rootFile, container);
+            }).catch((error) => this.reportAsyncPanelActionFailure('Unlink from all parents', error));
           });
       });
       menu.showAtMouseEvent(evt);
@@ -2961,10 +3011,14 @@ export class PanelBuilder {
           new Notice('Only markdown files can be subitems.');
           return;
         }
-        void this.changeRelationToChild(rootFile, draggedFile).then(rerender);
+        void this.changeRelationToChild(rootFile, draggedFile)
+          .then(rerender)
+          .catch((error) => this.reportAsyncPanelActionFailure('Convert attachment to child', error));
       } else {
         // Dragging child → attachments
-        void this.changeRelationToAttachment(rootFile, draggedFile).then(rerender);
+        void this.changeRelationToAttachment(rootFile, draggedFile)
+          .then(rerender)
+          .catch((error) => this.reportAsyncPanelActionFailure('Convert child to attachment', error));
       }
     });
   }
@@ -4666,7 +4720,10 @@ export class PanelBuilder {
             .setTitle('Remove attachment')
             .setIcon('unlink')
             .onClick(() => {
-              void this.plugin.bulkEditService.unlinkAttachment(rootFile, node.file).then(onRefresh);
+              void this.plugin.bulkEditService.unlinkAttachmentWithOutcome(rootFile, node.file).then((outcome) => {
+                this.showAttachmentUnlinkResult(outcome, node.file);
+                onRefresh();
+              }).catch((error) => this.reportAsyncPanelActionFailure('Remove attachment', error));
             });
         });
       } else {
@@ -4675,7 +4732,10 @@ export class PanelBuilder {
             .setTitle('Unlink from parent')
             .setIcon('unlink')
             .onClick(() => {
-              void this.plugin.bulkEditService.unlinkFromParent(node.file, rootFile).then(onRefresh);
+              void this.plugin.bulkEditService.unlinkFromParentWithOutcome(node.file, rootFile).then((outcome) => {
+                this.showParentUnlinkResult(outcome, node.file, rootFile);
+                onRefresh();
+              }).catch((error) => this.reportAsyncPanelActionFailure('Unlink from parent', error));
             });
         });
         menu.addItem((item) => {
@@ -4683,12 +4743,10 @@ export class PanelBuilder {
             .setTitle('Unlink from all parents')
             .setIcon('unlink-2')
             .onClick(() => {
-              void this.plugin.bulkEditService.unlinkFromAllParents(node.file).then((count) => {
-                if (count > 0) {
-                  new Notice(`Removed ${count} parent link${count === 1 ? '' : 's'} from ${node.file.basename}.`);
-                }
+              void this.plugin.bulkEditService.unlinkFromAllParentsWithOutcome(node.file).then((outcome) => {
+                this.showParentUnlinkAggregateResult(outcome, node.file);
                 onRefresh();
-              });
+              }).catch((error) => this.reportAsyncPanelActionFailure('Unlink from all parents', error));
             });
         });
       }
@@ -4851,9 +4909,11 @@ export class PanelBuilder {
 
   private async promptLinkToParent(file: TFile, onRefresh: () => void): Promise<void> {
     new FileSuggestModal(this.app, async (parentFile: TFile) => {
-      await this.plugin.bulkEditService.linkToParent([file], parentFile);
-      new Notice(`Linked ${file.basename} to parent: ${parentFile.basename}`);
-      onRefresh();
+      const linkedCount = await this.plugin.bulkEditService.linkToParent([file], parentFile);
+      new Notice(linkedCount > 0
+        ? `Linked ${file.basename} to parent: ${parentFile.basename}`
+        : `No new parent link was added to ${parentFile.basename}.`);
+      if (linkedCount > 0) onRefresh();
     }, { extensions: ['md', 'base'] }).open();
   }
 
@@ -4861,9 +4921,11 @@ export class PanelBuilder {
     new MultiFileSelectModal(this.app, async (childFiles: TFile[]) => {
       const unique = childFiles.filter((candidate) => candidate.path !== file.path);
       if (!unique.length) return;
-      await this.plugin.bulkEditService.linkChildren(file, unique);
-      new Notice(`Linked ${unique.length} child item(s) to ${file.basename}.`);
-      onRefresh();
+      const linkedCount = await this.plugin.bulkEditService.linkChildren(file, unique);
+      new Notice(linkedCount > 0
+        ? `Linked ${linkedCount} child item${linkedCount === 1 ? '' : 's'} to ${file.basename}.`
+        : 'No new child links were added.');
+      if (linkedCount > 0) onRefresh();
     }).open();
   }
 

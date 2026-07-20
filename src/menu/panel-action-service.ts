@@ -18,6 +18,10 @@ import { ConfirmDeleteModal } from '../modals/confirm-delete-modal';
 import { CameraCaptureModal } from '../modals/camera-capture-modal';
 import { TextInputModal } from '../modals/text-input-modal';
 import { getFolderPathOptions, getUniqueMarkdownPath, sanitizeSubitemTitle } from '../services/subitem-creation-service';
+import {
+  runGuardedRelationshipConversion,
+  type RelationshipConversionStatus,
+} from '../services/relationship-outcome';
 import { getPlainDisplayTitle } from '../utils/display-title';
 
 type ViewMode = 'reading' | 'live' | 'source';
@@ -32,6 +36,24 @@ export class PanelActionService {
 
   private get app(): App {
     return this.plugin.app;
+  }
+
+  private showParentLinkResult(linkedCount: number, parentFile: TFile): void {
+    new Notice(linkedCount > 0
+      ? `Linked ${linkedCount} item${linkedCount === 1 ? '' : 's'} to parent: ${parentFile.basename}`
+      : `No new parent links were added to ${parentFile.basename}.`);
+  }
+
+  private showChildLinkResult(linkedCount: number): void {
+    new Notice(linkedCount > 0
+      ? `Linked ${linkedCount} child${linkedCount === 1 ? '' : 'ren'}.`
+      : 'No new child links were added.');
+  }
+
+  private showAttachmentLinkResult(addedCount: number): void {
+    new Notice(addedCount > 0
+      ? `Embedded ${addedCount} attachment${addedCount === 1 ? '' : 's'}.`
+      : 'No new attachments were embedded.');
   }
 
   async setViewModeForFile(file: TFile, mode: ViewMode): Promise<void> {
@@ -90,21 +112,69 @@ export class PanelActionService {
 
     new MultiFileSelectModal(this.app, async (files: TFile[]) => {
       const added = await this.plugin.bulkEditService.linkAttachments(parentFile, files);
+      this.showAttachmentLinkResult(added);
       if (added > 0) {
-        new Notice(`Embedded ${added} item(s) in ${parentFile.basename}.`);
         onRefresh();
       }
     }).open();
   }
 
-  async changeRelationToAttachment(rootFile: TFile, childFile: TFile): Promise<void> {
-    await this.plugin.subitemRelationshipSyncService.unlinkChildFromParent(childFile, rootFile);
-    await this.plugin.bulkEditService.linkAttachments(rootFile, [childFile]);
+  async changeRelationToAttachment(rootFile: TFile, childFile: TFile): Promise<RelationshipConversionStatus> {
+    const outcome = await runGuardedRelationshipConversion(
+      () => this.plugin.subitemRelationshipSyncService.unlinkChildFromParent(childFile, rootFile),
+      async () => {
+        try {
+          const added = await this.plugin.bulkEditService.linkAttachments(rootFile, [childFile]);
+          if (added > 0) return 'created';
+        } catch (error) {
+          logger.warn('[TPS GCM] Attachment replacement call rejected; checking its postcondition', {
+            root: rootFile.path,
+            child: childFile.path,
+            error: logger.errorSummary(error),
+          });
+        }
+        return await this.plugin.bulkEditService.hasAttachmentRelationAuthoritatively(rootFile, childFile) === true
+          ? 'present'
+          : 'refused';
+      },
+    );
+    this.showRelationshipConversionOutcome(outcome, childFile, 'attachment');
+    return outcome;
   }
 
-  async changeRelationToChild(rootFile: TFile, targetFile: TFile): Promise<void> {
-    await this.plugin.bulkEditService.unlinkAttachment(rootFile, targetFile);
-    await this.plugin.bulkEditService.linkToParent([targetFile], rootFile);
+  async changeRelationToChild(rootFile: TFile, targetFile: TFile): Promise<RelationshipConversionStatus> {
+    const outcome = await runGuardedRelationshipConversion(
+      () => this.plugin.bulkEditService.unlinkAttachmentWithOutcome(rootFile, targetFile),
+      async () => {
+        try {
+          const linked = await this.plugin.bulkEditService.linkToParent([targetFile], rootFile);
+          if (linked > 0) return 'created';
+        } catch (error) {
+          logger.warn('[TPS GCM] Child replacement call rejected; checking its postcondition', {
+            root: rootFile.path,
+            child: targetFile.path,
+            error: logger.errorSummary(error),
+          });
+        }
+        const liveParents = await this.plugin.parentLinkResolutionService.getParentsForChildAuthoritatively(targetFile);
+        return liveParents?.some((entry) => entry.file.path === rootFile.path) ? 'present' : 'refused';
+      },
+    );
+    this.showRelationshipConversionOutcome(outcome, targetFile, 'child');
+    return outcome;
+  }
+
+  private showRelationshipConversionOutcome(
+    outcome: RelationshipConversionStatus,
+    file: TFile,
+    replacementKind: 'attachment' | 'child',
+  ): void {
+    if (outcome === 'converted') return;
+    if (outcome === 'unlink-refused') {
+      new Notice(`Couldn’t convert ${file.basename}: the existing relation was not fully removed.`);
+      return;
+    }
+    new Notice(`Removed the old relation, but couldn’t create the replacement ${replacementKind} relation for ${file.basename}.`);
   }
 
   showSubitemAddMenu(event: MouseEvent, file: TFile): void {
@@ -193,8 +263,8 @@ export class PanelActionService {
         .setIcon('link')
         .onClick(() => {
           new FileSuggestModal(this.app, async (file: TFile) => {
-            await this.plugin.bulkEditService.linkToParent(entries.map(e => e.file), file);
-            new Notice(`Linked to parent: ${file.basename}`);
+            const linkedCount = await this.plugin.bulkEditService.linkToParent(sourceFiles, file);
+            this.showParentLinkResult(linkedCount, file);
           }, { extensions: ['md', 'base'] }).open();
         });
     });
@@ -209,8 +279,8 @@ export class PanelActionService {
           }
           new MultiFileSelectModal(this.app, async (files: TFile[]) => {
             if (files.length > 0) {
-              await this.plugin.bulkEditService.linkChildren(currentFile, files);
-              new Notice(`Linked ${files.length} children.`);
+              const linkedCount = await this.plugin.bulkEditService.linkChildren(currentFile, files);
+              this.showChildLinkResult(linkedCount);
             }
           }).open();
         });
@@ -227,7 +297,7 @@ export class PanelActionService {
           new MultiFileSelectModal(this.app, async (files: TFile[]) => {
             if (files.length > 0) {
               const added = await this.plugin.bulkEditService.linkAttachments(currentFile, files);
-              new Notice(`Embedded ${added} attachment(s).`);
+              this.showAttachmentLinkResult(added);
             }
           }).open();
         });
@@ -356,8 +426,8 @@ export class PanelActionService {
           .setIcon('link')
           .onClick(() => {
             new FileSuggestModal(this.app, async (parentFile: TFile) => {
-              await this.plugin.bulkEditService.linkToParent(entries.map(entry => entry.file), parentFile);
-              new Notice(`Linked to parent: ${parentFile.basename}`);
+              const linkedCount = await this.plugin.bulkEditService.linkToParent(sourceFiles, parentFile);
+              this.showParentLinkResult(linkedCount, parentFile);
             }, { extensions: ['md', 'base'] }).open();
           });
       });
@@ -372,8 +442,8 @@ export class PanelActionService {
             }
             new MultiFileSelectModal(this.app, async (files: TFile[]) => {
               if (files.length > 0) {
-                await this.plugin.bulkEditService.linkChildren(currentFile, files);
-                new Notice(`Linked ${files.length} children.`);
+                const linkedCount = await this.plugin.bulkEditService.linkChildren(currentFile, files);
+                this.showChildLinkResult(linkedCount);
               }
             }).open();
           });
@@ -390,7 +460,7 @@ export class PanelActionService {
             new MultiFileSelectModal(this.app, async (files: TFile[]) => {
               if (files.length > 0) {
                 const added = await this.plugin.bulkEditService.linkAttachments(currentFile, files);
-                new Notice(`Embedded ${added} attachment(s).`);
+                this.showAttachmentLinkResult(added);
               }
             }).open();
           });

@@ -13,7 +13,7 @@ function createHarness(initialContent, options = {}) {
     settings: {
       properties: [],
       enableActivityLog: false,
-      enableAutoRename: false,
+      enableAutoRename: options.enableAutoRename === true,
     },
     app: {
       vault: {
@@ -61,7 +61,9 @@ function createHarness(initialContent, options = {}) {
       },
     },
     fileNamingService: {
-      async updateFilenameIfNeeded() {},
+      async updateFilenameIfNeeded() {
+        if (options.renameError) throw options.renameError;
+      },
     },
   };
 
@@ -109,6 +111,37 @@ test('a guarded abort is byte-identical and skips global normalizers', async () 
   assert.equal(harness.getContent(), original);
 });
 
+test('typed mutation outcomes distinguish changed, unchanged, guarded, malformed, and unsupported paths', async () => {
+  const original = '---\ntitle: Original\n---\nBody\n';
+  const harness = createHarness(original);
+
+  assert.equal(await harness.service.processWithOutcome(harness.file, (frontmatter) => {
+    frontmatter.status = 'done';
+  }), 'changed');
+  assert.equal(await harness.service.processWithOutcome(harness.file, (frontmatter) => {
+    frontmatter.status = 'done';
+  }), 'unchanged');
+  const beforeExplicitNoop = harness.getContent();
+  assert.equal(await harness.service.processGuardedWithOutcome(harness.file, () => 'unchanged'), 'unchanged');
+  assert.equal(harness.getContent(), beforeExplicitNoop);
+  assert.equal(await harness.service.processGuardedWithOutcome(harness.file, () => false), 'guarded-abort');
+
+  const malformed = createHarness('---\n{broken\n---\nBody\n');
+  assert.equal(
+    await malformed.service.processWithOutcome(malformed.file, (frontmatter) => {
+      frontmatter.status = 'must-not-write';
+    }),
+    'parse-failed',
+  );
+  assert.equal(malformed.getContent(), '---\n{broken\n---\nBody\n');
+
+  const unsupportedFile = new TFile('Notes/Unsupported.txt');
+  assert.equal(
+    await harness.service.processWithOutcome(unsupportedFile, () => {}),
+    'unsupported',
+  );
+});
+
 test('an immediately empty frontmatter block is a valid atomic mutation target', async () => {
   const harness = createHarness('---\n---\nBody\n');
 
@@ -135,6 +168,21 @@ test('a follow-up event failure cannot turn a durable write into a rejected muta
   assert.equal(changed, true);
   assert.equal(harness.getModifyCount(), 1);
   assert.match(harness.getContent(), /status: "committed"/);
+});
+
+test('a post-commit auto-rename failure cannot turn a durable frontmatter write into failure', async () => {
+  const harness = createHarness('---\ntitle: Original\n---\nBody\n', {
+    enableAutoRename: true,
+    renameError: new Error('synthetic rename failure'),
+  });
+
+  const outcome = await harness.service.processWithOutcome(harness.file, (frontmatter) => {
+    frontmatter.title = 'Renamed';
+  });
+
+  assert.equal(outcome, 'changed');
+  assert.equal(harness.getModifyCount(), 1);
+  assert.match(harness.getContent(), /title: "Renamed"/);
 });
 
 test('same-service atomic writes to one note preserve both mutations', async () => {
@@ -189,28 +237,40 @@ test('promise-returning Markdown mutators fail closed without persisting synchro
   assert.equal(harness.getContent(), original);
 });
 
-test('a transient malformed snapshot is retried before the mutator runs', async () => {
-  let repaired = false;
-  const harness = createHarness('---\n{broken\n---\nBody\n', {
-    afterProcessError({ setContent }) {
-      if (repaired) return;
-      repaired = true;
-      setContent('---\ntitle: Recovered\n---\nBody\n');
-    },
-  });
+test('a malformed snapshot fails closed immediately without retrying or running the mutator', async () => {
+  const original = '---\n{broken\n---\nBody\n';
+  const harness = createHarness(original);
   let mutatorCalls = 0;
 
-  const changed = await harness.service.processGuarded(harness.file, (frontmatter) => {
+  const outcome = await harness.service.processGuardedWithOutcome(harness.file, (frontmatter) => {
     mutatorCalls += 1;
     frontmatter.status = 'done';
     return true;
   });
 
-  assert.equal(changed, true);
-  assert.equal(mutatorCalls, 1);
-  assert.equal(harness.getProcessAttemptCount(), 2);
-  assert.equal(harness.getModifyCount(), 1);
-  assert.match(harness.getContent(), /status: "done"/);
+  assert.equal(outcome, 'parse-failed');
+  assert.equal(mutatorCalls, 0);
+  assert.equal(harness.getProcessAttemptCount(), 1);
+  assert.equal(harness.getModifyCount(), 0);
+  assert.equal(harness.getContent(), original);
+});
+
+test('duplicate top-level YAML keys are never silently repaired or discarded', async () => {
+  const original = '---\ntitle: First\ntitle: Second\ntags: keep\n---\nBody\n';
+  const harness = createHarness(original);
+  let mutatorCalls = 0;
+
+  const outcome = await harness.service.processGuardedWithOutcome(harness.file, (frontmatter) => {
+    mutatorCalls += 1;
+    frontmatter.status = 'done';
+    return true;
+  });
+
+  assert.equal(outcome, 'parse-failed');
+  assert.equal(mutatorCalls, 0);
+  assert.equal(harness.getProcessAttemptCount(), 1);
+  assert.equal(harness.getModifyCount(), 0);
+  assert.equal(harness.getContent(), original);
 });
 
 test('concurrent exact-style same-ID insertions commit one authoritative record', async () => {

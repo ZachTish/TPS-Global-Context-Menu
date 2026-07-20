@@ -4,6 +4,8 @@ import * as logger from "../logger";
 import { mergeNormalizedTags, normalizeTagValue } from "../utils/tag-utils";
 import { findExistingDailyNoteForIsoDate, getDailyNotePathForIsoDate, getDailyNoteScheduledValueForIsoDate, getIsoDateFromScheduledValue } from "../utils/daily-note-task-schedule";
 import type { CustomProperty } from "../types";
+import { isFrontmatterMutationReady } from "./frontmatter-mutation-outcome";
+import { normalizeLeadingWhitespaceBeforeFrontmatter as normalizeLeadingFrontmatter } from "./leading-frontmatter-normalizer";
 
 type HeaderTarget = {
     line: number;
@@ -841,7 +843,6 @@ export class NoteOperationService {
 
         let content = "";
         let hasFrontmatter = false;
-        let shouldWriteTitleViaFrontmatterApi = false;
 
         try {
             const normalizedTemplatePath = normalizePath(templatePath);
@@ -856,8 +857,7 @@ export class NoteOperationService {
         if (!content) {
             content = `---\ntitle: ${titleValue}\ntags: [dailynote]\n---\n\n`;
         } else if (hasFrontmatter) {
-            // Preserve template text exactly; update title via processFrontMatter after create.
-            shouldWriteTitleViaFrontmatterApi = true;
+            // Preserve the template text exactly; the normalizer below owns metadata.
         } else {
             content = `---\ntitle: ${titleValue}\ntags: [dailynote]\n---\n\n${content}`;
         }
@@ -880,40 +880,48 @@ export class NoteOperationService {
         // This is safe to call even when Templater is not installed.
         await this.runTemplaterOnFile(created);
 
-        if (shouldWriteTitleViaFrontmatterApi) {
-            try {
-                await this.app.fileManager.processFrontMatter(created, (fm: any) => {
-                    fm.title = titleValue;
-                });
-            } catch (error) {
-                logger.warn("Failed setting daily note title via processFrontMatter", error);
-            }
-        }
-
         await this.normalizeCreatedDailyNote(created, titleValue, folder, isoDate);
 
         return created;
     }
 
-    private async normalizeCreatedDailyNote(file: TFile, titleValue: string, folder: string, isoDate: string | null = getIsoDateFromScheduledValue(titleValue)): Promise<void> {
+    private async normalizeCreatedDailyNote(file: TFile, titleValue: string, folder: string, isoDate: string | null = getIsoDateFromScheduledValue(titleValue)): Promise<boolean> {
         const targetFolder = String(folder || file.parent?.path || '/').trim() || '/';
         const scheduledValue = isoDate ? getDailyNoteScheduledValueForIsoDate(isoDate) : `${titleValue} 00:00:00`;
 
-        await this.normalizeLeadingWhitespaceBeforeFrontmatter(file);
-
         try {
-            await this.app.fileManager.processFrontMatter(file, (fm: any) => {
-                fm.title = titleValue;
+            await this.normalizeLeadingWhitespaceBeforeFrontmatter(file);
+            const outcome = await this.plugin.frontmatterMutationService.processGuardedWithOutcome(file, (fm: any) => {
+                let mutationNeeded = false;
+                if (fm.title !== titleValue) {
+                    fm.title = titleValue;
+                    mutationNeeded = true;
+                }
                 const scheduled = String(fm?.scheduled ?? '').trim();
                 if (!scheduled || /<%[\s\S]*%>/.test(scheduled) || /\{\{[\s\S]*\}\}/.test(scheduled)) {
-                    fm.scheduled = scheduledValue;
+                    if (fm.scheduled !== scheduledValue) {
+                        fm.scheduled = scheduledValue;
+                        mutationNeeded = true;
+                    }
                 }
-                if (this.plugin.settings.autoSaveFolderPath) {
+                if (this.plugin.settings.autoSaveFolderPath && fm.folderPath !== targetFolder) {
                     fm.folderPath = targetFolder;
+                    mutationNeeded = true;
                 }
+                return mutationNeeded ? true : 'unchanged';
             });
+            if (!isFrontmatterMutationReady(outcome)) {
+                logger.warn('Created daily note normalization stopped because its frontmatter update was not committed', {
+                    file: file.path,
+                    outcome,
+                });
+                new Notice(`Daily note ${file.basename} exists, but its required properties could not be saved. Filename and Notebook Navigator rule updates were skipped.`);
+                return false;
+            }
         } catch (error) {
             logger.warn('Failed normalizing created daily note frontmatter', { file: file.path, error });
+            new Notice(`Daily note ${file.basename} exists, but its required properties could not be saved. Filename and Notebook Navigator rule updates were skipped.`);
+            return false;
         }
 
         try {
@@ -931,6 +939,7 @@ export class NoteOperationService {
         } catch (error) {
             logger.warn('Failed applying NN rules to created daily note', { file: file.path, error });
         }
+        return true;
     }
 
     /**
@@ -953,31 +962,7 @@ export class NoteOperationService {
     }
 
     private async normalizeLeadingWhitespaceBeforeFrontmatter(file: TFile): Promise<void> {
-        let content = '';
-        try {
-            content = await this.app.vault.cachedRead(file);
-        } catch {
-            return;
-        }
-
-        if (!content) return;
-
-        const normalized = content.replace(/\r\n/g, '\n');
-        const bom = normalized.startsWith('\uFEFF') ? '\uFEFF' : '';
-        const body = bom ? normalized.slice(1) : normalized;
-        if (body.startsWith('---\n')) return;
-
-        const trimmedLeading = body.replace(/^\s*/, '');
-        const leadingOffset = body.length - trimmedLeading.length;
-        if (leadingOffset <= 0 || !trimmedLeading.startsWith('---\n')) return;
-
-        const prefix = body.slice(0, leadingOffset);
-        if (/\S/.test(prefix)) return;
-
-        const liveFile = this.app.vault.getAbstractFileByPath(file.path);
-        if (!(liveFile instanceof TFile)) return;
-
-        await this.app.vault.modify(liveFile, `${bom}${trimmedLeading}`);
+        await normalizeLeadingFrontmatter(this.app, file);
     }
 
     private hasKeys(value: unknown): boolean {
@@ -1141,10 +1126,16 @@ export class NoteOperationService {
             }
 
             try {
-                await this.app.fileManager.processFrontMatter(liveFile, (frontmatter: any) => {
-                    frontmatter.tags = mergeNormalizedTags(frontmatter.tags, archiveTag);
+                const outcome = await this.plugin.frontmatterMutationService.processGuardedWithOutcome(liveFile, (frontmatter: any) => {
+                    const nextTags = mergeNormalizedTags(frontmatter.tags, archiveTag);
+                    if (JSON.stringify(frontmatter.tags ?? []) === JSON.stringify(nextTags)) return 'unchanged';
+                    frontmatter.tags = nextTags;
+                    return true;
                 });
-                archived += 1;
+                if (outcome === 'changed') archived += 1;
+                else if (!isFrontmatterMutationReady(outcome)) {
+                    logger.warn('[TPS GCM] Archive source tag write was refused', { file: liveFile.path, outcome });
+                }
             } catch (err) {
                 logger.error("[TPS GCM] Failed adding archive tag after add-to-note", liveFile.path, err);
             }

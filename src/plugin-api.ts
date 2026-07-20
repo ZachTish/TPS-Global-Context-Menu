@@ -8,6 +8,8 @@ import { executeCommandById, getInternalPlugin, getPluginById, hasCommand } from
 import { mapSubitemCheckboxStateToStatus } from './utils/linked-subitem-mapping';
 import { TPS_EVENTS, TPS_LEGACY_EVENTS } from './tps-contracts';
 import { findExistingDailyNoteForIsoDate, getDailyNotePathForIsoDate } from './utils/daily-note-task-schedule';
+import * as logger from './logger';
+import { isFrontmatterMutationReady } from './services/frontmatter-mutation-outcome';
 
 type ChecklistTaskState = string;
 
@@ -321,14 +323,23 @@ async function applyChecklistPromotionMetadata(
     plugin: TPSGlobalContextMenuPlugin,
     created: TFile,
     promotion: ChecklistPromotionMetadata,
-): Promise<void> {
-    if (!promotion.scheduled && promotion.tags.length === 0) return;
-    await plugin.bulkEditService.runSerializedFrontmatterWrite(created, async () => {
-        await plugin.app.fileManager.processFrontMatter(created, (frontmatter) => {
+): Promise<boolean> {
+    if (!promotion.scheduled && promotion.tags.length === 0) return true;
+    const outcome = await plugin.bulkEditService.runSerializedFrontmatterWrite(created, async () =>
+        plugin.frontmatterMutationService.processGuardedWithOutcome(created, (frontmatter) => {
+            const nextTags = promotion.tags.length > 0
+                ? mergeNormalizedTags(frontmatter.tags, promotion.tags)
+                : frontmatter.tags;
+            if ((!promotion.scheduled || frontmatter.scheduled === promotion.scheduled)
+                && JSON.stringify(frontmatter.tags ?? []) === JSON.stringify(nextTags ?? [])) {
+                return 'unchanged';
+            }
             if (promotion.scheduled) frontmatter.scheduled = promotion.scheduled;
-            if (promotion.tags.length > 0) frontmatter.tags = mergeNormalizedTags(frontmatter.tags, promotion.tags);
-        });
-    });
+            if (promotion.tags.length > 0) frontmatter.tags = nextTags;
+            return true;
+        }),
+    );
+    return isFrontmatterMutationReady(outcome);
 }
 
 export async function promoteChecklistItemToChild(
@@ -366,7 +377,11 @@ export async function promoteChecklistItemToChild(
     );
     if (!created) return null;
 
-    await applyChecklistPromotionMetadata(plugin, created, promotion);
+    if (!(await applyChecklistPromotionMetadata(plugin, created, promotion))) {
+        logger.warn('[TPS GCM] Checklist promotion metadata was not committed', { file: created.path });
+        new Notice('Created the child note, but could not apply its checklist metadata. The source item was left unchanged.');
+        return created;
+    }
 
     const promotedLineIndex = resolveChecklistLineIndex(lines, {
         lineNumber: item.lineNumber,
@@ -476,11 +491,20 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             keys: string[],
         ) => plugin.frontmatterMutationService.deleteKeys(files, keys),
     };
+    /**
+     * Atomic compatibility surface for current Advanced Canvas documents.
+     * Reads require Advanced Canvas' Canvas-specific metadata-cache signature;
+     * writes additionally require metadata version 1.0-1.0. Process mutators
+     * must finish synchronously inside Vault.process and return true only when
+     * a changed JSON revision was durably committed.
+     */
     const canvasPropertiesApi = {
+        /** Defensive cached snapshot, or an empty record when compatibility indexing is unavailable. */
         read: (file: TFile) => plugin.canvasPropertiesService.read(file),
+        /** Run one synchronous Canvas frontmatter mutation; async mutators are refused before persistence. */
         process: (
             file: TFile,
-            mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>,
+            mutator: (frontmatter: Record<string, unknown>) => void,
         ) => plugin.canvasPropertiesService.process(file, mutator),
         setValues: (
             files: TFile[],
@@ -671,7 +695,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         deleteFrontmatterKeys: frontmatterApi.deleteKeys,
         /** Structured frontmatter API for other TPS plugins. */
         frontmatter: frontmatterApi,
-        /** Canvas properties bridge backed by Advanced Canvas metadata compatibility. */
+        /** Atomic Canvas property bridge gated by Advanced Canvas' Canvas-specific metadata-cache signature. */
         canvasProperties: canvasPropertiesApi,
         /** Create `.canvas` files from markdown notes, preserving source notes and copying note frontmatter into canvas metadata. */
         convertNotesToCanvases: (files: TFile[], options?: { outputFolder?: string; openCreated?: boolean }) =>

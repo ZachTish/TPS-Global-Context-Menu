@@ -6,10 +6,14 @@ import { getCompatibleMarkdownViewFromLeaf, getViewMode, pickBestMarkdownLeaf } 
 import { normalizeTagList } from '../utils/tag-utils';
 import { normalizeCompletedDateValue } from '../utils/completed-date-utils';
 import { isFrontmatterDelimiterLine } from '../utils/frontmatter-delimiter';
+import {
+  didFrontmatterMutationChange,
+  type FrontmatterMutationOutcome,
+} from './frontmatter-mutation-outcome';
 
 type FrontmatterRecord = Record<string, unknown>;
 type FrontmatterMutator = (frontmatter: FrontmatterRecord) => void;
-type GuardedFrontmatterMutator = (frontmatter: FrontmatterRecord) => boolean;
+type GuardedFrontmatterMutator = (frontmatter: FrontmatterRecord) => boolean | 'unchanged';
 type FrontmatterMutationAbortKind = 'guarded-abort' | 'no-change' | 'parse-failed' | 'write-refused';
 type ActivityChange = {
   key: string;
@@ -33,15 +37,18 @@ class FrontmatterMutationAbort extends Error {
 export class FrontmatterMutationService {
   private writeChains = new Map<string, Promise<void>>();
   private warnedPaths = new Set<string>();
-  private static readonly PARSE_RETRY_DELAYS_MS = [40, 120, 250];
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
   async process(file: TFile, mutator: FrontmatterMutator): Promise<boolean> {
+    return didFrontmatterMutationChange(await this.processWithOutcome(file, mutator));
+  }
+
+  async processWithOutcome(file: TFile, mutator: FrontmatterMutator): Promise<FrontmatterMutationOutcome> {
     if (this.plugin.canvasPropertiesService?.isCanvasFile(file)) {
-      return this.plugin.canvasPropertiesService.process(file, mutator);
+      return this.plugin.canvasPropertiesService.processWithOutcome(file, mutator);
     }
-    if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'md') return false;
+    if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'md') return 'unsupported';
     return this.processMarkdown(file, (frontmatter) => {
       const result = mutator(frontmatter);
       this.assertSynchronousMutatorResult(result, file);
@@ -50,8 +57,17 @@ export class FrontmatterMutationService {
   }
 
   async processGuarded(file: TFile, mutator: GuardedFrontmatterMutator): Promise<boolean> {
-    if (this.plugin.canvasPropertiesService?.isCanvasFile(file)) return false;
-    if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'md') return false;
+    return didFrontmatterMutationChange(await this.processGuardedWithOutcome(file, mutator));
+  }
+
+  async processGuardedWithOutcome(
+    file: TFile,
+    mutator: GuardedFrontmatterMutator,
+  ): Promise<FrontmatterMutationOutcome> {
+    if (this.plugin.canvasPropertiesService?.isCanvasFile(file)) {
+      return this.plugin.canvasPropertiesService.processGuardedWithOutcome(file, mutator);
+    }
+    if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'md') return 'unsupported';
     return this.processMarkdown(file, (frontmatter) => {
       const result = mutator(frontmatter);
       this.assertSynchronousMutatorResult(result, file);
@@ -59,16 +75,18 @@ export class FrontmatterMutationService {
     });
   }
 
-  private async processMarkdown(file: TFile, mutator: GuardedFrontmatterMutator): Promise<boolean> {
-    let changed = false;
+  private async processMarkdown(
+    file: TFile,
+    mutator: GuardedFrontmatterMutator,
+  ): Promise<FrontmatterMutationOutcome> {
+    let outcome: FrontmatterMutationOutcome = 'write-refused';
     let nextTitle: string | null = null;
     const started = performance.now();
     await this.runSerialized(file, async () => {
-      for (let attemptIndex = 0; attemptIndex <= FrontmatterMutationService.PARSE_RETRY_DELAYS_MS.length; attemptIndex += 1) {
-        let committedTitle: string | null = null;
-        const writeStarted = performance.now();
-        try {
-          await this.plugin.app.vault.process(file, (fullContent) => {
+      let committedTitle: string | null = null;
+      const writeStarted = performance.now();
+      try {
+        await this.plugin.app.vault.process(file, (fullContent) => {
             const normalized = this.normalizeContent(fullContent);
             const parsed = this.parseFrontmatterDocument(normalized.content);
             if (parsed.ok !== true) {
@@ -79,7 +97,11 @@ export class FrontmatterMutationService {
             const originalFrontmatter = { ...frontmatter };
             const originalTitle = readFrontmatterString(originalFrontmatter, 'title').trim();
             const before = stringifyYaml(this.sortFrontmatter(frontmatter)).trimEnd();
-            if (mutator(frontmatter) !== true) {
+            const mutationDecision = mutator(frontmatter);
+            if (mutationDecision === 'unchanged') {
+              throw new FrontmatterMutationAbort('no-change');
+            }
+            if (mutationDecision !== true) {
               throw new FrontmatterMutationAbort('guarded-abort');
             }
             this.normalizeTagValues(frontmatter);
@@ -107,47 +129,44 @@ export class FrontmatterMutationService {
             const mutatedTitle = readFrontmatterString(frontmatter, 'title').trim();
             if (mutatedTitle && mutatedTitle !== originalTitle) committedTitle = mutatedTitle;
             return nextContent;
-          });
-          changed = true;
-          nextTitle = committedTitle;
-          logger.perf('frontmatterMutation.writeContent', {
-            file: file.path,
-            mode: 'vault.process',
-            durationMs: Math.round(performance.now() - writeStarted),
-          });
-          try {
-            this.plugin.eventService.emitExplicitAction([file.path], { source: 'frontmatter' });
-          } catch (error) {
-            logger.warn('[TPS GCM] Frontmatter write committed but its follow-up event failed', {
-              file: file.path,
-              error: logger.errorSummary(error),
-            });
-          }
-          return;
+        });
+        outcome = 'changed';
+        nextTitle = committedTitle;
+        logger.perf('frontmatterMutation.writeContent', {
+          file: file.path,
+          mode: 'vault.process',
+          durationMs: Math.round(performance.now() - writeStarted),
+        });
+        try {
+          this.plugin.eventService.emitExplicitAction([file.path], { source: 'frontmatter' });
         } catch (error) {
-          if (!(error instanceof FrontmatterMutationAbort)) throw error;
-          if (error.kind === 'parse-failed') {
-            const delay = FrontmatterMutationService.PARSE_RETRY_DELAYS_MS[attemptIndex];
-            if (delay != null) {
-              await this.sleep(delay);
-              continue;
-            }
-            this.warnMalformed(file, error.reason, error.detail);
-            return;
-          }
-          if (error.kind === 'write-refused') {
-            this.warnMalformed(file, error.reason, error.detail);
-            logger.warn('[TPS GCM] Refusing frontmatter write that failed atomic validation', {
-              file: file.path,
-              reason: error.reason,
-              stack: new Error().stack,
-            });
-          }
+          logger.warn('[TPS GCM] Frontmatter write committed but its follow-up event failed', {
+            file: file.path,
+            error: logger.errorSummary(error),
+          });
+        }
+        return;
+      } catch (error) {
+        if (!(error instanceof FrontmatterMutationAbort)) throw error;
+        if (error.kind === 'parse-failed') {
+          this.warnMalformed(file, error.reason, error.detail);
+          outcome = 'parse-failed';
           return;
         }
+        if (error.kind === 'write-refused') {
+          this.warnMalformed(file, error.reason, error.detail);
+          logger.warn('[TPS GCM] Refusing frontmatter write that failed atomic validation', {
+            file: file.path,
+            reason: error.reason,
+            stack: new Error().stack,
+          });
+        }
+        outcome = error.kind === 'no-change' ? 'unchanged' : error.kind;
+        return;
       }
     });
 
+    const changed = didFrontmatterMutationChange(outcome);
     logger.perf('frontmatterMutation.process', {
       file: file.path,
       changed,
@@ -157,13 +176,20 @@ export class FrontmatterMutationService {
     if (changed && nextTitle && this.plugin.settings.enableAutoRename) {
       const liveFile = this.plugin.app.vault.getFileByPath(file.path);
       if (liveFile instanceof TFile) {
-        await this.plugin.fileNamingService.updateFilenameIfNeeded(liveFile, {
-          bypassCreationGrace: true,
-          titleOverride: nextTitle,
-        });
+        try {
+          await this.plugin.fileNamingService.updateFilenameIfNeeded(liveFile, {
+            bypassCreationGrace: true,
+            titleOverride: nextTitle,
+          });
+        } catch (error) {
+          logger.warn('[TPS GCM] Frontmatter write committed but its auto-rename follow-up failed', {
+            file: file.path,
+            error: logger.errorSummary(error),
+          });
+        }
       }
     }
-    return changed;
+    return outcome;
   }
 
   async updateValues(files: TFile[], updates: Record<string, unknown>): Promise<TFile[]> {
@@ -392,7 +418,7 @@ export class FrontmatterMutationService {
     }
 
     try {
-      const parsed = this.parseYamlBlockWithDuplicateKeyRepair(split.frontmatterBlock);
+      const parsed = parseYaml(split.frontmatterBlock);
       const frontmatter = parsed && typeof parsed === 'object' && !Array.isArray(parsed)
         ? parsed as FrontmatterRecord
         : {};
@@ -499,71 +525,6 @@ export class FrontmatterMutationService {
       }
     }
     return { ok: true };
-  }
-
-  private parseYamlBlockWithDuplicateKeyRepair(block: string): unknown {
-    try {
-      return parseYaml(block);
-    } catch (error) {
-      if (!this.isDuplicateYamlKeyError(error)) throw error;
-
-      const repaired = this.removeDuplicateTopLevelYamlKeys(block);
-      if (repaired === block) throw error;
-
-      logger.warn('[TPS GCM] Repaired duplicate frontmatter keys before mutation', {
-        error: error instanceof Error ? error.message : String(error),
-      });
-      return parseYaml(repaired);
-    }
-  }
-
-  private isDuplicateYamlKeyError(error: unknown): boolean {
-    const message = error instanceof Error ? error.message : String(error || '');
-    return message.toLowerCase().includes('map keys must be unique');
-  }
-
-  private removeDuplicateTopLevelYamlKeys(block: string): string {
-    const lines = String(block || '').replace(/\r\n/g, '\n').split('\n');
-    const keySpans: Array<{ key: string; start: number; end: number }> = [];
-
-    for (let index = 0; index < lines.length; index++) {
-      const line = lines[index] || '';
-      const match = line.match(/^([^#\s][^:]*):(?:\s|$)/);
-      if (!match) continue;
-
-      let end = index + 1;
-      while (end < lines.length && !/^([^#\s][^:]*):(?:\s|$)/.test(lines[end] || '')) {
-        end += 1;
-      }
-      keySpans.push({ key: casefold(match[1]), start: index, end });
-      index = end - 1;
-    }
-
-    if (keySpans.length === 0) return block;
-
-    const lastSpanByKey = new Map<string, number>();
-    keySpans.forEach((span, index) => lastSpanByKey.set(span.key, index));
-    const duplicateLineRanges: Array<{ start: number; end: number }> = [];
-    keySpans.forEach((span, index) => {
-      if (lastSpanByKey.get(span.key) !== index) {
-        duplicateLineRanges.push({ start: span.start, end: span.end });
-      }
-    });
-
-    if (duplicateLineRanges.length === 0) return block;
-
-    const output: string[] = [];
-
-    for (let index = 0; index < lines.length; index++) {
-      const duplicateRange = duplicateLineRanges.find((range) => index >= range.start && index < range.end);
-      if (duplicateRange) {
-        index = duplicateRange.end - 1;
-        continue;
-      }
-      output.push(lines[index] || '');
-    }
-
-    return output.join('\n');
   }
 
   private sortFrontmatter(frontmatter: FrontmatterRecord): FrontmatterRecord {
@@ -781,10 +742,6 @@ export class FrontmatterMutationService {
         frontmatter[key] = normalized;
       }
     }
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
   }
 
   private hasSuspiciousBrokenSubitemLine(text: string): boolean {

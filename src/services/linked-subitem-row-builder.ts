@@ -33,6 +33,7 @@ export function buildLinkedSubitemRow(
   container.className = 'tps-gcm-linked-subitem-row tps-gcm-linked-subitem-row-content';
   container.dataset.linkedSubitemPath = model.childFile.path;
   container.dataset.linkedSubitemParent = model.parentFile.path;
+  container.dataset.linkedSubitemStatus = model.renderedStatus;
 
   const includeCheckbox = options?.includeCheckbox === true;
   let checkbox: HTMLElement | null = null;
@@ -48,6 +49,7 @@ export function buildLinkedSubitemRow(
     button.dataset.linkedSubitemPath = model.childFile.path;
     button.dataset.linkedSubitemParent = model.parentFile.path;
     button.dataset.linkedSubitemState = model.checkboxState || '[ ]';
+    button.dataset.linkedSubitemStatus = model.renderedStatus;
     setIcon(button, getIconNameForModel(model));
     button.addEventListener('mousedown', (evt) => {
       evt.preventDefault();

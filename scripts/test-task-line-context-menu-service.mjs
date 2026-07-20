@@ -916,7 +916,7 @@ test('note-level recurrence skips configured daily notes instead of creating dai
     bulkEditSource.indexOf('const isTrackerRecurrence = this.isTrackerRecurrenceRule(recurrenceRule);'),
     'daily-note skip must happen before RRULE parsing',
   );
-  assert.match(bulkEditSource, /recurrenceStatuses\.includes\(fm\.status\) && !\(await this\.shouldSkipNoteLevelRecurrence\(file, fm\.scheduled\)\)/);
+  assert.match(bulkEditSource, /if \(!liveSource \|\| await this\.shouldSkipNoteLevelRecurrence\(file, liveSource\.scheduled\)\) continue;/);
   assert.doesNotMatch(bulkEditSource, /return await this\.createNextDailyNoteRecurrenceInstance\(file, frontmatter, nextDate, recurrenceRule\)/);
   assert.match(readFileSync(new URL('../src/services/recurrence-service.ts', import.meta.url), 'utf8'), /isNoteLevelRecurrenceSkipped\(file, fm\)/);
   assert.match(fileNamingSource, /shouldSkipNoteLevelRecurrence\(liveFile, scheduled\)\) return "skipped"/);

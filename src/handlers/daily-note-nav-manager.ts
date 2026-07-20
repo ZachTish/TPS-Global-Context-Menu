@@ -2,6 +2,8 @@ import { App, Component, Modal, TFile, WorkspaceLeaf, setIcon, normalizePath, No
 import TPSGlobalContextMenuPlugin from "../main";
 import * as logger from "../logger";
 import { findExistingDailyNoteForIsoDate, getDailyNoteScheduledValueForIsoDate } from "../utils/daily-note-task-schedule";
+import { isFrontmatterMutationReady } from "../services/frontmatter-mutation-outcome";
+import { normalizeLeadingWhitespaceBeforeFrontmatter as normalizeLeadingFrontmatter } from "../services/leading-frontmatter-normalizer";
 
 type DailyNavTarget = {
     leaf: WorkspaceLeaf;
@@ -748,7 +750,6 @@ export class DailyNoteNavManager extends Component {
         const { template } = this.getDailyNoteSettings();
         let content = "";
         let hasFrontmatter = false;
-        let shouldWriteTitleViaFrontmatterApi = false;
         const adapter = this.plugin.app.vault.adapter as any;
 
         try {
@@ -771,8 +772,7 @@ export class DailyNoteNavManager extends Component {
         if (!content) {
             content = `---\ntitle: ${titleValue}\ntags: [dailynote]\n---\n\n`;
         } else if (hasFrontmatter) {
-            // Preserve template text exactly; update title via processFrontMatter after create.
-            shouldWriteTitleViaFrontmatterApi = true;
+            // Preserve the template text exactly; the normalizer below owns metadata.
         } else {
             content = `---\ntitle: ${titleValue}\ntags: [dailynote]\n---\n\n${content}`;
         }
@@ -783,19 +783,11 @@ export class DailyNoteNavManager extends Component {
             // Run Templater explicitly so <% tp.* %> expressions in the template are evaluated.
             await this.runTemplaterOnFile(created);
 
-            if (shouldWriteTitleViaFrontmatterApi) {
-                try {
-                    await this.plugin.app.fileManager.processFrontMatter(created, (fm) => {
-                        fm.title = titleValue;
-                    });
-                } catch (error) {
-                    logger.warn("Failed to set daily note title via processFrontMatter", error);
-                }
-            }
             await this.normalizeCreatedDailyNote(created, titleValue, folder, isoDate);
             return created;
         } catch (err) {
             logger.error("Failed creating daily note from template", normalizedPath, err);
+            new Notice(`Failed to create daily note: ${normalizedPath}`);
             return null;
         }
     }
@@ -819,25 +811,43 @@ export class DailyNoteNavManager extends Component {
         }
     }
 
-    private async normalizeCreatedDailyNote(file: TFile, titleValue: string, folder: string, isoDate: string | null = null): Promise<void> {
+    private async normalizeCreatedDailyNote(file: TFile, titleValue: string, folder: string, isoDate: string | null = null): Promise<boolean> {
         const targetFolder = String(folder || file.parent?.path || '/').trim() || '/';
         const scheduledValue = isoDate ? getDailyNoteScheduledValueForIsoDate(isoDate) : `${titleValue} 00:00:00`;
 
-        await this.normalizeLeadingWhitespaceBeforeFrontmatter(file);
-
         try {
-            await this.plugin.app.fileManager.processFrontMatter(file, (fm: any) => {
-                fm.title = titleValue;
+            await this.normalizeLeadingWhitespaceBeforeFrontmatter(file);
+            const outcome = await this.plugin.frontmatterMutationService.processGuardedWithOutcome(file, (fm: any) => {
+                let mutationNeeded = false;
+                if (fm.title !== titleValue) {
+                    fm.title = titleValue;
+                    mutationNeeded = true;
+                }
                 const scheduled = String(fm?.scheduled ?? '').trim();
                 if (!scheduled || /<%[\s\S]*%>/.test(scheduled) || /\{\{[\s\S]*\}\}/.test(scheduled)) {
-                    fm.scheduled = scheduledValue;
+                    if (fm.scheduled !== scheduledValue) {
+                        fm.scheduled = scheduledValue;
+                        mutationNeeded = true;
+                    }
                 }
-                if (this.plugin.settings.autoSaveFolderPath) {
+                if (this.plugin.settings.autoSaveFolderPath && fm.folderPath !== targetFolder) {
                     fm.folderPath = targetFolder;
+                    mutationNeeded = true;
                 }
+                return mutationNeeded ? true : 'unchanged';
             });
+            if (!isFrontmatterMutationReady(outcome)) {
+                logger.warn('Daily note normalization stopped because its frontmatter update was not committed', {
+                    file: file.path,
+                    outcome,
+                });
+                new Notice(`Daily note ${file.basename} exists, but its required properties could not be saved. Filename and Notebook Navigator rule updates were skipped.`);
+                return false;
+            }
         } catch (error) {
             logger.warn('Failed normalizing daily note after creation', { file: file.path, error });
+            new Notice(`Daily note ${file.basename} exists, but its required properties could not be saved. Filename and Notebook Navigator rule updates were skipped.`);
+            return false;
         }
 
         try {
@@ -855,34 +865,11 @@ export class DailyNoteNavManager extends Component {
         } catch (error) {
             logger.warn('Failed applying NN rules to daily note', { file: file.path, error });
         }
+        return true;
     }
 
     private async normalizeLeadingWhitespaceBeforeFrontmatter(file: TFile): Promise<void> {
-        let content = '';
-        try {
-            content = await this.plugin.app.vault.cachedRead(file);
-        } catch {
-            return;
-        }
-
-        if (!content) return;
-
-        const normalized = content.replace(/\r\n/g, '\n');
-        const bom = normalized.startsWith('\uFEFF') ? '\uFEFF' : '';
-        const body = bom ? normalized.slice(1) : normalized;
-        if (body.startsWith('---\n')) return;
-
-        const trimmedLeading = body.replace(/^\s*/, '');
-        const leadingOffset = body.length - trimmedLeading.length;
-        if (leadingOffset <= 0 || !trimmedLeading.startsWith('---\n')) return;
-
-        const prefix = body.slice(0, leadingOffset);
-        if (/\S/.test(prefix)) return;
-
-        const liveFile = this.plugin.app.vault.getAbstractFileByPath(file.path);
-        if (!(liveFile instanceof TFile)) return;
-
-        await this.plugin.app.vault.modify(liveFile, `${bom}${trimmedLeading}`);
+        await normalizeLeadingFrontmatter(this.plugin.app, file);
     }
 
     async goToDate(baseIsoDateStr: string | null, offset: number, sourceLeaf?: WorkspaceLeaf | null) {
@@ -934,6 +921,7 @@ export class DailyNoteNavManager extends Component {
                 const shouldCreate = await this.confirmCreateDailyNote(targetFilename, targetPath);
                 if (!shouldCreate) return;
                 file = await this.ensureDailyNoteExists(targetPath, targetFilename, targetDate);
+                if (!(file instanceof TFile)) return;
             }
 
             if (file instanceof TFile) {
@@ -945,8 +933,6 @@ export class DailyNoteNavManager extends Component {
                     { revealLeaf: true, active: true, reuseLeafIfNoExisting: true },
                 );
                 if (!opened) return;
-            } else {
-                new Notice(`Failed to open daily note: ${targetPath}`);
             }
         } catch (err) {
             logger.error("goToDate failed", err);

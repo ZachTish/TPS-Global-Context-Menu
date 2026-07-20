@@ -14,9 +14,9 @@ test('recurrence writes scheduled values with space separator', () => {
   const source = read('src/services/bulk-edit-service.ts');
 
   assert.match(source, /const scheduled = window\.moment\(firstOccurrence\)\.format\('YYYY-MM-DD HH:mm:ss'\)/);
-  assert.match(source, /const newScheduled = window\.moment\(nextDate\)\.format\('YYYY-MM-DD HH:mm:ss'\)/);
+  assert.match(source, /const newScheduled = nextDate \? window\.moment\(nextDate\)\.format\('YYYY-MM-DD HH:mm:ss'\)/);
   assert.doesNotMatch(source, /const scheduled = window\.moment\(firstOccurrence\)\.format\('YYYY-MM-DDTHH:mm:ss'\)/);
-  assert.doesNotMatch(source, /const newScheduled = window\.moment\(nextDate\)\.format\('YYYY-MM-DDTHH:mm:ss'\)/);
+  assert.doesNotMatch(source, /const newScheduled = nextDate \? window\.moment\(nextDate\)\.format\('YYYY-MM-DDTHH:mm:ss'\)/);
 });
 
 test('generic frontmatter date normalization emits space-separated datetime strings', () => {
