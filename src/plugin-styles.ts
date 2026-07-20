@@ -5234,6 +5234,20 @@ export const PLUGIN_STYLES = `
         height: 14px;
         stroke-width: 2.5px;
       }
+      .tps-gcm-parent-nav-button--external-icon-only {
+        min-width: 40px;
+        justify-content: center;
+      }
+      .tps-gcm-parent-nav-button--external-icon-only .tps-gcm-parent-nav-label {
+        display: none;
+      }
+      .tps-gcm-parent-nav-button--external-icon-only .tps-gcm-parent-nav-icon {
+        margin: 0;
+      }
+      .tps-gcm-parent-nav-button--external-icon-only svg {
+        width: 18px;
+        height: 18px;
+      }
 
       .tps-gcm-top-parent-nav {
         margin: calc(4px * var(--tps-gcm-density)) 0 calc(8px * var(--tps-gcm-density));

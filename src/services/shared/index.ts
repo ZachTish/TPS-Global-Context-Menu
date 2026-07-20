@@ -11,7 +11,7 @@ import type { ResolvedParentLink } from '../subitem-types';
 import { SharedScheduleService } from './schedule-service';
 import { SharedStatusService } from './status-service';
 
-type FrontmatterMutator = (frontmatter: Record<string, unknown>) => void | Promise<void>;
+type FrontmatterMutator = (frontmatter: Record<string, unknown>) => void;
 
 export type GcmSharedServices = ReturnType<typeof createSharedServices>;
 

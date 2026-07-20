@@ -90,6 +90,15 @@ export function timeTrackingSessionOverlapsRange(
   return true;
 }
 
+export function timeTrackingSessionMatchesTarget(
+  session: Pick<TimeTrackingSessionRecord, 'targetType' | 'sourcePath'> & { targetPath?: string },
+  path: string,
+  targetType: TimeTrackingTargetType,
+): boolean {
+  return session.targetType === targetType
+    && (session.targetPath === path || session.sourcePath === path);
+}
+
 function defaultParseDate(value: string): Date | null {
   const parsed = new Date(String(value || ''));
   return Number.isFinite(parsed.getTime()) ? parsed : null;

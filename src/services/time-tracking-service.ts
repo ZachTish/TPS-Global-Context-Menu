@@ -10,10 +10,12 @@ import {
   updateTaskLineTimestamps,
 } from '../utils/task-line-metadata';
 import { findCurrentTaskLineIndex } from '../utils/task-block-move';
+import { isFrontmatterDelimiterLine } from '../utils/frontmatter-delimiter';
 import {
   normalizeTimeTrackingRecord,
   normalizeTimeTrackingRecordList,
   resolveTimeTrackingStorageKind,
+  timeTrackingSessionMatchesTarget,
   timeTrackingSessionOverlapsRange,
   type TimeTrackingSessionRecord,
   type TimeTrackingStorageMode,
@@ -35,6 +37,9 @@ export interface TimeTrackingTargetInput {
   rawLine?: string;
   type?: TimeTrackingTargetType;
   title?: string;
+  sessionId?: string;
+  startedAt?: Date | string | number;
+  sourcePathSnapshot?: string;
 }
 
 export interface TimeTrackingRangeInput {
@@ -77,6 +82,7 @@ interface StoredSession {
   record: TimeTrackingSessionRecord;
   storageMode: 'frontmatter';
   storageFile: TFile;
+  storageKey?: string;
   storageLineNumber?: number;
 }
 
@@ -121,23 +127,58 @@ export class TimeTrackingService {
     const target = await this.resolveAndEnsureTarget(input);
     if (!target) return null;
 
+    const requestedSessionId = String(input?.sessionId || '').trim();
+    if (requestedSessionId) {
+      if (requestedSessionId.length > 256
+        || !/^[a-z0-9](?:[a-z0-9._:-]*[a-z0-9])?$/i.test(requestedSessionId)) {
+        new Notice('Time tracking session identity is invalid.');
+        return null;
+      }
+      const existingSessions = await this.findStoredSessionsById(requestedSessionId);
+      if (existingSessions.length > 0) {
+        const existing = existingSessions.length === 1 ? existingSessions[0] : null;
+        if (!existing) {
+          new Notice('Time tracking session identity is not unique.');
+          return null;
+        }
+        const existingTarget = await this.resolveTargetForRecord(existing.record, existing);
+        const existingPath = existingTarget?.file.path || existing.record.sourcePath;
+        if (!existing.record.end
+          && existing.record.targetType === target.type
+          && existingPath === target.file.path) {
+          return this.hydrateStoredSession(existing);
+        }
+        new Notice('Time tracking session identity is already in use.');
+        return null;
+      }
+    }
+
     const active = this.plugin.settings.timeTrackingSingleActiveSession === false
       ? null
       : await this.getActiveSession();
     if (active) {
+      if (requestedSessionId) {
+        new Notice(`A timer is already running for "${active.title}".`);
+        return null;
+      }
       const shouldStartAdditional = confirm(
         `A timer is already running for "${active.title}". Start another running timer?`,
       );
       if (!shouldStartAdditional) return active;
     }
 
-    const now = new Date();
+    const hasRequestedStart = input?.startedAt != null && input.startedAt !== '';
+    const now = hasRequestedStart ? this.normalizeDateInput(input?.startedAt) : new Date();
+    if (!now) {
+      new Notice('Time tracking start time is invalid.');
+      return null;
+    }
     const timestamp = this.formatDateTime(now);
     const record: TimeTrackingSessionRecord = {
-      id: this.createId('tt'),
+      id: requestedSessionId || this.createId('tt'),
       targetId: target.tpsId,
       targetType: target.type,
-      sourcePath: target.file.path,
+      sourcePath: normalizePath(String(input?.sourcePathSnapshot || target.file.path)).replace(/^\/+/, ''),
       lineNumber: target.lineNumber,
       start: timestamp,
       createdAt: timestamp,
@@ -145,14 +186,80 @@ export class TimeTrackingService {
     };
 
     const storageFile = await this.resolveStorageFileForNewSession(target, now);
-    await this.writeNewSession(target, record, storageFile);
-    const resolvedTarget = await this.resolveTargetForRecord(record, { storageFile });
-    await this.syncTargetScheduledMetadata(resolvedTarget ?? target, record, { mode: 'running' });
-    await this.clearPausedTimer({ silent: true });
-    await this.refreshActiveTimerCache();
-    this.refreshStatusBar();
-    this.refreshFileUi((resolvedTarget ?? target).file);
-    new Notice(`Started timer: ${target.title}`);
+    const stored = await this.writeNewSession(target, record, storageFile);
+    if (!stored) {
+      new Notice('Time tracking could not confirm the timer write.');
+      return null;
+    }
+    const needsDailyLink = target.type === 'note'
+      && storageFile.path !== target.file.path
+      && this.getStorageMode() === 'daily-note';
+    if (needsDailyLink) {
+      if (requestedSessionId) {
+        await this.runExactStartPostCommitStep(requestedSessionId, 'daily-link', () => (
+          this.ensureTrackedNoteDailyLink(target.file, storageFile, record.targetId)
+        ));
+      } else {
+        await this.ensureTrackedNoteDailyLink(target.file, storageFile, record.targetId);
+      }
+    }
+    let projectedFile: TFile | null = null;
+    if (requestedSessionId) {
+      try {
+        if (target.type === 'note') {
+          const exactTargetFile = await this.findNoteByTpsId(record.targetId, true);
+          if (!exactTargetFile) throw new Error('The exact timer target identity is unavailable.');
+          await this.syncTargetScheduledMetadata({
+            file: exactTargetFile,
+            type: 'note',
+            title: this.getNoteTitle(exactTargetFile),
+          }, record, {
+            mode: 'running',
+            expectedTargetId: record.targetId,
+          });
+          projectedFile = exactTargetFile;
+        } else {
+          const resolvedTarget = await this.resolveTargetForRecord(record, { storageFile });
+          await this.syncTargetScheduledMetadata(resolvedTarget ?? target, record, { mode: 'running' });
+          projectedFile = (resolvedTarget ?? target).file;
+        }
+      } catch (error) {
+        logger.warn('[TimeTracking] Exact timer started but target projection was skipped.', {
+          id: requestedSessionId,
+          targetId: record.targetId,
+          error: logger.errorSummary(error),
+        });
+      }
+    } else {
+      const resolvedTarget = await this.resolveTargetForRecord(record, { storageFile });
+      await this.syncTargetScheduledMetadata(resolvedTarget ?? target, record, { mode: 'running' });
+      projectedFile = (resolvedTarget ?? target).file;
+    }
+    if (requestedSessionId) {
+      await this.runExactStartPostCommitStep(requestedSessionId, 'paused-state', () => (
+        this.clearPausedTimer({ silent: true }).then(() => undefined)
+      ));
+      await this.runExactStartPostCommitStep(requestedSessionId, 'active-cache', () => (
+        this.refreshActiveTimerCache()
+      ));
+      await this.runExactStartPostCommitStep(requestedSessionId, 'status-bar', () => {
+        this.refreshStatusBar();
+      });
+      if (projectedFile) {
+        await this.runExactStartPostCommitStep(requestedSessionId, 'target-ui', () => {
+          this.refreshFileUi(projectedFile);
+        });
+      }
+      await this.runExactStartPostCommitStep(requestedSessionId, 'notice', () => {
+        new Notice(`Started timer: ${target.title}`);
+      });
+    } else {
+      await this.clearPausedTimer({ silent: true });
+      await this.refreshActiveTimerCache();
+      this.refreshStatusBar();
+      if (projectedFile) this.refreshFileUi(projectedFile);
+      new Notice(`Started timer: ${target.title}`);
+    }
     const storageMode = this.resolveSessionStorageKind(target);
     return this.hydrateStoredSession({
       record,
@@ -262,6 +369,81 @@ export class TimeTrackingService {
     }
     await this.refreshActiveTimerCache();
     this.refreshStatusBar();
+    new Notice(`Stopped timer: ${hydrated.title}`);
+    return hydrated;
+  }
+
+  async stopActiveNoteTimerByIdForPath(
+    expectedPathInput: string,
+    sessionIdInput: string,
+    endInput: Date | string | number,
+  ): Promise<TimeTrackingSession | null> {
+    // Owned cleanup must remain possible after tracking is disabled or the target becomes archived.
+    const sessionId = String(sessionIdInput || '').trim();
+    const expectedPath = normalizePath(String(expectedPathInput || '').trim()).replace(/^\/+/, '');
+    const end = this.normalizeDateInput(endInput);
+    if (!expectedPath || !sessionId || !end) return null;
+
+    const storedSessions = await this.findStoredSessionsById(sessionId);
+    if (storedSessions.length !== 1) return null;
+    const stored = storedSessions[0];
+    if (stored.record.end || stored.record.targetType !== 'note') return null;
+    const target = await this.resolveTargetForRecord(stored.record, stored);
+    const targetPath = target?.file.path || stored.record.sourcePath;
+    const start = this.normalizeDateInput(stored.record.start);
+    if ((targetPath !== expectedPath && stored.record.sourcePath !== expectedPath)
+      || !start
+      || end.getTime() <= start.getTime()) return null;
+
+    let proposedUpdate: TimeTrackingSessionRecord | null = null;
+    const storageChanged = await this.plugin.frontmatterMutationService.processGuarded(stored.storageFile, (frontmatter) => {
+      const locations = this.findRawSessionLocations(frontmatter, sessionId);
+      if (locations.length !== 1) return false;
+      const [{ key: existingKey, rawValue, rawEntries, index, record: candidate }] = locations;
+      if (candidate.end
+        || candidate.targetType !== 'note'
+        || candidate.targetId !== stored.record.targetId
+        || candidate.sourcePath !== stored.record.sourcePath
+        || candidate.start !== stored.record.start) return false;
+      proposedUpdate = this.withUpdatedTimes(candidate, candidate.start, end);
+      rawEntries[index] = this.mergeUpdatedSessionIntoRawEntry(rawEntries[index], proposedUpdate);
+      setValueCaseInsensitive(frontmatter, existingKey, Array.isArray(rawValue) ? rawEntries : rawEntries[0]);
+      return true;
+    });
+    if (!storageChanged || !proposedUpdate) return null;
+    const updated = proposedUpdate;
+
+    const hydrated = await this.hydrateStoredSession({ ...stored, record: updated });
+    try {
+      const exactTargetFile = await this.findNoteByTpsId(stored.record.targetId, true);
+      if (exactTargetFile) {
+        await this.syncTargetScheduledMetadata({
+          file: exactTargetFile,
+          type: 'note',
+          title: this.getNoteTitle(exactTargetFile),
+        }, updated, {
+          mode: 'stopped',
+          end,
+          expectedTargetId: stored.record.targetId,
+        });
+        this.refreshFileUi(exactTargetFile);
+      }
+    } catch (error) {
+      logger.warn('[TimeTracking] Exact timer stopped but target projection was skipped.', {
+        id: sessionId,
+        targetId: stored.record.targetId,
+        error: logger.errorSummary(error),
+      });
+    }
+    try {
+      await this.refreshActiveTimerCache();
+      this.refreshStatusBar();
+    } catch (error) {
+      logger.warn('[TimeTracking] Exact timer stopped but runtime cache refresh failed.', {
+        id: sessionId,
+        error: logger.errorSummary(error),
+      });
+    }
     new Notice(`Stopped timer: ${hydrated.title}`);
     return hydrated;
   }
@@ -392,6 +574,10 @@ export class TimeTrackingService {
       end: record.end,
     });
     await this.writeNewSession(target, record, storageFile);
+    if (target.type === 'note' && storageFile.path !== target.file.path && this.getStorageMode() === 'daily-note') {
+      await this.ensureTrackedNoteDailyLink(target.file, storageFile, record.targetId);
+    }
+    await this.refreshActiveTimerCache();
     const resolvedTarget = await this.resolveTargetForRecord(record, { storageFile });
     if (resolvedTarget?.file instanceof TFile) {
       await this.syncTargetScheduledMetadata(resolvedTarget, record, { mode: 'stopped', end });
@@ -516,10 +702,49 @@ export class TimeTrackingService {
 
   async getActiveTimersForFile(file: TFile): Promise<TimeTrackingSession[]> {
     if (!this.isEnabled()) return [];
+    return this.getActiveTimersForFileByType(file);
+  }
+
+  async getActiveNoteTimersForFile(file: TFile): Promise<TimeTrackingSession[]> {
+    return this.getActiveNoteTimersForPath(file.path);
+  }
+
+  async getActiveNoteTimersForPath(pathInput: string): Promise<TimeTrackingSession[]> {
+    // This exact-ownership query intentionally bypasses UI/archive visibility filters for cleanup.
+    const path = normalizePath(String(pathInput || '').trim()).replace(/^\/+/, '');
+    if (!path) return [];
+    const stored = await this.scanStoredSessions({
+      includeIgnoredStorage: true,
+      requireFreshContent: true,
+      scanAllPropertyKeys: true,
+    });
+    const output: TimeTrackingSession[] = [];
+    for (const item of stored) {
+      if (item.record.end || item.record.targetType !== 'note') continue;
+      const hydrated = await this.hydrateStoredSession(item);
+      if (timeTrackingSessionMatchesTarget(hydrated, path, 'note')) output.push(hydrated);
+    }
+    return output.sort((a, b) => String(a.start || '').localeCompare(String(b.start || '')));
+  }
+
+  async getTimerSessionsById(idInput: string): Promise<TimeTrackingSession[]> {
+    const id = String(idInput || '').trim();
+    if (!id) return [];
+    const stored = await this.findStoredSessionsById(id);
+    const output: TimeTrackingSession[] = [];
+    for (const item of stored) output.push(await this.hydrateStoredSession(item));
+    return output;
+  }
+
+  private async getActiveTimersForFileByType(
+    file: TFile,
+    targetType?: TimeTrackingTargetType,
+  ): Promise<TimeTrackingSession[]> {
     const stored = await this.scanStoredSessions();
     const active = stored.filter((session) => !session.record.end);
     const output: TimeTrackingSession[] = [];
     for (const item of active) {
+      if (targetType && item.record.targetType !== targetType) continue;
       if (await this.shouldIgnoreStoredSession(item)) continue;
       const hydrated = await this.hydrateStoredSession(item);
       if (hydrated.targetPath === file.path || hydrated.sourcePath === file.path) {
@@ -634,7 +859,7 @@ export class TimeTrackingService {
   private async syncTargetScheduledMetadata(
     target: TFile | TimeTrackingTargetReference,
     record: TimeTrackingSessionRecord,
-    options: { mode: 'running' | 'stopped'; end?: Date },
+    options: { mode: 'running' | 'stopped'; end?: Date; expectedTargetId?: string },
   ): Promise<void> {
     const start = this.normalizeDateInput(record.start);
     if (!start) return;
@@ -667,7 +892,14 @@ export class TimeTrackingService {
       return;
     }
 
-    await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
+    const expectedTargetId = String(options.expectedTargetId || '').trim();
+    const mutate = (frontmatter: Record<string, unknown>): boolean => {
+      if (expectedTargetId) {
+        const identityKey = findKeyCaseInsensitive(frontmatter, TPS_ID_FIELD)
+          || findKeyCaseInsensitive(frontmatter, 'subitemId');
+        const actualTargetId = identityKey ? String(frontmatter[identityKey] ?? '').trim() : '';
+        if (actualTargetId !== expectedTargetId) return false;
+      }
       if (isProcessRunFrontmatter(frontmatter)) {
         deleteValueCaseInsensitive(frontmatter, 'scheduled');
       } else {
@@ -682,7 +914,15 @@ export class TimeTrackingService {
       if (endKey) {
         setValueCaseInsensitive(frontmatter, endKey, endValue);
       }
-    });
+      return true;
+    };
+    if (expectedTargetId) {
+      await this.plugin.frontmatterMutationService.processGuarded(file, mutate);
+    } else {
+      await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
+        mutate(frontmatter);
+      });
+    }
   }
 
   private async syncTaskLineScheduledMetadata(
@@ -766,7 +1006,8 @@ export class TimeTrackingService {
     const type = input?.type === 'task' ? 'task' : 'note';
 
     if (type === 'note') {
-      const tpsId = await this.ensureNoteTpsId(file);
+      const tpsId = await this.ensureNoteTpsId(file, Boolean(String(input?.sessionId || '').trim()));
+      if (!tpsId) return null;
       const title = input?.title?.trim() || this.getNoteTitle(file);
       return { file, type, title, tpsId };
     }
@@ -883,15 +1124,27 @@ export class TimeTrackingService {
     return `task-${Math.abs(hash).toString(36)}`;
   }
 
-  private async ensureNoteTpsId(file: TFile): Promise<string> {
-    let resolved = this.getFrontmatterTpsId(file);
-    if (resolved) return resolved;
+  private async ensureNoteTpsId(file: TFile, requireAuthoritative = false): Promise<string | null> {
+    const cached = this.getFrontmatterTpsId(file);
+    if (cached && !requireAuthoritative) return cached;
 
-    resolved = this.createId('item');
-    await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
-      setValueCaseInsensitive(frontmatter, TPS_ID_FIELD, resolved);
+    const generated = this.createId('item');
+    let resolved: string | null = null;
+    let foundExisting = false;
+    const changed = await this.plugin.frontmatterMutationService.processGuarded(file, (frontmatter) => {
+      const existingKey = findKeyCaseInsensitive(frontmatter, TPS_ID_FIELD)
+        || findKeyCaseInsensitive(frontmatter, 'subitemId');
+      const existing = existingKey ? String(frontmatter[existingKey] ?? '').trim() : '';
+      if (existing) {
+        resolved = existing;
+        foundExisting = true;
+        return false;
+      }
+      resolved = generated;
+      setValueCaseInsensitive(frontmatter, TPS_ID_FIELD, generated);
+      return true;
     });
-    return resolved;
+    return resolved && (foundExisting || changed) ? resolved : null;
   }
 
   private getFrontmatterTpsId(file: TFile): string | null {
@@ -910,36 +1163,70 @@ export class TimeTrackingService {
     target: ResolvedTimeTrackingTarget,
     record: TimeTrackingSessionRecord,
     resolvedStorageFile?: TFile,
-  ): Promise<void> {
-    const storageMode = this.resolveSessionStorageKind(target);
+  ): Promise<boolean> {
     const file = resolvedStorageFile ?? await this.resolveStorageFileForNewSession(target, this.normalizeDateInput(record.start) ?? new Date());
-    await this.appendFrontmatterSession(file, record);
-    if (target.type === 'note' && file.path !== target.file.path && this.getStorageMode() === 'daily-note') {
-      await this.ensureTrackedNoteDailyLink(target.file, file);
+    return this.appendFrontmatterSession(file, record);
+  }
+
+  private async runExactStartPostCommitStep(
+    sessionId: string,
+    step: string,
+    operation: () => void | Promise<void>,
+  ): Promise<void> {
+    try {
+      await operation();
+    } catch (error) {
+      logger.warn('[TimeTracking] Exact timer start follow-up failed after the session was stored.', {
+        id: sessionId,
+        step,
+        error: logger.errorSummary(error),
+      });
     }
-    await this.refreshActiveTimerCache();
   }
 
-  private async appendFrontmatterSession(file: TFile, record: TimeTrackingSessionRecord): Promise<void> {
+  private async appendFrontmatterSession(file: TFile, record: TimeTrackingSessionRecord): Promise<boolean> {
     const key = this.getPropertyKey();
-    await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
+    let inserted = false;
+    const changed = await this.plugin.frontmatterMutationService.processGuarded(file, (frontmatter) => {
+      if (this.findRawSessionLocations(frontmatter, record.id).length > 0) return false;
       const existingKey = findKeyCaseInsensitive(frontmatter, key) || key;
-      const current = this.normalizeRecordList(frontmatter[existingKey]);
-      current.push(record);
-      setValueCaseInsensitive(frontmatter, existingKey, current);
+      const rawEntries = this.getRawSessionEntries(frontmatter[existingKey]);
+      rawEntries.push(record);
+      setValueCaseInsensitive(frontmatter, existingKey, rawEntries);
+      inserted = true;
+      return true;
     });
+    return inserted && changed;
   }
 
-  private async ensureTrackedNoteDailyLink(sourceFile: TFile, dailyNote: TFile): Promise<void> {
+  private async ensureTrackedNoteDailyLink(
+    sourceFile: TFile,
+    dailyNote: TFile,
+    expectedTargetId?: string,
+  ): Promise<void> {
     const key = 'timeTrackingDailyNotes';
     const link = this.plugin.app.fileManager.generateMarkdownLink(dailyNote, sourceFile.path);
-    await this.plugin.frontmatterMutationService.process(sourceFile, (frontmatter) => {
+    const mutate = (frontmatter: Record<string, unknown>): boolean => {
+      if (expectedTargetId) {
+        const identityKey = findKeyCaseInsensitive(frontmatter, TPS_ID_FIELD)
+          || findKeyCaseInsensitive(frontmatter, 'subitemId');
+        const actualTargetId = identityKey ? String(frontmatter[identityKey] ?? '').trim() : '';
+        if (actualTargetId !== expectedTargetId) return false;
+      }
       const existingKey = findKeyCaseInsensitive(frontmatter, key) || key;
       const current = this.normalizeStringList(frontmatter[existingKey]);
-      if (current.includes(link) || current.includes(dailyNote.path) || current.includes(dailyNote.basename)) return;
+      if (current.includes(link) || current.includes(dailyNote.path) || current.includes(dailyNote.basename)) return false;
       current.push(link);
       setValueCaseInsensitive(frontmatter, existingKey, current);
-    });
+      return true;
+    };
+    if (expectedTargetId) {
+      await this.plugin.frontmatterMutationService.processGuarded(sourceFile, mutate);
+    } else {
+      await this.plugin.frontmatterMutationService.process(sourceFile, (frontmatter) => {
+        mutate(frontmatter);
+      });
+    }
   }
 
   private normalizeStringList(value: unknown): string[] {
@@ -1050,17 +1337,25 @@ export class TimeTrackingService {
     return dailyPlugin?.options || null;
   }
 
-  private async scanStoredSessions(): Promise<StoredSession[]> {
+  private async scanStoredSessions(options: {
+    includeIgnoredStorage?: boolean;
+    requireFreshContent?: boolean;
+    scanAllPropertyKeys?: boolean;
+  } = {}): Promise<StoredSession[]> {
     const key = this.getPropertyKey();
     const output: StoredSession[] = [];
 
     for (const file of this.plugin.app.vault.getMarkdownFiles()) {
-      if (this.shouldIgnoreTimeTrackingPath(file.path)) continue;
-      const frontmatter = await this.readFrontmatterForTimeTrackingScan(file);
-      const existingKey = frontmatter ? findKeyCaseInsensitive(frontmatter, key) : null;
-      if (frontmatter && existingKey) {
-        for (const record of this.normalizeRecordList(frontmatter[existingKey])) {
-          output.push({ record, storageMode: 'frontmatter', storageFile: file });
+      if (!options.includeIgnoredStorage && this.shouldIgnoreTimeTrackingPath(file.path)) continue;
+      const frontmatter = await this.readFrontmatterForTimeTrackingScan(file, options.requireFreshContent === true);
+      const propertyKeys = frontmatter
+        ? options.scanAllPropertyKeys
+          ? Object.keys(frontmatter)
+          : [findKeyCaseInsensitive(frontmatter, key)].filter((value): value is string => Boolean(value))
+        : [];
+      for (const storageKey of propertyKeys) {
+        for (const record of this.normalizeRecordList(frontmatter?.[storageKey])) {
+          output.push({ record, storageMode: 'frontmatter', storageFile: file, storageKey });
         }
       }
     }
@@ -1068,26 +1363,52 @@ export class TimeTrackingService {
     return output;
   }
 
-  private async readFrontmatterForTimeTrackingScan(file: TFile): Promise<Record<string, unknown> | undefined> {
+  private async readFrontmatterForTimeTrackingScan(
+    file: TFile,
+    requireFreshContent = false,
+  ): Promise<Record<string, unknown> | undefined> {
     const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
-    if (cached && findKeyCaseInsensitive(cached, this.getPropertyKey())) return cached;
+    if (!requireFreshContent && cached && findKeyCaseInsensitive(cached, this.getPropertyKey())) return cached;
 
     let raw = '';
     try {
-      raw = await this.plugin.app.vault.cachedRead(file);
+      raw = requireFreshContent
+        ? await this.plugin.app.vault.read(file)
+        : await this.plugin.app.vault.cachedRead(file);
     } catch {
+      if (requireFreshContent) {
+        throw new Error(`Time tracking could not read authoritative storage: ${file.path}`);
+      }
       return cached;
     }
-    if (!raw.startsWith('---')) return cached;
-    const normalized = raw.replace(/\r\n/g, '\n');
-    const closing = normalized.indexOf('\n---', 3);
-    if (closing < 0) return cached;
+    const withoutBom = raw.startsWith('\uFEFF') ? raw.slice(1) : raw;
+    const normalized = withoutBom.replace(/\r\n?/g, '\n');
+    const lines = normalized.split('\n');
+    if (!isFrontmatterDelimiterLine(lines[0] ?? '')) return requireFreshContent ? undefined : cached;
+    const closingLine = lines.findIndex((line, index) => index > 0 && isFrontmatterDelimiterLine(line));
+    if (closingLine < 0) {
+      if (requireFreshContent) {
+        throw new Error(`Time tracking found malformed authoritative frontmatter: ${file.path}`);
+      }
+      return cached;
+    }
     try {
-      const parsed = parseYaml(normalized.slice(4, closing));
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-        ? parsed as Record<string, unknown>
-        : cached;
+      const yamlSource = lines.slice(1, closingLine).join('\n');
+      const hasYamlValue = yamlSource
+        .split('\n')
+        .some((line) => line.trim() && !line.trim().startsWith('#'));
+      const parsed = hasYamlValue ? parseYaml(yamlSource) : {};
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+      if (requireFreshContent) {
+        throw new Error(`Time tracking found non-object authoritative frontmatter: ${file.path}`);
+      }
+      return cached;
     } catch {
+      if (requireFreshContent) {
+        throw new Error(`Time tracking could not parse authoritative frontmatter: ${file.path}`);
+      }
       return cached;
     }
   }
@@ -1096,6 +1417,17 @@ export class TimeTrackingService {
     const targetId = String(id || '').trim();
     if (!targetId) return null;
     return (await this.scanStoredSessions()).find((session) => session.record.id === targetId) ?? null;
+  }
+
+  private async findStoredSessionsById(id: string): Promise<StoredSession[]> {
+    const targetId = String(id || '').trim();
+    if (!targetId) return [];
+    return (await this.scanStoredSessions({
+      includeIgnoredStorage: true,
+      requireFreshContent: true,
+      scanAllPropertyKeys: true,
+    }))
+      .filter((session) => session.record.id === targetId);
   }
 
   private async getActiveStoredSession(): Promise<StoredSession | null> {
@@ -1217,10 +1549,8 @@ export class TimeTrackingService {
   ): Promise<TimeTrackingTargetReference | null> {
     if (record.targetType === 'note') {
       const sourceFile = this.resolveFile(record.sourcePath);
-      const sourceId = sourceFile ? this.getFrontmatterTpsId(sourceFile) : null;
-      const file = sourceFile && (!sourceId || sourceId === record.targetId || sourceFile.path === stored?.storageFile?.path)
-        ? sourceFile
-        : this.findNoteByTpsId(record.targetId) ?? sourceFile ?? stored?.storageFile ?? null;
+      const identityFile = await this.findNoteByTpsId(record.targetId);
+      const file = identityFile ?? sourceFile ?? stored?.storageFile ?? null;
       if (!(file instanceof TFile)) return null;
       return { file, type: 'note', title: this.getNoteTitle(file) };
     }
@@ -1330,13 +1660,23 @@ export class TimeTrackingService {
     return true;
   }
 
-  private findNoteByTpsId(tpsId: string): TFile | null {
+  private async findNoteByTpsId(tpsId: string, requireFreshContent = false): Promise<TFile | null> {
     const wanted = String(tpsId || '').trim();
     if (!wanted) return null;
+    let match: TFile | null = null;
     for (const file of this.plugin.app.vault.getMarkdownFiles()) {
-      if (this.getFrontmatterTpsId(file) === wanted) return file;
+      const frontmatter = requireFreshContent
+        ? await this.readFrontmatterForTimeTrackingScan(file, true)
+        : this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+      const key = frontmatter
+        ? findKeyCaseInsensitive(frontmatter, TPS_ID_FIELD) || findKeyCaseInsensitive(frontmatter, 'subitemId')
+        : null;
+      const candidateId = key ? String(frontmatter?.[key] ?? '').trim() : '';
+      if (candidateId !== wanted) continue;
+      if (match) return null;
+      match = file;
     }
-    return null;
+    return match;
   }
 
   private resolveFile(path: string | null | undefined): TFile | null {
@@ -1352,6 +1692,66 @@ export class TimeTrackingService {
 
   private normalizeRecord(value: unknown): TimeTrackingSessionRecord | null {
     return normalizeTimeTrackingRecord(value);
+  }
+
+  private getRawSessionEntries(value: unknown): unknown[] {
+    return Array.isArray(value) ? [...value] : value == null ? [] : [value];
+  }
+
+  private findRawSessionLocations(
+    frontmatter: Record<string, unknown>,
+    id: string,
+  ): Array<{
+    key: string;
+    rawValue: unknown;
+    rawEntries: unknown[];
+    index: number;
+    record: TimeTrackingSessionRecord;
+  }> {
+    const targetId = String(id || '').trim();
+    if (!targetId) return [];
+    const locations: Array<{
+      key: string;
+      rawValue: unknown;
+      rawEntries: unknown[];
+      index: number;
+      record: TimeTrackingSessionRecord;
+    }> = [];
+    for (const key of Object.keys(frontmatter)) {
+      const rawValue = frontmatter[key];
+      const rawEntries = this.getRawSessionEntries(rawValue);
+      rawEntries.forEach((entry, index) => {
+        const record = this.normalizeRecord(entry);
+        if (record?.id === targetId) {
+          locations.push({ key, rawValue, rawEntries, index, record });
+        }
+      });
+    }
+    return locations;
+  }
+
+  private mergeUpdatedSessionIntoRawEntry(
+    value: unknown,
+    updated: TimeTrackingSessionRecord,
+  ): unknown {
+    let source = value;
+    let stringify = false;
+    if (typeof source === 'string') {
+      try {
+        source = JSON.parse(source);
+        stringify = true;
+      } catch {
+        return updated;
+      }
+    }
+    if (!source || typeof source !== 'object' || Array.isArray(source)) return updated;
+    const merged = {
+      ...(source as Record<string, unknown>),
+      end: updated.end,
+      durationMinutes: updated.durationMinutes,
+      updatedAt: updated.updatedAt,
+    };
+    return stringify ? JSON.stringify(merged) : merged;
   }
 
   private withUpdatedTimes(

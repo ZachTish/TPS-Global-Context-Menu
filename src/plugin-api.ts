@@ -445,7 +445,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
     const frontmatterApi = {
         process: (
             file: TFile,
-            mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>,
+            mutator: (frontmatter: Record<string, unknown>) => void,
         ) => plugin.frontmatterMutationService.process(file, mutator),
         setValues: (
             files: TFile[],

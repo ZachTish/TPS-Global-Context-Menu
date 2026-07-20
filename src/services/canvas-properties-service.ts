@@ -168,7 +168,10 @@ export class CanvasPropertiesService {
     return settings?.canvasMetadataCompatibilityEnabled;
   }
 
-  private resolveFrontmatterWriter(): ((file: TFile, mutator: CanvasFrontmatterMutator) => Promise<unknown>) | null {
+  private resolveFrontmatterWriter(): ((
+    file: TFile,
+    mutator: (frontmatter: CanvasFrontmatterRecord) => void,
+  ) => Promise<unknown>) | null {
     const fileManager = this.plugin.app.fileManager as any;
     const current = fileManager?.processFrontMatter;
     if (typeof current === 'function' && current.__tpsGcmFrontmatterPatch !== true) {

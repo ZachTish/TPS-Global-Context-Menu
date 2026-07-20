@@ -85,6 +85,14 @@ import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { installVisibleViewportContract } from './utils/mobile-overlay';
 import { TPSHealthUiClient } from './tps-health-ui-client';
 import type { TPSHealthUiApiSnapshot } from './tps-health-ui-contract';
+import { TPSGcmIntegrationHost } from './tps-gcm-integration-host';
+import {
+  createGcmExternalActionRegistrationKey,
+  createTPSGcmIntegrationApi,
+} from './tps-gcm-integration-api';
+import type {
+  TPSGcmIntegrationApi,
+} from './tps-gcm-integration-contract';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -208,6 +216,7 @@ export interface GcmExternalActionRegistration {
   order?: number;
   icon?: string | ((context: GcmExternalActionContext) => string | Promise<string>);
   label: string | ((context: GcmExternalActionContext) => string | Promise<string>);
+  display?: 'icon-label' | 'icon-only';
   title?: string | ((context: GcmExternalActionContext) => string | Promise<string>);
   isVisible?: (context: GcmExternalActionContext) => boolean | Promise<boolean>;
   onClick: (context: GcmExternalActionContext) => void | Promise<void>;
@@ -289,7 +298,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private archiveSweepTimerId: number | null = null;
   private restoreMenuPatch: (() => void) | null = null;
   private restoreProcessFrontmatterPatch: (() => void) | null = null;
-  private nativeProcessFrontmatterDelegate: ((file: TFile, mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>, options?: unknown) => Promise<unknown>) | null = null;
+  private nativeProcessFrontmatterDelegate: ((file: TFile, mutator: (frontmatter: Record<string, unknown>) => void, options?: unknown) => Promise<unknown>) | null = null;
   private basesPreviewPropertiesObserver: MutationObserver | null = null;
   private basesPreviewPropertiesRefreshTimer: number | null = null;
   private basesPreviewPropertiesRetryTimers: number[] = [];
@@ -308,6 +317,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private openingBaseLinkHoverEditorPath: string | null = null;
   private healthUiClient?: TPSHealthUiClient;
   private healthUiApi?: Readonly<TPSHealthUiApiSnapshot>;
+  private gcmIntegrationHost?: TPSGcmIntegrationHost;
   private lifecycleEpoch = 0;
   taskCheckboxHandler: TaskCheckboxHandler;
   private fileExclusionService: AutoFrontmatterExclusionService;
@@ -368,14 +378,61 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (!id || !pluginId || typeof action?.onClick !== 'function') {
       throw new Error('GCM external action requires id, pluginId, and onClick.');
     }
-    const key = `${pluginId}:${id}`;
-    this.externalActionRegistrations.set(key, { ...action, id, pluginId });
+    const key = createGcmExternalActionRegistrationKey(pluginId, id);
+    const registration = { ...action, id, pluginId };
+    this.externalActionRegistrations.set(key, registration);
     this.overlayRenderingService?.scheduleMenus?.('external-action-registered', 0);
     return () => {
+      if (this.externalActionRegistrations.get(key) !== registration) return;
       if (this.externalActionRegistrations.delete(key)) {
         this.overlayRenderingService?.scheduleMenus?.('external-action-unregistered', 0);
       }
     };
+  }
+
+  private createGcmIntegrationApi(assertCurrent: () => void): TPSGcmIntegrationApi {
+    return createTPSGcmIntegrationApi({
+      registerExternalAction: (action) => this.registerExternalAction({
+        id: action.id,
+        pluginId: action.pluginId,
+        order: action.order,
+        icon: action.icon,
+        label: action.label,
+        display: action.display,
+        title: action.title,
+        isVisible: action.isVisible
+          ? async ({ file, placement }) => {
+            return action.isVisible?.({ filePath: file.path, placement }) ?? false;
+          }
+          : undefined,
+        onClick: async ({ file, placement }) => {
+          await action.onClick({ filePath: file.path, placement });
+        },
+      }),
+      resolveMarkdownFile: (path) => {
+        const file = this.app.vault.getAbstractFileByPath(path);
+        return file instanceof TFile && file.extension.toLowerCase() === 'md' ? file : undefined;
+      },
+      openFile: (file, reveal) => this.openFileInLeaf(
+        file,
+        false,
+        () => this.app.workspace.getLeaf(false),
+        { revealLeaf: reveal },
+      ),
+      isTimeTrackingEnabled: () => this.timeTrackingService.isEnabled(),
+      getTimerSessionsById: (sessionId) => this.timeTrackingService.getTimerSessionsById(sessionId),
+      startNoteTimer: (file, title, sessionId, startedAt, requestedPath) => this.timeTrackingService.startTimer({
+        file,
+        type: 'note',
+        title,
+        sessionId,
+        startedAt,
+        sourcePathSnapshot: requestedPath,
+      }),
+      stopActiveNoteTimerByIdForPath: (path, sessionId, endedAt) => (
+        this.timeTrackingService.stopActiveNoteTimerByIdForPath(path, sessionId, endedAt)
+      ),
+    }, assertCurrent);
   }
 
   getExternalActions(): GcmExternalActionRegistration[] {
@@ -410,6 +467,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   async onload(): Promise<void> {
     const lifecycleEpoch = ++this.lifecycleEpoch;
+    const previousGcmIntegrationHost = this.gcmIntegrationHost;
+    this.gcmIntegrationHost = undefined;
+    previousGcmIntegrationHost?.withdraw('reload');
+    this.externalActionRegistrations.clear();
     const previousHealthUiClient = this.healthUiClient;
     this.healthUiClient = undefined;
     this.healthUiApi = undefined;
@@ -653,6 +714,32 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.installBasesPreviewPropertiesBridge();
 
     registerGcmCommands(this);
+
+    if (!this.isCurrentLifecycle(lifecycleEpoch)) return;
+    const gcmIntegrationHost = new TPSGcmIntegrationHost(this.app, {
+      warn: (event, details) => logger.flowWarn('GcmIntegration', event, {
+        ...details,
+        ...(details.error ? { error: logger.errorSummary(details.error) } : {}),
+      }),
+      flow: (event, details) => logger.flow('GcmIntegration', event, details),
+    });
+    this.gcmIntegrationHost = gcmIntegrationHost;
+    try {
+      gcmIntegrationHost.publish(
+        (assertCurrent) => this.createGcmIntegrationApi(assertCurrent),
+        (eventRef) => this.registerEvent(eventRef),
+      );
+    } catch (error) {
+      gcmIntegrationHost.withdraw('reload');
+      if (this.gcmIntegrationHost === gcmIntegrationHost) this.gcmIntegrationHost = undefined;
+      throw error;
+    }
+    if (!this.isCurrentLifecycle(lifecycleEpoch)
+      || this.gcmIntegrationHost !== gcmIntegrationHost
+      || !gcmIntegrationHost.getDescriptor()) {
+      gcmIntegrationHost.withdraw('reload');
+      if (this.gcmIntegrationHost === gcmIntegrationHost) this.gcmIntegrationHost = undefined;
+    }
   }
 
   private registerInteractionHandlers(): void {
@@ -1710,6 +1797,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   onunload(): void {
     this.lifecycleEpoch += 1;
+    const gcmIntegrationHost = this.gcmIntegrationHost;
+    this.gcmIntegrationHost = undefined;
+    gcmIntegrationHost?.withdraw('unload');
+    this.externalActionRegistrations.clear();
     const healthUiClient = this.healthUiClient;
     this.healthUiClient = undefined;
     this.healthUiApi = undefined;
@@ -2406,7 +2497,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     const plugin = this;
     const gcmProcessFrontmatterPatch = async function (
       file: TFile,
-      mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>,
+      mutator: (frontmatter: Record<string, unknown>) => void,
     ) {
       return await plugin.frontmatterMutationService.process(file, mutator);
     };
@@ -2421,7 +2512,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   async processFrontmatterWithNativeDelegate(
     file: TFile,
-    mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>,
+    mutator: (frontmatter: Record<string, unknown>) => void,
     options?: unknown,
   ): Promise<unknown> {
     if (typeof this.nativeProcessFrontmatterDelegate !== 'function') {

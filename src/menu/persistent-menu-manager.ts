@@ -3806,7 +3806,7 @@ export class PersistentMenuManager {
       const context: GcmExternalActionContext = { file, placement };
       const button = document.createElement('button');
       button.type = 'button';
-      button.className = `${className} tps-gcm-parent-nav-button--external`;
+      button.className = `${className} tps-gcm-parent-nav-button--external${action.display === 'icon-only' ? ' tps-gcm-parent-nav-button--external-icon-only' : ''}`;
       button.dataset.tpsGcmExternalActionId = `${action.pluginId}:${action.id}`;
       button.dataset.tpsGcmExternalPluginId = action.pluginId;
       button.dataset.tpsGcmExternalActionKey = action.id;
@@ -3825,7 +3825,23 @@ export class PersistentMenuManager {
 
       addSafeClickListener(button, (evt) => {
         evt.preventDefault();
-        void action.onClick(context);
+        try {
+          void Promise.resolve(action.onClick(context)).catch((error) => {
+            logger.warn('[TPS GCM] External action rejected', {
+              actionId: action.id,
+              pluginId: action.pluginId,
+              file: context.file.path,
+              error: logger.errorSummary(error),
+            });
+          });
+        } catch (error) {
+          logger.warn('[TPS GCM] External action threw', {
+            actionId: action.id,
+            pluginId: action.pluginId,
+            file: context.file.path,
+            error: logger.errorSummary(error),
+          });
+        }
       });
 
       void this.refreshExternalActionButton(action, context, button, icon, label);

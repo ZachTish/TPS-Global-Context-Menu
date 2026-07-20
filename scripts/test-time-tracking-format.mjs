@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   normalizeTimeTrackingRecordList,
   resolveTimeTrackingStorageKind,
+  timeTrackingSessionMatchesTarget,
   timeTrackingSessionOverlapsRange,
 } from '../src/services/time-tracking-format.ts';
 
@@ -72,4 +73,18 @@ test('treats active sessions as running through the provided active end time for
     ),
     false,
   );
+});
+
+test('note-timer path matching excludes task timers in the same file', () => {
+  const note = {
+    ...baseRecord,
+    id: 'tt_note',
+    targetType: 'note',
+    sourcePath: 'Health/Workout.md',
+    targetPath: 'Health/Workout.md',
+  };
+  const task = { ...note, id: 'tt_task', targetType: 'task' };
+  assert.equal(timeTrackingSessionMatchesTarget(note, 'Health/Workout.md', 'note'), true);
+  assert.equal(timeTrackingSessionMatchesTarget(task, 'Health/Workout.md', 'note'), false);
+  assert.equal(timeTrackingSessionMatchesTarget(note, 'Health/Other.md', 'note'), false);
 });

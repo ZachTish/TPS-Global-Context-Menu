@@ -5,9 +5,12 @@ import { casefold, deleteValueCaseInsensitive, findKeyCaseInsensitive, setValueC
 import { getCompatibleMarkdownViewFromLeaf, getViewMode, pickBestMarkdownLeaf } from './leaf-resolver';
 import { normalizeTagList } from '../utils/tag-utils';
 import { normalizeCompletedDateValue } from '../utils/completed-date-utils';
+import { isFrontmatterDelimiterLine } from '../utils/frontmatter-delimiter';
 
 type FrontmatterRecord = Record<string, unknown>;
-type FrontmatterMutator = (frontmatter: FrontmatterRecord) => void | Promise<void>;
+type FrontmatterMutator = (frontmatter: FrontmatterRecord) => void;
+type GuardedFrontmatterMutator = (frontmatter: FrontmatterRecord) => boolean;
+type FrontmatterMutationAbortKind = 'guarded-abort' | 'no-change' | 'parse-failed' | 'write-refused';
 type ActivityChange = {
   key: string;
   from?: unknown;
@@ -15,6 +18,17 @@ type ActivityChange = {
   added?: unknown[];
   removed?: unknown[];
 };
+
+class FrontmatterMutationAbort extends Error {
+  constructor(
+    readonly kind: FrontmatterMutationAbortKind,
+    readonly reason = '',
+    readonly detail?: unknown,
+  ) {
+    super(reason || kind);
+    this.name = 'FrontmatterMutationAbort';
+  }
+}
 
 export class FrontmatterMutationService {
   private writeChains = new Map<string, Promise<void>>();
@@ -28,63 +42,109 @@ export class FrontmatterMutationService {
       return this.plugin.canvasPropertiesService.process(file, mutator);
     }
     if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'md') return false;
+    return this.processMarkdown(file, (frontmatter) => {
+      const result = mutator(frontmatter);
+      this.assertSynchronousMutatorResult(result, file);
+      return true;
+    });
+  }
 
+  async processGuarded(file: TFile, mutator: GuardedFrontmatterMutator): Promise<boolean> {
+    if (this.plugin.canvasPropertiesService?.isCanvasFile(file)) return false;
+    if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'md') return false;
+    return this.processMarkdown(file, (frontmatter) => {
+      const result = mutator(frontmatter);
+      this.assertSynchronousMutatorResult(result, file);
+      return result;
+    });
+  }
+
+  private async processMarkdown(file: TFile, mutator: GuardedFrontmatterMutator): Promise<boolean> {
     let changed = false;
     let nextTitle: string | null = null;
     const started = performance.now();
     await this.runSerialized(file, async () => {
-      const attempt = await this.readParsedWithRetries(file);
-      if (!attempt) return;
+      for (let attemptIndex = 0; attemptIndex <= FrontmatterMutationService.PARSE_RETRY_DELAYS_MS.length; attemptIndex += 1) {
+        let committedTitle: string | null = null;
+        const writeStarted = performance.now();
+        try {
+          await this.plugin.app.vault.process(file, (fullContent) => {
+            const normalized = this.normalizeContent(fullContent);
+            const parsed = this.parseFrontmatterDocument(normalized.content);
+            if (parsed.ok !== true) {
+              throw new FrontmatterMutationAbort('parse-failed', parsed.reason, parsed.error);
+            }
 
-      const { normalized, parsed } = attempt;
-      if (!parsed.ok) {
-        const { reason, error } = parsed as { ok: false; reason: string; error?: unknown };
-        this.warnMalformed(file, reason, error);
-        return;
-      }
+            const frontmatter = parsed.frontmatter;
+            const originalFrontmatter = { ...frontmatter };
+            const originalTitle = readFrontmatterString(originalFrontmatter, 'title').trim();
+            const before = stringifyYaml(this.sortFrontmatter(frontmatter)).trimEnd();
+            if (mutator(frontmatter) !== true) {
+              throw new FrontmatterMutationAbort('guarded-abort');
+            }
+            this.normalizeTagValues(frontmatter);
+            this.normalizeDateTimeValues(frontmatter);
+            this.removeEmptyValuesChangedByMutation(frontmatter, originalFrontmatter);
+            this.appendActivityEntryIfNeeded(frontmatter, originalFrontmatter);
+            const sorted = this.sortFrontmatter(frontmatter);
+            const after = stringifyYaml(sorted).trimEnd();
+            const nextContent = after
+              ? `${normalized.bom}---\n${after}\n---${parsed.body ? `\n${parsed.body}` : '\n'}`
+              : `${normalized.bom}${parsed.body}`;
 
-      const frontmatter = parsed.frontmatter;
-      const originalFrontmatter = { ...frontmatter };
-      const originalTitle = readFrontmatterString(originalFrontmatter, 'title').trim();
-      const before = stringifyYaml(this.sortFrontmatter(frontmatter)).trimEnd();
-      await mutator(frontmatter);
-      this.normalizeTagValues(frontmatter);
-      this.normalizeDateTimeValues(frontmatter);
-      this.removeEmptyValuesChangedByMutation(frontmatter, originalFrontmatter);
-      this.appendActivityEntryIfNeeded(frontmatter, originalFrontmatter);
-      const mutatedTitle = readFrontmatterString(frontmatter, 'title').trim();
-      if (mutatedTitle && mutatedTitle !== originalTitle) {
-        nextTitle = mutatedTitle;
-      }
-      const sorted = this.sortFrontmatter(frontmatter);
-      const after = stringifyYaml(sorted).trimEnd();
+            if (nextContent === normalized.fullContent && before === after) {
+              throw new FrontmatterMutationAbort('no-change');
+            }
+            const validation = this.validateNextContent(nextContent);
+            if (validation.ok !== true) {
+              throw new FrontmatterMutationAbort('write-refused', validation.reason, validation.error);
+            }
+            if (!this.hasSuspiciousBrokenSubitemLine(normalized.fullContent)
+              && this.hasSuspiciousBrokenSubitemLine(nextContent)) {
+              throw new FrontmatterMutationAbort('write-refused', 'suspicious-broken-subitem-line');
+            }
 
-      const nextContent = after
-        ? `${normalized.bom}---\n${after}\n---${parsed.body ? `\n${parsed.body}` : '\n'}`
-        : `${normalized.bom}${parsed.body}`;
-
-      if (nextContent !== normalized.fullContent || before !== after) {
-        const validation = this.validateNextContent(nextContent);
-        if (validation.ok !== true) {
-          this.warnMalformed(file, validation.reason, validation.error);
-          logger.warn('[TPS GCM] Refusing frontmatter write that failed post-write validation', {
-            file: file.path,
-            reason: validation.reason,
-            stack: new Error().stack,
+            const mutatedTitle = readFrontmatterString(frontmatter, 'title').trim();
+            if (mutatedTitle && mutatedTitle !== originalTitle) committedTitle = mutatedTitle;
+            return nextContent;
           });
+          changed = true;
+          nextTitle = committedTitle;
+          logger.perf('frontmatterMutation.writeContent', {
+            file: file.path,
+            mode: 'vault.process',
+            durationMs: Math.round(performance.now() - writeStarted),
+          });
+          try {
+            this.plugin.eventService.emitExplicitAction([file.path], { source: 'frontmatter' });
+          } catch (error) {
+            logger.warn('[TPS GCM] Frontmatter write committed but its follow-up event failed', {
+              file: file.path,
+              error: logger.errorSummary(error),
+            });
+          }
+          return;
+        } catch (error) {
+          if (!(error instanceof FrontmatterMutationAbort)) throw error;
+          if (error.kind === 'parse-failed') {
+            const delay = FrontmatterMutationService.PARSE_RETRY_DELAYS_MS[attemptIndex];
+            if (delay != null) {
+              await this.sleep(delay);
+              continue;
+            }
+            this.warnMalformed(file, error.reason, error.detail);
+            return;
+          }
+          if (error.kind === 'write-refused') {
+            this.warnMalformed(file, error.reason, error.detail);
+            logger.warn('[TPS GCM] Refusing frontmatter write that failed atomic validation', {
+              file: file.path,
+              reason: error.reason,
+              stack: new Error().stack,
+            });
+          }
           return;
         }
-        if (!this.hasSuspiciousBrokenSubitemLine(normalized.fullContent) && this.hasSuspiciousBrokenSubitemLine(nextContent)) {
-          this.warnMalformed(file, 'suspicious-broken-subitem-line');
-          logger.warn('[TPS GCM] Refusing frontmatter write that would introduce a broken subitem line', {
-            file: file.path,
-            stack: new Error().stack,
-          });
-          return;
-        }
-        await this.writeContent(file, nextContent);
-        this.plugin.eventService.emitExplicitAction([file.path], { source: 'frontmatter' });
-        changed = true;
       }
     });
 
@@ -110,7 +170,7 @@ export class FrontmatterMutationService {
     const { markdownFiles, canvasFiles } = this.partitionByStorageType(files);
     await this.warnIfSchedulingMultiDateTaskContainer(markdownFiles, updates);
     const updatedCanvases = await this.plugin.canvasPropertiesService?.updateValues(canvasFiles, updates) ?? [];
-    const updatedMarkdown = await this.applyToFiles(markdownFiles, async (frontmatter) => {
+    const updatedMarkdown = await this.applyToFiles(markdownFiles, (frontmatter) => {
       for (const [key, value] of Object.entries(updates)) {
         if (value === undefined || value === null) {
           deleteValueCaseInsensitive(frontmatter, key);
@@ -125,7 +185,7 @@ export class FrontmatterMutationService {
   async setListValues(files: TFile[], key: string, values: unknown[]): Promise<TFile[]> {
     const { markdownFiles, canvasFiles } = this.partitionByStorageType(files);
     const updatedCanvases = await this.plugin.canvasPropertiesService?.setListValues(canvasFiles, key, values) ?? [];
-    const updatedMarkdown = await this.applyToFiles(markdownFiles, async (frontmatter) => {
+    const updatedMarkdown = await this.applyToFiles(markdownFiles, (frontmatter) => {
       const normalized = this.normalizeList(values);
       if (normalized.length === 0) {
         deleteValueCaseInsensitive(frontmatter, key);
@@ -141,7 +201,7 @@ export class FrontmatterMutationService {
     if (additions.length === 0) return [];
     const { markdownFiles, canvasFiles } = this.partitionByStorageType(files);
     const updatedCanvases = await this.plugin.canvasPropertiesService?.addValuesToList(canvasFiles, key, additions) ?? [];
-    const updatedMarkdown = await this.applyToFiles(markdownFiles, async (frontmatter) => {
+    const updatedMarkdown = await this.applyToFiles(markdownFiles, (frontmatter) => {
       const existingKey = findKeyCaseInsensitive(frontmatter, key) || key;
       const current = this.normalizeList(frontmatter[existingKey]);
       const merged = [...current];
@@ -162,7 +222,7 @@ export class FrontmatterMutationService {
     if (removals.size === 0) return [];
     const { markdownFiles, canvasFiles } = this.partitionByStorageType(files);
     const updatedCanvases = await this.plugin.canvasPropertiesService?.removeValuesFromList(canvasFiles, key, values) ?? [];
-    const updatedMarkdown = await this.applyToFiles(markdownFiles, async (frontmatter) => {
+    const updatedMarkdown = await this.applyToFiles(markdownFiles, (frontmatter) => {
       const existingKey = findKeyCaseInsensitive(frontmatter, key);
       if (!existingKey) return;
       const current = this.normalizeList(frontmatter[existingKey]);
@@ -183,7 +243,7 @@ export class FrontmatterMutationService {
     const updatedCanvases = await this.plugin.canvasPropertiesService?.updateValues(canvasFiles, {
       [key]: normalized || null,
     }) ?? [];
-    const updatedMarkdown = await this.applyToFiles(markdownFiles, async (frontmatter) => {
+    const updatedMarkdown = await this.applyToFiles(markdownFiles, (frontmatter) => {
       if (!normalized) {
         deleteValueCaseInsensitive(frontmatter, key);
       } else {
@@ -198,7 +258,7 @@ export class FrontmatterMutationService {
     if (normalizedKeys.length === 0) return [];
     const { markdownFiles, canvasFiles } = this.partitionByStorageType(files);
     const updatedCanvases = await this.plugin.canvasPropertiesService?.deleteKeys(canvasFiles, normalizedKeys) ?? [];
-    const updatedMarkdown = await this.applyToFiles(markdownFiles, async (frontmatter) => {
+    const updatedMarkdown = await this.applyToFiles(markdownFiles, (frontmatter) => {
       for (const key of normalizedKeys) {
         deleteValueCaseInsensitive(frontmatter, key);
       }
@@ -299,76 +359,25 @@ export class FrontmatterMutationService {
     }
   }
 
-  private async readNormalized(file: TFile): Promise<{ bom: string; content: string; fullContent: string } | null> {
-    try {
-      const fullContent = await this.plugin.app.vault.read(file);
-      const normalized = fullContent.replace(/\r\n/g, '\n');
-      if (!normalized) {
-        return { bom: '', content: '', fullContent: normalized };
-      }
-      if (normalized.startsWith('\uFEFF')) {
-        return { bom: '\uFEFF', content: normalized.slice(1), fullContent: normalized };
-      }
-      return { bom: '', content: normalized, fullContent: normalized };
-    } catch (error) {
-      logger.warn('[TPS GCM] Failed reading file for frontmatter mutation', { file: file.path, error });
-      return null;
+  private normalizeContent(fullContent: string): { bom: string; content: string; fullContent: string } {
+    const normalized = String(fullContent || '').replace(/\r\n?/g, '\n');
+    if (normalized.startsWith('\uFEFF')) {
+      return { bom: '\uFEFF', content: normalized.slice(1), fullContent: normalized };
     }
+    return { bom: '', content: normalized, fullContent: normalized };
   }
 
-  private async writeContent(file: TFile, nextContent: string): Promise<void> {
-    const started = performance.now();
-    await this.plugin.app.vault.modify(file, nextContent);
-    logger.perf('frontmatterMutation.writeContent', {
-      file: file.path,
-      mode: 'vault.modify',
-      durationMs: Math.round(performance.now() - started),
+  private assertSynchronousMutatorResult(result: unknown, file: TFile): void {
+    const candidate = result as { then?: unknown } | null | undefined;
+    if (!candidate || (typeof candidate !== 'object' && typeof candidate !== 'function')
+      || typeof candidate.then !== 'function') return;
+    void Promise.resolve(result as PromiseLike<unknown>).catch((error) => {
+      logger.warn('[TPS GCM] Rejected asynchronous frontmatter mutator settled after atomic refusal', {
+        file: file.path,
+        error: logger.errorSummary(error),
+      });
     });
-  }
-
-  private async readParsedWithRetries(file: TFile): Promise<{
-    normalized: { bom: string; content: string; fullContent: string };
-    parsed:
-      | { ok: true; frontmatter: FrontmatterRecord; body: string }
-      | { ok: false; reason: string; error?: unknown };
-  } | null> {
-    let last: {
-      normalized: { bom: string; content: string; fullContent: string };
-      parsed:
-        | { ok: true; frontmatter: FrontmatterRecord; body: string }
-        | { ok: false; reason: string; error?: unknown };
-    } | null = null;
-
-    for (let attemptIndex = 0; attemptIndex <= FrontmatterMutationService.PARSE_RETRY_DELAYS_MS.length; attemptIndex++) {
-      const normalized = await this.readNormalized(file);
-      if (!normalized) return null;
-
-      let parsed:
-        | { ok: true; frontmatter: FrontmatterRecord; body: string }
-        | { ok: false; reason: string; error?: unknown };
-      try {
-        parsed = this.parseFrontmatterDocument(normalized.content);
-      } catch (error) {
-        parsed = { ok: false, reason: 'yaml-parse-failed', error };
-      }
-
-      if (parsed.ok) {
-        if (attemptIndex > 0) {
-          logger.debug('[TPS GCM] Frontmatter parse recovered after retry', {
-            file: file.path,
-            attempts: attemptIndex + 1,
-          });
-        }
-        return { normalized, parsed };
-      }
-
-      last = { normalized, parsed };
-      const delay = FrontmatterMutationService.PARSE_RETRY_DELAYS_MS[attemptIndex];
-      if (delay == null) break;
-      await this.sleep(delay);
-    }
-
-    return last;
+    throw new TypeError('Frontmatter mutators must be synchronous for atomic Vault.process writes.');
   }
 
   private parseFrontmatterDocument(content: string):
@@ -396,13 +405,13 @@ export class FrontmatterMutationService {
   private splitFrontmatterDocument(content: string):
     | { ok: true; frontmatterBlock: string | null; body: string }
     | { ok: false; reason: string } {
-    const source = String(content || '').replace(/\r\n/g, '\n');
+    const source = String(content || '').replace(/\r\n?/g, '\n');
     const leadingWhitespace = source.match(/^[ \t\r\n]*/)?.[0] ?? '';
     const bodyStart = leadingWhitespace.length;
-    const hasTopFrontmatter = source.startsWith('---\n');
+    const hasTopFrontmatter = this.delimiterLineEndAt(source, 0) !== null;
     const hasWhitespacePaddedFrontmatter = !hasTopFrontmatter
       && bodyStart > 0
-      && source.slice(bodyStart).startsWith('---\n')
+      && this.delimiterLineEndAt(source, bodyStart) !== null
       && !/\S/.test(leadingWhitespace);
 
     if (!hasTopFrontmatter && !hasWhitespacePaddedFrontmatter) {
@@ -424,7 +433,7 @@ export class FrontmatterMutationService {
 
     const body = source.slice(first.end);
     const bodyWithoutLeadingWhitespace = body.replace(/^[ \t\r\n]*/, '');
-    if (bodyWithoutLeadingWhitespace.startsWith('---\n')) {
+    if (this.delimiterLineEndAt(bodyWithoutLeadingWhitespace, 0) !== null) {
       const secondStart = source.length - bodyWithoutLeadingWhitespace.length;
       const second = this.readFrontmatterBlockAt(source, secondStart);
       if (second && this.looksLikeYamlFrontmatter(second.block)) {
@@ -436,20 +445,31 @@ export class FrontmatterMutationService {
   }
 
   private readFrontmatterBlockAt(content: string, start: number): { block: string; end: number } | null {
-    if (!content.startsWith('---\n', start)) return null;
-    const close = this.findLineDelimiter(content, start + 4);
+    const openingEnd = this.delimiterLineEndAt(content, start);
+    if (openingEnd === null) return null;
+    const close = this.findLineDelimiter(content, openingEnd);
     if (close < 0) return null;
     const lineEnd = content.indexOf('\n', close + 1);
     const end = lineEnd < 0 ? content.length : lineEnd + 1;
     return {
-      block: content.slice(start + 4, close),
+      block: content.slice(openingEnd, close),
       end,
     };
   }
 
+  private delimiterLineEndAt(content: string, start: number): number | null {
+    if (start < 0 || start > content.length) return null;
+    const lineEnd = content.indexOf('\n', start);
+    const end = lineEnd < 0 ? content.length : lineEnd;
+    if (!isFrontmatterDelimiterLine(content.slice(start, end))) return null;
+    return lineEnd < 0 ? content.length : lineEnd + 1;
+  }
+
   private findLineDelimiter(content: string, fromIndex: number): number {
     const pattern = /(^|\n)---[ \t]*(?=\n|$)/g;
-    pattern.lastIndex = Math.max(0, fromIndex);
+    // A closing delimiter may begin exactly at fromIndex, in which case the
+    // regex also needs to see the newline immediately before that position.
+    pattern.lastIndex = Math.max(0, fromIndex - 1);
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(content)) !== null) {
       const delimiterStart = match.index + (match[1] ? 1 : 0);
@@ -764,7 +784,7 @@ export class FrontmatterMutationService {
   }
 
   private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => window.setTimeout(resolve, ms));
+    return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
   }
 
   private hasSuspiciousBrokenSubitemLine(text: string): boolean {
