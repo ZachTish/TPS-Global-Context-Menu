@@ -1785,7 +1785,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     new Setting(taskAutomation).setName('Warn before completing with open child notes').setDesc('When completing a note, warn if linked child notes still have an open status.').addToggle(t => t.setValue(this.plugin.settings.checkParentLinkStatuses).onChange(async v => { this.plugin.settings.checkParentLinkStatuses = v; await this.plugin.saveSettings(); }));
     new Setting(taskAutomation)
       .setName('Completion prompt status options')
-      .setDesc('When the last open checkbox is resolved, offer these note statuses, comma-separated.')
+      .setDesc('When the last open checkbox is resolved on a note that already has a status, offer these note statuses, comma-separated.')
       .addText((t) =>
         t.setValue((this.plugin.settings.checklistFinalPromptStatuses || ['complete', 'wont-do']).join(', '))
           .onChange(async (v) => {

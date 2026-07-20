@@ -375,7 +375,7 @@ export class TaskCheckboxHandler {
         if (this.hasOpenChecklistItems(updatedLines)) return;
         const cache = this.app.metadataCache.getFileCache(file);
         const status = String(cache?.frontmatter?.status ?? '').trim().toLowerCase();
-        if (status === 'complete' || status === 'wont-do') return;
+        if (!status || status === 'complete' || status === 'wont-do') return;
         const statusChoices = this.getChecklistFinalPromptStatuses();
         if (statusChoices.length === 0) return;
         const chosenStatus = await this.promptForFinalChecklistStatus(statusChoices);

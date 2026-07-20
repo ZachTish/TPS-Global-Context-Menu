@@ -50,6 +50,21 @@ test('rendered checkbox and drag fallbacks require exactly one text match', () =
   }
 });
 
+test('last-checklist-item status prompt requires an existing nonblank note status', () => {
+  const promptFlow = sourceBetween(
+    checkboxSource,
+    'private async maybePromptToCompleteNote(',
+    'private hasOpenChecklistItems(',
+  );
+  const statusReadIndex = promptFlow.indexOf("const status = String(cache?.frontmatter?.status ?? '').trim().toLowerCase();");
+  const statusGuardIndex = promptFlow.indexOf("if (!status || status === 'complete' || status === 'wont-do') return;");
+  const promptIndex = promptFlow.indexOf('promptForFinalChecklistStatus(statusChoices)');
+
+  assert.ok(statusReadIndex >= 0, 'the prompt must read only the note-level frontmatter status');
+  assert.ok(statusGuardIndex > statusReadIndex, 'missing, null, empty, and whitespace-only status values must stop the prompt');
+  assert.ok(promptIndex > statusGuardIndex, 'the status-presence guard must run before opening the modal');
+});
+
 test('TPS Table keeps Health precedence and lets task rows reach the shared task menu', () => {
   const routing = sourceBetween(
     mainSource,
