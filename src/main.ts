@@ -83,6 +83,8 @@ import { resolveCustomProperties } from './resolve-profiles';
 import { MIGRATED_TASK_MAPPING } from './constants/task-migration';
 import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { installVisibleViewportContract } from './utils/mobile-overlay';
+import { TPSHealthUiClient } from './tps-health-ui-client';
+import type { TPSHealthUiApiSnapshot } from './tps-health-ui-contract';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -120,10 +122,6 @@ const LEGACY_HEALTH_CUSTOM_PROPERTY_IDS = new Set([
   'workout-drop-set',
   'workout-superset',
 ]);
-
-function normalizeTpsTableKey(key: string): string {
-  return String(key || '').replace(/^note\./, '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
-}
 
 function getCommandOptionValues(plugin: TPSGlobalContextMenuPlugin): Record<string, string> {
   const commands = (plugin.app as any)?.commands?.commands;
@@ -308,6 +306,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private baseLinkHoverEditorLeaf: WorkspaceLeaf | null = null;
   private baseLinkPreviewSourceLeaf: WorkspaceLeaf | null = null;
   private openingBaseLinkHoverEditorPath: string | null = null;
+  private healthUiClient?: TPSHealthUiClient;
+  private healthUiApi?: Readonly<TPSHealthUiApiSnapshot>;
+  private lifecycleEpoch = 0;
   taskCheckboxHandler: TaskCheckboxHandler;
   private fileExclusionService: AutoFrontmatterExclusionService;
 
@@ -408,10 +409,46 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   async onload(): Promise<void> {
-    this.ignoreNextContext = false;
+    const lifecycleEpoch = ++this.lifecycleEpoch;
+    const previousHealthUiClient = this.healthUiClient;
+    this.healthUiClient = undefined;
+    this.healthUiApi = undefined;
+    previousHealthUiClient?.dispose();
 
-    await this.loadSettings();
+    const settings = await this.loadSettingsForLifecycle(lifecycleEpoch);
+    if (!settings || !this.isCurrentLifecycle(lifecycleEpoch)) return;
+    this.settings = settings;
+    this.ignoreNextContext = false;
     logger.setLoggingEnabled(this.settings.enableLogging);
+
+    const healthUiClient = new TPSHealthUiClient(this.app, this.manifest.id);
+    if (!this.isCurrentLifecycle(lifecycleEpoch)) return;
+    this.healthUiClient = healthUiClient;
+    try {
+      healthUiClient.start(
+        (eventRef) => this.registerEvent(eventRef),
+        (api) => {
+          if (!this.isCurrentLifecycle(lifecycleEpoch) || this.healthUiClient !== healthUiClient) return;
+          this.healthUiApi = api;
+          logger.flow('HealthUi', 'availability:changed', {
+            available: Boolean(api),
+            apiVersion: api?.apiVersion ?? null,
+          });
+          this.refreshHealthUiConsumers();
+        },
+      );
+    } catch (error) {
+      healthUiClient.dispose();
+      if (this.healthUiClient === healthUiClient) this.healthUiClient = undefined;
+      this.healthUiApi = undefined;
+      throw error;
+    }
+    if (!this.isCurrentLifecycle(lifecycleEpoch) || this.healthUiClient !== healthUiClient) {
+      healthUiClient.dispose();
+      if (this.healthUiClient === healthUiClient) this.healthUiClient = undefined;
+      this.healthUiApi = undefined;
+      return;
+    }
 
     installDateContainsPolyfill();
     this.register(installVisibleViewportContract());
@@ -802,7 +839,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     const row = target?.closest<HTMLElement>('.tps-log-base-row[data-path][data-line]');
     if (!row) return false;
 
-    if (this.handleTpsHealthFoodTableRowContextMenu(evt, row)) return true;
     if (
       row.dataset.tpsGcmContext === 'table-task'
       || (Boolean(row.dataset.taskPath) && Boolean(row.dataset.taskLine))
@@ -819,26 +855,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     const view = (row as any).__tpsTableView;
     if (!view || typeof view.handleExternalRowContextMenu !== 'function') return false;
     return view.handleExternalRowContextMenu(evt, row) === true;
-  }
-
-  private handleTpsHealthFoodTableRowContextMenu(evt: MouseEvent, row: HTMLElement): boolean {
-    const api = (this.app as any)?.tpsHealth;
-    if (typeof api?.openFoodLogEntryMenuFromLine !== 'function') return false;
-    if (!this.isTpsTableFoodRow(row)) return false;
-    const path = row.dataset.path || '';
-    const oneBasedLine = Number(row.dataset.line || '0');
-    if (!path || !Number.isInteger(oneBasedLine) || oneBasedLine < 1) return false;
-    evt.preventDefault();
-    evt.stopPropagation();
-    evt.stopImmediatePropagation();
-    void api.openFoodLogEntryMenuFromLine(evt, path, oneBasedLine - 1, '');
-    logger.flow('TpsTableView', 'context-menu:health-food-handoff', { path, lineNumber: oneBasedLine });
-    return true;
-  }
-
-  private isTpsTableFoodRow(row: HTMLElement): boolean {
-    return Array.from(row.querySelectorAll<HTMLElement>('.tps-log-base-cell[data-key]'))
-      .some((cell) => normalizeTpsTableKey(cell.dataset.key || '') === 'food' && Boolean(cell.textContent?.trim()));
   }
 
   private registerManualContextMenuHandler(): void {
@@ -1693,6 +1709,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.lifecycleEpoch += 1;
+    const healthUiClient = this.healthUiClient;
+    this.healthUiClient = undefined;
+    this.healthUiApi = undefined;
+    healthUiClient?.dispose();
     if (this.basesPreviewPropertiesRefreshTimer !== null) {
       window.clearTimeout(this.basesPreviewPropertiesRefreshTimer);
       this.basesPreviewPropertiesRefreshTimer = null;
@@ -1729,11 +1750,31 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     document.body?.classList?.remove('tps-context-hidden-for-keyboard');
   }
 
-  async loadSettings(): Promise<void> {
+  getHealthUiApi(): Readonly<TPSHealthUiApiSnapshot> | undefined {
+    return this.healthUiApi;
+  }
+
+  private isCurrentLifecycle(lifecycleEpoch: number): boolean {
+    return lifecycleEpoch === this.lifecycleEpoch;
+  }
+
+  private refreshHealthUiConsumers(): void {
+    const leaves = this.app.workspace.getLeavesOfType?.(TPS_HOME_VIEW_TYPE) || [];
+    for (const leaf of leaves) {
+      const view = leaf.view;
+      if (view instanceof TpsHomeView) view.refreshHealthActionAvailability();
+    }
+    this.overlayRenderingService?.scheduleMenus?.('health-ui-availability', 0);
+  }
+
+  private async loadSettingsForLifecycle(
+    lifecycleEpoch: number,
+  ): Promise<TPSGlobalContextMenuSettings | null> {
     const loaded = (await this.loadData()) as Partial<TPSGlobalContextMenuSettings> & {
       enableShiftClickCancel?: boolean;
       archiveFolder?: string;
     } | null;
+    if (!this.isCurrentLifecycle(lifecycleEpoch)) return null;
     const hadRetiredHomeCaptureHeadingSettings = Boolean(
       loaded && (
         Object.prototype.hasOwnProperty.call(loaded, 'homeCaptureAddHeading') ||
@@ -1744,97 +1785,98 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     let notebookNavigatorRulePayload = this.resolveNotebookNavigatorRuleSettingsPayload(loaded);
     if (!notebookNavigatorRulePayload) {
       notebookNavigatorRulePayload = this.resolveNotebookNavigatorRuleSettingsPayload(
-        await this.loadLegacyNotebookNavigatorCompanionSettings(),
+        await this.loadLegacyNotebookNavigatorCompanionSettings(lifecycleEpoch),
       );
+      if (!this.isCurrentLifecycle(lifecycleEpoch)) return null;
     }
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
-    this.stripLegacySettingsFields(this.settings as unknown as Record<string, unknown>);
-    const normalizedProperties = this.normalizeCustomProperties(this.settings.properties);
-    this.settings.properties = this.removeRetiredBundledCustomProperties(normalizedProperties);
-    const removedRetiredPropertyCount = normalizedProperties.length - this.settings.properties.length;
-    this.settings.enableVirtualBaseEmbeds = this.settings.enableVirtualBaseEmbeds !== false;
-    this.settings.virtualBaseEmbedProperties = this.normalizeVirtualBaseEmbedProperties(this.settings.virtualBaseEmbedProperties);
+    const settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
+    this.stripLegacySettingsFields(settings as unknown as Record<string, unknown>);
+    const normalizedProperties = this.normalizeCustomProperties(settings.properties);
+    settings.properties = this.removeRetiredBundledCustomProperties(normalizedProperties);
+    const removedRetiredPropertyCount = normalizedProperties.length - settings.properties.length;
+    settings.enableVirtualBaseEmbeds = settings.enableVirtualBaseEmbeds !== false;
+    settings.virtualBaseEmbedProperties = this.normalizeVirtualBaseEmbedProperties(settings.virtualBaseEmbedProperties);
     if (
       typeof loaded?.applyNotebookNavigatorRulesOnSubitemCreate !== 'boolean' &&
       typeof (loaded as Record<string, unknown> | null | undefined)?.applyCompanionRulesOnSubitemCreate === 'boolean'
     ) {
-      this.settings.applyNotebookNavigatorRulesOnSubitemCreate = Boolean(
+      settings.applyNotebookNavigatorRulesOnSubitemCreate = Boolean(
         (loaded as Record<string, unknown>).applyCompanionRulesOnSubitemCreate,
       );
     }
-    this.settings.notebookNavigatorRules = sanitizeNotebookNavigatorRuleSettings(
+    settings.notebookNavigatorRules = sanitizeNotebookNavigatorRuleSettings(
       notebookNavigatorRulePayload ?? DEFAULT_SETTINGS.notebookNavigatorRules,
     );
-    if (!this.settings.workspaceRibbonIcons || typeof this.settings.workspaceRibbonIcons !== 'object') {
-      this.settings.workspaceRibbonIcons = {};
+    if (!settings.workspaceRibbonIcons || typeof settings.workspaceRibbonIcons !== 'object') {
+      settings.workspaceRibbonIcons = {};
     }
     const legacyArchiveFolder = typeof loaded?.archiveFolder === 'string' ? loaded.archiveFolder.trim() : '';
-    if (!this.settings.archiveFolderPath && legacyArchiveFolder) {
-      this.settings.archiveFolderPath = legacyArchiveFolder;
+    if (!settings.archiveFolderPath && legacyArchiveFolder) {
+      settings.archiveFolderPath = legacyArchiveFolder;
     }
     if (
-      this.settings.checklistPromotionBehavior !== 'remove' &&
-      this.settings.checklistPromotionBehavior !== 'complete-and-link' &&
-      this.settings.checklistPromotionBehavior !== 'link-only'
+      settings.checklistPromotionBehavior !== 'remove' &&
+      settings.checklistPromotionBehavior !== 'complete-and-link' &&
+      settings.checklistPromotionBehavior !== 'link-only'
     ) {
-      this.settings.checklistPromotionBehavior = DEFAULT_SETTINGS.checklistPromotionBehavior;
+      settings.checklistPromotionBehavior = DEFAULT_SETTINGS.checklistPromotionBehavior;
     }
-    if (this.settings.topParentNavPlacement !== 'top' && this.settings.topParentNavPlacement !== 'bottom') {
-      this.settings.topParentNavPlacement = DEFAULT_SETTINGS.topParentNavPlacement;
+    if (settings.topParentNavPlacement !== 'top' && settings.topParentNavPlacement !== 'bottom') {
+      settings.topParentNavPlacement = DEFAULT_SETTINGS.topParentNavPlacement;
     }
-    this.settings.parentLinkFormat = normalizeParentLinkFormat(this.settings.parentLinkFormat);
-    this.settings.enableBasesForcedLinkPreview = this.settings.enableBasesForcedLinkPreview === true;
-    this.settings.collapseHeadingsOnOpen = this.settings.collapseHeadingsOnOpen === true;
-    this.settings.homeComponents = this.normalizeHomeComponents(this.settings.homeComponents);
-    this.settings.homeComponentLayouts = this.normalizeHomeComponentLayouts(this.settings.homeComponentLayouts);
-    this.settings.homeComponentActions = normalizeHomeComponentActions(this.settings.homeComponentActions);
-    this.settings.homeCalendarBasePath =
-      typeof this.settings.homeCalendarBasePath === 'string' && this.settings.homeCalendarBasePath.trim()
-        ? normalizePath(this.settings.homeCalendarBasePath.trim())
+    settings.parentLinkFormat = normalizeParentLinkFormat(settings.parentLinkFormat);
+    settings.enableBasesForcedLinkPreview = settings.enableBasesForcedLinkPreview === true;
+    settings.collapseHeadingsOnOpen = settings.collapseHeadingsOnOpen === true;
+    settings.homeComponents = this.normalizeHomeComponents(settings.homeComponents);
+    settings.homeComponentLayouts = this.normalizeHomeComponentLayouts(settings.homeComponentLayouts);
+    settings.homeComponentActions = normalizeHomeComponentActions(settings.homeComponentActions);
+    settings.homeCalendarBasePath =
+      typeof settings.homeCalendarBasePath === 'string' && settings.homeCalendarBasePath.trim()
+        ? normalizePath(settings.homeCalendarBasePath.trim())
         : DEFAULT_SETTINGS.homeCalendarBasePath;
-    this.settings.homeFoodBasePath =
-      typeof this.settings.homeFoodBasePath === 'string' && this.settings.homeFoodBasePath.trim()
-        ? normalizePath(this.settings.homeFoodBasePath.trim())
+    settings.homeFoodBasePath =
+      typeof settings.homeFoodBasePath === 'string' && settings.homeFoodBasePath.trim()
+        ? normalizePath(settings.homeFoodBasePath.trim())
         : DEFAULT_SETTINGS.homeFoodBasePath;
-    const configuredActivityBasePath = typeof this.settings.homeWorkoutBasePath === 'string'
-      ? normalizePath(this.settings.homeWorkoutBasePath.trim())
+    const configuredActivityBasePath = typeof settings.homeWorkoutBasePath === 'string'
+      ? normalizePath(settings.homeWorkoutBasePath.trim())
       : '';
-    this.settings.homeWorkoutBasePath = !configuredActivityBasePath || configuredActivityBasePath.toLowerCase() === 'workout log.base'
+    settings.homeWorkoutBasePath = !configuredActivityBasePath || configuredActivityBasePath.toLowerCase() === 'workout log.base'
       ? DEFAULT_SETTINGS.homeWorkoutBasePath
       : configuredActivityBasePath;
-    this.settings.homeOpenTasksBasePath =
-      typeof this.settings.homeOpenTasksBasePath === 'string' && this.settings.homeOpenTasksBasePath.trim()
-        ? normalizePath(this.settings.homeOpenTasksBasePath.trim())
+    settings.homeOpenTasksBasePath =
+      typeof settings.homeOpenTasksBasePath === 'string' && settings.homeOpenTasksBasePath.trim()
+        ? normalizePath(settings.homeOpenTasksBasePath.trim())
         : DEFAULT_SETTINGS.homeOpenTasksBasePath;
-    this.settings.homeCaptureInsertPosition =
-      this.settings.homeCaptureInsertPosition === 'top' ? 'top' : 'bottom';
-    this.settings.hideCompletedCheckboxes = this.settings.hideCompletedCheckboxes === true;
-    this.settings.hideAllTaskLinesInReadingMode = this.settings.hideAllTaskLinesInReadingMode === true;
-    this.settings.taskHidingExclusionPatterns = String(this.settings.taskHidingExclusionPatterns ?? '').trim();
-    this.settings.persistTaskVisibilityStateToFrontmatter = this.settings.persistTaskVisibilityStateToFrontmatter === true;
-    this.settings.taskVisibilityStateFrontmatterKey = String(this.settings.taskVisibilityStateFrontmatterKey || DEFAULT_SETTINGS.taskVisibilityStateFrontmatterKey).trim() || DEFAULT_SETTINGS.taskVisibilityStateFrontmatterKey;
-    this.settings.defaultStackedPropertiesClosed = this.settings.defaultStackedPropertiesClosed === true;
-    this.settings.timeTrackingPropertyKey = String(this.settings.timeTrackingPropertyKey || 'timeTracking').trim() || 'timeTracking';
-    if (this.settings.timeTrackingPropertyKey.toLowerCase() === 'scheduled') {
-      this.settings.timeTrackingPropertyKey = DEFAULT_SETTINGS.timeTrackingPropertyKey;
+    settings.homeCaptureInsertPosition =
+      settings.homeCaptureInsertPosition === 'top' ? 'top' : 'bottom';
+    settings.hideCompletedCheckboxes = settings.hideCompletedCheckboxes === true;
+    settings.hideAllTaskLinesInReadingMode = settings.hideAllTaskLinesInReadingMode === true;
+    settings.taskHidingExclusionPatterns = String(settings.taskHidingExclusionPatterns ?? '').trim();
+    settings.persistTaskVisibilityStateToFrontmatter = settings.persistTaskVisibilityStateToFrontmatter === true;
+    settings.taskVisibilityStateFrontmatterKey = String(settings.taskVisibilityStateFrontmatterKey || DEFAULT_SETTINGS.taskVisibilityStateFrontmatterKey).trim() || DEFAULT_SETTINGS.taskVisibilityStateFrontmatterKey;
+    settings.defaultStackedPropertiesClosed = settings.defaultStackedPropertiesClosed === true;
+    settings.timeTrackingPropertyKey = String(settings.timeTrackingPropertyKey || 'timeTracking').trim() || 'timeTracking';
+    if (settings.timeTrackingPropertyKey.toLowerCase() === 'scheduled') {
+      settings.timeTrackingPropertyKey = DEFAULT_SETTINGS.timeTrackingPropertyKey;
     }
     if (
-      this.settings.timeTrackingStorageMode !== 'daily-note' &&
-      this.settings.timeTrackingStorageMode !== 'source-note' &&
-      this.settings.timeTrackingStorageMode !== 'dedicated-note'
+      settings.timeTrackingStorageMode !== 'daily-note' &&
+      settings.timeTrackingStorageMode !== 'source-note' &&
+      settings.timeTrackingStorageMode !== 'dedicated-note'
     ) {
-      this.settings.timeTrackingStorageMode = DEFAULT_SETTINGS.timeTrackingStorageMode;
+      settings.timeTrackingStorageMode = DEFAULT_SETTINGS.timeTrackingStorageMode;
     }
-    this.settings.timeTrackingDedicatedNotePath =
-      String(this.settings.timeTrackingDedicatedNotePath || 'Time Tracking.md').trim() || 'Time Tracking.md';
-    this.settings.timeTrackingSingleActiveSession = this.settings.timeTrackingSingleActiveSession !== false;
-    this.settings.timeTrackingIgnoreArchivedFiles = this.settings.timeTrackingIgnoreArchivedFiles !== false;
-    this.settings.activityLogPropertyKey = String(this.settings.activityLogPropertyKey || 'activity').trim() || 'activity';
-    this.settings.activityLogTrackedProperties = String(
-      this.settings.activityLogTrackedProperties ?? DEFAULT_SETTINGS.activityLogTrackedProperties,
+    settings.timeTrackingDedicatedNotePath =
+      String(settings.timeTrackingDedicatedNotePath || 'Time Tracking.md').trim() || 'Time Tracking.md';
+    settings.timeTrackingSingleActiveSession = settings.timeTrackingSingleActiveSession !== false;
+    settings.timeTrackingIgnoreArchivedFiles = settings.timeTrackingIgnoreArchivedFiles !== false;
+    settings.activityLogPropertyKey = String(settings.activityLogPropertyKey || 'activity').trim() || 'activity';
+    settings.activityLogTrackedProperties = String(
+      settings.activityLogTrackedProperties ?? DEFAULT_SETTINGS.activityLogTrackedProperties,
     ).trim();
-    const activityMax = Number(this.settings.activityLogMaxEntries);
-    this.settings.activityLogMaxEntries = Number.isFinite(activityMax) && activityMax > 0 ? Math.floor(activityMax) : DEFAULT_SETTINGS.activityLogMaxEntries;
+    const activityMax = Number(settings.activityLogMaxEntries);
+    settings.activityLogMaxEntries = Number.isFinite(activityMax) && activityMax > 0 ? Math.floor(activityMax) : DEFAULT_SETTINGS.activityLogMaxEntries;
     const legacyUnchecked = Array.isArray(loaded?.linkedSubitemUncheckedStatuses)
       ? loaded?.linkedSubitemUncheckedStatuses.map((value) => String(value || '').trim()).filter(Boolean)
       : [];
@@ -1844,11 +1886,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     const legacyCanceled = Array.isArray(loaded?.linkedSubitemCanceledStatuses)
       ? loaded?.linkedSubitemCanceledStatuses.map((value) => String(value || '').trim()).filter(Boolean)
       : [];
-    const migratedMappings = Array.isArray(this.settings.linkedSubitemCheckboxMappings)
-      ? this.settings.linkedSubitemCheckboxMappings
+    const migratedMappings = Array.isArray(settings.linkedSubitemCheckboxMappings)
+      ? settings.linkedSubitemCheckboxMappings
       : [];
     if (migratedMappings.length === 0) {
-      this.settings.linkedSubitemCheckboxMappings = this.normalizeStrictLinkedSubitemMappings([
+      settings.linkedSubitemCheckboxMappings = this.normalizeStrictLinkedSubitemMappings([
         {
           checkboxState: '[ ]',
           toggleTargetStatus: String(loaded?.linkedSubitemToggleCheckedStatus || 'complete').trim() || 'complete',
@@ -1869,9 +1911,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         },
       ]);
     }
-    this.settings.linkedSubitemDefaultOpenState = String(this.settings.linkedSubitemDefaultOpenState || '[ ]').trim() || '[ ]';
-    this.settings.linkedSubitemCheckboxMappings = this.normalizeStrictLinkedSubitemMappings(
-      this.settings.linkedSubitemCheckboxMappings
+    settings.linkedSubitemDefaultOpenState = String(settings.linkedSubitemDefaultOpenState || '[ ]').trim() || '[ ]';
+    settings.linkedSubitemCheckboxMappings = this.normalizeStrictLinkedSubitemMappings(
+      settings.linkedSubitemCheckboxMappings
         .map((entry) => ({
         checkboxState: String(entry?.checkboxState || '').trim(),
         statuses: Array.isArray(entry?.statuses)
@@ -1883,12 +1925,13 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       }))
       .filter((entry) => entry.checkboxState && entry.statuses.length > 0),
     );
-    if (this.settings.linkedSubitemCheckboxMappings.length === 0) {
-      this.settings.linkedSubitemCheckboxMappings = this.getStrictLinkedSubitemMappings();
+    if (settings.linkedSubitemCheckboxMappings.length === 0) {
+      settings.linkedSubitemCheckboxMappings = this.getStrictLinkedSubitemMappings();
     }
-    logger.setLoggingEnabled(this.settings.enableLogging);
     if (hadRetiredHomeCaptureHeadingSettings || needsActivityBasePathMigration || removedRetiredPropertyCount > 0) {
-      await this.saveData(this.settings);
+      if (!this.isCurrentLifecycle(lifecycleEpoch)) return null;
+      await this.saveData(settings);
+      if (!this.isCurrentLifecycle(lifecycleEpoch)) return null;
     }
     if (hadRetiredHomeCaptureHeadingSettings) {
       logger.flow('Settings', 'migration:removed-home-capture-heading');
@@ -1901,6 +1944,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         count: removedRetiredPropertyCount,
       });
     }
+    return settings;
   }
 
   private normalizeHomeComponents(components: unknown): TPSGlobalContextMenuSettings['homeComponents'] {
@@ -2042,7 +2086,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     });
   }
 
-  private async loadLegacyNotebookNavigatorCompanionSettings(): Promise<unknown | null> {
+  private async loadLegacyNotebookNavigatorCompanionSettings(
+    lifecycleEpoch: number,
+  ): Promise<unknown | null> {
     const adapter = this.app.vault.adapter;
     const candidatePaths = [
       '.obsidian/plugins/TPS-Notebook-Navigator-Companion (Dev)/data.json',
@@ -2051,8 +2097,12 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     for (const path of candidatePaths) {
       try {
-        if (!(await adapter.exists(path))) continue;
+        if (!this.isCurrentLifecycle(lifecycleEpoch)) return null;
+        const exists = await adapter.exists(path);
+        if (!this.isCurrentLifecycle(lifecycleEpoch)) return null;
+        if (!exists) continue;
         const raw = await adapter.read(path);
+        if (!this.isCurrentLifecycle(lifecycleEpoch)) return null;
         const parsed = JSON.parse(raw);
         if (parsed && typeof parsed === 'object') return parsed;
       } catch (error) {
@@ -2060,6 +2110,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       }
     }
 
+    if (!this.isCurrentLifecycle(lifecycleEpoch)) return null;
     const pluginsRegistry = (this.app as any)?.plugins;
     const companion =
       pluginsRegistry?.getPlugin?.('tps-notebook-navigator-companion') ||

@@ -33,14 +33,14 @@ test('existing TPS plugin modal files opt into the shared mobile contract', () =
     '../../TPS-Controller (Dev)/src',
     '../../TPS-Kanban (Dev)/src',
     '../../TPS-Finances (Dev)/src',
-    '../../TPS-health (Dev)/src',
+    '../../TPS-health (Optimize)/src',
     '../../tps-messager/src',
   ].map((path) => fileURLToPath(new URL(path, import.meta.url)));
   const missing = pluginRoots.flatMap(sourceFiles)
     .filter((path) => /extends Modal|new Modal\(/.test(readFileSync(path, 'utf8')))
     .filter((path) => !readFileSync(path, 'utf8').includes('tps-keyboard-aware-modal'));
   assert.deepEqual(missing, []);
-  const healthSource = readFileSync(fileURLToPath(new URL('../../TPS-health (Dev)/src/main.ts', import.meta.url)), 'utf8');
+  const healthSource = readFileSync(fileURLToPath(new URL('../../TPS-health (Optimize)/src/main.ts', import.meta.url)), 'utf8');
   assert.doesNotMatch(healthSource, /setupKeyboardAwareHealthModal/);
   assert.match(readFileSync(`${srcRoot}/utils/mobile-overlay.ts`, 'utf8'), /target\.scrollIntoView/);
 });

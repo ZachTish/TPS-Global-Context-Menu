@@ -65,7 +65,7 @@ test('GCM keeps Health properties out of its core catalog and retires only manag
   assert.match(mainSource, /private removeRetiredBundledCustomProperties\(/);
   assert.match(mainSource, /id\.startsWith\('tps-health-'\)/);
   assert.match(mainSource, /LEGACY_HEALTH_CUSTOM_PROPERTY_IDS\.has\(id\)/);
-  assert.match(mainSource, /removedRetiredPropertyCount = normalizedProperties\.length - this\.settings\.properties\.length/);
+  assert.match(mainSource, /removedRetiredPropertyCount = normalizedProperties\.length - settings\.properties\.length/);
   assert.match(mainSource, /migration:removed-retired-bundled-properties'[\s\S]{0,120}count: removedRetiredPropertyCount/);
   assert.doesNotMatch(mainSource, /this\.settings\.homeComponentActions\['workout-tracker'\]\s*=/);
   assert.match(panelBuilder, /const scopedProperties = resolveCustomProperties/);

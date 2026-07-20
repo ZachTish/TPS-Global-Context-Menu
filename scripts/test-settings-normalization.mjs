@@ -124,12 +124,12 @@ test('obsolete type-profile settings are stripped without removing record or fol
 });
 
 test('retired bundled properties migrate once without rewriting saved Home actions', () => {
-  assert.match(mainSource, /const normalizedProperties = this\.normalizeCustomProperties\(this\.settings\.properties\);/);
-  assert.match(mainSource, /this\.settings\.properties = this\.removeRetiredBundledCustomProperties\(normalizedProperties\);/);
+  assert.match(mainSource, /const normalizedProperties = this\.normalizeCustomProperties\(settings\.properties\);/);
+  assert.match(mainSource, /settings\.properties = this\.removeRetiredBundledCustomProperties\(normalizedProperties\);/);
   assert.match(mainSource, /!id\.startsWith\('tps-health-'\) && !LEGACY_HEALTH_CUSTOM_PROPERTY_IDS\.has\(id\)/);
-  assert.match(mainSource, /hadRetiredHomeCaptureHeadingSettings \|\| needsActivityBasePathMigration \|\| removedRetiredPropertyCount > 0[\s\S]{0,100}await this\.saveData\(this\.settings\)/);
+  assert.match(mainSource, /hadRetiredHomeCaptureHeadingSettings \|\| needsActivityBasePathMigration \|\| removedRetiredPropertyCount > 0[\s\S]{0,180}await this\.saveData\(settings\)/);
   assert.match(mainSource, /migration:removed-retired-bundled-properties'[\s\S]{0,120}count: removedRetiredPropertyCount/);
-  assert.match(mainSource, /this\.settings\.homeComponentActions = normalizeHomeComponentActions\(this\.settings\.homeComponentActions\);/);
+  assert.match(mainSource, /settings\.homeComponentActions = normalizeHomeComponentActions\(settings\.homeComponentActions\);/);
   assert.doesNotMatch(mainSource, /const activityActions = this\.settings\.homeComponentActions/);
   assert.doesNotMatch(mainSource, /this\.settings\.homeComponentActions\['workout-tracker'\]\s*=/);
 });
@@ -150,7 +150,7 @@ test('optional inline and context surfaces default to the lean off state', () =>
   assert.match(typesSource, /DEFAULT_NOTEBOOK_NAVIGATOR_RULE_SETTINGS[\s\S]{0,120}enabled: false,[\s\S]{0,80}autoApplyOnFileOpen: false/);
   assert.match(constantsSource, /homeComponents:\s*\[\s*\{ type: 'base', path: HOME_DAILY_NOTE_FEED_BASE_PATH \},\s*'calendar',\s*'open-unscheduled-tasks',\s*\]/);
   assert.doesNotMatch(constantsSource, /commandId: 'tps-health:/);
-  assert.match(mainSource, /this\.settings = Object\.assign\(\{\}, DEFAULT_SETTINGS, loaded \?\? \{\}\);/);
+  assert.match(mainSource, /const settings = Object\.assign\(\{\}, DEFAULT_SETTINGS, loaded \?\? \{\}\);/);
 });
 
 test('icon and color rule filter matches exact case-insensitive working values deterministically', async () => {
@@ -240,13 +240,13 @@ test('recurrence and daily note child settings are hidden immediately when paren
 });
 
 test('TPS Home capture settings expose plain-line insertion defaults and retire heading routing', () => {
-  assert.match(mainSource, /homeCalendarBasePath =\s*typeof this\.settings\.homeCalendarBasePath === 'string'/);
+  assert.match(mainSource, /homeCalendarBasePath =\s*typeof settings\.homeCalendarBasePath === 'string'/);
   assert.match(settingsTabSource, /setName\('Home calendar Base path'\)/);
-  assert.match(mainSource, /homeCaptureInsertPosition === 'top' \? 'top' : 'bottom'/);
+  assert.match(mainSource, /settings\.homeCaptureInsertPosition === 'top' \? 'top' : 'bottom'/);
   assert.match(mainSource, /delete record\.homeCaptureAddHeading/);
   assert.match(mainSource, /delete record\.homeCaptureHeading/);
   assert.doesNotMatch(typesSource, /homeCaptureAddHeading|homeCaptureHeading/);
-  assert.match(mainSource, /homeComponentLayouts = this\.normalizeHomeComponentLayouts\(this\.settings\.homeComponentLayouts\)/);
+  assert.match(mainSource, /homeComponentLayouts = this\.normalizeHomeComponentLayouts\(settings\.homeComponentLayouts\)/);
   assert.match(mainSource, /private normalizeHomeComponentLayouts\(value: unknown\)/);
   assert.match(mainSource, /this\.normalizeHomeLayoutNumber\(source\.height, 220, 1200\)/);
   assert.match(mainSource, /this\.normalizeHomeLayoutNumber\(source\.capturePreviewHeight, 120, 900\)/);

@@ -31,6 +31,11 @@ import {
   type TpsBaseGroupDescriptor,
   type TpsBaseRowGroup,
 } from './base-row-grouping';
+import { parseDailyNoteFileDate } from '../utils/daily-note-task-schedule';
+import {
+  isHealthUiHomeActionId,
+  routeHealthUiHomeAction,
+} from '../services/health-ui-home-action-route';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
 
@@ -53,10 +58,6 @@ function getLogEntrySelectionId(
   const stable = getLogEntryStableIdentity({ fields });
   if (stable) return `${filePath}:stable:${stable.key}:${hashSelectionIdentity(stable.value)}`;
   return `${filePath}:line:${lineNumber}:${hashSelectionIdentity(line)}`;
-}
-
-interface HealthFoodLogApiLike {
-  openFoodLogEntryMenuFromLine?: (event: MouseEvent, filePath: string, lineNumber: number, line: string) => Promise<void>;
 }
 
 interface LogTableColumn {
@@ -901,6 +902,8 @@ export class TpsTableView extends BasesView {
       row.dataset.taskLine = String(entry.lineNumber + 1);
     }
     (row as any).__tpsTableView = this;
+    (row as any).__tpsTableEntry = entry;
+    (row as any).__tpsTableColumns = columns;
     row.addEventListener('click', (evt: MouseEvent) => this.handleEntryModifierClick(evt, entry), { capture: true });
     row.addEventListener('click', (evt: MouseEvent) => this.handleEntryClick(evt, entry));
     row.addEventListener('contextmenu', (evt) => this.openEntryContextMenu(evt, entry, row, columns), { capture: true });
@@ -1084,41 +1087,14 @@ export class TpsTableView extends BasesView {
   }
 
   handleExternalRowContextMenu(evt: MouseEvent, row: HTMLElement): boolean {
-    const path = row.dataset.path;
-    const oneBasedLine = Number(row.dataset.line || '0');
-    if (!path || !Number.isInteger(oneBasedLine) || oneBasedLine < 1) return false;
+    const entry = (row as any).__tpsTableEntry as LogLineEntry | undefined;
+    const columns = (row as any).__tpsTableColumns as LogTableColumn[] | undefined;
+    if (!entry || !Array.isArray(columns)) return false;
 
     evt.preventDefault();
     evt.stopPropagation();
     evt.stopImmediatePropagation();
-
-    const file = this.plugin.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof TFile)) {
-      new Notice(`Could not find source file: ${path}`);
-      return true;
-    }
-
-    void this.plugin.app.vault.cachedRead(file).then((content) => {
-      const lineNumber = oneBasedLine - 1;
-      const line = content.split('\n')[lineNumber] ?? '';
-      const fields = readInlineFields(line);
-      const columns = Array.from(row.querySelectorAll<HTMLElement>('.tps-log-base-cell[data-key]')).map((cell) => ({
-        key: cell.dataset.key || '',
-        label: cell.dataset.label || labelForKey(cell.dataset.key || ''),
-      })).filter((column) => column.key);
-      this.openEntryContextMenu(evt, {
-        id: `${file.path}:${lineNumber}`,
-        selectionId: getLogEntrySelectionId(file.path, lineNumber, line, fields),
-        file,
-        lineNumber,
-        line,
-        title: visibleLineText(line),
-        fields,
-      }, row, columns);
-    }).catch((error) => {
-      logger.flowError('TpsTableView', 'context-menu:source-read-failed', error, { path: file.path, lineNumber: oneBasedLine });
-      new Notice(`Could not read source file: ${path}`);
-    });
+    this.openEntryContextMenu(evt, entry, row, columns);
     return true;
   }
 
@@ -1187,7 +1163,8 @@ export class TpsTableView extends BasesView {
   async runCreateCommandOverride(): Promise<boolean> {
     const command = this.getCreateCommandOverride();
     if (!command) return false;
-    if (this.runHomeScopedFoodLogCommand(command.id)) return true;
+    const healthUiRoute = await this.runHomeScopedHealthAction(command.id);
+    if (healthUiRoute !== null) return healthUiRoute;
     const commands = (this.plugin.app as any)?.commands;
     if (typeof commands?.executeCommandById !== 'function') return false;
     try {
@@ -1214,33 +1191,88 @@ export class TpsTableView extends BasesView {
     }
   }
 
-  private runHomeScopedFoodLogCommand(commandId: string): boolean {
-    if (String(commandId || '').trim() !== 'tps-health:log-food') return false;
-    const contextDate = this.getHomeContextDate();
-    if (!contextDate) return false;
-    const appAny = this.plugin.app as any;
-    const healthCandidates = [
-      appAny.tpsHealth,
-      appAny.plugins?.getPlugin?.('tps-health'),
-      appAny.plugins?.plugins?.['tps-health'],
-      appAny.plugins?.getPlugin?.('TPS-health (Dev)'),
-      appAny.plugins?.plugins?.['TPS-health (Dev)'],
-    ];
-    const health = healthCandidates.find((candidate) => typeof candidate?.openFoodLogger === 'function');
-    if (!health) return false;
-    const moment = (window as any).moment;
-    const selected = typeof moment === 'function' ? moment(contextDate, 'YYYY-MM-DD', true) : null;
-    const current = typeof moment === 'function' ? moment().startOf('day') : null;
-    const dateContext = {
+  private async runHomeScopedHealthAction(commandId: string): Promise<boolean | null> {
+    if (!isHealthUiHomeActionId(commandId)) return null;
+    const homeHost = this.getHomeContextHost();
+    if (!homeHost) return null;
+
+    const contextDate = this.normalizeDateKey(
+      homeHost.dataset.tpsContextDate || homeHost.dataset.tpsContextScheduled || '',
+    );
+    const dailyNotePath = this.getExactHomeContextPath(homeHost);
+    const dailyNote = dailyNotePath ? this.plugin.app.vault.getAbstractFileByPath(dailyNotePath) : null;
+    const panel = this.containerEl.closest<HTMLElement>('.tps-home-panel[data-tps-home-component-key]');
+    const componentId = String(panel?.dataset.tpsHomeComponentKey || '').trim();
+    const rawBasePath = normalizePath(String(
+      this.containerEl.dataset.tpsBasePath
+      || this.containerEl.closest<HTMLElement>('[data-tps-base-path]')?.dataset.tpsBasePath
+      || '',
+    ).trim()).replace(/^\/+/, '');
+    const basePath = rawBasePath.toLowerCase().endsWith('.base') ? rawBasePath : undefined;
+    const exactDailyNoteDate = dailyNote instanceof TFile
+      ? parseDailyNoteFileDate(this.plugin.app, this.plugin.settings, dailyNote)
+      : null;
+
+    if (!contextDate
+      || !(dailyNote instanceof TFile)
+      || exactDailyNoteDate !== contextDate
+      || !componentId) {
+      logger.flowWarn('TpsTableView', 'create-command:home-health-unavailable', {
+        commandId,
+        reason: 'invalid-exact-home-context',
+        dateIso: contextDate,
+        dailyNotePath,
+        componentId,
+      });
+      new Notice('TPS Health could not verify the selected Home Daily Note. Nothing was opened.');
+      return true;
+    }
+
+    const result = await routeHealthUiHomeAction(() => this.plugin.getHealthUiApi(), commandId, {
+      source: 'tps-home',
       dateIso: contextDate,
-      label: selected?.isValid?.() ? selected.format('ddd, MMM D YYYY') : contextDate,
-      isToday: Boolean(selected?.isValid?.() && current?.isValid?.() && selected.isSame(current, 'day')),
-      foodLogTarget: 'daily-note',
-      focusAfterLog: false,
-    };
-    health.openFoodLogger(dateContext);
-    logger.flow('TpsTableView', 'create-command:home-food-log', { commandId, dateIso: contextDate });
+      dailyNotePath: dailyNote.path,
+      componentId,
+      ...(basePath ? { basePath } : {}),
+    });
+    if (!result.matched || result.status === 'unavailable') {
+      logger.flowWarn('TpsTableView', 'create-command:home-health-unavailable', {
+        commandId,
+        reason: 'provider-unavailable-or-rejected',
+        dateIso: contextDate,
+        dailyNotePath: dailyNote.path,
+      });
+      new Notice('TPS Health is unavailable for the selected Home day. Nothing was opened.');
+      return true;
+    }
+    if (result.status === 'failed') {
+      logger.flowError('TpsTableView', 'create-command:home-health-failed', result.error, {
+        commandId,
+        dateIso: contextDate,
+        dailyNotePath: dailyNote.path,
+      });
+      new Notice('TPS Health could not open that action. Nothing was changed.');
+      return true;
+    }
+    logger.flow('TpsTableView', 'create-command:home-health', {
+      commandId,
+      dateIso: contextDate,
+      dailyNotePath: dailyNote.path,
+    });
     return true;
+  }
+
+  private getHomeContextHost(): HTMLElement | null {
+    return this.containerEl.closest<HTMLElement>(
+      '[data-tps-context-source="home"][data-tps-context-date], [data-tps-context-source="home"][data-tps-context-scheduled]',
+    );
+  }
+
+  private getExactHomeContextPath(homeHost: HTMLElement): string | null {
+    const raw = String(homeHost.dataset.tpsContextPath || '').trim();
+    if (!raw) return null;
+    const path = normalizePath(raw).replace(/^\/+/, '');
+    return path.toLowerCase().endsWith('.md') ? path : null;
   }
 
   private openEntryContextMenu(evt: MouseEvent, entry: LogLineEntry, row: HTMLElement, columns: LogTableColumn[]): void {
@@ -1248,19 +1280,49 @@ export class TpsTableView extends BasesView {
     evt.stopPropagation();
     evt.stopImmediatePropagation();
 
-    this.applyEntryContextSelection(evt, row);
-
-    const healthApi = this.getHealthFoodLogApi();
-    if (isFoodLogEntry(entry) && typeof healthApi?.openFoodLogEntryMenuFromLine === 'function') {
+    const healthUiApi = this.plugin.getHealthUiApi();
+    if (isFoodLogEntry(entry)) {
+      if (!healthUiApi) {
+        logger.flowWarn('TpsTableView', 'context-menu:health-food-unavailable', {
+          path: entry.file.path,
+          lineNumber: entry.lineNumber + 1,
+          foodId: entry.fields.foodid || '',
+        });
+        new Notice('TPS Health is unavailable. The food-log row was left unchanged.');
+        return;
+      }
       logger.flow('TpsTableView', 'context-menu:health-food-handoff', {
         path: entry.file.path,
         lineNumber: entry.lineNumber + 1,
         foodId: entry.fields.foodid || '',
       });
-      void healthApi.openFoodLogEntryMenuFromLine(evt, entry.file.path, entry.lineNumber, entry.line);
+      void healthUiApi.openFoodLogEntryMenu({
+        clientX: evt.clientX,
+        clientY: evt.clientY,
+        screenX: evt.screenX,
+        screenY: evt.screenY,
+        filePath: entry.file.path,
+        lineNumber: entry.lineNumber,
+        renderedLine: entry.line,
+      }).then((result) => {
+        if (result.status === 'opened') return;
+        logger.flowWarn('TpsTableView', 'context-menu:health-food-not-opened', {
+          path: entry.file.path,
+          lineNumber: entry.lineNumber + 1,
+          status: result.status,
+        });
+        new Notice('That food-log row changed. Refresh the table and try again.');
+      }).catch((error) => {
+        logger.flowError('TpsTableView', 'context-menu:health-food-failed', error, {
+          path: entry.file.path,
+          lineNumber: entry.lineNumber + 1,
+        });
+        new Notice('TPS Health could not open that food-log row.');
+      });
       return;
     }
 
+    this.applyEntryContextSelection(evt, row);
     this.setActiveContextRow(row);
     const menu = new Menu();
     menu.onHide(() => this.setActiveContextRow(null));
@@ -1437,18 +1499,6 @@ export class TpsTableView extends BasesView {
       identity: getLogEntryStableIdentity(entry),
     });
     this.queueRender();
-  }
-
-  private getHealthFoodLogApi(): HealthFoodLogApiLike | null {
-    const appAny = this.plugin.app as any;
-    const candidates = [
-      appAny.tpsHealth,
-      appAny.plugins?.getPlugin?.('tps-health')?.api,
-      appAny.plugins?.plugins?.['tps-health']?.api,
-      appAny.plugins?.getPlugin?.('TPS-health (Dev)')?.api,
-      appAny.plugins?.plugins?.['TPS-health (Dev)']?.api,
-    ];
-    return candidates.find((candidate) => typeof candidate?.openFoodLogEntryMenuFromLine === 'function') ?? null;
   }
 
   private getConfigValue(key: string): unknown {

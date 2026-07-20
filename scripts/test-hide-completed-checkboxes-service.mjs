@@ -182,7 +182,7 @@ test('task hiding exclusions bypass completed and all-task hiding by file patter
   assert.match(settingsSource, /setValue\(this\.plugin\.settings\.taskHidingExclusionPatterns \?\? ''\)/);
   assert.doesNotMatch(settingsSource, /setValue\(this\.plugin\.settings\.taskHidingExclusionPatterns \?\? 'Inbox\/'\)/);
   assert.match(settingsSource, /this\.plugin\.settings\.taskHidingExclusionPatterns = value/);
-  assert.match(mainSource, /taskHidingExclusionPatterns = String\(this\.settings\.taskHidingExclusionPatterns \?\? ''\)\.trim\(\)/);
+  assert.match(mainSource, /settings\.taskHidingExclusionPatterns = String\(settings\.taskHidingExclusionPatterns \?\? ''\)\.trim\(\)/);
   assert.match(source, /TASK_HIDING_EXCLUDED_ROOT_CLASS = 'tps-gcm-task-hiding-excluded'/);
   assert.match(source, /private clearTaskHidingRoot\(root: HTMLElement\): void/);
   assert.match(source, /private isRootTaskHidingExcluded\(root: HTMLElement\): boolean/);

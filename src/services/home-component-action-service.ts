@@ -1,11 +1,16 @@
 import { Notice } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
-import type { HomeActionContext, HomeActionProvider, HomeComponentAction } from '../types';
+import type { HomeActionContext, HomeComponentAction } from '../types';
 import {
   routeHomeComponentAction,
   type HomeActionHandler,
 } from './home-component-action-core';
 import * as logger from '../logger';
+import {
+  canExecuteHealthUiHomeAction,
+  isHealthUiHomeActionId,
+  routeHealthUiHomeAction,
+} from './health-ui-home-action-route';
 
 export const HOME_CAPTURE_COMMAND_ID = 'tps-global-context-menu:capture-to-home-note';
 export const HOME_ADD_TASK_COMMAND_ID = 'tps-global-context-menu:add-task-to-home-note';
@@ -28,14 +33,11 @@ export class HomeComponentActionService {
     const commandId = String(action.commandId || '').trim();
     if (!commandId) return false;
     if (action.target === 'workspace') return this.hasCommand(commandId);
+    if (isHealthUiHomeActionId(commandId)) {
+      return canExecuteHealthUiHomeAction(this.plugin.getHealthUiApi(), commandId);
+    }
     if (this.handlers.has(commandId)) return true;
-    return this.getProviders().some((provider) => {
-      try {
-        return provider.canHandle(commandId);
-      } catch {
-        return false;
-      }
-    });
+    return false;
   }
 
   async execute(action: HomeComponentAction, context: HomeActionContext): Promise<boolean> {
@@ -48,23 +50,32 @@ export class HomeComponentActionService {
       basePath: context.basePath || null,
     });
     try {
+      if (action.target !== 'workspace' && isHealthUiHomeActionId(action.commandId)) {
+        const healthResult = await routeHealthUiHomeAction(
+          () => this.plugin.getHealthUiApi(),
+          action.commandId,
+          context,
+        );
+        if (healthResult.matched && healthResult.status === 'failed') throw healthResult.error;
+        if (!healthResult.matched || healthResult.status !== 'handled') {
+          this.noticeUnavailable(action, context);
+          return false;
+        }
+        logger.flow('HomeAction', 'execute:handled', {
+          commandId: action.commandId,
+          target: action.target,
+          route: 'health-ui',
+          dailyNotePath: context.dailyNotePath,
+        });
+        return true;
+      }
       const result = await routeHomeComponentAction(action, context, {
         getRegisteredHandler: (commandId) => this.handlers.get(commandId) || null,
-        getProviders: () => this.getProviders(),
+        getProviders: () => [],
         executeWorkspaceCommand: (commandId) => this.executeWorkspaceCommand(commandId),
       });
       if (result.status === 'unavailable') {
-        logger.flowWarn('HomeAction', 'execute:unavailable', {
-          commandId: action.commandId,
-          target: action.target,
-          componentId: context.componentId,
-        });
-        new Notice(
-          action.target === 'home-note'
-            ? 'This command does not support the selected Home Daily Note. Edit the action and choose Run normally if that is intentional.'
-            : 'That command is not available.',
-          8000,
-        );
+        this.noticeUnavailable(action, context);
         return false;
       }
       logger.flow('HomeAction', 'execute:handled', {
@@ -86,19 +97,18 @@ export class HomeComponentActionService {
     }
   }
 
-  private getProviders(): HomeActionProvider[] {
-    const plugins = (this.plugin.app as any)?.plugins?.plugins;
-    if (!plugins || typeof plugins !== 'object') return [];
-    const providers: HomeActionProvider[] = [];
-    const seen = new Set<unknown>();
-    for (const loadedPlugin of Object.values(plugins) as any[]) {
-      const provider = loadedPlugin?.api?.homeActions || loadedPlugin?.homeActions;
-      if (!provider || seen.has(provider)) continue;
-      if (typeof provider.canHandle !== 'function' || typeof provider.execute !== 'function') continue;
-      seen.add(provider);
-      providers.push(provider as HomeActionProvider);
-    }
-    return providers;
+  private noticeUnavailable(action: HomeComponentAction, context: HomeActionContext): void {
+    logger.flowWarn('HomeAction', 'execute:unavailable', {
+      commandId: action.commandId,
+      target: action.target,
+      componentId: context.componentId,
+    });
+    new Notice(
+      action.target === 'home-note'
+        ? 'This command does not support the selected Home Daily Note. Edit the action and choose Run normally if that is intentional.'
+        : 'That command is not available.',
+      8000,
+    );
   }
 
   private hasCommand(commandId: string): boolean {

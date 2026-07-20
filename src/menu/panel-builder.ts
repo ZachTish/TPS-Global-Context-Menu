@@ -22,6 +22,7 @@ import { getCheckboxStateMarker, normalizeCheckboxStateToken } from '../utils/ch
 import { getWikilinkDisplayText, isLinkListProperty, parseLinkListInput } from '../utils/list-utils';
 import { extractWebLink } from '../utils/web-link-utils';
 import { getPlainDisplayTitle } from '../utils/display-title';
+import type { TPSHealthUiMetricRenderConfig } from '../tps-health-ui-contract';
 
 interface SubitemNode {
   file: TFile;
@@ -76,17 +77,6 @@ interface GraphData {
   mentions: TFile[];
 }
 
-interface TPSHealthMetricRenderConfig {
-  propertyKey: string;
-  label: string;
-  unit: string;
-  kind?: 'min' | 'max' | 'range' | 'counter';
-  goal?: number;
-  min?: number;
-  max?: number;
-  color?: string;
-}
-
 type TPSHealthMetricState = 'good' | 'under' | 'over' | 'neutral';
 
 interface TPSHealthMetricDisplay {
@@ -94,10 +84,6 @@ interface TPSHealthMetricDisplay {
   visualPercent: number;
   labelPercent: string;
   color: string;
-}
-
-interface TPSHealthApiLike {
-  getMetricRenderConfig?: (propertyKey: string) => TPSHealthMetricRenderConfig | null;
 }
 
 const ATTACHMENTS_FRONTMATTER_KEY = 'attachments';
@@ -691,10 +677,12 @@ export class PanelBuilder {
     const entries = this.delegates.createFileEntries([file]);
     const entry = entries?.[0];
     const frontmatter = (entry?.frontmatter || {}) as Record<string, any>;
+    const healthMetricConfigs = this.getHealthMetricRenderConfigs();
     const properties = this.withHealthMetricProperties(
       resolveCustomProperties(this.plugin.settings.properties || [], entries, new ViewModeService(), 'inline')
         .filter((prop) => prop && prop.showInCollapsed !== false),
       frontmatter,
+      healthMetricConfigs,
     );
 
     const panel = document.createElement('section');
@@ -770,7 +758,7 @@ export class PanelBuilder {
 
       const value = document.createElement('div');
       value.className = 'tps-gcm-top-property-value';
-      this.populateStackedPropertyValue(value, entries, prop, frontmatter);
+      this.populateStackedPropertyValue(value, entries, prop, frontmatter, healthMetricConfigs);
       this.makeStackedPropertyValueEditable(value, entries, prop);
       row.appendChild(value);
 
@@ -1193,7 +1181,13 @@ export class PanelBuilder {
     void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(files, changedKeys);
   }
 
-  private populateStackedPropertyValue(target: HTMLElement, entries: any[], prop: any, frontmatter: Record<string, any>): void {
+  private populateStackedPropertyValue(
+    target: HTMLElement,
+    entries: any[],
+    prop: any,
+    frontmatter: Record<string, any>,
+    healthMetricConfigs = this.getHealthMetricRenderConfigs(),
+  ): void {
     const propId = String(prop?.id || '').toLowerCase();
     const propKey = String(prop?.key || '').trim();
     const propKeyLower = propKey.toLowerCase();
@@ -1238,7 +1232,7 @@ export class PanelBuilder {
     }
 
     const raw = propKey ? this.getFrontmatterValueCaseInsensitive(frontmatter, propKey) : undefined;
-    const healthMetric = propKey ? this.getHealthMetricRenderConfig(propKey) : null;
+    const healthMetric = propKey ? this.getHealthMetricRenderConfig(propKey, healthMetricConfigs) : null;
     const numericValue = this.toFiniteNumber(raw);
     if (healthMetric && numericValue !== null) {
       target.appendChild(this.createHealthMetricPropertyValue(numericValue, healthMetric));
@@ -1272,30 +1266,32 @@ export class PanelBuilder {
     target.appendChild(link);
   }
 
-  private getHealthMetricRenderConfig(propKey: string): TPSHealthMetricRenderConfig | null {
-    const api = (this.app as any).tpsHealth as TPSHealthApiLike | undefined;
-    if (!api?.getMetricRenderConfig) return null;
+  private getHealthMetricRenderConfig(
+    propKey: string,
+    configs = this.getHealthMetricRenderConfigs(),
+  ): Readonly<TPSHealthUiMetricRenderConfig> | null {
+    const normalizedKey = String(propKey || '').trim().toLowerCase();
+    if (!normalizedKey) return null;
+    return configs.find((config) => config.propertyKey.toLowerCase() === normalizedKey) ?? null;
+  }
+
+  private getHealthMetricRenderConfigs(): readonly Readonly<TPSHealthUiMetricRenderConfig>[] {
+    const api = this.plugin.getHealthUiApi();
+    if (!api) return [];
     try {
-      return api.getMetricRenderConfig(propKey);
+      return api.getMetricRenderConfigs();
     } catch (error) {
-      logger.warn('Failed to resolve TPS Health metric config', error);
-      return null;
+      logger.warn('Failed to resolve TPS Health metric configs', error);
+      return [];
     }
   }
 
-  private withHealthMetricProperties(properties: any[], frontmatter: Record<string, any>): any[] {
-    const api = (this.app as any).tpsHealth as (TPSHealthApiLike & {
-      getMetricRenderConfigs?: () => TPSHealthMetricRenderConfig[];
-    }) | undefined;
-    if (!api?.getMetricRenderConfigs) return properties;
-
-    let configs: TPSHealthMetricRenderConfig[] = [];
-    try {
-      configs = api.getMetricRenderConfigs() || [];
-    } catch (error) {
-      logger.warn('Failed to resolve TPS Health metric configs', error);
-      return properties;
-    }
+  private withHealthMetricProperties(
+    properties: any[],
+    frontmatter: Record<string, any>,
+    configs = this.getHealthMetricRenderConfigs(),
+  ): any[] {
+    if (configs.length === 0) return properties;
 
     const configuredKeys = new Set((this.plugin.settings.properties || []).map((prop) => String(prop?.key || '').toLowerCase()).filter(Boolean));
     const existingKeys = new Set(properties.map((prop) => String(prop?.key || '').toLowerCase()).filter(Boolean));
@@ -1317,7 +1313,7 @@ export class PanelBuilder {
     return next;
   }
 
-  private createHealthMetricPropertyValue(value: number, metric: TPSHealthMetricRenderConfig): HTMLElement {
+  private createHealthMetricPropertyValue(value: number, metric: Readonly<TPSHealthUiMetricRenderConfig>): HTMLElement {
     const display = this.getHealthMetricDisplay(value, metric);
     const roundedValue = this.roundHealthMetricValue(value);
     const goalText = this.formatHealthMetricGoalText(metric);
@@ -1338,7 +1334,7 @@ export class PanelBuilder {
     return wrapper;
   }
 
-  private getHealthMetricDisplay(value: number, metric: TPSHealthMetricRenderConfig): TPSHealthMetricDisplay {
+  private getHealthMetricDisplay(value: number, metric: Readonly<TPSHealthUiMetricRenderConfig>): TPSHealthMetricDisplay {
     const min = this.finiteHealthMetricNumber(metric.min);
     const max = this.finiteHealthMetricNumber(metric.max);
     const goal = this.getHealthMetricProgressGoal(metric);
@@ -1354,7 +1350,7 @@ export class PanelBuilder {
 
   private getHealthMetricState(
     value: number,
-    metric: TPSHealthMetricRenderConfig,
+    metric: Readonly<TPSHealthUiMetricRenderConfig>,
     min = this.finiteHealthMetricNumber(metric.min),
     max = this.finiteHealthMetricNumber(metric.max),
   ): TPSHealthMetricState {
@@ -1371,13 +1367,13 @@ export class PanelBuilder {
     return 'neutral';
   }
 
-  private getHealthMetricStateColor(state: TPSHealthMetricState, metric: TPSHealthMetricRenderConfig): string {
+  private getHealthMetricStateColor(state: TPSHealthMetricState, metric: Readonly<TPSHealthUiMetricRenderConfig>): string {
     if (state === 'good') return 'var(--color-green)';
     if (state === 'under' || state === 'over') return 'var(--color-red)';
     return metric.color || 'var(--interactive-accent)';
   }
 
-  private getHealthMetricProgressGoal(metric: TPSHealthMetricRenderConfig): number {
+  private getHealthMetricProgressGoal(metric: Readonly<TPSHealthUiMetricRenderConfig>): number {
     const min = this.finiteHealthMetricNumber(metric.min);
     const max = this.finiteHealthMetricNumber(metric.max);
     if (metric.kind === 'counter') return 0;
@@ -1400,7 +1396,7 @@ export class PanelBuilder {
     return Number.isFinite(parsed) ? parsed : null;
   }
 
-  private formatHealthMetricGoalText(metric: TPSHealthMetricRenderConfig): string {
+  private formatHealthMetricGoalText(metric: Readonly<TPSHealthUiMetricRenderConfig>): string {
     const unit = metric.unit || '';
     const min = this.finiteHealthMetricNumber(metric.min);
     const max = this.finiteHealthMetricNumber(metric.max);

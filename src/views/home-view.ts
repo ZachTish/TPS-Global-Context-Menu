@@ -19,6 +19,7 @@ import { withBaseEmbedRenderContext } from './base-embed-context';
 import { DEFAULT_SETTINGS, HOME_DAILY_NOTE_FEED_BASE_CONTENT, HOME_DAILY_NOTE_FEED_BASE_PATH } from '../constants';
 import { normalizeHomeComponentActions } from '../services/home-component-action-core';
 import { addHomeBaseContextFilter, resolveHomeBaseDefinitionSourcePath } from './home-base-context';
+import { prepareCurrentHealthUiFoodDescription } from '../services/health-ui-food-description';
 
 export const TPS_HOME_VIEW_TYPE = 'tps-home';
 
@@ -126,40 +127,6 @@ class HomeCaptureRevisionConflictError extends Error {
     super('The Daily Note changed outside Quick Capture.');
     this.name = 'HomeCaptureRevisionConflictError';
   }
-}
-
-interface TPSHealthApiLike {
-  ensureFoodLogBase?: () => Promise<string>;
-  ensureActivityLogBase?: () => Promise<string>;
-  ensureWorkoutLogBase?: () => Promise<string>;
-  getActiveWorkout?: () => HomeActiveWorkoutState | null;
-  getActiveWorkoutPath?: () => string;
-}
-
-interface TPSHealthPluginLike {
-  api?: TPSHealthApiLike;
-  settings?: {
-    workoutsFolder?: string;
-  };
-  openFoodLogger?: (dateContext?: HomeFoodLogDateContext | null) => void;
-  openActivityLogger?: (dateContext?: HomeFoodLogDateContext | null) => void;
-  openFoodDescriber?: (description: string, dateContext?: HomeFoodLogDateContext | null) => Promise<void>;
-  openWorkoutStarter?: (dateContext?: HomeFoodLogDateContext | null) => void;
-}
-
-interface HomeFoodLogDateContext {
-  dateIso: string;
-  label: string;
-  isToday: boolean;
-  foodLogTarget?: 'daily-note' | 'single-file';
-  focusAfterLog?: boolean;
-}
-
-interface HomeActiveWorkoutState {
-  path?: string;
-  dailyNotePath?: string;
-  title?: string;
-  startedAt?: string;
 }
 
 type HomeActiveTimerTarget =
@@ -576,9 +543,17 @@ export class TpsHomeView extends ItemView {
     const cssclasses = frontmatter.cssclasses;
     const cssList = Array.isArray(cssclasses) ? cssclasses : String(cssclasses || '').split(/\s+/);
     if (cssList.some((entry) => String(entry).trim() === 'tps-health-workout')) return true;
-    const healthPlugin = this.getHealthPlugin();
-    const workoutsFolder = normalizePath(String(healthPlugin?.settings?.workoutsFolder || '').trim()).replace(/^\/+|\/+$/g, '');
-    return Boolean(workoutsFolder && (file.path === workoutsFolder || file.path.startsWith(`${workoutsFolder}/`)));
+    const healthUiApi = this.plugin.getHealthUiApi();
+    if (!healthUiApi) return false;
+    try {
+      return healthUiApi.isWorkoutFile(file.path);
+    } catch (error) {
+      logger.flowWarn('HomeView', 'workout-file:health-ui-failed', {
+        path: file.path,
+        error: logger.errorSummary(error),
+      });
+      return false;
+    }
   }
 
   private renderHomeActiveTimerButton(button: HTMLButtonElement, target: HomeActiveTimerTarget | null): void {
@@ -657,7 +632,7 @@ export class TpsHomeView extends ItemView {
     actions.createSpan({ cls: 'tps-home-capture-shortcut', text: '⌘↵ Add to day' });
 
     if (Platform.isMobile) {
-      await this.renderMobileQuickCapture(editorHost, actions, addButton, taskButton, today, generation);
+      await this.renderMobileQuickCapture(editorHost, actions, addButton, taskButton, component, today, generation);
       if (!this.isHomeRenderCurrent(generation)) return;
       this.renderQuickCapturePreview(panel, component, today, generation);
       return;
@@ -806,12 +781,12 @@ export class TpsHomeView extends ItemView {
 
       const submit = async (task: boolean) => {
         if (submitInFlight || !this.isHomeCaptureSessionCurrent(session)) return;
-        const value = getCaptureValue();
+        const submittedSource = this.getHomeCaptureSessionValue(session);
+        const value = submittedSource.trim();
         if (!value) return;
         submitInFlight = true;
         updateSubmitState();
         let rerender = false;
-        let afterRender: (() => void) | null = null;
         try {
           const trigger = !editTarget ? HOME_CAPTURE_TRIGGERS.find((candidate) => candidate.matches(value)) : null;
           if (trigger) {
@@ -825,14 +800,31 @@ export class TpsHomeView extends ItemView {
             });
             if (choice === 'cancel') return;
             if (choice === 'describe') {
-              const healthPlugin = this.getHealthPlugin();
-              if (typeof healthPlugin?.openFoodDescriber !== 'function') {
-                new Notice('TPS Health Describe is unavailable.');
-                return;
-              }
               const description = trigger.clean(value);
               if (!description) {
                 new Notice('Add a food description before #food.');
+                return;
+              }
+              const preparation = await prepareCurrentHealthUiFoodDescription(
+                () => this.plugin.getHealthUiApi(),
+                {
+                  description,
+                  context: this.buildHealthUiExactContext(component, today, dailyNote),
+                },
+              );
+              if (preparation.status === 'unavailable') {
+                new Notice('TPS Health Describe is unavailable.');
+                return;
+              }
+              if (preparation.status === 'failed') throw preparation.error;
+              if (!this.isHomeCaptureSessionCurrent(session)) return;
+              if (this.getHomeCaptureSessionValue(session) !== submittedSource) {
+                logger.flow('HomeCaptureTrigger', 'describe:source-preserved', {
+                  selectedDate: today.format('YYYY-MM-DD'),
+                  surface: 'desktop-editor',
+                  reason: 'changed-during-prepare',
+                });
+                new Notice('Food description prepared; newer capture text was kept.', 6000);
                 return;
               }
               const outcome = await runReplacement('', 'food-describe-clear');
@@ -841,12 +833,6 @@ export class TpsHomeView extends ItemView {
               this.homeCaptureDraftTarget = null;
               this.homeCaptureEditTarget = null;
               new Notice('Your food is being researched and will be added to the tray shortly.', 6000);
-              afterRender = () => {
-                void healthPlugin.openFoodDescriber(description, this.getHomeFoodLogDateContext(today)).catch((error) => {
-                  logger.flowError('HomeCaptureTrigger', 'food-describe:failed', error, { selectedDate: today.format('YYYY-MM-DD') });
-                  new Notice(error instanceof Error ? error.message : 'Could not build the food tray.', 10000);
-                });
-              };
               return;
             }
           }
@@ -882,7 +868,6 @@ export class TpsHomeView extends ItemView {
           submitInFlight = false;
           if (addButton.isConnected) updateSubmitState();
           if (rerender) await this.render();
-          afterRender?.();
         }
       };
 
@@ -994,6 +979,7 @@ export class TpsHomeView extends ItemView {
     actions: HTMLElement,
     addButton: HTMLButtonElement,
     taskButton: HTMLButtonElement,
+    component: HomeComponentId,
     today: any,
     generation: number,
   ): Promise<void> {
@@ -1055,7 +1041,8 @@ export class TpsHomeView extends ItemView {
     };
     const submit = async (task: boolean) => {
       if (submitInFlight || !this.isHomeRenderCurrent(generation) || !textarea.isConnected) return;
-      const value = textarea.value.trim();
+      const submittedSource = textarea.value;
+      const value = submittedSource.trim();
       if (!value) return;
       submitInFlight = true;
       updateSubmitState();
@@ -1102,27 +1089,44 @@ export class TpsHomeView extends ItemView {
           });
           if (choice === 'cancel') return;
           if (choice === 'describe') {
-            const healthPlugin = this.getHealthPlugin();
-            if (typeof healthPlugin?.openFoodDescriber !== 'function') {
-              new Notice('TPS Health Describe is unavailable.');
-              return;
-            }
             const description = trigger.clean(value);
             if (!description) {
               new Notice('Add a food description before #food.');
+              return;
+            }
+            if (!this.plugin.getHealthUiApi()) {
+              new Notice('TPS Health Describe is unavailable.');
+              return;
+            }
+            const dailyNote = this.getBackedDailyNoteFile()
+              ?? await this.plugin.homeCaptureService.getDailyNoteForCapture(today.clone());
+            if (!this.isHomeRenderCurrent(generation) || !textarea.isConnected) return;
+            const preparation = await prepareCurrentHealthUiFoodDescription(
+              () => this.plugin.getHealthUiApi(),
+              {
+                description,
+                context: this.buildHealthUiExactContext(component, today, dailyNote),
+              },
+            );
+            if (preparation.status === 'unavailable') {
+              new Notice('TPS Health Describe is unavailable.');
+              return;
+            }
+            if (preparation.status === 'failed') throw preparation.error;
+            if (!this.isHomeRenderCurrent(generation) || !textarea.isConnected) return;
+            if (textarea.value !== submittedSource) {
+              logger.flow('HomeCaptureTrigger', 'describe:source-preserved', {
+                selectedDate: today.format('YYYY-MM-DD'),
+                surface: 'mobile-textarea',
+                reason: 'changed-during-prepare',
+              });
+              new Notice('Food description prepared; newer capture text was kept.', 6000);
               return;
             }
             textarea.value = '';
             updateSubmitState();
             new Notice('Your food is being researched and will be added to the tray shortly.', 6000);
             await this.render();
-            void healthPlugin.openFoodDescriber(description, this.getHomeFoodLogDateContext(today)).catch((error) => {
-              logger.flowError('HomeCaptureTrigger', 'food-describe:failed', error, {
-                selectedDate: today.format('YYYY-MM-DD'),
-                surface: 'mobile-textarea',
-              });
-              new Notice(error instanceof Error ? error.message : 'Could not build the food tray.', 10000);
-            });
             return;
           }
         }
@@ -1696,86 +1700,6 @@ export class TpsHomeView extends ItemView {
     });
   }
 
-  private addFoodLogPanelAction(panel: HTMLElement, today: any): void {
-    const heading = panel.querySelector<HTMLElement>('.tps-home-panel-heading');
-    if (!heading) return;
-
-    const button = heading.createEl('button', {
-      cls: 'tps-home-panel-action tps-home-food-log-button',
-      attr: {
-        type: 'button',
-        title: 'Log food',
-        'aria-label': 'Log food',
-      },
-    });
-    const icon = button.createSpan({ cls: 'tps-home-panel-action-icon' });
-    setIcon(icon, 'apple');
-    button.createSpan({ text: 'Log food' });
-    button.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      this.openHomeFoodLogger(today);
-    });
-  }
-
-  private openHomeFoodLogger(today: any): void {
-    const healthPlugin = this.getHealthPlugin();
-    const dateContext = this.getHomeFoodLogDateContext(today);
-    if (typeof healthPlugin?.openFoodLogger === 'function') {
-      healthPlugin.openFoodLogger(dateContext);
-      return;
-    }
-    void this.runCommand('tps-health:log-food');
-  }
-
-  private addWorkoutPanelAction(panel: HTMLElement, today: any): void {
-    const heading = panel.querySelector<HTMLElement>('.tps-home-panel-heading');
-    if (!heading) return;
-
-    const button = heading.createEl('button', {
-      cls: 'tps-home-panel-action tps-home-start-workout-button',
-      attr: {
-        type: 'button',
-        title: 'Start a workout for this day',
-        'aria-label': 'Start a workout for this day',
-      },
-    });
-    const icon = button.createSpan({ cls: 'tps-home-panel-action-icon' });
-    setIcon(icon, 'play');
-    button.createSpan({ text: 'Start workout' });
-    button.addEventListener('click', (event) => {
-      event.preventDefault();
-      event.stopPropagation();
-      this.openHomeWorkoutStarter(today);
-    });
-  }
-
-  private openHomeWorkoutStarter(today: any): void {
-    const healthPlugin = this.getHealthPlugin();
-    const dateContext = this.getHomeFoodLogDateContext(today);
-    if (typeof healthPlugin?.openWorkoutStarter === 'function') {
-      healthPlugin.openWorkoutStarter(dateContext);
-      return;
-    }
-    logger.flowWarn('HomeView', 'start-workout:context-api-unavailable', {
-      date: dateContext.dateIso,
-    });
-    void this.runCommand('tps-health:start-workout');
-  }
-
-  private getHomeFoodLogDateContext(today: any): HomeFoodLogDateContext {
-    const moment = getMoment();
-    const selected = (today?.clone ? today.clone() : moment(today)).startOf('day');
-    const current = moment().startOf('day');
-    return {
-      dateIso: selected.format('YYYY-MM-DD'),
-      label: selected.format('ddd, MMM D YYYY'),
-      isToday: selected.isSame(current, 'day'),
-      foodLogTarget: 'daily-note',
-      focusAfterLog: false,
-    };
-  }
-
   private prepareHomeScrollHost(host: HTMLElement, label: string): void {
     host.addClass('tps-home-base-viewport');
     host.dataset.tpsHomeScrollOwner = 'base-viewport';
@@ -2001,6 +1925,9 @@ export class TpsHomeView extends ItemView {
           'aria-label': this.editMode ? `Configure ${label}` : label,
         },
       });
+      button.dataset.tpsHomeActionCommandId = action.commandId;
+      button.dataset.tpsHomeActionTarget = action.target;
+      button.dataset.tpsHomeActionLabel = label;
       const icon = button.createSpan({ cls: 'tps-home-panel-action-icon' });
       setIcon(icon, action.icon || 'play');
       button.createSpan({ cls: 'tps-home-panel-action-label', text: label });
@@ -2018,9 +1945,11 @@ export class TpsHomeView extends ItemView {
           event.preventDefault();
           event.stopPropagation();
           if (button.disabled) return;
+          button.dataset.tpsHomeActionInFlight = 'true';
           button.disabled = true;
           void this.runHomeComponentAction(component, action).finally(() => {
-            if (button.isConnected) button.disabled = !this.plugin.homeComponentActionService.canExecute(action);
+            delete button.dataset.tpsHomeActionInFlight;
+            if (button.isConnected) this.refreshHealthActionAvailability();
           });
         });
       }
@@ -2031,6 +1960,26 @@ export class TpsHomeView extends ItemView {
       });
       add.addClass('tps-home-action-add-button');
     }
+  }
+
+  refreshHealthActionAvailability(): void {
+    if (!this.rootEl || this.homeClosing) return;
+    const buttons = this.rootEl.querySelectorAll<HTMLButtonElement>(
+      '.tps-home-configured-action:not(.is-editing)[data-tps-home-action-command-id]',
+    );
+    buttons.forEach((button) => {
+      if (button.dataset.tpsHomeActionInFlight === 'true') return;
+      const commandId = String(button.dataset.tpsHomeActionCommandId || '').trim();
+      const target = button.dataset.tpsHomeActionTarget === 'workspace' ? 'workspace' : 'home-note';
+      const label = String(button.dataset.tpsHomeActionLabel || commandId).trim() || commandId;
+      const available = this.plugin.homeComponentActionService.canExecute({
+        id: 'availability-refresh',
+        commandId,
+        target,
+      });
+      button.disabled = !available;
+      button.title = available ? label : `${label} is unavailable`;
+    });
   }
 
   private async runHomeComponentAction(component: HomeComponentId, action: HomeComponentAction): Promise<void> {
@@ -2050,8 +1999,19 @@ export class TpsHomeView extends ItemView {
     const selected = this.getSelectedDate();
     const dailyNote = this.getBackedDailyNoteFile()
       ?? await this.plugin.homeCaptureService.getDailyNoteForCapture(selected.clone());
+    return this.buildHealthUiExactContext(component, selected, dailyNote);
+  }
+
+  private buildHealthUiExactContext(
+    component: HomeComponentId,
+    selected: any,
+    dailyNote: TFile,
+  ): HomeActionContext {
     const componentId = this.getHomeComponentKey(component);
-    const basePath = this.getHomeComponentBasePath(component);
+    const rawBasePath = normalizePath(String(this.getHomeComponentBasePath(component) || '').trim()).replace(/^\/+/, '');
+    const basePath = rawBasePath
+      ? rawBasePath.toLowerCase().endsWith('.base') ? rawBasePath : `${rawBasePath}.base`
+      : undefined;
     return {
       source: 'tps-home',
       dateIso: selected.format('YYYY-MM-DD'),
@@ -2717,11 +2677,11 @@ export class TpsHomeView extends ItemView {
   }
 
   private async ensureDefaultFoodLogBaseFile(): Promise<TFile | null> {
-    const healthApi = this.getHealthApi();
-    if (typeof healthApi?.ensureFoodLogBase !== 'function') return null;
+    const healthUiApi = this.plugin.getHealthUiApi();
+    if (!healthUiApi) return null;
 
     try {
-      const path = normalizePath(String(await healthApi.ensureFoodLogBase() || '').trim()).replace(/^\/+/, '');
+      const path = normalizePath(String(await healthUiApi.ensureLogBase('food') || '').trim()).replace(/^\/+/, '');
       const file = path ? this.app.vault.getAbstractFileByPath(path) : null;
       return file instanceof TFile && file.extension === 'base' ? file : null;
     } catch (error) {
@@ -2748,46 +2708,17 @@ export class TpsHomeView extends ItemView {
   }
 
   private async ensureDefaultWorkoutLogBaseFile(): Promise<TFile | null> {
-    const healthApi = this.getHealthApi();
-    const ensureActivityLogBase = healthApi?.ensureActivityLogBase || healthApi?.ensureWorkoutLogBase;
-    if (typeof ensureActivityLogBase !== 'function') return null;
+    const healthUiApi = this.plugin.getHealthUiApi();
+    if (!healthUiApi) return null;
 
     try {
-      const path = normalizePath(String(await ensureActivityLogBase.call(healthApi) || '').trim()).replace(/^\/+/, '');
+      const path = normalizePath(String(await healthUiApi.ensureLogBase('activity') || '').trim()).replace(/^\/+/, '');
       const file = path ? this.app.vault.getAbstractFileByPath(path) : null;
       return file instanceof TFile && file.extension === 'base' ? file : null;
     } catch (error) {
       logger.flowError('HomeView', 'ensure-activity-log-base-failed', error);
       return null;
     }
-  }
-
-  private getHealthApi(): TPSHealthApiLike | null {
-    const appAny = this.app as any;
-    const healthPlugin = this.getHealthPlugin();
-    return appAny.tpsHealth || healthPlugin?.api || healthPlugin || null;
-  }
-
-  private getHealthPlugin(): TPSHealthPluginLike | null {
-    const plugins = (this.app as any).plugins;
-    const direct = (
-      plugins?.getPlugin?.('tps-health')
-      || plugins?.plugins?.['tps-health']
-      || plugins?.getPlugin?.('TPS-health (Dev)')
-      || plugins?.plugins?.['TPS-health (Dev)']
-      || null
-    );
-    if (direct) return direct;
-
-    const loadedPlugins = plugins?.plugins && typeof plugins.plugins === 'object'
-      ? Object.values(plugins.plugins)
-      : [];
-    return loadedPlugins.find((plugin: any) => {
-      const manifestId = String(plugin?.manifest?.id || '').trim();
-      return manifestId === 'tps-health'
-        || typeof plugin?.openFoodLogger === 'function'
-        || typeof plugin?.api?.ensureFoodLogBase === 'function';
-    }) as TPSHealthPluginLike || null;
   }
 
   private async unloadEmbeds(): Promise<void> {

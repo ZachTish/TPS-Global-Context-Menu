@@ -7,6 +7,7 @@ const checkboxSource = readFileSync(
   'utf8',
 );
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+const logBaseSource = readFileSync(new URL('../src/views/log-base-view.ts', import.meta.url), 'utf8');
 const dragSource = readFileSync(
   new URL('../src/services/task-line-drag-service.ts', import.meta.url),
   'utf8',
@@ -54,17 +55,28 @@ test('TPS Table keeps Health precedence and lets task rows reach the shared task
   const routing = sourceBetween(
     mainSource,
     'private handleTpsTableRowContextMenu(evt: MouseEvent): boolean',
-    'private handleTpsHealthFoodTableRowContextMenu',
+    'private registerManualContextMenuHandler',
   );
-  const healthIndex = routing.indexOf('handleTpsHealthFoodTableRowContextMenu');
   const taskIndex = routing.indexOf("row.dataset.tpsGcmContext === 'table-task'");
   const selectionSyncIndex = routing.indexOf('applyEntryContextSelection');
   const taskReturnIndex = routing.indexOf('return false', taskIndex);
   const genericIndex = routing.indexOf('handleExternalRowContextMenu');
 
-  assert.ok(healthIndex >= 0, 'Health handoff must remain present');
-  assert.ok(taskIndex > healthIndex, 'Health rows must be handed off before task routing');
+  assert.ok(taskIndex >= 0, 'task routing must remain present');
   assert.ok(selectionSyncIndex > taskIndex, 'task rows must synchronize visible table selection before handoff');
   assert.ok(taskReturnIndex > selectionSyncIndex, 'task selection must synchronize before shared task routing resumes');
   assert.ok(genericIndex > taskReturnIndex, 'task rows must bypass the generic table record menu');
+
+  const recordMenu = sourceBetween(
+    logBaseSource,
+    'private openEntryContextMenu(evt: MouseEvent, entry: LogLineEntry, row: HTMLElement, columns: LogTableColumn[]): void',
+    'private setActiveContextRow',
+  );
+  const foodIndex = recordMenu.indexOf('if (isFoodLogEntry(entry))');
+  const publicHandoffIndex = recordMenu.indexOf('healthUiApi.openFoodLogEntryMenu');
+  const genericSelectionIndex = recordMenu.indexOf('this.applyEntryContextSelection');
+  assert.ok(foodIndex >= 0, 'Health food detection must remain present');
+  assert.ok(publicHandoffIndex > foodIndex, 'Health food rows must use the public Health UI handoff');
+  assert.ok(genericSelectionIndex > publicHandoffIndex, 'Health food rows must return before generic table selection and editing');
+  assert.match(recordMenu, /if \(!healthUiApi\) \{[\s\S]*?row was left unchanged[\s\S]*?return;/);
 });

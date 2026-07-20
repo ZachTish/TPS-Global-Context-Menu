@@ -155,7 +155,9 @@ test('TPS Home separates dashboard UI from daily-note capture storage', () => {
   assert.match(viewSource, /Describe food/);
   assert.match(viewSource, /Keep as capture/);
   assert.match(viewSource, /food-describe-clear/);
-  assert.match(viewSource, /HomeCaptureTrigger', 'food-describe:failed/);
+  assert.match(viewSource, /prepareCurrentHealthUiFoodDescription/);
+  assert.match(viewSource, /TPS Health Describe is unavailable/);
+  assert.match(viewSource, /quick-capture:submit-failed/);
   assert.match(viewSource, /homeCaptureEditTarget/);
   assert.match(viewSource, /Save changes/);
   assert.match(viewSource, /quick-capture:edit-cancelled/);
@@ -248,7 +250,7 @@ test('TPS Home separates dashboard UI from daily-note capture storage', () => {
   assert.match(viewSource, /renderWorkoutBase/);
   assert.match(viewSource, /getHomeWorkoutBaseFile/);
   assert.match(viewSource, /ensureDefaultWorkoutLogBaseFile/);
-  assert.match(viewSource, /ensureActivityLogBase \|\| healthApi\?\.ensureWorkoutLogBase/);
+  assert.match(viewSource, /healthUiApi\.ensureLogBase\('activity'\)/);
   assert.doesNotMatch(viewSource, /Show workout logs/);
   assert.doesNotMatch(viewSource, /HomeWorkoutLogsModal/);
   assert.doesNotMatch(viewSource, /getHomeWorkoutLogEntries/);
@@ -509,9 +511,9 @@ test('TPS Table create command override uses selectable commands and resilient e
   assert.match(mainSource, /const tableRoots = Array\.from\(leaf\.querySelectorAll<HTMLElement>\('\.tps-log-base'\)\)/);
   assert.match(mainSource, /if \(tableRoots\.length !== 1\) return null/);
   assert.doesNotMatch(mainSource, /let node: HTMLElement \| null = target/);
-  assert.match(mainSource, /private handleTpsHealthFoodTableRowContextMenu\(evt: MouseEvent, row: HTMLElement\): boolean/);
-  assert.match(mainSource, /api\.openFoodLogEntryMenuFromLine\(evt, path, oneBasedLine - 1, ''\)/);
-  assert.match(mainSource, /context-menu:health-food-handoff/);
+  assert.doesNotMatch(mainSource, /handleTpsHealthFoodTableRowContextMenu/);
+  assert.match(logBaseViewSource, /__tpsTableEntry = entry/);
+  assert.match(logBaseViewSource, /renderedLine: entry\.line/);
   assert.match(mainSource, /'\.internal-embed'/);
   assert.match(mainSource, /'\.markdown-embed'/);
   assert.match(mainSource, /'\.canvas-node-content'/);
@@ -575,7 +577,7 @@ test('TPS Table supports persistent Shift-click range selection without opening 
 test('TPS Home shows a running time-tracked note indicator from the timer service', () => {
   assert.match(viewSource, /private homeActiveTimerButton: HTMLButtonElement \| null = null/);
   assert.match(viewSource, /private homeActiveTimerTarget: HomeActiveTimerTarget \| null = null/);
-  assert.match(viewSource, /getActiveWorkout\?: \(\) => HomeActiveWorkoutState \| null/);
+  assert.doesNotMatch(viewSource, /HomeActiveWorkoutState|getActiveWorkout|getActiveWorkoutPath/);
   assert.match(viewSource, /type HomeActiveTimerTarget =/);
   assert.match(viewSource, /this\.registerInterval\(window\.setInterval\(\(\) => \{\s*void this\.refreshHomeActiveTimerButton\(\);\s*\}, 1000\)\)/);
   assert.match(viewSource, /this\.homeActiveTimerButton = this\.createIconButton\(actions, 'timer', 'Open running time-tracked note'/);
@@ -590,7 +592,8 @@ test('TPS Home shows a running time-tracked note indicator from the timer servic
   assert.match(viewSource, /private isWorkoutTimeTrackingSession\(session: TimeTrackingSession\): boolean/);
   assert.match(viewSource, /kind === 'workout' \|\| runType === 'workout'/);
   assert.match(viewSource, /tps-health-workout/);
-  assert.match(viewSource, /workoutsFolder/);
+  assert.match(viewSource, /healthUiApi\.isWorkoutFile\(file\.path\)/);
+  assert.doesNotMatch(viewSource, /workoutsFolder/);
   assert.doesNotMatch(viewSource, /const workout = typeof healthApi\?\.getActiveWorkout === 'function' \? healthApi\.getActiveWorkout\(\) : null/);
   assert.doesNotMatch(viewSource, /workout\?\.path \|\| healthApi\?\.getActiveWorkoutPath\?\.\(\) \|\| workout\?\.dailyNotePath/);
   assert.match(viewSource, /button\.style\.display = target \? '' : 'none'/);
@@ -725,21 +728,12 @@ test('GCM owns TPS List Bases registration and bundles the task-aware renderer',
 });
 
 test('TPS Home food tracker uses TPS Table totals and keeps selected-day logging', () => {
-  assert.match(viewSource, /addFoodLogPanelAction/);
-  assert.match(viewSource, /openHomeFoodLogger/);
-  assert.match(viewSource, /getHomeFoodLogDateContext/);
-  assert.match(viewSource, /foodLogTarget: 'daily-note'/);
-  assert.match(viewSource, /focusAfterLog: false/);
-  assert.match(viewSource, /healthPlugin\.openFoodLogger\(dateContext\)/);
-  assert.match(viewSource, /text: 'Log food'/);
-  assert.match(viewSource, /tps-home-food-log-button/);
+  assert.doesNotMatch(viewSource, /addFoodLogPanelAction|openHomeFoodLogger|getHomeFoodLogDateContext/);
   assert.match(viewSource, /renderFoodBase/);
   assert.match(viewSource, /getHomeFoodBaseFile/);
   assert.match(viewSource, /ensureDefaultFoodLogBaseFile/);
-  assert.match(viewSource, /appAny\.tpsHealth/);
-  assert.match(viewSource, /getHealthPlugin/);
-  assert.match(viewSource, /TPS-health \(Dev\)/);
-  assert.match(viewSource, /healthApi\.ensureFoodLogBase/);
+  assert.match(viewSource, /healthUiApi\.ensureLogBase\('food'\)/);
+  assert.doesNotMatch(viewSource, /appAny\.tpsHealth|getHealthPlugin|TPS-health \(Dev\)/);
   assert.match(viewSource, /panel\.dataset\.tpsHomeFoodDate = dateIso/);
   assert.doesNotMatch(viewSource, /renderHomeFoodMacroSummary|getDailyFoodMacroTotals|food-macros:/);
   assert.doesNotMatch(stylesSource, /tps-home-food-macro/);
@@ -772,11 +766,7 @@ test('TPS Home Base panels use one bounded native scroll viewport', () => {
 
 test('TPS Home activity log delegates to the configured TPS Health Activity Base', () => {
   assert.match(viewSource, /renderWorkoutBase/);
-  assert.match(viewSource, /addWorkoutPanelAction/);
-  assert.match(viewSource, /text: 'Start workout'/);
-  assert.match(viewSource, /openHomeWorkoutStarter/);
-  assert.match(viewSource, /healthPlugin\.openWorkoutStarter\(dateContext\)/);
-  assert.match(viewSource, /start-workout:context-api-unavailable/);
+  assert.doesNotMatch(viewSource, /addWorkoutPanelAction|openHomeWorkoutStarter|start-workout:context-api-unavailable/);
   assert.match(viewSource, /decorateHomeWorkoutPanel/);
   assert.match(viewSource, /text: 'No activity logged'/);
   assert.match(viewSource, /is-tps-home-workout-empty/);
@@ -794,7 +784,7 @@ test('TPS Home activity log delegates to the configured TPS Health Activity Base
   assert.match(viewSource, /this\.plugin\.settings\.homeWorkoutBasePath/);
   assert.match(viewSource, /'Activity Log\.base'/);
   assert.match(viewSource, /ensureDefaultWorkoutLogBaseFile/);
-  assert.match(viewSource, /ensureActivityLogBase \|\| healthApi\?\.ensureWorkoutLogBase/);
+  assert.match(viewSource, /healthUiApi\.ensureLogBase\('activity'\)/);
   assert.doesNotMatch(viewSource, /scheduleHomeWorkoutDateFilter/);
   assert.doesNotMatch(viewSource, /applyHomeWorkoutDateFilter/);
   assert.doesNotMatch(viewSource, /tps-home-filtered-row-hidden/);
@@ -803,7 +793,7 @@ test('TPS Home activity log delegates to the configured TPS Health Activity Base
   assert.match(viewSource, /format\('YYYY-MM-DD'\)/);
   assert.match(settingsTabSource, /Activity log component/);
   assert.match(settingsTabSource, /Activity Log\.base/);
-  assert.match(mainSource, /this\.settings\.homeWorkoutBasePath/);
+  assert.match(mainSource, /settings\.homeWorkoutBasePath/);
   assert.match(mainSource, /'workout-tracker'/);
   assert.doesNotMatch(viewSource, /class HomeWorkoutLogsModal/);
   assert.doesNotMatch(stylesSource, /tps-home-workout-logs-modal/);
@@ -817,9 +807,13 @@ test('TPS Home scopes Food tracker rows explicitly without changing the Base sou
   assert.match(viewSource, /panel\.dataset\.tpsHomeFoodDate = dateIso/);
   assert.match(logBaseViewSource, /lineMatchesHomeDateContext\(fields, file\)/);
   assert.match(logBaseViewSource, /resolveHomeFoodLineDateKey\(fields, file\.path\)/);
-  assert.match(logBaseViewSource, /runHomeScopedFoodLogCommand/);
-  assert.match(logBaseViewSource, /create-command:home-food-log/);
-  assert.match(logBaseViewSource, /health\.openFoodLogger\(dateContext\)/);
+  assert.match(logBaseViewSource, /runHomeScopedHealthAction/);
+  assert.match(logBaseViewSource, /create-command:home-health/);
+  assert.match(logBaseViewSource, /routeHealthUiHomeAction/);
+  assert.match(logBaseViewSource, /const healthUiRoute = await this\.runHomeScopedHealthAction\(command\.id\)/);
+  assert.match(logBaseViewSource, /private async runHomeScopedHealthAction/);
+  assert.match(logBaseViewSource, /await routeHealthUiHomeAction/);
+  assert.match(logBaseViewSource, /\(\) => this\.plugin\.getHealthUiApi\(\)/);
   assert.match(logBaseViewSource, /home-date-filter:skip-line/);
   assert.doesNotMatch(logBaseViewSource, /getHomeContextDailyNoteFile/);
   assert.doesNotMatch(logBaseViewSource, /byPath\.set\(homeDailyNote\.path/);
@@ -841,7 +835,7 @@ test('TPS Home scopes Food tracker rows explicitly without changing the Base sou
   }
   assert.doesNotMatch(viewSource, /createFoodRow/);
   assert.doesNotMatch(viewSource, /openFoodEntryMenu/);
-  assert.match(mainSource, /openFoodLogEntryMenuFromLine/);
+  assert.match(logBaseViewSource, /openFoodLogEntryMenu/);
 });
 
 test('TPS Table title edits preserve record fields and stale writes resolve by stable identity', async () => {
@@ -881,7 +875,7 @@ test('TPS Table title edits preserve record fields and stale writes resolve by s
     fields: readInlineFields(original),
   }), -1);
   assert.match(logBaseViewSource, /context-menu:health-food-handoff/);
-  assert.match(logBaseViewSource, /openFoodLogEntryMenuFromLine/);
+  assert.match(logBaseViewSource, /openFoodLogEntryMenu/);
   assert.match(logBaseViewSource, /plugin\.openFileInLeaf/);
   assert.match(logLineUtilsSource, /\['foodid', 'setid', 'tpsid', 'logid', 'workoutid', 'financeid'\]/);
 });

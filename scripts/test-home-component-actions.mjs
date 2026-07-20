@@ -191,6 +191,12 @@ test('Home UI, capture writer, and feed Base keep selected-note context explicit
   assert.match(homeSource, /sourcePath,\s*\}, \(\) => MarkdownRenderer\.render/);
   assert.doesNotMatch(homeSource, /headerActions:/);
   assert.doesNotMatch(actionServiceSource, /getActiveFile/);
+  const healthActionBranch = actionServiceSource.slice(
+    actionServiceSource.indexOf("if (action.target !== 'workspace' && isHealthUiHomeActionId"),
+    actionServiceSource.indexOf('const result = await routeHomeComponentAction'),
+  );
+  assert.match(healthActionBranch, /await routeHealthUiHomeAction/);
+  assert.match(healthActionBranch, /\(\) => this\.plugin\.getHealthUiApi\(\)/);
   assert.match(apiSource, /homeActions:/);
   assert.match(contextSource, /sourcePath\?: string/);
   assert.match(bridgeSource, /dataset\.tpsContextPath = renderContext\.sourcePath/);
