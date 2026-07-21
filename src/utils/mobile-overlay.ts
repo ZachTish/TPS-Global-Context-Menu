@@ -24,13 +24,40 @@ export type OverlayPlacement = {
 
 const REPOSITION_DELAYS = [0, 80, 220, 420];
 
+function positiveDimension(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function viewportOffset(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
+}
+
 export function getVisibleViewport(targetWindow: Window = window): VisibleViewport {
   const viewport = targetWindow.visualViewport;
+  const layoutWidth = positiveDimension(targetWindow.innerWidth);
+  const layoutHeight = positiveDimension(targetWindow.innerHeight);
+  if (!viewport) {
+    return {
+      left: 0,
+      top: 0,
+      width: layoutWidth ?? 1,
+      height: layoutHeight ?? 1,
+    };
+  }
+
+  const left = viewportOffset(viewport.offsetLeft);
+  const top = viewportOffset(viewport.offsetTop);
+  const visualWidth = positiveDimension(viewport.width) ?? layoutWidth ?? 1;
+  const visualHeight = positiveDimension(viewport.height) ?? layoutHeight ?? 1;
+  const right = Math.min(left + visualWidth, layoutWidth ?? left + visualWidth);
+  const bottom = Math.min(top + visualHeight, layoutHeight ?? top + visualHeight);
   return {
-    left: viewport?.offsetLeft ?? 0,
-    top: viewport?.offsetTop ?? 0,
-    width: viewport?.width ?? targetWindow.innerWidth,
-    height: viewport?.height ?? targetWindow.innerHeight,
+    left,
+    top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
   };
 }
 
@@ -103,8 +130,15 @@ export class KeyboardAwareOverlay {
   }
 
   reposition(): void {
-    if (!this.element.isConnected || !this.anchor.isConnected) return;
+    if (!this.element.isConnected) return;
     const viewport = getVisibleViewport();
+    const forceCompact = document.body.classList.contains('is-mobile')
+      || document.body.classList.contains('is-phone');
+    const compactBottomSheet = forceCompact && this.options.compactBottomSheet !== false;
+    if (!this.anchor.isConnected && !compactBottomSheet) return;
+    const anchorRect = this.anchor.isConnected
+      ? this.anchor.getBoundingClientRect()
+      : { left: viewport.left, top: viewport.top, bottom: viewport.top };
     const availableHeight = Math.max(1, viewport.height - (this.options.margin ?? 12) * 2);
     const measuredHeight = Math.min(
       this.element.scrollHeight || this.element.getBoundingClientRect().height || 260,
@@ -112,10 +146,10 @@ export class KeyboardAwareOverlay {
     );
     const placement = computeOverlayPlacement(
       viewport,
-      this.anchor.getBoundingClientRect(),
+      anchorRect,
       measuredHeight,
       this.options,
-      document.body.classList.contains('is-mobile') || document.body.classList.contains('is-phone'),
+      forceCompact,
     );
     this.element.classList.toggle('tps-keyboard-aware-overlay--compact', placement.compact);
     this.element.style.setProperty('--tps-overlay-left', `${placement.left}px`);

@@ -537,11 +537,53 @@ test('mobile task and note editors share the keyboard-aware overlay contract', a
   assert.match(persistentMenuSource, /new KeyboardAwareOverlay\(popover, anchorEl/);
   assert.match(mobileOverlaySource, /window\.visualViewport\?\.addEventListener\('resize'/);
   assert.match(mobileOverlaySource, /const REPOSITION_DELAYS = \[0, 80, 220, 420\]/);
+  assert.match(mobileOverlaySource, /const compactBottomSheet = forceCompact && this\.options\.compactBottomSheet !== false/);
+  assert.match(mobileOverlaySource, /if \(!this\.anchor\.isConnected && !compactBottomSheet\) return/);
   assert.match(mainSource, /this\.register\(installVisibleViewportContract\(\)\)/);
   assert.match(pluginStylesSource, /\.tps-keyboard-aware-overlay\s*\{/);
   assert.match(pluginStylesSource, /--tps-visible-viewport-height/);
   assert.match(pluginStylesSource, /body\.is-mobile \.modal:is\(\.mod-tps-gcm, \.tps-keyboard-aware-modal\)/);
   assert.match(pluginStylesSource, /\.tps-gcm-task-editor-actions\s*\{[\s\S]*position:\s*sticky/);
+});
+
+test('mobile overlay intersects stale visual and layout viewport dimensions', async () => {
+  const { computeOverlayPlacement, getVisibleViewport } = await importMobileOverlayUtility();
+  const staleVisualViewport = getVisibleViewport({
+    innerWidth: 390,
+    innerHeight: 360,
+    visualViewport: { offsetLeft: 0, offsetTop: 0, width: 390, height: 844 },
+  });
+  assert.deepEqual(staleVisualViewport, { left: 0, top: 0, width: 390, height: 360 });
+
+  const staleLayoutViewport = getVisibleViewport({
+    innerWidth: 390,
+    innerHeight: 844,
+    visualViewport: { offsetLeft: 0, offsetTop: 24, width: 390, height: 336 },
+  });
+  assert.deepEqual(staleLayoutViewport, { left: 0, top: 24, width: 390, height: 336 });
+
+  const offsetIntersection = getVisibleViewport({
+    innerWidth: 390,
+    innerHeight: 360,
+    visualViewport: { offsetLeft: 10, offsetTop: 24, width: 390, height: 844 },
+  });
+  assert.deepEqual(offsetIntersection, { left: 10, top: 24, width: 380, height: 336 });
+
+  const placement = computeOverlayPlacement(
+    staleVisualViewport,
+    { left: 20, top: 500, bottom: 540 },
+    300,
+    { maxWidth: 480 },
+    true,
+  );
+  assert.deepEqual(placement, {
+    left: 12,
+    top: 48,
+    width: 366,
+    maxHeight: 336,
+    compact: true,
+  });
+  assert.ok(placement.top + Math.min(300, placement.maxHeight) <= 348);
 });
 
 test('custom Base note links use Hover Editor while task bodies stay task-scoped', () => {
