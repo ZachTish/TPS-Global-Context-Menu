@@ -9,6 +9,10 @@ import {
 } from '../utils/task-recurrence';
 import * as logger from '../logger';
 
+export interface RecurrenceModalOptions {
+    showEndsOn?: boolean;
+}
+
 export class RecurrenceModal extends Modal {
     currentRule: string;
     onSubmit: (rule: string, endsOn: string | null) => void | Promise<void>;
@@ -17,14 +21,25 @@ export class RecurrenceModal extends Modal {
     private currentEndsOn: string;
     private endsOnValue: string;
     private submitting = false;
+    private readonly options: Required<RecurrenceModalOptions>;
 
-    constructor(app: App, currentRule: string, startDate: Date, currentEndsOn: string, onSubmit: (rule: string, endsOn: string | null) => void | Promise<void>) {
+    constructor(
+        app: App,
+        currentRule: string,
+        startDate: Date,
+        currentEndsOn: string,
+        onSubmit: (rule: string, endsOn: string | null) => void | Promise<void>,
+        options: RecurrenceModalOptions = {},
+    ) {
         super(app);
         this.currentRule = currentRule;
         this.startDate = startDate;
         this.currentEndsOn = currentEndsOn;
         this.endsOnValue = currentEndsOn;
         this.onSubmit = onSubmit;
+        this.options = {
+            showEndsOn: options.showEndsOn !== false,
+        };
     }
 
     private getEasterDate(year: number, timeSource: Date): Date {
@@ -176,17 +191,19 @@ export class RecurrenceModal extends Modal {
         this.previewEl = contentEl.createDiv({ cls: 'tps-gcm-recurrence-preview' });
         this.updatePreview(this.currentRule);
 
-        new Setting(contentEl)
-            .setName('Ends on (optional)')
-            .setDesc('Stop creating new instances after this date. Leave blank to recur forever.')
-            .addText((text) => {
-                text.setValue(this.currentEndsOn);
-                text.setPlaceholder('YYYY-MM-DD');
-                text.inputEl.type = 'date';
-                text.inputEl.style.width = '100%';
-                text.inputEl.addEventListener('change', () => { this.endsOnValue = text.getValue(); });
-                text.inputEl.addEventListener('input', () => { this.endsOnValue = text.getValue(); });
-            });
+        if (this.options.showEndsOn) {
+            new Setting(contentEl)
+                .setName('Ends on (optional)')
+                .setDesc('Stop creating new instances after this date. Leave blank to recur forever.')
+                .addText((text) => {
+                    text.setValue(this.currentEndsOn);
+                    text.setPlaceholder('YYYY-MM-DD');
+                    text.inputEl.type = 'date';
+                    text.inputEl.style.width = '100%';
+                    text.inputEl.addEventListener('change', () => { this.endsOnValue = text.getValue(); });
+                    text.inputEl.addEventListener('input', () => { this.endsOnValue = text.getValue(); });
+                });
+        }
 
         new Setting(contentEl)
             .addButton((btn) => {

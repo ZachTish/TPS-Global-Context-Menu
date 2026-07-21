@@ -55,6 +55,16 @@ import {
 import type { LineItemDeleteMode } from '../utils/line-item-deletion';
 import { resolveCustomProperties } from '../resolve-profiles';
 import { ViewModeService } from './view-mode-service';
+import {
+  applyTaskEditorPropertyChanges,
+  applyTaskEditorScheduleResult,
+  buildTaskEditorPropertyChange,
+  collectTaskEditorProperties,
+  isTruthyTaskPropertyValue,
+  normalizeTaskEditorPropertyValue,
+  type TaskEditorPropertyChange,
+  type TaskEditorPropertyDescriptor,
+} from './task-editor-properties';
 
 export type TaskLineContext = {
   file: TFile;
@@ -69,6 +79,15 @@ export type TaskLineContext = {
 };
 
 type TaskLineHighlightKind = 'active' | 'selected';
+
+type TaskEditorPropertyDraft = {
+  descriptor: TaskEditorPropertyDescriptor;
+  initialValue: string;
+  getValue: () => string;
+  setDisabled: (disabled: boolean) => void;
+  focus: () => void;
+  getValidationError: () => string | null;
+};
 
 const KANBAN_TASK_SELECTOR = [
   '[data-tps-gcm-context="kanban-task"]',
@@ -295,6 +314,32 @@ export class TaskLineContextMenuService {
     input.value = initialBody;
     this.renderTaskEditorCheckbox(checkboxButton, context);
 
+    let childModalCount = 0;
+    const setChildModalOpen = (open: boolean): void => {
+      childModalCount = Math.max(0, childModalCount + (open ? 1 : -1));
+      card.toggleClass('is-child-modal-open', childModalCount > 0);
+      if (childModalCount === 0 && card.isConnected) {
+        window.setTimeout(() => this.taskEditorOverlay?.schedule(), 0);
+      }
+    };
+    const openChildModal = (modal: Modal, focusTarget: HTMLElement): void => {
+      const originalOnClose = modal.onClose.bind(modal);
+      let resumed = false;
+      modal.onClose = () => {
+        try {
+          originalOnClose();
+        } finally {
+          if (!resumed) {
+            resumed = true;
+            setChildModalOpen(false);
+            if (card.isConnected) window.setTimeout(() => focusTarget.focus(), 0);
+          }
+        }
+      };
+      setChildModalOpen(true);
+      modal.open();
+    };
+
     let checkboxBusy = false;
     let longPressTimer: number | null = null;
     let longPressTriggered = false;
@@ -374,9 +419,245 @@ export class TaskLineContextMenuService {
       openStatusMenu();
     });
 
+    const propertyDrafts: TaskEditorPropertyDraft[] = [];
+    let scheduledCompanions: {
+      initialTimeEstimate: string;
+      initialAllDay: string;
+      timeEstimate: string;
+      allDay: string;
+    } | null = null;
+    const propertyDescriptors = collectTaskEditorProperties(
+      context.rawLine,
+      this.plugin.settings.properties || [],
+      this.getStatusKey(),
+      [
+        this.plugin.settings.dateCreatedFrontmatterKey,
+        this.plugin.settings.dateModifiedFrontmatterKey,
+      ],
+    );
+    if (propertyDescriptors.length > 0) {
+      const propertiesEl = card.createDiv({ cls: 'tps-gcm-task-editor-properties' });
+      propertiesEl.createDiv({
+        cls: 'tps-gcm-task-editor-properties-title',
+        text: 'Properties',
+      });
+
+      const scheduleOverlay = (target: HTMLElement): void => {
+        target.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+        this.taskEditorOverlay?.schedule();
+      };
+      const configureControl = (control: HTMLElement): void => {
+        control.addEventListener('focus', () => scheduleOverlay(control));
+        control.addEventListener('input', () => this.taskEditorOverlay?.schedule());
+      };
+      const addDraft = (
+        descriptor: TaskEditorPropertyDescriptor,
+        getValue: () => string,
+        setDisabled: (disabled: boolean) => void,
+        focus: () => void,
+        getValidationError: () => string | null = () => null,
+      ): void => {
+        propertyDrafts.push({
+          descriptor,
+          initialValue: normalizeTaskEditorPropertyValue(descriptor, descriptor.value),
+          getValue,
+          setDisabled,
+          focus,
+          getValidationError,
+        });
+      };
+
+      for (const descriptor of propertyDescriptors) {
+        const propertyEl = propertiesEl.createDiv({ cls: 'tps-gcm-task-editor-property' });
+        const labelEl = propertyEl.createDiv({ cls: 'tps-gcm-task-editor-property-label' });
+        labelEl.createSpan({
+          cls: 'tps-gcm-task-editor-property-name',
+          text: descriptor.label,
+        });
+        if (descriptor.label.toLowerCase() !== descriptor.key.toLowerCase()) {
+          labelEl.createSpan({
+            cls: 'tps-gcm-task-editor-property-key',
+            text: descriptor.key,
+          });
+        }
+        const controlEl = propertyEl.createDiv({ cls: 'tps-gcm-task-editor-property-control' });
+        const ariaLabel = `${descriptor.label} property`;
+
+        if (descriptor.type === 'checkbox') {
+          const control = controlEl.createEl('input', {
+            cls: 'tps-gcm-task-editor-property-checkbox',
+            attr: { type: 'checkbox', 'aria-label': ariaLabel },
+          });
+          control.checked = isTruthyTaskPropertyValue(descriptor.value);
+          configureControl(control);
+          addDraft(
+            descriptor,
+            () => (control.checked ? 'true' : 'false'),
+            (disabled) => { control.disabled = disabled; },
+            () => control.focus(),
+          );
+          continue;
+        }
+
+        if (descriptor.type === 'datetime') {
+          let value = descriptor.value;
+          const isScheduled = descriptor.key.trim().toLowerCase() === 'scheduled';
+          if (isScheduled) {
+            const initialTimeEstimate = readInlineFieldValue(context.rawLine, 'timeEstimate');
+            const initialAllDay = readInlineFieldValue(context.rawLine, 'allDay');
+            scheduledCompanions = {
+              initialTimeEstimate,
+              initialAllDay,
+              timeEstimate: initialTimeEstimate,
+              allDay: initialAllDay,
+            };
+          }
+          const control = controlEl.createEl('button', {
+            cls: 'tps-gcm-task-editor-property-button',
+            attr: { type: 'button', 'aria-label': ariaLabel },
+          });
+          const renderValue = (): void => {
+            control.textContent = value || 'Set date…';
+            control.toggleClass('is-empty', !value);
+            control.setAttribute('title', value || `Set ${descriptor.label}`);
+          };
+          renderValue();
+          control.addEventListener('click', () => {
+            const timeEstimate = isScheduled && scheduledCompanions
+              ? Number.parseInt(scheduledCompanions.timeEstimate || '0', 10) || 0
+              : 0;
+            const allDay = isScheduled && scheduledCompanions
+              ? isTruthyTaskPropertyValue(scheduledCompanions.allDay)
+              : false;
+            const modal = new ScheduledModal(this.plugin.app, value, timeEstimate, allDay, (result) => {
+              value = result.date;
+              scheduledCompanions = applyTaskEditorScheduleResult(
+                descriptor.key,
+                scheduledCompanions,
+                result,
+              );
+              renderValue();
+              this.taskEditorOverlay?.schedule();
+            }, isScheduled ? {} : {
+              title: `Set ${descriptor.label || descriptor.key}`,
+              fieldLabel: descriptor.label || descriptor.key,
+              showTimeDetails: false,
+            });
+            openChildModal(modal, control);
+          });
+          configureControl(control);
+          addDraft(
+            descriptor,
+            () => value,
+            (disabled) => { control.disabled = disabled; },
+            () => control.focus(),
+          );
+          continue;
+        }
+
+        if (descriptor.type === 'recurrence') {
+          let value = descriptor.value;
+          const control = controlEl.createEl('button', {
+            cls: 'tps-gcm-task-editor-property-button',
+            attr: { type: 'button', 'aria-label': ariaLabel },
+          });
+          const renderValue = (): void => {
+            control.textContent = value || 'Set recurrence…';
+            control.toggleClass('is-empty', !value);
+            control.setAttribute('title', value || `Set ${descriptor.label}`);
+          };
+          renderValue();
+          control.addEventListener('click', () => {
+            const scheduledDraft = propertyDrafts.find((draft) => (
+              draft.descriptor.key.trim().toLowerCase() === 'scheduled'
+            ));
+            const scheduled = scheduledDraft?.getValue() || readInlineFieldValue(context.rawLine, 'scheduled');
+            const startDate = scheduled ? new Date(scheduled.replace(' ', 'T')) : new Date();
+            const modal = new RecurrenceModal(
+              this.plugin.app,
+              value,
+              Number.isNaN(startDate.getTime()) ? new Date() : startDate,
+              '',
+              (rule) => {
+                value = String(rule || '').trim();
+                renderValue();
+                this.taskEditorOverlay?.schedule();
+              },
+              { showEndsOn: false },
+            );
+            openChildModal(modal, control);
+          });
+          configureControl(control);
+          addDraft(
+            descriptor,
+            () => value,
+            (disabled) => { control.disabled = disabled; },
+            () => control.focus(),
+          );
+          continue;
+        }
+
+        if (descriptor.type === 'selector') {
+          const control = controlEl.createEl('select', {
+            cls: 'tps-gcm-task-editor-property-input',
+            attr: { 'aria-label': ariaLabel },
+          });
+          control.createEl('option', { text: '(none)', value: '' });
+          const options = getEffectivePropertyOptions(this.plugin.app, descriptor.property);
+          if (descriptor.value && !options.some((option) => option === descriptor.value)) {
+            control.createEl('option', { text: descriptor.value, value: descriptor.value });
+          }
+          for (const option of options) {
+            control.createEl('option', { text: option, value: option });
+          }
+          control.value = descriptor.value;
+          configureControl(control);
+          addDraft(
+            descriptor,
+            () => control.value,
+            (disabled) => { control.disabled = disabled; },
+            () => control.focus(),
+          );
+          continue;
+        }
+
+        const control = controlEl.createEl('input', {
+          cls: 'tps-gcm-task-editor-property-input',
+          attr: {
+            type: 'text',
+            inputmode: descriptor.type === 'number' ? 'decimal' : 'text',
+            value: descriptor.value,
+            'aria-label': ariaLabel,
+            placeholder: descriptor.type === 'list' ? 'Comma-separated values' : '',
+          },
+        });
+        if (descriptor.type === 'number') control.step = 'any';
+        const getValidationError = (): string | null => {
+          if (descriptor.type !== 'number') return null;
+          const rawValue = control.value.trim();
+          const invalid = control.validity.badInput || Boolean(rawValue && !Number.isFinite(Number(rawValue)));
+          control.setAttribute('aria-invalid', String(invalid));
+          return invalid ? `${descriptor.label || descriptor.key} must be a valid number.` : null;
+        };
+        control.addEventListener('input', () => {
+          if (control.getAttribute('aria-invalid') === 'true') getValidationError();
+        });
+        configureControl(control);
+        addDraft(
+          descriptor,
+          () => control.value,
+          (disabled) => { control.disabled = disabled; },
+          () => control.focus(),
+          getValidationError,
+        );
+      }
+    }
+
     const hint = card.createDiv({
       cls: 'tps-gcm-task-editor-hint',
-      text: 'Edit task text and tags. Inline properties stay attached. ⌘↵ saves.',
+      text: propertyDrafts.length > 0
+        ? 'Edit task text, tags, and existing properties. Hidden TPS metadata stays attached. ⌘↵ saves.'
+        : 'Edit task text and tags. Hidden TPS metadata stays attached. ⌘↵ saves.',
     });
     const actions = card.createDiv({ cls: 'tps-gcm-task-editor-actions' });
     const openButton = actions.createEl('button', { text: 'Open in note', attr: { type: 'button' } });
@@ -398,18 +679,58 @@ export class TaskLineContextMenuService {
         input.focus();
         return;
       }
-      if (nextBody === initialBody) {
+      const propertyChanges: TaskEditorPropertyChange[] = [];
+      for (const draft of propertyDrafts) {
+        const rawValue = draft.getValue();
+        const change = buildTaskEditorPropertyChange(draft.descriptor, draft.initialValue, rawValue);
+        if (!change) continue;
+        const validationError = draft.getValidationError();
+        if (validationError) {
+          new Notice(validationError);
+          draft.focus();
+          return;
+        }
+        if (draft.descriptor.type === 'number' && rawValue.trim() && !Number.isFinite(Number(rawValue))) {
+          new Notice(`${draft.descriptor.label || draft.descriptor.key} must be a valid number.`);
+          draft.focus();
+          return;
+        }
+        propertyChanges.push(change);
+      }
+      if (scheduledCompanions) {
+        if (scheduledCompanions.timeEstimate !== scheduledCompanions.initialTimeEstimate) {
+          propertyChanges.push({
+            key: 'timeEstimate',
+            value: scheduledCompanions.timeEstimate || null,
+          });
+        }
+        if (scheduledCompanions.allDay !== scheduledCompanions.initialAllDay) {
+          propertyChanges.push({
+            key: 'allDay',
+            value: scheduledCompanions.allDay || null,
+          });
+        }
+      }
+      const bodyChanged = nextBody !== initialBody;
+      if (!bodyChanged && propertyChanges.length === 0) {
         this.closeTaskEditor();
         return;
       }
       saving = true;
       input.disabled = true;
+      checkboxButton.disabled = true;
+      propertyDrafts.forEach((draft) => draft.setDisabled(true));
       saveButton.disabled = true;
       try {
-        const updated = await this.updateTaskLine(context, (line) => setTaskEditableBody(line, nextBody));
+        const updated = await this.updateTaskLine(context, (line) => {
+          const editedBody = bodyChanged ? setTaskEditableBody(line, nextBody) : line;
+          return applyTaskEditorPropertyChanges(editedBody, propertyChanges);
+        });
         if (!updated) {
           saving = false;
           input.disabled = false;
+          checkboxButton.disabled = false;
+          propertyDrafts.forEach((draft) => draft.setDisabled(false));
           saveButton.disabled = false;
           input.focus();
           return;
@@ -417,11 +738,19 @@ export class TaskLineContextMenuService {
         logger.flow('TaskQuickEditor', 'save', {
           path: context.file.path,
           lineNumber: context.lineNumber,
+          bodyChanged,
+          changedPropertyKeys: propertyChanges.map((change) => change.key),
         });
         this.closeTaskEditor();
+        const scheduledChange = propertyChanges.find((change) => change.key.toLowerCase() === 'scheduled');
+        if (scheduledChange) {
+          await this.maybePromptMoveScheduledDailyNoteTask(context, scheduledChange.value || '');
+        }
       } catch (error) {
         saving = false;
         input.disabled = false;
+        checkboxButton.disabled = false;
+        propertyDrafts.forEach((draft) => draft.setDisabled(false));
         saveButton.disabled = false;
         logger.flowError('TaskQuickEditor', 'save-failed', error, {
           path: context.file.path,
@@ -439,7 +768,7 @@ export class TaskLineContextMenuService {
       this.closeTaskEditor();
       void this.openTaskLine(context);
     });
-    input.addEventListener('keydown', (event: KeyboardEvent) => {
+    card.addEventListener('keydown', (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
         this.closeTaskEditor();
@@ -457,6 +786,15 @@ export class TaskLineContextMenuService {
     this.taskEditorOutsideHandler = (event: MouseEvent) => {
       const eventTarget = event.target;
       if (eventTarget instanceof Node && card.contains(eventTarget)) return;
+      if (eventTarget instanceof HTMLElement && eventTarget.closest([
+        '.modal',
+        '.modal-container',
+        '.menu',
+        '.popover',
+        '.hover-popover',
+        '.suggestion-container',
+      ].join(', '))) return;
+      if (childModalCount > 0) return;
       this.closeTaskEditor();
     };
     window.setTimeout(() => {
@@ -1566,7 +1904,7 @@ export class TaskLineContextMenuService {
           const startDate = scheduled ? new Date(scheduled.replace(' ', 'T')) : new Date();
           new RecurrenceModal(this.plugin.app, current, Number.isNaN(startDate.getTime()) ? new Date() : startDate, '', async (rule) => {
             await this.updateTaskLine(context, (line) => setInlineFieldValueOnTaskLine(line, property.key, rule || null));
-          }).open();
+          }, { showEndsOn: false }).open();
         });
     });
   }

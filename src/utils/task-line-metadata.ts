@@ -11,6 +11,11 @@ export interface ParsedTaskLine {
   body: string;
 }
 
+export interface TaskInlineField {
+  key: string;
+  value: string;
+}
+
 export const TASK_COMPLETED_DATE_FIELD = 'completedDate';
 
 export interface TaskLineTimestampOptions {
@@ -227,6 +232,14 @@ export function readInlineFieldValue(line: string, key: string): string {
     if (field.key.toLowerCase() === normalizedKey) return field.value.trim();
   }
   return '';
+}
+
+export function readTaskInlineFields(line: string): TaskInlineField[] {
+  const body = parseTaskLine(line)?.body ?? String(line || '');
+  return scanTaskInlineFields(body).map((field) => ({
+    key: field.key,
+    value: field.value.trim(),
+  }));
 }
 
 export function setInlineFieldValueOnTaskLine(line: string, key: string, value: string | null): string {

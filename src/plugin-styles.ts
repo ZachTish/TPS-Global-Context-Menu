@@ -8786,6 +8786,12 @@ export const PLUGIN_STYLES = `
         background: var(--background-primary);
         box-shadow: 0 18px 48px rgba(0, 0, 0, 0.38);
         color: var(--text-normal);
+        overscroll-behavior: contain;
+      }
+
+      .tps-gcm-task-editor-card.is-child-modal-open {
+        visibility: hidden;
+        pointer-events: none;
       }
 
       .tps-gcm-task-editor-header,
@@ -8881,6 +8887,125 @@ export const PLUGIN_STYLES = `
         outline: none;
       }
 
+      .tps-gcm-task-editor-properties {
+        display: flex;
+        flex: 0 1 auto;
+        flex-direction: column;
+        gap: 7px;
+        min-height: 0;
+        max-height: min(240px, 32vh);
+        overflow-x: hidden;
+        overflow-y: auto;
+        overscroll-behavior: contain;
+        padding: 10px;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 10px;
+        background: var(--background-secondary-alt);
+        scrollbar-gutter: stable;
+      }
+
+      .tps-gcm-task-editor-properties-title {
+        position: sticky;
+        top: -10px;
+        z-index: 1;
+        margin: -10px -10px 1px;
+        padding: 9px 10px 7px;
+        border-bottom: 1px solid var(--background-modifier-border-hover);
+        background: var(--background-secondary-alt);
+        color: var(--text-muted);
+        font-size: var(--font-ui-smaller);
+        font-weight: 650;
+        letter-spacing: 0.02em;
+        line-height: 1.25;
+        text-transform: uppercase;
+      }
+
+      .tps-gcm-task-editor-property {
+        display: grid;
+        grid-template-columns: minmax(92px, 0.7fr) minmax(0, 1.3fr);
+        gap: 10px;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .tps-gcm-task-editor-property-label {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        min-width: 0;
+        color: var(--text-normal);
+        font-size: var(--font-ui-small);
+        font-weight: 550;
+        line-height: 1.25;
+      }
+
+      .tps-gcm-task-editor-property-name,
+      .tps-gcm-task-editor-property-key {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .tps-gcm-task-editor-property-key {
+        color: var(--text-faint);
+        font-size: var(--font-ui-smaller);
+        font-weight: 400;
+      }
+
+      .tps-gcm-task-editor-property-control {
+        display: flex;
+        align-items: center;
+        min-width: 0;
+      }
+
+      .tps-gcm-task-editor-property-input,
+      .tps-gcm-task-editor-property-button {
+        box-sizing: border-box;
+        width: 100%;
+        min-width: 0;
+        min-height: 34px;
+        margin: 0;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 7px;
+        background: var(--background-primary);
+        color: var(--text-normal);
+        font: inherit;
+      }
+
+      .tps-gcm-task-editor-property-input {
+        padding: 6px 8px;
+      }
+
+      .tps-gcm-task-editor-property-button {
+        display: block;
+        overflow: hidden;
+        padding: 6px 9px;
+        text-align: left;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .tps-gcm-task-editor-property-input:focus,
+      .tps-gcm-task-editor-property-button:focus-visible {
+        border-color: var(--interactive-accent);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 24%, transparent);
+        outline: none;
+      }
+
+      .tps-gcm-task-editor-property-input[aria-invalid="true"] {
+        border-color: var(--text-error);
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-error) 20%, transparent);
+      }
+
+      input[type="checkbox"].tps-gcm-task-editor-property-checkbox {
+        flex: 0 0 auto;
+        width: var(--checkbox-size);
+        height: var(--checkbox-size);
+        min-width: var(--checkbox-size);
+        margin: 0;
+        touch-action: manipulation;
+      }
+
       .tps-gcm-task-editor-hint {
         margin-top: -5px;
         color: var(--text-faint);
@@ -8905,6 +9030,43 @@ export const PLUGIN_STYLES = `
         .tps-gcm-task-editor-input {
           min-height: 76px;
           max-height: min(180px, 30dvh);
+        }
+
+        .tps-gcm-task-editor-properties {
+          max-height: min(240px, 32dvh);
+          padding: 9px;
+          scrollbar-gutter: auto;
+        }
+
+        .tps-gcm-task-editor-properties-title {
+          top: -9px;
+          margin: -9px -9px 1px;
+          padding-right: 9px;
+          padding-left: 9px;
+        }
+
+        .tps-gcm-task-editor-property {
+          grid-template-columns: minmax(0, 1fr);
+          gap: 5px;
+          padding-bottom: 3px;
+        }
+
+        .tps-gcm-task-editor-property-label {
+          flex-direction: row;
+          gap: 6px;
+          align-items: baseline;
+        }
+
+        .tps-gcm-task-editor-property-input,
+        .tps-gcm-task-editor-property-button {
+          min-height: 40px;
+          font-size: 16px;
+        }
+
+        input[type="checkbox"].tps-gcm-task-editor-property-checkbox {
+          width: max(var(--checkbox-size), 22px);
+          height: max(var(--checkbox-size), 22px);
+          min-width: max(var(--checkbox-size), 22px);
         }
 
         .tps-gcm-task-editor-actions {

@@ -4,7 +4,15 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.3.5` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.4.0` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
+## 1.4.0
+
+- The exact-line task editor now shows editable controls for every ordinary inline property already present on the task. Configured selectors use their effective options; date/time and recurrence fields use the existing TPS pickers; number, list, checkbox, and text fields use compact type-appropriate controls.
+- `scheduled`, `timeEstimate`, and `allDay` are staged as one schedule edit. Status stays owned by the task checkbox, while sync IDs, relationship carriers, completion/timestamp fields, disabled or hidden definitions, and TPS payload metadata remain attached but unavailable for accidental editing.
+- Task text and property changes save through one freshly resolved line mutation. Only explicitly changed property keys are applied, so concurrent changes to untouched fields survive, Cancel/no-op saves are byte-identical, and invalid numbers are rejected before writing.
+- Child date/recurrence pickers suspend and then restore the parent editor without discarding unsaved text. The bounded property panel, focus scrolling, sticky actions, safe-area padding, and 16 px mobile controls keep long property lists usable with a software keyboard.
+- This is a backward-compatible minor release with no settings or data migration. Minimum supported Obsidian remains 1.10.0. Final validation details and artifact hashes are recorded in `release-notes/1.4.0.md`.
 
 ## 1.3.5
 

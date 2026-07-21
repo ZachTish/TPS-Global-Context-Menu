@@ -444,8 +444,8 @@ test('normal task clicks open the exact-line quick editor across task surfaces',
   assert.match(serviceSource, /async openQuickEditorForElement\(taskEl: HTMLElement, sourceEl: HTMLElement \| null = taskEl\)/);
   assert.match(serviceSource, /getTaskEditableBody\(context\.rawLine\)/);
   assert.match(serviceSource, /setTaskEditableBody\(line, nextBody\)/);
-  assert.match(serviceSource, /Inline properties stay attached/);
-  assert.match(serviceSource, /if \(nextBody === initialBody\)/);
+  assert.match(serviceSource, /existing properties\. Hidden TPS metadata stays attached/);
+  assert.match(serviceSource, /if \(!bodyChanged && propertyChanges\.length === 0\)/);
   assert.match(serviceSource, /this\.updateTaskLine\(context/);
   assert.match(serviceSource, /TaskQuickEditor', 'open'/);
   assert.match(serviceSource, /TaskQuickEditor', 'save'/);
