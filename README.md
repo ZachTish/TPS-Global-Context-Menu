@@ -4,7 +4,15 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.3.3` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.3.4` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
+## 1.3.4
+
+- Obsidian Mobile task editors now consume the native Capacitor `keyboardWillShow` and `keyboardDidShow` height carried by the app shell. This keeps the editor and its actions above the software keyboard when iOS overlays the keyboard without changing either `window.innerHeight` or `window.visualViewport`.
+- Native keyboard height, layout viewport, and visual viewport are combined by taking the smallest usable height. A webview that already resized is not reduced a second time, including when the visual viewport has panned to keep the focused field visible. The native boundary remains active through `keyboardWillHide` and clears after `keyboardDidHide`.
+- This is a backward-compatible patch release with no settings or data migration. Minimum supported Obsidian remains 1.10.0.
+- Validation passed the focused task-editor/mobile-overlay suites (48/48), TypeScript, and the complete isolated release-snapshot suite (269/269), followed by a separate exact-snapshot production build/deploy. Obsidian 1.12.7 was reloaded with `Reload app without saving`; the Plugin QA TPS List rendered both task rows, and clicking the open task exposed the exact-line editor plus Open in note, Cancel, and Save. The editor was canceled without changing the QA note. Automated regressions cover frozen viewport APIs, already-resized and panned webviews, editor replacement, zero-height native events, rotation, and plugin teardown; final iOS device confirmation remains separate.
+- Final test-vault validation details and artifact hashes are recorded in `release-notes/1.3.4.md`.
 
 ## 1.3.3
 
@@ -245,7 +253,7 @@ Agent integrations must not use fuzzy task titles or broad search results as mut
 
 ### Mobile overlay and input contract
 
-- TPS-owned anchored cards use the shared `KeyboardAwareOverlay` utility and `.tps-keyboard-aware-overlay` class. The utility intersects `window.visualViewport` with the layout viewport, clamps the card to the portion both APIs report as visible, uses a compact bottom-sheet placement on phone-sized surfaces, and repositions throughout the keyboard animation. This intersection handles either viewport report lagging during iOS keyboard transitions.
+- TPS-owned anchored cards use the shared `KeyboardAwareOverlay` utility and `.tps-keyboard-aware-overlay` class. The utility intersects `window.visualViewport` with the layout viewport and Obsidian Mobile's native Capacitor keyboard height, clamps the card to the smallest reported usable area, uses a compact bottom-sheet placement on phone-sized surfaces, and repositions throughout the keyboard animation. Native keyboard events cover the iOS overlay mode where neither viewport changes; viewport intersection still handles either browser API lagging.
 - TPS-owned Obsidian modals use the shared `mod-tps-gcm` class. The plugin publishes visible-viewport CSS variables and the shared modal rules keep inputs and scrollable content inside the portion of the screen above the mobile keyboard. Mobile text controls retain a 16px minimum font size to avoid iOS focus zoom.
 - New editable popups must use the shared overlay utility rather than adding their own `visualViewport` listeners. New input modals must add `mod-tps-gcm`; custom modal classes may extend the appearance but must not replace the shared viewport rules.
 - The task quick editor and editable Base note preview are the first anchored surfaces migrated to this contract. All current GCM `Modal` subclasses now opt into the modal contract.

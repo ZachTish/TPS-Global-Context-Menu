@@ -23,8 +23,14 @@ test('every TPS Modal opts into the shared mobile input contract', () => {
 test('editable popup cards use the shared keyboard-aware overlay', () => {
   const taskEditor = readFileSync(`${srcRoot}/services/task-line-context-menu-service.ts`, 'utf8');
   const notePreview = readFileSync(`${srcRoot}/menu/persistent-menu-manager.ts`, 'utf8');
+  const mobileOverlay = readFileSync(`${srcRoot}/utils/mobile-overlay.ts`, 'utf8');
   assert.match(taskEditor, /new KeyboardAwareOverlay\(card, anchorEl/);
   assert.match(notePreview, /new KeyboardAwareOverlay\(popover, anchorEl/);
+  assert.match(mobileOverlay, /NATIVE_KEYBOARD_SHOW_EVENTS = \['keyboardWillShow', 'keyboardDidShow'\]/);
+  assert.match(mobileOverlay, /window\.addEventListener\('keyboardDidHide', this\.keyboardDidHideHandler\)/);
+  assert.match(mobileOverlay, /window\.removeEventListener\('keyboardDidHide', this\.keyboardDidHideHandler\)/);
+  assert.match(mobileOverlay, /getVisibleViewport\(window, sharedNativeKeyboard\)/);
+  assert.match(mobileOverlay, /resetNativeKeyboard\(sharedNativeKeyboard\);\s+const root = document\.documentElement\.style/);
 });
 
 test('existing TPS plugin modal files opt into the shared mobile contract', () => {

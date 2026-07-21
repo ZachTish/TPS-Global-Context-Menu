@@ -22,11 +22,28 @@ export type OverlayPlacement = {
   compact: boolean;
 };
 
+export type NativeKeyboardState = {
+  height: number;
+  baselineHeight: number | null;
+  baselineWidth: number | null;
+};
+
 const REPOSITION_DELAYS = [0, 80, 220, 420];
+const NATIVE_KEYBOARD_SHOW_EVENTS = ['keyboardWillShow', 'keyboardDidShow'] as const;
+const sharedNativeKeyboard: NativeKeyboardState = {
+  height: 0,
+  baselineHeight: null,
+  baselineWidth: null,
+};
 
 function positiveDimension(value: unknown): number | null {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function nonNegativeDimension(value: unknown): number | null {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
 }
 
 function viewportOffset(value: unknown): number {
@@ -34,7 +51,7 @@ function viewportOffset(value: unknown): number {
   return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
 }
 
-export function getVisibleViewport(targetWindow: Window = window): VisibleViewport {
+function getViewportIntersection(targetWindow: Window): VisibleViewport {
   const viewport = targetWindow.visualViewport;
   const layoutWidth = positiveDimension(targetWindow.innerWidth);
   const layoutHeight = positiveDimension(targetWindow.innerHeight);
@@ -58,6 +75,98 @@ export function getVisibleViewport(targetWindow: Window = window): VisibleViewpo
     top,
     width: Math.max(1, right - left),
     height: Math.max(1, bottom - top),
+  };
+}
+
+export function readNativeKeyboardHeight(event: Event): number | null {
+  const direct = nonNegativeDimension((event as Event & { keyboardHeight?: unknown }).keyboardHeight);
+  const detail = nonNegativeDimension((event as CustomEvent<{ keyboardHeight?: unknown }>).detail?.keyboardHeight);
+  return direct ?? detail;
+}
+
+export function applyNativeKeyboardShow(
+  state: NativeKeyboardState,
+  event: Event,
+  targetWindow: Window = window,
+): boolean {
+  const height = readNativeKeyboardHeight(event);
+  if (height === null) return false;
+  state.height = height;
+  if (height === 0) return true;
+  if (state.baselineHeight === null || state.baselineWidth === null) return false;
+  seedNativeKeyboardBaseline(state, targetWindow);
+  return true;
+}
+
+export function clearNativeKeyboard(state: NativeKeyboardState): void {
+  state.height = 0;
+}
+
+export function resetNativeKeyboard(state: NativeKeyboardState): void {
+  state.height = 0;
+  state.baselineHeight = null;
+  state.baselineWidth = null;
+}
+
+function dimensionsApproximatelyMatch(left: number, right: number): boolean {
+  return Math.abs(left - right) <= Math.max(2, Math.min(left, right) * 0.08);
+}
+
+export function seedNativeKeyboardBaseline(
+  state: NativeKeyboardState,
+  targetWindow: Window = window,
+): VisibleViewport {
+  const viewport = getViewportIntersection(targetWindow);
+  const widthChanged = state.baselineWidth === null
+    || Math.abs(state.baselineWidth - viewport.width) > 1;
+  if (state.height > 0) {
+    // Without a hidden-state baseline, a shrunken WebView is indistinguishable
+    // from a full-height one. Keep the raw viewport instead of double-clamping.
+    if (state.baselineHeight === null || state.baselineWidth === null) return viewport;
+    if (!widthChanged) return viewport;
+
+    const previousHeight = state.baselineHeight;
+    const previousWidth = state.baselineWidth;
+    const looksRotated = previousHeight !== null
+      && previousWidth !== null
+      && dimensionsApproximatelyMatch(viewport.width, previousHeight);
+    const expectedFullHeight = looksRotated ? previousWidth : previousHeight;
+    const nextBaselineHeight = Math.max(viewport.height, expectedFullHeight ?? viewport.height);
+
+    if (viewport.height < nextBaselineHeight - 1) {
+      // A resized WebView already exposes the new keyboard boundary. Preserve
+      // that boundary instead of subtracting the stale pre-rotation height.
+      state.height = nextBaselineHeight - viewport.height;
+    } else if (nextBaselineHeight > viewport.width && previousHeight !== null) {
+      // A frozen portrait viewport needs a conservative clamp until Capacitor
+      // supplies its next height. The prior landscape height is a safe ceiling.
+      state.height = Math.max(state.height, previousHeight);
+    }
+    state.height = Math.min(state.height, Math.max(0, nextBaselineHeight - 1));
+    state.baselineHeight = nextBaselineHeight;
+    state.baselineWidth = viewport.width;
+    return viewport;
+  }
+
+  state.baselineHeight = widthChanged || state.baselineHeight === null
+    ? viewport.height
+    : Math.max(state.baselineHeight, viewport.height);
+  state.baselineWidth = viewport.width;
+  return viewport;
+}
+
+export function getVisibleViewport(
+  targetWindow: Window = window,
+  nativeKeyboard?: NativeKeyboardState,
+): VisibleViewport {
+  const viewport = getViewportIntersection(targetWindow);
+  const keyboardHeight = positiveDimension(nativeKeyboard?.height);
+  const baselineHeight = positiveDimension(nativeKeyboard?.baselineHeight);
+  if (keyboardHeight === null || baselineHeight === null) return viewport;
+  const nativeVisibleHeight = Math.max(1, baselineHeight - keyboardHeight);
+  return {
+    ...viewport,
+    height: Math.min(viewport.height, nativeVisibleHeight),
   };
 }
 
@@ -103,6 +212,15 @@ export class KeyboardAwareOverlay {
   private readonly timers = new Set<number>();
   private readonly repositionHandler = () => this.reposition();
   private readonly focusHandler = () => this.schedule();
+  private readonly keyboardShowHandler = (event: Event) => {
+    applyNativeKeyboardShow(sharedNativeKeyboard, event);
+    this.schedule();
+  };
+  private readonly keyboardWillHideHandler = () => this.schedule();
+  private readonly keyboardDidHideHandler = () => {
+    clearNativeKeyboard(sharedNativeKeyboard);
+    this.schedule();
+  };
 
   constructor(
     private readonly element: HTMLElement,
@@ -115,6 +233,11 @@ export class KeyboardAwareOverlay {
     window.visualViewport?.addEventListener('resize', this.repositionHandler);
     window.visualViewport?.addEventListener('scroll', this.repositionHandler);
     window.addEventListener('resize', this.repositionHandler);
+    for (const eventName of NATIVE_KEYBOARD_SHOW_EVENTS) {
+      window.addEventListener(eventName, this.keyboardShowHandler);
+    }
+    window.addEventListener('keyboardWillHide', this.keyboardWillHideHandler);
+    window.addEventListener('keyboardDidHide', this.keyboardDidHideHandler);
     this.element.addEventListener('focusin', this.focusHandler);
     this.element.addEventListener('focusout', this.focusHandler);
     this.reposition();
@@ -131,7 +254,7 @@ export class KeyboardAwareOverlay {
 
   reposition(): void {
     if (!this.element.isConnected) return;
-    const viewport = getVisibleViewport();
+    const viewport = getVisibleViewport(window, sharedNativeKeyboard);
     const forceCompact = document.body.classList.contains('is-mobile')
       || document.body.classList.contains('is-phone');
     const compactBottomSheet = forceCompact && this.options.compactBottomSheet !== false;
@@ -163,6 +286,11 @@ export class KeyboardAwareOverlay {
     window.visualViewport?.removeEventListener('resize', this.repositionHandler);
     window.visualViewport?.removeEventListener('scroll', this.repositionHandler);
     window.removeEventListener('resize', this.repositionHandler);
+    for (const eventName of NATIVE_KEYBOARD_SHOW_EVENTS) {
+      window.removeEventListener(eventName, this.keyboardShowHandler);
+    }
+    window.removeEventListener('keyboardWillHide', this.keyboardWillHideHandler);
+    window.removeEventListener('keyboardDidHide', this.keyboardDidHideHandler);
     this.element.removeEventListener('focusin', this.focusHandler);
     this.element.removeEventListener('focusout', this.focusHandler);
   }
@@ -175,11 +303,12 @@ export class KeyboardAwareOverlay {
 
 export function installVisibleViewportContract(): () => void {
   let timers: number[] = [];
-  let baselineHeight = Math.max(window.innerHeight, window.visualViewport?.height ?? 0);
+  resetNativeKeyboard(sharedNativeKeyboard);
 
   const update = (): void => {
-    const viewport = getVisibleViewport();
-    baselineHeight = Math.max(baselineHeight, viewport.height);
+    const rawViewport = seedNativeKeyboardBaseline(sharedNativeKeyboard);
+    const viewport = getVisibleViewport(window, sharedNativeKeyboard);
+    const baselineHeight = positiveDimension(sharedNativeKeyboard.baselineHeight) ?? rawViewport.height;
     const keyboardInset = Math.max(0, baselineHeight - viewport.height);
     const root = document.documentElement.style;
     root.setProperty('--tps-visible-viewport-left', `${viewport.left}px`);
@@ -191,6 +320,15 @@ export function installVisibleViewportContract(): () => void {
   const schedule = (): void => {
     for (const timer of timers) window.clearTimeout(timer);
     timers = REPOSITION_DELAYS.map((delay) => window.setTimeout(update, delay));
+  };
+  const handleKeyboardShow = (event: Event): void => {
+    applyNativeKeyboardShow(sharedNativeKeyboard, event);
+    schedule();
+  };
+  const handleKeyboardWillHide = (): void => schedule();
+  const handleKeyboardDidHide = (): void => {
+    clearNativeKeyboard(sharedNativeKeyboard);
+    schedule();
   };
   const handleFocus = (event: Event): void => {
     schedule();
@@ -210,6 +348,11 @@ export function installVisibleViewportContract(): () => void {
   window.visualViewport?.addEventListener('resize', schedule);
   window.visualViewport?.addEventListener('scroll', schedule);
   window.addEventListener('resize', schedule);
+  for (const eventName of NATIVE_KEYBOARD_SHOW_EVENTS) {
+    window.addEventListener(eventName, handleKeyboardShow);
+  }
+  window.addEventListener('keyboardWillHide', handleKeyboardWillHide);
+  window.addEventListener('keyboardDidHide', handleKeyboardDidHide);
   document.addEventListener('focusin', handleFocus, true);
   document.addEventListener('focusout', schedule, true);
   update();
@@ -219,8 +362,14 @@ export function installVisibleViewportContract(): () => void {
     window.visualViewport?.removeEventListener('resize', schedule);
     window.visualViewport?.removeEventListener('scroll', schedule);
     window.removeEventListener('resize', schedule);
+    for (const eventName of NATIVE_KEYBOARD_SHOW_EVENTS) {
+      window.removeEventListener(eventName, handleKeyboardShow);
+    }
+    window.removeEventListener('keyboardWillHide', handleKeyboardWillHide);
+    window.removeEventListener('keyboardDidHide', handleKeyboardDidHide);
     document.removeEventListener('focusin', handleFocus, true);
     document.removeEventListener('focusout', schedule, true);
+    resetNativeKeyboard(sharedNativeKeyboard);
     const root = document.documentElement.style;
     for (const name of [
       '--tps-visible-viewport-left',

@@ -586,6 +586,152 @@ test('mobile overlay intersects stale visual and layout viewport dimensions', as
   assert.ok(placement.top + Math.min(300, placement.maxHeight) <= 348);
 });
 
+test('mobile overlay clamps frozen viewport APIs to the native keyboard boundary', async () => {
+  const {
+    applyNativeKeyboardShow,
+    clearNativeKeyboard,
+    computeOverlayPlacement,
+    getVisibleViewport,
+    readNativeKeyboardHeight,
+    resetNativeKeyboard,
+    seedNativeKeyboardBaseline,
+  } = await importMobileOverlayUtility();
+  const frozenWindow = {
+    innerWidth: 390,
+    innerHeight: 844,
+    visualViewport: { offsetLeft: 0, offsetTop: 0, width: 390, height: 844 },
+  };
+  const nativeKeyboard = { height: 0, baselineHeight: null, baselineWidth: null };
+
+  assert.equal(readNativeKeyboardHeight({ keyboardHeight: 340 }), 340);
+  assert.equal(readNativeKeyboardHeight({ detail: { keyboardHeight: 340 } }), 340);
+  assert.equal(readNativeKeyboardHeight({ keyboardHeight: 0 }), 0);
+  assert.equal(readNativeKeyboardHeight({}), null);
+  assert.deepEqual(seedNativeKeyboardBaseline(nativeKeyboard, frozenWindow), {
+    left: 0,
+    top: 0,
+    width: 390,
+    height: 844,
+  });
+  assert.equal(applyNativeKeyboardShow(nativeKeyboard, { keyboardHeight: 340 }, frozenWindow), true);
+  assert.deepEqual(nativeKeyboard, { height: 340, baselineHeight: 844, baselineWidth: 390 });
+  assert.deepEqual(
+    getVisibleViewport(frozenWindow, nativeKeyboard),
+    { left: 0, top: 0, width: 390, height: 504 },
+  );
+  const keyboardSafePlacement = computeOverlayPlacement(
+    getVisibleViewport(frozenWindow, nativeKeyboard),
+    { left: 20, top: 500, bottom: 540 },
+    305,
+    { maxWidth: 480 },
+    true,
+  );
+  assert.deepEqual(keyboardSafePlacement, {
+    left: 12,
+    top: 187,
+    width: 366,
+    maxHeight: 480,
+    compact: true,
+  });
+  assert.ok(keyboardSafePlacement.top + 305 <= 504);
+
+  const alreadyShrunkWindow = {
+    innerWidth: 390,
+    innerHeight: 504,
+    visualViewport: { offsetLeft: 0, offsetTop: 0, width: 390, height: 504 },
+  };
+  assert.equal(applyNativeKeyboardShow(nativeKeyboard, { detail: { keyboardHeight: 340 } }, alreadyShrunkWindow), true);
+  assert.deepEqual(nativeKeyboard, { height: 340, baselineHeight: 844, baselineWidth: 390 });
+  assert.deepEqual(
+    getVisibleViewport(alreadyShrunkWindow, nativeKeyboard),
+    { left: 0, top: 0, width: 390, height: 504 },
+  );
+
+  const pannedShrunkWindow = {
+    innerWidth: 390,
+    innerHeight: 844,
+    visualViewport: { offsetLeft: 0, offsetTop: 340, width: 390, height: 504 },
+  };
+  assert.deepEqual(
+    getVisibleViewport(pannedShrunkWindow, nativeKeyboard),
+    { left: 0, top: 340, width: 390, height: 504 },
+  );
+
+  const lateState = { height: 0, baselineHeight: null, baselineWidth: null };
+  assert.equal(applyNativeKeyboardShow(lateState, { keyboardHeight: 340 }, alreadyShrunkWindow), false);
+  assert.deepEqual(lateState, { height: 340, baselineHeight: null, baselineWidth: null });
+  seedNativeKeyboardBaseline(lateState, alreadyShrunkWindow);
+  assert.deepEqual(lateState, { height: 340, baselineHeight: null, baselineWidth: null });
+  assert.deepEqual(
+    getVisibleViewport(alreadyShrunkWindow, lateState),
+    { left: 0, top: 0, width: 390, height: 504 },
+  );
+
+  const landscapeWindow = {
+    innerWidth: 844,
+    innerHeight: 390,
+    visualViewport: { offsetLeft: 0, offsetTop: 0, width: 844, height: 390 },
+  };
+  seedNativeKeyboardBaseline(nativeKeyboard, landscapeWindow);
+  assert.deepEqual(nativeKeyboard, { height: 340, baselineHeight: 390, baselineWidth: 844 });
+  assert.deepEqual(
+    getVisibleViewport(landscapeWindow, nativeKeyboard),
+    { left: 0, top: 0, width: 844, height: 50 },
+  );
+  assert.equal(applyNativeKeyboardShow(nativeKeyboard, { keyboardHeight: 220 }, landscapeWindow), true);
+  assert.deepEqual(nativeKeyboard, { height: 220, baselineHeight: 390, baselineWidth: 844 });
+  assert.deepEqual(
+    getVisibleViewport(landscapeWindow, nativeKeyboard),
+    { left: 0, top: 0, width: 844, height: 170 },
+  );
+
+  const rotatedAfterResize = { height: 340, baselineHeight: 844, baselineWidth: 390 };
+  const resizedLandscapeWindow = {
+    innerWidth: 844,
+    innerHeight: 170,
+    visualViewport: { offsetLeft: 0, offsetTop: 0, width: 844, height: 170 },
+  };
+  seedNativeKeyboardBaseline(rotatedAfterResize, resizedLandscapeWindow);
+  assert.deepEqual(rotatedAfterResize, { height: 220, baselineHeight: 390, baselineWidth: 844 });
+  assert.deepEqual(
+    getVisibleViewport(resizedLandscapeWindow, rotatedAfterResize),
+    { left: 0, top: 0, width: 844, height: 170 },
+  );
+
+  const eventAfterResize = { height: 340, baselineHeight: 844, baselineWidth: 390 };
+  assert.equal(
+    applyNativeKeyboardShow(eventAfterResize, { keyboardHeight: 220 }, resizedLandscapeWindow),
+    true,
+  );
+  assert.deepEqual(eventAfterResize, { height: 220, baselineHeight: 390, baselineWidth: 844 });
+  assert.deepEqual(
+    getVisibleViewport(resizedLandscapeWindow, eventAfterResize),
+    { left: 0, top: 0, width: 844, height: 170 },
+  );
+
+  seedNativeKeyboardBaseline(nativeKeyboard, frozenWindow);
+  assert.deepEqual(nativeKeyboard, { height: 390, baselineHeight: 844, baselineWidth: 390 });
+  assert.deepEqual(
+    getVisibleViewport(frozenWindow, nativeKeyboard),
+    { left: 0, top: 0, width: 390, height: 454 },
+  );
+
+  assert.equal(applyNativeKeyboardShow(nativeKeyboard, { keyboardHeight: 0 }, frozenWindow), true);
+  assert.deepEqual(nativeKeyboard, { height: 0, baselineHeight: 844, baselineWidth: 390 });
+
+  clearNativeKeyboard(nativeKeyboard);
+  assert.deepEqual(nativeKeyboard, { height: 0, baselineHeight: 844, baselineWidth: 390 });
+  seedNativeKeyboardBaseline(nativeKeyboard, frozenWindow);
+  assert.deepEqual(nativeKeyboard, { height: 0, baselineHeight: 844, baselineWidth: 390 });
+  assert.equal(applyNativeKeyboardShow(nativeKeyboard, {}, frozenWindow), false);
+
+  applyNativeKeyboardShow(nativeKeyboard, { keyboardHeight: 340 }, frozenWindow);
+  resetNativeKeyboard(nativeKeyboard);
+  assert.deepEqual(nativeKeyboard, { height: 0, baselineHeight: null, baselineWidth: null });
+  seedNativeKeyboardBaseline(nativeKeyboard, frozenWindow);
+  assert.deepEqual(nativeKeyboard, { height: 0, baselineHeight: 844, baselineWidth: 390 });
+});
+
 test('custom Base note links use Hover Editor while task bodies stay task-scoped', () => {
   assert.match(mainSource, /private registerBasesLinkPreviewHandler\(\): void/);
   assert.match(mainSource, /openBaseNotePreviewFromClick\(evt: MouseEvent, file: TFile, anchorEl: HTMLElement, force = false\): boolean/);
