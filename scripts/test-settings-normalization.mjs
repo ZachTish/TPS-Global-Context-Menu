@@ -21,6 +21,8 @@ const notebookRulesSectionSource = readFileSync(new URL('../src/notebook-navigat
 const notebookBucketSectionSource = readFileSync(new URL('../src/notebook-navigator-settings/bucket-section.ts', import.meta.url), 'utf8');
 const notebookHideSectionSource = readFileSync(new URL('../src/notebook-navigator-settings/hide-section.ts', import.meta.url), 'utf8');
 const fileNamingServiceSource = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
+const settingsPersistenceSource = readFileSync(new URL('../src/settings-persistence.ts', import.meta.url), 'utf8');
+const timeTrackingSource = readFileSync(new URL('../src/services/time-tracking-service.ts', import.meta.url), 'utf8');
 
 async function importModule(relativePath) {
   const build = await esbuild.build({
@@ -53,6 +55,211 @@ test('linked subitem mapping presentation fields survive textarea-style parse re
     { checkboxState: '[x]', statuses: ['complete'], toggleTargetStatus: 'todo', icon: 'check', label: 'Complete' },
     { checkboxState: '[custom]', statuses: ['waiting'], toggleTargetStatus: 'todo', icon: undefined, label: undefined },
   ]);
+});
+
+test('settings persistence merges only locally changed keys into the newest disk payload', async () => {
+  const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
+  let disk = {
+    settingA: 'desktop-old',
+    settingB: 'mobile-old',
+    lastArchiveTagSweepDate: '',
+    futureSetting: { enabled: true },
+  };
+  const persisted = [];
+  const coordinator = new SettingsPersistenceCoordinator(
+    async () => structuredClone(disk),
+    async (next) => {
+      persisted.push(structuredClone(next));
+      disk = structuredClone(next);
+    },
+  );
+  coordinator.setBaseline(disk);
+
+  disk.settingB = 'mobile-new';
+  await coordinator.request({
+    settingA: 'desktop-new',
+    settingB: 'mobile-old',
+    lastArchiveTagSweepDate: '',
+    futureSetting: { enabled: true },
+  });
+  assert.equal(disk.settingA, 'desktop-new');
+  assert.equal(disk.settingB, 'mobile-new');
+  assert.deepEqual(disk.futureSetting, { enabled: true });
+
+  coordinator.setBaseline(disk);
+  disk.settingA = 'mobile-newer';
+  await coordinator.request({
+    ...persisted.at(-1),
+    lastArchiveTagSweepDate: '2026-07-21',
+  });
+  assert.equal(disk.settingA, 'mobile-newer');
+  assert.equal(disk.lastArchiveTagSweepDate, '2026-07-21');
+});
+
+test('settings persistence serializes rapid edits and drains the newest snapshot', async () => {
+  const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
+  let disk = { folder: 'A', enabled: false };
+  let releaseFirst;
+  const firstSaveGate = new Promise((resolve) => { releaseFirst = resolve; });
+  let saveCount = 0;
+  const coordinator = new SettingsPersistenceCoordinator(
+    async () => structuredClone(disk),
+    async (next) => {
+      saveCount += 1;
+      if (saveCount === 1) await firstSaveGate;
+      disk = structuredClone(next);
+    },
+  );
+  coordinator.setBaseline(disk);
+
+  const first = coordinator.request({ folder: 'AB', enabled: false });
+  await Promise.resolve();
+  const second = coordinator.request({ folder: 'ABC', enabled: true });
+  releaseFirst();
+  await Promise.all([first, second]);
+
+  assert.equal(saveCount, 2);
+  assert.deepEqual(disk, { folder: 'ABC', enabled: true });
+});
+
+test('settings persistence keeps an in-flight revert as the newest intent', async () => {
+  const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
+  let disk = { value: 'old', synchronized: 'keep' };
+  let releaseFirst;
+  let firstWriteStarted;
+  const firstStarted = new Promise((resolve) => { firstWriteStarted = resolve; });
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const writes = [];
+  const coordinator = new SettingsPersistenceCoordinator(
+    async () => structuredClone(disk),
+    async (next) => {
+      writes.push(structuredClone(next));
+      if (writes.length === 1) {
+        firstWriteStarted();
+        await firstGate;
+      }
+      disk = structuredClone(next);
+    },
+  );
+  coordinator.setBaseline(disk);
+
+  const first = coordinator.request({ value: 'new', synchronized: 'keep' });
+  await firstStarted;
+  const reverted = coordinator.request({ value: 'old', synchronized: 'keep' });
+  releaseFirst();
+  await Promise.all([first, reverted]);
+
+  assert.deepEqual(writes.map((entry) => entry.value), ['new', 'old']);
+  assert.equal(disk.value, 'old');
+});
+
+test('a third settings request cannot erase a queued revert intent', async () => {
+  const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
+  let disk = { value: 'old', other: 'old' };
+  let releaseFirst;
+  let markFirstStarted;
+  const firstStarted = new Promise((resolve) => { markFirstStarted = resolve; });
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  let writes = 0;
+  const coordinator = new SettingsPersistenceCoordinator(
+    async () => structuredClone(disk),
+    async (next) => {
+      writes += 1;
+      if (writes === 1) {
+        markFirstStarted();
+        await firstGate;
+      }
+      disk = structuredClone(next);
+    },
+  );
+  coordinator.setBaseline(disk);
+
+  const first = coordinator.request({ value: 'new', other: 'old' });
+  await firstStarted;
+  const reverted = coordinator.request({ value: 'old', other: 'old' });
+  const third = coordinator.request({ value: 'old', other: 'new' });
+  releaseFirst();
+  await Promise.all([first, reverted, third]);
+
+  assert.equal(writes, 2);
+  assert.deepEqual(disk, { value: 'old', other: 'new' });
+});
+
+test('a newer settings snapshot supersedes a failed in-flight write', async () => {
+  const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
+  let disk = { value: 'old' };
+  let releaseFailure;
+  let firstWriteStarted;
+  const firstStarted = new Promise((resolve) => { firstWriteStarted = resolve; });
+  const failureGate = new Promise((resolve) => { releaseFailure = resolve; });
+  let attempts = 0;
+  const coordinator = new SettingsPersistenceCoordinator(
+    async () => structuredClone(disk),
+    async (next) => {
+      attempts += 1;
+      if (attempts === 1) {
+        firstWriteStarted();
+        await failureGate;
+        throw new Error('first write failed');
+      }
+      disk = structuredClone(next);
+    },
+  );
+  coordinator.setBaseline(disk);
+
+  const first = coordinator.request({ value: 'first' });
+  await firstStarted;
+  const newest = coordinator.request({ value: 'newest' });
+  releaseFailure();
+  await Promise.all([first, newest]);
+
+  assert.equal(attempts, 2);
+  assert.equal(disk.value, 'newest');
+});
+
+test('a request queued at drain completion starts a new durable drain', async () => {
+  const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
+  let disk = { value: 'old' };
+  let coordinator;
+  let completionWindowRequest;
+  let writeCount = 0;
+  coordinator = new SettingsPersistenceCoordinator(
+    async () => structuredClone(disk),
+    async (next) => {
+      writeCount += 1;
+      disk = structuredClone(next);
+      if (writeCount === 1) {
+        queueMicrotask(() => queueMicrotask(() => {
+          completionWindowRequest = coordinator.request({ value: 'newest' });
+        }));
+      }
+    },
+  );
+  coordinator.setBaseline(disk);
+
+  await coordinator.request({ value: 'first' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await completionWindowRequest;
+
+  assert.equal(writeCount, 2);
+  assert.equal(disk.value, 'newest');
+  await coordinator.waitForIdle();
+});
+
+test('settings controls use immediate persistence rather than unload-unsafe timers', () => {
+  assert.doesNotMatch(mainSource, /private debouncedSave = debounce/);
+  assert.doesNotMatch(settingsTabSource, /const debouncedSave = debounce/);
+  assert.match(mainSource, /await this\.persistSettingsSnapshot\(\);/);
+  assert.match(settingsPersistenceSource, /await this\.loadLatest\(\)/);
+  assert.match(settingsPersistenceSource, /mergeChangedSettings\(latest, requested\.snapshot, requested\.changedKeys\)/);
+  assert.match(timeTrackingSource, /await this\.plugin\.persistRuntimeSettingsState\(\)/);
+  assert.doesNotMatch(timeTrackingSource, /saveData\(this\.plugin\.settings\)/);
+  assert.equal(
+    (mainSource.match(/this\.saveData\(/g) ?? []).length,
+    1,
+    'only the persistence coordinator adapter may call saveData directly',
+  );
+  assert.match(mainSource, /if \(needsSettingsMigration\) await this\.persistSettingsSnapshot\(\);/);
 });
 
 test('parent link format and notebook navigator smart sort sanitize to one canonical shape', async () => {
@@ -126,7 +333,8 @@ test('retired bundled properties migrate once without rewriting saved Home actio
   assert.match(mainSource, /const normalizedProperties = this\.normalizeCustomProperties\(this\.settings\.properties\);/);
   assert.match(mainSource, /this\.settings\.properties = this\.removeRetiredBundledCustomProperties\(normalizedProperties\);/);
   assert.match(mainSource, /!id\.startsWith\('tps-health-'\) && !LEGACY_HEALTH_CUSTOM_PROPERTY_IDS\.has\(id\)/);
-  assert.match(mainSource, /hadRetiredHomeCaptureHeadingSettings \|\| needsActivityBasePathMigration \|\| removedRetiredPropertyCount > 0[\s\S]{0,100}await this\.saveData\(this\.settings\)/);
+  assert.match(mainSource, /const needsSettingsMigration =[\s\S]{0,180}removedRetiredPropertyCount > 0;/);
+  assert.match(mainSource, /needsSettingsMigration[\s\S]{0,180}preNormalizationSettings[\s\S]{0,180}if \(needsSettingsMigration\) await this\.persistSettingsSnapshot\(\);/);
   assert.match(mainSource, /migration:removed-retired-bundled-properties'[\s\S]{0,120}count: removedRetiredPropertyCount/);
   assert.match(mainSource, /this\.settings\.homeComponentActions = normalizeHomeComponentActions\(this\.settings\.homeComponentActions\);/);
   assert.doesNotMatch(mainSource, /const activityActions = this\.settings\.homeComponentActions/);

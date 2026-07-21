@@ -1,4 +1,4 @@
-import { BasesView, Plugin, QueryController, TFile, WorkspaceLeaf, Menu, debounce, Notice, normalizePath, Platform, type BasesViewConfig, type ViewOption } from 'obsidian';
+import { BasesView, Plugin, QueryController, TFile, WorkspaceLeaf, Menu, Notice, normalizePath, Platform, type BasesViewConfig, type ViewOption } from 'obsidian';
 import {
   BuildPanelOptions,
   HideRule,
@@ -83,6 +83,7 @@ import { resolveCustomProperties } from './resolve-profiles';
 import { MIGRATED_TASK_MAPPING } from './constants/task-migration';
 import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { installVisibleViewportContract } from './utils/mobile-overlay';
+import { SettingsPersistenceCoordinator, type SettingsRecord } from './settings-persistence';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -328,10 +329,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   taskCheckboxHandler: TaskCheckboxHandler;
   private fileExclusionService: AutoFrontmatterExclusionService;
 
-  // Create a debounced save function
-  private debouncedSave = debounce(async () => {
-    await this.saveData(this.settings);
-  }, 1000, false);
+  private settingsPersistence: SettingsPersistenceCoordinator | null = null;
 
   private getStrictLinkedSubitemMappings() {
     return [
@@ -1880,6 +1878,44 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     document.body?.classList?.remove('tps-context-hidden-for-keyboard');
   }
 
+  private reconcilePersistedSettings(
+    requested: SettingsRecord,
+    persisted: SettingsRecord,
+  ): void {
+    const live = this.settings as unknown as SettingsRecord;
+    const keys = new Set([...Object.keys(requested), ...Object.keys(persisted)]);
+    for (const key of keys) {
+      if (JSON.stringify(live[key]) !== JSON.stringify(requested[key])) continue;
+      if (Object.prototype.hasOwnProperty.call(persisted, key)) {
+        live[key] = JSON.parse(JSON.stringify({ value: persisted[key] })).value;
+      } else {
+        delete live[key];
+      }
+    }
+  }
+
+  private ensureSettingsPersistence(initialBaseline?: SettingsRecord): SettingsPersistenceCoordinator {
+    if (!this.settingsPersistence) {
+      this.settingsPersistence = new SettingsPersistenceCoordinator(
+        async () => (await this.loadData()) as SettingsRecord | null,
+        async (settings) => this.saveData(settings),
+        (requested, persisted) => this.reconcilePersistedSettings(requested, persisted),
+      );
+      this.settingsPersistence.setBaseline(
+        initialBaseline ?? this.settings as unknown as SettingsRecord,
+      );
+    }
+    return this.settingsPersistence;
+  }
+
+  private persistSettingsSnapshot(): Promise<void> {
+    return this.ensureSettingsPersistence().request(this.settings as unknown as SettingsRecord);
+  }
+
+  async persistRuntimeSettingsState(): Promise<void> {
+    await this.persistSettingsSnapshot();
+  }
+
   async loadSettings(): Promise<void> {
     const loaded = (await this.loadData()) as Partial<TPSGlobalContextMenuSettings> & {
       enableShiftClickCancel?: boolean;
@@ -1899,6 +1935,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       );
     }
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
+    const preNormalizationSettings = JSON.parse(JSON.stringify(this.settings)) as SettingsRecord;
     this.stripLegacySettingsFields(this.settings as unknown as Record<string, unknown>);
     const normalizedProperties = this.normalizeCustomProperties(this.settings.properties);
     this.settings.properties = this.removeRetiredBundledCustomProperties(normalizedProperties);
@@ -2038,9 +2075,17 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       this.settings.linkedSubitemCheckboxMappings = this.getStrictLinkedSubitemMappings();
     }
     logger.setLoggingEnabled(this.settings.enableLogging);
-    if (hadRetiredHomeCaptureHeadingSettings || needsActivityBasePathMigration || removedRetiredPropertyCount > 0) {
-      await this.saveData(this.settings);
-    }
+    const needsSettingsMigration =
+      hadRetiredHomeCaptureHeadingSettings ||
+      needsActivityBasePathMigration ||
+      removedRetiredPropertyCount > 0;
+    this.settingsPersistence = null;
+    this.ensureSettingsPersistence(
+      needsSettingsMigration
+        ? preNormalizationSettings
+        : this.settings as unknown as SettingsRecord,
+    );
+    if (needsSettingsMigration) await this.persistSettingsSnapshot();
     if (hadRetiredHomeCaptureHeadingSettings) {
       logger.flow('Settings', 'migration:removed-home-capture-heading');
     }
@@ -2471,7 +2516,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     } else {
       this.stopArchiveTagAutomation();
     }
-    this.debouncedSave();
+    await this.persistSettingsSnapshot();
     this.overlayRenderingService?.invalidate({
       reason: 'settings-save',
       surfaces: ['menus', 'linked-subitems', 'daily-nav'],
@@ -2877,7 +2922,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     const result = await this.noteOperationService.sweepArchiveTaggedFiles(reason);
     this.settings.lastArchiveTagSweepDate = todayKey;
-    await this.saveData(this.settings);
+    await this.persistSettingsSnapshot();
     logger.log(`[TPS GCM] Archive tag sweep complete (${reason})`, result);
   }
 

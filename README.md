@@ -4,7 +4,14 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.3.4` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.3.5` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
+## 1.3.5
+
+- Settings persistence now reloads the newest plugin data and merges only locally changed fields, preserving synchronized choices, archive/runtime state, and unknown newer-release fields.
+- Rapid edits retain quick reverts, every caller waits for the full durable drain, queued newer values supersede failed in-flight writes, and completion-window edits cannot be acknowledged before they are saved.
+- Startup migration and time-tracking state updates use the same coordinator; no runtime path writes a stale whole-settings snapshot directly. Settings text controls persist each change without unload-unsafe debounce timers.
+- This backward-compatible patch keeps the minimum supported Obsidian version at 1.10.0 and requires no manual migration.
 
 ## 1.3.4
 

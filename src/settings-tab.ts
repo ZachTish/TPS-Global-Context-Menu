@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, TextComponent, debounce } from 'obsidian';
+import { App, PluginSettingTab, Setting, TextComponent } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
 import type { AppearanceSettingKey, CustomProperty, LinkedSubitemCheckboxMapping, ViewModeConditionOperator, ViewModeConditionType, ViewModeRule, ViewModeRuleCondition } from './types';
 import { BucketSectionRenderer } from './notebook-navigator-settings/bucket-section';
@@ -648,8 +648,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
     containerEl.empty();
 
-    const debouncedSave = debounce(() => this.plugin.saveSettings(), 300);
-
     const saveAppearance = async () => {
       await this.plugin.saveSettings();
     };
@@ -712,9 +710,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         text
           .setPlaceholder('e.g., Attachments or Notes/Attachments')
           .setValue(this.plugin.settings.defaultAttachmentsPath)
-          .onChange((value) => {
+          .onChange(async (value) => {
             this.plugin.settings.defaultAttachmentsPath = value.trim();
-            void debouncedSave();
+            await this.plugin.saveSettings();
           })
       );
 
@@ -763,9 +761,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         text
           .setPlaceholder('home-schedule.base')
           .setValue(this.plugin.settings.homeCalendarBasePath || 'home-schedule.base')
-          .onChange((value) => {
+          .onChange(async (value) => {
             this.plugin.settings.homeCalendarBasePath = value.trim() || 'home-schedule.base';
-            void debouncedSave();
+            await this.plugin.saveSettings();
           })
       );
 
@@ -776,9 +774,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         text
           .setPlaceholder('Food Log.base')
           .setValue(this.plugin.settings.homeFoodBasePath || 'Food Log.base')
-          .onChange((value) => {
+          .onChange(async (value) => {
             this.plugin.settings.homeFoodBasePath = value.trim() || 'Food Log.base';
-            void debouncedSave();
+            await this.plugin.saveSettings();
           })
       );
 
@@ -789,9 +787,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         text
           .setPlaceholder('Activity Log.base')
           .setValue(this.plugin.settings.homeWorkoutBasePath || 'Activity Log.base')
-          .onChange((value) => {
+          .onChange(async (value) => {
             this.plugin.settings.homeWorkoutBasePath = value.trim() || 'Activity Log.base';
-            void debouncedSave();
+            await this.plugin.saveSettings();
           })
       );
 
@@ -802,9 +800,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         text
           .setPlaceholder('Open Unscheduled Tasks.base')
           .setValue(this.plugin.settings.homeOpenTasksBasePath || 'Open Unscheduled Tasks.base')
-          .onChange((value) => {
+          .onChange(async (value) => {
             this.plugin.settings.homeOpenTasksBasePath = value.trim() || 'Open Unscheduled Tasks.base';
-            void debouncedSave();
+            await this.plugin.saveSettings();
           })
       );
 
@@ -1619,10 +1617,10 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           text
             .setPlaceholder('timeTracking')
             .setValue(this.plugin.settings.timeTrackingPropertyKey || 'timeTracking')
-            .onChange((value) => {
+            .onChange(async (value) => {
               const next = value.trim() || 'timeTracking';
               this.plugin.settings.timeTrackingPropertyKey = next.toLowerCase() === 'scheduled' ? 'timeTracking' : next;
-              void debouncedSave();
+              await this.plugin.saveSettings();
             })
         );
 
@@ -1650,9 +1648,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             text
               .setPlaceholder('Time Tracking.md')
               .setValue(this.plugin.settings.timeTrackingDedicatedNotePath || 'Time Tracking.md')
-              .onChange((value) => {
+              .onChange(async (value) => {
                 this.plugin.settings.timeTrackingDedicatedNotePath = value.trim() || 'Time Tracking.md';
-                void debouncedSave();
+                await this.plugin.saveSettings();
               })
           );
       }
@@ -1703,10 +1701,10 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           .addOption('link-only', 'Link only')
           .addOption('remove', 'Remove checklist line')
           .setValue(this.plugin.settings.checklistPromotionBehavior ?? 'remove')
-          .onChange((value) => {
+          .onChange(async (value) => {
             if (value === 'remove' || value === 'complete-and-link' || value === 'link-only') {
               this.plugin.settings.checklistPromotionBehavior = value;
-              void debouncedSave();
+              await this.plugin.saveSettings();
             }
           })
       );

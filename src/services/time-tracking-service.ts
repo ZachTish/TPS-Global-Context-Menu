@@ -620,7 +620,7 @@ export class TimeTrackingService {
   }
 
   private async persistTimeTrackingState(): Promise<void> {
-    await this.plugin.saveData(this.plugin.settings);
+    await this.plugin.persistRuntimeSettingsState();
   }
 
   private refreshStatusBar(): void {
