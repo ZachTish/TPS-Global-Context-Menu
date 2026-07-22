@@ -4,7 +4,15 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.4.0` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.5.0` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
+## 1.5.0
+
+- `Move task from <source note>...` is now the first action in the lower task-menu section, so moving a task is immediately available beneath its property controls.
+- The source note uses GCM's canonical display title and comes from the task context itself, keeping the label accurate for embedded Calendar, Kanban, TPS List, TPS Table, and ordinary Markdown task surfaces.
+- The existing destination picker, same-note move-to-end behavior, nested task-block preservation, Daily Note migration record, and selected-task move flow are unchanged.
+- This is a backward-compatible minor release with no settings or data migration. Minimum supported Obsidian remains 1.10.0. Final validation details and artifact hashes are recorded in `release-notes/1.5.0.md`.
+- Validation passed the focused task-menu suites (57/57), TypeScript, and the complete declared suite (285/285), followed by a separate production-mode build. Obsidian 1.12.7 was reloaded with `Reload app without saving` in the isolated test vault; the existing TPS List task menu showed `Move task from Synthetic Task Sink...` first in its lower action section. The menu was canceled without changing the QA task, runtime artifacts matched the source build, and runtime-owned `data.json` retained its pre-build SHA-256.
 
 ## 1.4.0
 
@@ -319,6 +327,7 @@ Agent integrations must not use fuzzy task titles or broad search results as mut
 - TPS List headings and bullets plus TPS Table records use the same title-row contract. Their editor changes the clicked line item rather than its containing/source note; a leading wikilink or Markdown link keeps its target and receives the new display alias. The composed file menu suppresses its note title row on those line-item surfaces, preventing two competing title actions.
 - Checkbox/status choices come from the configured linked-subitem mappings. Optional property rows obey the global `Show custom properties in context menu` switch plus each property's context visibility, scope, exclusion, disabled/hidden, and inline-set contracts. Generic date fields use a date-only editor; only `scheduled` exposes all-day, time-estimate, and computed-end controls. Invalid numeric values are refused rather than writing `NaN`.
 - Single task rows in TPS List and task-shaped TPS Table records always include a Tags submenu even when optional custom-property rows are disabled. It adds/removes inline Markdown `#tags` through the same stale-target-safe task mutation path and suppresses the configured Tags property on that menu to avoid duplicate actions.
+- The lower task-action section begins with `Move task from <source note>...`. The source label uses the note's canonical display title so embedded Calendar, Kanban, TPS List, and TPS Table tasks identify their actual containing note before the destination picker opens.
 - Every mutating task action re-resolves the current source line by exact raw text, stable `tpsId`/`subitemId`, or one unique plain title. Ambiguous duplicate-title fallbacks fail closed instead of changing the first match. Timer identity writes, recurrence-template edits, Task API updates/deletes, checkbox changes, drag/move/delete operations, and note associations use the same stale-target rule and emit concise route/result diagnostics. Async modal actions report rejected writes rather than failing silently.
 - Task-line settings are grouped under `Workflows > Task Lines`, including task hiding/reveal behavior, task status-to-checkbox reconciliation, linked child-note checkbox rows, checklist completion warnings, and checklist promotion behavior.
 - `Completion prompt status options` are offered after the last open checkbox is resolved only when the containing note already has a populated frontmatter `status`. Missing, null, empty, and whitespace-only status values do not create a status or open the chooser; populated non-final statuses retain the configured prompt.

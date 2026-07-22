@@ -850,7 +850,8 @@ test('checkbox long-press menus append reusable task-line actions', () => {
   assert.match(serviceSource, /includeStatus = options\.includeStatus !== false/);
   assert.match(serviceSource, /includeNoteActions = options\.includeNoteActions !== false/);
   assert.match(serviceSource, /if \(includeNoteActions\) \{/);
-  assert.match(serviceSource, /setTitle\('Move task to note\.\.\.'\)/);
+  assert.match(serviceSource, /const sourceNoteTitle = this\.plugin\.noteTitleRenderService\.getDisplayTitle\(context\.file\) \|\| context\.file\.basename/);
+  assert.match(serviceSource, /setTitle\(`Move task from \$\{sourceNoteTitle\}\.\.\.`\)/);
   assert.match(serviceSource, /setTitle\('Move selected to note\.\.\.'\)/);
   assert.doesNotMatch(serviceSource, /setTitle\('Archive item in place'\)/);
   assert.doesNotMatch(serviceSource, /setTitle\('Archive selected in place'\)/);
@@ -870,7 +871,18 @@ test('inline task checkboxes can start task-line drags for calendar drops', () =
 });
 
 test('task menu can move a task to another file append-only without losing the source task first', () => {
-  assert.match(serviceSource, /setTitle\('Move task to note\.\.\.'\)/);
+  const taskMenuSource = serviceSource.slice(
+    serviceSource.indexOf('\n  addTaskLineMenuItems('),
+    serviceSource.indexOf('private addInlineTagsMenu'),
+  );
+  const secondaryMenuStart = taskMenuSource.indexOf('menu.addSeparator()');
+  const moveTaskIndex = taskMenuSource.indexOf('`Move task from ${sourceNoteTitle}...`');
+  const openTaskIndex = taskMenuSource.indexOf("'Open task line'");
+
+  assert.ok(secondaryMenuStart >= 0, 'task menu should retain its secondary action separator');
+  assert.match(taskMenuSource, /menu\.addSeparator\(\);\s*menu\.addItem\(\(item\) => \{\s*item\s*\.setTitle\(`Move task from \$\{sourceNoteTitle\}\.\.\.`\)/);
+  assert.ok(moveTaskIndex > secondaryMenuStart, 'move task should remain in the secondary action section');
+  assert.ok(moveTaskIndex < openTaskIndex, 'move task should be the first secondary action');
   assert.match(serviceSource, /new FileSuggestModal\(this\.plugin\.app, async \(targetFile\) => \{/);
   assert.match(serviceSource, /insertTaskBlockAfterFrontmatter\(content, taskBlockLines\)/);
   assert.match(serviceSource, /removeTaskBlockFromContent\(content, context\)/);

@@ -1550,7 +1550,14 @@ export class TaskLineContextMenuService {
     }
     this.addConfiguredPropertyMenus(menu, context, options.includeTags === true);
 
+    const sourceNoteTitle = this.plugin.noteTitleRenderService.getDisplayTitle(context.file) || context.file.basename;
     menu.addSeparator();
+    menu.addItem((item) => {
+      item
+        .setTitle(`Move task from ${sourceNoteTitle}...`)
+        .setIcon('file-input')
+        .onClick(() => this.promptMoveTaskToFile(context));
+    });
     menu.addItem((item) => {
       item
         .setTitle('Open task line')
@@ -1583,12 +1590,6 @@ export class TaskLineContextMenuService {
           });
       });
     }
-    menu.addItem((item) => {
-      item
-        .setTitle('Move task to note...')
-        .setIcon('file-input')
-        .onClick(() => this.promptMoveTaskToFile(context));
-    });
     menu.addItem((item) => {
       item
         .setTitle('Delete task')

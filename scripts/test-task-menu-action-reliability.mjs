@@ -51,6 +51,22 @@ test('task menu titles are plain and note actions describe whether they create o
   assert.match(menuSource, /return matches\.length === 1 \? matches\[0\] : -1/);
 });
 
+test('move task identifies its source note and leads the secondary action section', () => {
+  const taskMenuSource = menuSource.slice(
+    menuSource.indexOf('\n  addTaskLineMenuItems('),
+    menuSource.indexOf('private addInlineTagsMenu'),
+  );
+  const secondaryMenuStart = taskMenuSource.indexOf('menu.addSeparator()');
+  const moveTaskIndex = taskMenuSource.indexOf('`Move task from ${sourceNoteTitle}...`');
+  const openTaskIndex = taskMenuSource.indexOf("'Open task line'");
+
+  assert.match(taskMenuSource, /noteTitleRenderService\.getDisplayTitle\(context\.file\) \|\| context\.file\.basename/);
+  assert.match(taskMenuSource, /menu\.addSeparator\(\);\s*menu\.addItem\(\(item\) => \{\s*item\s*\.setTitle\(`Move task from \$\{sourceNoteTitle\}\.\.\.`\)/);
+  assert.ok(secondaryMenuStart >= 0);
+  assert.ok(moveTaskIndex > secondaryMenuStart);
+  assert.ok(moveTaskIndex < openTaskIndex);
+});
+
 test('task property rows honor the master switch, context visibility, and date-specific UI', () => {
   assert.match(menuSource, /showCustomPropertiesInContextMenu === false\) return/);
   assert.match(menuSource, /resolveCustomProperties\([\s\S]{0,500}'context'/);
