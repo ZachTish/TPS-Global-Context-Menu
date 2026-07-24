@@ -46,6 +46,7 @@ import * as logger from '../logger';
 import { KeyboardAwareOverlay } from '../utils/mobile-overlay';
 import { getOrderedSelectionRange } from '../utils/ordered-selection';
 import { matchTaskHighlightMetadata } from '../utils/task-highlight-metadata';
+import { buildTaskLineCandidateIndexes, resolveTaskLineIndex } from '../utils/task-line-resolution';
 import {
   inspectLineItemDeleteTarget,
   performLineItemDelete,
@@ -932,17 +933,23 @@ export class TaskLineContextMenuService {
     const content = await this.plugin.app.vault.cachedRead(file);
     const lines = content.split(/\r?\n/);
 
-    const directTargetTexts = sourceEl && sourceEl !== taskEl ? this.getDirectTaskElementSearchTexts(sourceEl) : [];
-    const targetTexts = directTargetTexts.length ? directTargetTexts : this.getTaskElementSearchTexts(taskEl);
+    const tableTaskIdentity = this.getTableTaskIdentity(taskEl);
+    const directTargetTexts = sourceEl && sourceEl !== taskEl && tableTaskIdentity == null
+      ? this.getDirectTaskElementSearchTexts(sourceEl)
+      : [];
+    const targetTexts = tableTaskIdentity
+      ? []
+      : directTargetTexts.length
+        ? directTargetTexts
+        : this.getTaskElementSearchTexts(taskEl);
     const candidateIndexes = this.getTaskLineCandidateIndexes(taskEl, lines, file, sourceEl);
-    for (const candidateIndex of candidateIndexes) {
-      const context = this.contextFromLine(file, candidateIndex, lines[candidateIndex] || '', taskEl, lines);
-      if (context && this.taskLineMatchesSearchTexts(context.rawLine, targetTexts)) {
-        return context;
-      }
-    }
-
-    const lineIndex = this.resolveFallbackLineIndex(lines, targetTexts);
+    const lineIndex = resolveTaskLineIndex({
+      lines,
+      candidateIndexes,
+      targetTexts,
+      exactTaskText: tableTaskIdentity?.taskText,
+      exactLineIdentity: tableTaskIdentity?.lineIdentity,
+    });
     if (lineIndex < 0) {
       logger.flowWarn('TaskLineResolve', 'line:unresolved', {
         path: file.path,
@@ -986,18 +993,7 @@ export class TaskLineContextMenuService {
     file: TFile,
     sourceEl: HTMLElement | null = null,
   ): number[] {
-    const candidates: number[] = [];
-    const add = (value: unknown, oneBased: boolean) => {
-      const raw = Number(value);
-      if (!Number.isFinite(raw)) return;
-      const lineIndex = Math.floor(raw) - (oneBased ? 1 : 0);
-      if (lineIndex < 0 || lineIndex >= lines.length || candidates.includes(lineIndex)) return;
-      candidates.push(lineIndex);
-    };
-
     const orderedLineIndex = this.resolveRenderedTaskLineIndexByOrder(taskEl, file, lines);
-    if (orderedLineIndex != null) add(orderedLineIndex, false);
-
     const pluginLine =
       sourceEl?.getAttribute('data-task-line') ||
       sourceEl?.getAttribute('data-tps-kanban-line') ||
@@ -1007,20 +1003,17 @@ export class TaskLineContextMenuService {
       taskEl.getAttribute('data-tps-kanban-line') ||
       taskEl.closest<HTMLElement>('[data-task-line], [data-tps-kanban-line]')?.getAttribute('data-task-line') ||
       taskEl.closest<HTMLElement>('[data-task-line], [data-tps-kanban-line]')?.getAttribute('data-tps-kanban-line');
-    if (pluginLine != null && pluginLine !== '') {
-      add(pluginLine, true);
-      add(pluginLine, false);
-    }
 
     const renderedLineHost =
       sourceEl?.closest<HTMLElement>('li.task-list-item[data-line], li[data-line], [data-line]') ||
       taskEl.closest<HTMLElement>('li.task-list-item[data-line], li[data-line], [data-line]');
     const renderedLine = renderedLineHost?.getAttribute('data-line') ?? taskEl.getAttribute('data-line');
-    if (renderedLine != null && renderedLine !== '') {
-      add(renderedLine, false);
-    }
-
-    return candidates;
+    return buildTaskLineCandidateIndexes({
+      lineCount: lines.length,
+      orderedLineIndex,
+      pluginLine,
+      renderedLine: taskEl.dataset.tpsGcmContext === 'table-task' ? null : renderedLine,
+    });
   }
 
   private resolveRenderedTaskLineIndexByOrder(taskEl: HTMLElement, file: TFile, lines: string[]): number | null {
@@ -1103,6 +1096,18 @@ export class TaskLineContextMenuService {
       });
   }
 
+  private getTableTaskIdentity(taskEl: HTMLElement): { taskText: string; lineIdentity: string } | null {
+    if (taskEl.dataset.tpsGcmContext !== 'table-task') return null;
+    return {
+      taskText: String(
+        taskEl.dataset.taskText
+        ?? taskEl.querySelector<HTMLElement>('.tps-log-base-cell[data-key="title"], [data-key="title"]')?.textContent
+        ?? '',
+      ).trim(),
+      lineIdentity: String(taskEl.dataset.taskLineIdentity || '').trim(),
+    };
+  }
+
   private resolveMarkdownTaskFile(taskEl: HTMLElement): TFile | null {
     const viewEl = taskEl.closest<HTMLElement>('.markdown-preview-view, .markdown-rendered, .markdown-view');
     const view = viewEl ? this.plugin.app.workspace.getLeavesOfType('markdown')
@@ -1112,44 +1117,6 @@ export class TaskLineContextMenuService {
     if (viewFile instanceof TFile) return viewFile;
     const activeFile = this.plugin.app.workspace.getActiveFile();
     return activeFile instanceof TFile ? activeFile : null;
-  }
-
-  private resolveFallbackLineIndex(lines: string[], targetTexts: string[]): number {
-    const normalizedTargets = targetTexts
-      .map((targetText) => this.normalizeTaskText(targetText))
-      .filter(Boolean);
-    if (!normalizedTargets.length) {
-      const taskLineIndexes = lines
-        .map((line, index) => parseTaskLine(line || '') ? index : -1)
-        .filter((index) => index >= 0);
-      return taskLineIndexes.length === 1 ? taskLineIndexes[0] : -1;
-    }
-    const matches = lines.reduce<number[]>((indexes, line, index) => {
-      const parsed = parseTaskLine(line || '');
-      if (parsed && this.taskLineMatchesNormalizedTargets(line || '', normalizedTargets)) indexes.push(index);
-      return indexes;
-    }, []);
-    return matches.length === 1 ? matches[0] : -1;
-  }
-
-  private taskLineMatchesSearchTexts(rawLine: string, targetTexts: string[]): boolean {
-    const normalizedTargets = targetTexts
-      .map((targetText) => this.normalizeTaskText(targetText))
-      .filter(Boolean);
-    if (!normalizedTargets.length) return true;
-    return this.taskLineMatchesNormalizedTargets(rawLine, normalizedTargets);
-  }
-
-  private taskLineMatchesNormalizedTargets(rawLine: string, normalizedTargets: string[]): boolean {
-    const parsed = parseTaskLine(rawLine || '');
-    if (!parsed) return false;
-    const normalizedLine = this.normalizeTaskText(getTaskDisplayTitle(rawLine || '') || parsed.body);
-    if (!normalizedLine) return false;
-    return normalizedTargets.some((normalizedTarget) =>
-      normalizedLine === normalizedTarget
-      || normalizedLine.includes(normalizedTarget)
-      || normalizedTarget.includes(normalizedLine)
-    );
   }
 
   private toggleSelectedTask(context: TaskLineContext, sourceEl: HTMLElement, surface = taskElSurface(sourceEl)): void {

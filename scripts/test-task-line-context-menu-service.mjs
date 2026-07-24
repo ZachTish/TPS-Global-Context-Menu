@@ -34,6 +34,7 @@ const typesSource = readFileSync(new URL('../src/types.ts', import.meta.url), 'u
 const subitemCreationSource = readFileSync(new URL('../src/services/subitem-creation-service.ts', import.meta.url), 'utf8');
 const dailyInboxLineSource = readFileSync(new URL('../src/services/daily-inbox-line-service.ts', import.meta.url), 'utf8');
 const notebookRuleSettingsSource = readFileSync(new URL('../src/services/notebook-navigator-rule-settings.ts', import.meta.url), 'utf8');
+const taskLineResolutionSource = readFileSync(new URL('../src/utils/task-line-resolution.ts', import.meta.url), 'utf8');
 
 test('task resolution inherits exact source metadata from rendered surface hosts', () => {
   assert.match(serviceSource, /closest<HTMLElement>\('\[data-task-path\], \[data-tps-kanban-path\], \[data-source-path\], \[data-file-path\], \[data-path\]'\)/);
@@ -107,6 +108,18 @@ async function importMobileOverlayUtility() {
 async function importTaskHighlightMetadataUtility() {
   const build = await esbuild.build({
     entryPoints: [fileURLToPath(new URL('../src/utils/task-highlight-metadata.ts', import.meta.url))],
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    write: false,
+  });
+  const bundled = build.outputFiles[0].text;
+  return import(`data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`);
+}
+
+async function importTaskLineResolutionUtility() {
+  const build = await esbuild.build({
+    entryPoints: [fileURLToPath(new URL('../src/utils/task-line-resolution.ts', import.meta.url))],
     bundle: true,
     format: 'esm',
     platform: 'node',
@@ -518,6 +531,165 @@ test('task highlight metadata keeps TPS task lines one-based and native lines ze
   assert.equal(matchTaskHighlightMetadata({ taskLine: '' }, { filePath: 'Inbox/A.md', lineNumber: 1, lineIndex: 0 }), null);
 });
 
+test('TPS Table property cells resolve through the row task identity and exact one-based source line', async () => {
+  const { buildTaskLineCandidateIndexes, getTaskLineIdentity, resolveTaskLineIndex } = await importTaskLineResolutionUtility();
+  const lines = [
+    '# Tasks',
+    '- [ ] Draft Base filter examples [area:: work] [priority:: medium]',
+    '- [/] Fix GCM filter cache [area:: work] [priority:: high]',
+    '- [-] Wait for mobile reproduction [area:: work] [priority:: high]',
+  ];
+  const exactCandidates = buildTaskLineCandidateIndexes({
+    lineCount: lines.length,
+    pluginLine: '3',
+  });
+
+  assert.deepEqual(exactCandidates, [2], 'plugin task lines are one-based');
+  assert.equal(
+    resolveTaskLineIndex({
+      lines,
+      candidateIndexes: exactCandidates,
+      targetTexts: ['working'],
+      exactTaskText: 'Fix GCM filter cache',
+      exactLineIdentity: getTaskLineIdentity(lines[2]),
+    }),
+    2,
+    'a clicked Status cell must not replace the row task identity',
+  );
+  assert.equal(
+    resolveTaskLineIndex({
+      lines,
+      candidateIndexes: exactCandidates,
+      targetTexts: ['Fix GCM filter cache'],
+      exactTaskText: 'Fix GCM filter cache',
+      exactLineIdentity: getTaskLineIdentity(lines[2]),
+    }),
+    2,
+    'the Title cell keeps resolving the same exact source task',
+  );
+
+  const staleCandidates = buildTaskLineCandidateIndexes({
+    lineCount: lines.length,
+    pluginLine: '2',
+  });
+  assert.equal(
+    resolveTaskLineIndex({
+      lines,
+      candidateIndexes: staleCandidates,
+      targetTexts: ['high'],
+      exactTaskText: 'Fix GCM filter cache',
+      exactLineIdentity: getTaskLineIdentity(lines[2]),
+    }),
+    2,
+    'a shifted source line relocates only by its unique canonical title',
+  );
+
+  const duplicateLines = [
+    '- [ ] Different task',
+    '- [/] Fix GCM filter cache [priority:: high]',
+    '- [ ] Fix GCM filter cache [priority:: low]',
+  ];
+  assert.equal(
+    resolveTaskLineIndex({
+      lines: duplicateLines,
+      candidateIndexes: [2],
+      targetTexts: ['high'],
+      exactTaskText: 'Fix GCM filter cache',
+      exactLineIdentity: getTaskLineIdentity(duplicateLines[1]),
+    }),
+    1,
+    'an exact source-line identity relocates past a stale same-title candidate',
+  );
+  assert.equal(
+    resolveTaskLineIndex({
+      lines: duplicateLines,
+      candidateIndexes: [2],
+      targetTexts: ['high'],
+      exactTaskText: 'Fix GCM filter cache',
+    }),
+    -1,
+    'a stale row without an exact source-line identity fails closed on duplicate titles',
+  );
+  assert.equal(
+    resolveTaskLineIndex({
+      lines: ['- [ ] Same task', '- [ ] Same task'],
+      candidateIndexes: [1],
+      targetTexts: ['Same task'],
+      exactTaskText: 'Same task',
+      exactLineIdentity: getTaskLineIdentity('- [ ] Same task'),
+    }),
+    -1,
+    'duplicate exact source lines remain ambiguous even when one occupies the old line',
+  );
+
+  const emptyTitleLine = '- [ ] [status:: working] [priority:: high]';
+  assert.equal(
+    resolveTaskLineIndex({
+      lines: ['# Tasks', emptyTitleLine],
+      candidateIndexes: [1],
+      targetTexts: ['working'],
+      exactTaskText: '',
+      exactLineIdentity: getTaskLineIdentity(emptyTitleLine),
+    }),
+    1,
+    'a title-less Table task still resolves from its exact source-line identity',
+  );
+  assert.equal(
+    resolveTaskLineIndex({
+      lines: ['# Tasks', emptyTitleLine],
+      candidateIndexes: [0],
+      targetTexts: ['working'],
+      exactTaskText: '',
+    }),
+    1,
+    'a legacy title-less Table row falls back only to a unique empty canonical title',
+  );
+
+  assert.deepEqual(
+    buildTaskLineCandidateIndexes({ lineCount: 20, renderedLine: '13' }),
+    [13],
+    'native rendered line metadata remains zero-based',
+  );
+  assert.equal(
+    resolveTaskLineIndex({
+      lines,
+      candidateIndexes: [1],
+      targetTexts: ['Wait for mobile reproduction'],
+    }),
+    3,
+    'non-Table surfaces retain unique descendant-text fallback behavior',
+  );
+  assert.equal(
+    resolveTaskLineIndex({
+      lines: ['- [ ] Same task', '- [/] Same task'],
+      candidateIndexes: [],
+      targetTexts: ['Same task'],
+    }),
+    -1,
+    'non-Table descendant-text fallback remains fail-closed when ambiguous',
+  );
+  assert.equal(
+    resolveTaskLineIndex({
+      lines: ['- [ ]'],
+      candidateIndexes: [0],
+      targetTexts: [],
+    }),
+    0,
+    'a blank non-Table task still resolves through exact line metadata when no search text exists',
+  );
+  assert.equal(
+    getTaskLineIdentity('- [ ] CRLF task\r'),
+    getTaskLineIdentity('- [ ] CRLF task'),
+    'source-line fingerprints are stable across LF and CRLF splitting',
+  );
+  assert.match(logBaseViewSource, /row\.dataset\.taskText = getTaskDisplayTitle\(entry\.line\)/);
+  assert.match(logBaseViewSource, /row\.dataset\.taskLineIdentity = getTaskLineIdentity\(entry\.line\)/);
+  assert.match(serviceSource, /const tableTaskIdentity = this\.getTableTaskIdentity\(taskEl\)/);
+  assert.match(serviceSource, /sourceEl && sourceEl !== taskEl && tableTaskIdentity == null/);
+  assert.match(serviceSource, /renderedLine: taskEl\.dataset\.tpsGcmContext === 'table-task' \? null : renderedLine/);
+  assert.doesNotMatch(serviceSource, /add\(pluginLine, false\)/);
+});
+
 test('mobile task and note editors share the keyboard-aware overlay contract', async () => {
   const { computeOverlayPlacement } = await importMobileOverlayUtility();
   const placement = computeOverlayPlacement(
@@ -817,7 +989,7 @@ test('GCM intercepts Kanban and Calendar task rows before the note file menu', (
   assert.match(serviceSource, /getTaskElementSearchTexts/);
   assert.match(serviceSource, /getTaskSearchTextVariants/);
   assert.match(serviceSource, /all day:\\s\*\(\?:true\|false\)/);
-  assert.match(serviceSource, /normalizedTargets\.some/);
+  assert.match(taskLineResolutionSource, /targetTexts\.some/);
   assert.match(mainSource, /new TaskLineContextMenuService\(this\)/);
   assert.match(mainSource, /taskLineContextMenuService\.handleContextMenu\(evt\)/);
   assert.match(mainSource, /if \(this\.taskLineContextMenuService\.handleContextMenu\(evt\)\) return;/);

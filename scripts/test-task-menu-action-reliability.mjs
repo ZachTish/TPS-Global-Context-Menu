@@ -6,6 +6,10 @@ const menuSource = readFileSync(
   new URL('../src/services/task-line-context-menu-service.ts', import.meta.url),
   'utf8',
 );
+const taskLineResolutionSource = readFileSync(
+  new URL('../src/utils/task-line-resolution.ts', import.meta.url),
+  'utf8',
+);
 const dailyLineSource = readFileSync(
   new URL('../src/services/daily-inbox-line-service.ts', import.meta.url),
   'utf8',
@@ -48,7 +52,7 @@ test('task menu titles are plain and note actions describe whether they create o
   assert.match(menuSource, /getTaskDisplayTitle\(context\.rawLine\) \|\| getPlainTaskTitle\(context\.title\)/);
   assert.match(menuSource, /parseTaskTitleLink\(getTaskSourceTitle\(context\.rawLine\)\)/);
   assert.match(menuSource, /hasAssociatedNote \? 'Open linked note' : 'Create note for task'/);
-  assert.match(menuSource, /return matches\.length === 1 \? matches\[0\] : -1/);
+  assert.match(taskLineResolutionSource, /return matchesByIdentity\.length === 1 \? matchesByIdentity\[0\] : -1/);
 });
 
 test('move task identifies its source note and leads the secondary action section', () => {

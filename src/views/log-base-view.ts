@@ -28,6 +28,8 @@ import {
   normalizeKanbanCheckboxState,
   type KanbanCheckboxMappingLike,
 } from '../tps-list/task-checkbox-utils';
+import { getTaskDisplayTitle } from '../utils/task-line-metadata';
+import { getTaskLineIdentity } from '../utils/task-line-resolution';
 import {
   getSourceNoteGroupValue,
   groupTpsBaseRows,
@@ -956,6 +958,8 @@ export class TpsTableView extends BasesView {
       row.dataset.tpsGcmContext = 'table-task';
       row.dataset.taskPath = entry.file.path;
       row.dataset.taskLine = String(entry.lineNumber + 1);
+      row.dataset.taskText = getTaskDisplayTitle(entry.line);
+      row.dataset.taskLineIdentity = getTaskLineIdentity(entry.line);
     }
     (row as any).__tpsTableView = this;
     row.addEventListener('click', (evt: MouseEvent) => this.handleEntryModifierClick(evt, entry), { capture: true });

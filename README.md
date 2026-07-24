@@ -4,7 +4,15 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.7.0` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.7.1` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
+## 1.7.1
+
+- TPS Table task actions now resolve from the row’s canonical task identity instead of the clicked cell value. Right-clicking Status, Area, Project, Priority, Scheduled, Owner, or another property cell opens the menu for that row’s actual task instead of reporting `Could not resolve the task line`.
+- Each task row carries its exact source path, one-based task line, canonical title, and a compact source-line fingerprint. A uniquely matching fingerprint safely follows shifted source lines; if the source line changed, unique-title fallback remains available, while ambiguous duplicate tasks fail closed.
+- Title-less tasks resolve through the same fingerprint path. Line fingerprints normalize LF/CRLF endings, plugin-owned task lines remain one-based, and native rendered line metadata remains zero-based.
+- This is a backward-compatible patch release with no settings or note-data migration. Minimum supported Obsidian remains 1.10.0.
+- Validation passed all 319 declared tests, TypeScript, and the required separate production-mode build/deploy. In Obsidian 1.12.7, the isolated test vault opened the correct `Fix GCM filter cache` menu from both Status and Project cells and opened its exact editor at `Tasks.md · line 14` from Title. The fixture notes and runtime `data.json` remained byte-identical, and production was not directly changed.
 
 ## 1.7.0
 
