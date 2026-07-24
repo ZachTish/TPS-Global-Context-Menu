@@ -4,7 +4,15 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.6.1` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.6.2` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
+## 1.6.2
+
+- Custom-field Selector and List manual options now persist every edit, including continued typing in the same textarea after an earlier settings write finishes.
+- The shared settings persistence reconciler preserves live nested object/array identity when disk data matches the requested save. Genuinely newer synchronized top-level settings still merge into the running plugin, while a newer local edit is never overwritten by an older completed request.
+- Settings controls retain immediate persistence; a separate Save button is unnecessary. The same fix protects other nested rule and custom-field editors that keep an object reference while open.
+- This is a backward-compatible patch release with no settings or data migration. Minimum supported Obsidian remains 1.10.0. Final validation details and artifact hashes are recorded in `release-notes/1.6.2.md`.
+- Validation passed the focused settings suite (21/21), TypeScript, and the complete declared suite (296/296), followed by the required separate production-mode build. Obsidian 1.12.7 was reloaded in the isolated test vault. A temporary Selector saved `qa-one`, then saved `qa-two` through the same still-open textarea after the first write completed; both values survived closing/reopening settings and a full app reload. The temporary field was deleted through the UI, the original six-field settings payload and SHA-256 were restored exactly, and production was not directly changed.
 
 ## 1.6.1
 

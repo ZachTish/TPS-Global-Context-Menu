@@ -97,6 +97,71 @@ test('settings persistence merges only locally changed keys into the newest disk
   assert.equal(disk.lastArchiveTagSweepDate, '2026-07-21');
 });
 
+test('settings persistence keeps rendered custom-property references live across sequential saves', async () => {
+  const {
+    reconcilePersistedSettingsInPlace,
+    SettingsPersistenceCoordinator,
+  } = await importModule('../src/settings-persistence.ts');
+  let disk = {
+    properties: [{ id: 'status', options: ['todo'] }],
+    synchronizedPreference: 'desktop-old',
+  };
+  const live = structuredClone(disk);
+  const renderedProperty = live.properties[0];
+  const coordinator = new SettingsPersistenceCoordinator(
+    async () => structuredClone(disk),
+    async (next) => {
+      disk = structuredClone(next);
+    },
+    (requested, persisted) => {
+      reconcilePersistedSettingsInPlace(live, requested, persisted);
+    },
+  );
+  coordinator.setBaseline(disk);
+
+  renderedProperty.options = ['todo', 'working'];
+  await coordinator.request(live);
+
+  assert.equal(
+    live.properties[0],
+    renderedProperty,
+    'an identical successful save must not detach the property used by the open settings control',
+  );
+  assert.deepEqual(disk.properties[0].options, ['todo', 'working']);
+
+  disk.synchronizedPreference = 'mobile-new';
+  renderedProperty.options = ['todo', 'working', 'holding'];
+  await coordinator.request(live);
+
+  assert.equal(live.properties[0], renderedProperty);
+  assert.deepEqual(disk.properties[0].options, ['todo', 'working', 'holding']);
+  assert.equal(
+    live.synchronizedPreference,
+    'mobile-new',
+    'genuinely newer synchronized settings must still reconcile into the live object',
+  );
+});
+
+test('settings reconciliation respects key presence and never overwrites a newer live edit', async () => {
+  const { reconcilePersistedSettingsInPlace } = await importModule('../src/settings-persistence.ts');
+  const requested = {
+    removedRemotely: 'old',
+    editedAgain: { value: 'requested' },
+  };
+  const live = structuredClone(requested);
+  live.editedAgain.value = 'newer-live';
+  const persisted = {
+    addedRemotely: { enabled: true },
+    editedAgain: { value: 'remote' },
+  };
+
+  reconcilePersistedSettingsInPlace(live, requested, persisted);
+
+  assert.equal(Object.hasOwn(live, 'removedRemotely'), false);
+  assert.deepEqual(live.addedRemotely, { enabled: true });
+  assert.deepEqual(live.editedAgain, { value: 'newer-live' });
+});
+
 test('settings persistence serializes rapid edits and drains the newest snapshot', async () => {
   const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
   let disk = { folder: 'A', enabled: false };

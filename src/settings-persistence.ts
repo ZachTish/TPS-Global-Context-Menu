@@ -11,6 +11,47 @@ const cloneSettings = (value: SettingsRecord): SettingsRecord =>
 const valuesMatch = (left: unknown, right: unknown): boolean =>
   JSON.stringify(left) === JSON.stringify(right);
 
+const hasOwn = (record: SettingsRecord, key: string): boolean =>
+  Object.prototype.hasOwnProperty.call(record, key);
+
+/**
+ * Applies only persisted values that differ from the completed request while
+ * leaving unchanged live values in place. Preserving those references matters
+ * for rendered settings controls whose callbacks still hold nested objects.
+ */
+export const reconcilePersistedSettingsInPlace = (
+  live: SettingsRecord,
+  requested: SettingsRecord,
+  persisted: SettingsRecord,
+): void => {
+  const keys = new Set([...Object.keys(requested), ...Object.keys(persisted)]);
+  for (const key of keys) {
+    const liveHasKey = hasOwn(live, key);
+    const requestedHasKey = hasOwn(requested, key);
+    const persistedHasKey = hasOwn(persisted, key);
+
+    if (
+      liveHasKey !== requestedHasKey
+      || (requestedHasKey && !valuesMatch(live[key], requested[key]))
+    ) {
+      continue;
+    }
+
+    if (
+      requestedHasKey === persistedHasKey
+      && (!requestedHasKey || valuesMatch(requested[key], persisted[key]))
+    ) {
+      continue;
+    }
+
+    if (persistedHasKey) {
+      live[key] = cloneSettings({ value: persisted[key] }).value;
+    } else {
+      delete live[key];
+    }
+  }
+};
+
 export const getChangedSettingsKeys = (
   baseline: SettingsRecord,
   snapshot: SettingsRecord,
@@ -26,7 +67,7 @@ export const mergeChangedSettings = (
 ): SettingsRecord => {
   const merged = cloneSettings(latest);
   for (const key of changedKeys) {
-    if (Object.prototype.hasOwnProperty.call(snapshot, key)) {
+    if (hasOwn(snapshot, key)) {
       merged[key] = cloneSettings({ value: snapshot[key] }).value;
     } else {
       delete merged[key];

@@ -83,7 +83,11 @@ import { resolveCustomProperties } from './resolve-profiles';
 import { MIGRATED_TASK_MAPPING } from './constants/task-migration';
 import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { installVisibleViewportContract } from './utils/mobile-overlay';
-import { SettingsPersistenceCoordinator, type SettingsRecord } from './settings-persistence';
+import {
+  reconcilePersistedSettingsInPlace,
+  SettingsPersistenceCoordinator,
+  type SettingsRecord,
+} from './settings-persistence';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -1882,16 +1886,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     requested: SettingsRecord,
     persisted: SettingsRecord,
   ): void {
-    const live = this.settings as unknown as SettingsRecord;
-    const keys = new Set([...Object.keys(requested), ...Object.keys(persisted)]);
-    for (const key of keys) {
-      if (JSON.stringify(live[key]) !== JSON.stringify(requested[key])) continue;
-      if (Object.prototype.hasOwnProperty.call(persisted, key)) {
-        live[key] = JSON.parse(JSON.stringify({ value: persisted[key] })).value;
-      } else {
-        delete live[key];
-      }
-    }
+    reconcilePersistedSettingsInPlace(
+      this.settings as unknown as SettingsRecord,
+      requested,
+      persisted,
+    );
   }
 
   private ensureSettingsPersistence(initialBaseline?: SettingsRecord): SettingsPersistenceCoordinator {
