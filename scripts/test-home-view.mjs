@@ -503,11 +503,12 @@ test('TPS Table create command override uses selectable commands and resilient e
   assert.match(mainSource, /this\.registerDomEvent\(document, 'click'/);
   assert.match(mainSource, /private async handleTpsTableNativeCreateClick\(evt: MouseEvent\): Promise<void>/);
   assert.match(mainSource, /private getTpsTableNativeCreateScope\(target: HTMLElement\): HTMLElement \| null/);
-  assert.match(mainSource, /const owner = target\.closest<HTMLElement>\(/);
+  assert.match(mainSource, /private getTpsBaseNativeCreateScope\(target: HTMLElement, rootSelector: string\): HTMLElement \| null/);
+  assert.match(mainSource, /const boundedOwner = target\.closest<HTMLElement>\(/);
   assert.match(mainSource, /'\.tps-home-panel'/);
-  assert.match(mainSource, /if \(owner\) return owner\.querySelector<HTMLElement>\('\.tps-log-base'\) \? owner : null;/);
-  assert.match(mainSource, /const tableRoots = Array\.from\(leaf\.querySelectorAll<HTMLElement>\('\.tps-log-base'\)\)/);
-  assert.match(mainSource, /if \(tableRoots\.length !== 1\) return null/);
+  assert.match(mainSource, /getVisibleTpsBaseCreateRoot\(boundedOwner, rootSelector\) \? boundedOwner : null/);
+  assert.match(mainSource, /getVisibleTpsBaseCreateRoot\(leaf, rootSelector\) \? leaf : null/);
+  assert.match(mainSource, /root\.isConnected && root\.getClientRects\(\)\.length > 0/);
   assert.doesNotMatch(mainSource, /let node: HTMLElement \| null = target/);
   assert.match(mainSource, /private handleTpsHealthFoodTableRowContextMenu\(evt: MouseEvent, row: HTMLElement\): boolean/);
   assert.match(mainSource, /api\.openFoodLogEntryMenuFromLine\(evt, path, oneBasedLine - 1, ''\)/);
@@ -516,7 +517,7 @@ test('TPS Table create command override uses selectable commands and resilient e
   assert.match(mainSource, /'\.markdown-embed'/);
   assert.match(mainSource, /'\.canvas-node-content'/);
   assert.match(mainSource, /'\.tps-home-base-host'/);
-  assert.match(mainSource, /scope\.querySelector<HTMLElement>\('\.tps-log-base'\)/);
+  assert.match(mainSource, /getVisibleTpsBaseCreateRoot\(scope, '\.tps-log-base'\)/);
   assert.match(mainSource, /!view\.hasCreateCommandOverride\(\)/);
   assert.match(mainSource, /candidate\.closest<HTMLElement>\('\.bases-toolbar, \.bases-header, \.bases-view-header, \.base-view-header'\)/);
   assert.match(mainSource, /target\.closest\('\.modal, \.modal-container, \.menu, \.popover, \.suggestion-container, \.prompt'\)/);

@@ -229,3 +229,28 @@ test('TPS Table loadEntries keeps task query aliases out of inferred display col
   const columns = view.getColumns(entries).map((column) => column.key);
   assert.deepEqual(columns, ['kind', 'source', 'line']);
 });
+
+test('TPS Table creation-time filter reads fail closed while rendering remains tolerant', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const view = Object.create(TpsTableView.prototype);
+  const readError = new Error('synthetic Base read failure');
+  view.config = { get: () => null };
+  view.containerEl = { closest: () => null };
+  view.getViewName = () => 'Tasks';
+  view.getBaseFile = () => ({ path: 'Tasks.base' });
+  view.plugin = {
+    app: {
+      vault: {
+        cachedRead: async () => {
+          throw readError;
+        },
+      },
+    },
+  };
+
+  assert.deepEqual(await view.getEffectiveBaseFilterRoots(false), []);
+  await assert.rejects(
+    view.getEffectiveBaseFilterRoots(true),
+    (error) => error === readError,
+  );
+});

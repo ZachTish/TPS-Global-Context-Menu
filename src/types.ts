@@ -38,6 +38,7 @@ export type ParentLinkFormat = 'wikilink' | 'markdown-title';
 export type ChecklistPromotionBehavior = 'remove' | 'complete-and-link' | 'link-only';
 export type LinkedSubitemCheckboxStyle = 'native' | 'soft-link' | 'accent';
 export type TimeTrackingStorageMode = 'daily-note' | 'source-note' | 'dedicated-note';
+export type TpsBaseWriteFallbackMode = 'filter-required' | 'today-daily-note' | 'specific-note';
 type ExtensibleLiteral<T extends string> = T | (string & Record<never, never>);
 
 export type TpsRecordKind = 'note' | 'task' | 'project' | 'food' | 'log' | 'workflow' | 'run' | 'workout' | 'workout-plan';
@@ -563,6 +564,8 @@ export interface TPSGlobalContextMenuSettings {
   // Default paths for new items
   defaultAttachmentsPath: string;
   checklistPromotionBehavior: ChecklistPromotionBehavior;
+  tpsBaseWriteFallbackMode: TpsBaseWriteFallbackMode;
+  tpsBaseWriteFallbackPath: string;
 
   // Appearance (Navigator-style controls)
   menuTextScale: number;

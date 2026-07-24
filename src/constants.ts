@@ -183,6 +183,8 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   // Default paths for new items
   defaultAttachmentsPath: '',
   checklistPromotionBehavior: 'remove',
+  tpsBaseWriteFallbackMode: 'filter-required',
+  tpsBaseWriteFallbackPath: '',
 
   menuTextScale: 1,
   buttonScale: 1,

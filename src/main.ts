@@ -88,6 +88,13 @@ import {
   SettingsPersistenceCoordinator,
   type SettingsRecord,
 } from './settings-persistence';
+import {
+  normalizeTpsBaseWriteFallbackMode,
+  normalizeTpsBaseWriteNotePath,
+  resolveTpsBaseWriteTarget,
+  type ResolveTpsBaseWriteTargetOptions,
+  type TpsBaseWriteTargetResolution,
+} from './services/tps-base-write-target-service';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -776,7 +783,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     const scope = this.getTpsListNativeCreateScope(target);
     if (!scope) return;
-    const listRoot = scope.querySelector<HTMLElement>('.tps-list-scroll');
+    const listRoot = this.getVisibleTpsBaseCreateRoot(scope, '.tps-list-scroll');
     const view = (listRoot as any)?.__tpsListView as { createFileForView: () => Promise<void> } | undefined;
     if (!listRoot || !view || typeof view.createFileForView !== 'function') return;
     if (!this.isTpsTableNativeCreateTarget(target, scope)) return;
@@ -816,9 +823,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     const scope = this.getTpsTableNativeCreateScope(target);
     if (!scope) return;
-    const tableRoot = scope.querySelector<HTMLElement>('.tps-log-base');
+    const tableRoot = this.getVisibleTpsBaseCreateRoot(scope, '.tps-log-base');
     const view = (tableRoot as any)?.__tpsTableView as TpsTableView | undefined;
-    if (!view || typeof view.createFileForView !== 'function') return;
+    if (!tableRoot || !view || typeof view.createFileForView !== 'function') return;
     if (!this.isTpsTableNativeCreateTarget(target, scope)) return;
 
     evt.preventDefault();
@@ -843,43 +850,35 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   private getTpsListNativeCreateScope(target: HTMLElement): HTMLElement | null {
-    const owner = target.closest<HTMLElement>([
-      '.bases-view',
-      '.bases-embed',
-      '.internal-embed',
-      '.markdown-embed',
-      '.cm-embed-block',
-      '.canvas-node-content',
-      '.tps-home-base-host',
-      '.tps-home-panel',
-    ].join(', '));
-    if (owner) return owner.querySelector<HTMLElement>('.tps-list-scroll') ? owner : null;
-
-    const leaf = target.closest<HTMLElement>('.workspace-leaf-content');
-    if (!leaf) return null;
-    const listRoots = Array.from(leaf.querySelectorAll<HTMLElement>('.tps-list-scroll'));
-    if (listRoots.length !== 1) return null;
-    return leaf;
+    return this.getTpsBaseNativeCreateScope(target, '.tps-list-scroll');
   }
 
   private getTpsTableNativeCreateScope(target: HTMLElement): HTMLElement | null {
-    const owner = target.closest<HTMLElement>([
-      '.bases-view',
-      '.bases-embed',
+    return this.getTpsBaseNativeCreateScope(target, '.tps-log-base');
+  }
+
+  private getTpsBaseNativeCreateScope(target: HTMLElement, rootSelector: string): HTMLElement | null {
+    const boundedOwner = target.closest<HTMLElement>([
+      '.tps-home-panel',
+      '.tps-home-base-host',
       '.internal-embed',
       '.markdown-embed',
       '.cm-embed-block',
       '.canvas-node-content',
-      '.tps-home-base-host',
-      '.tps-home-panel',
+      '.bases-embed',
     ].join(', '));
-    if (owner) return owner.querySelector<HTMLElement>('.tps-log-base') ? owner : null;
-
+    if (boundedOwner) {
+      return this.getVisibleTpsBaseCreateRoot(boundedOwner, rootSelector) ? boundedOwner : null;
+    }
     const leaf = target.closest<HTMLElement>('.workspace-leaf-content');
     if (!leaf) return null;
-    const tableRoots = Array.from(leaf.querySelectorAll<HTMLElement>('.tps-log-base'));
-    if (tableRoots.length !== 1) return null;
-    return leaf;
+    return this.getVisibleTpsBaseCreateRoot(leaf, rootSelector) ? leaf : null;
+  }
+
+  private getVisibleTpsBaseCreateRoot(scope: HTMLElement, selector: string): HTMLElement | null {
+    const roots = Array.from(scope.querySelectorAll<HTMLElement>(selector))
+      .filter((root) => root.isConnected && root.getClientRects().length > 0);
+    return roots.length === 1 ? roots[0] : null;
   }
 
   private isTpsTableNativeCreateTarget(target: HTMLElement, scope: HTMLElement): boolean {
@@ -2000,6 +1999,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.taskHidingExclusionPatterns = String(this.settings.taskHidingExclusionPatterns ?? '').trim();
     this.settings.persistTaskVisibilityStateToFrontmatter = this.settings.persistTaskVisibilityStateToFrontmatter === true;
     this.settings.taskVisibilityStateFrontmatterKey = String(this.settings.taskVisibilityStateFrontmatterKey || DEFAULT_SETTINGS.taskVisibilityStateFrontmatterKey).trim() || DEFAULT_SETTINGS.taskVisibilityStateFrontmatterKey;
+    this.settings.tpsBaseWriteFallbackMode = normalizeTpsBaseWriteFallbackMode(this.settings.tpsBaseWriteFallbackMode);
+    this.settings.tpsBaseWriteFallbackPath = normalizeTpsBaseWriteNotePath(this.settings.tpsBaseWriteFallbackPath) || '';
     this.settings.defaultStackedPropertiesClosed = this.settings.defaultStackedPropertiesClosed === true;
     this.settings.timeTrackingPropertyKey = String(this.settings.timeTrackingPropertyKey || 'timeTracking').trim() || 'timeTracking';
     if (this.settings.timeTrackingPropertyKey.toLowerCase() === 'scheduled') {
@@ -2497,6 +2498,38 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     const controller = this.getControllerArchiveFolderPath();
     const resolved = controller || configured || legacy;
     return resolved ? normalizePath(resolved) : '';
+  }
+
+  async resolveTpsBaseWriteFile(
+    options: Omit<ResolveTpsBaseWriteTargetOptions, 'todayIsoDate'> = {},
+  ): Promise<TpsBaseWriteTargetResolution> {
+    const result = await resolveTpsBaseWriteTarget(this, {
+      ...options,
+      todayIsoDate: () => {
+        const momentLib = (window as any)?.moment;
+        if (typeof momentLib === 'function') return momentLib().format('YYYY-MM-DD');
+        const today = new Date();
+        const year = today.getFullYear();
+        const month = String(today.getMonth() + 1).padStart(2, '0');
+        const day = String(today.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      },
+    });
+    const details = {
+      source: result.source,
+      reason: result.reason,
+      path: result.path,
+      explicitTargetSpecified: options.explicitTargetSpecified === true,
+      createExplicitIfMissing: options.createExplicitIfMissing === true,
+    };
+    if (result.file) {
+      logger.flow('TpsBaseWriteTarget', 'resolve:done', details);
+    } else if (result.error) {
+      logger.flowError('TpsBaseWriteTarget', 'resolve:failed', result.error, details);
+    } else {
+      logger.flowWarn('TpsBaseWriteTarget', 'resolve:blocked', details);
+    }
+    return result;
   }
 
   async saveSettings(): Promise<void> {

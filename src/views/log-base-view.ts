@@ -162,6 +162,8 @@ export class TpsTableView extends BasesView {
   constructor(controller: QueryController, containerEl: HTMLElement, private plugin: TPSGlobalContextMenuPlugin) {
     super(controller);
     this.containerEl = containerEl;
+    this.containerEl.removeClass('tps-list-scroll');
+    delete (this.containerEl as any).__tpsListView;
     const renderContext = getCurrentBaseEmbedRenderContext() || takePendingBaseEmbedRenderContext(TPS_TABLE_VIEW_TYPE);
     if (renderContext) {
       this.containerEl.dataset.tpsBasePath = renderContext.path;
@@ -200,6 +202,8 @@ export class TpsTableView extends BasesView {
     this.selectionAnchorId = null;
     this.renderedEntryOrder = [];
     this.containerEl.empty();
+    this.containerEl.removeClass('tps-log-base');
+    if ((this.containerEl as any).__tpsTableView === this) delete (this.containerEl as any).__tpsTableView;
   }
 
   async createFileForView(baseFileName?: string, frontmatterProcessor?: (frontmatter: Record<string, unknown>) => void): Promise<void> {
@@ -209,36 +213,57 @@ export class TpsTableView extends BasesView {
   }
 
   private async createLineForView(): Promise<boolean> {
-    const filterRoots = await this.getEffectiveBaseFilterRoots();
-    const defaults = resolveTpsTableLineCreateDefaults(filterRoots, (value) => this.resolveLineCreateToken(value));
-    if (!defaults.kind) return false;
-
-    const targetPath = this.normalizeLineCreateTargetPath(defaults.targetPath);
-    if (!targetPath) {
+    let filterRoots: unknown[];
+    try {
+      filterRoots = await this.getEffectiveBaseFilterRoots(true);
+    } catch (error) {
       logger.flowWarn('TpsTableView', 'create-line:blocked', {
-        reason: 'missing-explicit-markdown-target',
-        kind: defaults.kind,
+        reason: 'filter-read-failed',
         base: this.getBaseFile()?.path || null,
         viewName: this.getViewName(),
+        error: logger.errorSummary(error),
       });
-      new Notice('This line view needs an exact file.path or task.path filter before it can create a bullet or task.');
+      new Notice('Could not read the Base filters, so TPS Table did not create anything.');
       return true;
     }
-
-    const targetFile = this.plugin.app.vault.getFileByPath(targetPath);
-    if (!(targetFile instanceof TFile) || targetFile.extension !== 'md') {
-      logger.flowWarn('TpsTableView', 'create-line:blocked', { reason: 'target-not-found', kind: defaults.kind, targetPath });
-      new Notice(`Line target not found: ${targetPath}`);
-      return true;
-    }
+    const defaults = resolveTpsTableLineCreateDefaults(filterRoots, (value) => this.resolveLineCreateToken(value));
+    if (!defaults.kind) return false;
 
     const title = await new Promise<string | null>((resolve) => {
       new TpsTableLineCreateModal(this.plugin.app, defaults.kind!, resolve).open();
     });
     if (!title) {
-      logger.flow('TpsTableView', 'create-line:cancelled', { kind: defaults.kind, targetPath });
+      logger.flow('TpsTableView', 'create-line:cancelled', { kind: defaults.kind });
       return true;
     }
+
+    const targetResolution = await this.plugin.resolveTpsBaseWriteFile({
+      explicitTargetPath: defaults.targetPath,
+      explicitTargetSpecified: defaults.targetPathSpecified,
+      createExplicitIfMissing: false,
+    });
+    const targetFile = targetResolution.file;
+    if (!(targetFile instanceof TFile)) {
+      logger.flowWarn('TpsTableView', 'create-line:blocked', {
+        reason: targetResolution.reason,
+        kind: defaults.kind,
+        source: targetResolution.source,
+        targetPath: targetResolution.path,
+        base: this.getBaseFile()?.path || null,
+        viewName: this.getViewName(),
+      });
+      if (targetResolution.reason === 'filter-required') {
+        new Notice('Choose a TPS List/Table fallback write note in GCM Tasks settings, or add an exact file.path/task.path filter.');
+      } else if (targetResolution.source === 'filter') {
+        new Notice(targetResolution.path
+          ? `Line target not found: ${targetResolution.path}`
+          : 'The Base write-target filter did not resolve to a Markdown note.');
+      } else {
+        new Notice('The configured TPS List/Table fallback write note is unavailable.');
+      }
+      return true;
+    }
+    const targetPath = targetFile.path;
 
     const line = buildTpsTableMarkdownLine(defaults.kind, title, defaults.fields);
     logger.flow('TpsTableView', 'create-line:start', {
@@ -277,17 +302,6 @@ export class TpsTableView extends BasesView {
       if (path.toLowerCase().endsWith('.md')) return normalizePath(path).replace(/^\/+/, '');
     }
     return null;
-  }
-
-  private normalizeLineCreateTargetPath(value: unknown): string | null {
-    const raw = String(value || '').trim()
-      .replace(/^\[\[|\]\]$/gu, '')
-      .replace(/^"+|"+$/gu, '')
-      .replace(/^'+|'+$/gu, '');
-    if (!raw) return null;
-    const normalized = normalizePath(raw).replace(/^\/+/, '');
-    if (!normalized || normalized.endsWith('/') || normalized.toLowerCase().endsWith('.base')) return null;
-    return normalized.toLowerCase().endsWith('.md') ? normalized : `${normalized}.md`;
   }
 
   private queueRender(): void {
@@ -456,7 +470,7 @@ export class TpsTableView extends BasesView {
       .filter((entry) => entry.checkboxState && entry.statuses.length > 0);
   }
 
-  private async getEffectiveBaseFilterRoots(): Promise<unknown[]> {
+  private async getEffectiveBaseFilterRoots(failOnReadError = false): Promise<unknown[]> {
     const runtimeRoots = extractFilterRootCandidates([
       this.config?.get?.('filters'),
       (this.config as any)?.filters,
@@ -466,7 +480,7 @@ export class TpsTableView extends BasesView {
       (this as any)?.queryController?.query?.filters,
       (this as any)?.queryController?.queryState,
     ]);
-    const stampedRoots = this.getStampedBaseFilterRoots();
+    const stampedRoots = this.getStampedBaseFilterRoots(failOnReadError);
     if (stampedRoots) return composeEffectiveFilterRoots(runtimeRoots, stampedRoots);
     const baseFile = this.getBaseFile();
     if (!baseFile) return composeEffectiveFilterRoots(runtimeRoots, []);
@@ -483,11 +497,12 @@ export class TpsTableView extends BasesView {
       return roots;
     } catch (error) {
       logger.flowWarn('TpsTableView', 'filters:read-failed', { path: baseFile.path, error: logger.errorSummary(error) });
+      if (failOnReadError) throw error;
       return composeEffectiveFilterRoots(runtimeRoots, []);
     }
   }
 
-  private getStampedBaseFilterRoots(): unknown[] | null {
+  private getStampedBaseFilterRoots(failOnReadError = false): unknown[] | null {
     const host = this.containerEl.closest<HTMLElement>('[data-tps-base-definition]');
     const serialized = host?.dataset.tpsBaseDefinition;
     if (!serialized) return null;
@@ -496,6 +511,7 @@ export class TpsTableView extends BasesView {
       return extractPersistedFilterRoots(parsed, this.getViewName(), new Set([TPS_TABLE_VIEW_TYPE])).filters;
     } catch (error) {
       logger.flowWarn('TpsTableView', 'filters:stamped-definition-invalid', { error: logger.errorSummary(error) });
+      if (failOnReadError) throw error;
       return null;
     }
   }

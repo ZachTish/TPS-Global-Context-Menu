@@ -3,6 +3,7 @@ export type TpsTableLineKind = 'bullet' | 'task';
 export type TpsTableLineCreateDefaults = {
   kind: TpsTableLineKind | null;
   targetPath: string | null;
+  targetPathSpecified: boolean;
   fields: Record<string, string>;
 };
 
@@ -21,6 +22,7 @@ export function resolveTpsTableLineCreateDefaults(
   return {
     kind: resolved.kind ?? null,
     targetPath: resolved.targetPath ?? null,
+    targetPathSpecified: resolved.targetPathSpecified === true,
     fields: resolved.fields ?? {},
   };
 }
@@ -103,7 +105,7 @@ function inferNodeDefaults(node: unknown, resolveValue: ResolveValue): PartialLi
 
 function mergeConjunction(nodes: unknown[], resolveValue: ResolveValue): PartialLineCreateDefaults {
   let merged: PartialLineCreateDefaults = {};
-  for (const node of nodes) merged = mergePreferred(merged, inferNodeDefaults(node, resolveValue));
+  for (const node of nodes) merged = mergeConjunctive(merged, inferNodeDefaults(node, resolveValue));
   return merged;
 }
 
@@ -127,21 +129,21 @@ function defaultsForProperty(property: string, rawValue: string, resolveValue: R
   const lowerProperty = String(property || '').trim().toLowerCase();
   const semanticProperty = lowerProperty.replace(/^(?:tps|kanban|task)\./u, '');
   const value = resolveValue(stripWrappingQuotes(rawValue)).trim();
-  if (!value) return {};
 
   if (['kind', 'itemkind', 'itemtype'].includes(semanticProperty)) {
+    if (!value) return {};
     const normalizedKind = value.toLowerCase();
     if (normalizedKind === 'bullet' || normalizedKind === 'bullets') return { kind: 'bullet' };
     if (normalizedKind === 'task' || normalizedKind === 'tasks') return { kind: 'task' };
     return {};
   }
 
-  if (['path', 'filepath', 'file'].includes(semanticProperty)
-    || ['file.path', 'note.path', 'task.path', 'task.file.path'].includes(lowerProperty)) {
-    return { targetPath: value };
+  if (lowerProperty === 'file.path' || lowerProperty === 'task.path') {
+    return { targetPath: value || null, targetPathSpecified: true };
   }
 
-  if (lowerProperty.startsWith('file.') || lowerProperty.startsWith('note.')) return {};
+  if (!value) return {};
+  if (lowerProperty.startsWith('file.') || lowerProperty.startsWith('note.') || lowerProperty === 'task.file.path') return {};
   if (['title', 'line', 'source', 'extension', 'ext'].includes(semanticProperty)) return {};
   return { fields: { [sanitizeFieldKey(semanticProperty)]: value } };
 }
@@ -163,15 +165,54 @@ function nodeHasLineKindFilter(node: unknown): boolean {
 }
 
 function mergePreferred(current: PartialLineCreateDefaults, incoming: PartialLineCreateDefaults): PartialLineCreateDefaults {
+  const currentOwnsTarget = current.targetPathSpecified === true;
   return {
     kind: current.kind ?? incoming.kind,
-    targetPath: current.targetPath ?? incoming.targetPath,
+    targetPath: currentOwnsTarget ? current.targetPath ?? null : incoming.targetPath,
+    targetPathSpecified: currentOwnsTarget || incoming.targetPathSpecified === true,
+    fields: { ...(incoming.fields ?? {}), ...(current.fields ?? {}) },
+  };
+}
+
+function mergeConjunctive(current: PartialLineCreateDefaults, incoming: PartialLineCreateDefaults): PartialLineCreateDefaults {
+  const currentOwnsTarget = current.targetPathSpecified === true;
+  const incomingOwnsTarget = incoming.targetPathSpecified === true;
+  let targetPath = currentOwnsTarget ? current.targetPath ?? null : incoming.targetPath;
+  if (currentOwnsTarget && incomingOwnsTarget) {
+    const currentPath = normalizeComparableTargetPath(current.targetPath);
+    const incomingPath = normalizeComparableTargetPath(incoming.targetPath);
+    targetPath = currentPath && incomingPath && currentPath === incomingPath
+      ? current.targetPath ?? incoming.targetPath ?? null
+      : null;
+  }
+  return {
+    kind: current.kind ?? incoming.kind,
+    targetPath,
+    targetPathSpecified: currentOwnsTarget || incomingOwnsTarget,
     fields: { ...(incoming.fields ?? {}), ...(current.fields ?? {}) },
   };
 }
 
 function hasDefaults(defaults: PartialLineCreateDefaults): boolean {
-  return Boolean(defaults.kind || defaults.targetPath || Object.keys(defaults.fields ?? {}).length);
+  return Boolean(defaults.kind || defaults.targetPathSpecified || Object.keys(defaults.fields ?? {}).length);
+}
+
+function normalizeComparableTargetPath(value: unknown): string | null {
+  let raw = String(value ?? '').trim();
+  const markdownLink = raw.match(/^\[[^\]]*\]\(([^)]+)\)$/u);
+  if (markdownLink) raw = markdownLink[1] ?? '';
+  raw = raw
+    .replace(/^\[\[|\]\]$/gu, '')
+    .split('|')[0]
+    .split('#')[0]
+    .replace(/^"+|"+$/gu, '')
+    .replace(/^'+|'+$/gu, '')
+    .replace(/\\/gu, '/')
+    .replace(/\/+/gu, '/')
+    .replace(/^\/+/u, '')
+    .trim();
+  if (!raw || raw.endsWith('/')) return null;
+  return /\.[^/]+$/u.test(raw) ? raw : `${raw}.md`;
 }
 
 function sanitizeFieldKey(value: string): string {

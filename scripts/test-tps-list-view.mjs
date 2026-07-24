@@ -133,6 +133,45 @@ async function loadBulletLineSourceTarget() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
+async function loadTpsBaseWriteTargetService() {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/services/tps-base-write-target-service.ts', import.meta.url))],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+    plugins: [{
+      name: 'obsidian-stub',
+      setup(context) {
+        context.onResolve({ filter: /^obsidian$/ }, () => ({
+          path: 'obsidian',
+          namespace: 'tps-base-write-target-test',
+        }));
+        context.onLoad({ filter: /.*/, namespace: 'tps-base-write-target-test' }, () => ({
+          contents: `
+            class TFile {
+              constructor(path) {
+                this.path = String(path);
+                this.name = this.path.split('/').at(-1) || this.path;
+                this.basename = this.name.replace(/\\.[^.]+$/, '');
+                this.extension = this.name.includes('.') ? this.name.split('.').at(-1) : '';
+              }
+            }
+            globalThis.__TpsBaseWriteTargetTestFile = TFile;
+            module.exports = {
+              TFile,
+              normalizePath: (value) => String(value).replace(/\\\\/g, '/').replace(/\\/+/g, '/'),
+            };
+          `,
+          loader: 'js',
+        }));
+      },
+    }],
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
 async function loadLogLineUtils() {
   const result = await build({
     entryPoints: [fileURLToPath(new URL('../src/views/log-line-utils.ts', import.meta.url))],
@@ -833,6 +872,9 @@ test('TPS List structural bullet mode creates a Markdown bullet instead of a not
   assert.equal(getKanbanRootLineKind('bullets'), 'bullet');
   assert.equal(getKanbanRootLineKind('tasks'), 'task');
   assert.equal(getKanbanRootLineKind('notes'), null);
+  assert.equal(getKanbanRootLineKind('heading'), null);
+  assert.equal(getKanbanRootLineKind('headers'), null);
+  assert.equal(getKanbanRootLineKind('h2'), null);
   assert.equal(
     buildKanbanRootTaskLine({ ...common, itemKind: 'bullet' }),
     '- Capture this #inbox [project:: Home]',
@@ -842,7 +884,244 @@ test('TPS List structural bullet mode creates a Markdown bullet instead of a not
     '- [ ] Capture this #inbox [project:: Home]',
   );
   assert.match(viewSource, /const lineKind = getKanbanRootLineKind\(creationMode\);/);
-  assert.match(viewSource, /taskFilter,\s+lineKind,\s+\);/);
+  assert.match(viewSource, /taskFilter,\s+lineKind,\s+creationFilterRoots,\s+\);/);
+});
+
+test('shared TPS Base write resolver keeps fallback subordinate to explicit filters', async () => {
+  const {
+    normalizeTpsBaseWriteFallbackMode,
+    normalizeTpsBaseWriteNotePath,
+    resolveTpsBaseWriteTarget,
+  } = await loadTpsBaseWriteTargetService();
+  const TestFile = globalThis.__TpsBaseWriteTargetTestFile;
+  const filtered = new TestFile('Inbox/Filtered.md');
+  const specific = new TestFile('Inbox/Specific.md');
+  const daily = new TestFile('Daily/2026-07-24.md');
+  const files = new Map([
+    [filtered.path, filtered],
+    [specific.path, specific],
+  ]);
+  let dailyNoteRequests = 0;
+  const host = {
+    app: {
+      vault: {
+        getAbstractFileByPath: (path) => files.get(path) ?? null,
+      },
+    },
+    settings: {
+      tpsBaseWriteFallbackMode: 'filter-required',
+      tpsBaseWriteFallbackPath: '',
+    },
+    noteOperationService: {
+      ensureDailyNote: async (dateValue) => {
+        dailyNoteRequests += 1;
+        assert.equal(dateValue, '2026-07-24 00:00:00');
+        return daily;
+      },
+    },
+  };
+  const todayIsoDate = () => '2026-07-24';
+
+  assert.equal(normalizeTpsBaseWriteFallbackMode(undefined), 'filter-required');
+  assert.equal(normalizeTpsBaseWriteFallbackMode('unexpected'), 'filter-required');
+  assert.equal(normalizeTpsBaseWriteFallbackMode('today-daily-note'), 'today-daily-note');
+  assert.equal(normalizeTpsBaseWriteFallbackMode('specific-note'), 'specific-note');
+  assert.equal(normalizeTpsBaseWriteNotePath('[[Inbox/Specific|label]]'), 'Inbox/Specific.md');
+  assert.equal(normalizeTpsBaseWriteNotePath('[label](Inbox/Specific.md#Section)'), 'Inbox/Specific.md');
+
+  assert.deepEqual(
+    await resolveTpsBaseWriteTarget(host, { todayIsoDate }),
+    { file: null, source: null, path: null, reason: 'filter-required' },
+  );
+
+  host.settings.tpsBaseWriteFallbackMode = 'today-daily-note';
+  assert.deepEqual(
+    await resolveTpsBaseWriteTarget(host, { todayIsoDate }),
+    { file: daily, source: 'today-daily-note', path: daily.path, reason: 'resolved' },
+  );
+  assert.equal(dailyNoteRequests, 1);
+
+  host.settings.tpsBaseWriteFallbackMode = 'specific-note';
+  host.settings.tpsBaseWriteFallbackPath = '[[Inbox/Specific]]';
+  assert.deepEqual(
+    await resolveTpsBaseWriteTarget(host, { todayIsoDate }),
+    { file: specific, source: 'specific-note', path: specific.path, reason: 'resolved' },
+  );
+
+  assert.deepEqual(
+    await resolveTpsBaseWriteTarget(host, {
+      explicitTargetPath: 'Inbox/Filtered.md',
+      explicitTargetSpecified: true,
+      createExplicitIfMissing: false,
+      todayIsoDate,
+    }),
+    { file: filtered, source: 'filter', path: filtered.path, reason: 'resolved' },
+  );
+  assert.deepEqual(
+    await resolveTpsBaseWriteTarget(host, {
+      explicitTargetPath: 'Inbox/Missing.md',
+      explicitTargetSpecified: true,
+      createExplicitIfMissing: false,
+      todayIsoDate,
+    }),
+    { file: null, source: 'filter', path: 'Inbox/Missing.md', reason: 'filter-target-not-found' },
+  );
+  assert.deepEqual(
+    await resolveTpsBaseWriteTarget(host, {
+      explicitTargetPath: null,
+      explicitTargetSpecified: true,
+      createExplicitIfMissing: false,
+      todayIsoDate,
+    }),
+    { file: null, source: 'filter', path: null, reason: 'invalid-filter-target' },
+  );
+  assert.equal(dailyNoteRequests, 1, 'no fallback may run after an explicit filter claims the target');
+
+  assert.match(mainSource, /const result = await resolveTpsBaseWriteTarget\(this,[\s\S]*todayIsoDate:/);
+  assert.match(viewSource, /gcmPlugin\.resolveTpsBaseWriteFile\(\{\s*explicitTargetPath: defaults\.targetPath,\s*explicitTargetSpecified: defaults\.targetPathSpecified === true,/);
+  assert.match(logBaseSource, /this\.plugin\.resolveTpsBaseWriteFile\(\{\s*explicitTargetPath: defaults\.targetPath,\s*explicitTargetSpecified: defaults\.targetPathSpecified,/);
+});
+
+test('TPS List active-view target filters retain ownership when resolved or unresolved', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const taskFilter = {
+    mode: 'tasks',
+    includeDone: true,
+    statuses: new Set(),
+    tags: new Set(),
+    excludeStatuses: new Set(),
+    excludeTags: new Set(),
+  };
+  let roots = [
+    { and: ['task.path == "Inbox/Active View.md"'] },
+    { and: ['task.path == "Inbox/Whole Base.md"'] },
+  ];
+  view.getBaseFilterRoots = () => roots;
+  view.resolveBaseContextToken = (value) => String(value || '');
+
+  const resolved = view.getRootTaskCreationDefaults(taskFilter);
+  assert.equal(resolved.targetPath, 'Inbox/Active View.md');
+  assert.equal(resolved.targetPathSpecified, true);
+
+  roots = [
+    { and: ['task.path == this.file.path'] },
+    { and: ['task.path == "Inbox/Whole Base.md"'] },
+  ];
+  view.resolveBaseContextToken = (value) => value === 'this.file.path' ? '' : String(value || '');
+  const unresolved = view.getRootTaskCreationDefaults(taskFilter);
+  assert.equal(unresolved.targetPath, null);
+  assert.equal(
+    unresolved.targetPathSpecified,
+    true,
+    'an unresolved explicit active-view filter must block lower-priority Base and settings fallbacks',
+  );
+
+  const resolverCalls = [];
+  view.getGcmPlugin = () => ({
+    resolveTpsBaseWriteFile: async (options) => {
+      resolverCalls.push(options);
+      return { file: null, source: 'filter', path: null, reason: 'invalid-filter-target' };
+    },
+  });
+  assert.equal(await view.resolveRootTaskTargetFile(resolved), null);
+  assert.equal(await view.resolveRootTaskTargetFile(unresolved), null);
+  assert.deepEqual(resolverCalls, [
+    {
+      explicitTargetPath: 'Inbox/Active View.md',
+      explicitTargetSpecified: true,
+      createExplicitIfMissing: true,
+    },
+    {
+      explicitTargetPath: null,
+      explicitTargetSpecified: true,
+      createExplicitIfMissing: true,
+    },
+  ]);
+});
+
+test('TPS List only treats canonical file.path and task.path filters as write targets', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const taskFilter = {
+    mode: 'tasks',
+    includeDone: true,
+    statuses: new Set(),
+    tags: new Set(),
+    excludeStatuses: new Set(),
+    excludeTags: new Set(),
+  };
+  view.resolveBaseContextToken = (value) => String(value || '');
+
+  view.getBaseFilterRoots = () => [{
+    and: [
+      'kind == "task"',
+      'note.path == "Metadata.md"',
+      'task.file.path == "Source Alias.md"',
+      'path == "line-value"',
+    ],
+  }];
+  const metadataOnly = view.getRootTaskCreationDefaults(taskFilter);
+  assert.equal(metadataOnly.targetPath, null);
+  assert.equal(metadataOnly.targetPathSpecified, false);
+
+  view.getBaseFilterRoots = () => [{
+    and: [
+      'kind == "task"',
+      'file.path == "Inbox/A.md"',
+      'task.path == "Inbox/B.md"',
+    ],
+  }];
+  const conflicting = view.getRootTaskCreationDefaults(taskFilter);
+  assert.equal(conflicting.targetPath, null);
+  assert.equal(conflicting.targetPathSpecified, true);
+});
+
+test('TPS List creation waits for persisted Base filters before resolving settings fallback', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const runtimeRoot = { and: ['kind == "task"'] };
+  const persistedRoot = { and: ['task.path == "Inbox/Persisted.md"'] };
+  const baseFile = { path: 'Tasks.base', stat: { mtime: 42 } };
+  let releaseLoad;
+  let persistedRoots = null;
+  let resolved = false;
+
+  view.getRuntimeBaseFilterRoots = () => [runtimeRoot];
+  view.getStampedBaseFilterRoots = () => null;
+  view.getBaseFile = () => baseFile;
+  view.getConfiguredBaseViewName = () => 'Tasks';
+  view.loadBaseFileFilters = async () => {
+    await new Promise((resolve) => {
+      releaseLoad = resolve;
+    });
+    persistedRoots = [persistedRoot];
+    return true;
+  };
+  view.getBaseFileFilterRoot = () => persistedRoots;
+
+  const rootsPromise = view.getBaseFilterRootsForCreation().then((roots) => {
+    resolved = true;
+    return roots;
+  });
+  await Promise.resolve();
+  assert.equal(resolved, false, 'creation must not race ahead of the persisted-filter read');
+  releaseLoad();
+  assert.deepEqual(await rootsPromise, [runtimeRoot, persistedRoot]);
+  assert.match(viewSource, /creationFilterRoots = await this\.getBaseFilterRootsForCreation\(\)/);
+  assert.match(viewSource, /getRootTaskCreationDefaults\(effectiveTaskFilter, effectiveFilterRoots\)/);
+});
+
+test('TPS List headings remain display-only when Base write fallbacks are configured', async () => {
+  const { getKanbanRootLineKind } = await loadTaskCreationUtils();
+  assert.equal(getKanbanRootLineKind('heading'), null);
+  assert.equal(getKanbanRootLineKind('headings'), null);
+  assert.equal(getKanbanRootLineKind('header'), null);
+  assert.equal(getKanbanRootLineKind('h6'), null);
+  assert.match(viewSource, /const lineKind = getKanbanRootLineKind\(creationMode\);\s*if \(lineKind\) \{/);
+  assert.match(viewSource, /if \(task\.itemKind === 'heading'\) return;/);
+  assert.doesNotMatch(viewSource, /createRootTaskForLane\([\s\S]{0,200}'heading'/);
+  assert.doesNotMatch(logBaseSource, /TpsTableLineKind = 'bullet' \| 'task' \| 'heading'/);
 });
 
 test('TPS List keeps nested tasks with their parent while sorting siblings', async () => {

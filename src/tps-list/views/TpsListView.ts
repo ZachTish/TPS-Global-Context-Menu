@@ -180,6 +180,7 @@ type TaskCreationDefaults = {
   includeDone?: boolean;
   status?: string | null;
   targetPath?: string | null;
+  targetPathSpecified?: boolean;
   inlineFields: Map<string, { key: string; value: string }>;
   tags: Set<string>;
   excludedStatuses: Set<string>;
@@ -444,8 +445,10 @@ export class TpsListView extends BasesView {
   private openTasksLoading = new Set<string>();
   private baseFileFilterCache: { path: string; mtime: number; viewName: string; viewNames: string[]; filters: unknown[] | null } | null = null;
   private baseFileFiltersLoadingKey: string | null = null;
+  private baseFileFiltersLoadingPromise: Promise<boolean> | null = null;
   private embeddedBaseFilterCache: { path: string; mtime: number; viewName: string; viewNames: string[]; filters: unknown[] | null } | null = null;
   private embeddedBaseFiltersLoadingKey: string | null = null;
+  private embeddedBaseFiltersLoadingPromise: Promise<boolean> | null = null;
   private baseFilterSignature = '';
   private baseFilterPollInterval: number | null = null;
   private renderGeneration = 0;
@@ -466,6 +469,8 @@ export class TpsListView extends BasesView {
     super(controller);
     this.plugin = plugin;
     this.scrollEl = scrollEl;
+    scrollEl.removeClass('tps-log-base');
+    delete (scrollEl as any).__tpsTableView;
     scrollEl.addClass('tps-list-scroll');
     Object.assign(scrollEl, { __tpsListView: this });
     this.containerEl = scrollEl.createDiv({ cls: 'tps-list-container' });
@@ -478,14 +483,25 @@ export class TpsListView extends BasesView {
     frontmatterProcessor?: (frontmatter: Record<string, unknown>) => void,
   ): Promise<void> {
     if (this.runCreateCommandOverride()) return;
-    const taskFilter = this.getTaskRootFilterFromBaseFilters();
+    let creationFilterRoots: unknown[];
+    try {
+      creationFilterRoots = await this.getBaseFilterRootsForCreation();
+    } catch (error) {
+      flowError('CreateFile', 'filter-read-failed', error, {
+        viewType: this.type,
+        viewName: this.getConfiguredBaseViewName(),
+      });
+      new Notice('Could not read the Base filters, so TPS List did not create anything.');
+      return;
+    }
+    const taskFilter = this.getTaskRootFilterFromBaseFilters(creationFilterRoots);
     flow('CreateFile', 'start', {
       baseFileName: baseFileName || '',
       taskFilterMode: taskFilter.mode,
       viewType: this.type,
       viewName: this.getConfiguredBaseViewName(),
     });
-    const creationMode = this.getPriorityResolvedCreationMode(taskFilter);
+    const creationMode = this.getPriorityResolvedCreationMode(taskFilter, creationFilterRoots);
     const lineKind = getKanbanRootLineKind(creationMode);
     if (lineKind) {
       flow('CreateFile', 'route-root-line', {
@@ -499,6 +515,7 @@ export class TpsListView extends BasesView {
         { id: 'ungrouped', label: 'Ungrouped', groups: [], laneIds: ['ungrouped'] },
         taskFilter,
         lineKind,
+        creationFilterRoots,
       );
       return;
     }
@@ -520,8 +537,11 @@ export class TpsListView extends BasesView {
     await super.createFileForView(baseFileName ?? creationDefaults.baseFileName ?? undefined, mergedProcessor);
   }
 
-  private getPriorityResolvedCreationMode(taskFilter: KanbanTaskRootFilter): TaskCreationDefaults['mode'] {
-    for (const root of this.getBaseFilterRoots()) {
+  private getPriorityResolvedCreationMode(
+    taskFilter: KanbanTaskRootFilter,
+    roots = this.getBaseFilterRoots(),
+  ): TaskCreationDefaults['mode'] {
+    for (const root of roots) {
       const mode = this.inferPriorityCreationModeFromFilterNode(root);
       if (mode) return mode;
     }
@@ -1446,39 +1466,52 @@ export class TpsListView extends BasesView {
       : null;
   }
 
-  private async loadBaseFileFilters(file: TFile, mtime = Number(file.stat?.mtime || 0), viewName = this.getCurrentBaseViewName()): Promise<void> {
+  private async loadBaseFileFilters(file: TFile, mtime = Number(file.stat?.mtime || 0), viewName = this.getCurrentBaseViewName()): Promise<boolean> {
     const loadingKey = `${file.path}:${mtime}:${viewName}`;
-    if (this.baseFileFiltersLoadingKey === loadingKey) return;
+    if (this.baseFileFiltersLoadingKey === loadingKey && this.baseFileFiltersLoadingPromise) {
+      return this.baseFileFiltersLoadingPromise;
+    }
     this.baseFileFiltersLoadingKey = loadingKey;
-    try {
-      const content = await this.app.vault.cachedRead(file);
-      const parsed = parseYaml(content) as Record<string, unknown> | null | undefined;
-      const extracted = this.extractBaseFileFilterRoots(parsed, viewName);
-      if (this.baseFileFiltersLoadingKey !== loadingKey) return;
-      const previous = this.baseFileFilterCache;
-      this.baseFileFilterCache = {
-        path: file.path,
-        mtime,
-        viewName: extracted.viewName,
-        viewNames: extracted.viewNames,
-        filters: extracted.filters,
-      };
-      if (previous?.path !== file.path || previous?.mtime !== mtime || previous?.viewName !== extracted.viewName || previous?.filters !== extracted.filters) {
-        flow('BaseFilters', 'loaded', {
+    const loadPromise = (async () => {
+      try {
+        const content = await this.app.vault.cachedRead(file);
+        const parsed = parseYaml(content) as Record<string, unknown> | null | undefined;
+        const extracted = this.extractBaseFileFilterRoots(parsed, viewName);
+        if (this.baseFileFiltersLoadingKey !== loadingKey) return;
+        const previous = this.baseFileFilterCache;
+        this.baseFileFilterCache = {
           path: file.path,
+          mtime,
           viewName: extracted.viewName,
-          viewCount: extracted.viewNames.length,
-          filterRoots: extracted.filters?.length || 0,
-        });
-        this.refreshDebounced();
+          viewNames: extracted.viewNames,
+          filters: extracted.filters,
+        };
+        if (previous?.path !== file.path || previous?.mtime !== mtime || previous?.viewName !== extracted.viewName || previous?.filters !== extracted.filters) {
+          flow('BaseFilters', 'loaded', {
+            path: file.path,
+            viewName: extracted.viewName,
+            viewCount: extracted.viewNames.length,
+            filterRoots: extracted.filters?.length || 0,
+          });
+          this.refreshDebounced();
+        }
+        return true;
+      } catch (error) {
+        flowError('BaseFilters', 'read-failed', error, { path: file.path, viewName });
+        if (this.baseFileFiltersLoadingKey === loadingKey) {
+          this.baseFileFilterCache = { path: file.path, mtime, viewName, viewNames: [], filters: null };
+        }
+        return false;
       }
-    } catch (error) {
-      flowError('BaseFilters', 'read-failed', error, { path: file.path, viewName });
-      if (this.baseFileFiltersLoadingKey === loadingKey) {
-        this.baseFileFilterCache = { path: file.path, mtime, viewName, viewNames: [], filters: null };
-      }
+    })();
+    this.baseFileFiltersLoadingPromise = loadPromise;
+    try {
+      return await loadPromise;
     } finally {
-      if (this.baseFileFiltersLoadingKey === loadingKey) this.baseFileFiltersLoadingKey = null;
+      if (this.baseFileFiltersLoadingPromise === loadPromise) {
+        this.baseFileFiltersLoadingPromise = null;
+        if (this.baseFileFiltersLoadingKey === loadingKey) this.baseFileFiltersLoadingKey = null;
+      }
     }
   }
 
@@ -1660,6 +1693,8 @@ export class TpsListView extends BasesView {
     // Do not clear the root scroll element; Bases controls this container's lifecycle.
     // Clearing it here can leave the view blank when switching away and back.
     this.containerEl?.empty();
+    this.scrollEl.removeClass('tps-list-scroll');
+    if ((this.scrollEl as any).__tpsListView === this) delete (this.scrollEl as any).__tpsListView;
   }
   onResize(): void {}
 
@@ -4907,7 +4942,22 @@ export class TpsListView extends BasesView {
     // Runtime roots include unsaved edits from Obsidian's Base filter editor. Keep
     // them ahead of persisted roots so the custom view reacts immediately while
     // still inheriting the Base-wide filters stored in the .base file.
-    const runtimeRoots = this.extractFilterRootCandidates([
+    const runtimeRoots = this.getRuntimeBaseFilterRoots();
+    const stampedRoots = this.getStampedBaseFilterRoots();
+    if (stampedRoots) return composeEffectiveFilterRoots(runtimeRoots, stampedRoots);
+    const baseFile = this.getBaseFile();
+    if (baseFile) {
+      const fileRoots = this.getBaseFileFilterRoot();
+      return composeEffectiveFilterRoots(runtimeRoots, fileRoots || []);
+    }
+
+    const embeddedRoots = this.getEmbeddedBaseFilterRoot();
+    if (embeddedRoots?.length) return composeEffectiveFilterRoots(runtimeRoots, embeddedRoots);
+    return composeEffectiveFilterRoots(runtimeRoots, []);
+  }
+
+  private getRuntimeBaseFilterRoots(): unknown[] {
+    return this.extractFilterRootCandidates([
       this.config?.get?.('filters'),
       (this.config as any)?.filters,
       (this as any)?.filters,
@@ -4917,14 +4967,33 @@ export class TpsListView extends BasesView {
       (this as any)?.queryController?.query?.filters,
       (this as any)?.queryController?.queryState,
     ]);
+  }
+
+  private async getBaseFilterRootsForCreation(): Promise<unknown[]> {
+    const runtimeRoots = this.getRuntimeBaseFilterRoots();
     const stampedRoots = this.getStampedBaseFilterRoots();
     if (stampedRoots) return composeEffectiveFilterRoots(runtimeRoots, stampedRoots);
     const baseFile = this.getBaseFile();
     if (baseFile) {
+      const loaded = await this.loadBaseFileFilters(
+        baseFile,
+        Number(baseFile.stat?.mtime || 0),
+        this.getConfiguredBaseViewName(),
+      );
+      if (!loaded) throw new Error(`Could not read Base filters from ${baseFile.path}`);
       const fileRoots = this.getBaseFileFilterRoot();
       return composeEffectiveFilterRoots(runtimeRoots, fileRoots || []);
     }
 
+    const embeddedFile = this.getBaseContextFile();
+    if (embeddedFile) {
+      const loaded = await this.loadEmbeddedBaseFilters(
+        embeddedFile,
+        Number(embeddedFile.stat?.mtime || 0),
+        this.getConfiguredBaseViewName(),
+      );
+      if (!loaded) throw new Error(`Could not read embedded Base filters from ${embeddedFile.path}`);
+    }
     const embeddedRoots = this.getEmbeddedBaseFilterRoot();
     if (embeddedRoots?.length) return composeEffectiveFilterRoots(runtimeRoots, embeddedRoots);
     return composeEffectiveFilterRoots(runtimeRoots, []);
@@ -4971,63 +5040,81 @@ export class TpsListView extends BasesView {
       : null;
   }
 
-  private async loadEmbeddedBaseFilters(file: TFile, mtime = Number(file.stat?.mtime || 0), viewName = this.getConfiguredBaseViewName()): Promise<void> {
+  private async loadEmbeddedBaseFilters(file: TFile, mtime = Number(file.stat?.mtime || 0), viewName = this.getConfiguredBaseViewName()): Promise<boolean> {
     const loadingKey = `${file.path}:${mtime}:${viewName}`;
-    if (this.embeddedBaseFiltersLoadingKey === loadingKey) return;
+    if (this.embeddedBaseFiltersLoadingKey === loadingKey && this.embeddedBaseFiltersLoadingPromise) {
+      return this.embeddedBaseFiltersLoadingPromise;
+    }
     this.embeddedBaseFiltersLoadingKey = loadingKey;
-    try {
-      const content = await this.app.vault.cachedRead(file);
-      const exactRoots: unknown[] = [];
-      const fallbackRoots: unknown[] = [];
-      const viewNames: string[] = [];
-      let fallbackBlockCount = 0;
-      const blockPattern = /```base\s*\n([\s\S]*?)```/gi;
-      let match: RegExpExecArray | null = null;
-      while ((match = blockPattern.exec(content)) !== null) {
-        try {
-          const parsed = parseYaml(match[1] || '') as Record<string, unknown> | null | undefined;
-          const blockMatch = this.getEmbeddedKanbanBlockMatch(parsed, viewName);
-          if (!blockMatch) continue;
-          if (blockMatch === 'fallback') fallbackBlockCount += 1;
-          const extracted = this.extractBaseFileFilterRoots(parsed, viewName);
-          viewNames.push(...extracted.viewNames);
-          if (extracted.filters?.length) {
-            const target = blockMatch === 'exact' ? exactRoots : fallbackRoots;
-            target.push(...extracted.filters);
+    const loadPromise = (async () => {
+      try {
+        const content = await this.app.vault.cachedRead(file);
+        const exactRoots: unknown[] = [];
+        const fallbackRoots: unknown[] = [];
+        const viewNames: string[] = [];
+        let fallbackBlockCount = 0;
+        const blockPattern = /```base\s*\n([\s\S]*?)```/gi;
+        let match: RegExpExecArray | null = null;
+        while ((match = blockPattern.exec(content)) !== null) {
+          try {
+            const parsed = parseYaml(match[1] || '') as Record<string, unknown> | null | undefined;
+            const blockMatch = this.getEmbeddedKanbanBlockMatch(parsed, viewName);
+            if (!blockMatch) continue;
+            if (blockMatch === 'fallback') fallbackBlockCount += 1;
+            const extracted = this.extractBaseFileFilterRoots(parsed, viewName);
+            viewNames.push(...extracted.viewNames);
+            if (extracted.filters?.length) {
+              const target = blockMatch === 'exact' ? exactRoots : fallbackRoots;
+              target.push(...extracted.filters);
+            }
+          } catch (error) {
+            flowError('EmbeddedBaseFilters', 'parse-block-failed', error, { path: file.path, viewName });
           }
-        } catch (error) {
-          flowError('EmbeddedBaseFilters', 'parse-block-failed', error, { path: file.path, viewName });
         }
-      }
-      const ambiguousFallback = exactRoots.length === 0 && fallbackBlockCount > 1;
-      const roots = exactRoots.length ? exactRoots : ambiguousFallback ? [] : fallbackRoots;
-      const currentViewName = viewName || (ambiguousFallback ? '' : viewNames[0] || '');
-      if (this.embeddedBaseFiltersLoadingKey !== loadingKey) return;
-      const previous = this.embeddedBaseFilterCache;
-      this.embeddedBaseFilterCache = {
-        path: file.path,
-        mtime,
-        viewName: currentViewName,
-        viewNames: Array.from(new Set(viewNames)),
-        filters: roots.length ? roots : null,
-      };
-      if (ambiguousFallback) {
-        flowWarn('EmbeddedBaseFilters', 'ambiguous-fallback-skipped', {
+        const ambiguousFallback = exactRoots.length === 0 && fallbackBlockCount > 1;
+        const roots = exactRoots.length ? exactRoots : ambiguousFallback ? [] : fallbackRoots;
+        const currentViewName = viewName || (ambiguousFallback ? '' : viewNames[0] || '');
+        if (this.embeddedBaseFiltersLoadingKey !== loadingKey) return;
+        const previous = this.embeddedBaseFilterCache;
+        this.embeddedBaseFilterCache = {
           path: file.path,
-          viewName,
-          fallbackBlocks: fallbackBlockCount,
-        });
-      }
-      if (previous?.path !== file.path || previous?.mtime !== mtime || previous?.viewName !== currentViewName || previous?.filters !== this.embeddedBaseFilterCache.filters) {
-        flow('EmbeddedBaseFilters', 'loaded', {
-          path: file.path,
+          mtime,
           viewName: currentViewName,
-          filterRoots: roots.length,
-        });
-        this.refreshDebounced();
+          viewNames: Array.from(new Set(viewNames)),
+          filters: roots.length ? roots : null,
+        };
+        if (ambiguousFallback) {
+          flowWarn('EmbeddedBaseFilters', 'ambiguous-fallback-skipped', {
+            path: file.path,
+            viewName,
+            fallbackBlocks: fallbackBlockCount,
+          });
+        }
+        if (previous?.path !== file.path || previous?.mtime !== mtime || previous?.viewName !== currentViewName || previous?.filters !== this.embeddedBaseFilterCache.filters) {
+          flow('EmbeddedBaseFilters', 'loaded', {
+            path: file.path,
+            viewName: currentViewName,
+            filterRoots: roots.length,
+          });
+          this.refreshDebounced();
+        }
+        return true;
+      } catch (error) {
+        flowError('EmbeddedBaseFilters', 'read-failed', error, { path: file.path, viewName });
+        if (this.embeddedBaseFiltersLoadingKey === loadingKey) {
+          this.embeddedBaseFilterCache = { path: file.path, mtime, viewName, viewNames: [], filters: null };
+        }
+        return false;
       }
+    })();
+    this.embeddedBaseFiltersLoadingPromise = loadPromise;
+    try {
+      return await loadPromise;
     } finally {
-      if (this.embeddedBaseFiltersLoadingKey === loadingKey) this.embeddedBaseFiltersLoadingKey = null;
+      if (this.embeddedBaseFiltersLoadingPromise === loadPromise) {
+        this.embeddedBaseFiltersLoadingPromise = null;
+        if (this.embeddedBaseFiltersLoadingKey === loadingKey) this.embeddedBaseFiltersLoadingKey = null;
+      }
     }
   }
 
@@ -5391,7 +5478,7 @@ export class TpsListView extends BasesView {
     return trimmed;
   }
 
-  private getTaskRootFilterFromBaseFilters(): KanbanTaskRootFilter {
+  private getTaskRootFilterFromBaseFilters(roots = this.getBaseFilterRoots()): KanbanTaskRootFilter {
     const filter: KanbanTaskRootFilter = {
       mode: 'mixed',
       hasTaskDirective: false,
@@ -5403,7 +5490,7 @@ export class TpsListView extends BasesView {
       tags: new Set<string>(),
       excludeTags: new Set<string>(),
     };
-    for (const root of this.getBaseFilterRoots()) {
+    for (const root of roots) {
       if (this.hasTaskDirectiveInFilterNode(root)) filter.hasTaskDirective = true;
       if (filterTreeIncludesStructuralKind(root, 'bullet')) filter.includeBullets = true;
       if (filterTreeIncludesStructuralKind(root, 'heading')) filter.includeHeadings = true;
@@ -6068,7 +6155,12 @@ export class TpsListView extends BasesView {
     displayLane: DisplayLaneGroup,
     taskFilter = this.getTaskRootFilterFromBaseFilters(),
     itemKind: KanbanRootLineKind = getKanbanRootLineKind(this.getPriorityResolvedCreationMode(taskFilter)) ?? 'task',
+    creationFilterRoots?: unknown[],
   ): Promise<void> {
+    const effectiveFilterRoots = creationFilterRoots ?? await this.getBaseFilterRootsForCreation();
+    const effectiveTaskFilter = creationFilterRoots
+      ? taskFilter
+      : this.getTaskRootFilterFromBaseFilters(effectiveFilterRoots);
     const targetSelection = propName
       ? await this.resolveDropValueForDisplayLane(displayLane)
       : { selected: true, value: null as string | null };
@@ -6085,7 +6177,7 @@ export class TpsListView extends BasesView {
       return;
     }
 
-    const defaults = this.getRootTaskCreationDefaults(taskFilter);
+    const defaults = this.getRootTaskCreationDefaults(effectiveTaskFilter, effectiveFilterRoots);
     const targetFile = await this.resolveRootTaskTargetFile(defaults);
     if (!targetFile) {
       flowWarn('CreateRootTask', 'missing-target', {
@@ -6098,7 +6190,7 @@ export class TpsListView extends BasesView {
       return;
     }
 
-    const taskLine = this.buildRootTaskLine(title, propName, targetSelection.value, taskFilter, itemKind, defaults);
+    const taskLine = this.buildRootTaskLine(title, propName, targetSelection.value, effectiveTaskFilter, itemKind, defaults);
     flow('CreateRootTask', 'write', {
       path: targetFile.path,
       lane: displayLane.label,
@@ -6140,7 +6232,10 @@ export class TpsListView extends BasesView {
     });
   }
 
-  private getRootTaskCreationDefaults(taskFilter: KanbanTaskRootFilter): TaskCreationDefaults {
+  private getRootTaskCreationDefaults(
+    taskFilter: KanbanTaskRootFilter,
+    roots = this.getBaseFilterRoots(),
+  ): TaskCreationDefaults {
     const fallback: TaskCreationDefaults = {
       mode: taskFilter.mode,
       includeDone: taskFilter.includeDone,
@@ -6152,7 +6247,7 @@ export class TpsListView extends BasesView {
     };
 
     let structured = fallback;
-    for (const root of [...this.getBaseFilterRoots()].reverse()) {
+    for (const root of [...roots].reverse()) {
       const defaults = this.inferTaskCreationDefaultsFromFilterNode(root);
       if (!defaults) continue;
       structured = this.mergePriorityTaskCreationDefaults(defaults, structured);
@@ -6180,7 +6275,10 @@ export class TpsListView extends BasesView {
         mode: higherPriority.mode ?? lowerPriority.mode,
         includeDone: higherPriority.includeDone ?? lowerPriority.includeDone,
         status: null,
-        targetPath: higherPriority.targetPath ?? lowerPriority.targetPath ?? null,
+        targetPath: higherPriority.targetPathSpecified === true
+          ? higherPriority.targetPath ?? null
+          : lowerPriority.targetPath ?? null,
+        targetPathSpecified: higherPriority.targetPathSpecified === true || lowerPriority.targetPathSpecified === true,
         inlineFields,
         tags,
         excludedStatuses,
@@ -6192,7 +6290,10 @@ export class TpsListView extends BasesView {
       mode: higherPriority.mode ?? lowerPriority.mode,
       includeDone: higherPriority.includeDone ?? lowerPriority.includeDone,
       status,
-      targetPath: higherPriority.targetPath ?? lowerPriority.targetPath ?? null,
+      targetPath: higherPriority.targetPathSpecified === true
+        ? higherPriority.targetPath ?? null
+        : lowerPriority.targetPath ?? null,
+      targetPathSpecified: higherPriority.targetPathSpecified === true || lowerPriority.targetPathSpecified === true,
       inlineFields,
       tags,
       excludedStatuses,
@@ -6255,6 +6356,7 @@ export class TpsListView extends BasesView {
       includeDone: right.includeDone,
       status: right.status,
       targetPath: right.targetPath,
+      targetPathSpecified: right.targetPathSpecified,
       inlineFields: new Map(right.inlineFields),
       tags: new Set(right.tags),
       excludedStatuses: new Set(right.excludedStatuses),
@@ -6263,8 +6365,20 @@ export class TpsListView extends BasesView {
 
     const status = right.status ?? left.status ?? null;
     if (left.status && right.status && left.status !== right.status) return null;
-    const targetPath = right.targetPath ?? left.targetPath ?? null;
-    if (left.targetPath && right.targetPath && this.normalizeTaskTargetPath(left.targetPath) !== this.normalizeTaskTargetPath(right.targetPath)) return null;
+    const leftOwnsTarget = left.targetPathSpecified === true;
+    const rightOwnsTarget = right.targetPathSpecified === true;
+    const normalizedLeftTarget = this.normalizeTaskTargetPath(left.targetPath);
+    const normalizedRightTarget = this.normalizeTaskTargetPath(right.targetPath);
+    const targetPathSpecified = leftOwnsTarget || rightOwnsTarget;
+    const targetPath = leftOwnsTarget && rightOwnsTarget
+      ? normalizedLeftTarget && normalizedRightTarget && normalizedLeftTarget === normalizedRightTarget
+        ? normalizedRightTarget
+        : null
+      : rightOwnsTarget
+        ? normalizedRightTarget
+        : leftOwnsTarget
+          ? normalizedLeftTarget
+          : null;
 
     const inlineFields = new Map(left.inlineFields);
     for (const [normalizedKey, field] of right.inlineFields) {
@@ -6283,6 +6397,7 @@ export class TpsListView extends BasesView {
       includeDone: right.includeDone ?? left.includeDone,
       status,
       targetPath,
+      targetPathSpecified,
       inlineFields,
       tags,
       excludedStatuses,
@@ -6326,11 +6441,18 @@ export class TpsListView extends BasesView {
   }
 
   private inferTaskPathCreationDefaultsFromString(expr: string): TaskCreationDefaults | null {
-    const pathMatch = expr.match(/^(?:task\.)?(?:path|file|file\.path)\s*(?:==|=|is|equals?)\s*(?:"([^"]+)"|'([^']+)'|([^\s].*?))$/i);
-    const resolved = pathMatch ? this.resolveBaseContextToken(pathMatch[1] || pathMatch[2] || pathMatch[3]) : null;
+    const pathMatch = expr.match(/^(?:file\.path|task\.path)\s*(?:==|=|is|equals?)\s*(?:"([^"]+)"|'([^']+)'|([^\s].*?))$/i);
+    if (!pathMatch) return null;
+    const resolved = this.resolveBaseContextToken(pathMatch[1] || pathMatch[2] || pathMatch[3]);
     const targetPath = this.normalizeTaskTargetPath(resolved || '');
-    if (!targetPath) return null;
-    return { targetPath, inlineFields: new Map(), tags: new Set(), excludedStatuses: new Set(), excludedTags: new Set() };
+    return {
+      targetPath,
+      targetPathSpecified: true,
+      inlineFields: new Map(),
+      tags: new Set(),
+      excludedStatuses: new Set(),
+      excludedTags: new Set(),
+    };
   }
 
   private inferTaskValueCreationDefaultsFromString(expr: string, propName: 'status' | 'tags'): TaskCreationDefaults | null {
@@ -6398,10 +6520,20 @@ export class TpsListView extends BasesView {
       const value = this.normalizeTaskTag(values[0]);
       return { inlineFields: new Map(), tags: new Set(excluded ? [] : [value]), excludedStatuses: new Set(), excludedTags: new Set(excluded ? [value] : []) };
     }
-    if (['path', 'file', 'filepath'].includes(normalizedProp) || propRaw.toLowerCase() === 'task.path' || propRaw.toLowerCase() === 'task.file.path') {
+    if (propRaw.toLowerCase() === 'file.path' || propRaw.toLowerCase() === 'task.path') {
       const value = this.normalizeTaskTargetPath(this.resolveBaseContextToken(values[0]) || '');
-      return value && !excluded ? { targetPath: value, inlineFields: new Map(), tags: new Set(), excludedStatuses: new Set(), excludedTags: new Set() } : null;
+      return !excluded
+        ? {
+            targetPath: value,
+            targetPathSpecified: true,
+            inlineFields: new Map(),
+            tags: new Set(),
+            excludedStatuses: new Set(),
+            excludedTags: new Set(),
+          }
+        : null;
     }
+    if (propRaw.toLowerCase() === 'task.file.path') return null;
     if (!excluded && !propRaw.toLowerCase().startsWith('note.') && !propRaw.toLowerCase().startsWith('file.') && !this.isReservedTaskDefaultKey(normalizedProp)) {
       return {
         inlineFields: new Map([[normalizedProp, { key: propRaw.replace(/^task\./i, '').replace(/^tps\./i, ''), value: values[0] }]]),
@@ -6431,6 +6563,28 @@ export class TpsListView extends BasesView {
   }
 
   private async resolveRootTaskTargetFile(defaults = this.getRootTaskCreationDefaults(this.getTaskRootFilterFromBaseFilters())): Promise<TFile | null> {
+    const gcmPlugin = this.getGcmPlugin();
+    if (typeof gcmPlugin?.resolveTpsBaseWriteFile === 'function') {
+      const resolution = await gcmPlugin.resolveTpsBaseWriteFile({
+        explicitTargetPath: defaults.targetPath,
+        explicitTargetSpecified: defaults.targetPathSpecified === true,
+        createExplicitIfMissing: true,
+      });
+      if (resolution?.file instanceof TFile) {
+        flow('CreateRootTaskTarget', 'resolved', {
+          path: resolution.file.path,
+          source: resolution.source,
+        });
+        return resolution.file;
+      }
+      flowWarn('CreateRootTaskTarget', 'unresolved', {
+        source: resolution?.source ?? null,
+        reason: resolution?.reason ?? 'resolver-returned-no-file',
+        targetPath: resolution?.path ?? defaults.targetPath ?? null,
+      });
+      return null;
+    }
+
     const targetPath = resolveKanbanRootTaskTargetPath(defaults.targetPath, this.plugin.settings?.defaultRootTaskPath || '');
     if (targetPath) {
       const existing = this.app.vault.getFileByPath(targetPath);

@@ -8,6 +8,7 @@ import type { BindCommittedText, SettingsSectionContext } from './notebook-navig
 import { collectVaultPropertyOptions, getEffectivePropertyOptions, normalizeManualPropertyOptions } from './utils/property-options';
 import { mergeLinkedSubitemMappingPresentation } from './utils/linked-subitem-mapping';
 import { normalizeParentLinkFormat } from './handlers/parent-link-format';
+import { FileSuggestModal } from './modals/FileSuggestModal';
 import {
   BASE_QUERY_GUIDE_GOTCHAS,
   BASE_QUERY_GUIDE_SECTIONS,
@@ -1772,6 +1773,47 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         text: 'Task-line creation, hiding, checkbox/status mapping, and completion safeguards.',
         cls: 'setting-item-description',
       });
+      new Setting(taskAutomation)
+        .setName('When a Base has no write target')
+        .setDesc('Fallback write note for new TPS List/Table task and bullet lines. An exact active-view or whole-Base file.path/task.path filter always wins.')
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('filter-required', 'Require a file.path/task.path filter')
+            .addOption('today-daily-note', 'Today’s Daily Note')
+            .addOption('specific-note', 'Specific note')
+            .setValue(this.plugin.settings.tpsBaseWriteFallbackMode)
+            .onChange(async (value) => {
+              if (value !== 'filter-required' && value !== 'today-daily-note' && value !== 'specific-note') return;
+              this.plugin.settings.tpsBaseWriteFallbackMode = value;
+              await this.plugin.saveSettings();
+              this.redisplayPreservingRouteFocus('tasks');
+            })
+        );
+      if (this.plugin.settings.tpsBaseWriteFallbackMode === 'specific-note') {
+        new Setting(taskAutomation)
+          .setName('Fallback write note')
+          .setDesc('Existing Markdown note used only when the effective Base filters do not identify an exact write target.')
+          .addText((text) =>
+            text
+              .setPlaceholder('Inbox/Tasks.md')
+              .setValue(this.plugin.settings.tpsBaseWriteFallbackPath)
+              .onChange(async (value) => {
+                this.plugin.settings.tpsBaseWriteFallbackPath = value.trim();
+                await this.plugin.saveSettings();
+              })
+          )
+          .addButton((button) =>
+            button
+              .setButtonText('Choose note')
+              .onClick(() => {
+                new FileSuggestModal(this.app, async (file) => {
+                  this.plugin.settings.tpsBaseWriteFallbackPath = file.path;
+                  await this.plugin.saveSettings();
+                  this.redisplayPreservingRouteFocus('tasks');
+                }, { extensions: ['md'] }).open();
+              })
+          );
+      }
       new Setting(taskAutomation)
         .setName('Default attachments path')
         .setDesc('Folder where new attachment notes are created. Leave empty to use the vault root.')

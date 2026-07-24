@@ -286,6 +286,6 @@ export const BASE_QUERY_GUIDE_GOTCHAS = [
   'TPS List kind is a GCM structural selector: task, bullet, note, h1 through h6, plus header/heading as aliases for every Markdown heading level. Use note.kind when you mean frontmatter named kind.',
   'TPS List exposes whole-note, checkbox-task, plain-bullet, and Markdown-heading rows. Ordinary paragraphs are not standalone rows.',
   'Heading filters are display-only. They never make + New create a heading; keep task or bullet first in the active-view or/any branch to choose the creation route.',
-  'Keep both Daily Note path filters: file.path scopes the displayed note data, while task.path scopes every synthesized line row and gives + New an explicit task/bullet write target.',
+  'Keep both Daily Note path filters for a deterministic feed: file.path scopes displayed note data, while task.path scopes synthesized rows and gives + New an explicit task/bullet write target. Without an exact target, Workflows → Tasks can supply today’s Daily Note or one configured note as a fallback.',
   'Paths are vault-relative. Use the .md extension for explicit task.path creation targets.',
 ];

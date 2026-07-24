@@ -328,6 +328,49 @@ test('settings controls use immediate persistence rather than unload-unsafe time
   assert.match(mainSource, /if \(needsSettingsMigration\) await this\.persistSettingsSnapshot\(\);/);
 });
 
+test('TPS Base write fallback settings default safely and persist every Tasks workflow choice', () => {
+  const tasksStart = settingsTabSource.indexOf("if (this.activeWorkflowPage === 'tasks')");
+  const tasksEnd = settingsTabSource.indexOf("if (this.activeWorkflowPage === 'child-notes')", tasksStart);
+  const tasksSource = settingsTabSource.slice(tasksStart, tasksEnd);
+
+  assert.ok(tasksStart >= 0 && tasksEnd > tasksStart, 'Tasks workflow settings must remain directly reachable');
+  assert.match(typesSource, /export type TpsBaseWriteFallbackMode = 'filter-required' \| 'today-daily-note' \| 'specific-note';/);
+  assert.match(typesSource, /tpsBaseWriteFallbackMode: TpsBaseWriteFallbackMode;/);
+  assert.match(typesSource, /tpsBaseWriteFallbackPath: string;/);
+  assert.match(constantsSource, /tpsBaseWriteFallbackMode: 'filter-required',/);
+  assert.match(constantsSource, /tpsBaseWriteFallbackPath: '',/);
+  assert.match(mainSource, /this\.settings\.tpsBaseWriteFallbackMode = normalizeTpsBaseWriteFallbackMode\(this\.settings\.tpsBaseWriteFallbackMode\);/);
+  assert.match(mainSource, /this\.settings\.tpsBaseWriteFallbackPath = normalizeTpsBaseWriteNotePath\(this\.settings\.tpsBaseWriteFallbackPath\) \|\| '';/);
+
+  assert.match(tasksSource, /setName\('When a Base has no write target'\)/);
+  assert.match(tasksSource, /\.addOption\('filter-required', 'Require a file\.path\/task\.path filter'\)/);
+  assert.match(tasksSource, /\.addOption\('today-daily-note', 'Today’s Daily Note'\)/);
+  assert.match(tasksSource, /\.addOption\('specific-note', 'Specific note'\)/);
+  assert.match(tasksSource, /\.setValue\(this\.plugin\.settings\.tpsBaseWriteFallbackMode\)/);
+  assert.match(
+    tasksSource,
+    /this\.plugin\.settings\.tpsBaseWriteFallbackMode = value;\s*await this\.plugin\.saveSettings\(\);\s*this\.redisplayPreservingRouteFocus\('tasks'\);/,
+  );
+
+  assert.match(tasksSource, /if \(this\.plugin\.settings\.tpsBaseWriteFallbackMode === 'specific-note'\)/);
+  assert.match(tasksSource, /setName\('Fallback write note'\)/);
+  assert.match(tasksSource, /\.setValue\(this\.plugin\.settings\.tpsBaseWriteFallbackPath\)/);
+  assert.match(
+    tasksSource,
+    /this\.plugin\.settings\.tpsBaseWriteFallbackPath = value\.trim\(\);\s*await this\.plugin\.saveSettings\(\);/,
+  );
+  assert.match(tasksSource, /new FileSuggestModal\(this\.app,[\s\S]*\{ extensions: \['md'\] \}\)\.open\(\)/);
+  assert.match(
+    tasksSource,
+    /this\.plugin\.settings\.tpsBaseWriteFallbackPath = file\.path;\s*await this\.plugin\.saveSettings\(\);\s*this\.redisplayPreservingRouteFocus\('tasks'\);/,
+  );
+  assert.doesNotMatch(
+    tasksSource,
+    /tpsBaseWriteFallbackPath\s*=\s*''/,
+    'switching away from Specific note must not erase the saved path',
+  );
+});
+
 test('parent link format and notebook navigator smart sort sanitize to one canonical shape', async () => {
   const { sanitizeNotebookNavigatorRuleSettings } = await importModule('../src/services/notebook-navigator-rule-settings.ts');
 
