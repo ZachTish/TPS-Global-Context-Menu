@@ -18,10 +18,11 @@ export function extractPersistedFilterRoots(
     if (!view || typeof view !== 'object') return false;
     return acceptedViewTypes.has(String((view as Record<string, unknown>).type || '').trim());
   });
-  const viewNames = views
-    .map((view) => typeof view === 'object' && view ? String((view as Record<string, unknown>).name || '').trim() : '')
+  const viewNames = acceptedViews
+    .map((view) => String(view.name || '').trim())
     .filter(Boolean);
-  const viewName = requestedViewName || String(acceptedViews[0]?.name || '').trim();
+  const viewName = requestedViewName
+    || (acceptedViews.length === 1 ? String(acceptedViews[0]?.name || '').trim() : '');
   const activeView = acceptedViews.find((view) => {
     const candidate = String(view.name || '').trim();
     return viewName ? candidate === viewName : acceptedViews.length === 1;
@@ -31,6 +32,19 @@ export function extractPersistedFilterRoots(
   if (activeView?.filters) filters.push(activeView.filters);
   if (parsed.filters) filters.push(parsed.filters);
   return { viewName, viewNames, filters: filters.length ? filters : null };
+}
+
+export function isPersistedFilterCacheMatch(
+  cachedViewName: string,
+  requestedViewName: string,
+  acceptedViewNames: string[] = [],
+): boolean {
+  const cached = String(cachedViewName || '').trim();
+  const requested = String(requestedViewName || '').trim();
+  if (requested) return cached === requested;
+  if (!cached) return true;
+  const accepted = acceptedViewNames.map((name) => String(name || '').trim()).filter(Boolean);
+  return accepted.length === 1 && accepted[0] === cached;
 }
 
 export function composeEffectiveFilterRoots(runtimeRoots: unknown[], persistedRoots: unknown[]): unknown[] {

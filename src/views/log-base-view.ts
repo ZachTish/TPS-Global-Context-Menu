@@ -24,6 +24,11 @@ import { hashSelectionIdentity } from '../utils/selection-identity';
 import { requestLineItemDelete } from '../services/line-item-delete-service';
 import { normalizeTagValue } from '../utils/tag-utils';
 import {
+  getKanbanStatusForCheckboxState,
+  normalizeKanbanCheckboxState,
+  type KanbanCheckboxMappingLike,
+} from '../tps-list/task-checkbox-utils';
+import {
   getSourceNoteGroupValue,
   groupTpsBaseRows,
   isSourceNoteGroupProperty,
@@ -42,6 +47,7 @@ interface LogLineEntry {
   line: string;
   title: string;
   fields: Record<string, string>;
+  queryFields?: Record<string, string>;
 }
 
 function getLogEntrySelectionId(
@@ -69,6 +75,7 @@ import {
   appendTpsTableMarkdownLine,
   buildTpsTableMarkdownLine,
   getTpsTableMarkdownLineKind,
+  getTpsTableTaskQueryFields,
   hasTpsTableLineKindFilter,
   resolveTpsTableLineCreateDefaults,
   type TpsTableLineKind,
@@ -376,6 +383,7 @@ export class TpsTableView extends BasesView {
     const entries: LogLineEntry[] = [];
     const filterRoots = await this.getEffectiveBaseFilterRoots();
     const sourceFiles = filterRoots.length ? this.plugin.app.vault.getMarkdownFiles() : this.getSourceFiles();
+    const checkboxMappings = this.getTaskCheckboxMappings();
     let unknownFilterRows = 0;
     for (const file of sourceFiles) {
       let content = '';
@@ -389,8 +397,26 @@ export class TpsTableView extends BasesView {
         const fields = readInlineFields(line);
         const markdownKind = getTpsTableMarkdownLineKind(line);
         if (markdownKind && !fields.kind) fields.kind = markdownKind;
-        if (!this.lineMatches(fields) && !(markdownKind && hasTpsTableLineKindFilter(filterRoots))) return;
-        const filterResult = evaluateLogBaseFilterRoots(filterRoots, this.createFilterContext(fields, file));
+        let queryFields = fields;
+        if (markdownKind === 'task') {
+          const statusService = this.plugin.sharedServices?.status;
+          queryFields = {
+            ...fields,
+            ...getTpsTableTaskQueryFields(
+              line,
+              (checkboxState) => {
+                const mappedStatus = getKanbanStatusForCheckboxState(checkboxState, checkboxMappings)
+                  || statusService?.checkboxStateToStatus?.(checkboxState)
+                  || '';
+                return statusService?.normalize?.(mappedStatus) || mappedStatus;
+              },
+              (status) => statusService?.isDoneStatus?.(status)
+                ?? (status === 'complete' || status === 'wont-do'),
+            ),
+          };
+        }
+        if (!this.lineMatches(queryFields) && !(markdownKind && hasTpsTableLineKindFilter(filterRoots))) return;
+        const filterResult = evaluateLogBaseFilterRoots(filterRoots, this.createFilterContext(queryFields, file));
         if (filterResult === false) return;
         if (filterResult == null && filterRoots.length) unknownFilterRows += 1;
         if (!this.lineMatchesHomeDateContext(fields, file)) return;
@@ -402,6 +428,7 @@ export class TpsTableView extends BasesView {
           line,
           title: visibleLineText(line),
           fields,
+          queryFields,
         });
       });
     }
@@ -413,6 +440,20 @@ export class TpsTableView extends BasesView {
       });
     }
     return this.sortEntries(entries);
+  }
+
+  private getTaskCheckboxMappings(): KanbanCheckboxMappingLike[] {
+    const configured = this.plugin.settings?.linkedSubitemCheckboxMappings;
+    if (!Array.isArray(configured)) return [];
+    return configured
+      .map((entry) => ({
+        checkboxState: normalizeKanbanCheckboxState(String(entry?.checkboxState || '[ ]')),
+        statuses: Array.isArray(entry?.statuses)
+          ? entry.statuses.map((status) => String(status || '').trim().toLowerCase()).filter(Boolean)
+          : [],
+        toggleTargetStatus: String(entry?.toggleTargetStatus || '').trim() || undefined,
+      }))
+      .filter((entry) => entry.checkboxState && entry.statuses.length > 0);
   }
 
   private async getEffectiveBaseFilterRoots(): Promise<unknown[]> {
@@ -1130,7 +1171,7 @@ export class TpsTableView extends BasesView {
     if (this.isFileLinkColumn(key)) return entry.file.basename;
     if (normalized === 'source' || normalized === 'path') return `${entry.file.path}:${entry.lineNumber + 1}`;
     if (normalized === 'linenumber') return String(entry.lineNumber + 1);
-    return this.displayInlineValue(entry.fields[normalized] ?? '', entry.file.path);
+    return this.displayInlineValue(entry.fields[normalized] ?? entry.queryFields?.[normalized] ?? '', entry.file.path);
   }
 
   private isFileLinkColumn(key: string): boolean {
@@ -1277,7 +1318,14 @@ export class TpsTableView extends BasesView {
 
     const editableColumns = columns
       .map((column) => ({ ...column, normalized: normalizeInlineKey(column.key) }))
-      .filter((column) => column.normalized && column.normalized !== 'line' && column.normalized !== 'title' && column.normalized !== 'source' && column.normalized !== 'path' && column.normalized !== 'linenumber' && column.normalized !== 'tags');
+      .filter((column) => column.normalized
+        && column.normalized !== 'line'
+        && column.normalized !== 'title'
+        && column.normalized !== 'source'
+        && column.normalized !== 'path'
+        && column.normalized !== 'linenumber'
+        && column.normalized !== 'tags'
+        && (entry.fields[column.normalized] != null || entry.queryFields?.[column.normalized] == null));
 
     for (const column of editableColumns) {
       const current = entry.fields[column.normalized] ?? '';

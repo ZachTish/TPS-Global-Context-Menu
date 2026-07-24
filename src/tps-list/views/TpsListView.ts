@@ -34,7 +34,12 @@ import {
   parseBareSemanticKindExpression,
 } from '../filter-kind-utils';
 import { getTpsListHeadingDisplayTitle, parseTpsListHeadingLine, setTpsListHeadingText } from '../heading-line-utils';
-import { combineFilterTreeResults, composeEffectiveFilterRoots, extractPersistedFilterRoots } from '../base-filter-roots';
+import {
+  combineFilterTreeResults,
+  composeEffectiveFilterRoots,
+  extractPersistedFilterRoots,
+  isPersistedFilterCacheMatch,
+} from '../base-filter-roots';
 import { resolveBaseEmbedSourcePath } from '../../views/base-embed-context';
 import { getOrderedSelectionRange, toggleOrderedSelection } from '../../utils/ordered-selection';
 import { hashSelectionIdentity } from '../../utils/selection-identity';
@@ -439,7 +444,7 @@ export class TpsListView extends BasesView {
   private openTasksLoading = new Set<string>();
   private baseFileFilterCache: { path: string; mtime: number; viewName: string; viewNames: string[]; filters: unknown[] | null } | null = null;
   private baseFileFiltersLoadingKey: string | null = null;
-  private embeddedBaseFilterCache: { path: string; mtime: number; viewName: string; filters: unknown[] | null } | null = null;
+  private embeddedBaseFilterCache: { path: string; mtime: number; viewName: string; viewNames: string[]; filters: unknown[] | null } | null = null;
   private embeddedBaseFiltersLoadingKey: string | null = null;
   private baseFilterSignature = '';
   private baseFilterPollInterval: number | null = null;
@@ -1136,7 +1141,12 @@ export class TpsListView extends BasesView {
   }
 
   private getStatusForCheckboxState(rawState: string): string {
-    return getKanbanStatusForCheckboxState(rawState, this.getGcmCheckboxMappings());
+    return this.normalizeTaskStatus(getKanbanStatusForCheckboxState(rawState, this.getGcmCheckboxMappings()));
+  }
+
+  private normalizeTaskStatus(rawStatus: unknown): string {
+    const normalized = this.getGcmServices()?.status?.normalize?.(rawStatus);
+    return String(normalized || rawStatus || '').trim().toLowerCase();
   }
 
   private getLaneIdForStatus(status: string | null): string {
@@ -1420,13 +1430,18 @@ export class TpsListView extends BasesView {
     if (
       this.baseFileFilterCache?.path === file.path
       && this.baseFileFilterCache.mtime === mtime
-      && (!viewName || this.baseFileFilterCache.viewName === viewName)
+      && isPersistedFilterCacheMatch(this.baseFileFilterCache.viewName, viewName, this.baseFileFilterCache.viewNames)
     ) {
       return this.baseFileFilterCache.filters;
     }
 
     void this.loadBaseFileFilters(file, mtime, viewName);
-    return this.baseFileFilterCache?.path === file.path && (!viewName || this.baseFileFilterCache.viewName === viewName)
+    return this.baseFileFilterCache?.path === file.path
+      && isPersistedFilterCacheMatch(
+        this.baseFileFilterCache.viewName,
+        viewName,
+        this.baseFileFilterCache.viewNames,
+      )
       ? this.baseFileFilterCache.filters
       : null;
   }
@@ -1439,6 +1454,7 @@ export class TpsListView extends BasesView {
       const content = await this.app.vault.cachedRead(file);
       const parsed = parseYaml(content) as Record<string, unknown> | null | undefined;
       const extracted = this.extractBaseFileFilterRoots(parsed, viewName);
+      if (this.baseFileFiltersLoadingKey !== loadingKey) return;
       const previous = this.baseFileFilterCache;
       this.baseFileFilterCache = {
         path: file.path,
@@ -1458,7 +1474,9 @@ export class TpsListView extends BasesView {
       }
     } catch (error) {
       flowError('BaseFilters', 'read-failed', error, { path: file.path, viewName });
-      this.baseFileFilterCache = { path: file.path, mtime, viewName, viewNames: [], filters: null };
+      if (this.baseFileFiltersLoadingKey === loadingKey) {
+        this.baseFileFilterCache = { path: file.path, mtime, viewName, viewNames: [], filters: null };
+      }
     } finally {
       if (this.baseFileFiltersLoadingKey === loadingKey) this.baseFileFiltersLoadingKey = null;
     }
@@ -3480,9 +3498,18 @@ export class TpsListView extends BasesView {
 
     if (task.itemKind === 'heading' && /^(?:task\.)?(?:status|checkboxstatus|open|isopen|done|isdone|completed|complete)\b/i.test(expr)) return false;
     const status = this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo';
-    if (/^(?:task\.)?(?:open|isopen)\s*(?:==|=)\s*(true|1)$/i.test(expr)) return !this.getDoneStatuses().has(status);
-    if (/^(?:task\.)?(?:done|isdone|completed|complete)\s*(?:==|=)\s*(false|0)$/i.test(expr)) return !this.getDoneStatuses().has(status);
-    if (/^(?:task\.)?(?:done|isdone|completed|complete)\s*(?:==|=)\s*(true|1)$/i.test(expr)) return this.getDoneStatuses().has(status);
+    const booleanMatch = expr.match(
+      /^(?:task\.)?(open|isopen|done|isdone|completed|complete)\s*(==|=|!=|!==|is|equals?)\s*(true|false|1|0)$/i,
+    );
+    if (booleanMatch) {
+      const isOpenProperty = ['open', 'isopen'].includes(booleanMatch[1].toLowerCase());
+      const actual = isOpenProperty
+        ? !this.getDoneStatuses().has(status)
+        : this.getDoneStatuses().has(status);
+      const expected = ['true', '1'].includes(booleanMatch[3].toLowerCase());
+      const matched = actual === expected;
+      return booleanMatch[2].startsWith('!') ? !matched : matched;
+    }
 
     const statusResult = this.evaluateTaskValueFilterExpression(expr, 'status', [status], false);
     if (statusResult != null) return statusResult;
@@ -3767,11 +3794,13 @@ export class TpsListView extends BasesView {
         if (normalized.startsWith('note')) return false;
         return normalized === 'all' || normalized === 'mixed';
       });
-    } else if (['open', 'isopen'].includes(normalizedProp)) {
+    } else if (['open', 'isopen', 'done', 'isdone', 'completed', 'complete'].includes(normalizedProp)) {
       if (task.itemKind === 'heading') return false;
       const status = this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo';
       const isOpen = !this.getDoneStatuses().has(status);
-      result = values.some((value) => value.toLowerCase() === 'true' || value === '1') ? isOpen : null;
+      const actual = ['open', 'isopen'].includes(normalizedProp) ? isOpen : !isOpen;
+      const expected = values.find((value) => ['true', 'false', '1', '0'].includes(value.toLowerCase()));
+      result = expected == null ? null : actual === ['true', '1'].includes(expected.toLowerCase());
     } else if ((propRaw.toLowerCase().startsWith('task.') || normalizedProp === 'status' || normalizedProp === 'checkboxstatus') && ['status', 'checkboxstatus'].includes(normalizedProp)) {
       if (task.itemKind === 'heading') return false;
       const status = this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo';
@@ -3975,7 +4004,7 @@ export class TpsListView extends BasesView {
   private getDoneStatuses(): Set<string> {
     const gcmDoneStatuses = this.getGcmServices()?.status?.getDoneStatuses?.();
     if (Array.isArray(gcmDoneStatuses) && gcmDoneStatuses.length > 0) {
-      return new Set(gcmDoneStatuses.map((s: unknown) => String(s || '').trim().toLowerCase()).filter(Boolean));
+      return new Set(gcmDoneStatuses.map((status: unknown) => this.normalizeTaskStatus(status)).filter(Boolean));
     }
 
     const firstWithDoneStatuses = this.getRelationshipSettingsSources().find(
@@ -3984,7 +4013,7 @@ export class TpsListView extends BasesView {
     const raw: string[] = firstWithDoneStatuses?.recurrenceCompletionStatuses?.length
       ? firstWithDoneStatuses.recurrenceCompletionStatuses
       : ['complete', 'wont-do'];
-    return new Set(raw.map((s: string) => String(s || '').trim().toLowerCase()));
+    return new Set(raw.map((status: string) => this.normalizeTaskStatus(status)).filter(Boolean));
   }
 
   private async applyInlineTaskProperty(
@@ -4922,13 +4951,22 @@ export class TpsListView extends BasesView {
     if (
       this.embeddedBaseFilterCache?.path === file.path
       && this.embeddedBaseFilterCache.mtime === mtime
-      && (!viewName || this.embeddedBaseFilterCache.viewName === viewName)
+      && isPersistedFilterCacheMatch(
+        this.embeddedBaseFilterCache.viewName,
+        viewName,
+        this.embeddedBaseFilterCache.viewNames,
+      )
     ) {
       return this.embeddedBaseFilterCache.filters;
     }
 
     void this.loadEmbeddedBaseFilters(file, mtime, viewName);
-    return this.embeddedBaseFilterCache?.path === file.path && (!viewName || this.embeddedBaseFilterCache.viewName === viewName)
+    return this.embeddedBaseFilterCache?.path === file.path
+      && isPersistedFilterCacheMatch(
+        this.embeddedBaseFilterCache.viewName,
+        viewName,
+        this.embeddedBaseFilterCache.viewNames,
+      )
       ? this.embeddedBaseFilterCache.filters
       : null;
   }
@@ -4942,6 +4980,7 @@ export class TpsListView extends BasesView {
       const exactRoots: unknown[] = [];
       const fallbackRoots: unknown[] = [];
       const viewNames: string[] = [];
+      let fallbackBlockCount = 0;
       const blockPattern = /```base\s*\n([\s\S]*?)```/gi;
       let match: RegExpExecArray | null = null;
       while ((match = blockPattern.exec(content)) !== null) {
@@ -4949,6 +4988,7 @@ export class TpsListView extends BasesView {
           const parsed = parseYaml(match[1] || '') as Record<string, unknown> | null | undefined;
           const blockMatch = this.getEmbeddedKanbanBlockMatch(parsed, viewName);
           if (!blockMatch) continue;
+          if (blockMatch === 'fallback') fallbackBlockCount += 1;
           const extracted = this.extractBaseFileFilterRoots(parsed, viewName);
           viewNames.push(...extracted.viewNames);
           if (extracted.filters?.length) {
@@ -4959,15 +4999,25 @@ export class TpsListView extends BasesView {
           flowError('EmbeddedBaseFilters', 'parse-block-failed', error, { path: file.path, viewName });
         }
       }
-      const roots = exactRoots.length ? exactRoots : fallbackRoots;
-      const currentViewName = viewName || viewNames[0] || '';
+      const ambiguousFallback = exactRoots.length === 0 && fallbackBlockCount > 1;
+      const roots = exactRoots.length ? exactRoots : ambiguousFallback ? [] : fallbackRoots;
+      const currentViewName = viewName || (ambiguousFallback ? '' : viewNames[0] || '');
+      if (this.embeddedBaseFiltersLoadingKey !== loadingKey) return;
       const previous = this.embeddedBaseFilterCache;
       this.embeddedBaseFilterCache = {
         path: file.path,
         mtime,
         viewName: currentViewName,
+        viewNames: Array.from(new Set(viewNames)),
         filters: roots.length ? roots : null,
       };
+      if (ambiguousFallback) {
+        flowWarn('EmbeddedBaseFilters', 'ambiguous-fallback-skipped', {
+          path: file.path,
+          viewName,
+          fallbackBlocks: fallbackBlockCount,
+        });
+      }
       if (previous?.path !== file.path || previous?.mtime !== mtime || previous?.viewName !== currentViewName || previous?.filters !== this.embeddedBaseFilterCache.filters) {
         flow('EmbeddedBaseFilters', 'loaded', {
           path: file.path,
@@ -4991,9 +5041,9 @@ export class TpsListView extends BasesView {
       return type === TPS_LIST_VIEW_TYPE;
     }) as Array<Record<string, unknown>>;
     if (!kanbanViews.length) return null;
-    if (kanbanViews.some((record) => {
+    if (viewName && kanbanViews.some((record) => {
       const name = String(record.name || '').trim();
-      return !viewName || !name || name === viewName;
+      return !name || name === viewName;
     })) return 'exact';
     return kanbanViews.length === 1 ? 'fallback' : null;
   }
@@ -5005,7 +5055,11 @@ export class TpsListView extends BasesView {
     const viewName = this.getConfiguredBaseViewName();
     if (this.baseFileFilterCache?.path === file.path
       && this.baseFileFilterCache.mtime === mtime
-      && (!viewName || this.baseFileFilterCache.viewName === viewName)) return;
+      && isPersistedFilterCacheMatch(
+        this.baseFileFilterCache.viewName,
+        viewName,
+        this.baseFileFilterCache.viewNames,
+      )) return;
     void this.loadBaseFileFilters(file, mtime, viewName);
   }
 
@@ -5016,7 +5070,7 @@ export class TpsListView extends BasesView {
     const viewName = this.getConfiguredBaseViewName();
     return cache?.path === file.path
       && cache.mtime === Number(file.stat?.mtime || 0)
-      && (!viewName || cache.viewName === viewName);
+      && isPersistedFilterCacheMatch(cache.viewName, viewName, cache.viewNames);
   }
 
   private extractFilterRootCandidates(candidates: unknown[]): unknown[] {
@@ -5355,6 +5409,10 @@ export class TpsListView extends BasesView {
       if (filterTreeIncludesStructuralKind(root, 'heading')) filter.includeHeadings = true;
       this.collectTaskRootFilterNode(root, filter);
     }
+    // A task-aware Base query owns completion visibility. Feed every task status
+    // into its effective all-views + active-view predicates instead of applying
+    // the legacy open-task preview gate first.
+    if (filter.hasTaskDirective) filter.includeDone = true;
     const doneStatuses = this.getDoneStatuses();
     for (const status of filter.statuses) {
       if (doneStatuses.has(status)) filter.includeDone = true;
@@ -5441,7 +5499,6 @@ export class TpsListView extends BasesView {
     if (/^(?:task\.)?(?:done|isdone|completed|complete)\s*(?:==|=)\s*(true|1)$/i.test(expr)) {
       filter.hasTaskDirective = true;
       filter.includeDone = true;
-      filter.statuses.add('complete');
     }
 
     this.collectTaskValuesFromFilterExpression(expr, 'status', filter.statuses, filter.excludeStatuses, filter, isNegated, false);

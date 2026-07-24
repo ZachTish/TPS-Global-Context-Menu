@@ -35,6 +35,30 @@ export function getTpsTableMarkdownLineKind(line: string): TpsTableLineKind | nu
   return null;
 }
 
+export function getTpsTableTaskQueryFields(
+  line: string,
+  resolveStatus: (checkboxState: string) => string = defaultStatusForCheckboxState,
+  isDoneStatus: (status: string) => boolean = defaultIsDoneStatus,
+): Record<string, string> {
+  const markerMatch = String(line || '').match(/^\s*[-+*]\s+\[([^\]])\]\s*/u);
+  if (!markerMatch) return {};
+  const checkboxState = `[${markerMatch[1]}]`;
+  const status = String(resolveStatus(checkboxState) || defaultStatusForCheckboxState(checkboxState))
+    .trim()
+    .toLowerCase();
+  const done = isDoneStatus(status);
+  return {
+    status,
+    checkboxstatus: status,
+    open: String(!done),
+    isopen: String(!done),
+    done: String(done),
+    isdone: String(done),
+    completed: String(done),
+    complete: String(done),
+  };
+}
+
 export function buildTpsTableMarkdownLine(
   kind: TpsTableLineKind,
   title: string,
@@ -156,6 +180,20 @@ function sanitizeFieldKey(value: string): string {
 
 function stripWrappingQuotes(value: string): string {
   return String(value || '').trim().replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/u, '$1$2').trim();
+}
+
+function defaultStatusForCheckboxState(rawState: string): string {
+  const marker = String(rawState || '').trim().replace(/^\[|\]$/gu, '').trim().toLowerCase();
+  if (!marker) return 'todo';
+  if (marker === 'x') return 'complete';
+  if (marker === '/' || marker === '\\') return 'working';
+  if (marker === '?') return 'holding';
+  if (marker === '-' || marker === '~') return 'wont-do';
+  return marker;
+}
+
+function defaultIsDoneStatus(status: string): boolean {
+  return status === 'complete' || status === 'wont-do';
 }
 
 function asArray(value: unknown): unknown[] {

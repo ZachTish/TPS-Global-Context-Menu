@@ -88,6 +88,40 @@ test('missing requested view does not borrow filters from another named view', a
   assert.deepEqual(result.filters, [parsed.filters]);
 });
 
+test('unresolved view identity never borrows a sibling view filter', async () => {
+  const { extractPersistedFilterRoots, isPersistedFilterCacheMatch } = await loadFilterModule();
+  const parsed = {
+    filters: { and: ['kind == "task"'] },
+    views: [
+      { type: 'tps-list', name: 'All tasks' },
+      { type: 'tps-list', name: 'Working', filters: { and: ['status == "working"'] } },
+    ],
+  };
+  const unresolved = extractPersistedFilterRoots(parsed, '', accepted);
+  assert.equal(unresolved.viewName, '');
+  assert.deepEqual(unresolved.filters, [parsed.filters]);
+  assert.equal(isPersistedFilterCacheMatch('Working', '', unresolved.viewNames), false);
+  assert.equal(isPersistedFilterCacheMatch('', ''), true);
+  assert.equal(isPersistedFilterCacheMatch('Working', 'Working'), true);
+  assert.equal(isPersistedFilterCacheMatch('All tasks', 'Working'), false);
+});
+
+test('a single custom view remains a safe fallback when its identity is unavailable', async () => {
+  const { extractPersistedFilterRoots, isPersistedFilterCacheMatch } = await loadFilterModule();
+  const parsed = {
+    filters: { and: ['kind == "task"'] },
+    views: [
+      { type: 'table', name: 'Native table', filters: { and: ['status == "complete"'] } },
+      { type: 'tps-list', name: 'Only TPS view', filters: { and: ['status == "working"'] } },
+    ],
+  };
+  const result = extractPersistedFilterRoots(parsed, '', accepted);
+  assert.equal(result.viewName, 'Only TPS view');
+  assert.deepEqual(result.viewNames, ['Only TPS view']);
+  assert.deepEqual(result.filters, [parsed.views[1].filters, parsed.filters]);
+  assert.equal(isPersistedFilterCacheMatch(result.viewName, '', result.viewNames), true);
+});
+
 test('Base query guide keeps the Daily Note Feed target and row kinds explicit', async () => {
   const { CURRENT_DAILY_NOTE_FEED_QUERY, BASE_QUERY_GUIDE_GOTCHAS } = await loadGuideModule();
   assert.match(CURRENT_DAILY_NOTE_FEED_QUERY, /file\.path == this\.file\.path/);

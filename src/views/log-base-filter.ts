@@ -92,7 +92,7 @@ function readComparableValues(rawProperty: string, context: LogBaseFilterContext
     if (fileKey === 'tag' || fileKey === 'tags') return context.file.tags;
     return readRecordValues(context.file.frontmatter, property.replace(/^file\./i, ''));
   }
-  const lineKey = normalizeKey(property.replace(/^(?:note|line|log)\./i, ''));
+  const lineKey = normalizeKey(property.replace(/^(?:note|line|log|task)\./i, ''));
   const lineValue = Object.entries(context.fields).find(([key]) => normalizeKey(key) === lineKey)?.[1];
   if (lineValue != null) return toValues(lineValue);
   return readRecordValues(context.file.frontmatter, property.replace(/^note\./i, '')) ?? [];

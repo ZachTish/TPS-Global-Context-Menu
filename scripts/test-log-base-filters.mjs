@@ -1,11 +1,59 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
+const logBaseViewSource = readFileSync(new URL('../src/views/log-base-view.ts', import.meta.url), 'utf8');
+
 async function loadModule() {
   const result = await build({ entryPoints: [fileURLToPath(new URL('../src/views/log-base-filter.ts', import.meta.url))], bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
+async function loadCreateModule() {
+  const result = await build({ entryPoints: [fileURLToPath(new URL('../src/views/log-base-create.ts', import.meta.url))], bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
+async function loadBaseFilterRoots() {
+  const result = await build({ entryPoints: [fileURLToPath(new URL('../src/tps-list/base-filter-roots.ts', import.meta.url))], bundle: true, write: false, platform: 'node', format: 'esm', logLevel: 'silent' });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
+async function loadViewModule() {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/views/log-base-view.ts', import.meta.url))],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+    plugins: [{
+      name: 'obsidian-stub',
+      setup(builder) {
+        builder.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian', namespace: 'tps-table-test' }));
+        builder.onLoad({ filter: /.*/, namespace: 'tps-table-test' }, () => ({
+          contents: `
+            class Dummy {}
+            const api = new Proxy(
+              {
+                BasesView: Dummy,
+                Modal: Dummy,
+                TFile: Dummy,
+                normalizePath: (value) => String(value),
+                parseYaml: (value) => JSON.parse(value),
+              },
+              { get(target, key) { return key in target ? target[key] : Dummy; } },
+            );
+            module.exports = api;
+          `,
+          loader: 'js',
+        }));
+      },
+    }],
+  });
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
@@ -41,4 +89,143 @@ test('unsupported branches stay unknown instead of hiding rows', async () => {
 test('active Food Log source and selected-day predicates match representative rows', async () => {
   const { evaluateLogBaseFilterRoots } = await loadModule();
   assert.equal(evaluateLogBaseFilterRoots([{ and: ['file.ext == "md"'] }, { and: ['completedDate >= date("2026-07-08")', 'completedDate < date("2026-07-09")'] }], context), true);
+});
+
+test('TPS Table derives task status fields and follows the active view without sticky completion defaults', async () => {
+  const [
+    { evaluateLogBaseFilterRoots },
+    { getTpsTableTaskQueryFields },
+    { extractPersistedFilterRoots },
+  ] = await Promise.all([loadModule(), loadCreateModule(), loadBaseFilterRoots()]);
+  const definition = {
+    filters: { and: ['kind == "task"'] },
+    views: [
+      { type: 'tps-table', name: 'All tasks' },
+      { type: 'tps-table', name: 'Working', filters: { and: ['status == "working"'] } },
+      { type: 'tps-table', name: 'All tasks again' },
+      { type: 'tps-table', name: 'Open', filters: { and: ['open == true'] } },
+      { type: 'tps-table', name: 'Complete', filters: { and: ['status == "complete"'] } },
+    ],
+  };
+  const rows = [
+    ['- [ ] Todo', 'Todo'],
+    ['- [\\] Working', 'Working'],
+    ['- [?] Holding', 'Holding'],
+    ['- [x] Complete', 'Complete'],
+    ['- [-] Wont do', 'Wont do'],
+  ].map(([line, title]) => ({
+    title,
+    fields: { kind: 'task', ...getTpsTableTaskQueryFields(line) },
+  }));
+  const acceptedTypes = new Set(['tps-table']);
+  const select = (viewName) => {
+    const roots = extractPersistedFilterRoots(definition, viewName, acceptedTypes).filters ?? [];
+    return rows
+      .filter((row) => evaluateLogBaseFilterRoots(roots, { ...context, fields: row.fields }) === true)
+      .map((row) => row.title);
+  };
+
+  assert.deepEqual(select('All tasks'), ['Todo', 'Working', 'Holding', 'Complete', 'Wont do']);
+  assert.deepEqual(select('Working'), ['Working']);
+  assert.deepEqual(select('All tasks again'), ['Todo', 'Working', 'Holding', 'Complete', 'Wont do']);
+  assert.deepEqual(select('Open'), ['Todo', 'Working', 'Holding']);
+  assert.deepEqual(select('Complete'), ['Complete']);
+  assert.deepEqual(
+    getTpsTableTaskQueryFields('- [!] Review', () => 'reviewing', () => false),
+    {
+      status: 'reviewing',
+      checkboxstatus: 'reviewing',
+      open: 'true',
+      isopen: 'true',
+      done: 'false',
+      isdone: 'false',
+      completed: 'false',
+      complete: 'false',
+    },
+  );
+  assert.deepEqual(
+    getTpsTableTaskQueryFields('- [z] Archived', () => 'archived', (status) => status === 'archived'),
+    {
+      status: 'archived',
+      checkboxstatus: 'archived',
+      open: 'false',
+      isopen: 'false',
+      done: 'true',
+      isdone: 'true',
+      completed: 'true',
+      complete: 'true',
+    },
+  );
+  assert.equal(
+    evaluateLogBaseFilterRoots(
+      [{ property: 'task.status', operator: 'is', value: 'working' }],
+      { ...context, fields: rows[1].fields },
+    ),
+    true,
+  );
+  assert.match(logBaseViewSource, /queryFields = \{[\s\S]{0,200}\.\.\.getTpsTableTaskQueryFields\(/);
+  assert.match(logBaseViewSource, /createFilterContext\(queryFields, file\)/);
+  assert.match(logBaseViewSource, /entry\.fields\[normalized\] \?\? entry\.queryFields\?\.\[normalized\]/);
+  assert.doesNotMatch(logBaseViewSource, /Object\.assign\(fields,\s*getTpsTableTaskQueryFields\(/);
+  assert.match(logBaseViewSource, /linkedSubitemCheckboxMappings/);
+  assert.match(logBaseViewSource, /getKanbanStatusForCheckboxState\(checkboxState, checkboxMappings\)/);
+  assert.match(logBaseViewSource, /statusService\?\.isDoneStatus/);
+});
+
+test('TPS Table loadEntries keeps task query aliases out of inferred display columns', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const view = Object.create(TpsTableView.prototype);
+  const file = {
+    path: 'Inbox/Tasks.md',
+    name: 'Tasks.md',
+    basename: 'Tasks',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+  };
+  view.plugin = {
+    settings: {
+      linkedSubitemCheckboxMappings: [
+        { checkboxState: '[ ]', statuses: ['todo'] },
+        { checkboxState: '[x]', statuses: ['complete'] },
+      ],
+    },
+    sharedServices: {
+      status: {
+        normalize: (value) => String(value || '').toLowerCase(),
+        checkboxStateToStatus: () => '',
+        isDoneStatus: (status) => status === 'complete',
+      },
+    },
+    app: {
+      vault: {
+        getMarkdownFiles: () => [file],
+        cachedRead: async () => '- [ ] Todo\n- [x] Complete',
+      },
+    },
+  };
+  view.getEffectiveBaseFilterRoots = async () => [{ and: ['kind == "task"'] }];
+  view.createFilterContext = (fields, sourceFile) => ({
+    fields,
+    file: {
+      path: sourceFile.path,
+      name: sourceFile.name,
+      basename: sourceFile.basename,
+      extension: sourceFile.extension,
+      folder: sourceFile.parent.path,
+      tags: [],
+      frontmatter: {},
+    },
+  });
+  view.lineMatchesHomeDateContext = () => true;
+  view.sortEntries = (entries) => entries;
+  view.getConfiguredColumnKeys = () => [];
+  view.isHomeFoodSummary = () => false;
+
+  const entries = await view.loadEntries();
+  assert.equal(entries.length, 2);
+  assert.deepEqual(Object.keys(entries[0].fields), ['kind']);
+  assert.equal(entries[0].queryFields.status, 'todo');
+  assert.equal(entries[1].queryFields.status, 'complete');
+  const columns = view.getColumns(entries).map((column) => column.key);
+  assert.deepEqual(columns, ['kind', 'source', 'line']);
 });

@@ -73,6 +73,18 @@ async function loadFilterKindUtils() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
+async function loadBaseFilterRoots() {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/tps-list/base-filter-roots.ts', import.meta.url))],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
 async function loadHeadingLineUtils() {
   const result = await build({
     entryPoints: [fileURLToPath(new URL('../src/tps-list/heading-line-utils.ts', import.meta.url))],
@@ -164,7 +176,13 @@ async function loadTpsListViewHarness() {
           contents: `
             class Dummy {}
             const api = new Proxy(
-              { BasesView: Dummy, Modal: Dummy, TFile: Dummy },
+              {
+                BasesView: Dummy,
+                Modal: Dummy,
+                TFile: Dummy,
+                normalizePath: (value) => String(value),
+                parseYaml: (value) => JSON.parse(value),
+              },
               { get(target, key) { return key in target ? target[key] : Dummy; } },
             );
             module.exports = api;
@@ -344,6 +362,169 @@ test('TPS List scans every requested synthesized Markdown row family', async () 
   assert.match(viewSource, /filterTreeIncludesStructuralKind\(root, 'heading'\)/);
 });
 
+test('TPS List lets effective Base filters own task completion visibility across view switches', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const { extractPersistedFilterRoots } = await loadBaseFilterRoots();
+  const view = Object.create(TpsListView.prototype);
+  const definition = {
+    filters: { and: ['kind == "task"'] },
+    views: [
+      { type: 'tps-list', name: 'All tasks' },
+      { type: 'tps-list', name: 'Working', filters: { and: ['status == "working"'] } },
+      { type: 'tps-list', name: 'All tasks again' },
+      { type: 'tps-list', name: 'Open', filters: { and: ['open == true'] } },
+      { type: 'tps-list', name: 'Closed', filters: { and: ['open == false'] } },
+      { type: 'tps-list', name: 'Complete', filters: { and: ['complete == true'] } },
+    ],
+  };
+  const tasks = [
+    { itemKind: 'task', line: 1, text: 'Todo', checkboxState: '[ ]', inlineFields: [] },
+    { itemKind: 'task', line: 2, text: 'Working', checkboxState: '[\\]', inlineFields: [] },
+    { itemKind: 'task', line: 3, text: 'Holding', checkboxState: '[?]', inlineFields: [] },
+    { itemKind: 'task', line: 4, text: 'Complete', checkboxState: '[x]', inlineFields: [] },
+    { itemKind: 'task', line: 5, text: 'Wont do', checkboxState: '[-]', inlineFields: [] },
+  ];
+  const statuses = new Map([
+    ['[ ]', 'todo'],
+    ['[\\]', 'working'],
+    ['[?]', 'holding'],
+    ['[x]', 'complete'],
+    ['[-]', 'wont-do'],
+  ]);
+  let roots = [];
+  view.getBaseFilterRoots = () => roots;
+  view.shouldShowCompletedTasks = () => false;
+  view.getDoneStatuses = () => new Set(['complete', 'wont-do']);
+  view.getStatusForCheckboxState = (checkboxState) => statuses.get(checkboxState) || 'todo';
+  view.isEmbeddedScheduledDailyTaskBoard = () => false;
+  view.resolveBaseContextToken = (value) => String(value || '').replace(/^(["'])(.*)\1$/u, '$2');
+
+  const select = (viewName) => {
+    roots = extractPersistedFilterRoots(definition, viewName, new Set(['tps-list'])).filters ?? [];
+    const taskFilter = view.getTaskRootFilterFromBaseFilters();
+    return tasks.filter((task) => view.taskMatchesRootFilter(task, taskFilter, null)).map((task) => task.text);
+  };
+
+  assert.deepEqual(select('All tasks'), ['Todo', 'Working', 'Holding', 'Complete', 'Wont do']);
+  assert.deepEqual(select('Working'), ['Working']);
+  assert.deepEqual(select('All tasks again'), ['Todo', 'Working', 'Holding', 'Complete', 'Wont do']);
+  assert.deepEqual(select('Open'), ['Todo', 'Working', 'Holding']);
+  assert.deepEqual(select('Closed'), ['Complete', 'Wont do']);
+  assert.deepEqual(select('Complete'), ['Complete', 'Wont do']);
+
+  roots = [
+    { property: 'status', operator: 'is', value: 'working' },
+    definition.filters,
+  ];
+  const runtimeObjectFilter = view.getTaskRootFilterFromBaseFilters();
+  assert.deepEqual(
+    tasks.filter((task) => view.taskMatchesRootFilter(task, runtimeObjectFilter, null)).map((task) => task.text),
+    ['Working'],
+  );
+
+  roots = [{ property: 'open', operator: 'is', value: false }, definition.filters];
+  const runtimeClosedFilter = view.getTaskRootFilterFromBaseFilters();
+  assert.deepEqual(
+    tasks.filter((task) => view.taskMatchesRootFilter(task, runtimeClosedFilter, null)).map((task) => task.text),
+    ['Complete', 'Wont do'],
+  );
+
+  roots = [{ property: 'done', operator: 'is', value: true }, definition.filters];
+  const runtimeDoneFilter = view.getTaskRootFilterFromBaseFilters();
+  assert.deepEqual(
+    tasks.filter((task) => view.taskMatchesRootFilter(task, runtimeDoneFilter, null)).map((task) => task.text),
+    ['Complete', 'Wont do'],
+  );
+});
+
+test('TPS List normalizes configured checkbox status aliases before completion checks', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  view.getGcmCheckboxMappings = () => [
+    { checkboxState: '[d]', statuses: ['done'] },
+  ];
+  view.getGcmServices = () => ({
+    status: {
+      normalize: (value) => value === 'done' ? 'complete' : String(value || '').toLowerCase(),
+      getDoneStatuses: () => ['complete', 'wont-do'],
+    },
+  });
+  assert.equal(view.getStatusForCheckboxState('[d]'), 'complete');
+  assert.equal(view.getDoneStatuses().has(view.getStatusForCheckboxState('[d]')), true);
+});
+
+test('TPS List ignores a stale filter load that finishes after a newer view', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const pending = [];
+  view.app = {
+    vault: {
+      cachedRead: () => new Promise((resolve) => pending.push(resolve)),
+    },
+  };
+  view.refreshDebounced = () => {};
+  view.extractBaseFileFilterRoots = (_parsed, viewName) => ({
+    viewName,
+    viewNames: ['All tasks', 'Working'],
+    filters: [{ and: [`view == "${viewName}"`] }],
+  });
+  const file = { path: 'Tasks.base', stat: { mtime: 1 } };
+
+  const workingLoad = view.loadBaseFileFilters(file, 1, 'Working');
+  const allLoad = view.loadBaseFileFilters(file, 1, 'All tasks');
+  pending[1]('{}');
+  await allLoad;
+  assert.equal(view.baseFileFilterCache.viewName, 'All tasks');
+  pending[0]('{}');
+  await workingLoad;
+  assert.equal(view.baseFileFilterCache.viewName, 'All tasks');
+  view.getBaseFile = () => file;
+  view.getConfiguredBaseViewName = () => '';
+  view.baseFileFilterCache.viewNames = ['All tasks'];
+  assert.equal(view.isBaseFileFilterReady(), true);
+});
+
+test('TPS List skips ambiguous filters from multiple unidentified embedded Base blocks', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const content = [
+    '```base',
+    JSON.stringify({
+      filters: { and: ['kind == "task"'] },
+      views: [{ type: 'tps-list', name: 'First', filters: { and: ['status == "working"'] } }],
+    }),
+    '```',
+    '',
+    '```base',
+    JSON.stringify({
+      filters: { and: ['kind == "task"'] },
+      views: [{ type: 'tps-list', name: 'Second', filters: { and: ['status == "complete"'] } }],
+    }),
+    '```',
+  ].join('\n');
+  let reads = 0;
+  view.app = {
+    vault: {
+      cachedRead: async () => {
+        reads += 1;
+        return content;
+      },
+    },
+  };
+  view.refreshDebounced = () => {};
+  const file = { path: 'Inbox/Embedded host.md', stat: { mtime: 1 } };
+
+  await view.loadEmbeddedBaseFilters(file, 1, '');
+  assert.equal(view.embeddedBaseFilterCache.viewName, '');
+  assert.deepEqual(view.embeddedBaseFilterCache.viewNames, ['First', 'Second']);
+  assert.equal(view.embeddedBaseFilterCache.filters, null);
+
+  view.getBaseContextFile = () => file;
+  view.getConfiguredBaseViewName = () => '';
+  assert.equal(view.getEmbeddedBaseFilterRoot(), null);
+  assert.equal(reads, 1);
+});
+
 test('TPS List parses, displays, and safely renames Markdown headings', async () => {
   const { getTpsListHeadingDisplayTitle, parseTpsListHeadingLine, setTpsListHeadingText } = await loadHeadingLineUtils();
   assert.deepEqual(parseTpsListHeadingLine('## what im doing today'), {
@@ -427,7 +608,7 @@ test('TPS List and TPS Table row menus expose built-in tag actions', async () =>
   assert.match(logBaseSource, /addLogLineTag\(readInlineFields\(line\)\.tags, tag\)/);
   assert.match(logBaseSource, /removeLogLineTag\(readInlineFields\(line\)\.tags, tag\)/);
   assert.match(logBaseSource, /setInlineFieldValue\([\s\S]{0,80}'tags'/);
-  assert.match(logBaseSource, /column\.normalized !== 'linenumber' && column\.normalized !== 'tags'/);
+  assert.match(logBaseSource, /column\.normalized !== 'linenumber'[\s\S]{0,120}column\.normalized !== 'tags'/);
   assert.doesNotMatch(logBaseSource, /column\.normalized !== 'tag'/);
 
   const { addLogLineTag, readLogLineTags, removeLogLineTag } = await loadLogLineUtils();
