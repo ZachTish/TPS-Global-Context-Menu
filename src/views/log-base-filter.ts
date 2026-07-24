@@ -1,4 +1,5 @@
 import { combineFilterTreeResults } from '../tps-list/base-filter-roots';
+import { parseTaskTagValues } from '../utils/task-line-metadata';
 
 export type LogBaseFilterFile = {
   path: string;
@@ -14,6 +15,8 @@ export type LogBaseFilterContext = {
   fields: Record<string, string>;
   file: LogBaseFilterFile;
   contextDate?: string | null;
+  rowKind?: string | null;
+  taskTags?: string[];
 };
 
 export function evaluateLogBaseFilterRoots(roots: unknown[], context: LogBaseFilterContext): boolean | null {
@@ -51,13 +54,23 @@ function evaluateStringFilter(rawExpression: string, context: LogBaseFilterConte
   if (call) {
     const values = readComparableValues(call[1], context);
     if (values == null) return null;
-    result = evaluateValues(values, call[2], splitArguments(call[3]).map((value) => resolveLiteral(value, context)));
+    result = evaluateValues(
+      values,
+      call[2],
+      splitArguments(call[3]).map((value) => resolveLiteral(value, context)),
+      isExactContainsProperty(call[1], context),
+    );
   } else {
     const comparison = expression.match(/^([\w.\s-]+)\s*(==|=|!=|!==|>=|<=|>|<|is|equals?)\s*(.+)$/i);
     if (!comparison) return null;
     const values = readComparableValues(comparison[1], context);
     if (values == null) return null;
-    result = evaluateValues(values, comparison[2], [resolveLiteral(comparison[3], context)]);
+    result = evaluateValues(
+      values,
+      comparison[2],
+      [resolveLiteral(comparison[3], context)],
+      isExactContainsProperty(comparison[1], context),
+    );
   }
   return result == null ? null : negated ? !result : result;
 }
@@ -73,7 +86,7 @@ function evaluateObjectFilter(record: Record<string, unknown>, context: LogBaseF
   const operator = String(record.operator ?? record.op ?? record.comparison ?? record.condition ?? 'equals').trim();
   const rawExpected = record.values ?? record.value ?? record.expected ?? record.right ?? record.rhs ?? record.target;
   const expected = asArray(rawExpected).map((value) => resolveLiteral(value, context));
-  const result = evaluateValues(values, operator, expected);
+  const result = evaluateValues(values, operator, expected, isExactContainsProperty(property, context));
   const negated = record.negated === true || record.exclude === true;
   return result == null ? null : negated ? !result : result;
 }
@@ -82,6 +95,8 @@ function readComparableValues(rawProperty: string, context: LogBaseFilterContext
   const property = String(rawProperty || '').trim();
   const normalized = normalizeKey(property);
   if (!normalized) return null;
+  if (isTaskTagProperty(property, context)) return readTaskTagValues(context);
+  if (/^task\.tags?$/iu.test(property)) return [];
   if (normalized.startsWith('file')) {
     const fileKey = normalized.slice(4);
     if (fileKey === 'path') return [context.file.path];
@@ -98,17 +113,46 @@ function readComparableValues(rawProperty: string, context: LogBaseFilterContext
   return readRecordValues(context.file.frontmatter, property.replace(/^note\./i, '')) ?? [];
 }
 
+function isTaskTagProperty(rawProperty: string, context: LogBaseFilterContext): boolean {
+  if (!/^(?:task\.)?tags?$/iu.test(String(rawProperty || '').trim())) return false;
+  const rowKind = normalizeKey(context.rowKind ?? context.fields.kind);
+  return rowKind === 'task' || Array.isArray(context.taskTags);
+}
+
+function isExactContainsProperty(rawProperty: string, context: LogBaseFilterContext): boolean {
+  return isTaskTagProperty(rawProperty, context)
+    || /^file\.tags?$/iu.test(String(rawProperty || '').trim());
+}
+
+function readTaskTagValues(context: LogBaseFilterContext): string[] {
+  const inlineTagFields = Object.entries(context.fields)
+    .filter(([key]) => /^(?:tag|tags)$/u.test(normalizeKey(key)))
+    .map(([, value]) => value);
+  return parseTaskTagValues([context.taskTags ?? [], inlineTagFields]);
+}
+
 function readRecordValues(record: Record<string, unknown>, rawKey: string): unknown[] | null {
   const normalized = normalizeKey(rawKey);
   const entry = Object.entries(record || {}).find(([key]) => normalizeKey(key) === normalized);
   return entry ? toValues(entry[1]) : null;
 }
 
-function evaluateValues(current: unknown[], rawOperator: string, expected: unknown[]): boolean | null {
+function evaluateValues(
+  current: unknown[],
+  rawOperator: string,
+  expected: unknown[],
+  exactContains = false,
+): boolean | null {
   const operator = String(rawOperator || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
   if (['isempty', 'empty'].includes(operator)) return current.length === 0 || current.every(isEmptyValue);
   if (['isnotempty', 'exists'].includes(operator)) return current.length > 0 && current.some((value) => !isEmptyValue(value));
-  if (['contains', 'containsany'].includes(operator)) return expected.some((target) => current.some((value) => normalizeValue(value).includes(normalizeValue(target))));
+  if (['contains', 'containsany'].includes(operator)) {
+    return expected.some((target) => current.some((value) => (
+      exactContains
+        ? normalizeValue(value) === normalizeValue(target)
+        : normalizeValue(value).includes(normalizeValue(target))
+    )));
+  }
   if (operator === 'startswith') return expected.some((target) => current.some((value) => normalizeValue(value).startsWith(normalizeValue(target))));
   if (operator === 'endswith') return expected.some((target) => current.some((value) => normalizeValue(value).endsWith(normalizeValue(target))));
   if (['!=', '!==', 'isnot', 'notequal', 'notequals', 'doesnotequal'].includes(operator)) return expected.every((target) => current.every((value) => compareValues(value, target) !== 0));

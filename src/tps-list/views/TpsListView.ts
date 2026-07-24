@@ -51,6 +51,7 @@ import { setVisibleLineText, visibleLineText } from '../../views/log-line-utils'
 import { resolveExactLineRevisionIndex, splitLineItemContent } from '../../utils/line-item-deletion';
 import {
   addInlineTagToTaskLine,
+  parseTaskTagValues,
   readInlineTags,
   removeInlineTagFromTaskLine,
 } from '../../utils/task-line-metadata';
@@ -2178,7 +2179,7 @@ export class TpsListView extends BasesView {
       const value = rawTag.trim();
       if (value) fields.push({ key: 'tag', value });
     }
-    return fields.slice(0, 6);
+    return fields;
   }
 
   private stripTaskInlineFields(text: string): string {
@@ -3658,6 +3659,18 @@ export class TpsListView extends BasesView {
   }
 
   private evaluateTaskFileFilterExpression(expr: string, file: TFile | null): boolean | null {
+    const fileTagCall = expr.match(/^file\.tags?\.(containsAny|contains|equals)\((.*)\)$/i);
+    if (fileTagCall) {
+      const currentTags = new Set(
+        this.getTaskFileComparableValues(file, 'file.tags')
+          .map((value) => this.normalizeTaskTag(value)),
+      );
+      const expectedTags = this.extractFilterTokens(fileTagCall[2] || '')
+        .map((value) => this.resolveBaseContextToken(value) || value)
+        .map((value) => this.normalizeTaskTag(value))
+        .filter(Boolean);
+      return expectedTags.some((tag) => currentTags.has(tag));
+    }
     const folderComparison = expr.match(/^file\.folder\s*(==|=|!=|!==|is|equals?)\s*(?:"([^"]*)"|'([^']*)'|(.+))$/i);
     if (folderComparison) {
       const expected = String(folderComparison[2] ?? folderComparison[3] ?? folderComparison[4] ?? '').trim();
@@ -3874,6 +3887,20 @@ export class TpsListView extends BasesView {
       } else {
         result = values.some((value) => this.taskFilePathMatches(file, value));
       }
+    } else if (/^file\.tags?$/i.test(propRaw)) {
+      const tags = new Set(
+        this.getTaskFileComparableValues(file, propRaw)
+          .map((value) => this.normalizeTaskTag(value)),
+      );
+      if (this.isImplicitEmptyValueFilter(operator, values)) {
+        result = tags.size === 0;
+      } else if (this.isImplicitNotEmptyValueFilter(operator, values)) {
+        result = tags.size > 0;
+      } else if (this.isEmptyFilterOperator(operator) || this.isExistsFilterOperator(operator)) {
+        result = this.isEmptyFilterOperator(operator) ? tags.size === 0 : tags.size > 0;
+      } else {
+        result = values.some((value) => tags.has(this.normalizeTaskTag(value)));
+      }
     } else if (propRaw.toLowerCase().startsWith('file.') || ['folder', 'folderpath', 'name', 'basename'].includes(normalizedProp)) {
       const currentValues = this.getTaskFileComparableValues(file, propRaw);
       if (this.isImplicitEmptyValueFilter(operator, values) || this.isEmptyFilterOperator(operator)) {
@@ -3920,6 +3947,12 @@ export class TpsListView extends BasesView {
     if (prop === 'basename') return [file.basename.toLowerCase()];
     if (prop === 'path') return [file.path.toLowerCase()];
     if (prop === 'extension' || prop === 'ext') return [file.extension.toLowerCase()];
+    if (prop === 'tag' || prop === 'tags') {
+      const cache = this.app.metadataCache.getFileCache(file) as any;
+      const frontmatterTags = this.asArray(cache?.frontmatter?.tags);
+      const inlineTags = this.asArray(cache?.tags).map((tag: any) => tag?.tag ?? tag);
+      return parseTaskTagValues([...frontmatterTags, ...inlineTags]);
+    }
     if (prop === 'links' || prop === 'link') {
       // TPS task rows are synthesized Base records. Their source note is
       // exposed separately through file.name/path/folder, but the task record
@@ -4001,7 +4034,9 @@ export class TpsListView extends BasesView {
     for (const field of task.inlineFields ?? []) {
       const key = this.normalizeInlinePropertyKey(field.key);
       if (normalized === 'tags') {
-        if (key === 'tag' || key === 'tags') values.push(this.normalizeTaskTag(field.value));
+        if (key === 'tag' || key === 'tags') {
+          values.push(...parseTaskTagValues(field.value).map((tag) => this.normalizeTaskTag(tag)));
+        }
       } else if (key === normalized) {
         values.push(String(field.value || '').trim());
       }
@@ -6469,7 +6504,7 @@ export class TpsListView extends BasesView {
     };
     const callMatch = expr.match(new RegExp(`^${propPattern}\\.(?:containsAny|contains|equals)\\((.*)\\)$`, 'i'));
     if (callMatch) {
-      const token = this.extractQuotedStrings(callMatch[1] || '')[0];
+      const token = this.extractFilterTokens(callMatch[1] || '')[0];
       return token ? tokenDefaults(token) : null;
     }
     const comparisonMatch = expr.match(new RegExp(`^${propPattern}\\s*(==|=|!=|!==)\\s*["']([^"']+)["']$`, 'i'));

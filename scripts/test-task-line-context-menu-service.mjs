@@ -192,6 +192,8 @@ test('task line metadata helpers edit task text without destroying inline task p
     removeInlineTagFromTaskLine,
     readInlineFieldValue,
     readInlineTags,
+    readTaskLineTags,
+    parseTaskTagValues,
     insertLineAfterFrontmatter,
   } = await importUtility();
 
@@ -231,6 +233,14 @@ test('task line metadata helpers edit task text without destroying inline task p
     '  - Nested reminder [status:: active]',
   );
   assert.deepEqual(readInlineTags(line), ['topic/home']);
+  assert.deepEqual(
+    readTaskLineTags('- [ ] Tagged #a #ab #abc #abcd [tags:: #café, #仕事]'),
+    ['a', 'ab', 'abc', 'abcd', 'café', '仕事'],
+  );
+  assert.deepEqual(
+    parseTaskTagValues(['#a #ab', '#abc, #abcd', '#café', '#仕事']),
+    ['a', 'ab', 'abc', 'abcd', 'café', '仕事'],
+  );
   assert.equal(addInlineTagToTaskLine(line, '#topic/home'), line);
   assert.equal(addInlineTagToTaskLine(line, 'errand'), `${line} #errand`);
   assert.equal(removeInlineTagFromTaskLine(`${line} #errand`, 'topic/home'), '- [ ] bathroom window [priority:: high] [scheduled:: 2026-05-31 09:00:00] #errand');

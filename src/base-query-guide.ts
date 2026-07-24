@@ -224,9 +224,9 @@ export const BASE_QUERY_GUIDE_SECTIONS: BaseQueryGuideSection[] = [
         description: 'Boolean shortcut for a status configured as done.',
       },
       {
-        expression: 'tags / tag / task.tags',
-        appliesTo: 'TPS List task + bullet rows',
-        description: 'Task/bullet tags exposed by TPS line parsing. A leading # is optional when comparing values.',
+        expression: 'tags / tag / task.tags / task.tag',
+        appliesTo: 'TPS List task + bullet rows; TPS Table task rows',
+        description: 'Task-row aliases combine raw #tags with [tag:: …] and [tags:: …]. Prefixes and a leading # are optional; matching uses exact tag membership. Use file.tags for the containing note.',
       },
       {
         expression: 'task.file.ext / task.file.extension',

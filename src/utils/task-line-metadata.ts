@@ -1,5 +1,5 @@
 const TASK_LINE_RE = /^(\s*(?:[-*+]|\d+[.)])\s+)\[([^\]\r\n]?)\](\s*)(.*)$/;
-const TAG_GLOBAL_RE = /(?:^|\s)(#[A-Za-z0-9_/-]+)/g;
+const TAG_GLOBAL_RE = /(?:^|\s)(#[\p{L}\p{N}_/-]+)/gu;
 const TPS_INLINE_METADATA_RE = /\s*(?:\[(?:tpsInlineProps|tps-inline-props)\s*::\s*[^\]]+\]|%%\s*tps-inline-props\s*:[\s\S]*?%%|<!--\s*tps-inline-props\s*:[\s\S]*?-->|<span\b[^>]*data-tps-inline-props\s*=\s*(?:"[^"]*"|'[^']*')[^>]*>\s*<\/span>|\[\^\s*tps-inline:[^\]]+\](?::\s*\S+)?)\s*/gi;
 
 export const TASK_ASSOCIATED_NOTE_PATH_KEY = 'associatedNotePath';
@@ -274,6 +274,50 @@ export function readInlineTags(line: string): string[] {
     }
   }
   TAG_GLOBAL_RE.lastIndex = 0;
+  return tags;
+}
+
+/**
+ * Read the complete semantic tag list for a task-shaped Markdown line.
+ *
+ * Task filters treat raw `#tags`, singular `[tag:: ...]`, and plural
+ * `[tags:: ...]` fields as one list. Context-menu mutation helpers keep using
+ * `readInlineTags`, which intentionally represents writable raw hashtags.
+ */
+export function readTaskLineTags(line: string): string[] {
+  const inlineFieldTags = readTaskInlineFields(line)
+    .filter((field) => /^(?:tag|tags)$/iu.test(field.key.trim()))
+    .flatMap((field) => parseTaskTagValues(field.value));
+  return parseTaskTagValues([...readInlineTags(line), ...inlineFieldTags]);
+}
+
+/**
+ * Parse persisted task tags without the incremental-typing cleanup used by
+ * settings inputs. Stored tags are never discarded merely because one is a
+ * prefix of another, and Unicode letters/numbers remain valid.
+ */
+export function parseTaskTagValues(raw: unknown): string[] {
+  const tags: string[] = [];
+  const seen = new Set<string>();
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (value == null || value === false) return;
+    String(value)
+      .replace(/^\s*\[|\]\s*$/gu, '')
+      .split(/[,\s]+/u)
+      .map((token) => normalizeInlineTag(token))
+      .filter(Boolean)
+      .forEach((tag) => {
+        const key = tag.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        tags.push(key);
+      });
+  };
+  visit(raw);
   return tags;
 }
 
@@ -552,9 +596,11 @@ function normalizeInlineFieldKey(key: string): string {
 function normalizeInlineTag(tag: string): string {
   return String(tag || '')
     .trim()
-    .replace(/^#/, '')
-    .replace(/[^A-Za-z0-9_/-]/g, '')
-    .replace(/^\/+|\/+$/g, '');
+    .replace(/^#+/u, '')
+    .replace(/^[\[\]`"'(){}]+|[\[\]`"'(){}]+$/gu, '')
+    .replace(/[.,;:!?]+$/gu, '')
+    .replace(/[^\p{L}\p{N}_/-]/gu, '')
+    .replace(/^\/+|\/+$/gu, '');
 }
 
 type TaskInlinePropsJsonBlock = {

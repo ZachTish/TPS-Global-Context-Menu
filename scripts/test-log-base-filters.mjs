@@ -164,12 +164,115 @@ test('TPS Table derives task status fields and follows the active view without s
     true,
   );
   assert.match(logBaseViewSource, /queryFields = \{[\s\S]{0,200}\.\.\.getTpsTableTaskQueryFields\(/);
-  assert.match(logBaseViewSource, /createFilterContext\(queryFields, file\)/);
+  assert.match(
+    logBaseViewSource,
+    /createFilterContext\(\s*queryFields,\s*file,\s*line,\s*markdownKind\s*\)/,
+  );
   assert.match(logBaseViewSource, /entry\.fields\[normalized\] \?\? entry\.queryFields\?\.\[normalized\]/);
   assert.doesNotMatch(logBaseViewSource, /Object\.assign\(fields,\s*getTpsTableTaskQueryFields\(/);
   assert.match(logBaseViewSource, /linkedSubitemCheckboxMappings/);
   assert.match(logBaseViewSource, /getKanbanStatusForCheckboxState\(checkboxState, checkboxMappings\)/);
   assert.match(logBaseViewSource, /statusService\?\.isDoneStatus/);
+});
+
+test('TPS Table task tag filters use exact task-tag membership across aliases and Markdown forms', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const view = Object.create(TpsTableView.prototype);
+  const file = {
+    path: 'Inbox/Tagged Tasks.md',
+    name: 'Tagged Tasks.md',
+    basename: 'Tagged Tasks',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+  };
+  const waitingOnlyLines = [
+    '- [ ] Raw waiting #waiting',
+    '- [ ] Singular waiting [tag:: #waiting]',
+    '- [ ] Plural waiting [tags:: #waiting]',
+    '- [ ] Structural kind wins [kind:: note] [tag:: #waiting]',
+  ];
+  const homeOnlyLines = [
+    '- [ ] Raw home #home',
+    '- [ ] Singular home [tag:: #home]',
+    '- [ ] Plural home [tags:: #home]',
+  ];
+  const sharedLine = '- [ ] Multi waiting and home [tags:: #waiting, #home]';
+  const waitingLines = [...waitingOnlyLines, sharedLine];
+  const homeLines = [sharedLine, ...homeOnlyLines];
+  const taskLines = [
+    ...waitingOnlyLines,
+    sharedLine,
+    ...homeOnlyLines,
+    '- [ ] Longer waiting tag #waiting-room',
+    '- [ ] Longer home tag [tags:: #home-office]',
+    '- [ ] File tag only',
+  ];
+  const sourceLines = [
+    ...taskLines,
+    '- Bullet with task-shaped tag #waiting',
+    'Plain line cannot spoof task kind [kind:: task] [tags:: #waiting]',
+  ];
+  let filterRoots = [];
+  view.plugin = {
+    settings: {
+      linkedSubitemCheckboxMappings: [
+        { checkboxState: '[ ]', statuses: ['todo'] },
+      ],
+    },
+    sharedServices: {
+      status: {
+        normalize: (value) => String(value || '').toLowerCase(),
+        checkboxStateToStatus: () => '',
+        isDoneStatus: () => false,
+      },
+    },
+    app: {
+      vault: {
+        getMarkdownFiles: () => [file],
+        cachedRead: async () => sourceLines.join('\n'),
+      },
+      metadataCache: {
+        getFileCache: () => ({
+          tags: [],
+          frontmatter: { tags: '#waiting, #home' },
+        }),
+      },
+    },
+  };
+  view.getEffectiveBaseFilterRoots = async () => filterRoots;
+  view.getHomeContextDate = () => null;
+  view.lineMatches = () => true;
+  view.lineMatchesHomeDateContext = () => true;
+  view.sortEntries = (entries) => entries;
+
+  const select = async (tagFilter) => {
+    filterRoots = [{ and: ['kind == "task"', tagFilter] }];
+    return (await view.loadEntries()).map((entry) => entry.line);
+  };
+  const aliases = ['tag', 'tags', 'task.tag', 'task.tags'];
+  const literalForms = (tag) => [tag, `#${tag}`, `"${tag}"`, `"#${tag}"`];
+
+  for (const alias of aliases) {
+    for (const [tag, expected] of [['waiting', waitingLines], ['home', homeLines]]) {
+      for (const literal of literalForms(tag)) {
+        const expression = `${alias}.contains(${literal})`;
+        assert.deepEqual(await select(expression), expected, expression);
+      }
+      const objectFilter = { property: alias, operator: 'contains', value: tag };
+      assert.deepEqual(await select(objectFilter), expected, JSON.stringify(objectFilter));
+    }
+  }
+
+  assert.deepEqual(
+    await select('file.tags.contains(waiting)'),
+    taskLines,
+    'file.tags must remain source-note metadata and must not be treated as task tags',
+  );
+  assert.deepEqual(
+    await select('file.tags.contains(wait)'),
+    [],
+    'file.tags.contains must use exact tag membership rather than substrings',
+  );
 });
 
 test('TPS Table loadEntries keeps task query aliases out of inferred display columns', async () => {

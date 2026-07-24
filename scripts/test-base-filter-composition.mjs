@@ -158,6 +158,7 @@ test('Base query guide includes the complete documented native file property set
   assert.ok(expressions.includes('kind == "h1" … kind == "h6"'));
   assert.ok(expressions.includes('heading.level'));
   assert.ok(expressions.includes('title / task.title / line.text / heading.text'));
+  assert.ok(expressions.includes('tags / tag / task.tags / task.tag'));
   assert.ok(expressions.includes('lineFilterKey / lineProperty / lineFilterKeys'));
   assert.ok(expressions.includes('lineFilterAnyKeys'));
   assert.ok(expressions.includes('task.<inline-key> or <inline-key>'));

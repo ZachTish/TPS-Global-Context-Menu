@@ -476,6 +476,116 @@ test('TPS List lets effective Base filters own task completion visibility across
   );
 });
 
+test('TPS List task tag filters use exact task-tag membership across aliases and Markdown forms', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const taggedFile = {
+    path: 'Inbox/Tagged Tasks.md',
+    name: 'Tagged Tasks.md',
+    basename: 'Tagged Tasks',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+  };
+  const untaggedFile = {
+    path: 'Inbox/Untagged Source.md',
+    name: 'Untagged Source.md',
+    basename: 'Untagged Source',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+  };
+  const waitingOnlyText = [
+    'Raw waiting #waiting',
+    'Singular waiting [tag:: #waiting]',
+    'Plural waiting [tags:: #waiting]',
+    'Late raw waiting [a:: 1] [b:: 2] [c:: 3] [d:: 4] [e:: 5] [f:: 6] [g:: 7] #waiting',
+    'Structural kind wins [kind:: note] [tag:: #waiting]',
+  ];
+  const homeOnlyText = [
+    'Raw home #home',
+    'Singular home [tag:: #home]',
+    'Plural home [tags:: #home]',
+  ];
+  const sharedText = 'Multi waiting and home [tags:: #waiting, #home]';
+  const waitingText = [...waitingOnlyText, sharedText];
+  const homeText = [sharedText, ...homeOnlyText];
+  const taskText = [
+    ...waitingOnlyText,
+    sharedText,
+    ...homeOnlyText,
+    'Longer waiting tag #waiting-room',
+    'Longer home tag [tags:: #home-office]',
+    'File tag only',
+  ];
+  const source = [
+    ...taskText.map((text) => `- [ ] ${text}`),
+    '- Bullet cannot spoof task kind [kind:: task] #waiting',
+  ].join('\n');
+  const fileFrontmatter = new Map([
+    [taggedFile.path, { tags: ['#waiting', '#home'] }],
+    [untaggedFile.path, { tags: ['#other'] }],
+  ]);
+  let roots = [];
+  view.app = {
+    metadataCache: {
+      getFileCache: (file) => ({ frontmatter: fileFrontmatter.get(file.path) ?? {} }),
+    },
+  };
+  view.getBaseFilterRoots = () => roots;
+  view.shouldShowCompletedTasks = () => false;
+  view.getDoneStatuses = () => new Set(['complete', 'wont-do']);
+  view.getStatusForCheckboxState = () => 'todo';
+  view.isEmbeddedScheduledDailyTaskBoard = () => false;
+  view.resolveBaseContextToken = (value) => String(value || '').replace(/^(["'])(.*)\1$/u, '$2');
+  const rows = view.parseOpenTasks(
+    source,
+    taggedFile.path,
+    Number.MAX_SAFE_INTEGER,
+    true,
+    true,
+  ).openTasks;
+
+  const select = (tagFilter, file = taggedFile) => {
+    roots = [{ and: ['kind == "task"', tagFilter] }];
+    const taskFilter = view.getTaskRootFilterFromBaseFilters();
+    return rows
+      .filter((task) => view.taskMatchesRootFilter(task, taskFilter, file))
+      .map((task) => task.text);
+  };
+  const aliases = ['tag', 'tags', 'task.tag', 'task.tags'];
+  const literalForms = (tag) => [tag, `#${tag}`, `"${tag}"`, `"#${tag}"`];
+
+  for (const alias of aliases) {
+    for (const [tag, expected] of [['waiting', waitingText], ['home', homeText]]) {
+      for (const literal of literalForms(tag)) {
+        const expression = `${alias}.contains(${literal})`;
+        assert.deepEqual(select(expression), expected, expression);
+      }
+      const objectFilter = { property: alias, operator: 'contains', value: tag };
+      assert.deepEqual(select(objectFilter), expected, JSON.stringify(objectFilter));
+
+      roots = [{ and: ['kind == "task"', `${alias}.contains(${tag})`] }];
+      const defaults = view.getRootTaskCreationDefaults(view.getTaskRootFilterFromBaseFilters());
+      assert.deepEqual([...defaults.tags], [`#${tag}`], `${alias} should create a task that satisfies its tag filter`);
+    }
+  }
+
+  assert.deepEqual(
+    select('file.tags.contains(waiting)', taggedFile),
+    taskText,
+    'file.tags should select tasks by source-note metadata without becoming a task tag',
+  );
+  assert.deepEqual(
+    select('file.tags.contains(waiting)', untaggedFile),
+    [],
+    'task tags must not satisfy a file.tags filter',
+  );
+  assert.deepEqual(
+    select('file.tags.contains(wait)', taggedFile),
+    [],
+    'file.tags.contains must use exact tag membership rather than substrings',
+  );
+});
+
 test('TPS List normalizes configured checkbox status aliases before completion checks', async () => {
   const { TpsListView } = await loadTpsListViewHarness();
   const view = Object.create(TpsListView.prototype);

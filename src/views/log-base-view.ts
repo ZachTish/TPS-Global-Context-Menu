@@ -28,7 +28,7 @@ import {
   normalizeKanbanCheckboxState,
   type KanbanCheckboxMappingLike,
 } from '../tps-list/task-checkbox-utils';
-import { getTaskDisplayTitle } from '../utils/task-line-metadata';
+import { getTaskDisplayTitle, parseTaskTagValues, readTaskLineTags } from '../utils/task-line-metadata';
 import { getTaskLineIdentity } from '../utils/task-line-resolution';
 import {
   getSourceNoteGroupValue,
@@ -413,11 +413,19 @@ export class TpsTableView extends BasesView {
         const fields = readInlineFields(line);
         const markdownKind = getTpsTableMarkdownLineKind(line);
         if (markdownKind && !fields.kind) fields.kind = markdownKind;
-        let queryFields = fields;
+        let queryFields = { ...fields };
+        if (markdownKind) {
+          queryFields.kind = markdownKind;
+        } else if (/^(?:tasks?|bullets?)$/iu.test(String(queryFields.kind || '').trim())) {
+          // `kind` is the structural Base discriminator for synthesized rows.
+          // A plain line cannot opt into task/bullet behavior with editable
+          // inline metadata such as `[kind:: task]`.
+          delete queryFields.kind;
+        }
         if (markdownKind === 'task') {
           const statusService = this.plugin.sharedServices?.status;
           queryFields = {
-            ...fields,
+            ...queryFields,
             ...getTpsTableTaskQueryFields(
               line,
               (checkboxState) => {
@@ -432,7 +440,10 @@ export class TpsTableView extends BasesView {
           };
         }
         if (!this.lineMatches(queryFields) && !(markdownKind && hasTpsTableLineKindFilter(filterRoots))) return;
-        const filterResult = evaluateLogBaseFilterRoots(filterRoots, this.createFilterContext(queryFields, file));
+        const filterResult = evaluateLogBaseFilterRoots(
+          filterRoots,
+          this.createFilterContext(queryFields, file, line, markdownKind),
+        );
         if (filterResult === false) return;
         if (filterResult == null && filterRoots.length) unknownFilterRows += 1;
         if (!this.lineMatchesHomeDateContext(fields, file)) return;
@@ -543,17 +554,24 @@ export class TpsTableView extends BasesView {
     return null;
   }
 
-  private createFilterContext(fields: Record<string, string>, file: TFile): LogBaseFilterContext {
+  private createFilterContext(
+    fields: Record<string, string>,
+    file: TFile,
+    line = '',
+    markdownKind: 'task' | 'bullet' | null = null,
+  ): LogBaseFilterContext {
     const cache = this.plugin.app.metadataCache.getFileCache(file);
     const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
     const frontmatterTags = Array.isArray(frontmatter.tags) ? frontmatter.tags : frontmatter.tags ? [frontmatter.tags] : [];
-    const tags = [
+    const tags = parseTaskTagValues([
       ...(cache?.tags || []).map((tag) => tag.tag),
       ...frontmatterTags.map((tag) => String(tag || '')),
-    ].map((tag) => String(tag || '').trim()).filter(Boolean);
+    ]);
     return {
       fields,
       contextDate: this.getHomeContextDate(),
+      rowKind: markdownKind,
+      taskTags: markdownKind === 'task' ? readTaskLineTags(line) : undefined,
       file: {
         path: file.path,
         name: file.name,
