@@ -130,13 +130,21 @@ test('Base query guide includes the complete documented native file property set
   assert.ok(expressions.includes('<field> / line.<field> / log.<field>'));
 });
 
-test('settings renders the Base query guide at the bottom before the settings footer', () => {
+test('Advanced renders one compact Base query reference before the settings footer', () => {
   const source = readFileSync(fileURLToPath(new URL('../src/settings-tab.ts', import.meta.url)), 'utf8');
-  const diagnostics = source.indexOf("'Debug Logging'");
-  const guideRender = source.indexOf('this.renderBaseQueryGuide(containerEl, createSection);');
+  const diagnostics = source.indexOf("'Debug logging'");
+  const guideRender = source.indexOf('this.renderBaseQueryGuide(diagnostics);');
   const footer = source.indexOf('Note: native context menu items are preserved');
   assert.ok(diagnostics >= 0);
   assert.ok(guideRender > diagnostics);
   assert.ok(footer > guideRender);
-  assert.match(source, /'Base query guide'/);
+  assert.match(source, /'Base query reference'/);
+
+  const guideStart = source.indexOf('private renderBaseQueryGuide');
+  const guideEnd = source.indexOf('private renderPropertyOptionSettings', guideStart);
+  const guideSource = source.slice(guideStart, guideEnd);
+  assert.match(guideSource, /this\.createTrackedSection\(/);
+  assert.match(guideSource, /\.setName\('Reference category'\)/);
+  assert.match(guideSource, /BASE_QUERY_GUIDE_SECTIONS\.find\(/);
+  assert.doesNotMatch(guideSource, /createCollapsibleSection\(/);
 });

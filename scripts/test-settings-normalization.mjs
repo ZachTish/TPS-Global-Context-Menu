@@ -9,6 +9,7 @@ const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf
 const constantsSource = readFileSync(new URL('../src/constants.ts', import.meta.url), 'utf8');
 const typesSource = readFileSync(new URL('../src/types.ts', import.meta.url), 'utf8');
 const settingsTabSource = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
+const stylesSource = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
 const parentLinkFormatSource = readFileSync(new URL('../src/handlers/parent-link-format.ts', import.meta.url), 'utf8');
 const registerEventsSource = readFileSync(new URL('../src/events/register-events.ts', import.meta.url), 'utf8');
 const panelBuilderSource = readFileSync(new URL('../src/menu/panel-builder.ts', import.meta.url), 'utf8');
@@ -444,6 +445,78 @@ test('recurrence and daily note child settings are hidden immediately when paren
   assert.match(settingsTabSource, /enableRecurrence = v; await this\.plugin\.saveSettings\(\); this\.display\(\);/);
   assert.match(settingsTabSource, /if \(this\.plugin\.settings\.enableDailyNoteNav\) \{/);
   assert.match(settingsTabSource, /enableDailyNoteNav = v;\s*await this\.plugin\.saveSettings\(\);\s*this\.display\(\);/);
+});
+
+test('settings use shallow routed pages with responsive, accessible selectors', () => {
+  const hubStart = settingsTabSource.indexOf('private renderSettingsHub');
+  const hubEnd = settingsTabSource.indexOf('private renderRulesFieldsNavigation', hubStart);
+  const hubSource = settingsTabSource.slice(hubStart, hubEnd);
+  assert.match(hubSource, /Choose what to configure/);
+  for (const route of ['rules-fields', 'menus-surfaces', 'workflows', 'appearance', 'advanced']) {
+    assert.match(hubSource, new RegExp(`id: '${route}'`));
+  }
+  assert.equal((hubSource.match(/\bid: '/g) || []).length, 5);
+  assert.match(settingsTabSource, /private activeSettingsPage: SettingsPageId = 'rules-fields';/);
+  assert.match(settingsTabSource, /private activeRulesFieldsPage: RulesFieldsPageId = 'frontmatter';/);
+  assert.match(settingsTabSource, /private activeFrontmatterEditor: FrontmatterEditorId = 'sort';/);
+  for (const transientKey of [
+    'activeSettingsPage',
+    'activeRulesFieldsPage',
+    'activeFrontmatterEditor',
+    'activeWorkflowPage',
+    'activeBaseQuerySection',
+  ]) {
+    assert.doesNotMatch(typesSource, new RegExp(`\\b${transientKey}\\b`));
+    assert.doesNotMatch(constantsSource, new RegExp(`\\b${transientKey}\\b`));
+  }
+
+  const routeButtonsStart = settingsTabSource.indexOf('private renderRouteButtons');
+  const routeButtonsEnd = settingsTabSource.indexOf('private renderSettingsHub', routeButtonsStart);
+  const routeButtonsSource = settingsTabSource.slice(routeButtonsStart, routeButtonsEnd);
+  assert.match(routeButtonsSource, /createEl\('button'/);
+  assert.match(routeButtonsSource, /button\.type = 'button'/);
+  assert.match(routeButtonsSource, /setAttr\('aria-pressed'/);
+  assert.match(routeButtonsSource, /option\.id === activeId/);
+  assert.match(settingsTabSource, /private navigateToSettingsPage[\s\S]*focus\(\{ preventScroll: false \}\)/);
+  assert.match(settingsTabSource, /private redisplayPreservingRouteFocus[\s\S]*focusRouteButton\(route\)/);
+  assert.match(settingsTabSource, /private focusRouteButton[\s\S]*focus\(\{ preventScroll: true \}\)/);
+  assert.match(settingsTabSource, /heading\.setAttr\('tabindex', '-1'\)/);
+
+  const displayStart = settingsTabSource.indexOf('display(): void');
+  const displayEnd = settingsTabSource.indexOf('\n  renderProperties(container:', displayStart);
+  const displaySource = settingsTabSource.slice(displayStart, displayEnd);
+  assert.match(displaySource, /const activePage = this\.activeSettingsPage === 'rules-fields'/);
+  assert.match(displaySource, /this\.renderRulesFieldsNavigation\(activePage\)/);
+  assert.match(displaySource, /this\.renderWorkflowNavigation\(automation\)/);
+  assert.doesNotMatch(displaySource, /createCollapsibleSection\(containerEl/);
+  assert.doesNotMatch(displaySource, /createTrackedSection\(containerEl/);
+  assert.doesNotMatch(displaySource, /containerEl\.createEl\('details'/);
+
+  const frontmatterStart = settingsTabSource.indexOf('private renderNotebookNavigatorRules');
+  const frontmatterEnd = settingsTabSource.indexOf('private ensureNotebookNavigatorSettingsStyles', frontmatterStart);
+  const frontmatterSource = settingsTabSource.slice(frontmatterStart, frontmatterEnd);
+  assert.match(frontmatterSource, /id: 'sort', label: 'Sort buckets'/);
+  assert.match(frontmatterSource, /id: 'tags', label: 'Tag rules'/);
+  assert.match(frontmatterSource, /id: 'icon-color', label: 'Icon \+ color'/);
+  assert.match(frontmatterSource, /if \(this\.activeFrontmatterEditor === 'sort'\)/);
+  assert.equal((frontmatterSource.match(/this\.createTrackedSection\(/g) || []).length, 1);
+  assert.match(frontmatterSource, /'Advanced rule settings'/);
+
+  for (const workflow of ['home-daily', 'tasks', 'child-notes', 'recurrence', 'time-tracking']) {
+    assert.match(settingsTabSource, new RegExp(`id: '${workflow}', label:`));
+    assert.match(displaySource, new RegExp(`this\\.activeWorkflowPage === '${workflow}'`));
+  }
+  assert.match(displaySource, /this\.activeRulesFieldsPage === 'custom-fields'[\s\S]*showCustomPropertiesInInlineUi[\s\S]*this\.renderProperties\(propertiesConfigContainer\)/);
+  assert.match(displaySource, /this\.activeRulesFieldsPage === 'view-mode'[\s\S]*enableViewModeSwitching[\s\S]*viewModeRules/);
+
+  assert.match(stylesSource, /\.tps-gcm-settings-hub\s*\{[\s\S]*position: sticky;[\s\S]*grid-template-columns:/);
+  assert.match(stylesSource, /\.tps-gcm-settings-route-button\[aria-pressed='true'\]/);
+  assert.match(stylesSource, /\.tps-gcm-settings-route-button\s*\{[\s\S]*\n  height: auto;/);
+  assert.match(stylesSource, /@media \(max-width: 700px\)[\s\S]*\.tps-gcm-settings-hub[\s\S]*display: flex/);
+  assert.match(stylesSource, /@media \(max-width: 700px\)[\s\S]*\.tps-gcm-settings-subnav/);
+  assert.match(stylesSource, /\.tps-gcm-viewmode-condition-row\s*\{[\s\S]*grid-template-columns:/);
+  assert.match(stylesSource, /@media \(max-width: 700px\)[\s\S]*\.tps-gcm-viewmode-condition-row[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.doesNotMatch(stylesSource, /(?:^|\n)\.tps-settings-(?:hub|subnav|route|page|editor|callout)/);
 });
 
 test('TPS Home capture settings expose plain-line insertion defaults and retire heading routing', () => {

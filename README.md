@@ -4,7 +4,15 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.5.0` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.6.0` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
+## 1.6.0
+
+- Replaced the deep settings accordion tree with a sticky five-destination **Choose what to configure** hub: Rules & fields, Menus & surfaces, Workflows, Appearance, and Advanced. Only the active page renders.
+- Rules & fields uses direct selectors for Frontmatter rules, Custom fields, and View mode, with a second compact selector for Sort buckets, Tag rules, or Icon + color. Workflows similarly exposes Home & daily notes, Tasks, Child notes, Recurrence, and Time tracking without nesting three accordions deep.
+- Kept repeated custom-field editors, advanced frontmatter safeguards, and the compact Base reference as the only disclosures. Mobile uses compact horizontal route strips, view-mode rows stack safely, and route changes restore keyboard focus.
+- Preserved all existing setting keys, defaults, and plugin actions; no settings migration is required. Minimum supported Obsidian remains 1.10.0.
+- Validation passed the complete declared suite and standalone production-mode build. Obsidian 1.12.7 was reloaded in the isolated test vault; top-level routes, rule/custom-field selectors, and workflow selectors were checked without changing settings. Production was not directly changed.
 
 ## 1.5.0
 
@@ -208,7 +216,9 @@ Agent integrations must not use fuzzy task titles or broad search results as mut
 
 ## Settings Surface
 
-- Settings use direct collapsible sections with descriptive titles for context-menu placement, inline surfaces, Notebook Navigator rule writes, custom properties, view mode rules, note workflows, and debug logging.
+- Settings open on an always-visible **Choose what to configure** hub with five destinations: **Rules & fields**, **Menus & surfaces**, **Workflows**, **Appearance**, and **Advanced**. Only the selected page is rendered.
+- **Rules & fields** has a flat selector for Frontmatter rules, Custom fields, and View mode. Frontmatter rules expose direct Sort buckets, Tag rules, and Icon + color editors; Custom fields keeps placement/display controls beside field definitions; View mode keeps its master controls, keys, folders, and rules on one page.
+- **Workflows** has direct buttons for Home & daily notes, Tasks, Child notes, Recurrence, and Time tracking. Advanced rule safeguards, each repeated custom-field editor, and the compact Base query reference are the only intentional disclosures.
 - Retired type-profile automation settings are stripped during settings normalization and on the next settings save. Semantic record fields such as `kind`, `runKind`, `runType`, and the generic `log`/`run` contracts remain supported; the GCM `Type` custom property remains the existing folder-move control.
 - Debug logging includes an off-by-default `Log opener decisions` toggle. When console logging is also enabled, focused-tab opener branches log compact tab-routing decisions for note opens.
 - Empty/non-configurable sections are intentionally omitted from the settings tab.
@@ -624,7 +634,10 @@ Version `0.1.9` isolated native Base create actions to their owning Base compone
 
 ## Settings layout
 
-All feature areas start as collapsed top-level groups. Optional rule safeguards and repeatable custom-property editors may use one nested accordion, but no settings flow exceeds two collapse levels. Re-renders preserve the user’s current open sections; a fresh settings open starts fully collapsed.
+The top level is an always-visible five-button hub, and only one destination page renders at a time. Rules and workflows use one additional row of direct buttons instead of nested top-level accordions. The current route and selected editor survive `display()` re-renders as transient UI state and do not add keys to saved plugin settings. A fresh settings-tab instance defaults to **Rules & fields → Frontmatter rules → Sort buckets**.
 
+Disclosures are limited to advanced frontmatter safeguards, one editor per repeated custom field, and the compact Base query reference. Hub buttons expose `aria-pressed`; on narrow screens the hub and secondary selectors become compact horizontal strips, while fixed-width view-mode condition rows stack to one column.
+
+- 2026-07-24 (1.6.0): Replaced the deep settings accordion tree with the routed settings hub, flat rule/workflow selectors, and a single-category Base query reference. The complete suite, standalone build, test-vault reload, and live top-level/rule/workflow UI checks passed.
 - 2026-07-13: Audited settings hierarchy and initial state. Auto-frontmatter rules no longer default open, and the first render now closes every tracked section while retaining the two-level maximum. Validation: settings hierarchy audit, full test suite, production build/deploy, and Obsidian reload.
 - 2026-07-13: Home's persisted `workout-tracker` component became Activity log. It defaults to `Activity Log.base`, offers inline activity logging plus workout start, scopes rows to the selected day, and TPS Table supports `lineFilterAnyKeys` for activity/workout compatibility. Validated with Home regressions, TypeScript, production build, deployment, reload, and UI QA.

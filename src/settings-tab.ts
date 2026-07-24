@@ -19,6 +19,18 @@ import {
 const NN_TEXT_COMMIT_DEBOUNCE_MS = 300;
 const NN_SETTINGS_STYLE_ID = 'tps-gcm-notebook-navigator-rule-settings-style';
 
+type SettingsPageId = 'rules-fields' | 'menus-surfaces' | 'workflows' | 'appearance' | 'advanced';
+type RulesFieldsPageId = 'frontmatter' | 'custom-fields' | 'view-mode';
+type FrontmatterEditorId = 'sort' | 'tags' | 'icon-color';
+type WorkflowPageId = 'home-daily' | 'tasks' | 'child-notes' | 'recurrence' | 'time-tracking';
+
+interface SettingsRouteOption<T extends string> {
+  id: T;
+  label: string;
+  description?: string;
+  summary?: string;
+}
+
 const createCollapsibleSection = (
   parent: HTMLElement,
   title: string,
@@ -50,9 +62,11 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   plugin: TPSGlobalContextMenuPlugin;
   private static readonly SETTINGS_BUILD_STAMP = '2026-03-11 18:12';
   private readonly sectionState = new Map<string, boolean>();
-  private settingsViewState = new Map<string, boolean>();
-  private settingsScrollTop = 0;
-  private hasRenderedSettings = false;
+  private activeSettingsPage: SettingsPageId = 'rules-fields';
+  private activeRulesFieldsPage: RulesFieldsPageId = 'frontmatter';
+  private activeFrontmatterEditor: FrontmatterEditorId = 'sort';
+  private activeWorkflowPage: WorkflowPageId = 'home-daily';
+  private activeBaseQuerySection = BASE_QUERY_GUIDE_SECTIONS[0]?.title || '';
   private readonly nnTextCommitTimers = new Map<string, number>();
 
   constructor(app: App, plugin: TPSGlobalContextMenuPlugin) {
@@ -61,7 +75,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   }
 
   private getSectionStateKey(parent: HTMLElement, title: string): string {
-    return title.trim();
+    const route = parent.closest<HTMLElement>('[data-tps-settings-route]')?.dataset.tpsSettingsRoute || 'settings';
+    return `${route}::${title.trim()}`;
   }
 
   private createTrackedSection(
@@ -85,6 +100,187 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       });
     }
     return content;
+  }
+
+  private createSettingsPage(
+    parent: HTMLElement,
+    route: SettingsPageId,
+    title: string,
+    description: string,
+  ): HTMLElement {
+    const page = parent.createDiv({ cls: 'tps-gcm-settings-page' });
+    page.dataset.tpsSettingsRoute = route;
+    const heading = page.createEl('h3', { text: title });
+    heading.setAttr('tabindex', '-1');
+    page.createEl('p', { text: description, cls: 'setting-item-description' });
+    return page;
+  }
+
+  private focusRouteButton(route: string): void {
+    const button = Array.from(
+      this.containerEl.querySelectorAll<HTMLButtonElement>('.tps-gcm-settings-route-button'),
+    ).find((candidate) => candidate.dataset.tpsSettingsRoute === route);
+    button?.focus({ preventScroll: true });
+  }
+
+  private navigateToSettingsPage(route: SettingsPageId): void {
+    this.activeSettingsPage = route;
+    this.display();
+    this.containerEl
+      .querySelector<HTMLElement>('.tps-gcm-settings-page > h3')
+      ?.focus({ preventScroll: false });
+  }
+
+  private redisplayPreservingRouteFocus(route: string): void {
+    const scrollTop = this.containerEl.scrollTop;
+    this.display();
+    this.containerEl.scrollTop = scrollTop;
+    this.focusRouteButton(route);
+  }
+
+  private renderRouteButtons<T extends string>(
+    parent: HTMLElement,
+    options: SettingsRouteOption<T>[],
+    activeId: T,
+    onSelect: (id: T) => void,
+    className: string,
+    ariaLabel: string,
+  ): void {
+    const nav = parent.createDiv({ cls: className });
+    nav.setAttr('role', 'group');
+    nav.setAttr('aria-label', ariaLabel);
+
+    options.forEach((option) => {
+      const button = nav.createEl('button', { cls: 'tps-gcm-settings-route-button' });
+      button.type = 'button';
+      button.dataset.tpsSettingsRoute = option.id;
+      button.setAttr('aria-pressed', option.id === activeId ? 'true' : 'false');
+      button.createSpan({ cls: 'tps-gcm-settings-route-title', text: option.label });
+      if (option.summary) {
+        button.createSpan({ cls: 'tps-gcm-settings-route-summary', text: option.summary });
+      }
+      if (option.description) {
+        button.createSpan({ cls: 'tps-gcm-settings-route-description', text: option.description });
+      }
+      button.addEventListener('click', () => {
+        if (option.id === activeId) return;
+        onSelect(option.id);
+      });
+    });
+  }
+
+  private renderSettingsHub(container: HTMLElement): void {
+    const settings = this.plugin.settings;
+    const frontmatterRules = settings.notebookNavigatorRules;
+    const ruleCount = frontmatterRules.smartSort.buckets.length
+      + frontmatterRules.hideRules.length
+      + frontmatterRules.rules.length;
+    const enabledWorkflowCount = [
+      settings.enableDailyNoteNav,
+      settings.reconcileTaskStatusToCheckbox,
+      settings.enableLinkedSubitemCheckboxes,
+      settings.enableRecurrence,
+      settings.enableTimeTracking,
+    ].filter(Boolean).length;
+
+    container.createEl('h3', { text: 'Choose what to configure', cls: 'tps-gcm-settings-hub-heading' });
+    container.createEl('p', {
+      text: 'Choose one area. Only that page is shown, so rule editors stay easy to find without loading every advanced option at once.',
+      cls: 'setting-item-description',
+    });
+
+    this.renderRouteButtons<SettingsPageId>(
+      container,
+      [
+        {
+          id: 'rules-fields',
+          label: 'Rules & fields',
+          summary: `${ruleCount} rules · ${(settings.properties || []).length} fields`,
+          description: 'Frontmatter rules, custom fields, and view-mode rules.',
+        },
+        {
+          id: 'menus-surfaces',
+          label: 'Menus & surfaces',
+          summary: settings.enableInlinePersistentMenus ? 'Inline menu on' : 'Inline menu off',
+          description: 'Right-click placement, view coverage, previews, and inline UI.',
+        },
+        {
+          id: 'workflows',
+          label: 'Workflows',
+          summary: `${enabledWorkflowCount} core features on`,
+          description: 'Daily notes, tasks, child notes, recurrence, and time tracking.',
+        },
+        {
+          id: 'appearance',
+          label: 'Appearance',
+          summary: 'Sizing & placement',
+          description: 'Menu, navigation, and modal dimensions.',
+        },
+        {
+          id: 'advanced',
+          label: 'Advanced',
+          summary: settings.enableLogging ? 'Debug logging on' : 'Debug logging off',
+          description: 'Diagnostics and the compact Base query reference.',
+        },
+      ],
+      this.activeSettingsPage,
+      (id) => {
+        this.navigateToSettingsPage(id);
+      },
+      'tps-gcm-settings-hub',
+      'TPS Global Context Menu settings pages',
+    );
+  }
+
+  private renderRulesFieldsNavigation(container: HTMLElement): void {
+    const rules = this.plugin.settings.notebookNavigatorRules;
+    this.renderRouteButtons<RulesFieldsPageId>(
+      container,
+      [
+        {
+          id: 'frontmatter',
+          label: 'Frontmatter rules',
+          summary: `${rules.smartSort.buckets.length + rules.hideRules.length + rules.rules.length} configured`,
+        },
+        {
+          id: 'custom-fields',
+          label: 'Custom fields',
+          summary: `${(this.plugin.settings.properties || []).length} configured`,
+        },
+        {
+          id: 'view-mode',
+          label: 'View mode',
+          summary: `${(this.plugin.settings.viewModeRules || []).length} rules`,
+        },
+      ],
+      this.activeRulesFieldsPage,
+      (id) => {
+        this.activeRulesFieldsPage = id;
+        this.redisplayPreservingRouteFocus(id);
+      },
+      'tps-gcm-settings-subnav',
+      'Rules and fields sections',
+    );
+  }
+
+  private renderWorkflowNavigation(container: HTMLElement): void {
+    this.renderRouteButtons<WorkflowPageId>(
+      container,
+      [
+        { id: 'home-daily', label: 'Home & daily notes' },
+        { id: 'tasks', label: 'Tasks' },
+        { id: 'child-notes', label: 'Child notes' },
+        { id: 'recurrence', label: 'Recurrence' },
+        { id: 'time-tracking', label: 'Time tracking' },
+      ],
+      this.activeWorkflowPage,
+      (id) => {
+        this.activeWorkflowPage = id;
+        this.redisplayPreservingRouteFocus(id);
+      },
+      'tps-gcm-settings-subnav tps-gcm-settings-subnav--workflow',
+      'Workflow sections',
+    );
   }
 
   private bindNotebookNavigatorCommittedText: BindCommittedText = (
@@ -156,18 +352,13 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     }
   }
 
-  private renderNotebookNavigatorRules(container: HTMLElement, createSection: (parent: HTMLElement, title: string, description?: string, defaultOpen?: boolean) => HTMLElement): void {
+  private renderNotebookNavigatorRules(container: HTMLElement): void {
     this.ensureNotebookNavigatorSettingsStyles();
     const settings = this.plugin.settings.notebookNavigatorRules;
-    const root = createSection(
-      container,
-      'Auto Frontmatter Modification Rules',
-      'Rules and safeguards for automatic GCM frontmatter writes such as icon, color, sort, hidden tags, title/path fields, and child-note metadata.',
-      false,
-    );
+    const root = container.createDiv({ cls: 'tps-gcm-settings-editor-page' });
+    root.dataset.tpsSettingsRoute = 'frontmatter-rules';
 
-    const automation = createCollapsibleSection(root, 'Rule Automation Toggles and Manual Apply', 'When GCM applies auto frontmatter rule outputs and how to run them on demand.', false);
-    new Setting(automation)
+    new Setting(root)
       .setName('Enable rule application')
       .setDesc('Allow GCM to write configured frontmatter rule outputs to markdown files.')
       .addToggle((toggle) => toggle.setValue(settings.enabled).onChange(async (value) => {
@@ -176,67 +367,11 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         this.display();
       }));
 
-    if (settings.enabled) {
-      new Setting(automation)
-        .setName('Auto-apply on file open')
-        .setDesc('Evaluate and apply rules when a markdown file becomes active.')
-        .addToggle((toggle) => toggle.setValue(settings.autoApplyOnFileOpen).onChange(async (value) => {
-          settings.autoApplyOnFileOpen = value;
-          await this.plugin.saveSettings();
-        }));
-
-      new Setting(automation)
-        .setName('Auto-apply on metadata change')
-        .setDesc('Evaluate and apply rules after frontmatter changes.')
-        .addToggle((toggle) => toggle.setValue(settings.autoApplyOnMetadataChange).onChange(async (value) => {
-          settings.autoApplyOnMetadataChange = value;
-          await this.plugin.saveSettings();
-        }));
-
-      new Setting(automation)
-        .setName('Startup vault scan')
-        .setDesc('Scan markdown files once after startup.')
-        .addToggle((toggle) => toggle.setValue(settings.applyOnStartup).onChange(async (value) => {
-          settings.applyOnStartup = value;
-          await this.plugin.saveSettings();
-        }));
-
-      new Setting(automation)
-        .setName('Metadata debounce (ms)')
-        .setDesc('Debounce for metadata-change rule application.')
-        .addText((text) => {
-          text.setPlaceholder('350');
-          this.bindNotebookNavigatorCommittedText(text, String(settings.metadataDebounceMs), async (value) => {
-            const parsed = Number.parseInt(value, 10);
-            settings.metadataDebounceMs = Number.isFinite(parsed) ? Math.max(0, Math.min(parsed, 5000)) : 350;
-          });
-        });
-
-      new Setting(automation)
-        .setName('Manual apply')
-        .setDesc('Apply configured Notebook Navigator rules immediately through GCM.')
-        .addButton((button) => button.setButtonText('Active file').onClick(async () => {
-          await this.plugin.applyRulesToActiveFile(true);
-        }))
-        .addButton((button) => button.setButtonText('All markdown files').onClick(async () => {
-          await this.plugin.applyRulesToAllFiles(false);
-        }));
-
-      const preview = this.plugin.getRulePreviewForActiveFile?.();
-      const previewText = preview
-        ? [
-          `Active file: ${String(preview.filePath || '')}`,
-          `Icon: ${preview.icon ? `${String(preview.iconField)} = ${String(preview.icon)}` : '(no matching icon rule)'}`,
-          `Color: ${preview.color ? `${String(preview.colorField)} = ${String(preview.color)}` : '(no matching color rule)'}`,
-          `Sort: ${preview.sortKey ? `${String(preview.sortField)} = ${String(preview.sortKey)}${preview.sortMatched === false ? ' (no bucket matched)' : ''}` : '(not written)'}`,
-          `Tags: +${(preview.tagsAdded as string[] | undefined)?.join(', ') || 'none'} / -${(preview.tagsRemoved as string[] | undefined)?.join(', ') || 'none'}`,
-        ].join('\n')
-        : 'Active file preview unavailable. Open a markdown note to inspect rule outputs.';
-      const previewBox = automation.createEl('pre', {
-        cls: 'tps-nn-preview',
-        text: previewText,
+    if (!settings.enabled) {
+      root.createEl('p', {
+        cls: 'tps-gcm-settings-callout',
+        text: 'Rule application is off. You can still build and review rules below; turn it on when you are ready for GCM to write their outputs.',
       });
-      previewBox.setAttr('aria-label', 'Active file rule output preview');
     }
 
     const overview = root.createDiv({ cls: 'tps-nn-overview-grid' });
@@ -244,8 +379,106 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     this.renderRuleOverviewCard(overview, 'Tags', `${settings.hideRules.length} rules`, settings.autoRemoveHiddenWhenNoMatch ? 'Managed tags auto-clean.' : 'Manual tags preserved.');
     this.renderRuleOverviewCard(overview, 'Icon + Color', `${settings.rules.length} rules`, 'First matching icon and color win.');
 
-    const frontmatter = createCollapsibleSection(root, 'Managed Icon, Color, and Sort Field Names', 'Metadata keys GCM writes for visual and sorting outputs.', false);
-    new Setting(frontmatter)
+    this.renderRouteButtons<FrontmatterEditorId>(
+      root,
+      [
+        { id: 'sort', label: 'Sort buckets', summary: `${settings.smartSort.buckets.length}` },
+        { id: 'tags', label: 'Tag rules', summary: `${settings.hideRules.length}` },
+        { id: 'icon-color', label: 'Icon + color', summary: `${settings.rules.length}` },
+      ],
+      this.activeFrontmatterEditor,
+      (id) => {
+        this.activeFrontmatterEditor = id;
+        this.redisplayPreservingRouteFocus(id);
+      },
+      'tps-gcm-settings-subnav tps-gcm-settings-subnav--rule-kind',
+      'Frontmatter rule editor',
+    );
+
+    const sectionContext: SettingsSectionContext = {
+      plugin: this.plugin,
+      bindCommittedText: this.bindNotebookNavigatorCommittedText,
+      refresh: () => this.display(),
+      persistRuleChange: (applyActive = false) => this.persistNotebookNavigatorRuleChange(applyActive),
+    };
+
+    if (this.activeFrontmatterEditor === 'sort') {
+      new BucketSectionRenderer(sectionContext).render(root);
+    } else if (this.activeFrontmatterEditor === 'tags') {
+      new HideSectionRenderer(sectionContext).render(root);
+    } else {
+      new RulesSectionRenderer(sectionContext).render(root);
+    }
+
+    const advanced = this.createTrackedSection(
+      root,
+      'Advanced rule settings',
+      'Automatic triggers, output field names, cleanup, exclusions, and general frontmatter writes.',
+      false,
+    );
+
+    new Setting(advanced)
+      .setName('Auto-apply on file open')
+      .setDesc('Evaluate and apply rules when a markdown file becomes active.')
+      .addToggle((toggle) => toggle.setValue(settings.autoApplyOnFileOpen).onChange(async (value) => {
+        settings.autoApplyOnFileOpen = value;
+        await this.plugin.saveSettings();
+      }));
+
+    new Setting(advanced)
+      .setName('Auto-apply on metadata change')
+      .setDesc('Evaluate and apply rules after frontmatter changes.')
+      .addToggle((toggle) => toggle.setValue(settings.autoApplyOnMetadataChange).onChange(async (value) => {
+        settings.autoApplyOnMetadataChange = value;
+        await this.plugin.saveSettings();
+      }));
+
+    new Setting(advanced)
+      .setName('Startup vault scan')
+      .setDesc('Scan markdown files once after startup.')
+      .addToggle((toggle) => toggle.setValue(settings.applyOnStartup).onChange(async (value) => {
+        settings.applyOnStartup = value;
+        await this.plugin.saveSettings();
+      }));
+
+    new Setting(advanced)
+      .setName('Metadata debounce (ms)')
+      .setDesc('Debounce for metadata-change rule application.')
+      .addText((text) => {
+        text.setPlaceholder('350');
+        this.bindNotebookNavigatorCommittedText(text, String(settings.metadataDebounceMs), async (value) => {
+          const parsed = Number.parseInt(value, 10);
+          settings.metadataDebounceMs = Number.isFinite(parsed) ? Math.max(0, Math.min(parsed, 5000)) : 350;
+        });
+      });
+
+    new Setting(advanced)
+      .setName('Manual apply')
+      .setDesc('Apply configured frontmatter rules immediately through GCM.')
+      .addButton((button) => button.setButtonText('Active file').onClick(async () => {
+        await this.plugin.applyRulesToActiveFile(true);
+      }))
+      .addButton((button) => button.setButtonText('All markdown files').onClick(async () => {
+        await this.plugin.applyRulesToAllFiles(false);
+      }));
+
+    const preview = this.plugin.getRulePreviewForActiveFile?.();
+    const previewText = preview
+      ? [
+        `Active file: ${String(preview.filePath || '')}`,
+        `Icon: ${preview.icon ? `${String(preview.iconField)} = ${String(preview.icon)}` : '(no matching icon rule)'}`,
+        `Color: ${preview.color ? `${String(preview.colorField)} = ${String(preview.color)}` : '(no matching color rule)'}`,
+        `Sort: ${preview.sortKey ? `${String(preview.sortField)} = ${String(preview.sortKey)}${preview.sortMatched === false ? ' (no bucket matched)' : ''}` : '(not written)'}`,
+        `Tags: +${(preview.tagsAdded as string[] | undefined)?.join(', ') || 'none'} / -${(preview.tagsRemoved as string[] | undefined)?.join(', ') || 'none'}`,
+      ].join('\n')
+      : 'Active file preview unavailable. Open a markdown note to inspect rule outputs.';
+    const previewBox = advanced.createEl('pre', {
+      cls: 'tps-nn-preview',
+      text: previewText,
+    });
+    previewBox.setAttr('aria-label', 'Active file rule output preview');
+
+    new Setting(advanced)
       .setName('Icon field')
       .setDesc('Frontmatter key GCM uses to store icon value.')
       .addText((text) => {
@@ -255,7 +488,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         }, false, true);
       });
 
-    new Setting(frontmatter)
+    new Setting(advanced)
       .setName('Color field')
       .setDesc('Frontmatter key GCM uses to store color value.')
       .addText((text) => {
@@ -265,8 +498,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         }, false, true);
       });
 
-    const cleanup = createCollapsibleSection(root, 'No-Match Icon and Color Cleanup', 'Optional GCM removal behavior when no icon or color rules match.', false);
-    new Setting(cleanup)
+    new Setting(advanced)
       .setName('Clear icon when no match')
       .setDesc('Remove the icon field when no icon rule matches.')
       .addToggle((toggle) => toggle.setValue(settings.clearIconWhenNoMatch).onChange(async (value) => {
@@ -275,7 +507,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         await this.plugin.applyRulesToActiveFile(false);
       }));
 
-    new Setting(cleanup)
+    new Setting(advanced)
       .setName('Clear color when no match')
       .setDesc('Remove the color field when no color rule matches.')
       .addToggle((toggle) => toggle.setValue(settings.clearColorWhenNoMatch).onChange(async (value) => {
@@ -284,10 +516,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         await this.plugin.applyRulesToActiveFile(false);
       }));
 
-    const exclusions = createCollapsibleSection(root, 'Rule Write Exclusions', 'Files excluded from Notebook Navigator rule output writes.', false);
-    new Setting(exclusions)
+    new Setting(advanced)
       .setName('Rule write exclusions')
-      .setDesc('Skip icon/color/sort/hidden rule writes for matching files. One pattern per line; supports exact paths, folder prefixes, wildcards (*), name:<basename>, and re:<regex>.')
+      .setDesc('Skip icon/color/sort/tag rule writes for matching files. One pattern per line; supports exact paths, folder prefixes, wildcards (*), name:<basename>, and re:<regex>.')
       .addTextArea((text) => {
         text
           .setValue(settings.frontmatterWriteExclusions || '')
@@ -298,20 +529,19 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           });
       });
 
-    const generalWrites = createCollapsibleSection(root, 'Title, Folder, Timestamp, and Subitem Auto Writes', 'Other automatic frontmatter writes controlled by GCM.', false);
-    new Setting(generalWrites)
+    new Setting(advanced)
       .setName('Auto-sync title from filename')
       .setDesc('Keep frontmatter `title` aligned to the current filename on create/open/rename while excluding scheduled date prefixes or suffixes.')
       .addToggle(t => t.setValue(this.plugin.settings.autoSyncTitleFromFilename).onChange(async v => { this.plugin.settings.autoSyncTitleFromFilename = v; await this.plugin.saveSettings(); }));
-    new Setting(generalWrites)
+    new Setting(advanced)
       .setName('Sync folderPath frontmatter')
-      .setDesc('When enabled, write the note\'s current folder to `folderPath` during create/open/move flows. The Folder custom property can still move notes when this is off.')
+      .setDesc('Write the note\'s current folder to `folderPath` during create/open/move flows.')
       .addToggle(t => t.setValue(this.plugin.settings.autoSaveFolderPath).onChange(async v => { this.plugin.settings.autoSaveFolderPath = v; await this.plugin.saveSettings(); }));
-    new Setting(generalWrites)
+    new Setting(advanced)
       .setName('Auto-sync file timestamps')
-      .setDesc('Keep created/modified timestamps on note frontmatter and task lines. The modified value ignores GCM\'s own timestamp write to prevent update loops.')
+      .setDesc('Keep created/modified timestamps on note frontmatter and task lines.')
       .addToggle(t => t.setValue(this.plugin.settings.autoSyncFileTimestamps).onChange(async v => { this.plugin.settings.autoSyncFileTimestamps = v; await this.plugin.saveSettings(); }));
-    new Setting(generalWrites)
+    new Setting(advanced)
       .setName('Created timestamp key')
       .setDesc('Frontmatter key used for the file creation timestamp.')
       .addText(t => t
@@ -321,7 +551,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           this.plugin.settings.dateCreatedFrontmatterKey = String(v || '').trim() || 'datecreated';
           await this.plugin.saveSettings();
         }));
-    new Setting(generalWrites)
+    new Setting(advanced)
       .setName('Modified timestamp key')
       .setDesc('Frontmatter key used for the file modified timestamp.')
       .addText(t => t
@@ -331,7 +561,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           this.plugin.settings.dateModifiedFrontmatterKey = String(v || '').trim() || 'datemodified';
           await this.plugin.saveSettings();
         }));
-    new Setting(generalWrites)
+    new Setting(advanced)
       .setName('Timestamp format')
       .setDesc('Moment.js format used for created/modified timestamp values.')
       .addText(t => t
@@ -341,13 +571,13 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           this.plugin.settings.fileTimestampFormat = String(v || '').trim() || 'YYYY-MM-DD HH:mm:ss';
           await this.plugin.saveSettings();
         }));
-    new Setting(generalWrites)
-      .setName('Apply auto frontmatter rules on subitem create')
-      .setDesc('Immediately apply configured GCM frontmatter rules after GCM creates a subitem.')
+    new Setting(advanced)
+      .setName('Apply rules on subitem create')
+      .setDesc('Immediately apply configured frontmatter rules after GCM creates a subitem.')
       .addToggle(t => t.setValue(this.plugin.settings.applyNotebookNavigatorRulesOnSubitemCreate).onChange(async v => { this.plugin.settings.applyNotebookNavigatorRulesOnSubitemCreate = v; await this.plugin.saveSettings(); }));
-    new Setting(generalWrites)
+    new Setting(advanced)
       .setName('Global auto-write exclusions')
-      .setDesc('Skip non-rule automatic frontmatter writes, such as title, folderPath, timestamps, and daily-note repairs. One pattern per line; supports exact paths, folder prefixes, wildcards (*), name:<basename>, and re:<regex>.')
+      .setDesc('Skip non-rule automatic frontmatter writes such as title, folderPath, timestamps, and daily-note repairs.')
       .addTextArea(t => t
         .setValue(this.plugin.settings.frontmatterAutoWriteExclusions || '')
         .setPlaceholder('Templates/\nTemplates/*.md\nname:daily-template')
@@ -355,41 +585,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           this.plugin.settings.frontmatterAutoWriteExclusions = v;
           await this.plugin.saveSettings();
         }));
-
-    if (!settings.enabled) {
-      root.createEl('p', {
-        cls: 'setting-item-description',
-        text: 'Rule application is disabled. Enable it above to edit sort buckets, tag rules, and icon/color rules.',
-      });
-      return;
-    }
-
-    const ruleJumpBar = root.createDiv({ cls: 'tps-nn-rule-jumpbar' });
-    [
-      { label: 'Sort buckets', target: 'tps-nn-sort-buckets', count: settings.smartSort.buckets.length },
-      { label: 'Tag rules', target: 'tps-nn-tag-rules', count: settings.hideRules.length },
-      { label: 'Icon + color', target: 'tps-nn-icon-color-rules', count: settings.rules.length },
-    ].forEach((item) => {
-      const button = ruleJumpBar.createEl('button', {
-        text: `${item.label} (${item.count})`,
-        cls: 'tps-nn-jump-button',
-      });
-      button.type = 'button';
-      button.addEventListener('click', () => {
-        root.querySelector<HTMLElement>(`#${item.target}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      });
-    });
-
-    const sectionContext: SettingsSectionContext = {
-      plugin: this.plugin,
-      bindCommittedText: this.bindNotebookNavigatorCommittedText,
-      refresh: () => this.display(),
-      persistRuleChange: (applyActive = false) => this.persistNotebookNavigatorRuleChange(applyActive),
-    };
-
-    new BucketSectionRenderer(sectionContext).render(root);
-    new HideSectionRenderer(sectionContext).render(root);
-    new RulesSectionRenderer(sectionContext).render(root);
   }
 
   private ensureNotebookNavigatorSettingsStyles(): void {
@@ -644,8 +839,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
   display(): void {
     const { containerEl } = this;
-    this.captureSettingsViewState(containerEl);
-
     containerEl.empty();
 
     const saveAppearance = async () => {
@@ -660,12 +853,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     // Appearance sync mode is handled by TPS-Controller.
     const getAppearanceModeText = (_key: AppearanceSettingKey): string => 'Sync handled by TPS-Controller.';
     const attachAppearanceSyncToggle = (_setting: Setting, _key: AppearanceSettingKey) => { };
-
-    const createSection = (parent: HTMLElement, title: string, description?: string, defaultOpen = false): HTMLElement =>
-      this.createTrackedSection(parent, title, description, defaultOpen);
-
-    const createPopout = (parent: HTMLElement, title: string, description?: string, defaultOpen = false): HTMLElement =>
-      this.createTrackedSection(parent, title, description, defaultOpen);
 
     const pluginsRegistry = (this.app as any)?.plugins;
     const hasController = Boolean(
@@ -692,194 +879,99 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       );
     }
 
-    this.renderNotebookNavigatorRules(containerEl, createSection);
+    this.renderSettingsHub(containerEl);
 
-    // --- General Settings ---
-    const general = createSection(
-      containerEl,
-      'Context Menu Placement, Base Link Preview, and View Scope',
-      'Vault-wide defaults, menu placement, task hiding, and view coverage.',
-      false
-    );
+    const activePage = this.activeSettingsPage === 'rules-fields'
+      ? this.createSettingsPage(containerEl, 'rules-fields', 'Rules & fields', 'Configure frontmatter automation, reusable custom fields, and view-mode rules.')
+      : this.activeSettingsPage === 'menus-surfaces'
+        ? this.createSettingsPage(containerEl, 'menus-surfaces', 'Menus & surfaces', 'Choose where GCM appears and how note links and inline controls behave.')
+        : this.activeSettingsPage === 'workflows'
+          ? this.createSettingsPage(containerEl, 'workflows', 'Workflows', 'Configure one note-interaction workflow at a time.')
+          : this.activeSettingsPage === 'appearance'
+            ? this.createSettingsPage(containerEl, 'appearance', 'Appearance', 'Tune menu, navigation, and modal sizing without changing behavior.')
+            : this.createSettingsPage(containerEl, 'advanced', 'Advanced', 'Troubleshooting and Base query reference material.');
 
-    // Default paths for new items
-    new Setting(general)
-      .setName('Default attachments path')
-      .setDesc('Folder where new attachment notes are created (plus button). Leave empty to use vault root.')
-      .addText((text) =>
-        text
-          .setPlaceholder('e.g., Attachments or Notes/Attachments')
-          .setValue(this.plugin.settings.defaultAttachmentsPath)
-          .onChange(async (value) => {
-            this.plugin.settings.defaultAttachmentsPath = value.trim();
-            await this.plugin.saveSettings();
-          })
-      );
+    if (this.activeSettingsPage === 'rules-fields') {
+      this.renderRulesFieldsNavigation(activePage);
+      if (this.activeRulesFieldsPage === 'frontmatter') {
+        this.renderNotebookNavigatorRules(activePage);
+      }
+    }
 
-    new Setting(general)
-      .setName('Right-click menu placement')
-      .setDesc('Choose whether TPS items appear before or after native/core menu items.')
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('tps-last', 'TPS after native')
-          .addOption('tps-first', 'TPS before native')
-          .setValue(this.plugin.settings.nativeMenuPlacement || 'tps-last')
-          .onChange(async (value: 'tps-first' | 'tps-last') => {
-            this.plugin.settings.nativeMenuPlacement = value;
-            await this.plugin.saveSettings();
-          })
-      );
+    if (this.activeSettingsPage === 'menus-surfaces') {
+      new Setting(activePage)
+        .setName('Right-click menu placement')
+        .setDesc('Choose whether TPS items appear before or after native/core menu items.')
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('tps-last', 'TPS after native')
+            .addOption('tps-first', 'TPS before native')
+            .setValue(this.plugin.settings.nativeMenuPlacement || 'tps-last')
+            .onChange(async (value: 'tps-first' | 'tps-last') => {
+              this.plugin.settings.nativeMenuPlacement = value;
+              await this.plugin.saveSettings();
+            })
+        );
 
-    new Setting(general)
-      .setName('Force previews for Base links')
-      .setDesc('When enabled, note links in Calendar, Kanban, TPS List, and TPS Table open a Hover Editor preview on first click, then open the note on second click. Leave disabled for normal Notebook Navigator and note-opening behavior.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.enableBasesForcedLinkPreview === true)
-          .onChange(async (value) => {
-            this.plugin.settings.enableBasesForcedLinkPreview = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(general)
-      .setName('Collapse headings on first open')
-      .setDesc('Desktop only. When a Markdown note is opened and was not already open in another tab, run Obsidian fold-all so headings start collapsed. Mobile skips this automation so native heading/list collapse controls stay responsive.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.collapseHeadingsOnOpen === true)
-          .onChange(async (value) => {
-            this.plugin.settings.collapseHeadingsOnOpen = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(general)
-      .setName('Home calendar Base path')
-      .setDesc('Base file rendered by the Calendar component in TPS Home.')
-      .addText((text) =>
-        text
-          .setPlaceholder('home-schedule.base')
-          .setValue(this.plugin.settings.homeCalendarBasePath || 'home-schedule.base')
-          .onChange(async (value) => {
-            this.plugin.settings.homeCalendarBasePath = value.trim() || 'home-schedule.base';
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(general)
-      .setName('Home food Base path')
-      .setDesc('Base file rendered by the Food tracker component in TPS Home.')
-      .addText((text) =>
-        text
-          .setPlaceholder('Food Log.base')
-          .setValue(this.plugin.settings.homeFoodBasePath || 'Food Log.base')
-          .onChange(async (value) => {
-            this.plugin.settings.homeFoodBasePath = value.trim() || 'Food Log.base';
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(general)
-      .setName('Home activity Base path')
-      .setDesc('Base file rendered by the Activity log component in TPS Home.')
-      .addText((text) =>
-        text
-          .setPlaceholder('Activity Log.base')
-          .setValue(this.plugin.settings.homeWorkoutBasePath || 'Activity Log.base')
-          .onChange(async (value) => {
-            this.plugin.settings.homeWorkoutBasePath = value.trim() || 'Activity Log.base';
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(general)
-      .setName('Home open tasks Base path')
-      .setDesc('Base file rendered by the Open unscheduled tasks component in TPS Home.')
-      .addText((text) =>
-        text
-          .setPlaceholder('Open Unscheduled Tasks.base')
-          .setValue(this.plugin.settings.homeOpenTasksBasePath || 'Open Unscheduled Tasks.base')
-          .onChange(async (value) => {
-            this.plugin.settings.homeOpenTasksBasePath = value.trim() || 'Open Unscheduled Tasks.base';
-            await this.plugin.saveSettings();
-          })
-      );
-
-    new Setting(general)
-      .setName('Home capture position')
-      .setDesc('Where TPS Home quick capture inserts new lines in the daily note.')
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('bottom', 'Bottom of note')
-          .addOption('top', 'Top after frontmatter')
-          .setValue(this.plugin.settings.homeCaptureInsertPosition || 'bottom')
-          .onChange(async (value: 'top' | 'bottom') => {
-            this.plugin.settings.homeCaptureInsertPosition = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    // Consolidated Scope Settings
-    new Setting(general)
-      .setName('Enable in specific views')
-      .setDesc('Toggle where the custom context menu should appear.')
-      .addToggle(toggle => toggle
-        .setTooltip('Live Preview & Editor')
-        .setValue(this.plugin.settings.enableInLivePreview)
-        .onChange(async v => { this.plugin.settings.enableInLivePreview = v; await this.plugin.saveSettings(); }))
-      .addToggle(toggle => toggle
-        .setTooltip('Reading View & Popovers')
-        .setValue(this.plugin.settings.enableInPreview)
-        .onChange(async v => { this.plugin.settings.enableInPreview = v; await this.plugin.saveSettings(); }))
-      .addToggle(toggle => toggle
-        .setTooltip('Side Panels (Explorer, etc)')
-        .setValue(this.plugin.settings.enableInSidePanels)
-        .onChange(async v => { this.plugin.settings.enableInSidePanels = v; await this.plugin.saveSettings(); }));
-
-    const inlineUi = createSection(
-      containerEl,
-      'Inline Menu, Title Icon, and Parent Navigation',
-      'Controls for the persistent inline menu, title icon, and top parent navigation.',
-      false
-    );
-
-
-
-    new Setting(inlineUi)
-      .setName('Show inline context menu')
-      .setDesc('Master toggle for the persistent inline UI. Turn this off to hide the inline bar, title icon, and top parent nav.')
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.enableInlinePersistentMenus).onChange(async (value) => {
-          this.plugin.settings.enableInlinePersistentMenus = value;
-          await this.plugin.saveSettings();
-          this.display();
-        }),
-      );
-
-    if (this.plugin.settings.enableInlinePersistentMenus) {
-      new Setting(inlineUi)
-        .setName('Inline menu only')
-        .setDesc('Disable TPS additions in native/right-click menus and keep the plugin limited to inline persistent surfaces.')
+      new Setting(activePage)
+        .setName('Force previews for Base links')
+        .setDesc('Open note links in Calendar, Kanban, TPS List, and TPS Table as a preview on first click and the note on second click.')
         .addToggle((toggle) =>
-          toggle.setValue(this.plugin.settings.inlineMenuOnly).onChange(async (value) => {
-            this.plugin.settings.inlineMenuOnly = value;
+          toggle
+            .setValue(this.plugin.settings.enableBasesForcedLinkPreview === true)
+            .onChange(async (value) => {
+              this.plugin.settings.enableBasesForcedLinkPreview = value;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(activePage)
+        .setName('Enable in specific views')
+        .setDesc('Live Preview/editor, Reading View/popovers, and side panels, in that order.')
+        .addToggle(toggle => toggle
+          .setTooltip('Live Preview & Editor')
+          .setValue(this.plugin.settings.enableInLivePreview)
+          .onChange(async v => { this.plugin.settings.enableInLivePreview = v; await this.plugin.saveSettings(); }))
+        .addToggle(toggle => toggle
+          .setTooltip('Reading View & Popovers')
+          .setValue(this.plugin.settings.enableInPreview)
+          .onChange(async v => { this.plugin.settings.enableInPreview = v; await this.plugin.saveSettings(); }))
+        .addToggle(toggle => toggle
+          .setTooltip('Side Panels (Explorer, etc)')
+          .setValue(this.plugin.settings.enableInSidePanels)
+          .onChange(async v => { this.plugin.settings.enableInSidePanels = v; await this.plugin.saveSettings(); }));
+
+      new Setting(activePage)
+        .setName('Show inline context menu')
+        .setDesc('Master toggle for the persistent inline bar, title icon, and parent navigation.')
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.enableInlinePersistentMenus).onChange(async (value) => {
+            this.plugin.settings.enableInlinePersistentMenus = value;
             await this.plugin.saveSettings();
+            this.display();
           }),
         );
-    } else {
-      inlineUi.createEl('p', {
-        text: 'Inline UI is disabled. Enable the master toggle to configure the inline bar, title icon, and top parent navigation.',
-        cls: 'setting-item-description',
-      });
+
+      if (this.plugin.settings.enableInlinePersistentMenus) {
+        new Setting(activePage)
+          .setName('Inline menu only')
+          .setDesc('Disable TPS additions in native/right-click menus and keep only inline persistent surfaces.')
+          .addToggle((toggle) =>
+            toggle.setValue(this.plugin.settings.inlineMenuOnly).onChange(async (value) => {
+              this.plugin.settings.inlineMenuOnly = value;
+              await this.plugin.saveSettings();
+            }),
+          );
+      }
     }
 
     // --- Appearance Settings ---
-    const appearance = createSection(containerEl, 'Inline Menu, Daily Navigation, and Modal Sizing');
-    appearance.createEl('p', {
-      text: 'Use the cloud/monitor button on each row to switch between synced and this-device-only behavior.',
-      cls: 'setting-item-description',
-    });
+    if (this.activeSettingsPage === 'appearance') {
+      const appearance = activePage;
+      appearance.createEl('p', {
+        text: 'Appearance values sync through TPS Controller when it is available.',
+        cls: 'setting-item-description',
+      });
 
     const menuTextScaleSetting = new Setting(appearance)
       .setName('Menu text scale')
@@ -1088,73 +1180,138 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       );
     attachAppearanceSyncToggle(modalHeightSetting, 'modalMaxHeightVh');
 
-    new Setting(appearance)
-      .setName('Reset appearance')
-      .setDesc('Restore all appearance controls to default values.')
-      .addButton((button) =>
-        button
-          .setButtonText('Reset')
-          .onClick(async () => {
-            setAppearanceSettingValue('menuTextScale', 1);
-            setAppearanceSettingValue('buttonScale', 1);
-            setAppearanceSettingValue('controlScale', 1);
-            setAppearanceSettingValue('menuDensity', 1);
-            setAppearanceSettingValue('menuRadiusScale', 1);
-            setAppearanceSettingValue('liveMenuPosition', 'center');
-            setAppearanceSettingValue('liveMenuOffsetX', 0);
-            setAppearanceSettingValue('liveMenuOffsetY', 0);
-            setAppearanceSettingValue('subitemsMarginBottom', 0);
-            setAppearanceSettingValue('modalWidth', 520);
-            setAppearanceSettingValue('modalMaxHeightVh', 80);
-            await saveAppearance();
-            this.display();
-          }),
-      );
+      new Setting(appearance)
+        .setName('Reset appearance')
+        .setDesc('Restore all appearance controls to default values.')
+        .addButton((button) =>
+          button
+            .setButtonText('Reset')
+            .onClick(async () => {
+              setAppearanceSettingValue('menuTextScale', 1);
+              setAppearanceSettingValue('buttonScale', 1);
+              setAppearanceSettingValue('controlScale', 1);
+              setAppearanceSettingValue('menuDensity', 1);
+              setAppearanceSettingValue('menuRadiusScale', 1);
+              setAppearanceSettingValue('liveMenuPosition', 'center');
+              setAppearanceSettingValue('liveMenuOffsetX', 0);
+              setAppearanceSettingValue('liveMenuOffsetY', 0);
+              setAppearanceSettingValue('subitemsMarginBottom', 0);
+              setAppearanceSettingValue('modalWidth', 520);
+              setAppearanceSettingValue('modalMaxHeightVh', 80);
+              await saveAppearance();
+              this.display();
+            }),
+        );
+    }
 
 
     // --- Custom Property Configuration ---
-    const propertyConfig = createSection(
-      containerEl,
-      'Custom Property Definitions, Options, and Field Behavior',
-      'Define editable frontmatter fields and per-property behavior. Placement toggles live under the custom property display section.',
-      false
-    );
+    if (this.activeSettingsPage === 'rules-fields' && this.activeRulesFieldsPage === 'custom-fields') {
+      const propertyConfig = activePage.createDiv({ cls: 'tps-gcm-settings-editor-page' });
+      propertyConfig.dataset.tpsSettingsRoute = 'custom-fields';
 
-    propertyConfig.createEl('p', {
-      text: `${(this.plugin.settings.properties || []).length} properties configured. Use the custom property display section to choose where they appear.`,
-      cls: 'setting-item-description',
-    });
+      new Setting(propertyConfig)
+        .setName('Show custom fields in inline UI')
+        .setDesc('Display configured custom fields in the inline header/context strip.')
+        .addToggle(toggle => toggle
+          .setValue(this.plugin.settings.showCustomPropertiesInInlineUi !== false)
+          .onChange(async (value) => {
+            this.plugin.settings.showCustomPropertiesInInlineUi = value;
+            await this.plugin.saveSettings();
+            this.plugin.persistentMenuManager.ensureMenus();
+          }));
 
-    const propertiesConfigContainer = propertyConfig.createDiv();
-    this.renderProperties(propertiesConfigContainer);
-    new Setting(propertyConfig)
-      .addButton(btn => btn.setButtonText('Add Property').setCta().onClick(async () => {
-        this.plugin.settings.properties.push({ id: Date.now().toString(), label: 'New Property', key: 'new_prop', type: 'text' });
-        await this.plugin.saveSettings();
-        this.display();
-      }));
+      new Setting(propertyConfig)
+        .setName('Stack custom fields under title')
+        .setDesc('Show configured inline fields as a stacked section under the note title instead of the bottom inline strip.')
+        .addToggle(toggle => toggle
+          .setValue(this.plugin.settings.showCustomPropertiesUnderTitle === true)
+          .onChange(async (value) => {
+            this.plugin.settings.showCustomPropertiesUnderTitle = value;
+            await this.plugin.saveSettings();
+            this.plugin.persistentMenuManager.ensureMenus();
+          }));
 
-    // --- View Mode Settings ---
-    const viewMode = createSection(
-      containerEl,
-      'Automatic View Mode Field, Ignored Folders, and Rules',
-      'Frontmatter key, ignored folders, and automatic rules. Master toggles live under the note workflow toggles section.',
-      false
-    );
+      new Setting(propertyConfig)
+        .setName('Default stacked fields closed')
+        .setDesc('Newly opened notes start with the stacked Properties section collapsed.')
+        .addToggle(toggle => toggle
+          .setValue(this.plugin.settings.defaultStackedPropertiesClosed === true)
+          .onChange(async (value) => {
+            this.plugin.settings.defaultStackedPropertiesClosed = value;
+            await this.plugin.saveSettings();
+            this.plugin.persistentMenuManager.ensureMenus();
+          }));
 
-    if (!this.plugin.settings.enableViewModeSwitching) {
-      viewMode.createEl('p', {
-        text: 'Automatic view mode switching is off. Re-enable it under the note workflow toggles section to edit the frontmatter key, ignored folders, and rules.',
+      new Setting(propertyConfig)
+        .setName('Show custom fields in context menu')
+        .setDesc('Display configured custom fields in the right-click context menu.')
+        .addToggle(toggle => toggle
+          .setValue(this.plugin.settings.showCustomPropertiesInContextMenu !== false)
+          .onChange(async (value) => {
+            this.plugin.settings.showCustomPropertiesInContextMenu = value;
+            await this.plugin.saveSettings();
+          }));
+
+      new Setting(propertyConfig)
+        .setName('Inherit Notebook Navigator tag colors')
+        .setDesc('Let inline tag chips use Notebook Navigator tag colors when available.')
+        .addToggle(toggle => toggle
+          .setValue(this.plugin.settings.inheritNotebookNavigatorTagColors !== false)
+          .onChange(async (value) => {
+            this.plugin.settings.inheritNotebookNavigatorTagColors = value;
+            await this.plugin.saveSettings();
+          }));
+
+      propertyConfig.createEl('h4', { text: 'Field definitions' });
+      propertyConfig.createEl('p', {
+        text: `${(this.plugin.settings.properties || []).length} fields configured. Open one field to edit it.`,
         cls: 'setting-item-description',
       });
+
+      const propertiesConfigContainer = propertyConfig.createDiv();
+      this.renderProperties(propertiesConfigContainer);
+      new Setting(propertyConfig)
+        .addButton(btn => btn.setButtonText('Add field').setCta().onClick(async () => {
+          this.plugin.settings.properties.push({ id: Date.now().toString(), label: 'New Property', key: 'new_prop', type: 'text' });
+          await this.plugin.saveSettings();
+          this.display();
+        }));
     }
 
-    const viewModeConfigContainer = viewMode.createDiv();
-    let viewRulesPopout: HTMLElement = viewModeConfigContainer;
+    // --- View Mode Settings ---
+    if (this.activeSettingsPage === 'rules-fields' && this.activeRulesFieldsPage === 'view-mode') {
+      const viewMode = activePage.createDiv({ cls: 'tps-gcm-settings-editor-page' });
+      viewMode.dataset.tpsSettingsRoute = 'view-mode';
+      const viewModeConfigContainer = viewMode.createDiv();
+      const viewRulesPopout: HTMLElement = viewModeConfigContainer;
 
-    if (this.plugin.settings.enableViewModeSwitching) {
       new Setting(viewModeConfigContainer)
-        .setName('Frontmatter Key')
+        .setName('Enable automatic view mode switching')
+        .setDesc('Automatically switch between Source, Live Preview, and Reading modes based on the rules below.')
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.enableViewModeSwitching)
+            .onChange(async (value) => {
+              this.plugin.settings.enableViewModeSwitching = value;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(viewModeConfigContainer)
+        .setName('Show inline manual view mode controls')
+        .setDesc('Show Reading, Live, and Source buttons in the inline menu panel.')
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.enableInlineManualViewMode)
+            .onChange(async (value) => {
+              this.plugin.settings.enableInlineManualViewMode = value;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(viewModeConfigContainer)
+        .setName('Frontmatter key')
         .setDesc('The frontmatter property used to determine view mode (e.g. "viewmode")')
         .addText((text) =>
           text
@@ -1167,7 +1324,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         );
 
       new Setting(viewModeConfigContainer)
-        .setName('Ignored Folders')
+        .setName('Ignored folders')
         .setDesc('One path per line. Files in these folders will generally keep their current view mode.')
         .addTextArea((text) => {
           text
@@ -1181,12 +1338,11 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           text.inputEl.cols = 30;
         });
 
-      viewRulesPopout = createSection(
-        viewModeConfigContainer,
-        'View Mode Rules',
-        'Define condition rules with AND/OR matching (path contains, scheduled past, daily-note date rules, etc).'
-      );
-    }
+      viewModeConfigContainer.createEl('h4', { text: 'View mode rules' });
+      viewModeConfigContainer.createEl('p', {
+        text: 'Define AND/OR conditions using frontmatter, path, schedule, or Daily Note date.',
+        cls: 'setting-item-description',
+      });
 
     const ensureViewModeRules = (): ViewModeRule[] => {
       if (!Array.isArray(this.plugin.settings.viewModeRules)) {
@@ -1322,7 +1478,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       ];
     };
 
-    if (this.plugin.settings.enableViewModeSwitching) {
       new Setting(viewRulesPopout)
         .setName('Rules')
         .setDesc('Add and combine conditions per rule.')
@@ -1421,12 +1576,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         conditions.forEach((condition, conditionIndex) => {
           const type = normalizeConditionType(condition.type);
           const operator = normalizeConditionOperator(type, condition.operator);
-          const conditionRow = card.createDiv();
-          conditionRow.style.display = 'grid';
-          conditionRow.style.gridTemplateColumns = 'minmax(110px, 1fr) minmax(110px, 1fr) minmax(120px, 1.3fr) minmax(160px, 2fr) auto';
-          conditionRow.style.gap = '8px';
-          conditionRow.style.alignItems = 'center';
-          conditionRow.style.marginTop = '8px';
+          const conditionRow = card.createDiv({ cls: 'tps-gcm-viewmode-condition-row' });
 
           const typeSetting = new Setting(conditionRow).setClass('tps-gcm-no-border');
           typeSetting.addDropdown(drop => drop
@@ -1505,96 +1655,23 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       }
     }
 
-    // --- Menu Configuration (Consolidated) ---
-    const menuConfig = createSection(
-      containerEl,
-      'Custom Property Display in Inline UI and Context Menus',
-      'Controls for how custom properties and colored tags appear in the menu surfaces.',
-      false
-    );
-    const propertiesPopout = createSection(
-      menuConfig,
-      'Custom Properties',
-      'Feature toggles only. Define labels, keys, types, options, and per-property placement under the custom property definitions section.'
-    );
-
-    propertiesPopout.createEl('p', {
-      text: `${(this.plugin.settings.properties || []).length} properties configured in the custom property definitions section.`,
-      cls: 'setting-item-description',
-    });
-
-    new Setting(propertiesPopout)
-      .setName('Show custom properties in inline UI')
-      .setDesc('Display configured custom properties in the inline header/context strip.')
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.showCustomPropertiesInInlineUi !== false)
-        .onChange(async (value) => {
-          this.plugin.settings.showCustomPropertiesInInlineUi = value;
-          await this.plugin.saveSettings();
-          this.plugin.persistentMenuManager.ensureMenus();
-        }));
-
-    new Setting(propertiesPopout)
-      .setName('Stack custom properties under title')
-      .setDesc('Show configured inline properties as a stacked section under the note title/top buttons instead of in the bottom inline strip.')
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.showCustomPropertiesUnderTitle === true)
-        .onChange(async (value) => {
-          this.plugin.settings.showCustomPropertiesUnderTitle = value;
-          await this.plugin.saveSettings();
-          this.plugin.persistentMenuManager.ensureMenus();
-        }));
-
-    new Setting(propertiesPopout)
-      .setName('Default stacked properties closed')
-      .setDesc('When stacked properties are shown under the title, newly opened notes start with the Properties section collapsed.')
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.defaultStackedPropertiesClosed === true)
-        .onChange(async (value) => {
-          this.plugin.settings.defaultStackedPropertiesClosed = value;
-          await this.plugin.saveSettings();
-          this.plugin.persistentMenuManager.ensureMenus();
-        }));
-
-    new Setting(propertiesPopout)
-      .setName('Show custom properties in context menu')
-      .setDesc('Display configured custom properties in the right-click context menu.')
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.showCustomPropertiesInContextMenu !== false)
-        .onChange(async (value) => {
-          this.plugin.settings.showCustomPropertiesInContextMenu = value;
-          await this.plugin.saveSettings();
-        }));
-
-    new Setting(propertiesPopout)
-      .setName('Inherit Notebook Navigator tag colors')
-      .setDesc('When enabled, tag chips in the inline menu adopt Notebook Navigator tag colors if available.')
-      .addToggle(toggle => toggle
-        .setValue(this.plugin.settings.inheritNotebookNavigatorTagColors !== false)
-        .onChange(async (value) => {
-          this.plugin.settings.inheritNotebookNavigatorTagColors = value;
-          await this.plugin.saveSettings();
-        }));
-
     // --- Automation Features (Consolidated) ---
-    const automation = createSection(
-      containerEl,
-      'Task Lines, Recurrence, Time Tracking, and Note Navigation',
-      'Task, relationship, recurrence, navigation, and time-tracking controls that still belong in GCM.',
-      false
-    );
+    if (this.activeSettingsPage === 'workflows') {
+      const automation = activePage;
+      this.renderWorkflowNavigation(automation);
+      automation.createEl('p', {
+        text: 'Controller-owned scheduling and maintenance settings stay in TPS Controller. GCM keeps the note-interaction workflows below.',
+        cls: 'setting-item-description'
+      });
 
-    automation.createEl('p', {
-      text: 'These settings control note interactions. Controller-owned scheduling and legacy maintenance features are intentionally hidden from this page.',
-      cls: 'setting-item-description'
-    });
-
-    const timeTracking = createSection(
-      automation,
-      'Time Tracking',
-      'Start/stop timers and store session blocks through the GCM time tracking service.',
-      false
-    );
+    if (this.activeWorkflowPage === 'time-tracking') {
+      const timeTracking = automation.createDiv({ cls: 'tps-gcm-settings-editor-page' });
+      timeTracking.dataset.tpsSettingsRoute = 'time-tracking';
+      timeTracking.createEl('h4', { text: 'Time tracking' });
+      timeTracking.createEl('p', {
+        text: 'Start and stop timers and choose where note-level session blocks are stored.',
+        cls: 'setting-item-description',
+      });
 
     new Setting(timeTracking)
       .setName('Enable time tracking')
@@ -1685,13 +1762,28 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         cls: 'setting-item-description',
       });
     }
+    }
 
-    const taskAutomation = createSection(
-      automation,
-      'Task Lines',
-      'Task lines are inline items. Recurrence creates a fresh task instance; linked child-note identity stays on the child note.',
-      false,
-    );
+    if (this.activeWorkflowPage === 'tasks') {
+      const taskAutomation = automation.createDiv({ cls: 'tps-gcm-settings-editor-page' });
+      taskAutomation.dataset.tpsSettingsRoute = 'tasks';
+      taskAutomation.createEl('h4', { text: 'Tasks' });
+      taskAutomation.createEl('p', {
+        text: 'Task-line creation, hiding, checkbox/status mapping, and completion safeguards.',
+        cls: 'setting-item-description',
+      });
+      new Setting(taskAutomation)
+        .setName('Default attachments path')
+        .setDesc('Folder where new attachment notes are created. Leave empty to use the vault root.')
+        .addText((text) =>
+          text
+            .setPlaceholder('e.g., Attachments or Notes/Attachments')
+            .setValue(this.plugin.settings.defaultAttachmentsPath)
+            .onChange(async (value) => {
+              this.plugin.settings.defaultAttachmentsPath = value.trim();
+              await this.plugin.saveSettings();
+            })
+        );
     new Setting(taskAutomation)
       .setName('Checklist promote behavior')
       .setDesc('When promoting a checklist item to a subitem, choose whether to remove the line, complete + link it, or keep it open as a link.')
@@ -1792,13 +1884,16 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           })
       );
+    }
 
-    const relationshipAutomation = createSection(
-      automation,
-      'Child Notes',
-      'Child notes keep their own identity. Parent notes only store links to those children in the body.',
-      false,
-    );
+    if (this.activeWorkflowPage === 'child-notes') {
+      const relationshipAutomation = automation.createDiv({ cls: 'tps-gcm-settings-editor-page' });
+      relationshipAutomation.dataset.tpsSettingsRoute = 'child-notes';
+      relationshipAutomation.createEl('h4', { text: 'Child notes' });
+      relationshipAutomation.createEl('p', {
+        text: 'Parent links, page-connections navigation, completion classification, and child-panel filters.',
+        cls: 'setting-item-description',
+      });
     new Setting(relationshipAutomation).setName('Child parent property key').setDesc('Frontmatter key used on child notes to store parent links. Multiple parents are stored as an array under this key. Legacy parent/parents/childOf values are still read and migrated on write.').addText(t => t.setValue(this.plugin.settings.parentLinkFrontmatterKey || 'parent').onChange(async v => { this.plugin.settings.parentLinkFrontmatterKey = v.trim() || 'parent'; await this.plugin.saveSettings(); }));
     new Setting(relationshipAutomation)
       .setName('Body link format')
@@ -1859,14 +1954,18 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           this.plugin.settings.ignoredBacklinksFrontmatterKeys = v.split(',').map(s => s.trim()).filter(Boolean);
           await this.plugin.saveSettings();
         }));
+    }
 
-    const advancedAutomation = createSection(
-      automation,
-      'Recurrence',
-      [
-        hasController ? 'Prefer TPS Controller for recurring/archive orchestration.' : '',
-      ].filter(Boolean).join(' ')
-    );
+    if (this.activeWorkflowPage === 'recurrence') {
+      const advancedAutomation = automation.createDiv({ cls: 'tps-gcm-settings-editor-page' });
+      advancedAutomation.dataset.tpsSettingsRoute = 'recurrence';
+      advancedAutomation.createEl('h4', { text: 'Recurrence' });
+      advancedAutomation.createEl('p', {
+        text: hasController
+          ? 'GCM owns note-level recurrence behavior; prefer TPS Controller for orchestration and archive scheduling.'
+          : 'Configure how GCM creates the next recurring note instance.',
+        cls: 'setting-item-description',
+      });
     new Setting(advancedAutomation).setName('Note Recurrence').setDesc('Auto-create the next note instance when a recurring note is completed.').addToggle(t => t.setValue(this.plugin.settings.enableRecurrence).onChange(async v => { this.plugin.settings.enableRecurrence = v; await this.plugin.saveSettings(); this.display(); }));
 
 
@@ -1891,43 +1990,94 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       new Setting(sub).setName('Prompt on Edit').setDesc('Ask to update future instances').addToggle(t => t.setValue(this.plugin.settings.promptOnRecurrenceEdit).onChange(async v => { this.plugin.settings.promptOnRecurrenceEdit = v; await this.plugin.saveSettings(); }));
       new Setting(sub).setName('Template Folder').setDesc('Folder for recurring event templates (copied when recurrence first set). Leave blank to disable.').addText(t => t.setPlaceholder('e.g. Recurring Templates').setValue(this.plugin.settings.recurringTemplateFolder || '').onChange(async v => { this.plugin.settings.recurringTemplateFolder = v.trim(); await this.plugin.saveSettings(); }));
     }
+    }
 
-    const viewModeFeatures = createSection(
-      automation,
-      'Automatic and Manual View Mode Toggles',
-      'Feature toggles only. Rule/frontmatter configuration lives under the automatic view mode rules section.'
-    );
-    new Setting(viewModeFeatures)
-      .setName('Enable automatic view mode switching')
-      .setDesc('Automatically switch between Source, Live Preview, and Reading modes based on frontmatter and configured rules.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.enableViewModeSwitching)
-          .onChange(async (value) => {
-            this.plugin.settings.enableViewModeSwitching = value;
-            await this.plugin.saveSettings();
-            this.display();
-          })
-      );
+    if (this.activeWorkflowPage === 'home-daily') {
+      const navigationAutomation = automation.createDiv({ cls: 'tps-gcm-settings-editor-page' });
+      navigationAutomation.dataset.tpsSettingsRoute = 'home-daily';
+      navigationAutomation.createEl('h4', { text: 'Home & daily notes' });
+      navigationAutomation.createEl('p', {
+        text: 'TPS Home Base paths, capture placement, Daily Note navigation, and scheduled-task inheritance.',
+        cls: 'setting-item-description',
+      });
 
-    new Setting(viewModeFeatures)
-      .setName('Show inline manual view mode controls')
-      .setDesc('Show Reading / Live / Source buttons in the inline menu panel only.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.enableInlineManualViewMode)
-          .onChange(async (value) => {
-            this.plugin.settings.enableInlineManualViewMode = value;
-            await this.plugin.saveSettings();
-          })
-      );
+      new Setting(navigationAutomation)
+        .setName('Home calendar Base path')
+        .setDesc('Base file rendered by the Calendar component in TPS Home.')
+        .addText((text) =>
+          text
+            .setPlaceholder('home-schedule.base')
+            .setValue(this.plugin.settings.homeCalendarBasePath || 'home-schedule.base')
+            .onChange(async (value) => {
+              this.plugin.settings.homeCalendarBasePath = value.trim() || 'home-schedule.base';
+              await this.plugin.saveSettings();
+            })
+        );
 
-    const navigationAutomation = createSection(
-      automation,
-      'Daily Note Navigation and Scheduled Task Inheritance',
-      'Controls for the Previous, Today, Next, and week navigation overlay on daily notes.',
-      true,
-    );
+      new Setting(navigationAutomation)
+        .setName('Home food Base path')
+        .setDesc('Base file rendered by the Food tracker component in TPS Home.')
+        .addText((text) =>
+          text
+            .setPlaceholder('Food Log.base')
+            .setValue(this.plugin.settings.homeFoodBasePath || 'Food Log.base')
+            .onChange(async (value) => {
+              this.plugin.settings.homeFoodBasePath = value.trim() || 'Food Log.base';
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(navigationAutomation)
+        .setName('Home activity Base path')
+        .setDesc('Base file rendered by the Activity log component in TPS Home.')
+        .addText((text) =>
+          text
+            .setPlaceholder('Activity Log.base')
+            .setValue(this.plugin.settings.homeWorkoutBasePath || 'Activity Log.base')
+            .onChange(async (value) => {
+              this.plugin.settings.homeWorkoutBasePath = value.trim() || 'Activity Log.base';
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(navigationAutomation)
+        .setName('Home open tasks Base path')
+        .setDesc('Base file rendered by the Open unscheduled tasks component in TPS Home.')
+        .addText((text) =>
+          text
+            .setPlaceholder('Open Unscheduled Tasks.base')
+            .setValue(this.plugin.settings.homeOpenTasksBasePath || 'Open Unscheduled Tasks.base')
+            .onChange(async (value) => {
+              this.plugin.settings.homeOpenTasksBasePath = value.trim() || 'Open Unscheduled Tasks.base';
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(navigationAutomation)
+        .setName('Home capture position')
+        .setDesc('Where TPS Home quick capture inserts new lines in the Daily Note.')
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('bottom', 'Bottom of note')
+            .addOption('top', 'Top after frontmatter')
+            .setValue(this.plugin.settings.homeCaptureInsertPosition || 'bottom')
+            .onChange(async (value: 'top' | 'bottom') => {
+              this.plugin.settings.homeCaptureInsertPosition = value;
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(navigationAutomation)
+        .setName('Collapse headings on first open')
+        .setDesc('Desktop only. When a Markdown note is opened and was not already open in another tab, run Obsidian fold-all so headings start collapsed. Mobile skips this automation so native heading/list collapse controls stay responsive.')
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.collapseHeadingsOnOpen === true)
+            .onChange(async (value) => {
+              this.plugin.settings.collapseHeadingsOnOpen = value;
+              await this.plugin.saveSettings();
+            })
+        );
     new Setting(navigationAutomation)
       .setName('Enable Daily Note Navigation')
       .setDesc('Show hovering Previous/Today/Next controls on daily notes.')
@@ -1978,73 +2128,41 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           });
         }));
     }
+    }
+    }
 
-    const diagnostics = createSection(
-      containerEl,
-      'Debug Logging',
-      'Low-frequency troubleshooting settings.',
-      false
-    );
+    if (this.activeSettingsPage === 'advanced') {
+      const diagnostics = activePage;
+      diagnostics.createEl('h4', { text: 'Debug logging' });
 
-    new Setting(diagnostics)
-      .setName('Enable console logging')
-      .setDesc('Show debug logs in the developer console.')
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.enableLogging).onChange(async (value) => {
-          this.plugin.settings.enableLogging = value;
-          await this.plugin.saveSettings();
-        }),
-      );
+      new Setting(diagnostics)
+        .setName('Enable console logging')
+        .setDesc('Show debug logs in the developer console.')
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.enableLogging).onChange(async (value) => {
+            this.plugin.settings.enableLogging = value;
+            await this.plugin.saveSettings();
+          }),
+        );
 
-    new Setting(diagnostics)
-      .setName('Log opener decisions')
-      .setDesc('When console logging is enabled, log compact tab-routing decisions for note opens.')
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.logOpenerDecisions === true).onChange(async (value) => {
-          this.plugin.settings.logOpenerDecisions = value;
-          await this.plugin.saveSettings();
-        }),
-      );
+      new Setting(diagnostics)
+        .setName('Log opener decisions')
+        .setDesc('When console logging is enabled, log compact tab-routing decisions for note opens.')
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.logOpenerDecisions === true).onChange(async (value) => {
+            this.plugin.settings.logOpenerDecisions = value;
+            await this.plugin.saveSettings();
+          }),
+        );
 
-    this.renderBaseQueryGuide(containerEl, createSection);
+      this.renderBaseQueryGuide(diagnostics);
+    }
 
     containerEl.createEl('p', {
       text: 'Note: native context menu items are preserved; TPS actions are injected when context targets match.',
       cls: 'setting-item-description',
       attr: { style: 'margin-top: 20px; text-align: center; opacity: 0.7;' }
     });
-    this.restoreSettingsViewState(containerEl);
-  }
-
-  private captureSettingsViewState(containerEl: HTMLElement): void {
-    this.settingsScrollTop = containerEl.scrollTop;
-    this.settingsViewState.clear();
-    const detailsEls = Array.from(containerEl.querySelectorAll('details'));
-    detailsEls.forEach((detailsEl, index) => {
-      const details = detailsEl as HTMLDetailsElement;
-      const summaryText = details.querySelector('summary')?.textContent?.trim() || '';
-      this.settingsViewState.set(`${index}:${summaryText}`, details.open);
-    });
-  }
-
-  private restoreSettingsViewState(containerEl: HTMLElement): void {
-    const detailsEls = Array.from(containerEl.querySelectorAll('details'));
-    if (!this.hasRenderedSettings) {
-      detailsEls.forEach((detailsEl) => {
-        (detailsEl as HTMLDetailsElement).removeAttribute('open');
-      });
-      this.hasRenderedSettings = true;
-      containerEl.scrollTop = 0;
-      return;
-    }
-    detailsEls.forEach((detailsEl, index) => {
-      const details = detailsEl as HTMLDetailsElement;
-      const summaryText = details.querySelector('summary')?.textContent?.trim() || '';
-      const isOpen = this.settingsViewState.get(`${index}:${summaryText}`);
-      if (isOpen) details.setAttr('open', 'true');
-      else details.removeAttribute('open');
-    });
-    containerEl.scrollTop = this.settingsScrollTop;
   }
 
   renderProperties(container: HTMLElement) {
@@ -2392,15 +2510,12 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     });
   }
 
-  private renderBaseQueryGuide(
-    container: HTMLElement,
-    createSection: (parent: HTMLElement, title: string, description?: string, defaultOpen?: boolean) => HTMLElement,
-  ): void {
-    const guide = createSection(
+  private renderBaseQueryGuide(container: HTMLElement): void {
+    const guide = this.createTrackedSection(
       container,
-      'Base query guide',
-      'GCM custom view contracts first, followed by Daily Note targeting, synthesized row fields, and native Obsidian Base properties.',
-      true,
+      'Base query reference',
+      'Open a compact query example and choose one reference category at a time.',
+      false,
     );
 
     const dailyNoteCallout = guide.createDiv({ cls: 'tps-base-query-callout' });
@@ -2411,35 +2526,54 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     guide.createEl('pre', { cls: 'tps-base-query-code' })
       .createEl('code', { text: CURRENT_DAILY_NOTE_FEED_QUERY });
 
-    const gotchas = createCollapsibleSection(
-      guide,
-      'Daily Note Feed targeting notes',
-      'The important distinctions behind the current feed query.',
-      true,
-    );
-    const gotchaList = gotchas.createEl('ul', { cls: 'tps-base-query-gotchas' });
+    guide.createEl('h4', { text: 'Daily Note Feed targeting notes' });
+    const gotchaList = guide.createEl('ul', { cls: 'tps-base-query-gotchas' });
     BASE_QUERY_GUIDE_GOTCHAS.forEach((note) => gotchaList.createEl('li', { text: note }));
 
-    BASE_QUERY_GUIDE_SECTIONS.forEach((section) => {
-      const sectionBody = createCollapsibleSection(
-        guide,
-        section.title,
-        section.description,
-        section.defaultOpen === true,
-      );
-      const table = sectionBody.createEl('table', { cls: 'tps-base-query-reference' });
+    const selectedSection = BASE_QUERY_GUIDE_SECTIONS.find(
+      (section) => section.title === this.activeBaseQuerySection,
+    ) || BASE_QUERY_GUIDE_SECTIONS[0];
+
+    new Setting(guide)
+      .setName('Reference category')
+      .setDesc('Show one query namespace at a time.')
+      .addDropdown((dropdown) => {
+        dropdown.selectEl.dataset.tpsBaseQueryCategory = 'true';
+        BASE_QUERY_GUIDE_SECTIONS.forEach((section) => {
+          dropdown.addOption(section.title, section.title);
+        });
+        dropdown
+          .setValue(selectedSection?.title || '')
+          .onChange((value) => {
+            const scrollTop = this.containerEl.scrollTop;
+            this.activeBaseQuerySection = value;
+            this.display();
+            this.containerEl.scrollTop = scrollTop;
+            this.containerEl
+              .querySelector<HTMLSelectElement>('[data-tps-base-query-category="true"]')
+              ?.focus({ preventScroll: true });
+          });
+      });
+
+    if (selectedSection) {
+      guide.createEl('h4', { text: selectedSection.title });
+      guide.createEl('p', {
+        text: selectedSection.description,
+        cls: 'setting-item-description',
+      });
+      const table = guide.createEl('table', { cls: 'tps-base-query-reference' });
       const headRow = table.createEl('thead').createEl('tr');
       headRow.createEl('th', { text: 'Variable / expression' });
       headRow.createEl('th', { text: 'Available in' });
       headRow.createEl('th', { text: 'Meaning' });
       const body = table.createEl('tbody');
-      section.entries.forEach((entry) => {
+      selectedSection.entries.forEach((entry) => {
         const row = body.createEl('tr');
         row.createEl('td').createEl('code', { text: entry.expression });
         row.createEl('td', { cls: 'tps-base-query-scope', text: entry.appliesTo });
         row.createEl('td', { text: entry.description });
       });
-    });
+    }
 
     const links = guide.createDiv({ cls: 'tps-base-query-links' });
     links.createEl('a', {
