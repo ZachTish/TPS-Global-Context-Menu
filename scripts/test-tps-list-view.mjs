@@ -1065,8 +1065,8 @@ test('shared TPS Base write resolver keeps fallback subordinate to explicit filt
   };
   const todayIsoDate = () => '2026-07-24';
 
-  assert.equal(normalizeTpsBaseWriteFallbackMode(undefined), 'filter-required');
-  assert.equal(normalizeTpsBaseWriteFallbackMode('unexpected'), 'filter-required');
+  assert.equal(normalizeTpsBaseWriteFallbackMode(undefined), 'today-daily-note');
+  assert.equal(normalizeTpsBaseWriteFallbackMode('unexpected'), 'today-daily-note');
   assert.equal(normalizeTpsBaseWriteFallbackMode('today-daily-note'), 'today-daily-note');
   assert.equal(normalizeTpsBaseWriteFallbackMode('specific-note'), 'specific-note');
   assert.equal(normalizeTpsBaseWriteNotePath('[[Inbox/Specific|label]]'), 'Inbox/Specific.md');
@@ -1253,6 +1253,20 @@ test('TPS List creation waits for persisted Base filters before resolving settin
   assert.deepEqual(await rootsPromise, [runtimeRoot, persistedRoot]);
   assert.match(viewSource, /creationFilterRoots = await this\.getBaseFilterRootsForCreation\(\)/);
   assert.match(viewSource, /getRootTaskCreationDefaults\(effectiveTaskFilter, effectiveFilterRoots\)/);
+});
+
+test('TPS List never falls through to native note creation when mobile loses the Base identity', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  view.getRuntimeBaseFilterRoots = () => [{ and: ['task.tags.contains(shopping)'] }];
+  view.getStampedBaseFilterRoots = () => null;
+  view.getBaseFile = () => null;
+  view.getBaseContextFile = () => null;
+
+  await assert.rejects(
+    view.getBaseFilterRootsForCreation(),
+    /Could not resolve the Base definition for line creation/,
+  );
 });
 
 test('TPS List and TPS Table create Base-filtered headings with an explicit level', async () => {

@@ -19,6 +19,10 @@ import { withBaseEmbedRenderContext } from './base-embed-context';
 import { DEFAULT_SETTINGS, HOME_DAILY_NOTE_FEED_BASE_CONTENT, HOME_DAILY_NOTE_FEED_BASE_PATH } from '../constants';
 import { normalizeHomeComponentActions } from '../services/home-component-action-core';
 import { addHomeBaseContextFilter, resolveHomeBaseDefinitionSourcePath } from './home-base-context';
+import {
+  preserveTpsInlinePropsMetadata,
+  stripTaskInlinePropsMetadata,
+} from '../utils/task-line-metadata';
 
 export const TPS_HOME_VIEW_TYPE = 'tps-home';
 
@@ -852,8 +856,8 @@ export class TpsHomeView extends ItemView {
           }
           if (!this.plugin.homeCaptureService.validateCaptureValue(value, today.clone(), { task })) return;
 
-          const replacement = editTarget
-            ? value
+          const replacement = editTarget && originalEditLine != null
+            ? preserveTpsInlinePropsMetadata(originalEditLine, value)
             : `${this.plugin.homeCaptureService.formatCaptureValue(value, task)}${session.snapshot.suffix.startsWith('\n') ? '' : '\n'}`;
           const outcome = await runReplacement(replacement, editTarget ? 'edit-save' : task ? 'capture-task' : 'capture-note');
           rerender = outcome !== 'stale';
@@ -1024,7 +1028,7 @@ export class TpsHomeView extends ItemView {
         spellcheck: 'true',
       },
     });
-    textarea.value = editSnapshot?.value ?? '';
+    textarea.value = editSnapshot ? stripTaskInlinePropsMetadata(editSnapshot.value) : '';
     let submitInFlight = false;
     const resizeTextarea = () => {
       textarea.style.height = '1px';
@@ -1064,7 +1068,8 @@ export class TpsHomeView extends ItemView {
           if (!this.plugin.homeCaptureService.validateCaptureValue(value, today.clone())) return;
           let conflict = false;
           await this.app.vault.process(editFile, (current) => {
-            const next = replaceHomeCaptureRangeIfUnchanged(current, editSnapshot!, [editSnapshot!.value], value);
+            const replacement = preserveTpsInlinePropsMetadata(editSnapshot!.value, value);
+            const next = replaceHomeCaptureRangeIfUnchanged(current, editSnapshot!, [editSnapshot!.value], replacement);
             if (next == null) {
               conflict = true;
               return current;

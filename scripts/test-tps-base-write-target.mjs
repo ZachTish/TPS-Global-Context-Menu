@@ -109,8 +109,9 @@ test('write-target setting and note-path normalization is stable', async () => {
 
   assert.equal(normalizeTpsBaseWriteFallbackMode('today-daily-note'), 'today-daily-note');
   assert.equal(normalizeTpsBaseWriteFallbackMode('specific-note'), 'specific-note');
-  assert.equal(normalizeTpsBaseWriteFallbackMode('unknown'), 'filter-required');
-  assert.equal(normalizeTpsBaseWriteFallbackMode(null), 'filter-required');
+  assert.equal(normalizeTpsBaseWriteFallbackMode('filter-required'), 'filter-required');
+  assert.equal(normalizeTpsBaseWriteFallbackMode('unknown'), 'today-daily-note');
+  assert.equal(normalizeTpsBaseWriteFallbackMode(null), 'today-daily-note');
 
   assert.equal(normalizeTpsBaseWriteNotePath(' [[Projects/Tasks|Task sink]] '), 'Projects/Tasks.md');
   assert.equal(normalizeTpsBaseWriteNotePath('[Task sink](Inbox/Capture.md#Tasks)'), 'Inbox/Capture.md');
@@ -160,6 +161,27 @@ test('today Daily Note fallback resolves only when no filter target was specifie
   assert.equal(result.path, dailyFile.path);
   assert.equal(result.reason, 'resolved');
   assert.deepEqual(dailyCalls, ['2026-07-24 00:00:00']);
+});
+
+test('an unset write-target setting defaults to today while explicit conservative modes remain intact', async () => {
+  const { resolveTpsBaseWriteTarget, TFile } = await loadModule();
+  const dailyFile = new TFile('Daily/2026-07-24.md');
+  const { host, dailyCalls } = createHost(TFile, {
+    fallbackMode: 'today-daily-note',
+    dailyNote: dailyFile,
+  });
+  delete host.settings.tpsBaseWriteFallbackMode;
+
+  const result = await resolveTpsBaseWriteTarget(host, {
+    todayIsoDate: () => '2026-07-24',
+  });
+
+  assert.equal(result.file, dailyFile);
+  assert.equal(result.source, 'today-daily-note');
+  assert.deepEqual(dailyCalls, ['2026-07-24 00:00:00']);
+
+  host.settings.tpsBaseWriteFallbackMode = 'filter-required';
+  assert.equal((await resolveTpsBaseWriteTarget(host, { todayIsoDate: () => '2026-07-24' })).reason, 'filter-required');
 });
 
 test('specific-note fallback resolves an existing Markdown note without creating it', async () => {

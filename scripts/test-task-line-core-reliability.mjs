@@ -17,6 +17,7 @@ async function importBundled(relativePath) {
 
 const metadataPromise = importBundled('../src/utils/task-line-metadata.ts');
 const taskBlockPromise = importBundled('../src/utils/task-block-move.ts');
+const logLinePromise = importBundled('../src/views/log-line-utils.ts');
 
 test('task source titles preserve link markup while display titles unwrap links anywhere', async () => {
   const { getPlainTaskTitle, getTaskDisplayTitle, getTaskSourceTitle } = await metadataPromise;
@@ -123,6 +124,35 @@ test('clone cleanup strips every hidden TPS metadata carrier without removing vi
   assert.equal(readInlineFieldValue(stripped, 'scheduled'), '2026-07-14');
   assert.equal(readInlineFieldValue(stripped, 'parents'), '[[Projects/Test]]');
   assert.match(stripped, /^- \[ \] Clone me/u);
+});
+
+test('hidden GCM properties merge without loss and remain hidden through line edits', async () => {
+  const {
+    mergeTpsInlinePropsMetadata,
+    preserveTpsInlinePropsMetadata,
+    stripTaskInlinePropsMetadata,
+  } = await metadataPromise;
+  const { setVisibleLineText, visibleLineText } = await logLinePromise;
+  const source = '- [ ] Buy milk %% tps-inline-props:{"externalId":"reminders:1","CreatedDate":"old"} %%';
+  const merged = mergeTpsInlinePropsMetadata(source, { createdDate: '2026-07-25 12:34:00' });
+
+  assert.match(merged, /"externalId":"reminders:1"/u);
+  assert.match(merged, /"CreatedDate":"2026-07-25 12:34:00"/u);
+  assert.equal((merged.match(/createddate/giu) || []).length, 1);
+  assert.equal(stripTaskInlinePropsMetadata(merged), '- [ ] Buy milk');
+  assert.equal(visibleLineText(merged), 'Buy milk');
+  assert.equal(
+    preserveTpsInlinePropsMetadata(merged, '- [ ] Buy oat milk'),
+    '- [ ] Buy oat milk %% tps-inline-props:{"externalId":"reminders:1","CreatedDate":"2026-07-25 12:34:00"} %%',
+  );
+  assert.equal(
+    setVisibleLineText(merged, 'Buy oat milk'),
+    '- [ ] Buy oat milk %% tps-inline-props:{"externalId":"reminders:1","CreatedDate":"2026-07-25 12:34:00"} %%',
+  );
+
+  const encoded = `[tpsInlineProps:: ${encodeURIComponent(JSON.stringify({ externalId: 'encoded' }))}]`;
+  const encodedMerged = mergeTpsInlinePropsMetadata(`- Encoded ${encoded}`, { createdDate: '2026-07-25 12:34:00' });
+  assert.match(decodeURIComponent(encodedMerged), /"externalId":"encoded","createdDate":"2026-07-25 12:34:00"/u);
 });
 
 test('task relocation uses exact and stable identities and refuses ambiguous fallback matches', async () => {

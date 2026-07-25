@@ -98,6 +98,24 @@ test('the production Shopping query shape inherits task kind and adds the view t
   assert.deepEqual(plan.fields, {});
 });
 
+test('task-scoped active filters retain task intent when mobile supplies only runtime roots', async () => {
+  const { resolveTpsBaseLineCreationPlan } = await loadModule();
+  const plan = resolveTpsBaseLineCreationPlan([
+    {
+      and: [
+        'task.tags.contains(shopping)',
+        'task.status == "working"',
+      ],
+    },
+  ]);
+
+  assert.equal(plan.blockedReason, null);
+  assert.equal(plan.kind, 'task');
+  assert.equal(plan.status, 'working');
+  assert.deepEqual(plan.tags, ['#shopping']);
+  assert.equal(plan.provenance.kind?.expression, 'task.tags.contains(shopping)');
+});
+
 test('the additive plan becomes matching TPS List and TPS Table Markdown', async () => {
   const [
     { resolveTpsBaseLineCreationPlan },

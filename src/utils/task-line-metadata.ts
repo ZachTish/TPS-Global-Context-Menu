@@ -87,21 +87,45 @@ export function setTaskAssociatedNotePath(line: string, path: string): string {
   const cleanPath = normalizeTaskAssociatedNotePath(path);
   if (!cleanPath) return line;
   if (readTaskAssociatedNotePath(line) === cleanPath) return line;
+  return mergeTpsInlinePropsMetadata(line, { [TASK_ASSOCIATED_NOTE_PATH_KEY]: cleanPath });
+}
 
+export function mergeTpsInlinePropsMetadata(
+  line: string,
+  patch: Record<string, unknown>,
+): string {
+  const entries = Object.entries(patch || {})
+    .map(([key, value]) => [String(key || '').trim(), value] as const)
+    .filter(([key, value]) => key.length > 0 && value !== undefined);
+  if (entries.length === 0) return line;
   const blocks = getTaskInlinePropsJsonBlocks(line);
-  const target = blocks.find((block) => !!findCaseInsensitiveRecordKey(block.value, TASK_ASSOCIATED_NOTE_PATH_KEY))
+  const target = blocks.find((block) => entries.some(([key]) => !!findCaseInsensitiveRecordKey(block.value, key)))
     || blocks[0];
   if (target) {
-    const existingKey = findCaseInsensitiveRecordKey(target.value, TASK_ASSOCIATED_NOTE_PATH_KEY);
-    const value = Object.fromEntries(
-      Object.entries(target.value).filter(([key]) => key.trim().toLowerCase() !== TASK_ASSOCIATED_NOTE_PATH_KEY.toLowerCase()),
-    );
-    value[existingKey || TASK_ASSOCIATED_NOTE_PATH_KEY] = cleanPath;
+    const value = { ...target.value };
+    for (const [key, nextValue] of entries) {
+      const matches = Object.keys(value)
+        .filter((candidate) => candidate.trim().toLowerCase() === key.toLowerCase());
+      const destinationKey = matches[0] || key;
+      matches.slice(1).forEach((duplicate) => delete value[duplicate]);
+      value[destinationKey] = nextValue;
+    }
+    if (JSON.stringify(value) === JSON.stringify(target.value)) return line;
     const serialized = serializeTaskInlinePropsPayload(value, target.encoding);
     return `${line.slice(0, target.payloadStart)}${serialized}${line.slice(target.payloadEnd)}`;
   }
 
-  return `${String(line || '').trimEnd()} %% tps-inline-props:${JSON.stringify({ [TASK_ASSOCIATED_NOTE_PATH_KEY]: cleanPath })} %%`.trimEnd();
+  return `${String(line || '').trimEnd()} %% tps-inline-props:${JSON.stringify(Object.fromEntries(entries))} %%`.trimEnd();
+}
+
+export function preserveTpsInlinePropsMetadata(sourceLine: string, editedLine: string): string {
+  const source = String(sourceLine || '');
+  const carriers = getTaskInlinePropsMetadataRanges(source)
+    .map((range) => source.slice(range.start, range.end).trim())
+    .filter(Boolean);
+  const visible = stripTaskInlinePropsMetadata(editedLine).trimEnd();
+  if (carriers.length === 0) return visible;
+  return `${visible} ${carriers.join(' ')}`.trimEnd();
 }
 
 export function normalizeTaskAssociatedNotePath(rawValue: unknown): string {

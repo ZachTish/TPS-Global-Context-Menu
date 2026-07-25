@@ -348,6 +348,16 @@ function applyCondition(
   };
   const property = normalizeProperty(condition.property);
   const semanticProperty = normalizeSemanticProperty(property);
+  if (
+    effectivePositive
+    && property.startsWith('task.')
+    && property !== 'task.path'
+    && property !== 'task.file.path'
+  ) {
+    const inferredTask = applyKind(state, 'task', true, source, context);
+    if (!inferredTask) return [];
+    state = inferredTask;
+  }
   const literalResults = condition.values.map((value) => resolveLiteral(value, context.options));
   const resolvedValues = literalResults.filter((entry) => entry.supported).map((entry) => entry.value).filter((value) => value !== '');
   if (literalResults.some((entry) => !entry.supported) && resolvedValues.length === 0) {

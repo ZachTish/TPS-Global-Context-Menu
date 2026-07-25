@@ -14,6 +14,10 @@ import {
 import { CaptureMarkdownEditor } from './home-capture-markdown-editor';
 import { formatCaptureMarkdownForWrite } from './home-capture-markdown-core';
 import { formatFileWikilink } from '../utils/list-utils';
+import {
+  preserveTpsInlinePropsMetadata,
+  stripTaskInlinePropsMetadata,
+} from '../utils/task-line-metadata';
 import * as logger from '../logger';
 
 const getMoment = (): any => (window as any).moment;
@@ -146,7 +150,7 @@ export class HomeCaptureService {
   }
 
   formatCaptureValue(text: string, task = false): string {
-    return formatHomeCaptureBlock(text, getMoment()().format('HH:mm'), { task }).trimEnd();
+    return formatHomeCaptureBlock(text, getMoment()().format('YYYY-MM-DD HH:mm:ss'), { task }).trimEnd();
   }
 
   validateCaptureValue(text: string, date = getMoment()(), options: HomeCaptureOptions = {}): boolean {
@@ -295,7 +299,7 @@ export class HomeCaptureService {
       return null;
     }
     const file = requestedFile instanceof TFile ? requestedFile : await this.ensureDailyNote(date);
-    const timestamp = getMoment()().format('HH:mm');
+    const timestamp = getMoment()().format('YYYY-MM-DD HH:mm:ss');
     const block = options.preserveMarkdown === true
       ? formatCaptureMarkdownForWrite(value, timestamp)
       : formatHomeCaptureBlock(value, timestamp, { task: options.task === true });
@@ -1233,7 +1237,7 @@ class HomeCaptureLineEditModal extends Modal {
     saveButton.createSpan({ text: 'Save changes' });
     const cancelButton = actions.createEl('button', { text: 'Cancel', attr: { type: 'button' } });
 
-    let value = this.snapshot.value;
+    let value = stripTaskInlinePropsMetadata(this.snapshot.value);
     let hasContent = true;
     let saving = false;
     const update = () => {
@@ -1241,7 +1245,7 @@ class HomeCaptureLineEditModal extends Modal {
     };
     const save = async () => {
       if (saveButton.disabled || saving) return;
-      const replacement = value.trim();
+      const replacement = preserveTpsInlinePropsMetadata(this.snapshot.value, value.trim());
       if (!replacement || /[\r\n]/.test(replacement)) {
         new Notice('Line editing supports one non-empty line.');
         return;
@@ -1278,7 +1282,7 @@ class HomeCaptureLineEditModal extends Modal {
 
     this.markdownEditor = new CaptureMarkdownEditor({
       parentEl: editorHost,
-      initialValue: this.snapshot.value,
+      initialValue: stripTaskInlinePropsMetadata(this.snapshot.value),
       onChange: (markdown, nextHasContent) => {
         value = markdown;
         hasContent = nextHasContent;

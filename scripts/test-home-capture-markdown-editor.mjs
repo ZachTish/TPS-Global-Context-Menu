@@ -33,21 +33,24 @@ test('capture Markdown starts empty despite its visible bullet marker', () => {
 });
 
 test('live-editor Markdown writes without adding a second list marker', () => {
-  assert.equal(core.formatCaptureMarkdownForWrite('- Thought', '12:34'), '- Thought 12:34\n');
-  assert.equal(core.formatCaptureMarkdownForWrite('- [ ] Task', '12:34'), '- [ ] Task 12:34\n');
-  assert.equal(core.formatCaptureMarkdownForWrite('Plain text', '12:34'), 'Plain text 12:34\n');
+  const createdDate = '2026-07-25 12:34:00';
+  const hidden = '%% tps-inline-props:{"createdDate":"2026-07-25 12:34:00"} %%';
+  assert.equal(core.formatCaptureMarkdownForWrite('- Thought', createdDate), `- Thought ${hidden}\n`);
+  assert.equal(core.formatCaptureMarkdownForWrite('- [ ] Task', createdDate), `- [ ] Task ${hidden}\n`);
+  assert.equal(core.formatCaptureMarkdownForWrite('Plain text', createdDate), `Plain text ${hidden}\n`);
   assert.equal(
-    core.formatCaptureMarkdownForWrite('- One\n- [ ] Two\nPlain', '12:34'),
-    '- One 12:34\n- [ ] Two 12:34\nPlain 12:34\n',
+    core.formatCaptureMarkdownForWrite('- One\n- [ ] Two\nPlain', createdDate),
+    `- One ${hidden}\n- [ ] Two ${hidden}\nPlain ${hidden}\n`,
   );
   assert.equal(
-    core.formatCaptureMarkdownForWrite('- Parent\n  - Child\n    - Grandchild\n- [ ] Second\n\nPlain', '12:34'),
-    '- Parent 12:34\n  - Child\n    - Grandchild\n- [ ] Second 12:34\n\nPlain 12:34\n',
+    core.formatCaptureMarkdownForWrite('- Parent\n  - Child\n    - Grandchild\n- [ ] Second\n\nPlain', createdDate),
+    `- Parent ${hidden}\n  - Child\n    - Grandchild\n- [ ] Second ${hidden}\n\nPlain ${hidden}\n`,
   );
   assert.equal(
-    core.formatCaptureMarkdownForWrite('\t- Parent\n\t\t- Child\n\t- Second\n\t- ', '12:34'),
-    '\t- Parent 12:34\n\t\t- Child\n\t- Second 12:34\n\t- \n',
+    core.formatCaptureMarkdownForWrite('\t- Parent\n\t\t- Child\n\t- Second\n\t- ', createdDate),
+    `\t- Parent ${hidden}\n\t\t- Child\n\t- Second ${hidden}\n\t- \n`,
   );
+  assert.equal(core.formatCaptureMarkdownForWrite(`- Existing ${hidden}`, createdDate), `- Existing ${hidden}\n`);
 });
 
 test('Mod-L semantics toggle bullet and checkbox markers without changing content', () => {

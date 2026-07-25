@@ -73,6 +73,10 @@ import { normalizeHomeComponentActions } from './services/home-component-action-
 import { TPS_HOME_VIEW_TYPE, TpsHomeView } from './views/home-view';
 import { TPS_TABLE_VIEW_TYPE, TpsTableView } from './views/log-base-view';
 import { TPS_LIST_VIEW_TYPE, createTpsListView, createTpsListViewOptions } from './views/tps-list-bridge-view';
+import {
+  getTpsBaseNativeCreateEventTarget,
+  isTpsBaseNativeCreateTarget,
+} from './views/native-base-create-owner';
 import { sanitizeNotebookNavigatorRuleSettings } from './services/notebook-navigator-rule-settings';
 import { registerGcmEvents } from './events/register-events';
 import { registerGcmCommands } from './commands/register-commands';
@@ -778,15 +782,15 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   private async handleTpsListNativeCreateClick(evt: MouseEvent | KeyboardEvent): Promise<void> {
     if (evt.defaultPrevented || (evt instanceof MouseEvent && evt.button !== 0)) return;
-    const target = evt.target instanceof HTMLElement ? evt.target : null;
-    if (!target || target.closest('.tps-list-scroll')) return;
+    const target = getTpsBaseNativeCreateEventTarget(evt.target);
+    if (!target) return;
 
     const scope = this.getTpsListNativeCreateScope(target);
     if (!scope) return;
     const listRoot = this.getVisibleTpsBaseCreateRoot(scope, '.tps-list-scroll');
     const view = (listRoot as any)?.__tpsListView as { createFileForView: () => Promise<void> } | undefined;
     if (!listRoot || !view || typeof view.createFileForView !== 'function') return;
-    if (!this.isTpsTableNativeCreateTarget(target, scope)) return;
+    if (!isTpsBaseNativeCreateTarget(target, scope)) return;
 
     evt.preventDefault();
     evt.stopPropagation();
@@ -818,15 +822,15 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   private async handleTpsTableNativeCreateClick(evt: MouseEvent): Promise<void> {
     if (evt.defaultPrevented || evt.button !== 0) return;
-    const target = evt.target instanceof HTMLElement ? evt.target : null;
-    if (!target || target.closest('.tps-log-base')) return;
+    const target = getTpsBaseNativeCreateEventTarget(evt.target);
+    if (!target) return;
 
     const scope = this.getTpsTableNativeCreateScope(target);
     if (!scope) return;
     const tableRoot = this.getVisibleTpsBaseCreateRoot(scope, '.tps-log-base');
     const view = (tableRoot as any)?.__tpsTableView as TpsTableView | undefined;
     if (!tableRoot || !view || typeof view.createFileForView !== 'function') return;
-    if (!this.isTpsTableNativeCreateTarget(target, scope)) return;
+    if (!isTpsBaseNativeCreateTarget(target, scope)) return;
 
     evt.preventDefault();
     evt.stopPropagation();
@@ -849,15 +853,15 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     await view.createFileForView();
   }
 
-  private getTpsListNativeCreateScope(target: HTMLElement): HTMLElement | null {
+  private getTpsListNativeCreateScope(target: Element): HTMLElement | null {
     return this.getTpsBaseNativeCreateScope(target, '.tps-list-scroll');
   }
 
-  private getTpsTableNativeCreateScope(target: HTMLElement): HTMLElement | null {
+  private getTpsTableNativeCreateScope(target: Element): HTMLElement | null {
     return this.getTpsBaseNativeCreateScope(target, '.tps-log-base');
   }
 
-  private getTpsBaseNativeCreateScope(target: HTMLElement, rootSelector: string): HTMLElement | null {
+  private getTpsBaseNativeCreateScope(target: Element, rootSelector: string): HTMLElement | null {
     const boundedOwner = target.closest<HTMLElement>([
       '.tps-home-panel',
       '.tps-home-base-host',
@@ -876,25 +880,12 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   private getVisibleTpsBaseCreateRoot(scope: HTMLElement, selector: string): HTMLElement | null {
-    const roots = Array.from(scope.querySelectorAll<HTMLElement>(selector))
+    const roots = [
+      ...(scope.matches(selector) ? [scope] : []),
+      ...Array.from(scope.querySelectorAll<HTMLElement>(selector)),
+    ]
       .filter((root) => root.isConnected && root.getClientRects().length > 0);
     return roots.length === 1 ? roots[0] : null;
-  }
-
-  private isTpsTableNativeCreateTarget(target: HTMLElement, scope: HTMLElement): boolean {
-    if (target.closest('.modal, .modal-container, .menu, .popover, .suggestion-container, .prompt')) return false;
-    const candidate = target.closest<HTMLElement>('button, .clickable-icon, [role="button"], [aria-label], [title], .bases-toolbar > *, .bases-header > *');
-    if (!candidate || !scope.contains(candidate)) return false;
-    if (candidate.closest('.workspace-tab-header, .mod-left-split, .mod-right-split')) return false;
-    const baseChrome = candidate.closest<HTMLElement>('.bases-toolbar, .bases-header, .bases-view-header, .base-view-header');
-    if (!baseChrome || !scope.contains(baseChrome)) return false;
-
-    const label = [
-      candidate.getAttribute('aria-label'),
-      candidate.getAttribute('title'),
-      candidate.textContent,
-    ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean).join(' ');
-    return /\b(new|create|add)\b/.test(label);
   }
 
   private registerLinkedSubitemHandlers(): void {

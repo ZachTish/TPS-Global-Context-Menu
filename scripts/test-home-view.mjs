@@ -19,6 +19,7 @@ const stylesSource = readFileSync(new URL('../src/plugin-styles.ts', import.meta
 const settingsTabSource = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
 const captureServiceSource = readFileSync(new URL('../src/services/home-capture-service.ts', import.meta.url), 'utf8');
 const contextTargetServiceSource = readFileSync(new URL('../src/services/context-target-service.ts', import.meta.url), 'utf8');
+const nativeCreateOwnerSource = readFileSync(new URL('../src/views/native-base-create-owner.ts', import.meta.url), 'utf8');
 const tpsListBridgeSource = readFileSync(new URL('../src/views/tps-list-bridge-view.ts', import.meta.url), 'utf8');
 const tpsListViewSource = readFileSync(new URL('../src/tps-list/views/TpsListView.ts', import.meta.url), 'utf8');
 const baseEmbedContextSource = readFileSync(new URL('../src/views/base-embed-context.ts', import.meta.url), 'utf8');
@@ -502,8 +503,8 @@ test('TPS Table create command override uses selectable commands and resilient e
   assert.match(mainSource, /private registerTpsTableNativeCreateHandler\(\): void/);
   assert.match(mainSource, /this\.registerDomEvent\(document, 'click'/);
   assert.match(mainSource, /private async handleTpsTableNativeCreateClick\(evt: MouseEvent\): Promise<void>/);
-  assert.match(mainSource, /private getTpsTableNativeCreateScope\(target: HTMLElement\): HTMLElement \| null/);
-  assert.match(mainSource, /private getTpsBaseNativeCreateScope\(target: HTMLElement, rootSelector: string\): HTMLElement \| null/);
+  assert.match(mainSource, /private getTpsTableNativeCreateScope\(target: Element\): HTMLElement \| null/);
+  assert.match(mainSource, /private getTpsBaseNativeCreateScope\(target: Element, rootSelector: string\): HTMLElement \| null/);
   assert.match(mainSource, /const boundedOwner = target\.closest<HTMLElement>\(/);
   assert.match(mainSource, /'\.tps-home-panel'/);
   assert.match(mainSource, /getVisibleTpsBaseCreateRoot\(boundedOwner, rootSelector\) \? boundedOwner : null/);
@@ -519,8 +520,8 @@ test('TPS Table create command override uses selectable commands and resilient e
   assert.match(mainSource, /'\.tps-home-base-host'/);
   assert.match(mainSource, /getVisibleTpsBaseCreateRoot\(scope, '\.tps-log-base'\)/);
   assert.match(mainSource, /!view\.hasCreateCommandOverride\(\)/);
-  assert.match(mainSource, /candidate\.closest<HTMLElement>\('\.bases-toolbar, \.bases-header, \.bases-view-header, \.base-view-header'\)/);
-  assert.match(mainSource, /target\.closest\('\.modal, \.modal-container, \.menu, \.popover, \.suggestion-container, \.prompt'\)/);
+  assert.match(nativeCreateOwnerSource, /candidate\.closest<HTMLElement>\(NATIVE_BASE_CREATE_CHROME_SELECTOR\)/);
+  assert.match(nativeCreateOwnerSource, /target\.closest\(NATIVE_BASE_CREATE_EXCLUDED_SELECTOR\)/);
   assert.match(mainSource, /evt\.preventDefault\(\);\s+evt\.stopPropagation\(\);\s+evt\.stopImmediatePropagation\(\);/);
   assert.match(mainSource, /await view\.runCreateCommandOverride\(\)/);
   assert.match(mainSource, /basePath: tableRoot\.dataset\.tpsBasePath \|\| null/);

@@ -1775,11 +1775,11 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       });
       new Setting(taskAutomation)
         .setName('When a Base has no write target')
-        .setDesc('Fallback write note for new TPS List/Table task and bullet lines. An exact active-view or whole-Base file.path/task.path filter always wins.')
+        .setDesc('Fallback write note for new TPS List/Table task and bullet lines. Today’s Daily Note is the default; an exact active-view or whole-Base file.path/task.path filter always wins.')
         .addDropdown((dropdown) =>
           dropdown
-            .addOption('filter-required', 'Require a file.path/task.path filter')
             .addOption('today-daily-note', 'Today’s Daily Note')
+            .addOption('filter-required', 'Require a file.path/task.path filter')
             .addOption('specific-note', 'Specific note')
             .setValue(this.plugin.settings.tpsBaseWriteFallbackMode)
             .onChange(async (value) => {

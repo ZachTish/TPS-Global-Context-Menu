@@ -6,6 +6,7 @@ import { readFileSync } from 'node:fs';
 import { build } from 'esbuild';
 
 globalThis.__homeCaptureServiceSource = readFileSync(new URL('../src/services/home-capture-service.ts', import.meta.url), 'utf8');
+globalThis.__homeViewSource = readFileSync(new URL('../src/views/home-view.ts', import.meta.url), 'utf8');
 globalThis.__gcmCommandSource = readFileSync(new URL('../src/commands/register-commands.ts', import.meta.url), 'utf8');
 
 async function loadCaptureServiceModule() {
@@ -90,6 +91,7 @@ function installMomentStub() {
         .replace('DD', pad(date.getDate()))
         .replace('HH', pad(date.getHours()))
         .replace('mm', pad(date.getMinutes()))
+        .replace('ss', pad(date.getSeconds()))
         .replace('ddd', weekdays[date.getDay()]),
       toDate: () => new Date(date.getTime()),
     };
@@ -192,15 +194,15 @@ test('Home capture writes selected-day daily notes through Daily Notes settings'
       'scheduled: 2026-07-08 00:00:00',
       '---',
       '',
-      '- Alpha 12:34',
-      '- Beta 12:34',
+      '- Alpha %% tps-inline-props:{"createdDate":"2026-07-04 12:34:00"} %%',
+      '- Beta %% tps-inline-props:{"createdDate":"2026-07-04 12:34:00"} %%',
       '',
     ].join('\n'),
   );
   assert.deepEqual(globalThis.__notices.slice(-1), ['Added to 2026-07-08.']);
 });
 
-test('Home capture timestamps every root Markdown line and leaves nested descendants unstamped', async () => {
+test('Home capture stores createdDate on every root Markdown line and leaves nested descendants unstamped', async () => {
   installMomentStub();
   const { plugin, files } = createPluginHarness({
     dailyNotes: {
@@ -223,12 +225,12 @@ test('Home capture timestamps every root Markdown line and leaves nested descend
       'scheduled: 2026-07-09 00:00:00',
       '---',
       '',
-      '- First root 12:34',
+      '- First root %% tps-inline-props:{"createdDate":"2026-07-04 12:34:00"} %%',
       '  - Nested child',
       '    - Nested grandchild',
-      '- [ ] Second root 12:34',
+      '- [ ] Second root %% tps-inline-props:{"createdDate":"2026-07-04 12:34:00"} %%',
       '',
-      'Plain root 12:34',
+      'Plain root %% tps-inline-props:{"createdDate":"2026-07-04 12:34:00"} %%',
       '',
     ].join('\n'),
   );
@@ -259,7 +261,7 @@ test('Home capture writes an explicit current-note target under the selected hea
     '',
     'Nested body',
     '',
-    '- Added from command 12:34',
+    '- Added from command %% tps-inline-props:{"createdDate":"2026-07-04 12:34:00"} %%',
     '',
     '## Later',
     '',
@@ -335,7 +337,7 @@ test('Home capture can write selected-day daily notes as unchecked tasks', async
       'scheduled: 2026-07-10 00:00:00',
       '---',
       '',
-      '- [ ] Call HVAC 12:34',
+      '- [ ] Call HVAC %% tps-inline-props:{"createdDate":"2026-07-04 12:34:00"} %%',
       '',
     ].join('\n'),
   );
@@ -457,7 +459,7 @@ test('Home capture ignores legacy heading settings and writes into the daily not
       'scheduled: 2026-07-12 00:00:00',
       '---',
       '',
-      '- Body only 12:34',
+      '- Body only %% tps-inline-props:{"createdDate":"2026-07-04 12:34:00"} %%',
       '',
     ].join('\n'),
   );
@@ -493,6 +495,16 @@ test('Home capture exposes the selected daily note and no separate draft note', 
   assert.match(source, /Capture destination section/);
   assert.match(source, /headingTarget: selectedHeadingTarget/);
   assert.match(source, /openCaptureModalForContext/);
+});
+
+test('capture line editors hide and preserve GCM inline-property carriers', () => {
+  const serviceSource = globalThis.__homeCaptureServiceSource;
+  const homeSource = globalThis.__homeViewSource;
+  assert.match(serviceSource, /initialValue: stripTaskInlinePropsMetadata\(this\.snapshot\.value\)/u);
+  assert.match(serviceSource, /preserveTpsInlinePropsMetadata\(this\.snapshot\.value, value\.trim\(\)\)/u);
+  assert.match(homeSource, /textarea\.value = editSnapshot \? stripTaskInlinePropsMetadata\(editSnapshot\.value\) : ''/u);
+  assert.match(homeSource, /preserveTpsInlinePropsMetadata\(editSnapshot!\.value, value\)/u);
+  assert.match(homeSource, /preserveTpsInlinePropsMetadata\(originalEditLine, value\)/u);
 });
 
 test('capture commands explicitly distinguish today, current note, and contextual Home targets', () => {

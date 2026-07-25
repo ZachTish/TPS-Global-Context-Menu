@@ -1,4 +1,5 @@
 import { getMarkdownIndentColumns } from '../tps-list/tps-list-hierarchy';
+import { mergeTpsInlinePropsMetadata } from '../utils/task-line-metadata';
 
 export type CaptureListKind = 'bullet' | 'task';
 
@@ -60,12 +61,12 @@ export function formatCaptureMarkdownForWrite(markdown: string, timestamp: strin
   const contentLines = lines.filter(captureLineHasContent);
   if (contentLines.length === 0) return '';
   const rootIndent = Math.min(...contentLines.map(getMarkdownIndentColumns));
-  const suffix = String(timestamp || '').trim();
+  const createdDate = String(timestamp || '').trim();
   for (let index = 0; index < lines.length; index += 1) {
     if (!captureLineHasContent(lines[index])) continue;
     if (getMarkdownIndentColumns(lines[index]) !== rootIndent) continue;
-    lines[index] = suffix
-      ? `${lines[index].trimEnd()} ${suffix}`
+    lines[index] = createdDate
+      ? mergeTpsInlinePropsMetadata(lines[index].trimEnd(), { createdDate })
       : lines[index].trimEnd();
   }
   return `${lines.join('\n')}\n`;

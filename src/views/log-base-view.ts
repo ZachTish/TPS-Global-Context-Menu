@@ -604,7 +604,10 @@ export class TpsTableView extends BasesView {
     const stampedRoots = this.getStampedBaseFilterRoots(failOnReadError);
     if (stampedRoots) return composeEffectiveFilterRoots(runtimeRoots, stampedRoots);
     const baseFile = this.getBaseFile();
-    if (!baseFile) return composeEffectiveFilterRoots(runtimeRoots, []);
+    if (!baseFile) {
+      if (failOnReadError) throw new Error('Could not resolve the Base definition for line creation');
+      return composeEffectiveFilterRoots(runtimeRoots, []);
+    }
     try {
       const parsed = parseYaml(await this.plugin.app.vault.cachedRead(baseFile)) as Record<string, unknown> | null | undefined;
       const persisted = extractPersistedFilterRoots(parsed, this.getViewName(), new Set([TPS_TABLE_VIEW_TYPE]));

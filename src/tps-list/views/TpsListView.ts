@@ -5069,10 +5069,9 @@ export class TpsListView extends BasesView {
         this.getConfiguredBaseViewName(),
       );
       if (!loaded) throw new Error(`Could not read embedded Base filters from ${embeddedFile.path}`);
+      return composeEffectiveFilterRoots(runtimeRoots, this.getEmbeddedBaseFilterRoot() || []);
     }
-    const embeddedRoots = this.getEmbeddedBaseFilterRoot();
-    if (embeddedRoots?.length) return composeEffectiveFilterRoots(runtimeRoots, embeddedRoots);
-    return composeEffectiveFilterRoots(runtimeRoots, []);
+    throw new Error('Could not resolve the Base definition for line creation');
   }
 
   private getStampedBaseFilterRoots(): unknown[] | null {

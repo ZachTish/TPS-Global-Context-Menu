@@ -19,23 +19,28 @@ async function loadCaptureBlockModule() {
 const captureBlock = await loadCaptureBlockModule();
 
 test('formatHomeCaptureBlock creates plain and task capture blocks', () => {
+  const createdDate = '2026-07-25 09:15:00';
   assert.equal(
-    captureBlock.formatHomeCaptureBlock('first line\nsecond line', '09:15'),
-    '- first line 09:15\n- second line 09:15\n',
+    captureBlock.formatHomeCaptureBlock('first line\nsecond line', createdDate),
+    '- first line %% tps-inline-props:{"createdDate":"2026-07-25 09:15:00"} %%\n'
+      + '- second line %% tps-inline-props:{"createdDate":"2026-07-25 09:15:00"} %%\n',
   );
   assert.equal(
-    captureBlock.formatHomeCaptureBlock('first line\nsecond line', '09:15', { task: true }),
-    '- [ ] first line 09:15\n- [ ] second line 09:15\n',
+    captureBlock.formatHomeCaptureBlock('first line\nsecond line', createdDate, { task: true }),
+    '- [ ] first line %% tps-inline-props:{"createdDate":"2026-07-25 09:15:00"} %%\n'
+      + '- [ ] second line %% tps-inline-props:{"createdDate":"2026-07-25 09:15:00"} %%\n',
   );
   assert.equal(
-    captureBlock.formatHomeCaptureBlock('parent\n  child\nsecond root', '09:15'),
-    '- parent 09:15\n    child\n- second root 09:15\n',
+    captureBlock.formatHomeCaptureBlock('parent\n  child\nsecond root', createdDate),
+    '- parent %% tps-inline-props:{"createdDate":"2026-07-25 09:15:00"} %%\n'
+      + '    child\n'
+      + '- second root %% tps-inline-props:{"createdDate":"2026-07-25 09:15:00"} %%\n',
   );
   assert.equal(
     captureBlock.formatHomeCaptureBlock('\tfirst\n\t\tchild\n\tsecond', ''),
     '- first\n  \tchild\n- second\n',
   );
-  assert.equal(captureBlock.formatHomeCaptureBlock('   ', '09:15'), '');
+  assert.equal(captureBlock.formatHomeCaptureBlock('   ', createdDate), '');
 });
 
 test('insertHomeCaptureBlock appends plain captures to the bottom by default', () => {

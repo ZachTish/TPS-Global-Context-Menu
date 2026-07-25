@@ -1,5 +1,6 @@
 import { getMarkdownIndentColumns } from '../tps-list/tps-list-hierarchy';
 import { parseTpsListHeadingLine, type TpsListHeadingLevel } from '../tps-list/heading-line-utils';
+import { mergeTpsInlinePropsMetadata } from '../utils/task-line-metadata';
 
 export type HomeCaptureInsertPosition = 'top' | 'bottom';
 
@@ -58,12 +59,15 @@ export function formatHomeCaptureBlock(text: string, timeLabel: string, options:
   if (contentLines.length === 0) return '';
   const rootIndent = Math.min(...contentLines.map(getMarkdownIndentColumns));
   const marker = options.task === true ? '- [ ] ' : '- ';
-  const suffix = String(timeLabel || '').trim();
+  const createdDate = String(timeLabel || '').trim();
   const formatted = lines.map((line) => {
     if (!line.trim()) return '';
     const dedented = removeMarkdownIndentColumns(line, rootIndent).trimEnd();
     if (getMarkdownIndentColumns(dedented) > 0) return `  ${dedented}`;
-    return suffix ? `${marker}${dedented} ${suffix}` : `${marker}${dedented}`;
+    const rootLine = `${marker}${dedented}`;
+    return createdDate
+      ? mergeTpsInlinePropsMetadata(rootLine, { createdDate })
+      : rootLine;
   });
   return `${formatted.join('\n')}\n`;
 }

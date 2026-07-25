@@ -42,9 +42,9 @@ export interface TpsBaseWriteTargetHost {
 }
 
 export function normalizeTpsBaseWriteFallbackMode(value: unknown): TpsBaseWriteFallbackMode {
-  return value === 'today-daily-note' || value === 'specific-note'
+  return value === 'filter-required' || value === 'specific-note'
     ? value
-    : 'filter-required';
+    : 'today-daily-note';
 }
 
 export function normalizeTpsBaseWriteNotePath(value: unknown): string | null {

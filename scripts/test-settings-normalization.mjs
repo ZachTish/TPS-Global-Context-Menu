@@ -337,7 +337,7 @@ test('TPS Base write fallback settings default safely and persist every Tasks wo
   assert.match(typesSource, /export type TpsBaseWriteFallbackMode = 'filter-required' \| 'today-daily-note' \| 'specific-note';/);
   assert.match(typesSource, /tpsBaseWriteFallbackMode: TpsBaseWriteFallbackMode;/);
   assert.match(typesSource, /tpsBaseWriteFallbackPath: string;/);
-  assert.match(constantsSource, /tpsBaseWriteFallbackMode: 'filter-required',/);
+  assert.match(constantsSource, /tpsBaseWriteFallbackMode: 'today-daily-note',/);
   assert.match(constantsSource, /tpsBaseWriteFallbackPath: '',/);
   assert.match(mainSource, /this\.settings\.tpsBaseWriteFallbackMode = normalizeTpsBaseWriteFallbackMode\(this\.settings\.tpsBaseWriteFallbackMode\);/);
   assert.match(mainSource, /this\.settings\.tpsBaseWriteFallbackPath = normalizeTpsBaseWriteNotePath\(this\.settings\.tpsBaseWriteFallbackPath\) \|\| '';/);

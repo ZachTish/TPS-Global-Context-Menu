@@ -425,3 +425,17 @@ test('TPS Table creation-time filter reads fail closed while rendering remains t
     (error) => error === readError,
   );
 });
+
+test('TPS Table never falls through to native note creation when mobile loses the Base identity', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const view = Object.create(TpsTableView.prototype);
+  view.config = { get: () => ({ and: ['task.tags.contains(shopping)'] }) };
+  view.containerEl = { closest: () => null };
+  view.getBaseFile = () => null;
+
+  assert.deepEqual(await view.getEffectiveBaseFilterRoots(false), [{ and: ['task.tags.contains(shopping)'] }]);
+  await assert.rejects(
+    view.getEffectiveBaseFilterRoots(true),
+    /Could not resolve the Base definition for line creation/,
+  );
+});
