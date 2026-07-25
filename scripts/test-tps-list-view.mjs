@@ -9,6 +9,7 @@ const viewSource = readFileSync(new URL('../src/tps-list/views/TpsListView.ts', 
 const bridgeSource = readFileSync(new URL('../src/views/tps-list-bridge-view.ts', import.meta.url), 'utf8');
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const logBaseSource = readFileSync(new URL('../src/views/log-base-view.ts', import.meta.url), 'utf8');
+const logBaseCreateSource = readFileSync(new URL('../src/views/log-base-create.ts', import.meta.url), 'utf8');
 const menuBuilderSource = readFileSync(new URL('../src/menu/menu-builder.ts', import.meta.url), 'utf8');
 const gcmStyles = readFileSync(new URL('../src/plugin-styles.ts', import.meta.url), 'utf8');
 const kanbanSource = readFileSync(new URL('../../TPS-Kanban (Dev)/src/views/KanbanView.ts', import.meta.url), 'utf8');
@@ -377,6 +378,14 @@ test('TPS List resolves the Home-stamped Daily Note before Base and workspace fa
   assert.match(viewSource, /contextHost\?\.dataset\.tpsContextPath/);
 });
 
+test('TPS List resolves deterministic Base date expressions before prospective matching', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  view.getBaseContextFile = () => null;
+  view.getBaseContextFrontmatterValue = () => null;
+  assert.equal(view.resolveBaseContextToken('date("2026-08-12") + "2d"'), '2026-08-14');
+});
+
 test('TPS List scans every requested synthesized Markdown row family', async () => {
   const {
     filterTreeIncludesStructuralKind,
@@ -690,8 +699,28 @@ test('TPS List parses, displays, and safely renames Markdown headings', async ()
   assert.equal(parseTpsListHeadingLine('#missing-space'), null);
   assert.equal(getTpsListHeadingDisplayTitle('## [[Projects/Launch|Launch plan]]'), 'Launch plan');
   assert.equal(
+    getTpsListHeadingDisplayTitle('### Launch plan #work [priority:: low] <!-- keep --> ^launch'),
+    'Launch plan',
+  );
+  assert.equal(
     setTpsListHeadingText('## [[Projects/Launch|Launch plan]]', 'Release plan'),
     '## [[Projects/Launch|Release plan]]',
+  );
+  assert.equal(
+    setTpsListHeadingText('### Launch plan #work [priority:: low] <!-- keep -->', 'Release plan'),
+    '### Release plan #work [priority:: low] <!-- keep -->',
+  );
+  assert.equal(
+    setTpsListHeadingText('### Launch  plan  [priority:: low  value]  #work <!-- keep   spacing --> ^launch', 'Release plan'),
+    '### Release plan  [priority:: low  value]  #work <!-- keep   spacing --> ^launch',
+  );
+  assert.equal(
+    setTpsListHeadingText('# #tag [priority:: low]', 'Release'),
+    '# Release #tag [priority:: low]',
+  );
+  assert.equal(
+    setTpsListHeadingText('# [priority:: low]', 'Release'),
+    '# Release [priority:: low]',
   );
   assert.match(viewSource, /parseTpsListHeadingLine\(line\) \?\? this\.parseLineItem/);
   assert.match(viewSource, /private createListHeadingRow\(/);
@@ -962,7 +991,7 @@ test('bullet source-note resolution honors associations, exercise precedence, an
   assert.deepEqual(ownerOnly, { resolution: null, ambiguousVisibleTargets: false });
 });
 
-test('TPS List structural bullet mode creates a Markdown bullet instead of a note or checkbox task', async () => {
+test('TPS List structural modes create task, bullet, and heading Markdown', async () => {
   const { buildKanbanRootTaskLine, getKanbanRootLineKind } = await loadTaskCreationUtils();
   const defaults = {
     status: 'todo',
@@ -982,9 +1011,9 @@ test('TPS List structural bullet mode creates a Markdown bullet instead of a not
   assert.equal(getKanbanRootLineKind('bullets'), 'bullet');
   assert.equal(getKanbanRootLineKind('tasks'), 'task');
   assert.equal(getKanbanRootLineKind('notes'), null);
-  assert.equal(getKanbanRootLineKind('heading'), null);
-  assert.equal(getKanbanRootLineKind('headers'), null);
-  assert.equal(getKanbanRootLineKind('h2'), null);
+  assert.equal(getKanbanRootLineKind('heading'), 'heading');
+  assert.equal(getKanbanRootLineKind('headers'), 'heading');
+  assert.equal(getKanbanRootLineKind('h2'), 'heading');
   assert.equal(
     buildKanbanRootTaskLine({ ...common, itemKind: 'bullet' }),
     '- Capture this #inbox [project:: Home]',
@@ -993,8 +1022,12 @@ test('TPS List structural bullet mode creates a Markdown bullet instead of a not
     buildKanbanRootTaskLine({ ...common, itemKind: 'task' }),
     '- [ ] Capture this #inbox [project:: Home]',
   );
-  assert.match(viewSource, /const lineKind = getKanbanRootLineKind\(creationMode\);/);
-  assert.match(viewSource, /taskFilter,\s+lineKind,\s+creationFilterRoots,\s+\);/);
+  assert.equal(
+    buildKanbanRootTaskLine({ ...common, itemKind: 'heading', headingLevel: 2 }),
+    '## Capture this #inbox [project:: Home]',
+  );
+  assert.match(viewSource, /const lineKind = linePlan\.kind;/);
+  assert.match(viewSource, /taskFilter,\s+lineKind,\s+creationFilterRoots,\s+lineDefaults,\s+\);/);
 });
 
 test('shared TPS Base write resolver keeps fallback subordinate to explicit filters', async () => {
@@ -1222,16 +1255,17 @@ test('TPS List creation waits for persisted Base filters before resolving settin
   assert.match(viewSource, /getRootTaskCreationDefaults\(effectiveTaskFilter, effectiveFilterRoots\)/);
 });
 
-test('TPS List headings remain display-only when Base write fallbacks are configured', async () => {
+test('TPS List and TPS Table create Base-filtered headings with an explicit level', async () => {
   const { getKanbanRootLineKind } = await loadTaskCreationUtils();
-  assert.equal(getKanbanRootLineKind('heading'), null);
-  assert.equal(getKanbanRootLineKind('headings'), null);
-  assert.equal(getKanbanRootLineKind('header'), null);
-  assert.equal(getKanbanRootLineKind('h6'), null);
-  assert.match(viewSource, /const lineKind = getKanbanRootLineKind\(creationMode\);\s*if \(lineKind\) \{/);
+  assert.equal(getKanbanRootLineKind('heading'), 'heading');
+  assert.equal(getKanbanRootLineKind('headings'), 'heading');
+  assert.equal(getKanbanRootLineKind('header'), 'heading');
+  assert.equal(getKanbanRootLineKind('h6'), 'heading');
+  assert.match(viewSource, /const lineKind = linePlan\.kind;\s*if \(lineKind\) \{/);
+  assert.match(viewSource, /headingLevel: defaults\.headingLevel/);
   assert.match(viewSource, /if \(task\.itemKind === 'heading'\) return;/);
-  assert.doesNotMatch(viewSource, /createRootTaskForLane\([\s\S]{0,200}'heading'/);
-  assert.doesNotMatch(logBaseSource, /TpsTableLineKind = 'bullet' \| 'task' \| 'heading'/);
+  assert.match(logBaseCreateSource, /TpsTableLineKind = 'bullet' \| 'task' \| 'heading'/);
+  assert.match(logBaseCreateSource, /kind === 'heading' \? `\$\{'#'\.repeat\(headingLevel\)\} `/);
 });
 
 test('TPS List keeps nested tasks with their parent while sorting siblings', async () => {

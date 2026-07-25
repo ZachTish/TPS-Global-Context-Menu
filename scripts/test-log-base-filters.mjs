@@ -80,10 +80,78 @@ test('Home context tokens work without changing standalone filter behavior', asy
   assert.equal(evaluateLogBaseFilterNode('completedDate < this.scheduled', context), false);
 });
 
+test('TPS Table evaluates deterministic Base date arithmetic against generated dates', async () => {
+  const { evaluateLogBaseFilterRoots } = await loadModule();
+  assert.equal(
+    evaluateLogBaseFilterRoots(
+      ['scheduled == date("2026-08-12") + "2d"'],
+      { ...context, fields: { scheduled: '2026-08-14' } },
+    ),
+    true,
+  );
+});
+
 test('unsupported branches stay unknown instead of hiding rows', async () => {
   const { evaluateLogBaseFilterNode } = await loadModule();
   assert.equal(evaluateLogBaseFilterNode({ or: ['unsupported.magic()', 'food == "eggs"'] }, context), null);
   assert.equal(evaluateLogBaseFilterNode({ and: ['unsupported.magic()', 'food == "eggs"'] }, context), false);
+});
+
+test('TPS Table heading rows satisfy generic and exact structural kind filters', async () => {
+  const { evaluateLogBaseFilterRoots } = await loadModule();
+  const headingContext = {
+    ...context,
+    rowKind: 'h3',
+    fields: { priority: 'low' },
+  };
+  assert.equal(evaluateLogBaseFilterRoots(['kind == "header"', 'priority == "low"'], headingContext), true);
+  assert.equal(evaluateLogBaseFilterRoots(['kind == "heading"'], headingContext), true);
+  assert.equal(evaluateLogBaseFilterRoots(['kind == "h3"'], headingContext), true);
+  assert.equal(evaluateLogBaseFilterRoots(['kind == "h2"'], headingContext), false);
+});
+
+test('TPS Table exposes clean heading titles, levels, and raw tags as synthesized columns', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const view = Object.create(TpsTableView.prototype);
+  const file = {
+    path: 'Inbox/Headings.md',
+    name: 'Headings.md',
+    basename: 'Headings',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+  };
+  view.plugin = {
+    settings: {},
+    app: {
+      vault: {
+        getMarkdownFiles: () => [file],
+        cachedRead: async () => '# Launch plan #qa-heading [priority:: low]',
+      },
+      metadataCache: {
+        getFileCache: () => ({ frontmatter: {} }),
+        getFirstLinkpathDest: () => null,
+      },
+    },
+  };
+  view.getEffectiveBaseFilterRoots = async () => [{ and: ['kind == "header"', 'tags.contains(qa-heading)'] }];
+  view.lineMatchesHomeDateContext = () => true;
+  view.sortEntries = (entries) => entries;
+  view.getHomeContextDate = () => '';
+
+  const entries = await view.loadEntries();
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].title, 'Launch plan');
+  assert.equal(entries[0].queryFields.headinglevel, '1');
+  assert.equal(entries[0].queryFields.tags, '#qa-heading');
+  assert.equal(view.getEntryValue(entries[0], 'heading.level'), '1');
+  assert.equal(view.getEntryValue(entries[0], 'tags'), '#qa-heading');
+});
+
+test('TPS Table canonical task.path filters address the containing note', async () => {
+  const { evaluateLogBaseFilterRoots } = await loadModule();
+  const taskContext = { ...context, rowKind: 'task', fields: { kind: 'task' } };
+  assert.equal(evaluateLogBaseFilterRoots(['task.path == "Daily Notes/2026/07/08.md"'], taskContext), true);
+  assert.equal(evaluateLogBaseFilterRoots(['task.path == "Inbox.md"'], taskContext), false);
 });
 
 test('active Food Log source and selected-day predicates match representative rows', async () => {
@@ -166,7 +234,7 @@ test('TPS Table derives task status fields and follows the active view without s
   assert.match(logBaseViewSource, /queryFields = \{[\s\S]{0,200}\.\.\.getTpsTableTaskQueryFields\(/);
   assert.match(
     logBaseViewSource,
-    /createFilterContext\(\s*queryFields,\s*file,\s*line,\s*markdownKind\s*\)/,
+    /createFilterContext\(\s*queryFields,\s*file,\s*line,\s*rowKind\s*\)/,
   );
   assert.match(logBaseViewSource, /entry\.fields\[normalized\] \?\? entry\.queryFields\?\.\[normalized\]/);
   assert.doesNotMatch(logBaseViewSource, /Object\.assign\(fields,\s*getTpsTableTaskQueryFields\(/);

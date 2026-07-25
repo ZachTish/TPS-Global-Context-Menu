@@ -1,5 +1,6 @@
 import { combineFilterTreeResults } from '../tps-list/base-filter-roots';
 import { parseTaskTagValues } from '../utils/task-line-metadata';
+import { resolveTpsBaseDateExpression } from './base-line-creation-plan';
 
 export type LogBaseFilterFile = {
   path: string;
@@ -95,6 +96,11 @@ function readComparableValues(rawProperty: string, context: LogBaseFilterContext
   const property = String(rawProperty || '').trim();
   const normalized = normalizeKey(property);
   if (!normalized) return null;
+  const semanticProperty = normalizeKey(property.replace(/^(?:tps|kanban|task|line|heading)\./iu, ''));
+  if (['kind', 'itemkind', 'itemtype'].includes(semanticProperty) && context.rowKind) {
+    return getStructuralKindValues(context.rowKind);
+  }
+  if (/^(?:task|line|heading)\.(?:path|file\.path)$/iu.test(property)) return [context.file.path];
   if (isTaskTagProperty(property, context)) return readTaskTagValues(context);
   if (/^task\.tags?$/iu.test(property)) return [];
   if (normalized.startsWith('file')) {
@@ -111,6 +117,16 @@ function readComparableValues(rawProperty: string, context: LogBaseFilterContext
   const lineValue = Object.entries(context.fields).find(([key]) => normalizeKey(key) === lineKey)?.[1];
   if (lineValue != null) return toValues(lineValue);
   return readRecordValues(context.file.frontmatter, property.replace(/^note\./i, '')) ?? [];
+}
+
+function getStructuralKindValues(rawKind: unknown): string[] {
+  const kind = String(rawKind ?? '').trim().toLowerCase();
+  const heading = kind.match(/^h([1-6])$/u);
+  if (heading) return [kind, 'heading', 'headings', 'header', 'headers'];
+  if (kind === 'heading') return ['heading', 'headings', 'header', 'headers', 'h1'];
+  if (kind === 'task') return ['task', 'tasks'];
+  if (kind === 'bullet') return ['bullet', 'bullets'];
+  return kind ? [kind] : [];
 }
 
 function isTaskTagProperty(rawProperty: string, context: LogBaseFilterContext): boolean {
@@ -177,9 +193,12 @@ function resolveLiteral(rawValue: unknown, context: LogBaseFilterContext): unkno
   if (typeof rawValue !== 'string') return rawValue;
   const raw = rawValue.trim();
   if (/^this\.(?:scheduled|date)$/i.test(raw)) return context.contextDate || '';
+  const deterministicDate = resolveTpsBaseDateExpression(raw, {
+    resolveValue: (value) => /^this\.(?:scheduled|date)$/i.test(value) ? context.contextDate || '' : value,
+  });
+  if (deterministicDate) return deterministicDate;
   const dateCall = raw.match(/^date\(\s*["']?([^"')]+)["']?\s*\)$/i);
   if (dateCall) return dateCall[1];
-  if (/^today\(\)$/i.test(raw)) return new Date().toISOString().slice(0, 10);
   if (/^(true|false)$/i.test(raw)) return raw.toLowerCase() === 'true';
   if (/^-?\d+(?:\.\d+)?$/.test(raw)) return Number(raw);
   return raw.replace(/^(["'])(.*)\1$/, '$2');

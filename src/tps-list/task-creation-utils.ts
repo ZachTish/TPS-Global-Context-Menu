@@ -8,12 +8,13 @@ export type KanbanTaskCreationDefaultsLike = {
   excludedTags: Set<string>;
 };
 
-export type KanbanRootLineKind = 'task' | 'bullet';
+export type KanbanRootLineKind = 'task' | 'bullet' | 'heading';
 
 export function getKanbanRootLineKind(mode: unknown): KanbanRootLineKind | null {
   const normalized = String(mode ?? '').trim().toLowerCase();
   if (normalized === 'task' || normalized === 'tasks') return 'task';
   if (normalized === 'bullet' || normalized === 'bullets') return 'bullet';
+  if (/^(?:heading|headings|header|headers|h[1-6])$/u.test(normalized)) return 'heading';
   return null;
 }
 
@@ -22,6 +23,7 @@ export type BuildKanbanRootTaskLineOptions = {
   propName: string | null;
   laneValue: string | null;
   itemKind?: KanbanRootLineKind;
+  headingLevel?: 1 | 2 | 3 | 4 | 5 | 6;
   defaults: KanbanTaskCreationDefaultsLike;
   getCheckboxStateForStatus: (status: string | null) => string | null;
   isStatusPropertyName?: (propName: string | null | undefined) => boolean;
@@ -63,17 +65,21 @@ export function buildKanbanRootTaskLine(options: BuildKanbanRootTaskLineOptions)
   const writablePropName = options.propName ? getTaskInlinePropertyName(options.propName) : '';
   const normalizedProp = writablePropName ? normalizeInlinePropertyKey(writablePropName) : '';
   const isStatusProperty = options.isStatusPropertyName ?? isDefaultStatusPropertyName;
-  const itemKind = options.itemKind === 'bullet' ? 'bullet' : 'task';
-  const title = String(options.title || '').trim() || (itemKind === 'bullet' ? 'Untitled bullet' : 'Untitled task');
+  const itemKind = options.itemKind === 'bullet' || options.itemKind === 'heading' ? options.itemKind : 'task';
+  const title = String(options.title || '').trim()
+    || (itemKind === 'bullet' ? 'Untitled bullet' : itemKind === 'heading' ? 'Untitled heading' : 'Untitled task');
+  const headingLevel = Math.max(1, Math.min(6, Number(options.headingLevel) || 1));
   const parts = [itemKind === 'bullet'
     ? `- ${title}`
-    : `- [${getCheckboxMarker(getLaneOrDefaultCheckboxState({
-      propName: options.propName,
-      laneValue: options.laneValue,
-      defaults: options.defaults,
-      getCheckboxStateForStatus: options.getCheckboxStateForStatus,
-      isStatusPropertyName: isStatusProperty,
-    }))}] ${title}`];
+    : itemKind === 'heading'
+      ? `${'#'.repeat(headingLevel)} ${title}`
+      : `- [${getCheckboxMarker(getLaneOrDefaultCheckboxState({
+        propName: options.propName,
+        laneValue: options.laneValue,
+        defaults: options.defaults,
+        getCheckboxStateForStatus: options.getCheckboxStateForStatus,
+        isStatusPropertyName: isStatusProperty,
+      }))}] ${title}`];
   const tags = new Set<string>();
 
   for (const tag of options.defaults.tags) {

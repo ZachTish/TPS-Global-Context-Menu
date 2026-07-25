@@ -61,6 +61,11 @@ import {
   isSourceNoteGroupProperty,
   resolveTpsBaseGroupDescriptor,
 } from '../../views/base-row-grouping';
+import {
+  resolveTpsBaseDateExpression,
+  resolveTpsBaseLineCreationPlan,
+  type TpsBaseLineCreationPlan,
+} from '../../views/base-line-creation-plan';
 
 export const TPS_LIST_VIEW_TYPE = 'tps-list';
 
@@ -177,7 +182,8 @@ type TaskDropPlan = {
 };
 
 type TaskCreationDefaults = {
-  mode?: 'mixed' | 'notes' | 'tasks' | 'bullets';
+  mode?: 'mixed' | 'notes' | 'tasks' | 'bullets' | 'headings';
+  headingLevel?: 1 | 2 | 3 | 4 | 5 | 6;
   includeDone?: boolean;
   status?: string | null;
   targetPath?: string | null;
@@ -379,13 +385,14 @@ class TaskTitleModal extends Modal {
     this.modalEl.addClass("mod-tps-gcm-tps-list");
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl('h3', { text: `Add ${this.itemKind} to ${this.cardTitle}` });
+    const noun = this.itemKind === 'heading' ? 'heading' : this.itemKind;
+    contentEl.createEl('h3', { text: `Add ${noun} to ${this.cardTitle}` });
 
     new Setting(contentEl)
-      .setName(`${this.itemKind === 'bullet' ? 'Bullet' : 'Task'} title`)
+      .setName(`${this.itemKind === 'bullet' ? 'Bullet' : this.itemKind === 'heading' ? 'Heading' : 'Task'} title`)
       .addText((text) => {
         this.inputEl = text.inputEl;
-        text.setPlaceholder(`${this.itemKind === 'bullet' ? 'Bullet' : 'Task'} title`);
+        text.setPlaceholder(`${this.itemKind === 'bullet' ? 'Bullet' : this.itemKind === 'heading' ? 'Heading' : 'Task'} title`);
         text.inputEl.addEventListener('keydown', (evt: KeyboardEvent) => {
           if (evt.key === 'Enter') {
             evt.preventDefault();
@@ -399,7 +406,7 @@ class TaskTitleModal extends Modal {
 
     const actions = contentEl.createDiv({ cls: 'tps-kanban-lane-rename-actions' });
     actions.createEl('button', { text: 'Cancel' }).addEventListener('click', () => this.cancel());
-    actions.createEl('button', { text: `Add ${this.itemKind}`, cls: 'mod-cta' }).addEventListener('click', () => this.submit());
+    actions.createEl('button', { text: `Add ${noun}`, cls: 'mod-cta' }).addEventListener('click', () => this.submit());
 
     window.setTimeout(() => this.inputEl?.focus(), 0);
   }
@@ -502,13 +509,40 @@ export class TpsListView extends BasesView {
       viewType: this.type,
       viewName: this.getConfiguredBaseViewName(),
     });
-    const creationMode = this.getPriorityResolvedCreationMode(taskFilter, creationFilterRoots);
-    const lineKind = getKanbanRootLineKind(creationMode);
+    const linePlan = resolveTpsBaseLineCreationPlan(creationFilterRoots, {
+      resolveValue: (value) => this.resolveBaseContextToken(value) ?? '',
+      defaultOpenStatus: 'todo',
+      defaultDoneStatus: 'complete',
+      isDoneStatus: (status) => this.getDoneStatuses().has(this.normalizeTaskStatus(status)),
+    });
+    if (linePlan.blockedReason) {
+      flowWarn('CreateFile', 'blocked', {
+        reason: linePlan.blockedReason,
+        selectedBranches: linePlan.diagnostics.selectedBranches,
+        viewName: this.getConfiguredBaseViewName(),
+      });
+      new Notice('Could not create an item because the active-view and whole-Base filters do not have a compatible default.');
+      return;
+    }
+    const lineKind = linePlan.kind;
     if (lineKind) {
+      const lineDefaults = this.getTaskCreationDefaultsFromPlan(linePlan);
+      if (lineKind === 'task' && lineDefaults.status && !this.getCheckboxStateForStatus(lineDefaults.status)) {
+        flowWarn('CreateFile', 'blocked', {
+          reason: 'unmapped-status',
+          status: lineDefaults.status,
+          viewName: this.getConfiguredBaseViewName(),
+        });
+        new Notice(`Could not create the task because status "${lineDefaults.status}" has no checkbox mapping.`);
+        return;
+      }
       flow('CreateFile', 'route-root-line', {
         reason: 'structural-kind-filter',
-        creationMode,
         itemKind: lineKind,
+        headingLevel: lineDefaults.headingLevel ?? null,
+        defaultKeys: Array.from(lineDefaults.inlineFields.keys()),
+        tagCount: lineDefaults.tags.size,
+        selectedBranches: linePlan.diagnostics.selectedBranches,
         viewName: this.getConfiguredBaseViewName(),
       });
       await this.createRootTaskForLane(
@@ -517,6 +551,7 @@ export class TpsListView extends BasesView {
         taskFilter,
         lineKind,
         creationFilterRoots,
+        lineDefaults,
       );
       return;
     }
@@ -1277,12 +1312,18 @@ export class TpsListView extends BasesView {
     const value = String(rawValue ?? '').trim().replace(/^["']|["']$/g, '');
     if (!value) return null;
     const contextFile = this.getBaseContextFile();
-    if (/^this\.file\.path$/i.test(value)) return contextFile?.path ?? null;
-    if (/^this\.file\.name$/i.test(value)) return contextFile?.name ?? null;
-    if (/^this\.file\.basename$/i.test(value)) return contextFile?.basename ?? null;
-    const frontmatterMatch = value.match(/^this\.([A-Za-z][\w -]{0,40})$/i);
-    if (frontmatterMatch?.[1]) return this.getBaseContextFrontmatterValue(frontmatterMatch[1]);
-    return value;
+    const resolveSimpleToken = (token: string): string | null => {
+      if (/^this\.file\.path$/i.test(token)) return contextFile?.path ?? null;
+      if (/^this\.file\.name$/i.test(token)) return contextFile?.name ?? null;
+      if (/^this\.file\.basename$/i.test(token)) return contextFile?.basename ?? null;
+      const frontmatterMatch = token.match(/^this\.([A-Za-z][\w -]{0,40})$/i);
+      if (frontmatterMatch?.[1]) return this.getBaseContextFrontmatterValue(frontmatterMatch[1]);
+      return token;
+    };
+    const dateValue = resolveTpsBaseDateExpression(value, {
+      resolveValue: (token) => resolveSimpleToken(token) ?? '',
+    });
+    return dateValue || resolveSimpleToken(value);
   }
 
   private getRuntimeBaseFile(): TFile | null {
@@ -6191,6 +6232,7 @@ export class TpsListView extends BasesView {
     taskFilter = this.getTaskRootFilterFromBaseFilters(),
     itemKind: KanbanRootLineKind = getKanbanRootLineKind(this.getPriorityResolvedCreationMode(taskFilter)) ?? 'task',
     creationFilterRoots?: unknown[],
+    resolvedCreationDefaults?: TaskCreationDefaults,
   ): Promise<void> {
     const effectiveFilterRoots = creationFilterRoots ?? await this.getBaseFilterRootsForCreation();
     const effectiveTaskFilter = creationFilterRoots
@@ -6212,7 +6254,7 @@ export class TpsListView extends BasesView {
       return;
     }
 
-    const defaults = this.getRootTaskCreationDefaults(effectiveTaskFilter, effectiveFilterRoots);
+    const defaults = resolvedCreationDefaults ?? this.getRootTaskCreationDefaults(effectiveTaskFilter, effectiveFilterRoots);
     const targetFile = await this.resolveRootTaskTargetFile(defaults);
     if (!targetFile) {
       flowWarn('CreateRootTask', 'missing-target', {
@@ -6226,6 +6268,22 @@ export class TpsListView extends BasesView {
     }
 
     const taskLine = this.buildRootTaskLine(title, propName, targetSelection.value, effectiveTaskFilter, itemKind, defaults);
+    const creationFilterMatch = this.lineMatchesCreationFilters(taskLine, targetFile, effectiveFilterRoots);
+    if (creationFilterMatch === false) {
+      flowWarn('CreateRootTask', 'blocked', {
+        reason: 'prospective-line-does-not-match-filters',
+        path: targetFile.path,
+        itemKind,
+      });
+      new Notice('TPS List did not create the item because the resulting line would not match this view.');
+      return;
+    }
+    if (creationFilterMatch == null) {
+      flowWarn('CreateRootTask', 'filter-validation-partial', {
+        path: targetFile.path,
+        itemKind,
+      });
+    }
     flow('CreateRootTask', 'write', {
       path: targetFile.path,
       lane: displayLane.label,
@@ -6261,10 +6319,33 @@ export class TpsListView extends BasesView {
       propName,
       laneValue,
       itemKind,
+      headingLevel: defaults.headingLevel,
       defaults,
       getCheckboxStateForStatus: (status) => this.getCheckboxStateForStatus(status),
       isStatusPropertyName: (name) => this.isStatusPropertyName(name),
     });
+  }
+
+  private lineMatchesCreationFilters(line: string, file: TFile, roots: unknown[]): boolean | null {
+    const parsed = parseTpsListHeadingLine(line) ?? this.parseLineItem(line, true);
+    if (!parsed) return false;
+    const checkboxState = parsed.itemKind === 'heading' ? undefined : parsed.checkboxState;
+    const text = this.cleanTaskText(parsed.text);
+    const task: OpenTaskSubitem = {
+      itemKind: parsed.itemKind,
+      ...(parsed.itemKind === 'heading' ? { headingLevel: parsed.headingLevel } : {}),
+      internalId: `${file.path}:creation-preview`,
+      line: 1,
+      indent: 0,
+      checkboxState,
+      text,
+      displayText: this.cleanTaskDisplayText(this.stripTaskInlineFields(text)),
+      inlineFields: this.extractTaskInlineFields(text),
+    };
+    return combineFilterTreeResults(
+      roots.map((root) => this.evaluateTaskFilterNode(root, task, file)),
+      'and',
+    );
   }
 
   private getRootTaskCreationDefaults(
@@ -6288,6 +6369,27 @@ export class TpsListView extends BasesView {
       structured = this.mergePriorityTaskCreationDefaults(defaults, structured);
     }
     return structured;
+  }
+
+  private getTaskCreationDefaultsFromPlan(plan: TpsBaseLineCreationPlan): TaskCreationDefaults {
+    const inlineFields = new Map<string, { key: string; value: string }>();
+    for (const [key, value] of Object.entries(plan.fields)) {
+      inlineFields.set(this.normalizeInlinePropertyKey(key), { key, value });
+    }
+    return {
+      mode: plan.kind === 'task' ? 'tasks' : plan.kind === 'bullet' ? 'bullets' : plan.kind === 'heading' ? 'headings' : undefined,
+      headingLevel: plan.kind === 'heading'
+        ? Math.max(1, Math.min(6, Number(plan.headingLevel) || 1)) as 1 | 2 | 3 | 4 | 5 | 6
+        : undefined,
+      includeDone: plan.status ? this.getDoneStatuses().has(this.normalizeTaskStatus(plan.status)) : undefined,
+      status: plan.status ? this.normalizeTaskStatus(plan.status) : null,
+      targetPath: plan.targetPath,
+      targetPathSpecified: plan.targetPathSpecified,
+      inlineFields,
+      tags: new Set(plan.tags.map((tag) => this.normalizeTaskTag(tag)).filter(Boolean)),
+      excludedStatuses: new Set(),
+      excludedTags: new Set(),
+    };
   }
 
   private mergePriorityTaskCreationDefaults(

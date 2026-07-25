@@ -24,10 +24,16 @@ import { hashSelectionIdentity } from '../utils/selection-identity';
 import { requestLineItemDelete } from '../services/line-item-delete-service';
 import { normalizeTagValue } from '../utils/tag-utils';
 import {
+  getKanbanCheckboxStateForStatus,
   getKanbanStatusForCheckboxState,
   normalizeKanbanCheckboxState,
   type KanbanCheckboxMappingLike,
 } from '../tps-list/task-checkbox-utils';
+import {
+  getTpsListHeadingDisplayTitle,
+  parseTpsListHeadingLine,
+  setTpsListHeadingText,
+} from '../tps-list/heading-line-utils';
 import { getTaskDisplayTitle, parseTaskTagValues, readTaskLineTags } from '../utils/task-line-metadata';
 import { getTaskLineIdentity } from '../utils/task-line-resolution';
 import {
@@ -38,6 +44,7 @@ import {
   type TpsBaseGroupDescriptor,
   type TpsBaseRowGroup,
 } from './base-row-grouping';
+import { resolveTpsBaseLineCreationPlan } from './base-line-creation-plan';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
 
@@ -79,7 +86,6 @@ import {
   getTpsTableMarkdownLineKind,
   getTpsTableTaskQueryFields,
   hasTpsTableLineKindFilter,
-  resolveTpsTableLineCreateDefaults,
   type TpsTableLineKind,
 } from './log-base-create';
 
@@ -89,6 +95,7 @@ class TpsTableLineCreateModal extends Modal {
   constructor(
     app: any,
     private readonly kind: TpsTableLineKind,
+    private readonly headingLevel: 1 | 2 | 3 | 4 | 5 | 6,
     private readonly resolveResult: (value: string | null) => void,
   ) {
     super(app);
@@ -98,17 +105,18 @@ class TpsTableLineCreateModal extends Modal {
     this.modalEl.addClass('mod-tps-gcm');
     this.modalEl.addClass('mod-tps-gcm-tps-table-create');
     this.contentEl.empty();
-    this.contentEl.createEl('h3', { text: this.kind === 'task' ? 'Add task' : 'Add bullet' });
+    const noun = this.kind === 'task' ? 'task' : this.kind === 'heading' ? `H${this.headingLevel} heading` : 'bullet';
+    this.contentEl.createEl('h3', { text: `Add ${noun}` });
     const input = this.contentEl.createEl('input', {
       type: 'text',
       attr: {
-        placeholder: this.kind === 'task' ? 'Task title' : 'Bullet text',
-        'aria-label': this.kind === 'task' ? 'Task title' : 'Bullet text',
+        placeholder: this.kind === 'task' ? 'Task title' : this.kind === 'heading' ? 'Heading title' : 'Bullet text',
+        'aria-label': this.kind === 'task' ? 'Task title' : this.kind === 'heading' ? 'Heading title' : 'Bullet text',
       },
     });
     const actions = this.contentEl.createDiv({ cls: 'modal-button-container' });
     const cancel = actions.createEl('button', { text: 'Cancel' });
-    const submit = actions.createEl('button', { cls: 'mod-cta', text: this.kind === 'task' ? 'Add task' : 'Add bullet' });
+    const submit = actions.createEl('button', { cls: 'mod-cta', text: `Add ${noun}` });
     cancel.addEventListener('click', () => this.finish(null));
     submit.addEventListener('click', () => this.finish(input.value));
     input.addEventListener('keydown', (evt: KeyboardEvent) => {
@@ -228,11 +236,30 @@ export class TpsTableView extends BasesView {
       new Notice('Could not read the Base filters, so TPS Table did not create anything.');
       return true;
     }
-    const defaults = resolveTpsTableLineCreateDefaults(filterRoots, (value) => this.resolveLineCreateToken(value));
+    const statusService = this.plugin.sharedServices?.status;
+    const defaults = resolveTpsBaseLineCreationPlan(filterRoots, {
+      resolveValue: (value) => this.resolveLineCreateToken(value),
+      defaultOpenStatus: 'todo',
+      defaultDoneStatus: 'complete',
+      isDoneStatus: (status) => statusService?.isDoneStatus?.(status)
+        ?? (status === 'complete' || status === 'wont-do'),
+      nonTaskStatusAsField: true,
+    });
+    if (defaults.blockedReason) {
+      logger.flowWarn('TpsTableView', 'create-line:blocked', {
+        reason: defaults.blockedReason,
+        base: this.getBaseFile()?.path || null,
+        viewName: this.getViewName(),
+        selectedBranches: defaults.diagnostics.selectedBranches,
+      });
+      new Notice('Could not create an item because the active-view and whole-Base filters do not have a compatible default.');
+      return true;
+    }
     if (!defaults.kind) return false;
+    const headingLevel = Math.max(1, Math.min(6, Number(defaults.headingLevel) || 1)) as 1 | 2 | 3 | 4 | 5 | 6;
 
     const title = await new Promise<string | null>((resolve) => {
-      new TpsTableLineCreateModal(this.plugin.app, defaults.kind!, resolve).open();
+      new TpsTableLineCreateModal(this.plugin.app, defaults.kind!, headingLevel, resolve).open();
     });
     if (!title) {
       logger.flow('TpsTableView', 'create-line:cancelled', { kind: defaults.kind });
@@ -267,11 +294,80 @@ export class TpsTableView extends BasesView {
     }
     const targetPath = targetFile.path;
 
-    const line = buildTpsTableMarkdownLine(defaults.kind, title, defaults.fields);
+    const checkboxState = defaults.kind === 'task' && defaults.status
+      ? getKanbanCheckboxStateForStatus(defaults.status, this.getTaskCheckboxMappings())
+      : defaults.kind === 'task' ? '[ ]' : null;
+    if (defaults.kind === 'task' && defaults.status && !checkboxState) {
+      logger.flowWarn('TpsTableView', 'create-line:blocked', {
+        reason: 'unmapped-status',
+        status: defaults.status,
+        base: this.getBaseFile()?.path || null,
+        viewName: this.getViewName(),
+      });
+      new Notice(`Could not create the task because status "${defaults.status}" has no checkbox mapping.`);
+      return true;
+    }
+    const line = buildTpsTableMarkdownLine(defaults.kind, title, defaults.fields, {
+      checkboxState,
+      headingLevel,
+      tags: defaults.tags,
+    });
+    const fields = readInlineFields(line);
+    const rowKind = defaults.kind === 'heading' ? `h${headingLevel}` : defaults.kind;
+    let queryFields: Record<string, string> = { ...fields, kind: rowKind };
+    const prospectiveTags = readTaskLineTags(line);
+    if (prospectiveTags.length > 0 && queryFields.tags == null) {
+      queryFields.tags = prospectiveTags.map((tag) => `#${tag}`).join(', ');
+    }
+    if (defaults.kind === 'heading') {
+      queryFields.headinglevel = String(headingLevel);
+      queryFields.headingtext = getTpsListHeadingDisplayTitle(line);
+      queryFields.headingpath = targetFile.path;
+    }
+    if (defaults.kind === 'task') {
+      queryFields = {
+        ...queryFields,
+        ...getTpsTableTaskQueryFields(
+          line,
+          (state) => {
+            const mapped = getKanbanStatusForCheckboxState(state, this.getTaskCheckboxMappings())
+              || statusService?.checkboxStateToStatus?.(state)
+              || '';
+            return statusService?.normalize?.(mapped) || mapped;
+          },
+          (status) => statusService?.isDoneStatus?.(status)
+            ?? (status === 'complete' || status === 'wont-do'),
+        ),
+      };
+    }
+    const prospectiveMatch = evaluateLogBaseFilterRoots(
+      filterRoots,
+      this.createFilterContext(queryFields, targetFile, line, rowKind),
+    );
+    if (prospectiveMatch === false) {
+      logger.flowWarn('TpsTableView', 'create-line:blocked', {
+        reason: 'prospective-line-does-not-match-filters',
+        kind: defaults.kind,
+        targetPath,
+      });
+      new Notice('TPS Table did not create the item because the resulting line would not match this view.');
+      return true;
+    }
+    if (prospectiveMatch == null) {
+      logger.flowWarn('TpsTableView', 'create-line:filter-validation-partial', {
+        kind: defaults.kind,
+        targetPath,
+        unsupportedFilters: defaults.diagnostics.unsupportedFilters,
+      });
+    }
     logger.flow('TpsTableView', 'create-line:start', {
       kind: defaults.kind,
       targetPath,
       fieldKeys: Object.keys(defaults.fields),
+      tagCount: defaults.tags.length,
+      status: defaults.status || '',
+      headingLevel: defaults.kind === 'heading' ? headingLevel : null,
+      selectedBranches: defaults.diagnostics.selectedBranches,
     });
     await this.plugin.app.vault.process(targetFile, (content) => appendTpsTableMarkdownLine(content, line));
     logger.flow('TpsTableView', 'create-line:done', { kind: defaults.kind, targetPath });
@@ -411,16 +507,28 @@ export class TpsTableView extends BasesView {
       }
       content.split('\n').forEach((line, index) => {
         const fields = readInlineFields(line);
+        const heading = parseTpsListHeadingLine(line);
         const markdownKind = getTpsTableMarkdownLineKind(line);
-        if (markdownKind && !fields.kind) fields.kind = markdownKind;
+        const rowKind = heading ? `h${heading.headingLevel}` : markdownKind;
+        if (rowKind && !fields.kind) fields.kind = rowKind;
         let queryFields = { ...fields };
-        if (markdownKind) {
-          queryFields.kind = markdownKind;
-        } else if (/^(?:tasks?|bullets?)$/iu.test(String(queryFields.kind || '').trim())) {
+        if (rowKind) {
+          queryFields.kind = rowKind;
+        } else if (/^(?:tasks?|bullets?|headings?|headers?|h[1-6])$/iu.test(String(queryFields.kind || '').trim())) {
           // `kind` is the structural Base discriminator for synthesized rows.
           // A plain line cannot opt into task/bullet behavior with editable
           // inline metadata such as `[kind:: task]`.
           delete queryFields.kind;
+        }
+        const structuralTags = rowKind ? readTaskLineTags(line) : [];
+        if (structuralTags.length > 0 && queryFields.tags == null) {
+          queryFields.tags = structuralTags.map((tag) => `#${tag}`).join(', ');
+        }
+        if (heading) {
+          queryFields.headinglevel = String(heading.headingLevel);
+          queryFields.headingtext = getTpsListHeadingDisplayTitle(line);
+          queryFields.headingline = String(index + 1);
+          queryFields.headingpath = file.path;
         }
         if (markdownKind === 'task') {
           const statusService = this.plugin.sharedServices?.status;
@@ -442,7 +550,7 @@ export class TpsTableView extends BasesView {
         if (!this.lineMatches(queryFields) && !(markdownKind && hasTpsTableLineKindFilter(filterRoots))) return;
         const filterResult = evaluateLogBaseFilterRoots(
           filterRoots,
-          this.createFilterContext(queryFields, file, line, markdownKind),
+          this.createFilterContext(queryFields, file, line, rowKind),
         );
         if (filterResult === false) return;
         if (filterResult == null && filterRoots.length) unknownFilterRows += 1;
@@ -453,7 +561,7 @@ export class TpsTableView extends BasesView {
           file,
           lineNumber: index,
           line,
-          title: visibleLineText(line),
+          title: heading ? getTpsListHeadingDisplayTitle(line) : visibleLineText(line),
           fields,
           queryFields,
         });
@@ -558,7 +666,7 @@ export class TpsTableView extends BasesView {
     fields: Record<string, string>,
     file: TFile,
     line = '',
-    markdownKind: 'task' | 'bullet' | null = null,
+    rowKind: string | null = null,
   ): LogBaseFilterContext {
     const cache = this.plugin.app.metadataCache.getFileCache(file);
     const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
@@ -570,8 +678,8 @@ export class TpsTableView extends BasesView {
     return {
       fields,
       contextDate: this.getHomeContextDate(),
-      rowKind: markdownKind,
-      taskTags: markdownKind === 'task' ? readTaskLineTags(line) : undefined,
+      rowKind,
+      taskTags: rowKind ? readTaskLineTags(line) : undefined,
       file: {
         path: file.path,
         name: file.name,
@@ -1191,7 +1299,7 @@ export class TpsTableView extends BasesView {
         file,
         lineNumber,
         line,
-        title: visibleLineText(line),
+        title: getTpsListHeadingDisplayTitle(line) || visibleLineText(line),
         fields,
       }, row, columns);
     }).catch((error) => {
@@ -1341,6 +1449,7 @@ export class TpsTableView extends BasesView {
     }
 
     this.setActiveContextRow(row);
+    const isHeading = parseTpsListHeadingLine(entry.line) != null;
     const menu = new Menu();
     menu.onHide(() => this.setActiveContextRow(null));
 
@@ -1384,7 +1493,7 @@ export class TpsTableView extends BasesView {
     });
     menu.addItem((item) => {
       item
-        .setTitle('Delete record')
+        .setTitle(isHeading ? 'Delete heading' : 'Delete record')
         .setIcon('trash-2')
         .onClick(() => void this.deleteEntry(entry));
       (item as any).setWarning?.(true);
@@ -1415,7 +1524,11 @@ export class TpsTableView extends BasesView {
     new TextInputModal(this.plugin.app, 'Title', displayTitle, async (value) => {
       const title = String(value || '').replace(/\s+/g, ' ').trim();
       if (!title) return;
-      await this.updateEntryLine(entry, (line) => setVisibleLineText(line, title));
+      await this.updateEntryLine(entry, (line) => (
+        parseTpsListHeadingLine(line)
+          ? setTpsListHeadingText(line, title)
+          : setVisibleLineText(line, title)
+      ));
     }).open();
   }
 
@@ -1475,13 +1588,15 @@ export class TpsTableView extends BasesView {
   }
 
   private async deleteEntry(entry: LogLineEntry): Promise<void> {
+    const isHeading = parseTpsListHeadingLine(entry.line) != null;
     await requestLineItemDelete({
       app: this.plugin.app,
       file: entry.file,
       lineIndex: entry.lineNumber,
       rawLine: entry.line,
-      itemLabel: 'record',
+      itemLabel: isHeading ? 'heading' : 'record',
       source: 'tps-table-menu',
+      ...(isHeading ? { blockKind: 'heading-section' as const } : {}),
       resolveLineIndex: (lines) => resolveEntryLineNumber(lines, entry),
       onDeleted: () => this.queueRender(),
     });

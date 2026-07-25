@@ -117,13 +117,25 @@ test('conflicting canonical targets in one conjunction fail closed', async () =>
   ]).targetPath, '[[Inbox/A#Tasks|A]]');
 });
 
-test('semantic line filters expose bullets and tasks without weakening ordinary log matching', async () => {
-  const { getTpsTableMarkdownLineKind, hasTpsTableLineKindFilter } = await loadModule();
+test('semantic line filters expose bullets, tasks, and headings without weakening ordinary log matching', async () => {
+  const { buildTpsTableMarkdownLine, getTpsTableMarkdownLineKind, hasTpsTableLineKindFilter } = await loadModule();
   assert.equal(getTpsTableMarkdownLineKind('- A bullet'), 'bullet');
   assert.equal(getTpsTableMarkdownLineKind('- [ ] A task'), 'task');
+  assert.equal(getTpsTableMarkdownLineKind('### A heading'), 'heading');
   assert.equal(getTpsTableMarkdownLineKind('Paragraph'), null);
-  assert.equal(hasTpsTableLineKindFilter([{ or: ['kind == "bullet"', 'kind == "task"'] }]), true);
+  assert.equal(hasTpsTableLineKindFilter([{ or: ['kind == "bullet"', 'kind == "task"', 'kind == "h3"'] }]), true);
   assert.equal(hasTpsTableLineKindFilter(['file.ext == "md"']), false);
+  assert.equal(
+    buildTpsTableMarkdownLine('heading', 'A heading', { priority: 'low' }, {
+      headingLevel: 3,
+      tags: ['#work'],
+    }),
+    '### A heading #work [priority:: low]',
+  );
+  assert.equal(
+    buildTpsTableMarkdownLine('task', 'Working', {}, { checkboxState: '[\\]' }),
+    '- [\\] Working',
+  );
 });
 
 test('table view owns filter-derived line creation and uses an atomic vault mutation', () => {
