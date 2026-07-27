@@ -42,6 +42,7 @@ import {
 } from '../tps-list/heading-line-utils';
 import {
   getTaskDisplayTitle,
+  parseTaskLine,
   parseTaskTagValues,
   readInlineFieldValue,
   readTaskLineTags,
@@ -66,8 +67,10 @@ import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
 import type { CustomProperty } from '../types';
 import { isTagListProperty } from '../utils/list-utils';
 import { collectKnownVaultTags } from '../utils/known-tags';
+import { getEffectivePropertyOptions } from '../utils/property-options';
 import { splitLineItemContent } from '../utils/line-item-deletion';
 import { addLineEntityPropertyMenus } from '../menu/line-entity-property-menu';
+import type { TaskLineContext } from '../services/task-line-context-menu-service';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
 
@@ -1121,6 +1124,7 @@ export class TpsTableView extends BasesView {
       const cell = row.createEl('td', { cls: `bases-table-cell tps-log-base-cell tps-log-base-cell--${normalizeInlineKey(column.key)}` });
       cell.dataset.key = column.key;
       cell.dataset.label = column.label;
+      cell.dataset.tpsTableCellIntent = 'navigation';
       if (this.isFileLinkColumn(column.key)) {
         const link = cell.createEl('a', {
           cls: 'internal-link tps-log-base-file-link',
@@ -1143,6 +1147,7 @@ export class TpsTableView extends BasesView {
       } else {
         const configuredProperty = resolveConfiguredProperty(this.plugin.settings.properties || [], column.key);
         if (configuredProperty && isEntityReferenceProperty(configuredProperty)) {
+          cell.dataset.tpsTableCellIntent = 'property';
           const rawValue = entry.fields[normalizeInlineKey(configuredProperty.key)] ?? '';
           const displayValue = this.formatEntityCellValue(rawValue, configuredProperty);
           cell.addClass('tps-log-base-cell--editable');
@@ -1191,6 +1196,18 @@ export class TpsTableView extends BasesView {
               configuredProperty ?? this.createDatetimeColumnProperty(column),
             ),
           );
+        } else if (configuredProperty?.type === 'selector') {
+          const current = this.isTaskStatusSelector(entry, configuredProperty)
+            ? entry.queryFields?.status ?? entry.queryFields?.checkboxstatus ?? ''
+            : entry.fields[normalizeInlineKey(configuredProperty.key)]
+              ?? entry.queryFields?.[normalizeInlineKey(configuredProperty.key)]
+              ?? '';
+          this.configureTypedCell(
+            cell,
+            `${configuredProperty.label || column.label}: ${current || 'empty'}`,
+            current || `+ ${configuredProperty.label || column.label}`,
+            () => this.openSelectorCellEditor(entry, configuredProperty, cell),
+          );
         } else {
           cell.setText(this.getEntryValue(entry, column.key));
         }
@@ -1204,6 +1221,7 @@ export class TpsTableView extends BasesView {
     text: string,
     activate: () => void,
   ): void {
+    cell.dataset.tpsTableCellIntent = 'property';
     cell.addClass('tps-log-base-cell--editable');
     cell.setAttr('role', 'button');
     cell.setAttr('tabindex', '0');
@@ -1346,6 +1364,128 @@ export class TpsTableView extends BasesView {
     }).open();
   }
 
+  private openSelectorCellEditor(
+    entry: LogLineEntry,
+    property: CustomProperty,
+    anchor: HTMLElement,
+  ): void {
+    const taskStatus = this.isTaskStatusSelector(entry, property);
+    if (taskStatus) {
+      const context = this.createTaskLineContext(entry);
+      if (!context) {
+        new Notice('Could not resolve the task status.');
+        return;
+      }
+      this.plugin.taskLineContextMenuService.openTaskStatusPicker(
+        context,
+        anchor,
+        () => this.queueRender(),
+      );
+      return;
+    }
+    const current = readInlineFieldValue(entry.line, property.key);
+    const options = getEffectivePropertyOptions(this.plugin.app, property);
+    const menu = new Menu();
+
+    if (!taskStatus) {
+      menu.addItem((item) => {
+        item
+          .setTitle('(none)')
+          .setChecked(!current)
+          .onClick(() => {
+            void this.setSelectorCellValue(entry, property, null, 'clear');
+          });
+      });
+    }
+    menu.addItem((item) => {
+      item
+        .setTitle('Set custom value...')
+        .setIcon('pencil')
+        .onClick(() => {
+          new TextInputModal(
+            this.plugin.app,
+            property.label || property.key,
+            current,
+            (value) => {
+              const next = String(value || '').trim();
+              if (!next) {
+                new Notice('Value cannot be empty.');
+                return;
+              }
+              void this.setSelectorCellValue(entry, property, next, 'custom');
+            },
+          ).open();
+        });
+    });
+    if (options.length > 0) menu.addSeparator();
+    for (const option of options) {
+      menu.addItem((item) => {
+        item
+          .setTitle(option)
+          .setChecked(current === option)
+          .onClick(() => {
+            void this.setSelectorCellValue(entry, property, option, 'option');
+          });
+      });
+    }
+
+    const positionedMenu = menu as Menu & { showAtElement?: (element: HTMLElement) => void };
+    if (typeof positionedMenu.showAtElement === 'function') {
+      positionedMenu.showAtElement(anchor);
+    } else {
+      const rect = anchor.getBoundingClientRect();
+      menu.showAtPosition({ x: rect.left, y: rect.bottom });
+    }
+  }
+
+  private async setSelectorCellValue(
+    entry: LogLineEntry,
+    property: CustomProperty,
+    value: string | null,
+    route: 'clear' | 'custom' | 'option',
+  ): Promise<void> {
+    await this.updateEntryLine(
+      entry,
+      (line) => setLogInlineFieldValue(line, property.key, value),
+    );
+    logger.flow('TpsTableView', 'selector-cell:set', {
+      path: entry.file.path,
+      lineNumber: entry.lineNumber + 1,
+      property: property.key,
+      cleared: value == null,
+      route,
+    });
+  }
+
+  private isTaskStatusSelector(entry: LogLineEntry, property: CustomProperty): boolean {
+    const normalizedKey = normalizeInlineKey(property.key);
+    const normalizedId = normalizeInlineKey(property.id);
+    const configuredStatusKey = normalizeInlineKey(
+      this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status',
+    );
+    return (
+      normalizedId === 'status'
+      || normalizedKey === 'status'
+      || normalizedKey === 'checkboxstatus'
+      || normalizedKey === configuredStatusKey
+    ) && /^\s*(?:[-*+]|\d+[.)])\s+\[[^\]\r\n]?\]\s+/u.test(entry.line);
+  }
+
+  private createTaskLineContext(entry: LogLineEntry): TaskLineContext | null {
+    const parsed = parseTaskLine(entry.line);
+    if (!parsed) return null;
+    return {
+      file: entry.file,
+      lineNumber: entry.lineNumber + 1,
+      lineIndex: entry.lineNumber,
+      rawLine: entry.line,
+      title: getTaskDisplayTitle(entry.line),
+      checkboxToken: parsed.token,
+      isCalendarTask: false,
+      calendarAllDay: false,
+    };
+  }
+
   private renderGroupRow(
     parent: HTMLElement,
     descriptor: TpsBaseGroupDescriptor,
@@ -1385,6 +1525,12 @@ export class TpsTableView extends BasesView {
 
   private handleEntryClick(evt: MouseEvent, entry: LogLineEntry): void {
     if (evt.defaultPrevented) return;
+    const target = evt.target instanceof HTMLElement ? evt.target : null;
+    if (target?.closest('[data-tps-table-cell-intent="property"]')) {
+      evt.preventDefault();
+      evt.stopPropagation();
+      return;
+    }
     if (evt.shiftKey) {
       evt.preventDefault();
       evt.stopPropagation();

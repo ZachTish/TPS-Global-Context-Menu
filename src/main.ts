@@ -1352,6 +1352,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         '.tps-gcm-top-property-row',
         '.tps-gcm-top-property-value',
         '.tps-gcm-chip',
+        '[data-tps-table-cell-intent="property"]',
         '.workspace-ribbon',
         '.side-dock-ribbon',
         '.workspace-tabs',

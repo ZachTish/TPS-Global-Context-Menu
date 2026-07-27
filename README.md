@@ -4,7 +4,15 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.10.1` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.10.2` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
+## 1.10.2
+
+- TPS Table Selector cells now own their click interaction and open the configured option menu instead of allowing the row or Base note-preview handlers to open the containing note. Empty values, manual options, vault-backed options, custom values, and `(none)` remain available through the same shared property-option contract.
+- Task Status cells use the configured checkbox mappings and GCM's canonical checkbox-mutation pipeline. Status changes therefore retain completed-date, recurrence, checklist, note-status, timestamp, event, and overlay follow-ups instead of writing a competing inline status field.
+- Click ownership is limited to cells that actually expose an editor. Title and other non-editable row cells retain the existing exact-line task editor/navigation behavior; Accepted-Kind, Tags, Scheduled, and keyboard activation remain unchanged.
+- This is a backward-compatible patch release with no settings or note-data migration. Minimum supported Obsidian remains 1.10.0. Final validation and release artifact hashes are recorded in `release-notes/1.10.2.md`; production is not directly modified.
+- Validation passed the 20-test typed Base editor suite, the 46-test task-line context suite, TypeScript, and all 430 declared tests. In Obsidian 1.12.7, the reloaded relational TPS Table opened Priority's shared option menu and Status's authoritative checkbox-mapping menu without opening the containing note; its Title cell retained the exact-line task editor. A real Priority mutation was restored to the fixture's original SHA-256, and runtime-owned `data.json` stayed byte-identical.
 
 ## 1.10.1
 

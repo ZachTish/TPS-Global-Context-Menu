@@ -882,6 +882,55 @@ export class TaskLineContextMenuService {
     button.setAttr('title', `${status || context.checkboxToken} · Click to toggle · Long-press for status`);
   }
 
+  openTaskStatusPicker(
+    context: TaskLineContext,
+    anchor: HTMLElement,
+    onChanged: () => void = () => {},
+  ): void {
+    if (!anchor.isConnected) return;
+    const menu = new Menu();
+    for (const mapping of this.getCheckboxMappings()) {
+      const status = String(mapping.statuses?.[0] || '').trim();
+      const label = String(mapping.label || status || mapping.checkboxState).trim();
+      const selected = mapping.checkboxState === context.checkboxToken;
+      menu.addItem((item) => {
+        item
+          .setTitle(label)
+          .setIcon(mapping.icon || 'square')
+          .setChecked(selected)
+          .onClick(() => {
+            void this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, mapping.checkboxState), {
+              checkboxMutation: true,
+            }).then((updated) => {
+              if (!updated) return;
+              logger.flow('TaskLineContextMenu', 'status-picker:change', {
+                path: context.file.path,
+                lineNumber: context.lineNumber,
+                checkboxState: mapping.checkboxState,
+                status: status || null,
+              });
+              onChanged();
+            });
+          });
+      });
+    }
+    const positionedMenu = menu as Menu & { showAtElement?: (element: HTMLElement) => void };
+    if (typeof positionedMenu.showAtElement === 'function') {
+      positionedMenu.showAtElement(anchor);
+    } else {
+      const rect = anchor.getBoundingClientRect();
+      menu.showAtPosition({ x: rect.left, y: rect.bottom + 6 });
+    }
+  }
+
+  private setTaskStatusCheckboxState(line: string, checkboxState: string): string {
+    let next = setTaskCheckboxToken(line, checkboxState);
+    for (const key of new Set([this.getStatusKey(), 'status', 'checkboxStatus'])) {
+      next = setInlineFieldValueOnTaskLine(next, key, null);
+    }
+    return next;
+  }
+
   private showTaskEditorStatusMenu(
     context: TaskLineContext,
     button: HTMLInputElement,
@@ -2732,7 +2781,8 @@ export class TaskLineContextMenuService {
   }
 
   private getStatusKey(): string {
-    const configured = this.plugin.settings.properties?.find((prop) => prop.id === 'status')?.key;
+    const configured = this.plugin.sharedServices?.status?.getStatusPropertyKey?.()
+      || this.plugin.settings.properties?.find((prop) => String(prop.id || '').trim().toLowerCase() === 'status')?.key;
     return String(configured || 'status').trim() || 'status';
   }
 

@@ -7,6 +7,8 @@ import { build } from 'esbuild';
 
 const read = (relativePath) => readFileSync(new URL(`../${relativePath}`, import.meta.url), 'utf8');
 const logBase = read('src/views/log-base-view.ts');
+const main = read('src/main.ts');
+const taskLineContext = read('src/services/task-line-context-menu-service.ts');
 const tpsList = read('src/tps-list/views/TpsListView.ts');
 const tagModal = read('src/modals/TagSuggestModal.ts');
 
@@ -89,6 +91,61 @@ test('TPS Table renders empty Tags and Scheduled cells as isolated typed control
   assert.match(logBase, /new ScheduledModal\(this\.plugin\.app, current, timeEstimate, allDay/);
   assert.match(logBase, /setLogInlineFieldValue\(\s*next,\s*'timeEstimate'/);
   assert.match(logBase, /setLogInlineFieldValue\(\s*next,\s*'allDay'/);
+});
+
+test('TPS Table property cells own their click intent and configured selectors open a dropdown', () => {
+  assert.match(logBase, /cell\.dataset\.tpsTableCellIntent = 'navigation'/);
+  assert.match(logBase, /private configureTypedCell\([\s\S]*?cell\.dataset\.tpsTableCellIntent = 'property'/);
+  assert.match(logBase, /configuredProperty\?\.type === 'selector'/);
+  assert.match(logBase, /this\.openSelectorCellEditor\(entry, configuredProperty, cell\)/);
+  assert.match(logBase, /getEffectivePropertyOptions\(this\.plugin\.app, property\)/);
+  assert.match(logBase, /\.setTitle\('\(none\)'\)/);
+  assert.match(logBase, /\.setTitle\('Set custom value\.\.\.'\)/);
+  assert.match(logBase, /this\.setSelectorCellValue\(entry, property, option, 'option'\)/);
+  assert.match(logBase, /taskLineContextMenuService\.openTaskStatusPicker\(/);
+  assert.match(logBase, /sharedServices\?\.status\?\.getStatusPropertyKey\?\.\(\)/);
+  assert.match(logBase, /normalizedId === 'status'/);
+  assert.match(logBase, /target\?\.closest\('\[data-tps-table-cell-intent="property"\]'\)/);
+  assert.match(main, /'\[data-tps-table-cell-intent="property"\]'/);
+  assert.match(taskLineContext, /openTaskStatusPicker\(/);
+  assert.match(taskLineContext, /this\.setTaskStatusCheckboxState\(line, mapping\.checkboxState\)/);
+  assert.match(taskLineContext, /new Set\(\[this\.getStatusKey\(\), 'status', 'checkboxStatus'\]\)/);
+  assert.match(taskLineContext, /status-picker:change/);
+  assert.match(taskLineContext, /checkboxMutation:\s*true/);
+  assert.match(taskLineContext, /handleExternalChecklistStateMutation\(/);
+});
+
+test('TPS Table selector mutations preserve line identity and sibling fields', async () => {
+  const logLines = await importBundled('../src/views/log-line-utils.ts');
+  let line = '- [ ] Ship selector fix [tpsId:: selector-row] <!-- [contexts:: [[Contexts/Home]]] --> ^selector-row';
+
+  line = logLines.setLogInlineFieldValue(line, 'priority', 'high');
+
+  assert.match(line, /^- \[ \] Ship selector fix/u);
+  assert.equal(logLines.readInlineFields(line).priority, 'high');
+  assert.equal(logLines.readInlineFields(line).tpsid, 'selector-row');
+  assert.equal(logLines.readInlineFields(line).contexts, '[[Contexts/Home]]');
+  assert.match(line, /\^selector-row$/u);
+});
+
+test('task Status selection clears stale inline status carriers before completion follow-ups', async () => {
+  const metadata = await importBundled('../src/utils/task-line-metadata.ts');
+  let line = '- [ ] Finish selector QA [status:: holding] [checkboxStatus:: holding] [priority:: high] ^selector-status';
+
+  line = metadata.setTaskCheckboxToken(line, '[x]');
+  for (const key of ['workflowStatus', 'status', 'checkboxStatus']) {
+    line = metadata.setInlineFieldValueOnTaskLine(line, key, null);
+  }
+  line = metadata.updateTaskCompletedDateForCheckboxState(line, '[x]', {
+    completedAt: new Date(2026, 6, 27, 12, 34, 56),
+  });
+
+  assert.match(line, /^- \[x\] Finish selector QA/u);
+  assert.equal(metadata.readInlineFieldValue(line, 'status'), '');
+  assert.equal(metadata.readInlineFieldValue(line, 'checkboxStatus'), '');
+  assert.equal(metadata.readInlineFieldValue(line, 'priority'), 'high');
+  assert.equal(metadata.readInlineFieldValue(line, 'completedDate'), '2026-07-27 12:34:56');
+  assert.match(line, /\^selector-status$/u);
 });
 
 test('TPS List renders empty typed cells and routes task and note edits through native pickers', () => {
