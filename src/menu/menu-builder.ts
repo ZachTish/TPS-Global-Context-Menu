@@ -20,6 +20,7 @@ export interface NativeMenuLabelOptions {
   deleteLabel?: string;
   includeTitle?: boolean;
   includeTags?: boolean;
+  excludeCustomPropertyKeys?: readonly string[];
 }
 
 export class MenuBuilder {
@@ -548,10 +549,19 @@ export class MenuBuilder {
     // Dynamic Properties
     if (propertyEntries.length > 0 && this.plugin.settings.showCustomPropertiesInContextMenu !== false) {
       const properties = resolveCustomProperties(this.plugin.settings.properties || [], propertyEntries, new ViewModeService(), 'context');
+      const excludedPropertyKeys = new Set(
+        (options.excludeCustomPropertyKeys || [])
+          .map((key) => String(key || '').trim().toLowerCase())
+          .filter(Boolean),
+      );
 
       properties.forEach(prop => {
         if (prop.showInContextMenu === false) return;
         if (String(prop.key || '').trim().toLowerCase() === 'title' || String(prop.id || '').trim().toLowerCase() === 'title') return;
+        if (
+          excludedPropertyKeys.has(String(prop.key || '').trim().toLowerCase())
+          || excludedPropertyKeys.has(String(prop.id || '').trim().toLowerCase())
+        ) return;
         if (
           options.includeTags === true
           && (

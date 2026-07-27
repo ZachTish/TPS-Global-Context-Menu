@@ -191,6 +191,7 @@ test('task line metadata helpers edit task text without destroying inline task p
     addInlineTagToTaskLine,
     removeInlineTagFromTaskLine,
     readInlineFieldValue,
+    readTaskInlineFieldRecord,
     readInlineTags,
     readTaskLineTags,
     parseTaskTagValues,
@@ -223,6 +224,15 @@ test('task line metadata helpers edit task text without destroying inline task p
     '  - finished task #work',
   );
   assert.equal(readInlineFieldValue(line, 'priority'), 'high');
+  const inlineFieldRecord = readTaskInlineFieldRecord(
+    '- [ ] scoped task [Projects:: ] [priority:: high] [projects:: [[Ignored duplicate]]]',
+  );
+  assert.deepEqual(inlineFieldRecord, {
+    Projects: '',
+    priority: 'high',
+  });
+  assert.equal(Object.prototype.hasOwnProperty.call(inlineFieldRecord, 'Projects'), true);
+  assert.equal(Object.prototype.hasOwnProperty.call(inlineFieldRecord, 'contexts'), false);
   assert.equal(setInlineFieldValueOnTaskLine(line, 'priority', 'normal'), '- [ ] bathroom window [scheduled:: 2026-05-31 09:00:00] #topic/home [priority:: normal]');
   assert.equal(
     setInlineFieldValueOnLine('  - Nested reminder [scheduled:: 2026-05-31 09:00:00] [status:: active]', 'scheduled', '2026-06-01 10:30:00'),

@@ -84,6 +84,10 @@ import {
   resolveConfiguredProperty,
 } from '../../utils/entity-property';
 import { openEntitySuggestModal } from '../../modals/EntitySuggestModal';
+import {
+  addLineEntityPropertyMenus,
+  getConfiguredEntityReferencePropertyKeys,
+} from '../../menu/line-entity-property-menu';
 import { getWikilinkDisplayText, isTagListProperty, parseLinkListInput } from '../../utils/list-utils';
 import { collectKnownVaultTags } from '../../utils/known-tags';
 
@@ -868,6 +872,85 @@ export class TpsListView extends BasesView {
     });
   }
 
+  private async updateRenderedLineEntityProperty(
+    kind: 'heading' | 'bullet',
+    file: TFile,
+    lineIndex: number,
+    rawLine: string,
+    property: CustomProperty,
+    action: 'set' | 'clear' | 'remove',
+    updater: (currentLine: string) => string,
+  ): Promise<boolean> {
+    const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
+    let resolvedLineIndex = lineIndex;
+    try {
+      await this.app.vault.process(file, (content) => {
+        const parts = splitLineItemContent(content);
+        const resolvedIndex = resolveExactLineRevisionIndex(parts.lines, lineIndex, rawLine);
+        if (resolvedIndex < 0) {
+          mutation.outcome = 'stale';
+          return content;
+        }
+        const current = parts.lines[resolvedIndex] || '';
+        const stillMatchesKind = kind === 'heading'
+          ? parseTpsListHeadingLine(current) != null
+          : !!this.parseLineItem(current, true) && parseTpsListHeadingLine(current) == null;
+        if (!stillMatchesKind) {
+          mutation.outcome = 'stale';
+          return content;
+        }
+        const next = updater(current);
+        if (!next || next === current) return content;
+        parts.lines[resolvedIndex] = next;
+        resolvedLineIndex = resolvedIndex;
+        mutation.outcome = 'changed';
+        return `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`;
+      });
+    } catch (error) {
+      flowError(kind === 'heading' ? 'HeadingLineMenu' : 'BulletLineMenu', 'entity-property:failed', error, {
+        action,
+        path: file.path,
+        line: lineIndex + 1,
+        property: property.key,
+      });
+      new Notice(`Could not update ${property.label || property.key}.`);
+      return false;
+    }
+
+    if (mutation.outcome === 'stale') {
+      flowWarn(kind === 'heading' ? 'HeadingLineMenu' : 'BulletLineMenu', 'entity-property:stale-target', {
+        action,
+        path: file.path,
+        line: lineIndex + 1,
+        property: property.key,
+      });
+      new Notice(`That ${kind === 'heading' ? 'heading' : 'line item'} changed before its property could be updated.`);
+      return false;
+    }
+    if (mutation.outcome !== 'changed') return false;
+
+    this.clearTaskCachesForPath(file.path);
+    emitFilesUpdated(this.app, [file.path], 'tps-list');
+    this.getGcmPlugin()?.overlayRenderingService?.invalidate?.({
+      reason: `tps-list-${kind}-entity-property`,
+      file,
+      surfaces: ['menus', 'linked-subitems', 'live-preview-editors'],
+      rebuildInlineSubitems: kind === 'bullet',
+      refreshLivePreviewEditors: true,
+      delayMs: 80,
+    });
+    flow(kind === 'heading' ? 'HeadingLineMenu' : 'BulletLineMenu', 'entity-property:done', {
+      action,
+      path: file.path,
+      requestedLine: lineIndex + 1,
+      resolvedLine: resolvedLineIndex + 1,
+      property: property.key,
+      acceptedKind: property.acceptsKind,
+    });
+    this.render(false);
+    return true;
+  }
+
   private addBulletLineTagsMenu(menu: Menu, file: TFile, lineIndex: number, rawLine: string): void {
     const current = readInlineTags(rawLine);
     menu.addItem((item) => {
@@ -994,6 +1077,25 @@ export class TpsListView extends BasesView {
         this.promptRenderedLineTitle('heading', file, lineIndex, rawLine);
       }, false, 'tps-title');
 
+      if (plugin) {
+        addLineEntityPropertyMenus({
+          app: this.app,
+          plugin,
+          menu,
+          file,
+          rawLine,
+          mutateLine: (updater, property, action) => this.updateRenderedLineEntityProperty(
+            'heading',
+            file,
+            lineIndex,
+            rawLine,
+            property,
+            action,
+            updater,
+          ),
+        });
+      }
+
       addHeadingAction('Open heading in note', 'file-text', () => {
         void this.openTaskLine(file, oneBasedLine, row);
       });
@@ -1026,7 +1128,10 @@ export class TpsListView extends BasesView {
       }, true);
 
       const menuController = plugin?.menuController || this.getGcmApi()?.menuController;
-      menuController?.addToNativeMenu?.(menu, [file], { includeTitle: false });
+      menuController?.addToNativeMenu?.(menu, [file], {
+        includeTitle: false,
+        excludeCustomPropertyKeys: getConfiguredEntityReferencePropertyKeys(plugin),
+      });
       this.app.workspace.trigger('file-menu', menu as any, file as any);
       menu.showAtPosition({ x: event.clientX, y: event.clientY });
       flow('HeadingLineMenu', 'open', {
@@ -1080,6 +1185,24 @@ export class TpsListView extends BasesView {
         this.promptRenderedLineTitle('bullet', file, lineIndex, rawLine);
       }, false, 'tps-title');
       this.addBulletLineTagsMenu(menu, file, lineIndex, rawLine);
+      if (plugin) {
+        addLineEntityPropertyMenus({
+          app: this.app,
+          plugin,
+          menu,
+          file,
+          rawLine,
+          mutateLine: (updater, property, action) => this.updateRenderedLineEntityProperty(
+            'bullet',
+            file,
+            lineIndex,
+            rawLine,
+            property,
+            action,
+            updater,
+          ),
+        });
+      }
       addLineAction('Edit full line...', 'text-cursor-input', () => {
         this.openBulletLineEditor(event, file, oneBasedLine);
       });
@@ -1149,6 +1272,7 @@ export class TpsListView extends BasesView {
         menuController.addToNativeMenu(menu, [menuTarget], {
           deleteLabel: `Delete ${targetLabel}`,
           includeTitle: false,
+          excludeCustomPropertyKeys: getConfiguredEntityReferencePropertyKeys(plugin),
         });
       }
       this.app.workspace.trigger('file-menu', menu as any, menuTarget as any);
@@ -7203,6 +7327,7 @@ export class TpsListView extends BasesView {
     const selectionId = `${headingKind}:${displayLane.id}:${file.path}:${task.line}:${selectionFingerprint}`;
     row.dataset.path = file.path;
     row.dataset.tpsListSelectionId = selectionId;
+    row.dataset.tpsLineContext = 'true';
     row.dataset.tpsHeadingKind = headingKind;
     row.dataset.tpsHeadingLevel = String(headingLevel);
     this.registerListRowModifierSelection(row);

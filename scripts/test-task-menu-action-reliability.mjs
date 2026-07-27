@@ -72,8 +72,21 @@ test('move task identifies its source note and leads the secondary action sectio
 });
 
 test('task property rows honor the master switch, context visibility, and date-specific UI', () => {
+  const configuredPropertyMenus = menuSource.slice(
+    menuSource.indexOf('private addConfiguredPropertyMenus'),
+    menuSource.indexOf('private addEntityPropertyMenu'),
+  );
+  const taskPropertyGuard = menuSource.slice(
+    menuSource.indexOf('private isTaskMenuProperty'),
+    menuSource.indexOf('private getContextTaskTitle'),
+  );
+
   assert.match(menuSource, /showCustomPropertiesInContextMenu === false\) return/);
   assert.match(menuSource, /resolveCustomProperties\([\s\S]{0,500}'context'/);
+  assert.match(configuredPropertyMenus, /readTaskInlineFieldRecord\(context\.rawLine\)/);
+  assert.doesNotMatch(configuredPropertyMenus, /if \(key && value\) frontmatter\[key\] = value/);
+  assert.match(taskPropertyGuard, /property\.showInContextMenu === false/);
+  assert.doesNotMatch(taskPropertyGuard, /allowInlineSet/);
   assert.match(menuSource, /showTimeDetails: false/);
   assert.match(scheduledModalSource, /if \(this\.options\.showTimeDetails\)/);
   assert.match(scheduledModalSource, /fieldLabel: String\(options\.fieldLabel/);

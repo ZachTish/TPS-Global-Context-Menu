@@ -67,6 +67,7 @@ import type { CustomProperty } from '../types';
 import { isTagListProperty } from '../utils/list-utils';
 import { collectKnownVaultTags } from '../utils/known-tags';
 import { splitLineItemContent } from '../utils/line-item-deletion';
+import { addLineEntityPropertyMenus } from '../menu/line-entity-property-menu';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
 
@@ -1687,6 +1688,14 @@ export class TpsTableView extends BasesView {
     });
 
     this.addEntryTagsMenu(menu, entry);
+    addLineEntityPropertyMenus({
+      app: this.plugin.app,
+      plugin: this.plugin,
+      menu,
+      file: entry.file,
+      rawLine: entry.line,
+      mutateLine: (updater) => this.updateEntryLine(entry, updater),
+    });
 
     const editableColumns = columns
       .map((column) => ({ ...column, normalized: normalizeInlineKey(column.key) }))
@@ -1697,6 +1706,9 @@ export class TpsTableView extends BasesView {
         && column.normalized !== 'path'
         && column.normalized !== 'linenumber'
         && column.normalized !== 'tags'
+        && !isEntityReferenceProperty(
+          resolveConfiguredProperty(this.plugin.settings.properties || [], column.key),
+        )
         && (entry.fields[column.normalized] != null || entry.queryFields?.[column.normalized] == null));
 
     for (const column of editableColumns) {

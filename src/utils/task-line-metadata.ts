@@ -305,6 +305,24 @@ export function readTaskInlineFields(line: string): TaskInlineField[] {
 }
 
 /**
+ * Read semantic inline fields as a key-preserving record for visibility and
+ * scope evaluation. Empty values remain present so callers can distinguish a
+ * blank `[key:: ]` field from a missing field.
+ */
+export function readTaskInlineFieldRecord(line: string): Record<string, string> {
+  const record: Record<string, string> = {};
+  const seen = new Set<string>();
+  for (const field of readTaskInlineFields(line)) {
+    const key = String(field.key || '').trim();
+    const normalizedKey = key.toLowerCase();
+    if (!key || seen.has(normalizedKey)) continue;
+    seen.add(normalizedKey);
+    record[key] = field.value;
+  }
+  return record;
+}
+
+/**
  * Return inline fields with offsets relative to the supplied source.
  *
  * Unlike a flat regular expression, the scanner understands nested brackets,

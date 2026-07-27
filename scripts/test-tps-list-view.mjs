@@ -735,7 +735,10 @@ test('TPS List parses, displays, and safely renames Markdown headings', async ()
   assert.match(viewSource, /source: 'tps-list-heading-menu'/);
   assert.match(viewSource, /blockKind: 'heading-section'/);
   assert.match(viewSource, /reason: 'tps-list-heading-delete'/);
-  assert.match(viewSource, /addToNativeMenu\?\.\(menu, \[file\], \{ includeTitle: false \}\)/);
+  assert.match(
+    viewSource,
+    /addToNativeMenu\?\.\(menu, \[file\], \{[\s\S]{0,180}includeTitle: false,[\s\S]{0,180}excludeCustomPropertyKeys:/,
+  );
   assert.match(viewSource, /item\.task\.itemKind === 'heading' \? 'heading' as const : 'task' as const/);
   assert.match(viewSource, /if \(task\.itemKind === 'heading'\) return true;/);
   assert.match(viewSource, /!propRaw\.toLowerCase\(\)\.startsWith\('note\.'\) && \['itemtype', 'itemkind', 'kind'\]\.includes\(normalizedProp\)/);

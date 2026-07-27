@@ -26,6 +26,8 @@ import {
   readInlineFieldValue,
   readInlineTags,
   readTaskAssociatedNotePath,
+  readTaskInlineFieldRecord,
+  readTaskLineTags,
   removeInlineTagFromTaskLine,
   setInlineFieldValueOnTaskLine,
   setTaskCheckboxToken,
@@ -1727,13 +1729,8 @@ export class TaskLineContextMenuService {
   private addConfiguredPropertyMenus(menu: Menu, context: TaskLineContext, excludeTags = false): void {
     if (this.plugin.settings.showCustomPropertiesInContextMenu === false) return;
     const statusKey = this.getStatusKey().toLowerCase();
-    const frontmatter: Record<string, unknown> = {};
-    for (const property of this.plugin.settings.properties || []) {
-      const key = String(property?.key || '').trim();
-      const value = key ? readInlineFieldValue(context.rawLine, key) : '';
-      if (key && value) frontmatter[key] = value;
-    }
-    const tags = readInlineTags(context.rawLine);
+    const frontmatter: Record<string, unknown> = readTaskInlineFieldRecord(context.rawLine);
+    const tags = readTaskLineTags(context.rawLine);
     if (tags.length > 0) frontmatter.tags = tags;
     const properties = resolveCustomProperties(
       this.plugin.settings.properties || [],
@@ -2714,7 +2711,7 @@ export class TaskLineContextMenuService {
   }
 
   private isTaskMenuProperty(property: CustomProperty, statusKey: string): boolean {
-    if (!property || property.disabled || property.hidden || property.showInContextMenu === false || property.allowInlineSet === false) return false;
+    if (!property || property.disabled || property.hidden || property.showInContextMenu === false) return false;
     const key = String(property.key || '').trim().toLowerCase();
     const id = String(property.id || '').trim().toLowerCase();
     if (!key) return false;
