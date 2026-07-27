@@ -4,7 +4,18 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.9.0` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.10.0` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
+## 1.10.0
+
+- **Kind (Entity identity)** now registers Markdown notes and addressable Markdown task, bullet, and ATX-heading lines. Notes contribute configured Kind frontmatter such as `kind: project`; line entities contribute the same configured dimension through inline fields such as `[kind:: project]`.
+- Any scalar or list custom property with **Accepts kind** uses the shared constrained entity picker. Projects can therefore offer only project notes and project lines, Contexts only context notes and context lines, and future Kinds use the same generic index without hardcoded names.
+- Line choices write canonical Obsidian block links. Existing native block IDs are reused; a provisional line receives one collision-checked native block ID only when selected. Duplicate, moved, stale, deleted, or reclassified candidates fail closed instead of writing a drifting reference.
+- TPS Table and TPS List share the constrained picker for empty and populated cells. Their Tags cells use the searchable vault tag picker and combine visible hashtags with singular/plural inline tag carriers; Scheduled cells use the normal TPS date/time modal and preserve `timeEstimate` and `allDay` companions.
+- `plugin.api.entityIndex` is version 2. `queryAsync()` and `ensureReady()` include content-backed line entities; the synchronous `query()` remains note-only for version-1 caller compatibility. Locator, reference-target, source-path, and materialization methods support safe line resolution while revision-cached generic queries remain immutable.
+- The line index is incremental and retry-aware. File create/modify/rename/delete events replace one source snapshot, transient reads are retried on a later readiness request, dimension reconfiguration publishes only a final coherent revision, and duplicate native IDs remain unavailable until ambiguity is resolved.
+- This is a backward-compatible minor release with no automatic value migration. Existing out-of-Kind links remain stored and visible; constrained pickers govern future choices. Ordinary paragraphs, frontmatter lines, fenced examples, Canvas records, and non-Markdown files are not line entities. Minimum supported Obsidian remains 1.10.0.
+- Validation covered note and line entities for Project and Context, negative Kind controls, lazy block-ID materialization, duplicate/stale safety, live reclassification and cache invalidation, semantic tag add/remove behavior, timed Scheduled edits, completed-task visibility, additive Table/List creation defaults, closed-code/protected-carrier exclusions, unsafe target rejection, reload persistence, TypeScript, the complete declared test suite, and a separate production-mode build in Obsidian 1.12.7. Temporary settings returned to their original SHA-256 and disposable QA files were moved to `_archive`; production was not accessed.
 
 ## 1.9.0
 
@@ -286,20 +297,29 @@ Agent integrations must not use fuzzy task titles or broad search results as mut
 
 ### Entity index and Kind references
 
-The note registry is intentionally named `entityIndex` in code and API. **Kind** is one indexed dimension rather than the registry itself, leaving the same engine available to future plugins and dimensions.
+The registry is intentionally named `entityIndex` in code and API. **Kind** is one indexed dimension rather than the registry itself, leaving the same engine available to future plugins and dimensions.
 
-To register notes and constrain a reference:
+To register entities and constrain a reference:
 
-1. Under **Rules & fields → Custom fields**, keep or create a field whose type is **Kind (Note identity)**. Its configured key—normally `kind`—is indexed.
-2. Give a Markdown note a matching frontmatter value, such as `kind: project`. Scalar and YAML-list Kind values are supported.
-3. On another custom field, set **Accepts kind** to `project`. Use a scalar field for one project or a list field for several projects.
-4. In any supported property editor, choose from the project notes. GCM stores a normal `[[path|title]]` link; it does not duplicate project titles into a separate option list.
+1. Under **Rules & fields → Custom fields**, keep or create a field whose type is **Kind (Entity identity)**. Its configured key—normally `kind`—is indexed.
+2. Give a Markdown note a matching frontmatter value such as `kind: project`, or put the configured inline field on a Markdown task, bullet, or ATX heading such as `[kind:: project]`. Scalar and YAML-list note values are supported.
+3. On another custom field, set **Accepts kind** to `project`. Use a scalar field for one project or a link-list field for several projects.
+4. In any supported property editor, choose from the matching project notes and project lines. Notes store `[[path|title]]`; lines store `[[path#^block-id|title]]`.
 
-The index builds lazily from Obsidian's metadata cache, then updates incrementally. Queries are case-insensitive exact matches by dimension, deterministically sorted, immutable, and cached until the index revision changes. Renames replace the old path; deletes remove the entity; GCM frontmatter writes update the index immediately instead of waiting for a later cache event.
+Base structural filters and entity identity are separate. `kind == task`, `kind == bullet`, `kind == header`, and `kind == h1` through `h6` select Markdown row shapes; a checkbox does not automatically become a Kind `task` entity. A selectable line must already carry the configured inline Kind field. GCM intentionally does not expose Kind as an inline setter.
+
+The note index builds lazily from Obsidian's metadata cache. Content-backed task, bullet, and heading entities are added by `ensureReady()`/`queryAsync()` and then updated incrementally. Queries are case-insensitive exact matches by dimension, deterministically sorted, immutable, and cached until the index revision changes. Renames replace old paths, deletes remove source records, GCM writes invalidate immediately, and later readiness calls retry transient file-read failures.
 
 ```js
 const gcm = app.plugins.getPlugin('tps-global-context-menu');
-const projects = gcm.api.entityIndex.query({
+
+// Includes matching notes and addressable task/bullet/heading lines.
+const projects = await gcm.api.entityIndex.queryAsync({
+  dimensions: { kind: { anyOf: ['project'] } },
+});
+
+// Version-1 compatibility: synchronous query() remains note-only.
+const projectNotes = gcm.api.entityIndex.query({
   dimensions: { kind: { anyOf: ['project'] } },
 });
 
@@ -309,9 +329,15 @@ const unregister = gcm.api.entityIndex.registerDimension({
 });
 ```
 
-The generic query contract supports `dimensions`/`allOf`, `anyOf`, and `noneOf`, plus `search` and `limit`. `getById`, `getByPath`, `getDimensionValues`, `getRevision`, `onChanged`, and `invalidate` are also public. `registerDimension` returns an unregister callback; external dimensions remain registered when GCM's custom-field configuration changes.
+`entityIndex.version` is `2`. `query()` always returns its backward-compatible synchronous note-only view, even after content readiness; `queryAsync()` awaits line indexing and returns notes plus lines; `ensureReady()` prepares block-aware getters. The generic query contract supports `dimensions`/`allOf`, `anyOf`, and `noneOf`, plus `search` and `limit`.
 
-Constraints govern selection, not destructive migration. Existing out-of-Kind links remain visible and stored until the user changes them. There is no free-text escape hatch in a constrained picker and no implicit note creation. Version 1.9.0 indexes Markdown notes/frontmatter only: tasks, headers, and bullets keep their existing structural Kind semantics but are not selectable entities.
+`getById`, note-only `getByPath`, `getByLocator`, `getByReferenceTarget`, `getBySourcePath`, `materializeReference`, `getDimensionValues`, `getRevision`, `onChanged`, and `invalidate` are public. Records expose `entityType`, `sourcePath`, `lineKind`, `lineNumber`, `referenceState`, `subpath`, `blockId`, `locatorKey`, and `referenceTarget`. `materializeReference()` returns a note unchanged and atomically re-resolves a provisional line. `registerDimension` returns an unregister callback; external dimensions remain registered when GCM's custom-field configuration changes.
+
+Line entities are selectable only when they can produce a stable native block reference. A line that has no block ID remains provisional until selection, when GCM atomically re-resolves the exact source and appends one collision-checked ID. Ambiguous duplicate IDs, duplicate legacy identities, stale lines, and entities that changed Kind while a picker was open fail closed. The picker rechecks existence and accepted Kind immediately before writing. Ordinary paragraphs, frontmatter lines, fenced examples, Canvas records, and non-Markdown files are not indexed as lines. Field- or tag-shaped text inside closed inline code or protected TPS JSON is never treated as identity or editable metadata; unsafe paths that cannot be represented inside both a wikilink and GCM's hidden carrier are omitted from constrained pickers.
+
+Constraints govern selection, not destructive migration. Existing out-of-Kind links remain visible and stored until the user changes them. Scalar fields store one canonical link; list fields store deduplicated links. There is no free-text escape hatch and no implicit entity creation in a constrained picker.
+
+TPS Table and TPS List use the same constrained picker for empty and populated Projects, Contexts, and other accepted-Kind cells. Built-in `tag`/`tags` cells display and toggle the semantic union of visible hashtags, `[tag:: …]`, and `[tags:: …]`; custom tag fields stay isolated, and the picker offers known vault tags rather than creating arbitrary values. `scheduled` cells use the standard scheduling modal and manage `scheduled`, `timeEstimate`, and true-only `allDay`; unrelated datetime properties do not acquire schedule companions. Line edits use guarded exact-line atomic writes and preserve indentation, newline style, final-newline state, native block IDs, unrelated inline fields, and protected TPS JSON metadata.
 
 ## Settings Surface
 

@@ -4,7 +4,7 @@
  * property-row-service.ts, menu-controller.ts, and note-operation-service.ts.
  */
 
-const VALID_TAG_PATTERN = /^[a-z0-9_/-]+$/;
+const VALID_TAG_PATTERN = /^[\p{L}\p{N}_/-]+$/u;
 
 function splitTagString(raw: string): string[] {
     const value = String(raw || '').trim();
@@ -36,7 +36,7 @@ function splitTagString(raw: string): string[] {
         return value.split(',').map((part) => part.trim()).filter(Boolean);
     }
 
-    const hashMatches = Array.from(value.matchAll(/#([a-zA-Z0-9_/-]+)/g))
+    const hashMatches = Array.from(value.matchAll(/#([\p{L}\p{N}_/-]+)/gu))
         .map((match) => match[1])
         .filter(Boolean);
     if (hashMatches.length > 0) {

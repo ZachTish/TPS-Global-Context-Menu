@@ -34,6 +34,47 @@ test('task source titles preserve link markup while display titles unwrap links 
   );
 });
 
+test('native block IDs stay hidden and absolute-final across task and Base-line edits', async () => {
+  const {
+    getTaskDisplayTitle,
+    getTaskEditableBody,
+    mergeTpsInlinePropsMetadata,
+    readLineBlockId,
+    setInlineFieldValueOnTaskLine,
+    setTaskEditableBody,
+  } = await metadataPromise;
+  const {
+    setLogInlineFieldValue,
+    setVisibleLineText,
+    visibleLineText,
+  } = await logLinePromise;
+  const source = '- [ ] Visible <!-- [priority:: high] --> ^tps-project-alpha';
+
+  assert.equal(readLineBlockId(source), 'tps-project-alpha');
+  assert.equal(getTaskDisplayTitle(source), 'Visible');
+  assert.equal(getTaskEditableBody(source), 'Visible');
+  assert.equal(visibleLineText(source), 'Visible');
+
+  for (const updated of [
+    setInlineFieldValueOnTaskLine(source, 'priority', 'low'),
+    mergeTpsInlinePropsMetadata(source, { createdDate: '2026-07-27 08:00:00' }),
+    setTaskEditableBody(source, 'Renamed'),
+    setLogInlineFieldValue(source, 'priority', 'medium'),
+    setVisibleLineText(source, 'Retitled'),
+  ]) {
+    assert.match(updated, /\^tps-project-alpha$/u);
+    assert.equal((updated.match(/\^tps-project-alpha/gu) || []).length, 1);
+  }
+  assert.match(
+    setLogInlineFieldValue(source, 'priority', 'medium'),
+    /<!-- \[priority:: medium\] --> \^tps-project-alpha$/u,
+  );
+  assert.equal(
+    setLogInlineFieldValue(source, 'priority', null),
+    '- [ ] Visible ^tps-project-alpha',
+  );
+});
+
 test('inline-field scanning preserves balanced wikilinks inside bracket and parenthesis fields', async () => {
   const {
     getTaskSourceTitle,

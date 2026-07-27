@@ -9,9 +9,9 @@ export interface CustomProperty {
   optionsSource?: 'manual' | 'vault';
   listItemType?: 'tag' | 'text' | 'link'; // For list
   /**
-   * Restrict this property's values to indexed notes whose Kind identity
-   * matches this value. Constrained scalar values are stored as one wikilink;
-   * constrained lists are stored as link lists.
+   * Restrict this property's values to indexed notes or structural Markdown
+   * lines whose Kind identity matches this value. Constrained scalar values
+   * are stored as one wikilink; constrained lists are stored as link lists.
    */
   acceptsKind?: string;
   disabled?: boolean;

@@ -74,17 +74,17 @@ test('Kind is a first-class property identity and settings normalization migrate
   assert.match(
     normalization,
     /if \(normalized\.type === 'kind'\) \{\s*delete normalized\.acceptsKind;\s*normalized\.allowInlineSet = false;/,
-    'Kind is note identity, not a task-level or inline-reference property',
+    'Kind identity is configured separately from constrained reference properties',
   );
   assert.match(
     normalization,
     /if \(normalized\.acceptsKind\) normalized\.listItemType = 'link';/,
-    'constrained lists must persist note links rather than tags or free text',
+    'constrained lists must persist entity links rather than tags or free text',
   );
 
-  assert.match(sources.settings, /\.addOption\('kind', 'Kind \(Note identity\)'\)/);
+  assert.match(sources.settings, /\.addOption\('kind', 'Kind \(Entity identity\)'\)/);
   assert.match(sources.settings, /\.setName\('Accepts kind'\)/);
-  assert.match(sources.settings, /only offers notes registered with that Kind/);
+  assert.match(sources.settings, /only offers notes or lines registered with that Kind/);
   assert.match(sources.settings, /if \(acceptsKind && prop\.type === 'list'\) prop\.listItemType = 'link';/);
 });
 
@@ -109,11 +109,17 @@ test('the generic entity index is configured from every Kind property and is exp
   assert.match(sources.entityIndexService, /vault\.on\('rename'/);
 
   const api = sourceBlock(sources.pluginApi, 'entityIndex: {', 'overlays: {');
-  assert.match(api, /version:\s*1/);
+  assert.match(api, /version:\s*2/);
   for (const method of [
     'query',
+    'queryAsync',
+    'ensureReady',
     'getById',
     'getByPath',
+    'getByLocator',
+    'getByReferenceTarget',
+    'getBySourcePath',
+    'materializeReference',
     'getDimensionValues',
     'getRevision',
     'onChanged',
@@ -127,10 +133,14 @@ test('the generic entity index is configured from every Kind property and is exp
 test('the entity picker constrains choices to accepted Kind values and has no free-text escape hatch', () => {
   assert.match(
     sources.entityModal,
-    /this\.entityIndex\.query\(\{\s*dimensions:\s*\{\s*kind:\s*\{\s*anyOf:\s*\[\.\.\.this\.acceptedKinds\]/,
+    /dimensions:\s*\{\s*kind:\s*\{\s*anyOf:\s*\[\.\.\.this\.acceptedKinds\]/,
   );
-  assert.match(sources.entityModal, /buildEntityReferenceChoices\(readQueryEntities\(result\)\)/);
-  assert.match(sources.entityModal, /every returned value is a canonical\s*\n\s*\* wikilink/);
+  assert.match(sources.entityModal, /this\.entityIndex\.queryAsync\(query\)/);
+  assert.match(sources.entityModal, /await this\.entityIndex\.ensureReady\(\)/);
+  assert.match(sources.entityModal, /this\.entityIndex\.materializeReference\(currentEntity\)/);
+  assert.match(sources.entityModal, /buildEntityReferenceChoices\(await this\.queryAcceptedEntities\(\)\)/);
+  assert.match(sources.entityModal, /every returned value is a canonical\s*\n\s*\* wikilink to a note or line/);
+  assert.match(sources.entityModal, /entityMatchesAcceptedKinds\(resolvedEntity, this\.acceptedKinds\)/);
   assert.doesNotMatch(sources.entityModal, /TextInputModal|createNew|customValue|freeText/);
 });
 
@@ -195,7 +205,8 @@ test('TPS List renders empty constrained note and task properties as editable pi
     'private isWritableNotePropertyId(',
   );
   assert.match(noteProperties, /const entityReference = isEntityReferenceProperty\(configuredProperty\)/);
-  assert.match(noteProperties, /if \(!value && !entityReference\) continue;/);
+  assert.match(noteProperties, /const typedEmptyTarget = entityReference/);
+  assert.match(noteProperties, /if \(!value && !typedEmptyTarget\) continue;/);
   assert.match(noteProperties, /text:\s*value \|\| `\+ \$\{configuredProperty\?\.label \|\| propName\}`/);
   assert.match(noteProperties, /\.\.\.\(editable \? \{ role: 'button', tabindex: '0' \} : \{\}\)/);
 
@@ -232,8 +243,8 @@ test('TPS List renders empty constrained note and task properties as editable pi
   assert.match(entityTaskMutation, /resolveExactLineRevisionIndex\(parts\.lines, targetLine - 1, expectedLine\)/);
   assert.match(entityTaskMutation, /readInlineFieldValue\(currentLine, property\.key\)/);
   assert.match(entityTaskMutation, /mergeEntityReferenceList\(currentValue, wikilink\)/);
-  assert.match(entityTaskMutation, /setInlineFieldValueOnLine\(currentLine, property\.key, nextValue\)/);
-  assert.match(entityTaskMutation, /entity-update:stale-target/);
+  assert.match(entityTaskMutation, /setLogInlineFieldValue\(currentLine, property\.key, nextValue\)/);
+  assert.match(entityTaskMutation, /\$\{event\}:stale-target/);
   assert.match(noteEditor, /openEntitySuggestModal\(this\.app, gcm, configuredProperty/);
   assert.match(noteEditor, /fm\[actualKey\] = configuredProperty\.type === 'list'/);
 });

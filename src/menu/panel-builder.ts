@@ -232,7 +232,7 @@ class CreateCustomPropertyModal extends Modal {
         .addOption('number', 'Number')
         .addOption('datetime', 'Date/Time')
         .addOption('selector', 'Selector')
-        .addOption('kind', 'Kind (Note identity)')
+        .addOption('kind', 'Kind (Entity identity)')
         .addOption('list', 'List')
         .addOption('checkbox', 'Checkbox')
         .setValue(this.type)

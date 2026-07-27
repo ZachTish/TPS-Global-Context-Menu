@@ -1,10 +1,16 @@
 import { replaceLeadingLinkDisplayTitle } from '../utils/display-title';
-import { parseStringListInput } from '../utils/list-utils';
+import { splitLineItemContent } from '../utils/line-item-deletion';
 import { normalizeTagValue } from '../utils/tag-utils';
 import {
+  appendLineBlockId,
+  parseTaskTagValues,
   preserveTpsInlinePropsMetadata,
-  readInlineFieldRanges,
+  readLineBlockId,
+  readSemanticInlineFieldRanges,
+  readTaskLineTags,
   readTaskInlineFields,
+  removeInlineTagFromTaskLine,
+  stripLineBlockId,
   stripTaskInlinePropsMetadata,
 } from '../utils/task-line-metadata';
 
@@ -12,6 +18,12 @@ export interface LogLineReference {
   lineNumber: number;
   line: string;
   fields: Record<string, string>;
+}
+
+export interface LogLineContentMutation {
+  content: string;
+  outcome: 'changed' | 'unchanged' | 'stale';
+  lineNumber: number;
 }
 
 export function normalizeInlineKey(key: string): string {
@@ -28,11 +40,25 @@ export function readInlineFields(line: string): Record<string, string> {
 }
 
 export function readLogLineTags(raw: unknown): string[] {
-  return Array.from(new Set(
-    parseStringListInput(raw)
-      .map((tag) => normalizeTagValue(tag))
-      .filter(Boolean),
-  ));
+  return parseTaskTagValues(raw)
+    .map((tag) => normalizeTagValue(tag))
+    .filter(Boolean);
+}
+
+/**
+ * Resolve the value shown by a tag-like Base cell. The built-in `tag` and
+ * `tags` columns represent the task's complete semantic tag set, which may be
+ * split between visible hashtags and singular/plural inline carriers. Custom
+ * tag fields remain isolated to their configured value.
+ */
+export function readLogLinePropertyTags(
+  line: string,
+  key: string,
+  rawValue: unknown,
+): string[] {
+  return /^(?:tag|tags)$/iu.test(normalizeInlineKey(key))
+    ? readTaskLineTags(line)
+    : readLogLineTags(rawValue);
 }
 
 export function addLogLineTag(raw: unknown, tag: string): string {
@@ -48,19 +74,60 @@ export function removeLogLineTag(raw: unknown, tag: string): string | null {
   return tags.length > 0 ? tags.map((value) => `#${value}`).join(', ') : null;
 }
 
+/**
+ * Toggle one semantic task tag while keeping raw hashtags and [tag(s)::]
+ * fields in sync. Replacing only the inline field is insufficient when the
+ * selected value also exists as a raw hashtag because the task parser would
+ * immediately surface that tag again.
+ */
+export function toggleLogLineSemanticTag(
+  line: string,
+  key: string,
+  tag: string,
+  selected: boolean,
+): string {
+  const normalized = normalizeTagValue(tag);
+  if (!normalized) return String(line || '');
+  const current = readTaskLineTags(line);
+  const nextTags = selected
+    ? current.filter((value) => value.toLocaleLowerCase() !== normalized)
+    : Array.from(new Set([...current, normalized]));
+  const withoutSelectedRawTag = selected
+    ? removeInlineTagFromTaskLine(line, normalized)
+    : line;
+  const withoutSingularCarrier = setLogInlineFieldValue(
+    withoutSelectedRawTag,
+    'tag',
+    null,
+  );
+  const withoutPluralCarrier = setLogInlineFieldValue(
+    withoutSingularCarrier,
+    'tags',
+    null,
+  );
+  const canonicalKey = normalizeInlineKey(key) === 'tag' ? 'tag' : 'tags';
+  return setLogInlineFieldValue(
+    withoutPluralCarrier,
+    canonicalKey,
+    nextTags.length > 0 ? nextTags.map((value) => `#${value}`).join(', ') : null,
+  );
+}
+
 export function setLogInlineFieldValue(
   line: string,
   key: string,
   value: string | null,
 ): string {
-  const source = String(line || '');
+  const blockId = readLineBlockId(line);
+  const source = blockId ? stripLineBlockId(line) : String(line || '');
   const cleanKey = String(key || '').replace(/^note\./u, '').trim();
-  if (!cleanKey) return source;
+  if (!cleanKey) return String(line || '');
   const normalizedKey = cleanKey.toLocaleLowerCase();
   const indentation = source.match(/^[\t ]*/u)?.[0] || '';
   let withoutExisting = source;
-  const matchingRanges = readInlineFieldRanges(source)
-    .filter((field) => field.key.toLocaleLowerCase() === normalizedKey)
+  const matchingFields = readSemanticInlineFieldRanges(source)
+    .filter((field) => field.key.toLocaleLowerCase() === normalizedKey);
+  const matchingRanges = collapseEmptiedInlineFieldComments(source, matchingFields)
     .sort((left, right) => right.start - left.start);
   for (const range of matchingRanges) {
     let end = range.end;
@@ -74,15 +141,15 @@ export function setLogInlineFieldValue(
     withoutExisting = `${withoutExisting.slice(0, range.start)}${withoutExisting.slice(end)}`;
   }
 
-  let body = withoutExisting.slice(indentation.length)
-    .replace(/[ \t]*<!--[ \t]*-->[ \t]*/gu, ' ')
-    .replace(/[ \t]+(?=-->)/gu, ' ')
-    .trimEnd();
-  if (value === null) return `${indentation}${body}`;
+  let body = withoutExisting.slice(indentation.length).trimEnd();
+  if (value === null) {
+    const updated = `${indentation}${body}`;
+    return blockId ? appendLineBlockId(updated, blockId) : updated;
+  }
 
   const nextField = `[${cleanKey}:: ${String(value || '').trim()}]`;
   const trailingComment = body.match(/<!--([\s\S]*?)-->[ \t]*$/u);
-  if (trailingComment) {
+  if (trailingComment && isInlineFieldOnlyComment(trailingComment[1] || '')) {
     body = body.replace(
       /<!--([\s\S]*?)-->[ \t]*$/u,
       (_match, commentBody: string) =>
@@ -91,11 +158,14 @@ export function setLogInlineFieldValue(
   } else {
     body = `${body} <!-- ${nextField} -->`;
   }
-  return `${indentation}${body}`;
+  const updated = `${indentation}${body}`;
+  return blockId ? appendLineBlockId(updated, blockId) : updated;
 }
 
 export function visibleLineText(line: string): string {
-  const withoutHiddenMetadata = stripTaskInlinePropsMetadata(String(line || ''))
+  const withoutHiddenMetadata = stripLineBlockId(
+    stripTaskInlinePropsMetadata(String(line || '')),
+  )
     .replace(/<!--[\s\S]*?-->/g, '')
     .replace(/^\s*[-*+]\s+(?:\[[^\]\r\n]{0,2}\]\s+)?/, '');
   return removeInlineFields(withoutHiddenMetadata)
@@ -105,14 +175,14 @@ export function visibleLineText(line: string): string {
 
 export function setVisibleLineText(line: string, title: string): string {
   const raw = String(line || '');
-  const visibleRaw = stripTaskInlinePropsMetadata(raw);
+  const visibleRaw = stripLineBlockId(stripTaskInlinePropsMetadata(raw));
   const prefixMatch = visibleRaw.match(/^(\s*(?:[-*+]\s+|\d+[.)]\s+)(?:\[[^\]\r\n]{0,2}\]\s+)?)/);
   const prefix = prefixMatch?.[1] ?? '- ';
   const body = prefixMatch ? visibleRaw.slice(prefix.length) : visibleRaw;
   const commentIndex = body.indexOf('<!--');
   const outsideComment = commentIndex >= 0 ? body.slice(0, commentIndex) : body;
   const comment = commentIndex >= 0 ? body.slice(commentIndex).trim() : '';
-  const fields = readInlineFieldRanges(outsideComment)
+  const fields = readSemanticInlineFieldRanges(outsideComment)
     .map((field) => outsideComment.slice(field.start, field.end));
   const currentVisibleTitle = removeInlineFields(outsideComment)
     .replace(/\s+/g, ' ')
@@ -127,7 +197,7 @@ export function setVisibleLineText(line: string, title: string): string {
 }
 
 function removeInlineFields(source: string): string {
-  const ranges = readInlineFieldRanges(source);
+  const ranges = readSemanticInlineFieldRanges(source);
   if (ranges.length === 0) return source;
   let result = source;
   for (const range of [...ranges].sort((left, right) => right.start - left.start)) {
@@ -153,4 +223,75 @@ export function resolveEntryLineNumber(lines: string[], entry: LogLineReference)
     return indexes;
   }, []);
   return matches.length === 1 ? matches[0] : -1;
+}
+
+/**
+ * Apply one stale-safe row mutation without changing the note's newline style
+ * or final-newline state.
+ */
+export function mutateLogLineContent(
+  content: string,
+  entry: LogLineReference,
+  updater: (line: string) => string | null,
+): LogLineContentMutation {
+  const parts = splitLineItemContent(content);
+  const lineNumber = resolveEntryLineNumber(parts.lines, entry);
+  if (lineNumber < 0) {
+    return { content, outcome: 'stale', lineNumber: -1 };
+  }
+  const current = parts.lines[lineNumber] ?? '';
+  const nextLine = updater(current);
+  if (nextLine === current) {
+    return { content, outcome: 'unchanged', lineNumber };
+  }
+  if (nextLine === null) parts.lines.splice(lineNumber, 1);
+  else parts.lines[lineNumber] = nextLine;
+  return {
+    content: `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`,
+    outcome: 'changed',
+    lineNumber,
+  };
+}
+
+function isInlineFieldOnlyComment(commentBody: string): boolean {
+  let remainder = String(commentBody || '');
+  const ranges = readSemanticInlineFieldRanges(remainder)
+    .sort((left, right) => right.start - left.start);
+  if (ranges.length === 0) return false;
+  for (const range of ranges) {
+    remainder = `${remainder.slice(0, range.start)}${remainder.slice(range.end)}`;
+  }
+  return remainder.trim().length === 0;
+}
+
+function collapseEmptiedInlineFieldComments<T extends { start: number; end: number }>(
+  source: string,
+  matchingFields: readonly T[],
+): Array<{ start: number; end: number }> {
+  const covered = new Set<T>();
+  const ranges: Array<{ start: number; end: number }> = [];
+  const comments = /<!--([\s\S]*?)-->/gu;
+  let comment: RegExpExecArray | null;
+  while ((comment = comments.exec(source)) !== null) {
+    const start = comment.index;
+    const end = start + String(comment[0] || '').length;
+    const contained = matchingFields.filter(
+      (field) => field.start >= start && field.end <= end,
+    );
+    if (contained.length === 0) continue;
+    let remainder = String(comment[1] || '');
+    const bodyStart = start + 4;
+    for (const field of [...contained].sort((left, right) => right.start - left.start)) {
+      const localStart = field.start - bodyStart;
+      const localEnd = field.end - bodyStart;
+      remainder = `${remainder.slice(0, localStart)}${remainder.slice(localEnd)}`;
+    }
+    if (remainder.trim()) continue;
+    contained.forEach((field) => covered.add(field));
+    ranges.push({ start, end });
+  }
+  for (const field of matchingFields) {
+    if (!covered.has(field)) ranges.push({ start: field.start, end: field.end });
+  }
+  return ranges;
 }

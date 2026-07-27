@@ -66,6 +66,7 @@ async function importServiceBundled() {
 
 const corePromise = importBundled('../src/services/entity-index-core.ts');
 const servicePromise = importServiceBundled();
+const lineProviderPromise = importBundled('../src/services/line-entity-source-provider.ts');
 
 const sources = [
   {
@@ -389,6 +390,435 @@ test('search and limit operate after dimension filtering without changing determ
   assert.deepEqual(index.query({ limit: 0 }), []);
 });
 
+test('source snapshots atomically replace multiple line entities without displacing their note', async () => {
+  const { EntityIndexCore } = await corePromise;
+  const index = new EntityIndexCore();
+  index.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  index.rebuild([{
+    path: 'Work/Entities.md',
+    frontmatter: { kind: 'Notebook' },
+  }]);
+  const note = index.getByPath('Work/Entities.md');
+  const initialRevision = index.getRevision();
+  const observed = [];
+  index.onChanged((revision) => observed.push(revision));
+
+  const firstSnapshot = index.replaceSource('lines:work/entities.md', [
+    {
+      id: 'line:work/entities.md#^project-alpha',
+      path: 'Work/Entities.md',
+      sourcePath: 'Work/Entities.md',
+      entityType: 'block',
+      blockId: 'project-alpha',
+      lineKind: 'heading',
+      lineNumber: 3,
+      name: 'Project Alpha',
+      frontmatter: { kind: 'Project' },
+    },
+    {
+      id: 'line:work/entities.md#^context-home',
+      path: 'Work/Entities.md',
+      sourcePath: 'Work/Entities.md',
+      entityType: 'block',
+      blockId: 'context-home',
+      lineKind: 'bullet',
+      lineNumber: 4,
+      name: 'Home',
+      frontmatter: { kind: 'Context' },
+    },
+  ]);
+  assert.equal(firstSnapshot.length, 2);
+  assert.equal(index.getRevision(), initialRevision + 1, 'one file snapshot publishes one revision');
+  assert.equal(index.getByPath('Work/Entities.md'), note, 'line records never replace note lookup');
+  assert.equal(index.getBySourcePath('Work/Entities.md').length, 3);
+  assert.equal(
+    index.getByReferenceTarget('[[Work/Entities#^project-alpha|Project Alpha]]')?.name,
+    'Project Alpha',
+  );
+
+  index.replaceSource('lines:work/entities.md', [{
+    id: 'line:work/entities.md#^context-home',
+    path: 'Work/Entities.md',
+    sourcePath: 'Work/Entities.md',
+    entityType: 'block',
+    blockId: 'context-home',
+    lineKind: 'bullet',
+    lineNumber: 8,
+    name: 'Home context',
+    frontmatter: { kind: 'Context' },
+  }]);
+  assert.equal(index.getRevision(), initialRevision + 2);
+  assert.equal(index.getById('line:work/entities.md#^project-alpha'), null);
+  assert.equal(index.getByLocator({
+    path: 'Work/Entities',
+    entityType: 'block',
+    blockId: 'context-home',
+  })?.name, 'Home context');
+  assert.deepEqual(observed, [initialRevision + 1, initialRevision + 2]);
+});
+
+test('duplicate ready block identities fail closed in both rebuilds and source replacements', async () => {
+  const { EntityIndexCore } = await corePromise;
+  const index = new EntityIndexCore();
+  index.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  const ambiguous = [
+    {
+      id: 'line:entities.md#^duplicate',
+      path: 'Entities.md',
+      entityType: 'block',
+      blockId: 'duplicate',
+      lineKind: 'bullet',
+      lineNumber: 1,
+      name: 'First',
+      frontmatter: { kind: 'Project' },
+    },
+    {
+      id: 'line:entities.md#^duplicate',
+      path: 'Entities.md',
+      entityType: 'block',
+      blockId: 'duplicate',
+      lineKind: 'task',
+      lineNumber: 2,
+      name: 'Second',
+      frontmatter: { kind: 'Project' },
+    },
+  ];
+
+  index.rebuild(ambiguous);
+  assert.deepEqual(index.query({ dimensions: { kind: 'Project' } }), []);
+
+  index.rebuild([{ path: 'Entities.md', frontmatter: { kind: 'Notebook' } }]);
+  const before = index.getRevision();
+  const accepted = index.replaceSource('lines:entities.md', [
+    ...ambiguous,
+    {
+      id: 'line:entities.md#^unique',
+      path: 'Entities.md',
+      entityType: 'block',
+      blockId: 'unique',
+      lineKind: 'heading',
+      lineNumber: 3,
+      name: 'Unique',
+      frontmatter: { kind: 'Project' },
+    },
+  ]);
+  assert.deepEqual(accepted.map(({ name }) => name), ['Unique']);
+  assert.equal(index.getRevision(), before + 1);
+  assert.equal(index.getById('line:entities.md#^duplicate'), null);
+});
+
+test('line provider scans task, bullet, and heading entities but skips frontmatter and fences', async () => {
+  const { LineEntitySourceProvider } = await lineProviderPromise;
+  const provider = new LineEntitySourceProvider();
+  const content = [
+    '---',
+    'kind: Project',
+    '---',
+    '# Project North [Kind:: Project]',
+    '- Home [kind:: Context] ^context-home',
+    '- [ ] Ship it [kind:: Task]',
+    '```md',
+    '- Hidden [kind:: Project]',
+    '```',
+    'Plain paragraph [kind:: Project]',
+  ].join('\n');
+
+  const sources = provider.scanFile(
+    'Entities/Mixed.md',
+    content,
+    [{ name: 'kind', propertyKeys: ['kind'] }],
+  );
+  assert.deepEqual(
+    sources.map(({ lineKind, name, referenceState }) => ({ lineKind, name, referenceState })),
+    [
+      { lineKind: 'heading', name: 'Project North', referenceState: 'provisional' },
+      { lineKind: 'bullet', name: 'Home', referenceState: 'ready' },
+      { lineKind: 'task', name: 'Ship it', referenceState: 'provisional' },
+    ],
+  );
+  assert.equal(sources[1].subpath, '#^context-home');
+  assert.equal(provider.getDescriptor(sources[0].id)?.lineNumber, 4);
+});
+
+test('line provider ignores inline-code and protected-metadata field lookalikes', async () => {
+  const { LineEntitySourceProvider } = await lineProviderPromise;
+  const provider = new LineEntitySourceProvider();
+  const sources = provider.scanFile(
+    'Entities/Protected.md',
+    [
+      '- Inline code `example [kind:: Project]`',
+      '- Double-tick code `` [kind:: Project] ``',
+      '- Hidden percent %% tps-inline-props: {"example":" [kind:: Project]"} %%',
+      '- Hidden comment <!-- tps-inline-props: {"example":" [kind:: Project]"} -->',
+      '- Hidden span <span data-tps-inline-props=\'{"example":" [kind:: Project]"}\'></span>',
+      '- Visible [kind:: Context] `example [kind:: Project]`',
+      '- Visible hidden [kind:: Project] %% tps-inline-props: {"example":" [kind:: Context]"} %%',
+      '- Unclosed literal ` example [kind:: Project]',
+      '- Escaped literal \\` example [kind:: Context]',
+    ].join('\n'),
+    [{ name: 'kind', propertyKeys: ['kind'] }],
+  );
+
+  assert.deepEqual(
+    sources.map(({ name, frontmatter }) => ({ name, kind: frontmatter.kind })),
+    [
+      {
+        name: 'Visible `example [kind:: Project]`',
+        kind: 'Context',
+      },
+      {
+        name: 'Visible hidden',
+        kind: 'Project',
+      },
+      {
+        name: 'Unclosed literal ` example',
+        kind: 'Project',
+      },
+      {
+        name: 'Escaped literal \\` example',
+        kind: 'Context',
+      },
+    ],
+  );
+});
+
+test('line provider withholds block IDs duplicated by non-entity lines', async () => {
+  const { LineEntitySourceProvider } = await lineProviderPromise;
+  const provider = new LineEntitySourceProvider();
+  const sources = provider.scanFile(
+    'Entities/Duplicates.md',
+    [
+      '- Project entity [kind:: Project] ^duplicate',
+      'Ordinary paragraph ^duplicate',
+      '- Context entity [kind:: Context] ^unique-context',
+    ].join('\n'),
+    [{ name: 'kind', propertyKeys: ['kind'] }],
+  );
+
+  assert.deepEqual(sources.map(({ name }) => name), ['Context entity']);
+  assert.equal(provider.getDescriptor('line:entities/duplicates.md#^duplicate'), null);
+});
+
+test('native block uniqueness consistently ignores frontmatter and fenced examples', async () => {
+  const { LineEntitySourceProvider } = await lineProviderPromise;
+  const provider = new LineEntitySourceProvider(() => 'unused');
+  let content = [
+    '---',
+    'example: ^entity-ready',
+    '---',
+    '- Project entity [kind:: Project] ^entity-ready',
+    '```md',
+    'Code example ^entity-ready',
+    '```',
+  ].join('\n');
+  const [ready] = provider.scanFile(
+    'Entities/Code-Examples.md',
+    content,
+    [{ name: 'kind', propertyKeys: ['kind'] }],
+  );
+  assert.equal(ready?.blockId, 'entity-ready');
+
+  const materialized = await provider.materialize(
+    { path: 'Entities/Code-Examples.md' },
+    { id: ready.id },
+    {
+      process: async (_file, transform) => {
+        content = transform(content);
+        return content;
+      },
+    },
+  );
+  assert.equal(materialized.blockId, 'entity-ready');
+  assert.equal(materialized.changed, false);
+  assert.equal(materialized.lineNumber, 4);
+});
+
+test('invalid fence-like lines cannot expose code examples as entities', async () => {
+  const { LineEntitySourceProvider } = await lineProviderPromise;
+  const provider = new LineEntitySourceProvider();
+  const sources = provider.scanFile(
+    'Entities/Fences.md',
+    [
+      '```md',
+      '- Hidden one [kind:: Project]',
+      '```not-a-close',
+      '- Hidden two [kind:: Project]',
+      '```',
+      '- Visible [kind:: Project]',
+    ].join('\n'),
+    [{ name: 'kind', propertyKeys: ['kind'] }],
+  );
+
+  assert.deepEqual(sources.map(({ name }) => name), ['Visible']);
+});
+
+test('line provider lazily materializes native block links while preserving LF and CRLF bytes', async () => {
+  const { LineEntitySourceProvider } = await lineProviderPromise;
+  for (const newline of ['\n', '\r\n']) {
+    const provider = new LineEntitySourceProvider(() => 'tps-fixed-block');
+    let content = [
+      '# Project North [kind:: Project]',
+      '- Context Home [kind:: Context]',
+      '',
+    ].join(newline);
+    const sources = provider.scanFile(
+      'Entities/Mixed.md',
+      content,
+      [{ name: 'kind', propertyKeys: ['kind'] }],
+    );
+    const selected = sources[0];
+    const file = { path: 'Entities/Mixed.md' };
+    const result = await provider.materialize(
+      file,
+      { id: selected.id },
+      {
+        process: async (_file, transform) => {
+          content = transform(content);
+          return content;
+        },
+      },
+    );
+
+    assert.equal(result.blockId, 'tps-fixed-block');
+    assert.match(content.split(newline)[0], /\^tps-fixed-block$/u);
+    assert.equal(
+      (content.match(/\r\n/gu) || []).length,
+      newline === '\r\n' ? 2 : 0,
+      'materialization preserves the original newline representation',
+    );
+    assert.equal(content.endsWith(newline), true, 'final newline remains unchanged');
+  }
+});
+
+test('line materialization keeps legacy identity keys distinct and prefers native block identity', async () => {
+  const {
+    LineEntityResolutionError,
+    LineEntitySourceProvider,
+  } = await lineProviderPromise;
+  const provider = new LineEntitySourceProvider(() => 'tps-fixed-block');
+  let content = [
+    '- Target [kind:: Project] [tpsId:: old-id]',
+    '- Other [kind:: Project] [subitemId:: other-id]',
+  ].join('\n');
+  const [provisional] = provider.scanFile(
+    'Entities/Identity.md',
+    content,
+    [{ name: 'kind', propertyKeys: ['kind'] }],
+  );
+
+  content = [
+    '- Target changed [kind:: Project] [tpsId:: new-id]',
+    '- Other [kind:: Project] [subitemId:: old-id]',
+  ].join('\n');
+  await assert.rejects(
+    provider.materialize(
+      { path: 'Entities/Identity.md' },
+      { id: provisional.id },
+      {
+        process: async (_file, transform) => {
+          content = transform(content);
+          return content;
+        },
+      },
+    ),
+    (error) =>
+      error instanceof LineEntityResolutionError
+      && error.code === 'stale-source',
+  );
+  assert.equal(
+    content.includes('^tps-fixed-block'),
+    false,
+    'a tpsId can never retarget to an unrelated subitemId',
+  );
+
+  const readyProvider = new LineEntitySourceProvider(() => 'unused');
+  const originalReady = [
+    '- Ready target [kind:: Project] [tpsId:: ready-old] ^ready-native',
+    '- Other [kind:: Project] [tpsId:: other-id]',
+  ].join('\n');
+  const [ready] = readyProvider.scanFile(
+    'Entities/Ready-Identity.md',
+    originalReady,
+    [{ name: 'kind', propertyKeys: ['kind'] }],
+  );
+  let changedReady = [
+    '- Ready target changed [kind:: Context] [tpsId:: ready-new] ^ready-native',
+    '- Other [kind:: Project] [tpsId:: ready-old]',
+  ].join('\n');
+  const resolved = await readyProvider.materialize(
+    { path: 'Entities/Ready-Identity.md' },
+    { id: ready.id },
+    {
+      process: async (_file, transform) => {
+        changedReady = transform(changedReady);
+        return changedReady;
+      },
+    },
+  );
+  assert.equal(resolved.blockId, 'ready-native');
+  assert.equal(resolved.lineNumber, 1);
+  assert.equal(resolved.changed, false);
+  assert.equal(changedReady.match(/\^ready-native$/gmu)?.length, 1);
+});
+
+test('provisional lines never retarget through legacy identity lookalikes in code or protected metadata', async () => {
+  const {
+    LineEntityResolutionError,
+    LineEntitySourceProvider,
+  } = await lineProviderPromise;
+  const cases = [
+    {
+      label: 'closed inline code',
+      lookalike: '`example [tpsId:: spoof-code]`',
+      replacementIdentity: '[tpsId:: spoof-code]',
+    },
+    {
+      label: 'protected TPS metadata',
+      lookalike: '%% tps-inline-props:{"memo":" [subitemId:: spoof-protected]"} %%',
+      replacementIdentity: '[subitemId:: spoof-protected]',
+    },
+  ];
+
+  for (const fixture of cases) {
+    const provider = new LineEntitySourceProvider(() => 'must-not-materialize');
+    let content = `- Original [kind:: Project] ${fixture.lookalike}`;
+    const [provisional] = provider.scanFile(
+      'Entities/Legacy-Lookalike.md',
+      content,
+      [{ name: 'kind', propertyKeys: ['kind'] }],
+    );
+    assert.ok(provisional, fixture.label);
+    assert.deepEqual(
+      provider.getDescriptor(provisional.id)?.legacyIdentities,
+      [],
+      `${fixture.label} is not captured as a stable legacy identity`,
+    );
+
+    content = `- Unrelated [kind:: Project] ${fixture.replacementIdentity}`;
+    await assert.rejects(
+      provider.materialize(
+        { path: 'Entities/Legacy-Lookalike.md' },
+        { id: provisional.id },
+        {
+          process: async (_file, transform) => {
+            content = transform(content);
+            return content;
+          },
+        },
+      ),
+      (error) =>
+        error instanceof LineEntityResolutionError
+        && error.code === 'stale-source',
+      fixture.label,
+    );
+    assert.equal(
+      content.includes('^must-not-materialize'),
+      false,
+      `${fixture.label} cannot redirect a stale provisional selection`,
+    );
+  }
+});
+
 test('Obsidian service exposes the integration contract and cache-refresh event wiring', () => {
   const source = readFileSync(
     fileURLToPath(new URL('../src/services/entity-index-service.ts', import.meta.url)),
@@ -399,12 +829,18 @@ test('Obsidian service exposes the integration contract and cache-refresh event 
     'configureDimensions',
     'registerDimension',
     'query',
+    'queryAsync',
+    'ensureReady',
     'invalidate',
     'rebuild',
     'upsertFile',
     'getRevision',
     'getById',
     'getByPath',
+    'getByLocator',
+    'getByReferenceTarget',
+    'getBySourcePath',
+    'materializeReference',
     'getDimensionValues',
     'onChanged',
   ]) {
@@ -429,6 +865,9 @@ function createServiceHost(TFile, initialNotes = []) {
   const frontmatterByFile = new Map(
     files.map((file, index) => [file, initialNotes[index].frontmatter ?? {}]),
   );
+  const contentByFile = new Map(
+    files.map((file, index) => [file, initialNotes[index].content ?? '']),
+  );
   const register = (group, event, handler) => {
     const handlers = group.get(event) ?? [];
     handlers.push(handler);
@@ -443,6 +882,13 @@ function createServiceHost(TFile, initialNotes = []) {
     on: (event, handler) => register(eventHandlers.vault, event, handler),
     getMarkdownFiles: () => files.filter((file) => file.extension.toLowerCase() === 'md'),
     getAbstractFileByPath: (path) => files.find((file) => file.path === path) ?? null,
+    cachedRead: async (file) => contentByFile.get(file) ?? '',
+    read: async (file) => contentByFile.get(file) ?? '',
+    process: async (file, transform) => {
+      const next = transform(contentByFile.get(file) ?? '');
+      contentByFile.set(file, next);
+      return next;
+    },
   };
   const registeredEvents = [];
   const host = {
@@ -456,6 +902,7 @@ function createServiceHost(TFile, initialNotes = []) {
     host,
     files,
     frontmatterByFile,
+    contentByFile,
     registeredEvents,
     emitMetadata: (event, ...args) => emit('metadata', event, ...args),
     emitVault: (event, ...args) => emit('vault', event, ...args),
@@ -687,6 +1134,381 @@ test('metadata and vault events incrementally refresh, rename, and remove indexe
   assert.deepEqual(
     service.query({ dimensions: { classification: 'resolved' } }).map(({ path }) => path),
     ['Entities/Seed.md'],
+  );
+});
+
+test('async service readiness adds task, bullet, and heading entities without changing note APIs', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Registry.md',
+    basename: 'Registry',
+    frontmatter: { kind: 'Registry' },
+    content: [
+      '# Apollo [kind:: Project]',
+      '- Home [kind:: Context] ^context-home',
+      '- [ ] Delivery [kind:: Project]',
+    ].join('\n'),
+  }]);
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+
+  assert.deepEqual(
+    service.query({ dimensions: { kind: 'Project' } }),
+    [],
+    'legacy synchronous query builds notes without exposing a partial line scan',
+  );
+  const projectEntities = await service.queryAsync({
+    dimensions: { kind: 'Project' },
+  });
+  assert.deepEqual(
+    projectEntities.map(({ entityType, lineKind, name, referenceState }) => ({
+      entityType,
+      lineKind,
+      name,
+      referenceState,
+    })),
+    [
+      {
+        entityType: 'block',
+        lineKind: 'heading',
+        name: 'Apollo',
+        referenceState: 'provisional',
+      },
+      {
+        entityType: 'block',
+        lineKind: 'task',
+        name: 'Delivery',
+        referenceState: 'provisional',
+      },
+    ],
+  );
+  assert.equal(service.getByPath('Entities/Registry.md')?.entityType, 'note');
+  assert.equal(service.getBySourcePath('Entities/Registry.md').length, 4);
+  assert.equal(
+    service.getByReferenceTarget('Entities/Registry#^context-home')?.name,
+    'Home',
+  );
+});
+
+test('ready line index follows file create, rename, and delete without ghost source records', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Registry.md',
+    basename: 'Registry',
+    frontmatter: { kind: 'Registry' },
+    content: '',
+  }]);
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  service.setup();
+  await service.ensureReady();
+
+  const created = new TFile('Entities/Lifecycle.md', 'Lifecycle');
+  fixture.files.push(created);
+  fixture.frontmatterByFile.set(created, {});
+  fixture.contentByFile.set(
+    created,
+    '- Lifecycle project [kind:: Project] ^lifecycle-project',
+  );
+  const beforeCreate = service.getRevision();
+  fixture.emitVault('create', created);
+  const createdProjects = await service.queryAsync({
+    dimensions: { kind: 'Project' },
+  });
+  assert.deepEqual(
+    createdProjects.map(({ entityType, sourcePath, blockId }) => ({
+      entityType,
+      sourcePath,
+      blockId,
+    })),
+    [{
+      entityType: 'block',
+      sourcePath: 'Entities/Lifecycle.md',
+      blockId: 'lifecycle-project',
+    }],
+  );
+  assert.equal(
+    service.getRevision() - beforeCreate,
+    2,
+    'creation publishes one note revision and one line-source revision',
+  );
+  assert.equal(
+    service.getByReferenceTarget('Entities/Lifecycle#^lifecycle-project')?.sourcePath,
+    'Entities/Lifecycle.md',
+  );
+  const stableAfterCreate = service.getRevision();
+  await service.queryAsync({ dimensions: { kind: 'Project' } });
+  assert.equal(service.getRevision(), stableAfterCreate, 'a cached follow-up query does not rescan');
+
+  const oldPath = created.path;
+  created.path = 'Entities/Lifecycle Renamed.md';
+  created.basename = 'Lifecycle Renamed';
+  const beforeRename = service.getRevision();
+  fixture.emitVault('rename', created, oldPath);
+  const renamedProjects = await service.queryAsync({
+    dimensions: { kind: 'Project' },
+  });
+  assert.deepEqual(
+    renamedProjects.map(({ sourcePath, blockId }) => ({ sourcePath, blockId })),
+    [{
+      sourcePath: 'Entities/Lifecycle Renamed.md',
+      blockId: 'lifecycle-project',
+    }],
+  );
+  assert.deepEqual(service.getBySourcePath(oldPath), []);
+  assert.equal(service.getByReferenceTarget('Entities/Lifecycle#^lifecycle-project'), null);
+  assert.equal(
+    service.getByReferenceTarget('Entities/Lifecycle Renamed#^lifecycle-project')?.sourcePath,
+    'Entities/Lifecycle Renamed.md',
+  );
+  const renameRevisions = service.getRevision() - beforeRename;
+  assert.ok(
+    renameRevisions >= 2 && renameRevisions <= 4,
+    `rename revisions stay bounded (observed ${renameRevisions})`,
+  );
+  const stableAfterRename = service.getRevision();
+  await service.queryAsync({ dimensions: { kind: 'Project' } });
+  assert.equal(service.getRevision(), stableAfterRename, 'renamed content remains revision-cached');
+
+  const renamedPath = created.path;
+  const beforeDelete = service.getRevision();
+  fixture.emitVault('delete', created);
+  fixture.files.splice(fixture.files.indexOf(created), 1);
+  const deletedProjects = await service.queryAsync({
+    dimensions: { kind: 'Project' },
+  });
+  assert.deepEqual(deletedProjects, []);
+  assert.deepEqual(service.getBySourcePath(renamedPath), []);
+  assert.equal(
+    service.getByReferenceTarget('Entities/Lifecycle Renamed#^lifecycle-project'),
+    null,
+  );
+  const deleteRevisions = service.getRevision() - beforeDelete;
+  assert.ok(
+    deleteRevisions >= 1 && deleteRevisions <= 2,
+    `delete revisions stay bounded (observed ${deleteRevisions})`,
+  );
+  const stableAfterDelete = service.getRevision();
+  await service.queryAsync({ dimensions: { kind: 'Project' } });
+  assert.equal(service.getRevision(), stableAfterDelete, 'deleted sources do not reappear on query');
+});
+
+test('synchronous queries remain deterministic note-only after entity readiness', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Project.md',
+    basename: 'Project',
+    frontmatter: { kind: 'Project' },
+    content: '- Project line [kind:: Project] ^project-line',
+  }]);
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+
+  assert.deepEqual(
+    service.query({ dimensions: { kind: 'Project' } }).map(({ entityType }) => entityType),
+    ['note'],
+  );
+  assert.deepEqual(
+    (await service.queryAsync({ dimensions: { kind: 'Project' } }))
+      .map(({ entityType }) => entityType),
+    ['note', 'block'],
+  );
+  const syncAfter = service.query({ dimensions: { kind: 'Project' } });
+  assert.deepEqual(syncAfter.map(({ entityType }) => entityType), ['note']);
+  assert.equal(
+    service.query({ dimensions: { kind: 'Project' } }),
+    syncAfter,
+    'the note-only view remains revision-cached',
+  );
+});
+
+test('dimension reconfiguration restarts an in-flight line readiness build', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Race.md',
+    basename: 'Race',
+    content: '- Racing project [kind:: Project]',
+  }]);
+  let releaseFirstRead;
+  let firstRead = true;
+  fixture.host.app.vault.cachedRead = async (file) => {
+    if (!firstRead) return fixture.contentByFile.get(file) ?? '';
+    firstRead = false;
+    return new Promise((resolve) => {
+      releaseFirstRead = () => resolve(fixture.contentByFile.get(file) ?? '');
+    });
+  };
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  const pendingQuery = service.queryAsync({ dimensions: { kind: 'Project' } });
+  await Promise.resolve();
+  assert.equal(typeof releaseFirstRead, 'function');
+
+  service.registerDimension({ name: 'audience', propertyKeys: ['audience'] });
+  releaseFirstRead();
+  const results = await pendingQuery;
+  assert.deepEqual(
+    results.map(({ name, entityType }) => ({ name, entityType })),
+    [{ name: 'Racing project', entityType: 'block' }],
+  );
+});
+
+test('transient line scan failures retry once per later readiness request', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Transient.md',
+    basename: 'Transient',
+    content: '- Retry project [kind:: Project]',
+  }]);
+  let readAttempts = 0;
+  fixture.host.app.vault.cachedRead = async (file) => {
+    readAttempts += 1;
+    if (readAttempts <= 2) throw new Error(`transient read ${readAttempts}`);
+    return fixture.contentByFile.get(file) ?? '';
+  };
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    assert.deepEqual(
+      await service.queryAsync({ dimensions: { kind: 'Project' } }),
+      [],
+      'the initial failed scan returns a bounded partial result',
+    );
+    assert.equal(readAttempts, 1);
+    assert.deepEqual(
+      await service.queryAsync({ dimensions: { kind: 'Project' } }),
+      [],
+      'one later query makes one bounded retry rather than looping forever',
+    );
+    assert.equal(readAttempts, 2);
+    assert.deepEqual(
+      (await service.queryAsync({ dimensions: { kind: 'Project' } }))
+        .map(({ name, entityType }) => ({ name, entityType })),
+      [{ name: 'Retry project', entityType: 'block' }],
+    );
+    assert.equal(readAttempts, 3);
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
+test('selecting a provisional line materializes one native block link and reindexes it ready', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Registry.md',
+    basename: 'Registry',
+    content: '- [ ] Project Mercury [kind:: Project]',
+  }]);
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  const [provisional] = await service.queryAsync({
+    dimensions: { kind: 'Project' },
+  });
+  const before = fixture.contentByFile.get(fixture.files[0]);
+  assert.equal(provisional.referenceState, 'provisional');
+  assert.equal(before.includes('^tps-'), false, 'indexing itself never mutates the source');
+
+  const materialized = await service.materializeReference(provisional);
+  const after = fixture.contentByFile.get(fixture.files[0]);
+  assert.equal(materialized?.referenceState, 'ready');
+  assert.match(materialized?.subpath || '', /^#\^tps-[A-Za-z0-9-]+$/u);
+  assert.match(after, /\^tps-[A-Za-z0-9-]+$/u);
+  assert.equal((after.match(/\^tps-/gu) || []).length, 1);
+  assert.equal(
+    service.getByReferenceTarget(materialized.referenceTarget)?.id,
+    materialized.id,
+  );
+});
+
+test('ready line selection revalidates whole-file uniqueness and current Kind state', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const original = '- Project entity [kind:: Project] [tpsId:: entity-1] ^entity-ready';
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Ready.md',
+    basename: 'Ready',
+    content: original,
+  }]);
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  const [ready] = await service.queryAsync({ dimensions: { kind: 'Project' } });
+  assert.equal(ready.referenceState, 'ready');
+
+  fixture.contentByFile.set(
+    fixture.files[0],
+    `${original}\nOrdinary paragraph ^entity-ready`,
+  );
+  assert.equal(
+    await service.materializeReference(ready),
+    null,
+    'a duplicate added outside the indexed entity set rejects the stale ready choice',
+  );
+
+  const changedKind = '- Project entity [kind:: Context] [tpsId:: entity-1] ^entity-ready';
+  fixture.contentByFile.set(fixture.files[0], changedKind);
+  const refreshed = await service.materializeReference(ready);
+  assert.deepEqual(refreshed?.dimensions.kind, ['Context']);
+  assert.deepEqual(
+    await service.queryAsync({ dimensions: { kind: 'Project' } }),
+    [],
+  );
+});
+
+test('service line replacement is one revision and stale or duplicate identities never write', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Registry.md',
+    basename: 'Registry',
+    content: [
+      '- First [kind:: Project]',
+      '- Second [kind:: Project]',
+    ].join('\n'),
+  }]);
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  service.setup();
+  service.query();
+  const beforeReadyRevision = service.getRevision();
+  const initial = await service.queryAsync({ dimensions: { kind: 'Project' } });
+  assert.equal(service.getRevision(), beforeReadyRevision + 1);
+  assert.equal(initial.length, 2);
+
+  const replacement = [
+    '- First renamed [kind:: Project]',
+    '- Third [kind:: Project]',
+  ].join('\n');
+  const beforeReplacementRevision = service.getRevision();
+  fixture.emitMetadata('changed', fixture.files[0], replacement, { frontmatter: {} });
+  fixture.contentByFile.set(fixture.files[0], replacement);
+  await Promise.resolve();
+  assert.equal(service.getRevision(), beforeReplacementRevision + 1);
+  assert.deepEqual(
+    (await service.queryAsync({ dimensions: { kind: 'Project' } })).map(({ name }) => name),
+    ['First renamed', 'Third'],
+  );
+
+  const stale = (await service.queryAsync({ dimensions: { kind: 'Project' } }))[0];
+  const changedOutsideIndex = replacement.replace('First renamed', 'Changed elsewhere');
+  fixture.contentByFile.set(fixture.files[0], changedOutsideIndex);
+  assert.equal(await service.materializeReference(stale), null);
+  assert.equal(
+    fixture.contentByFile.get(fixture.files[0]),
+    changedOutsideIndex,
+    'stale selection fails closed without appending a block ID',
+  );
+
+  const duplicateReady = [
+    '- First [kind:: Project] ^duplicate',
+    '- Second [kind:: Project] ^duplicate',
+  ].join('\n');
+  fixture.emitMetadata('changed', fixture.files[0], duplicateReady, { frontmatter: {} });
+  fixture.contentByFile.set(fixture.files[0], duplicateReady);
+  await Promise.resolve();
+  assert.deepEqual(
+    await service.queryAsync({ dimensions: { kind: 'Project' } }),
+    [],
+    'both lines with an ambiguous ready block identity are withheld',
   );
 });
 

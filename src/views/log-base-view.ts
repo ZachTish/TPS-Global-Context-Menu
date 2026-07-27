@@ -1,6 +1,8 @@
 import { BasesEntry, BasesView, Menu, Notice, QueryController, TFile, normalizePath, parseYaml } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
 import { TextInputModal } from '../modals/text-input-modal';
+import { ScheduledModal } from '../modals/scheduled-modal';
+import { TagSuggestModal } from '../modals/TagSuggestModal';
 import * as logger from '../logger';
 import {
   addLogLineTag,
@@ -8,10 +10,13 @@ import {
   normalizeInlineKey,
   readInlineFields,
   readLogLineTags,
+  readLogLinePropertyTags,
   removeLogLineTag,
   resolveEntryLineNumber,
+  mutateLogLineContent,
   setLogInlineFieldValue,
   setVisibleLineText,
+  toggleLogLineSemanticTag,
   visibleLineText,
 } from './log-line-utils';
 import { getPlainDisplayTitle } from '../utils/display-title';
@@ -59,6 +64,9 @@ import {
 } from '../utils/entity-property';
 import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
 import type { CustomProperty } from '../types';
+import { isTagListProperty } from '../utils/list-utils';
+import { collectKnownVaultTags } from '../utils/known-tags';
+import { splitLineItemContent } from '../utils/line-item-deletion';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
 
@@ -519,7 +527,7 @@ export class TpsTableView extends BasesView {
         logger.flowWarn('TpsTableView', 'source-read:failed', { path: file.path, error: logger.errorSummary(error) });
         continue;
       }
-      content.split('\n').forEach((line, index) => {
+      splitLineItemContent(content).lines.forEach((line, index) => {
         const fields = readInlineFields(line);
         const heading = parseTpsListHeadingLine(line);
         const markdownKind = getTpsTableMarkdownLineKind(line);
@@ -1155,11 +1163,85 @@ export class TpsTableView extends BasesView {
             event.stopPropagation();
             this.openEntityCellEditor(entry, column, configuredProperty);
           });
+        } else if (this.isTagColumn(column, configuredProperty)) {
+          const currentTags = readLogLinePropertyTags(
+            entry.line,
+            configuredProperty?.key || column.key,
+            entry.fields[normalizeInlineKey(configuredProperty?.key || column.key)]
+              ?? entry.queryFields?.[normalizeInlineKey(configuredProperty?.key || column.key)]
+              ?? '',
+          );
+          this.configureTypedCell(
+            cell,
+            `${configuredProperty?.label || column.label}: ${currentTags.length > 0 ? currentTags.map((tag) => `#${tag}`).join(', ') : 'empty'}`,
+            currentTags.length > 0 ? currentTags.map((tag) => `#${tag}`).join(', ') : `+ ${configuredProperty?.label || column.label}`,
+            () => this.openTagCellEditor(entry, configuredProperty?.key || column.key),
+          );
+        } else if (this.isDatetimeColumn(column, configuredProperty)) {
+          const current = entry.fields[normalizeInlineKey(configuredProperty?.key || column.key)]
+            ?? entry.queryFields?.[normalizeInlineKey(configuredProperty?.key || column.key)]
+            ?? '';
+          this.configureTypedCell(
+            cell,
+            `${configuredProperty?.label || column.label}: ${current || 'empty'}`,
+            this.getEntryValue(entry, column.key) || `+ ${configuredProperty?.label || column.label}`,
+            () => this.openScheduledCellEditor(
+              entry,
+              configuredProperty ?? this.createDatetimeColumnProperty(column),
+            ),
+          );
         } else {
           cell.setText(this.getEntryValue(entry, column.key));
         }
       }
     }
+  }
+
+  private configureTypedCell(
+    cell: HTMLElement,
+    ariaLabel: string,
+    text: string,
+    activate: () => void,
+  ): void {
+    cell.addClass('tps-log-base-cell--editable');
+    cell.setAttr('role', 'button');
+    cell.setAttr('tabindex', '0');
+    cell.setAttr('aria-label', ariaLabel);
+    cell.setText(text);
+    cell.toggleClass('is-empty', /^\+\s/u.test(text));
+    cell.addEventListener('pointerdown', (event: PointerEvent) => event.stopPropagation());
+    cell.addEventListener('click', (event: MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      activate();
+    });
+    cell.addEventListener('keydown', (event: KeyboardEvent) => {
+      if (event.key !== 'Enter' && event.key !== ' ') return;
+      event.preventDefault();
+      event.stopPropagation();
+      activate();
+    });
+  }
+
+  private isTagColumn(column: LogTableColumn, property: CustomProperty | null): boolean {
+    return isTagListProperty(property)
+      || /^(?:tag|tags)$/u.test(normalizeInlineKey(property?.key || column.key));
+  }
+
+  private isDatetimeColumn(column: LogTableColumn, property: CustomProperty | null): boolean {
+    return property?.type === 'datetime'
+      || normalizeInlineKey(property?.key || column.key) === 'scheduled';
+  }
+
+  private createDatetimeColumnProperty(column: LogTableColumn): CustomProperty {
+    const key = String(column.key || 'scheduled').replace(/^note\./u, '').trim() || 'scheduled';
+    return {
+      id: key,
+      key,
+      label: column.label || labelForKey(key),
+      type: 'datetime',
+    };
   }
 
   private formatEntityCellValue(value: string, property: CustomProperty): string {
@@ -1191,6 +1273,76 @@ export class TpsTableView extends BasesView {
         column: column.key,
       });
     });
+  }
+
+  private openTagCellEditor(entry: LogLineEntry, key = 'tags'): void {
+    const semanticTaskTags = /^(?:tag|tags)$/iu.test(normalizeInlineKey(key));
+    const current = readLogLinePropertyTags(
+      entry.line,
+      key,
+      readInlineFieldValue(entry.line, key),
+    );
+    const available = [...collectKnownVaultTags(this.plugin.app), ...current];
+    new TagSuggestModal(this.plugin.app, available, async (tag, selected) => {
+      await this.updateEntryLine(entry, (line) => (
+        semanticTaskTags
+          ? toggleLogLineSemanticTag(line, key, tag, selected)
+          : setLogInlineFieldValue(
+              line,
+              key,
+              selected
+                ? removeLogLineTag(readInlineFieldValue(line, key), tag)
+                : addLogLineTag(readInlineFieldValue(line, key), tag),
+            )
+      ));
+      logger.flow('TpsTableView', 'tag-cell:toggle', {
+        path: entry.file.path,
+        lineNumber: entry.lineNumber + 1,
+        key,
+        tag,
+        action: selected ? 'remove' : 'add',
+      });
+    }, {
+      title: 'Choose tag',
+      selectedTags: current,
+    }).open();
+  }
+
+  private openScheduledCellEditor(entry: LogLineEntry, property: CustomProperty): void {
+    const isScheduled = normalizeInlineKey(property.key) === 'scheduled';
+    const current = readInlineFieldValue(entry.line, property.key);
+    const timeEstimate = Number.parseInt(readInlineFieldValue(entry.line, 'timeEstimate') || '0', 10) || 0;
+    const allDay = /^true$/iu.test(readInlineFieldValue(entry.line, 'allDay'));
+    new ScheduledModal(this.plugin.app, current, timeEstimate, allDay, async (result) => {
+      await this.updateEntryLine(entry, (line) => {
+        let next = setLogInlineFieldValue(line, property.key, result.date || null);
+        if (isScheduled) {
+          next = setLogInlineFieldValue(
+            next,
+            'timeEstimate',
+            result.date ? String(result.timeEstimate || 0) : null,
+          );
+          next = setLogInlineFieldValue(
+            next,
+            'allDay',
+            result.date && result.allDay ? 'true' : null,
+          );
+        }
+        return next;
+      });
+      logger.flow('TpsTableView', 'datetime-cell:set', {
+        path: entry.file.path,
+        lineNumber: entry.lineNumber + 1,
+        property: property.key,
+        cleared: !result.date,
+        allDay: result.allDay,
+        timeEstimate: result.timeEstimate,
+      });
+    }, isScheduled ? {} : {
+      title: `Set ${property.label || property.key}`,
+      fieldLabel: property.label || property.key,
+      showTimeDetails: false,
+    }).open();
   }
 
   private renderGroupRow(
@@ -1555,10 +1707,19 @@ export class TpsTableView extends BasesView {
       menu.addItem((item) => {
         item
           .setTitle(current ? `${column.label}: ${current}` : `${column.label} (create field)`)
-          .setIcon(configuredProperty && isEntityReferenceProperty(configuredProperty) ? 'file-search' : 'pencil')
+          .setIcon(configuredProperty && isEntityReferenceProperty(configuredProperty)
+            ? 'file-search'
+            : this.isDatetimeColumn(column, configuredProperty) ? 'calendar' : 'pencil')
           .onClick(() => {
             if (configuredProperty && isEntityReferenceProperty(configuredProperty)) {
               this.openEntityCellEditor(entry, column, configuredProperty);
+              return;
+            }
+            if (this.isDatetimeColumn(column, configuredProperty)) {
+              this.openScheduledCellEditor(
+                entry,
+                configuredProperty ?? this.createDatetimeColumnProperty(column),
+              );
               return;
             }
             this.promptEntryField(entry, column.key, column.label, current);
@@ -1615,24 +1776,27 @@ export class TpsTableView extends BasesView {
   }
 
   private addEntryTagsMenu(menu: Menu, entry: LogLineEntry): void {
-    const current = readLogLineTags(entry.fields.tags);
+    const current = readTaskLineTags(entry.line);
     menu.addItem((item) => {
       item
         .setTitle(current.length > 0 ? `Tags (${current.length})` : 'Tags')
         .setIcon('tag');
       const subMenu = (item as any).setSubmenu();
       subMenu.addItem((sub: any) => {
-        sub.setTitle('Add tag...').setIcon('plus').onClick(() => {
+        sub.setTitle('Choose vault tag...').setIcon('search').onClick(() => {
+          this.openTagCellEditor(entry, 'tags');
+        });
+      });
+      subMenu.addItem((sub: any) => {
+        sub.setTitle('Create tag...').setIcon('plus').onClick(() => {
           new TextInputModal(this.plugin.app, 'Tag', '', async (value) => {
             const tag = normalizeTagValue(String(value || ''));
             if (!tag) {
               new Notice('Enter a valid tag.');
               return;
             }
-            await this.updateEntryLine(entry, (line) => setLogInlineFieldValue(
-              line,
-              'tags',
-              addLogLineTag(readInlineFields(line).tags, tag),
+            await this.updateEntryLine(entry, (line) => (
+              toggleLogLineSemanticTag(line, 'tags', tag, false)
             ));
           }).open();
         });
@@ -1641,10 +1805,8 @@ export class TpsTableView extends BasesView {
       for (const tag of current) {
         subMenu.addItem((sub: any) => {
           sub.setTitle(`Remove #${tag}`).setIcon('x').onClick(() => {
-            void this.updateEntryLine(entry, (line) => setLogInlineFieldValue(
-              line,
-              'tags',
-              removeLogLineTag(readInlineFields(line).tags, tag),
+            void this.updateEntryLine(entry, (line) => (
+              toggleLogLineSemanticTag(line, 'tags', tag, true)
             ));
           });
         });
@@ -1685,24 +1847,14 @@ export class TpsTableView extends BasesView {
   }
 
   private async updateEntryLine(entry: LogLineEntry, updater: (line: string) => string | null): Promise<void> {
-    const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
+    let mutation: ReturnType<typeof mutateLogLineContent> = {
+      content: '',
+      outcome: 'unchanged',
+      lineNumber: entry.lineNumber,
+    };
     await this.plugin.app.vault.process(entry.file, (content) => {
-      const lines = content.split('\n');
-      const lineNumber = resolveEntryLineNumber(lines, entry);
-      if (lineNumber < 0) {
-        mutation.outcome = 'stale';
-        return content;
-      }
-      const current = lines[lineNumber] ?? '';
-      const nextLine = updater(current);
-      if (nextLine === null) {
-        lines.splice(lineNumber, 1);
-      } else {
-        lines[lineNumber] = nextLine;
-      }
-      if (nextLine === current) return content;
-      mutation.outcome = 'changed';
-      return lines.join('\n');
+      mutation = mutateLogLineContent(content, entry, updater);
+      return mutation.content;
     });
     if (mutation.outcome === 'stale') {
       logger.flowWarn('TpsTableView', 'record-mutation:stale-target', {

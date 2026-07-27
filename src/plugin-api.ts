@@ -533,11 +533,24 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             executeCommandById: (commandId: string) => executeCommandById(plugin.app, commandId),
         },
         entityIndex: {
-            version: 1,
+            version: 2,
             query: (criteria: Parameters<typeof plugin.entityIndexService.query>[0]) =>
                 plugin.entityIndexService.query(criteria),
+            queryAsync: (criteria: Parameters<typeof plugin.entityIndexService.queryAsync>[0]) =>
+                plugin.entityIndexService.queryAsync(criteria),
+            ensureReady: () => plugin.entityIndexService.ensureReady(),
             getById: (id: string) => plugin.entityIndexService.getById(id),
             getByPath: (path: string) => plugin.entityIndexService.getByPath(path),
+            getByLocator: (
+                locator: Parameters<typeof plugin.entityIndexService.getByLocator>[0],
+            ) => plugin.entityIndexService.getByLocator(locator),
+            getByReferenceTarget: (target: string) =>
+                plugin.entityIndexService.getByReferenceTarget(target),
+            getBySourcePath: (path: string) =>
+                plugin.entityIndexService.getBySourcePath(path),
+            materializeReference: (
+                entityOrId: Parameters<typeof plugin.entityIndexService.materializeReference>[0],
+            ) => plugin.entityIndexService.materializeReference(entityOrId),
             getDimensionValues: (dimension: string) =>
                 plugin.entityIndexService.getDimensionValues(dimension),
             getRevision: () => plugin.entityIndexService.getRevision(),

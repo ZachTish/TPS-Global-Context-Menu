@@ -75,6 +75,69 @@ test('whole-Base kind and active-view fields resolve additively', async () => {
   assert.deepEqual(plan.diagnostics.selectedBranches, ['root[0].and[0].or[0]']);
 });
 
+test('entity links, tags, and scheduled defaults compose additively like a task Base view', async () => {
+  const [
+    { resolveTpsBaseLineCreationPlan },
+    { buildKanbanRootTaskLine },
+    { buildTpsTableMarkdownLine },
+  ] = await Promise.all([loadModule(), loadTaskCreationModule(), loadTableCreationModule()]);
+  const plan = resolveTpsBaseLineCreationPlan([
+    {
+      and: [
+        'projects.contains("[[Entities/Project Note]]")',
+        'contexts.contains("[[Entities/Context Note]]")',
+        'tags.contains("qa/entity-default")',
+        'scheduled >= date("2026-08-16")',
+        'scheduled < date("2026-08-17")',
+      ],
+    },
+    {
+      and: [
+        'kind == "task"',
+        'task.path == "Inbox/Tasks.md"',
+      ],
+    },
+  ]);
+
+  assert.equal(plan.blockedReason, null);
+  assert.equal(plan.kind, 'task');
+  assert.equal(plan.targetPath, 'Inbox/Tasks.md');
+  assert.equal(plan.status, null);
+  assert.deepEqual(plan.tags, ['#qa/entity-default']);
+  assert.deepEqual(plan.fields, {
+    projects: '[[Entities/Project Note]]',
+    contexts: '[[Entities/Context Note]]',
+    scheduled: '2026-08-16',
+  });
+
+  const defaults = {
+    status: plan.status,
+    targetPath: plan.targetPath,
+    inlineFields: new Map(Object.entries(plan.fields).map(([key, value]) => [key, { key, value }])),
+    tags: new Set(plan.tags),
+    excludedTags: new Set(),
+  };
+  const expectedLine = '- [ ] Ship entity matrix #qa/entity-default [projects:: [[Entities/Project Note]]] [contexts:: [[Entities/Context Note]]] [scheduled:: 2026-08-16]';
+  assert.equal(
+    buildKanbanRootTaskLine({
+      title: 'Ship entity matrix',
+      propName: null,
+      laneValue: null,
+      itemKind: 'task',
+      defaults,
+      getCheckboxStateForStatus: () => '[ ]',
+    }),
+    expectedLine,
+  );
+  assert.equal(
+    buildTpsTableMarkdownLine('task', 'Ship entity matrix', plan.fields, {
+      checkboxState: '[ ]',
+      tags: plan.tags,
+    }),
+    expectedLine,
+  );
+});
+
 test('the production Shopping query shape inherits task kind and adds the view tag', async () => {
   const { resolveTpsBaseLineCreationPlan } = await loadModule();
   const plan = resolveTpsBaseLineCreationPlan([

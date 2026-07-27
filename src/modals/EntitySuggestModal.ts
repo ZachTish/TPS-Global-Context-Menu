@@ -8,11 +8,14 @@ import * as logger from '../logger';
 import type { CustomProperty } from '../types';
 import {
   buildEntityReferenceChoices,
+  entityMatchesAcceptedKinds,
+  entityToReferenceChoice,
   normalizeAcceptsKind,
   resolveEntityIndexQueryable,
 } from '../utils/entity-property';
 import type {
   EntityIndexQueryable,
+  EntityIndexQueryResult,
   EntityIndexRecordLike,
   EntityIndexSourceLike,
   EntityReferenceChoice,
@@ -29,10 +32,11 @@ type AcceptsKindSource = unknown | Pick<CustomProperty, 'acceptsKind'>;
 /**
  * Search-only picker for indexed entity references. It intentionally exposes no
  * "create" or arbitrary-value route: every returned value is a canonical
- * wikilink to a note accepted by the configured Kind constraint.
+ * wikilink to a note or line accepted by the configured Kind constraint.
  */
 export class EntitySuggestModal extends FuzzySuggestModal<EntityReferenceChoice> {
   private items: EntityReferenceChoice[] | null = null;
+  private readonly noMatchesText: string;
 
   constructor(
     app: App,
@@ -43,32 +47,31 @@ export class EntitySuggestModal extends FuzzySuggestModal<EntityReferenceChoice>
   ) {
     super(app);
     const kinds = acceptedKinds.join(', ');
-    this.setPlaceholder(options.placeholder || `Search ${kinds || 'matching'} notes…`);
-    this.emptyStateText = options.emptyStateText || `No notes match Kind ${formatKindList(acceptedKinds)}.`;
-    this.setInstructions([{ command: '↵', purpose: 'select note' }]);
+    this.setPlaceholder(options.placeholder || `Search ${kinds || 'matching'} entities…`);
+    this.noMatchesText = options.emptyStateText
+      || `No notes or lines match Kind ${formatKindList(acceptedKinds)}.`;
+    this.emptyStateText = 'Loading matching entities…';
+    this.setInstructions([{ command: '↵', purpose: 'select entity' }]);
     this.limit = 500;
+    void this.loadItems();
   }
 
   getItems(): EntityReferenceChoice[] {
-    if (this.items) return this.items;
+    return this.items ?? [];
+  }
 
+  private async loadItems(): Promise<void> {
     try {
-      const result = this.entityIndex.query({
-        dimensions: {
-          kind: {
-            anyOf: [...this.acceptedKinds],
-          },
-        },
-      });
-      this.items = buildEntityReferenceChoices(readQueryEntities(result));
+      this.items = buildEntityReferenceChoices(await this.queryAcceptedEntities());
+      this.emptyStateText = this.noMatchesText;
     } catch (error) {
       logger.flowError('EntitySuggestModal', 'query:failed', error, {
         acceptedKindCount: this.acceptedKinds.length,
       });
       this.items = [];
+      this.emptyStateText = 'Could not load matching entities.';
     }
-
-    return this.items;
+    this.refreshSuggestions();
   }
 
   getItemText(item: EntityReferenceChoice): string {
@@ -92,12 +95,79 @@ export class EntitySuggestModal extends FuzzySuggestModal<EntityReferenceChoice>
   }
 
   onChooseItem(item: EntityReferenceChoice, _evt: MouseEvent | KeyboardEvent): void {
-    void Promise.resolve(this.onChoose(item)).catch((error) => {
+    void this.chooseResolvedItem(item).catch((error) => {
       logger.flowError('EntitySuggestModal', 'choose:failed', error, {
         path: item.path,
       });
-      new Notice('Could not set the selected note.');
+      new Notice('Could not set the selected entity.');
     });
+  }
+
+  private async chooseResolvedItem(item: EntityReferenceChoice): Promise<void> {
+    const currentEntity = (await this.queryAcceptedEntities()).find(
+      (entity) => String(entity.id || '').toLocaleLowerCase() === item.id.toLocaleLowerCase(),
+    );
+    if (!currentEntity) {
+      new Notice('That entity was deleted or no longer matches this property. Nothing was updated.');
+      return;
+    }
+
+    let resolvedEntity = currentEntity;
+    const isLineEntity = currentEntity.entityType === 'block';
+    if (isLineEntity || currentEntity.referenceState === 'provisional') {
+      if (typeof this.entityIndex.materializeReference !== 'function') {
+        if (currentEntity.referenceState !== 'provisional') {
+          resolvedEntity = currentEntity;
+        } else {
+          new Notice('This line cannot be referenced until the entity index is fully available.');
+          return;
+        }
+      } else {
+        const materialized = await this.entityIndex.materializeReference(currentEntity);
+        if (!materialized) {
+          new Notice('That line changed or has a duplicate identity. Nothing was updated.');
+          return;
+        }
+        resolvedEntity = materialized;
+      }
+    }
+    if (!entityMatchesAcceptedKinds(resolvedEntity, this.acceptedKinds)) {
+      new Notice('That entity no longer matches this property’s accepted Kind. Nothing was updated.');
+      return;
+    }
+    const resolvedChoice = entityToReferenceChoice(resolvedEntity);
+    if (!resolvedChoice?.wikilink || resolvedChoice.referenceState !== 'ready') {
+      if (currentEntity.referenceState === 'provisional') {
+        new Notice('This line cannot be referenced until the entity index is fully available.');
+      }
+      return;
+    }
+    await this.onChoose(resolvedChoice);
+  }
+
+  private async queryAcceptedEntities(): Promise<readonly EntityIndexRecordLike[]> {
+    const query = {
+      dimensions: {
+        kind: {
+          anyOf: [...this.acceptedKinds],
+        },
+      },
+    };
+    let result: EntityIndexQueryResult;
+    if (typeof this.entityIndex.queryAsync === 'function') {
+      result = await this.entityIndex.queryAsync(query);
+    } else {
+      if (typeof this.entityIndex.ensureReady === 'function') {
+        await this.entityIndex.ensureReady();
+      }
+      result = this.entityIndex.query(query);
+    }
+    return readQueryEntities(result);
+  }
+
+  private refreshSuggestions(): void {
+    if (!this.inputEl) return;
+    this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
   }
 }
 
@@ -134,7 +204,7 @@ export function openEntitySuggestModal(
 }
 
 function readQueryEntities(
-  result: ReturnType<EntityIndexQueryable['query']>,
+  result: EntityIndexQueryResult,
 ): readonly EntityIndexRecordLike[] {
   if (Array.isArray(result)) return result;
   if (!result || typeof result !== 'object') return [];

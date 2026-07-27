@@ -1,6 +1,7 @@
 const TASK_LINE_RE = /^(\s*(?:[-*+]|\d+[.)])\s+)\[([^\]\r\n]?)\](\s*)(.*)$/;
 const TAG_GLOBAL_RE = /(?:^|\s)(#[\p{L}\p{N}_/-]+)/gu;
 const TPS_INLINE_METADATA_RE = /\s*(?:\[(?:tpsInlineProps|tps-inline-props)\s*::\s*[^\]]+\]|%%\s*tps-inline-props\s*:[\s\S]*?%%|<!--\s*tps-inline-props\s*:[\s\S]*?-->|<span\b[^>]*data-tps-inline-props\s*=\s*(?:"[^"]*"|'[^']*')[^>]*>\s*<\/span>|\[\^\s*tps-inline:[^\]]+\](?::\s*\S+)?)\s*/gi;
+const LINE_BLOCK_ID_RE = /(?:^|[ \t])\^([A-Za-z0-9-]+)[ \t]*$/u;
 
 export const TASK_ASSOCIATED_NOTE_PATH_KEY = 'associatedNotePath';
 
@@ -43,6 +44,31 @@ export function parseTaskLine(line: string): ParsedTaskLine | null {
     token: `[${marker}]`,
     body: String(match[4] || '').trim(),
   };
+}
+
+/**
+ * Read a native Obsidian block ID from the absolute end of a Markdown line.
+ *
+ * Obsidian only accepts Latin letters, numbers, and dashes in block IDs. Keeping
+ * this metadata at the absolute end is important: inline fields or hidden TPS
+ * carriers appended after it make the block reference unusable.
+ */
+export function readLineBlockId(line: string): string {
+  return String(line || '').match(LINE_BLOCK_ID_RE)?.[1] || '';
+}
+
+export function stripLineBlockId(line: string): string {
+  const source = String(line || '');
+  const match = source.match(LINE_BLOCK_ID_RE);
+  if (!match || match.index === undefined) return source;
+  return source.slice(0, match.index).trimEnd();
+}
+
+export function appendLineBlockId(line: string, blockId: string): string {
+  const cleanId = String(blockId || '').trim().replace(/^\^/u, '');
+  const source = stripLineBlockId(line).trimEnd();
+  if (!cleanId || !/^[A-Za-z0-9-]+$/u.test(cleanId)) return source;
+  return `${source} ^${cleanId}`;
 }
 
 export function getTaskDisplayTitle(line: string): string {
@@ -103,7 +129,9 @@ export function mergeTpsInlinePropsMetadata(
     .map(([key, value]) => [String(key || '').trim(), value] as const)
     .filter(([key, value]) => key.length > 0 && value !== undefined);
   if (entries.length === 0) return line;
-  const blocks = getTaskInlinePropsJsonBlocks(line);
+  const blockId = readLineBlockId(line);
+  const sourceLine = blockId ? stripLineBlockId(line) : line;
+  const blocks = getTaskInlinePropsJsonBlocks(sourceLine);
   const target = blocks.find((block) => entries.some(([key]) => !!findCaseInsensitiveRecordKey(block.value, key)))
     || blocks[0];
   if (target) {
@@ -117,20 +145,25 @@ export function mergeTpsInlinePropsMetadata(
     }
     if (JSON.stringify(value) === JSON.stringify(target.value)) return line;
     const serialized = serializeTaskInlinePropsPayload(value, target.encoding);
-    return `${line.slice(0, target.payloadStart)}${serialized}${line.slice(target.payloadEnd)}`;
+    const updated = `${sourceLine.slice(0, target.payloadStart)}${serialized}${sourceLine.slice(target.payloadEnd)}`;
+    return blockId ? appendLineBlockId(updated, blockId) : updated;
   }
 
-  return `${String(line || '').trimEnd()} %% tps-inline-props:${JSON.stringify(Object.fromEntries(entries))} %%`.trimEnd();
+  const updated = `${String(sourceLine || '').trimEnd()} %% tps-inline-props:${JSON.stringify(Object.fromEntries(entries))} %%`.trimEnd();
+  return blockId ? appendLineBlockId(updated, blockId) : updated;
 }
 
 export function preserveTpsInlinePropsMetadata(sourceLine: string, editedLine: string): string {
   const source = String(sourceLine || '');
+  const blockId = readLineBlockId(source);
   const carriers = getTaskInlinePropsMetadataRanges(source)
     .map((range) => source.slice(range.start, range.end).trim())
     .filter(Boolean);
-  const visible = stripTaskInlinePropsMetadata(editedLine).trimEnd();
-  if (carriers.length === 0) return visible;
-  return `${visible} ${carriers.join(' ')}`.trimEnd();
+  const visible = stripLineBlockId(stripTaskInlinePropsMetadata(editedLine)).trimEnd();
+  const updated = carriers.length === 0
+    ? visible
+    : `${visible} ${carriers.join(' ')}`.trimEnd();
+  return blockId ? appendLineBlockId(updated, blockId) : updated;
 }
 
 export function normalizeTaskAssociatedNotePath(rawValue: unknown): string {
@@ -257,7 +290,7 @@ export function readInlineFieldValue(line: string, key: string): string {
   const body = parseTaskLine(line)?.body ?? String(line || '');
   const normalizedKey = String(key || '').trim().toLowerCase();
   if (!normalizedKey) return '';
-  for (const field of scanTaskInlineFields(body)) {
+  for (const field of readSemanticInlineFieldRanges(body)) {
     if (field.key.toLowerCase() === normalizedKey) return field.value.trim();
   }
   return '';
@@ -265,7 +298,7 @@ export function readInlineFieldValue(line: string, key: string): string {
 
 export function readTaskInlineFields(line: string): TaskInlineField[] {
   const body = parseTaskLine(line)?.body ?? String(line || '');
-  return scanTaskInlineFields(body).map((field) => ({
+  return readSemanticInlineFieldRanges(body).map((field) => ({
     key: field.key,
     value: field.value.trim(),
   }));
@@ -281,38 +314,63 @@ export function readInlineFieldRanges(source: string): TaskInlineFieldRange[] {
   return scanTaskInlineFields(String(source || '')).map((field) => ({ ...field }));
 }
 
+/**
+ * Return only inline fields that represent persisted Markdown properties.
+ *
+ * Generic HTML comments such as `<!-- [project:: [[Alpha]]] -->` are an
+ * intentional hidden property carrier and remain semantic. Field-shaped text
+ * inside a closed inline-code span or a protected TPS JSON carrier is merely
+ * payload/example text and must never participate in reads, writes, or stable
+ * identity resolution.
+ */
+export function readSemanticInlineFieldRanges(source: string): TaskInlineFieldRange[] {
+  const value = String(source || '');
+  const excludedRanges = normalizeTaskTextRanges([
+    ...getTaskInlinePropsMetadataRanges(value),
+    ...getClosedInlineCodeRanges(value),
+  ]);
+  return scanTaskInlineFields(value)
+    .filter((field) => !isTextRangeContainedByAny(field, excludedRanges))
+    .map((field) => ({ ...field }));
+}
+
+export function readTaskInlinePropsMetadataRanges(source: string): TaskTextRange[] {
+  return getTaskInlinePropsMetadataRanges(String(source || ''))
+    .map((range) => ({ ...range }));
+}
+
 export function setInlineFieldValueOnTaskLine(line: string, key: string, value: string | null): string {
-  const parsed = parseTaskLine(line);
+  const blockId = readLineBlockId(line);
+  const source = blockId ? stripLineBlockId(line) : line;
+  const parsed = parseTaskLine(source);
   if (!parsed) return line;
   const cleanKey = String(key || '').trim();
   if (!cleanKey) return line;
   const nextBody = setInlineFieldValueOnBody(parsed.body, cleanKey, value);
-  return `${parsed.prefix}${parsed.token}${nextBody ? ` ${nextBody}` : ''}`.trimEnd();
+  const updated = `${parsed.prefix}${parsed.token}${nextBody ? ` ${nextBody}` : ''}`.trimEnd();
+  return blockId ? appendLineBlockId(updated, blockId) : updated;
 }
 
 export function setInlineFieldValueOnLine(line: string, key: string, value: string | null): string {
-  const source = String(line || '');
+  const blockId = readLineBlockId(line);
+  const source = blockId ? stripLineBlockId(line) : String(line || '');
   const cleanKey = String(key || '').trim();
-  if (!cleanKey) return source;
+  if (!cleanKey) return String(line || '');
   const indentation = source.match(/^[\t ]*/u)?.[0] || '';
-  return `${indentation}${setInlineFieldValueOnBody(source.slice(indentation.length), cleanKey, value)}`.trimEnd();
+  const updated = `${indentation}${setInlineFieldValueOnBody(source.slice(indentation.length), cleanKey, value)}`.trimEnd();
+  return blockId ? appendLineBlockId(updated, blockId) : updated;
 }
 
 export function readInlineTags(line: string): string[] {
   const body = parseTaskLine(line)?.body ?? String(line || '');
   const tags: string[] = [];
   const seen = new Set<string>();
-  TAG_GLOBAL_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = TAG_GLOBAL_RE.exec(body)) !== null) {
-    const tag = normalizeInlineTag(match[1]);
-    const key = tag.toLowerCase();
-    if (tag && !seen.has(key)) {
-      tags.push(tag);
-      seen.add(key);
-    }
+  for (const range of getVisibleTaskTagRanges(body)) {
+    const key = range.tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tags.push(range.tag);
   }
-  TAG_GLOBAL_RE.lastIndex = 0;
   return tags;
 }
 
@@ -324,10 +382,14 @@ export function readInlineTags(line: string): string[] {
  * `readInlineTags`, which intentionally represents writable raw hashtags.
  */
 export function readTaskLineTags(line: string): string[] {
-  const inlineFieldTags = readTaskInlineFields(line)
+  const source = String(line || '');
+  const fields = readSemanticInlineFieldRanges(source);
+  const inlineFieldTags = fields
     .filter((field) => /^(?:tag|tags)$/iu.test(field.key.trim()))
     .flatMap((field) => parseTaskTagValues(field.value));
-  return parseTaskTagValues([...readInlineTags(line), ...inlineFieldTags]);
+  const visibleTags = getVisibleTaskTagRanges(source)
+    .map((range) => range.tag);
+  return parseTaskTagValues([...visibleTags, ...inlineFieldTags]);
 }
 
 /**
@@ -365,18 +427,22 @@ export function addInlineTagToTaskLine(line: string, tag: string): string {
   if (!normalized) return line;
   const current = readInlineTags(line).map((value) => value.toLowerCase());
   if (current.includes(normalized.toLowerCase())) return line;
-  return `${String(line || '').trimEnd()} #${normalized}`.trimEnd();
+  const blockId = readLineBlockId(line);
+  const source = blockId ? stripLineBlockId(line) : String(line || '');
+  const updated = `${source.trimEnd()} #${normalized}`.trimEnd();
+  return blockId ? appendLineBlockId(updated, blockId) : updated;
 }
 
 export function removeInlineTagFromTaskLine(line: string, tag: string): string {
   const normalized = normalizeInlineTag(tag).toLowerCase();
   if (!normalized) return line;
-  return String(line || '')
-    .replace(TAG_GLOBAL_RE, (raw, tagValue: string) => {
-      return normalizeInlineTag(tagValue).toLowerCase() === normalized ? '' : raw;
-    })
-    .replace(/[ \t]{2,}/g, ' ')
-    .trimEnd();
+  const blockId = readLineBlockId(line);
+  const source = blockId ? stripLineBlockId(line) : String(line || '');
+  const matchingRanges = getVisibleTaskTagRanges(source)
+    .filter((range) => range.tag.toLowerCase() === normalized)
+    .map((range) => getTagRemovalRange(source, range));
+  const updated = removeTaskTextRanges(source, matchingRanges).trimEnd();
+  return blockId ? appendLineBlockId(updated, blockId) : updated;
 }
 
 export function insertLineAfterFrontmatter(content: string, line: string): string {
@@ -398,6 +464,7 @@ export function findAfterFrontmatterIndex(lines: string[]): number {
 export function stripTaskMetadata(body: string): string {
   const source = String(body || '');
   return removeTaskTextRanges(source, getTaskMetadataRanges(source), ' ')
+    .replace(/<!--\s*-->/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -420,10 +487,10 @@ function removeInlineFieldFromBody(body: string, key: string): string {
   const normalizedKey = String(key || '').trim().toLowerCase();
   if (!normalizedKey) return String(body || '').trimEnd();
   const source = String(body || '');
-  const matches = scanTaskInlineFields(source)
-    .filter((field) => field.key.toLowerCase() === normalizedKey);
-  return removeTaskTextRanges(source, matches, ' ')
-    .replace(/[ \t]{2,}/g, ' ')
+  const matches = readSemanticInlineFieldRanges(source)
+    .filter((field) => field.key.toLowerCase() === normalizedKey)
+    .map((field) => getInlineFieldRemovalRange(source, field));
+  return removeTaskTextRanges(source, matches)
     .trim();
 }
 
@@ -451,6 +518,7 @@ function extractTaskEditorMetadata(body: string): string[] {
 function stripTaskEditorMetadata(body: string): string {
   const source = String(body || '');
   return removeTaskTextRanges(source, getTaskEditorMetadataRanges(source), ' ')
+    .replace(/<!--\s*-->/gu, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -458,14 +526,19 @@ function stripTaskEditorMetadata(body: string): string {
 function getTaskEditorMetadataRanges(body: string): TaskTextRange[] {
   const source = String(body || '');
   return normalizeTaskTextRanges([
-    ...scanTaskInlineFields(source),
+    ...readSemanticInlineFieldRanges(source),
     ...getTaskInlinePropsMetadataRanges(source),
+    ...getLineBlockIdRanges(source),
   ]);
 }
 
 type TaskTextRange = {
   start: number;
   end: number;
+};
+
+type TaskTagTextRange = TaskTextRange & {
+  tag: string;
 };
 
 function scanTaskInlineFields(value: string): TaskInlineFieldRange[] {
@@ -521,10 +594,17 @@ function scanTaskInlineFields(value: string): TaskInlineFieldRange[] {
 function getTaskMetadataRanges(value: string): TaskTextRange[] {
   const source = String(value || '');
   const hidden = getTaskInlinePropsMetadataRanges(source);
-  const fields = scanTaskInlineFields(source)
+  const fields = readSemanticInlineFieldRanges(source)
     .filter((field) => !['tpsinlineprops', 'tps-inline-props'].includes(field.key.toLowerCase()));
-  const tags = getTaskTagRanges(source);
-  return normalizeTaskTextRanges([...hidden, ...fields, ...tags]);
+  const tags = getVisibleTaskTagRanges(source);
+  return normalizeTaskTextRanges([...hidden, ...fields, ...tags, ...getLineBlockIdRanges(source)]);
+}
+
+function getLineBlockIdRanges(value: string): TaskTextRange[] {
+  const source = String(value || '');
+  const match = source.match(LINE_BLOCK_ID_RE);
+  if (!match || match.index === undefined) return [];
+  return [{ start: match.index, end: source.length }];
 }
 
 function getTaskInlinePropsMetadataRanges(value: string): TaskTextRange[] {
@@ -539,20 +619,119 @@ function getTaskInlinePropsMetadataRanges(value: string): TaskTextRange[] {
   return ranges;
 }
 
-function getTaskTagRanges(value: string): TaskTextRange[] {
+function getVisibleTaskTagRanges(value: string): TaskTagTextRange[] {
   const source = String(value || '');
-  const ranges: TaskTextRange[] = [];
+  const protectedRanges = getTaskInlinePropsMetadataRanges(source);
+  const excludedRanges = normalizeTaskTextRanges([
+    ...protectedRanges,
+    ...readSemanticInlineFieldRanges(source),
+    ...getHtmlCommentRanges(source),
+    ...getClosedInlineCodeRanges(source),
+  ]);
+  const ranges: TaskTagTextRange[] = [];
   TAG_GLOBAL_RE.lastIndex = 0;
   let match: RegExpExecArray | null;
   while ((match = TAG_GLOBAL_RE.exec(source)) !== null) {
     const raw = String(match[0] || '');
-    const tag = String(match[1] || '');
-    const offset = raw.lastIndexOf(tag);
+    const rawTag = String(match[1] || '');
+    const offset = raw.lastIndexOf(rawTag);
     const start = match.index + Math.max(0, offset);
-    ranges.push({ start, end: start + tag.length });
+    const end = start + rawTag.length;
+    if (isTextRangeContainedByAny({ start, end }, excludedRanges)) continue;
+    const tag = normalizeInlineTag(rawTag);
+    if (tag) ranges.push({ start, end, tag });
   }
   TAG_GLOBAL_RE.lastIndex = 0;
   return ranges;
+}
+
+function getTagRemovalRange(source: string, range: TaskTagTextRange): TaskTextRange {
+  if (/[ \t]/u.test(source[range.end] || '')) {
+    return { start: range.start, end: range.end + 1 };
+  }
+  if (range.start > 0 && /[ \t]/u.test(source[range.start - 1] || '')) {
+    return { start: range.start - 1, end: range.end };
+  }
+  return { start: range.start, end: range.end };
+}
+
+function getInlineFieldRemovalRange(
+  source: string,
+  range: TaskInlineFieldRange,
+): TaskTextRange {
+  if (/[ \t]/u.test(source[range.end] || '')) {
+    return { start: range.start, end: range.end + 1 };
+  }
+  if (range.start > 0 && /[ \t]/u.test(source[range.start - 1] || '')) {
+    return { start: range.start - 1, end: range.end };
+  }
+  return { start: range.start, end: range.end };
+}
+
+function getClosedInlineCodeRanges(source: string): TaskTextRange[] {
+  const ranges: TaskTextRange[] = [];
+  for (let index = 0; index < source.length;) {
+    if (source[index] !== '`' || isEscapedMarkdownCharacter(source, index)) {
+      index += 1;
+      continue;
+    }
+
+    let markerLength = 1;
+    while (source[index + markerLength] === '`') markerLength += 1;
+    let cursor = index + markerLength;
+    let close = -1;
+    while (cursor < source.length) {
+      if (source[cursor] !== '`') {
+        cursor += 1;
+        continue;
+      }
+      let candidateLength = 1;
+      while (source[cursor + candidateLength] === '`') candidateLength += 1;
+      if (candidateLength === markerLength) {
+        close = cursor;
+        break;
+      }
+      cursor += candidateLength;
+    }
+
+    if (close < 0) {
+      index += markerLength;
+      continue;
+    }
+    ranges.push({ start: index, end: close + markerLength });
+    index = close + markerLength;
+  }
+  return ranges;
+}
+
+function isEscapedMarkdownCharacter(source: string, index: number): boolean {
+  let slashCount = 0;
+  for (let cursor = index - 1; cursor >= 0 && source[cursor] === '\\'; cursor -= 1) {
+    slashCount += 1;
+  }
+  return slashCount % 2 === 1;
+}
+
+function getHtmlCommentRanges(source: string): TaskTextRange[] {
+  const ranges: TaskTextRange[] = [];
+  const pattern = /<!--[\s\S]*?-->/gu;
+  let match: RegExpExecArray | null;
+  while ((match = pattern.exec(source)) !== null) {
+    ranges.push({
+      start: match.index,
+      end: match.index + String(match[0] || '').length,
+    });
+  }
+  return ranges;
+}
+
+function isTextRangeContainedByAny(
+  range: TaskTextRange,
+  containers: readonly TaskTextRange[],
+): boolean {
+  return containers.some(
+    (container) => range.start >= container.start && range.end <= container.end,
+  );
 }
 
 function normalizeTaskTextRanges(ranges: TaskTextRange[]): TaskTextRange[] {

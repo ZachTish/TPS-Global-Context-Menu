@@ -15,6 +15,7 @@ const PROPERTY_PREFIXES = new Set([
 export interface EntityIndexRecordLike {
   id?: string;
   path?: string;
+  sourcePath?: string;
   title?: string;
   label?: string;
   displayName?: string;
@@ -22,11 +23,21 @@ export interface EntityIndexRecordLike {
   basename?: string;
   file?: TFile | null;
   dimensions?: Record<string, unknown>;
+  entityType?: 'note' | 'block';
+  subpath?: string;
+  blockId?: string;
+  lineKind?: 'task' | 'bullet' | 'heading';
+  lineNumber?: number;
+  referenceState?: 'ready' | 'provisional';
+  locatorKey?: string;
+  referenceTarget?: string;
 }
 
 export interface EntityReferenceChoice {
   id: string;
   path: string;
+  referenceTarget: string;
+  referenceState: 'ready' | 'provisional';
   label: string;
   detail: string;
   wikilink: string;
@@ -36,11 +47,20 @@ export interface EntityReferenceChoice {
 
 export type EntityIndexQuery = EntityIndexQueryContract;
 
+export type EntityIndexQueryResult =
+  | readonly EntityIndexRecordLike[]
+  | {
+      entities?: readonly EntityIndexRecordLike[];
+      items?: readonly EntityIndexRecordLike[];
+    };
+
 export interface EntityIndexQueryable {
-  query(query: EntityIndexQueryContract): readonly EntityIndexRecordLike[] | {
-    entities?: readonly EntityIndexRecordLike[];
-    items?: readonly EntityIndexRecordLike[];
-  };
+  query(query: EntityIndexQueryContract): EntityIndexQueryResult;
+  queryAsync?(query: EntityIndexQueryContract): Promise<EntityIndexQueryResult>;
+  ensureReady?(): Promise<void>;
+  materializeReference?(
+    entityOrId: EntityIndexRecordLike | string,
+  ): Promise<EntityIndexRecordLike | null>;
 }
 
 export interface EntityIndexSourceLike {
@@ -98,6 +118,23 @@ export function isEntityReferenceProperty(
   property: Pick<CustomProperty, 'acceptsKind'> | null | undefined,
 ): boolean {
   return normalizeAcceptsKind(property?.acceptsKind).length > 0;
+}
+
+export function entityMatchesAcceptedKinds(
+  entity: EntityIndexRecordLike | null | undefined,
+  acceptedKinds: readonly string[],
+): boolean {
+  if (!entity) return false;
+  const raw = entity.dimensions?.kind;
+  const values = (Array.isArray(raw) ? raw : raw == null ? [] : [raw])
+    .map((value) => String(value || '').trim().toLocaleLowerCase())
+    .filter(Boolean);
+  const accepted = new Set(
+    acceptedKinds
+      .map((value) => String(value || '').trim().toLocaleLowerCase())
+      .filter(Boolean),
+  );
+  return values.some((value) => accepted.has(value));
 }
 
 /**
@@ -162,7 +199,7 @@ export function getPropertyReferenceCandidates(reference: unknown): string[] {
 }
 
 export function getEntityPath(entity: EntityIndexRecordLike | null | undefined): string {
-  return String(entity?.file?.path || entity?.path || '').trim();
+  return String(entity?.file?.path || entity?.sourcePath || entity?.path || '').trim();
 }
 
 export function getEntityDisplayLabel(entity: EntityIndexRecordLike | null | undefined): string {
@@ -180,13 +217,32 @@ export function getEntityDisplayLabel(entity: EntityIndexRecordLike | null | und
 }
 
 export function getEntityDisplayPath(entity: EntityIndexRecordLike | null | undefined): string {
-  return getEntityPath(entity).replace(/\.md$/iu, '');
+  const path = getEntityPath(entity).replace(/\.md$/iu, '');
+  const lineDetail = entity?.lineKind
+    ? `${entity.lineKind} line${entity.lineNumber ? ` ${entity.lineNumber}` : ''}`
+    : '';
+  return lineDetail ? `${path} · ${lineDetail}` : path;
 }
 
 export function formatEntityReference(entity: EntityIndexRecordLike | null | undefined): string {
   const path = getEntityPath(entity);
-  if (!path) return '';
-  return formatFileWikilink(path, sanitizeEntityReferenceAlias(getEntityDisplayLabel(entity)));
+  const subpath = getEntitySubpath(entity);
+  const target = subpath
+    ? `${path.replace(/\.md$/iu, '')}${subpath}`
+    : path.replace(/\.md$/iu, '');
+  const declaredTarget = String(entity?.referenceTarget || '').trim();
+  if (
+    !path
+    || !isSafeEntityReferenceTarget(target)
+    || (declaredTarget && !isSafeEntityReferenceTarget(declaredTarget))
+    || entity?.referenceState === 'provisional'
+    || (entity?.entityType === 'block' && !subpath)
+  ) {
+    return '';
+  }
+  const alias = sanitizeEntityReferenceAlias(getEntityDisplayLabel(entity));
+  if (!subpath) return formatFileWikilink(path, alias);
+  return alias ? `[[${target}|${alias}]]` : `[[${target}]]`;
 }
 
 /**
@@ -232,16 +288,34 @@ export function entityToReferenceChoice(
 ): EntityReferenceChoice | null {
   if (!entity) return null;
   const path = getEntityPath(entity);
-  if (!path || !isMarkdownEntity(entity, path)) return null;
+  if (
+    !path
+    || !isMarkdownEntity(entity, path)
+    || !isSafeEntityReferenceTarget(path)
+  ) {
+    return null;
+  }
 
   const label = getEntityDisplayLabel(entity) || getPathBasename(path);
   const detail = getEntityDisplayPath(entity);
-  const wikilink = formatFileWikilink(path, sanitizeEntityReferenceAlias(label));
-  if (!wikilink) return null;
+  const referenceState = entity.referenceState === 'provisional'
+    ? 'provisional'
+    : 'ready';
+  const wikilink = formatEntityReference(entity);
+  if (referenceState === 'ready' && !wikilink) return null;
+  const referenceTarget = getEntityReferenceTarget(entity);
+  if (
+    referenceTarget
+    && !isSafeEntityReferenceTarget(referenceTarget)
+  ) {
+    return null;
+  }
 
   return {
     id: String(entity.id || path),
     path,
+    referenceTarget,
+    referenceState,
     label,
     detail,
     wikilink,
@@ -254,14 +328,16 @@ export function buildEntityReferenceChoices(
   entities: readonly EntityIndexRecordLike[] | null | undefined,
 ): EntityReferenceChoice[] {
   const choices: EntityReferenceChoice[] = [];
-  const seenPaths = new Set<string>();
+  const seenTargets = new Set<string>();
 
   for (const entity of entities || []) {
     const choice = entityToReferenceChoice(entity);
     if (!choice) continue;
-    const pathIdentity = choice.path.toLocaleLowerCase();
-    if (seenPaths.has(pathIdentity)) continue;
-    seenPaths.add(pathIdentity);
+    const targetIdentity = choice.referenceState === 'ready'
+      ? getEntityReferenceTargetIdentity(choice.wikilink)
+      : `provisional:${choice.id.toLocaleLowerCase()}`;
+    if (!targetIdentity || seenTargets.has(targetIdentity)) continue;
+    seenTargets.add(targetIdentity);
     choices.push(choice);
   }
 
@@ -323,13 +399,28 @@ function getPathBasename(path: string): string {
 function sanitizeEntityReferenceAlias(value: unknown): string {
   return String(value ?? '')
     .replace(/[\r\n]+/gu, ' ')
+    .replace(/<!--|-->/gu, ' - ')
     .replace(/\|/gu, ' - ')
     .replace(/[\[\]]/gu, '')
     .replace(/\s+/gu, ' ')
     .trim();
 }
 
-function getEntityReferenceTargetIdentity(value: string): string {
+/**
+ * Entity references can be persisted inside a hidden HTML-comment carrier.
+ * There is no reliable Obsidian wikilink escaping for a target that contains
+ * HTML-comment or wikilink delimiters, so omit those entities from constrained
+ * pickers instead of serializing a value that could terminate either wrapper.
+ */
+function isSafeEntityReferenceTarget(value: unknown): boolean {
+  const target = String(value ?? '').trim();
+  return !!target
+    && !/[\u0000-\u001F\u007F[\]|]/u.test(target)
+    && !target.includes('<!--')
+    && !target.includes('-->');
+}
+
+export function getEntityReferenceTargetIdentity(value: string): string {
   const inner = String(value || '').trim().match(/^!?\[\[([^\]]+)\]\]$/u)?.[1] || '';
   if (!inner) return '';
   const rawTarget = inner.split('|', 1)[0]?.trim().replace(/\\/gu, '/') || '';
@@ -341,6 +432,23 @@ function getEntityReferenceTargetIdentity(value: string): string {
     .toLocaleLowerCase();
   const anchor = hashIndex >= 0 ? rawTarget.slice(hashIndex).trim().toLocaleLowerCase() : '';
   return `${path}${anchor}`;
+}
+
+function getEntitySubpath(entity: EntityIndexRecordLike | null | undefined): string {
+  const blockId = String(entity?.blockId || '').trim().replace(/^\^/u, '');
+  if (blockId) return `#^${blockId}`;
+  const subpath = String(entity?.subpath || '').trim();
+  if (!subpath) return '';
+  if (subpath.startsWith('#')) return subpath;
+  return subpath.startsWith('^') ? `#${subpath}` : `#${subpath}`;
+}
+
+function getEntityReferenceTarget(entity: EntityIndexRecordLike): string {
+  if (entity.referenceState === 'provisional') return '';
+  const explicit = String(entity.referenceTarget || '').trim();
+  if (explicit) return explicit;
+  const path = getEntityPath(entity);
+  return path ? `${path}${getEntitySubpath(entity)}` : '';
 }
 
 function isMarkdownEntity(entity: EntityIndexRecordLike, path: string): boolean {

@@ -46,17 +46,26 @@ import { hashSelectionIdentity } from '../../utils/selection-identity';
 import { resolveBulletLineSourceTarget } from '../bullet-line-source-target';
 import { requestLineItemDelete } from '../../services/line-item-delete-service';
 import { TextInputModal } from '../../modals/text-input-modal';
+import { ScheduledModal } from '../../modals/scheduled-modal';
+import { TagSuggestModal } from '../../modals/TagSuggestModal';
 import { getPlainDisplayTitle } from '../../utils/display-title';
-import { setVisibleLineText, visibleLineText } from '../../views/log-line-utils';
+import {
+  setLogInlineFieldValue,
+  setVisibleLineText,
+  toggleLogLineSemanticTag,
+  visibleLineText,
+} from '../../views/log-line-utils';
 import { resolveExactLineRevisionIndex, splitLineItemContent } from '../../utils/line-item-deletion';
 import {
   addInlineTagToTaskLine,
   parseTaskTagValues,
+  readInlineFieldRanges,
   readInlineFieldValue,
   readInlineTags,
+  readTaskLineTags,
   removeInlineTagFromTaskLine,
-  setInlineFieldValueOnLine,
 } from '../../utils/task-line-metadata';
+import { collectTpsListInlineFields } from '../task-inline-property-fields';
 import {
   getSourceNoteGroupValue,
   getTpsBaseGroupLaneId,
@@ -75,7 +84,8 @@ import {
   resolveConfiguredProperty,
 } from '../../utils/entity-property';
 import { openEntitySuggestModal } from '../../modals/EntitySuggestModal';
-import { getWikilinkDisplayText, parseLinkListInput } from '../../utils/list-utils';
+import { getWikilinkDisplayText, isTagListProperty, parseLinkListInput } from '../../utils/list-utils';
+import { collectKnownVaultTags } from '../../utils/known-tags';
 
 export const TPS_LIST_VIEW_TYPE = 'tps-list';
 
@@ -2158,9 +2168,9 @@ export class TpsListView extends BasesView {
       const checkboxState = parsed.itemKind === 'heading' ? undefined : parsed.checkboxState;
       const mappedStatus = parsed.itemKind === 'task' ? this.getStatusForCheckboxState(checkboxState || '[ ]') : '';
       if (parsed.itemKind === 'task' && !includeDone && doneStatuses.has(mappedStatus)) return;
+      const inlineFields = this.extractTaskInlineFields(parsed.text);
       const text = this.cleanTaskText(parsed.text);
       if (!text) return;
-      const inlineFields = this.extractTaskInlineFields(text);
       tasks.push({
         itemKind: parsed.itemKind,
         ...(parsed.itemKind === 'heading' ? { headingLevel: parsed.headingLevel } : {}),
@@ -2221,16 +2231,7 @@ export class TpsListView extends BasesView {
   }
 
   private extractTaskInlineFields(text: string): Array<{ key: string; value: string }> {
-    const fields: Array<{ key: string; value: string }> = [];
-    for (const field of this.getTaskInlineFieldRanges(text)) {
-      if (field.key && field.value) fields.push({ key: field.key, value: field.value });
-    }
-    const tagMatches = text.match(/(^|\s)#[\p{L}\p{N}/_-]+/gu) || [];
-    for (const rawTag of tagMatches) {
-      const value = rawTag.trim();
-      if (value) fields.push({ key: 'tag', value });
-    }
-    return fields;
+    return collectTpsListInlineFields(text);
   }
 
   private stripTaskInlineFields(text: string): string {
@@ -2250,24 +2251,12 @@ export class TpsListView extends BasesView {
   }
 
   private getTaskInlineFieldRanges(text: string): Array<{ start: number; end: number; key: string; value: string }> {
-    const source = String(text || '');
-    const ranges: Array<{ start: number; end: number; key: string; value: string }> = [];
-    const openerPattern = /[\[(]([A-Za-z][\w -]{0,40})::\s*/gu;
-    let match: RegExpExecArray | null;
-    while ((match = openerPattern.exec(source)) !== null) {
-      const opener = source[match.index];
-      const closer = opener === '[' ? ']' : ')';
-      const valueStart = openerPattern.lastIndex;
-      const end = source.indexOf(closer, valueStart);
-      if (end === -1) continue;
-      const key = String(match[1] || '').trim();
-      const value = source.slice(valueStart, end).trim();
-      if (key && value) {
-        ranges.push({ start: match.index, end: end + 1, key, value });
-      }
-      openerPattern.lastIndex = end + 1;
-    }
-    return ranges;
+    return readInlineFieldRanges(String(text || '')).map((field) => ({
+      start: field.start,
+      end: field.end,
+      key: field.key,
+      value: field.value,
+    }));
   }
 
   private getOpenTaskPreviewLimit(): number {
@@ -4092,7 +4081,7 @@ export class TpsListView extends BasesView {
         values.push(String(field.value || '').trim());
       }
     }
-    return values.map((value) => value.trim()).filter(Boolean);
+    return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
   }
 
   private normalizeTaskTag(value: string): string {
@@ -6145,6 +6134,23 @@ export class TpsListView extends BasesView {
       return { text: String(task.line + 1), title: `${file.path}:${task.line + 1}`, kind: 'line', editable: false };
     }
 
+    if (normalized === 'tag' || normalized === 'tags') {
+      const tags = this.getTaskInlineValues(task, 'tags')
+        .map((tag) => tag.replace(/^#/, ''))
+        .filter(Boolean);
+      if (tags.length === 0) return null;
+      const configuredProperty = this.getConfiguredCustomProperty(propId)
+        || this.getConfiguredCustomProperty('tags');
+      return {
+        text: tags.map((tag) => `#${tag}`).join(', '),
+        title: tags.map((tag) => `#${tag}`).join(', '),
+        kind: 'tag',
+        editable: task.itemKind !== 'heading',
+        propName: configuredProperty?.key || 'tags',
+        rawValue: tags.map((tag) => `#${tag}`).join(', '),
+      };
+    }
+
     for (const field of task.inlineFields ?? []) {
       const key = this.normalizeInlinePropertyKey(field.key);
       if (!key || key !== normalized || hidden.has(key)) continue;
@@ -6344,6 +6350,7 @@ export class TpsListView extends BasesView {
     const parsed = parseTpsListHeadingLine(line) ?? this.parseLineItem(line, true);
     if (!parsed) return false;
     const checkboxState = parsed.itemKind === 'heading' ? undefined : parsed.checkboxState;
+    const inlineFields = this.extractTaskInlineFields(parsed.text);
     const text = this.cleanTaskText(parsed.text);
     const task: OpenTaskSubitem = {
       itemKind: parsed.itemKind,
@@ -6354,7 +6361,7 @@ export class TpsListView extends BasesView {
       checkboxState,
       text,
       displayText: this.cleanTaskDisplayText(this.stripTaskInlineFields(text)),
-      inlineFields: this.extractTaskInlineFields(text),
+      inlineFields,
     };
     return combineFilterTreeResults(
       roots.map((root) => this.evaluateTaskFilterNode(root, task, file)),
@@ -7139,10 +7146,13 @@ export class TpsListView extends BasesView {
       const propName = this.getFrontmatterPropNameFromId(propId) ?? propId;
       const configuredProperty = this.getConfiguredCustomProperty(propId);
       const entityReference = isEntityReferenceProperty(configuredProperty);
+      const typedEmptyTarget = entityReference
+        || this.isTagProperty(configuredProperty, propName)
+        || this.isDatetimeProperty(configuredProperty, propName);
       const value = entityReference
         ? this.formatEntityPropertyValue(rawValue, configuredProperty!)
         : this.formatCardPropertyValue(rawValue);
-      if (!value && !entityReference) continue;
+      if (!value && !typedEmptyTarget) continue;
       const editable = this.isWritableNotePropertyId(propId);
       const span = parent.createSpan({
         cls: `tps-list-native-property${editable ? ' tps-list-native-property--editable' : ''}${!value ? ' is-empty' : ''}`,
@@ -7349,6 +7359,22 @@ export class TpsListView extends BasesView {
             propName: configuredProperty?.key,
             rawValue: '',
           };
+        } else if (this.isTagProperty(configuredProperty, propId)) {
+          property = {
+            text: `+ ${configuredProperty?.label || configuredProperty?.key || propId}`,
+            kind: 'tag',
+            editable: true,
+            propName: configuredProperty?.key || propId,
+            rawValue: '',
+          };
+        } else if (this.isDatetimeProperty(configuredProperty, propId)) {
+          property = {
+            text: `+ ${configuredProperty?.label || configuredProperty?.key || propId}`,
+            kind: 'datetime',
+            editable: true,
+            propName: configuredProperty?.key || propId,
+            rawValue: '',
+          };
         }
       }
       if (!property) continue;
@@ -7422,6 +7448,18 @@ export class TpsListView extends BasesView {
       void this.openListTaskEntityPicker(file, task, configuredProperty, gcm);
       return;
     }
+    if (this.isTagProperty(configuredProperty, propName)) {
+      void this.openListTaskTagPicker(file, task, configuredProperty?.key || propName);
+      return;
+    }
+    if (this.isDatetimeProperty(configuredProperty, propName)) {
+      void this.openListTaskScheduledPicker(
+        file,
+        task,
+        configuredProperty ?? this.createDatetimeProperty(propName),
+      );
+      return;
+    }
     this.startListPropertyInput(span, property.rawValue ?? property.text, async (nextValue) => {
       await this.applyInlineTaskProperty(file, task.line, propName, nextValue);
       this.render(false);
@@ -7434,36 +7472,8 @@ export class TpsListView extends BasesView {
     property: CustomProperty,
     source: any,
   ): Promise<void> {
-    let expectedLine = '';
-    try {
-      const content = await this.app.vault.cachedRead(file);
-      const parts = splitLineItemContent(content);
-      const directLine = parts.lines[Math.max(0, task.line - 1)] || '';
-      const taskText = String(task.text || '').replace(/\s+/g, ' ').trim();
-      const matchesTask = (line: string): boolean => {
-        const parsed = this.parseLineItem(line, true);
-        return !!parsed
-          && this.cleanTaskText(parsed.text).replace(/\s+/g, ' ').trim() === taskText;
-      };
-      if (matchesTask(directLine)) {
-        expectedLine = directLine;
-      } else {
-        const matches = parts.lines.filter(matchesTask);
-        expectedLine = matches.length === 1 ? matches[0] : '';
-      }
-    } catch (error) {
-      flowError('ListProperty', 'entity-picker:read-failed', error, {
-        path: file.path,
-        line: task.line,
-        property: property.key,
-      });
-      new Notice('Could not read the source line.');
-      return;
-    }
-    if (!expectedLine || !this.parseLineItem(expectedLine, true)) {
-      new Notice('Could not resolve the source line.');
-      return;
-    }
+    const expectedLine = await this.resolveRenderedTaskLine(file, task, 'entity-picker');
+    if (!expectedLine) return;
     openEntitySuggestModal(this.app, source, property, async (choice) => {
       const changed = await this.applyEntityTaskProperty(
         file,
@@ -7476,12 +7486,72 @@ export class TpsListView extends BasesView {
     });
   }
 
+  private async resolveRenderedTaskLine(
+    file: TFile,
+    task: OpenTaskSubitem,
+    source: string,
+  ): Promise<string> {
+    try {
+      const content = await this.app.vault.cachedRead(file);
+      const parts = splitLineItemContent(content);
+      const directLine = parts.lines[Math.max(0, task.line - 1)] || '';
+      const taskText = String(task.text || '').replace(/\s+/g, ' ').trim();
+      const matchesTask = (line: string): boolean => {
+        const parsed = this.parseLineItem(line, true);
+        return !!parsed
+          && this.cleanTaskText(parsed.text).replace(/\s+/g, ' ').trim() === taskText;
+      };
+      if (matchesTask(directLine)) {
+        return directLine;
+      }
+      const matches = parts.lines.filter(matchesTask);
+      if (matches.length === 1) return matches[0];
+    } catch (error) {
+      flowError('ListProperty', `${source}:read-failed`, error, {
+        path: file.path,
+        line: task.line,
+      });
+      new Notice('Could not read the source line.');
+      return '';
+    }
+    new Notice('Could not resolve the source line.');
+    return '';
+  }
+
   private async applyEntityTaskProperty(
     file: TFile,
     line: number,
     expectedLine: string,
     property: CustomProperty,
     wikilink: string,
+  ): Promise<boolean> {
+    return this.mutateRenderedTaskLine(
+      file,
+      line,
+      expectedLine,
+      property.key,
+      'entity-update',
+      (currentLine) => {
+      const currentValue = readInlineFieldValue(currentLine, property.key);
+      const nextValue = property.type === 'list'
+        ? mergeEntityReferenceList(currentValue, wikilink).join(', ')
+        : wikilink;
+        return setLogInlineFieldValue(currentLine, property.key, nextValue);
+      },
+      {
+        acceptedKind: property.acceptsKind,
+      },
+    );
+  }
+
+  private async mutateRenderedTaskLine(
+    file: TFile,
+    line: number,
+    expectedLine: string,
+    propertyKey: string,
+    event: string,
+    updater: (currentLine: string) => string,
+    logContext: Record<string, unknown> = {},
   ): Promise<boolean> {
     const targetLine = Math.max(1, Math.floor(Number(line || 1)));
     const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
@@ -7495,11 +7565,7 @@ export class TpsListView extends BasesView {
       }
       const currentLine = parts.lines[index] || '';
       if (!this.parseLineItem(currentLine, true)) return content;
-      const currentValue = readInlineFieldValue(currentLine, property.key);
-      const nextValue = property.type === 'list'
-        ? mergeEntityReferenceList(currentValue, wikilink).join(', ')
-        : wikilink;
-      const nextLine = setInlineFieldValueOnLine(currentLine, property.key, nextValue);
+      const nextLine = updater(currentLine);
       if (nextLine === currentLine) return content;
       parts.lines[index] = nextLine;
       resolvedLine = index + 1;
@@ -7507,25 +7573,116 @@ export class TpsListView extends BasesView {
       return `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`;
     });
     if (mutation.outcome === 'stale') {
-      flowWarn('ListProperty', 'entity-update:stale-target', {
+      flowWarn('ListProperty', `${event}:stale-target`, {
         path: file.path,
         requestedLine: targetLine,
-        property: property.key,
+        property: propertyKey,
+        ...logContext,
       });
-      new Notice('The source line changed while the note picker was open.');
+      new Notice('The source line changed while the property picker was open.');
       return false;
     }
     if (mutation.outcome !== 'changed') return false;
     this.clearTaskCachesForPath(file.path);
     emitFilesUpdated(this.app, [file.path], 'tps-list');
-    flow('ListProperty', 'entity-update:done', {
+    flow('ListProperty', `${event}:done`, {
       path: file.path,
       requestedLine: targetLine,
       resolvedLine,
-      property: property.key,
-      acceptedKind: property.acceptsKind,
+      property: propertyKey,
+      ...logContext,
     });
     return true;
+  }
+
+  private async openListTaskTagPicker(
+    file: TFile,
+    task: OpenTaskSubitem,
+    propertyKey: string,
+  ): Promise<void> {
+    const expectedLine = await this.resolveRenderedTaskLine(file, task, 'tag-picker');
+    if (!expectedLine) return;
+    const semanticTaskTags = /^(?:tag|tags)$/iu.test(this.normalizeInlinePropertyKey(propertyKey));
+    const current = semanticTaskTags
+      ? readTaskLineTags(expectedLine)
+      : parseTaskTagValues(readInlineFieldValue(expectedLine, propertyKey));
+    new TagSuggestModal(this.app, [...collectKnownVaultTags(this.app), ...current], async (tag, selected) => {
+      const changed = await this.mutateRenderedTaskLine(
+        file,
+        task.line,
+        expectedLine,
+        propertyKey,
+        'tag-update',
+        (line) => {
+          if (semanticTaskTags) {
+            return toggleLogLineSemanticTag(line, propertyKey, tag, selected);
+          }
+          const existing = parseTaskTagValues(readInlineFieldValue(line, propertyKey));
+          const normalizedTag = tag.toLocaleLowerCase();
+          const next = selected
+            ? existing.filter((value) => value.toLocaleLowerCase() !== normalizedTag)
+            : Array.from(new Set([...existing, normalizedTag]));
+          return setLogInlineFieldValue(
+            line,
+            propertyKey,
+            next.length > 0 ? next.map((value) => `#${value}`).join(', ') : null,
+          );
+        },
+        { tag, action: selected ? 'remove' : 'add' },
+      );
+      if (changed) this.render(false);
+    }, {
+      title: 'Choose tag',
+      selectedTags: current,
+    }).open();
+  }
+
+  private async openListTaskScheduledPicker(
+    file: TFile,
+    task: OpenTaskSubitem,
+    property: CustomProperty,
+  ): Promise<void> {
+    const expectedLine = await this.resolveRenderedTaskLine(file, task, 'datetime-picker');
+    if (!expectedLine) return;
+    const isScheduled = this.normalizeInlinePropertyKey(property.key) === 'scheduled';
+    const current = readInlineFieldValue(expectedLine, property.key);
+    const timeEstimate = Number.parseInt(readInlineFieldValue(expectedLine, 'timeEstimate') || '0', 10) || 0;
+    const allDay = /^true$/iu.test(readInlineFieldValue(expectedLine, 'allDay'));
+    new ScheduledModal(this.app, current, timeEstimate, allDay, async (result) => {
+      const changed = await this.mutateRenderedTaskLine(
+        file,
+        task.line,
+        expectedLine,
+        property.key,
+        'datetime-update',
+        (line) => {
+          let next = setLogInlineFieldValue(line, property.key, result.date || null);
+          if (isScheduled) {
+            next = setLogInlineFieldValue(
+              next,
+              'timeEstimate',
+              result.date ? String(result.timeEstimate || 0) : null,
+            );
+            next = setLogInlineFieldValue(
+              next,
+              'allDay',
+              result.date && result.allDay ? 'true' : null,
+            );
+          }
+          return next;
+        },
+        {
+          cleared: !result.date,
+          allDay: result.allDay,
+          timeEstimate: result.timeEstimate,
+        },
+      );
+      if (changed) this.render(false);
+    }, isScheduled ? {} : {
+      title: `Set ${property.label || property.key}`,
+      fieldLabel: property.label || property.key,
+      showTimeDetails: false,
+    }).open();
   }
 
   private startListNotePropertyEdit(
@@ -7543,12 +7700,62 @@ export class TpsListView extends BasesView {
         await this.app.fileManager.processFrontMatter(file, (fm) => {
           const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, writableProp) || writableProp;
           fm[actualKey] = configuredProperty.type === 'list'
-            ? mergeEntityReferenceList(fm[actualKey] ?? rawValue, choice.wikilink)
+            ? mergeEntityReferenceList(fm[actualKey], choice.wikilink)
             : choice.wikilink;
         });
         emitFilesUpdated(this.app, [file.path], 'tps-list');
         this.render(false);
       });
+      return;
+    }
+    if (this.isTagProperty(configuredProperty, writableProp)) {
+      const current = parseTaskTagValues(rawValue);
+      new TagSuggestModal(this.app, [...collectKnownVaultTags(this.app), ...current], async (tag, selected) => {
+        await this.app.fileManager.processFrontMatter(file, (fm) => {
+          const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, writableProp) || writableProp;
+          const existing = parseTaskTagValues(fm[actualKey]);
+          const normalizedTag = tag.toLocaleLowerCase();
+          const next = selected
+            ? existing.filter((value) => value.toLocaleLowerCase() !== normalizedTag)
+            : Array.from(new Set([...existing, normalizedTag]));
+          if (next.length > 0) fm[actualKey] = next;
+          else delete fm[actualKey];
+        });
+        emitFilesUpdated(this.app, [file.path], 'tps-list');
+        this.render(false);
+      }, {
+        title: 'Choose tag',
+        selectedTags: current,
+      }).open();
+      return;
+    }
+    if (this.isDatetimeProperty(configuredProperty, writableProp)) {
+      const property = configuredProperty ?? this.createDatetimeProperty(writableProp);
+      const cacheFrontmatter = (this.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, unknown>;
+      const actualKey = this.findFrontmatterKeyCaseInsensitive(cacheFrontmatter, writableProp) || writableProp;
+      const current = this.stringifyEditablePropertyValue(cacheFrontmatter[actualKey] ?? rawValue);
+      const timeEstimate = Number.parseInt(String(cacheFrontmatter.timeEstimate || '0'), 10) || 0;
+      const allDay = cacheFrontmatter.allDay === true || /^true$/iu.test(String(cacheFrontmatter.allDay || ''));
+      const isScheduled = this.normalizeInlinePropertyKey(property.key) === 'scheduled';
+      new ScheduledModal(this.app, current, timeEstimate, allDay, async (result) => {
+        await this.app.fileManager.processFrontMatter(file, (fm) => {
+          const destinationKey = this.findFrontmatterKeyCaseInsensitive(fm, writableProp) || writableProp;
+          if (result.date) fm[destinationKey] = result.date;
+          else delete fm[destinationKey];
+          if (isScheduled) {
+            if (result.date) fm.timeEstimate = result.timeEstimate || 0;
+            else delete fm.timeEstimate;
+            if (result.date && result.allDay) fm.allDay = true;
+            else delete fm.allDay;
+          }
+        });
+        emitFilesUpdated(this.app, [file.path], 'tps-list');
+        this.render(false);
+      }, isScheduled ? {} : {
+        title: `Set ${property.label || property.key}`,
+        fieldLabel: property.label || property.key,
+        showTimeDetails: false,
+      }).open();
       return;
     }
     this.startListPropertyInput(span, this.stringifyEditablePropertyValue(rawValue), async (nextValue) => {
@@ -7640,6 +7847,29 @@ export class TpsListView extends BasesView {
       .map((link) => getWikilinkDisplayText(link))
       .filter(Boolean)
       .join(', ');
+  }
+
+  private isTagProperty(property: CustomProperty | null, reference: string): boolean {
+    return isTagListProperty(property)
+      || /^(?:tag|tags)$/u.test(this.normalizeInlinePropertyKey(property?.key || reference));
+  }
+
+  private isDatetimeProperty(property: CustomProperty | null, reference: string): boolean {
+    return property?.type === 'datetime'
+      || this.normalizeInlinePropertyKey(property?.key || reference) === 'scheduled';
+  }
+
+  private createDatetimeProperty(reference: string): CustomProperty {
+    const key = String(reference || 'scheduled')
+      .replace(/^task\./iu, '')
+      .replace(/^note\./iu, '')
+      .trim() || 'scheduled';
+    return {
+      id: key,
+      key,
+      label: key.replace(/([a-z0-9])([A-Z])/gu, '$1 $2').replace(/\b\w/gu, (letter) => letter.toUpperCase()),
+      type: 'datetime',
+    };
   }
 
   private getConfiguredCustomProperty(reference: string): CustomProperty | null {

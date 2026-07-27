@@ -134,7 +134,7 @@ export class InlinePropertySuggest extends EditorSuggest<InlinePropertySuggestio
     openEntitySuggestModal(this.plugin.app, this.plugin, suggestion.acceptsKind, (choice) => {
       const currentLine = editor.getLine(lineNumber);
       if (currentLine !== sourceRevision) {
-        new Notice('The source line changed while the note picker was open.');
+        new Notice('The source line changed while the entity picker was open.');
         return;
       }
       const currentValue = readInlineFieldValue(currentLine, suggestion.key);

@@ -2311,7 +2311,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           .addOption('number', 'Number')
           .addOption('datetime', 'Date/Time')
           .addOption('selector', 'Selector (Dropdown)')
-          .addOption('kind', 'Kind (Note identity)')
+          .addOption('kind', 'Kind (Entity identity)')
           .addOption('list', 'List')
           .addOption('checkbox', 'Checkbox')
           .addOption('recurrence', 'Recurrence')
@@ -2335,8 +2335,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         new Setting(fields)
           .setName('Accepts kind')
           .setDesc([
-            'Optional. When set, this property becomes a note picker and only offers notes registered with that Kind.',
-            knownKinds.length > 0 ? `Known: ${knownKinds.slice(0, 8).join(', ')}${knownKinds.length > 8 ? ', …' : ''}` : 'You can name a Kind before matching notes exist.',
+            'Optional. When set, this property becomes an entity picker and only offers notes or lines registered with that Kind.',
+            knownKinds.length > 0 ? `Known: ${knownKinds.slice(0, 8).join(', ')}${knownKinds.length > 8 ? ', …' : ''}` : 'You can name a Kind before matching entities exist.',
           ].join(' '))
           .addText((text) => text
             .setPlaceholder('project')
@@ -2560,7 +2560,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         if (prop.acceptsKind) {
           new Setting(listOptionsDiv)
             .setName('List values')
-            .setDesc(`Stored as note links because this property accepts Kind "${prop.acceptsKind}".`);
+            .setDesc(`Stored as entity links because this property accepts Kind "${prop.acceptsKind}".`);
         } else {
           new Setting(listOptionsDiv)
             .setName('List values')

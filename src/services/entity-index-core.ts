@@ -11,6 +11,20 @@ export interface EntityIndexDimensionDefinition {
   propertyKeys: readonly string[];
 }
 
+export type EntityIndexEntityType = 'note' | 'block';
+export type EntityIndexLineKind = 'task' | 'bullet' | 'heading';
+export type EntityIndexReferenceState = 'ready' | 'provisional';
+
+export interface EntityIndexLocator {
+  path: string;
+  entityType?: EntityIndexEntityType;
+  subpath?: string;
+  blockId?: string;
+  lineNumber?: number;
+  lineKind?: EntityIndexLineKind;
+  locatorKey?: string;
+}
+
 export interface EntityIndexSource {
   /**
    * Stable entity identifier. Note-backed callers normally use the note path.
@@ -20,6 +34,25 @@ export interface EntityIndexSource {
   name?: string;
   basename?: string;
   frontmatter?: Readonly<Record<string, unknown>> | null;
+  /**
+   * Physical Markdown source. It equals `path` for note-backed entities and
+   * lets several line-backed records coexist inside the same note.
+   */
+  sourcePath?: string;
+  entityType?: EntityIndexEntityType;
+  subpath?: string;
+  blockId?: string;
+  lineKind?: EntityIndexLineKind;
+  /** One-based source line, used only while a block reference is provisional. */
+  lineNumber?: number;
+  referenceState?: EntityIndexReferenceState;
+  /**
+   * Stable locator identity. Providers should supply this for provisional
+   * entities that do not have a native Markdown subpath yet.
+   */
+  locatorKey?: string;
+  /** Provider-owned replacement scope. Usually supplied to replaceSource(). */
+  sourceKey?: string;
 }
 
 export interface EntityIndexRecord {
@@ -29,6 +62,15 @@ export interface EntityIndexRecord {
   readonly displayName: string;
   readonly basename: string;
   readonly dimensions: Readonly<Record<string, readonly string[]>>;
+  readonly sourcePath: string;
+  readonly entityType: EntityIndexEntityType;
+  readonly subpath: string;
+  readonly blockId: string;
+  readonly lineKind?: EntityIndexLineKind;
+  readonly lineNumber?: number;
+  readonly referenceState: EntityIndexReferenceState;
+  readonly locatorKey: string;
+  readonly referenceTarget: string;
 }
 
 export interface EntityIndexDimensionPredicate {
@@ -118,6 +160,35 @@ function normalizePath(path: string): string {
   return normalizeLookupValue(path.replace(/\\/g, '/'));
 }
 
+function normalizeSubpath(subpath: string): string {
+  const value = String(subpath || '').trim();
+  if (!value) return '';
+  if (value.startsWith('#')) return value;
+  if (value.startsWith('^')) return `#${value}`;
+  return `#${value}`;
+}
+
+function locatorKeyFor(
+  locator: EntityIndexLocator,
+): string {
+  const explicit = normalizeLookupValue(locator.locatorKey);
+  if (explicit) return explicit;
+  const path = normalizePath(locator.path);
+  if (!path) return '';
+  const entityType = locator.entityType || (locator.blockId || locator.subpath ? 'block' : 'note');
+  const blockId = normalizeLookupValue(locator.blockId).replace(/^\^/u, '');
+  const subpath = blockId ? `#^${blockId}` : normalizeSubpath(locator.subpath || '').toLocaleLowerCase();
+  if (entityType === 'block') {
+    if (subpath) return `block:${path}${subpath}`;
+    const lineNumber = Number.isFinite(Number(locator.lineNumber))
+      ? Math.max(1, Math.floor(Number(locator.lineNumber)))
+      : 0;
+    const lineKind = normalizeLookupValue(locator.lineKind);
+    return `block-provisional:${path}:${lineKind}:${lineNumber}`;
+  }
+  return `note:${path}`;
+}
+
 function uniqueDisplayValues(values: readonly string[]): readonly string[] {
   const seen = new Set<string>();
   const result: string[] = [];
@@ -191,6 +262,15 @@ function recordsEqual(left: EntityIndexRecord | undefined, right: EntityIndexRec
     || left.name !== right.name
     || left.displayName !== right.displayName
     || left.basename !== right.basename
+    || left.sourcePath !== right.sourcePath
+    || left.entityType !== right.entityType
+    || left.subpath !== right.subpath
+    || left.blockId !== right.blockId
+    || left.lineKind !== right.lineKind
+    || left.lineNumber !== right.lineNumber
+    || left.referenceState !== right.referenceState
+    || left.locatorKey !== right.locatorKey
+    || left.referenceTarget !== right.referenceTarget
   ) {
     return false;
   }
@@ -291,7 +371,11 @@ function getRecordDimensionValues(
 export class EntityIndexCore {
   private definitions: readonly NormalizedDimensionDefinition[] = Object.freeze([]);
   private readonly recordsById = new Map<string, EntityIndexRecord>();
-  private readonly idsByPath = new Map<string, string>();
+  private readonly noteIdsByPath = new Map<string, string>();
+  private readonly idsByLocator = new Map<string, string>();
+  private readonly idsBySourcePath = new Map<string, Set<string>>();
+  private readonly sourceKeyById = new Map<string, string>();
+  private readonly idsBySourceKey = new Map<string, Set<string>>();
   private readonly queryCache = new Map<string, readonly EntityIndexRecord[]>();
   private readonly dimensionValueCache = new Map<string, readonly string[]>();
   private readonly listeners = new Set<EntityIndexChangeListener>();
@@ -351,44 +435,87 @@ export class EntityIndexCore {
 
   invalidate(notify = true): void {
     this.recordsById.clear();
-    this.idsByPath.clear();
+    this.noteIdsByPath.clear();
+    this.idsByLocator.clear();
+    this.idsBySourcePath.clear();
+    this.sourceKeyById.clear();
+    this.idsBySourceKey.clear();
     this.clearDerivedCaches();
     this.bumpRevision(notify);
   }
 
   rebuild(sources: readonly EntityIndexSource[], forceRevision = false): void {
     const nextById = new Map<string, EntityIndexRecord>();
-    const nextIdsByPath = new Map<string, string>();
+    const nextSourceKeyById = new Map<string, string>();
+    const nextNoteIdsByPath = new Map<string, string>();
+    const nextIdsByLocator = new Map<string, string>();
+    const prepared = (sources || [])
+      .map((source) => ({ source, record: this.createRecord(source) }))
+      .filter((entry): entry is { source: EntityIndexSource; record: EntityIndexRecord } =>
+        Boolean(entry.record));
+    const blockIdCounts = new Map<string, number>();
+    const blockLocatorCounts = new Map<string, number>();
+    for (const { record } of prepared) {
+      if (record.entityType !== 'block') continue;
+      const id = normalizeLookupValue(record.id);
+      blockIdCounts.set(id, (blockIdCounts.get(id) || 0) + 1);
+      blockLocatorCounts.set(
+        record.locatorKey,
+        (blockLocatorCounts.get(record.locatorKey) || 0) + 1,
+      );
+    }
 
-    for (const source of sources ?? []) {
-      const record = this.createRecord(source);
-      if (!record) continue;
+    for (const { source, record } of prepared) {
       const normalizedId = normalizeLookupValue(record.id);
-      const normalizedRecordPath = normalizePath(record.path);
-
-      const priorRecordForId = nextById.get(normalizedId);
       if (
-        priorRecordForId
-        && normalizePath(priorRecordForId.path) !== normalizedRecordPath
+        record.entityType === 'block'
+        && (
+          (blockIdCounts.get(normalizedId) || 0) !== 1
+          || (blockLocatorCounts.get(record.locatorKey) || 0) !== 1
+        )
       ) {
-        nextIdsByPath.delete(normalizePath(priorRecordForId.path));
+        continue;
       }
-      const priorIdForPath = nextIdsByPath.get(normalizedRecordPath);
-      if (priorIdForPath && priorIdForPath !== normalizedId) {
-        nextById.delete(priorIdForPath);
+      const conflicts = new Set<string>();
+      if (nextById.has(normalizedId)) conflicts.add(normalizedId);
+      const locatorConflict = nextIdsByLocator.get(record.locatorKey);
+      if (locatorConflict) conflicts.add(locatorConflict);
+      if (record.entityType === 'note') {
+        const pathConflict = nextNoteIdsByPath.get(normalizePath(record.path));
+        if (pathConflict) conflicts.add(pathConflict);
+      }
+      for (const conflict of conflicts) {
+        const prior = nextById.get(conflict);
+        if (!prior) continue;
+        nextById.delete(conflict);
+        nextSourceKeyById.delete(conflict);
+        nextIdsByLocator.delete(prior.locatorKey);
+        if (prior.entityType === 'note') {
+          nextNoteIdsByPath.delete(normalizePath(prior.path));
+        }
       }
       nextById.set(normalizedId, record);
-      nextIdsByPath.set(normalizedRecordPath, normalizedId);
+      nextSourceKeyById.set(normalizedId, this.getSourceKey(source, record));
+      nextIdsByLocator.set(record.locatorKey, normalizedId);
+      if (record.entityType === 'note') {
+        nextNoteIdsByPath.set(normalizePath(record.path), normalizedId);
+      }
     }
 
     const changed = this.recordsById.size !== nextById.size
       || [...nextById.entries()].some(([id, record]) =>
-        !recordsEqual(this.recordsById.get(id), record));
+        !recordsEqual(this.recordsById.get(id), record)
+        || this.sourceKeyById.get(id) !== nextSourceKeyById.get(id));
 
     this.recordsById.clear();
-    this.idsByPath.clear();
+    this.noteIdsByPath.clear();
+    this.idsByLocator.clear();
+    this.idsBySourcePath.clear();
+    this.sourceKeyById.clear();
+    this.idsBySourceKey.clear();
     for (const [id, record] of nextById) this.recordsById.set(id, record);
-    for (const [path, id] of nextIdsByPath) this.idsByPath.set(path, id);
+    for (const [id, sourceKey] of nextSourceKeyById) this.sourceKeyById.set(id, sourceKey);
+    this.rebuildSecondaryIndexes();
     this.clearDerivedCaches();
     if (changed || forceRevision) this.bumpRevision(true);
   }
@@ -401,33 +528,127 @@ export class EntityIndexCore {
     }
 
     const normalizedId = normalizeLookupValue(record.id);
-    const normalizedRecordPath = normalizePath(record.path);
-    const oldIdAtPath = this.idsByPath.get(normalizedRecordPath);
     const oldRecord = this.recordsById.get(normalizedId);
+    const sourceKey = this.getSourceKey(source, record);
+    const conflicts = new Set<string>();
+    if (oldRecord) conflicts.add(normalizedId);
+    const locatorConflict = this.idsByLocator.get(record.locatorKey);
+    if (locatorConflict) conflicts.add(locatorConflict);
+    if (record.entityType === 'note') {
+      const pathConflict = this.noteIdsByPath.get(normalizePath(record.path));
+      if (pathConflict) conflicts.add(pathConflict);
+    }
 
-    if (oldIdAtPath && oldIdAtPath !== normalizedId) {
-      this.recordsById.delete(oldIdAtPath);
-    }
-    if (oldRecord && normalizePath(oldRecord.path) !== normalizedRecordPath) {
-      this.idsByPath.delete(normalizePath(oldRecord.path));
-    }
+    const changed = !recordsEqual(oldRecord, record)
+      || this.sourceKeyById.get(normalizedId) !== sourceKey
+      || [...conflicts].some((id) => id !== normalizedId);
+    if (!changed) return oldRecord ?? record;
 
-    this.recordsById.set(normalizedId, record);
-    this.idsByPath.set(normalizedRecordPath, normalizedId);
-    const changed = oldIdAtPath !== normalizedId || !recordsEqual(oldRecord, record);
-    if (changed) {
-      this.clearDerivedCaches();
-      this.bumpRevision(true);
-    }
+    for (const conflict of conflicts) this.removeRecordInternal(conflict);
+    this.addRecordInternal(normalizedId, record, sourceKey);
+    this.clearDerivedCaches();
+    this.bumpRevision(true);
     return record;
+  }
+
+  /**
+   * Atomically replaces every record owned by one provider/source snapshot.
+   *
+   * Duplicate IDs, locators, or note paths in the incoming snapshot are all
+   * omitted. A collision with another source is omitted as well. This
+   * fail-closed behavior prevents an ambiguous line from silently replacing a
+   * different entity, while valid siblings still update in one revision.
+   */
+  replaceSource(
+    sourceKey: string,
+    sources: readonly EntityIndexSource[],
+    notify = true,
+  ): readonly EntityIndexRecord[] {
+    const normalizedSourceKey = normalizeLookupValue(sourceKey);
+    if (!normalizedSourceKey) {
+      throw new Error('Entity index source replacement requires a non-empty source key.');
+    }
+
+    const candidates = (sources || [])
+      .map((source) => this.createRecord(source))
+      .filter((record): record is EntityIndexRecord => Boolean(record));
+    const idCounts = new Map<string, number>();
+    const locatorCounts = new Map<string, number>();
+    const notePathCounts = new Map<string, number>();
+    for (const record of candidates) {
+      const id = normalizeLookupValue(record.id);
+      idCounts.set(id, (idCounts.get(id) || 0) + 1);
+      locatorCounts.set(record.locatorKey, (locatorCounts.get(record.locatorKey) || 0) + 1);
+      if (record.entityType === 'note') {
+        const path = normalizePath(record.path);
+        notePathCounts.set(path, (notePathCounts.get(path) || 0) + 1);
+      }
+    }
+
+    const priorIds = this.idsBySourceKey.get(normalizedSourceKey) ?? new Set<string>();
+    const accepted: EntityIndexRecord[] = [];
+    for (const record of candidates) {
+      const id = normalizeLookupValue(record.id);
+      const notePath = normalizePath(record.path);
+      if (
+        (idCounts.get(id) || 0) !== 1
+        || (locatorCounts.get(record.locatorKey) || 0) !== 1
+        || (
+          record.entityType === 'note'
+          && (notePathCounts.get(notePath) || 0) !== 1
+        )
+      ) {
+        continue;
+      }
+
+      const externalId = this.recordsById.has(id) && !priorIds.has(id);
+      const locatorOwner = this.idsByLocator.get(record.locatorKey);
+      const externalLocator = Boolean(locatorOwner && !priorIds.has(locatorOwner));
+      const noteOwner = record.entityType === 'note'
+        ? this.noteIdsByPath.get(notePath)
+        : undefined;
+      const externalNotePath = Boolean(noteOwner && !priorIds.has(noteOwner));
+      if (externalId || externalLocator || externalNotePath) continue;
+      accepted.push(record);
+    }
+
+    const nextById = new Map(
+      accepted.map((record) => [normalizeLookupValue(record.id), record]),
+    );
+    const changed = priorIds.size !== nextById.size
+      || [...nextById.entries()].some(([id, record]) =>
+        !recordsEqual(this.recordsById.get(id), record)
+        || this.sourceKeyById.get(id) !== normalizedSourceKey);
+    if (!changed) {
+      return Object.freeze(
+        [...nextById.values()].sort((left, right) => compareText(left.id, right.id)),
+      );
+    }
+
+    for (const id of [...priorIds]) this.removeRecordInternal(id);
+    for (const [id, record] of nextById) {
+      this.addRecordInternal(id, record, normalizedSourceKey);
+    }
+    this.clearDerivedCaches();
+    this.bumpRevision(notify);
+    return Object.freeze(
+      [...nextById.values()].sort((left, right) => compareText(left.id, right.id)),
+    );
+  }
+
+  removeSource(sourceKey: string, notify = true): boolean {
+    const normalizedSourceKey = normalizeLookupValue(sourceKey);
+    const ids = this.idsBySourceKey.get(normalizedSourceKey);
+    if (!ids || ids.size === 0) return false;
+    for (const id of [...ids]) this.removeRecordInternal(id);
+    this.clearDerivedCaches();
+    this.bumpRevision(notify);
+    return true;
   }
 
   removeById(id: string): boolean {
     const normalizedId = normalizeLookupValue(id);
-    const record = this.recordsById.get(normalizedId);
-    if (!record) return false;
-    this.recordsById.delete(normalizedId);
-    this.idsByPath.delete(normalizePath(record.path));
+    if (!this.removeRecordInternal(normalizedId)) return false;
     this.clearDerivedCaches();
     this.bumpRevision(true);
     return true;
@@ -435,10 +656,8 @@ export class EntityIndexCore {
 
   removeByPath(path: string): boolean {
     const normalizedRecordPath = normalizePath(path);
-    const id = this.idsByPath.get(normalizedRecordPath);
-    if (!id) return false;
-    this.idsByPath.delete(normalizedRecordPath);
-    this.recordsById.delete(id);
+    const id = this.noteIdsByPath.get(normalizedRecordPath);
+    if (!id || !this.removeRecordInternal(id)) return false;
     this.clearDerivedCaches();
     this.bumpRevision(true);
     return true;
@@ -448,9 +667,58 @@ export class EntityIndexCore {
     return this.recordsById.get(normalizeLookupValue(id)) ?? null;
   }
 
+  /**
+   * Backward-compatible note lookup. Line entities in the same file never
+   * replace the note returned from this method.
+   */
   getByPath(path: string): EntityIndexRecord | null {
-    const id = this.idsByPath.get(normalizePath(path));
+    const id = this.noteIdsByPath.get(normalizePath(path));
     return id ? this.recordsById.get(id) ?? null : null;
+  }
+
+  getByLocator(locator: EntityIndexLocator | string): EntityIndexRecord | null {
+    const key = typeof locator === 'string'
+      ? normalizeLookupValue(locator)
+      : locatorKeyFor(locator);
+    const id = this.idsByLocator.get(key);
+    if (id) return this.recordsById.get(id) ?? null;
+    if (typeof locator !== 'string') {
+      const path = normalizePath(locator.path);
+      if (path && !/\.md$/iu.test(path)) {
+        const markdownKey = locatorKeyFor({ ...locator, path: `${locator.path}.md` });
+        const markdownId = this.idsByLocator.get(markdownKey);
+        if (markdownId) return this.recordsById.get(markdownId) ?? null;
+      }
+    }
+    return null;
+  }
+
+  getByReferenceTarget(target: string): EntityIndexRecord | null {
+    const raw = String(target || '').trim();
+    const inner = raw.match(/^!?\[\[([^\]]+)\]\]$/u)?.[1] || raw;
+    const rawTarget = inner.split('|', 1)[0]?.trim().replace(/\\/gu, '/') || '';
+    if (!rawTarget) return null;
+    const hashIndex = rawTarget.indexOf('#');
+    const path = hashIndex >= 0 ? rawTarget.slice(0, hashIndex) : rawTarget;
+    const subpath = hashIndex >= 0 ? rawTarget.slice(hashIndex) : '';
+    return this.getByLocator({
+      path,
+      entityType: subpath ? 'block' : 'note',
+      subpath,
+    });
+  }
+
+  getBySourcePath(path: string): readonly EntityIndexRecord[] {
+    const ids = this.idsBySourcePath.get(normalizePath(path));
+    if (!ids || ids.size === 0) return EMPTY_RECORDS;
+    return Object.freeze(
+      [...ids]
+        .map((id) => this.recordsById.get(id))
+        .filter((record): record is EntityIndexRecord => Boolean(record))
+        .sort((left, right) =>
+          compareText(left.name, right.name)
+          || compareText(left.locatorKey, right.locatorKey)),
+    );
   }
 
   getDimensionValues(dimensionName: string): readonly string[] {
@@ -494,7 +762,7 @@ export class EntityIndexCore {
       }
       if (normalizedQuery.search) {
         const haystack = normalizeLookupValue(
-          `${record.name}\n${record.basename}\n${record.path}`,
+          `${record.name}\n${record.basename}\n${record.path}\n${record.subpath}\n${record.lineKind || ''}`,
         );
         if (!haystack.includes(normalizedQuery.search)) return false;
       }
@@ -532,6 +800,35 @@ export class EntityIndexCore {
       ?? fallbackName.replace(/\.[^.]+$/, ''),
     ).trim();
     const name = String(source.name ?? basename).trim() || basename || path;
+    const sourcePath = String(source.sourcePath ?? path).replace(/\\/g, '/').trim() || path;
+    const entityType: EntityIndexEntityType = source.entityType === 'block' ? 'block' : 'note';
+    const blockId = String(source.blockId || '')
+      .trim()
+      .replace(/^\^/u, '');
+    const subpath = blockId
+      ? `#^${blockId}`
+      : normalizeSubpath(source.subpath || '');
+    const lineNumber = Number.isFinite(Number(source.lineNumber))
+      ? Math.max(1, Math.floor(Number(source.lineNumber)))
+      : undefined;
+    const lineKind = ['task', 'bullet', 'heading'].includes(String(source.lineKind || ''))
+      ? source.lineKind
+      : undefined;
+    const referenceState: EntityIndexReferenceState = source.referenceState === 'provisional'
+      && entityType === 'block'
+      && !subpath
+      ? 'provisional'
+      : 'ready';
+    const locatorKey = locatorKeyFor({
+      path,
+      entityType,
+      subpath,
+      blockId,
+      lineNumber,
+      lineKind,
+      locatorKey: source.locatorKey,
+    });
+    if (!locatorKey) return null;
     const frontmatter = source.frontmatter ?? {};
     const frontmatterByKey = new Map<string, unknown>();
     for (const [key, value] of Object.entries(frontmatter)) {
@@ -555,7 +852,96 @@ export class EntityIndexCore {
       displayName: name,
       basename,
       dimensions: Object.freeze(dimensions),
+      sourcePath,
+      entityType,
+      subpath,
+      blockId,
+      ...(lineKind ? { lineKind } : {}),
+      ...(lineNumber ? { lineNumber } : {}),
+      referenceState,
+      locatorKey,
+      referenceTarget: referenceState === 'ready' ? `${path}${subpath}` : '',
     });
+  }
+
+  private getSourceKey(source: EntityIndexSource, record: EntityIndexRecord): string {
+    const explicit = normalizeLookupValue(source.sourceKey);
+    if (explicit) return explicit;
+    return record.entityType === 'note'
+      ? `note:${normalizePath(record.path)}`
+      : `entity:${record.locatorKey}`;
+  }
+
+  private addRecordInternal(
+    normalizedId: string,
+    record: EntityIndexRecord,
+    sourceKey: string,
+  ): void {
+    this.recordsById.set(normalizedId, record);
+    this.sourceKeyById.set(normalizedId, sourceKey);
+    this.idsByLocator.set(record.locatorKey, normalizedId);
+    if (record.entityType === 'note') {
+      this.noteIdsByPath.set(normalizePath(record.path), normalizedId);
+    }
+    this.addToSetMap(this.idsBySourcePath, normalizePath(record.sourcePath), normalizedId);
+    this.addToSetMap(this.idsBySourceKey, sourceKey, normalizedId);
+  }
+
+  private removeRecordInternal(normalizedId: string): boolean {
+    const record = this.recordsById.get(normalizedId);
+    if (!record) return false;
+    this.recordsById.delete(normalizedId);
+    if (this.idsByLocator.get(record.locatorKey) === normalizedId) {
+      this.idsByLocator.delete(record.locatorKey);
+    }
+    if (
+      record.entityType === 'note'
+      && this.noteIdsByPath.get(normalizePath(record.path)) === normalizedId
+    ) {
+      this.noteIdsByPath.delete(normalizePath(record.path));
+    }
+    this.removeFromSetMap(this.idsBySourcePath, normalizePath(record.sourcePath), normalizedId);
+    const sourceKey = this.sourceKeyById.get(normalizedId);
+    this.sourceKeyById.delete(normalizedId);
+    if (sourceKey) this.removeFromSetMap(this.idsBySourceKey, sourceKey, normalizedId);
+    return true;
+  }
+
+  private rebuildSecondaryIndexes(): void {
+    for (const [id, record] of this.recordsById) {
+      this.idsByLocator.set(record.locatorKey, id);
+      if (record.entityType === 'note') {
+        this.noteIdsByPath.set(normalizePath(record.path), id);
+      }
+      this.addToSetMap(this.idsBySourcePath, normalizePath(record.sourcePath), id);
+      const sourceKey = this.sourceKeyById.get(id)
+        || (record.entityType === 'note'
+          ? `note:${normalizePath(record.path)}`
+          : `entity:${record.locatorKey}`);
+      this.sourceKeyById.set(id, sourceKey);
+      this.addToSetMap(this.idsBySourceKey, sourceKey, id);
+    }
+  }
+
+  private addToSetMap(
+    map: Map<string, Set<string>>,
+    key: string,
+    value: string,
+  ): void {
+    const values = map.get(key) ?? new Set<string>();
+    values.add(value);
+    map.set(key, values);
+  }
+
+  private removeFromSetMap(
+    map: Map<string, Set<string>>,
+    key: string,
+    value: string,
+  ): void {
+    const values = map.get(key);
+    if (!values) return;
+    values.delete(value);
+    if (values.size === 0) map.delete(key);
   }
 
   private getCanonicalDimensionName(dimensionName: string): string {
