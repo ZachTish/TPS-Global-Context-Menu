@@ -4,9 +4,11 @@ import { addSafeClickListener } from './menu-controller';
 import { FULL_DATE_REGEX, stripDateSuffix } from '../utils/date-suffix-utils';
 import { resolveCustomProperties } from '../resolve-profiles';
 import { ViewModeService } from '../services/view-mode-service';
-import { isTextListProperty } from '../utils/list-utils';
+import { getWikilinkDisplayText, isLinkListProperty, isTextListProperty, parseLinkListInput } from '../utils/list-utils';
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { getPlainDisplayTitle } from '../utils/display-title';
+import { isEntityReferenceProperty } from '../utils/entity-property';
+import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
 
 /**
  * Generate a consistent hue (0-360) from a string using a simple hash.
@@ -187,7 +189,23 @@ export class BadgeRenderer {
     const properties = resolveCustomProperties(this.plugin.settings.properties || [], entries, new ViewModeService(), 'inline');
     properties.forEach(prop => {
       if (prop.showInCollapsed === false) return;
-      if (prop.type === 'selector') {
+      if (isEntityReferenceProperty(prop) && prop.type !== 'list') {
+        const rawValue = this.getValueCaseInsensitive(fm, prop.key);
+        const value = rawValue === undefined || rawValue === null ? '' : String(rawValue).trim();
+        if (!value) return;
+        const badge = createBadge(getWikilinkDisplayText(value), `${prop.key} entity-reference`, null, (e) => {
+          e.stopPropagation();
+          openEntitySuggestModal(this.app, this.plugin, prop, async (choice) => {
+            const files = this.filesFromEntries(entries);
+            await this.plugin.bulkEditService.updateFrontmatter(files, { [prop.key]: choice.wikilink });
+            await this.afterWholeNotePropertyEdit(files, [prop.key]);
+            badge.textContent = choice.label;
+          });
+        });
+        nonTagBadges.push(badge);
+        return;
+      }
+      if (prop.type === 'selector' || prop.type === 'kind') {
         const rawValue = this.getValueCaseInsensitive(fm, prop.key);
         const value =
           rawValue === undefined || rawValue === null ? '' : String(rawValue).trim();
@@ -244,14 +262,19 @@ export class BadgeRenderer {
       } else if (prop.type === 'list') {
         const listValues = this.getValueCaseInsensitive(fm, prop.key);
         const isTextList = isTextListProperty(prop);
+        const isLinkList = isLinkListProperty(prop);
 
         if (listValues && listValues !== false && listValues !== null) {
-          const rawItems = Array.isArray(listValues) ? listValues : [listValues];
+          const rawItems = isLinkList
+            ? parseLinkListInput(listValues)
+            : Array.isArray(listValues) ? listValues : [listValues];
           const items = rawItems.filter((v: any) => typeof v === 'string' && v.trim());
           items.slice(0, 4).forEach((item: string) => {
-            const cleanItem = isTextList ? item.trim() : item.replace('#', '');
+            const cleanItem = isLinkList
+              ? getWikilinkDisplayText(item)
+              : isTextList ? item.trim() : item.replace('#', '');
             const badge = document.createElement('span');
-            badge.className = isTextList ? 'tps-gcm-badge' : 'tps-gcm-badge tps-gcm-badge-tag';
+            badge.className = isTextList || isLinkList ? 'tps-gcm-badge' : 'tps-gcm-badge tps-gcm-badge-tag';
 
             const removeBtn = document.createElement('button');
             removeBtn.className = 'tps-gcm-badge-tag-remove';
@@ -259,9 +282,9 @@ export class BadgeRenderer {
             removeBtn.textContent = '×';
             addSafeClickListener(removeBtn, async (e) => {
               e.stopPropagation();
-              if (isTextList) {
+              if (isTextList || isLinkList) {
                 const files = this.filesFromEntries(entries);
-                await this.plugin.bulkEditService.removeListValues(files, cleanItem, prop.key);
+                await this.plugin.bulkEditService.removeListValues(files, item, prop.key);
                 await this.afterWholeNotePropertyEdit(files, [prop.key]);
                 this.plugin.bulkEditService.showNotice('removed', `${prop.label || prop.key} ${cleanItem}`, '', entries.length);
               } else {
@@ -281,7 +304,7 @@ export class BadgeRenderer {
 
             addSafeClickListener(badge, (e) => {
               e.stopPropagation();
-              if (!isTextList) this.delegates.triggerTagSearch(cleanItem);
+              if (!isTextList && !isLinkList) this.delegates.triggerTagSearch(cleanItem);
             });
 
             // Consistent color based on tag hash
@@ -295,7 +318,7 @@ export class BadgeRenderer {
           if (items.length > 4) {
             tagBadges.push(createBadge(`+${items.length - 4}`, 'tag-more', null, (e) => {
               e.stopPropagation();
-              if (isTextList) this.delegates.openAddListValueModal(entries, prop.key, prop.label);
+              if (isTextList || isLinkList) this.delegates.openAddListValueModal(entries, prop.key, prop.label);
               else this.delegates.openAddTagModal(entries, prop.key);
             }));
           }
@@ -304,7 +327,7 @@ export class BadgeRenderer {
         // Add the "+" button AFTER the tags
         const addBadge = createBadge('+', 'add-tag', null, (e) => {
           e.stopPropagation();
-          if (isTextList) this.delegates.openAddListValueModal(entries, prop.key, prop.label);
+          if (isTextList || isLinkList) this.delegates.openAddListValueModal(entries, prop.key, prop.label);
           else this.delegates.openAddTagModal(entries, prop.key);
         });
         tagBadges.push(addBadge);

@@ -12,12 +12,15 @@ import * as logger from '../logger';
 import { ScheduledModal } from '../modals/scheduled-modal';
 import type { CustomProperty } from '../types';
 import { readInlineFieldValue, setInlineFieldValueOnLine } from '../utils/task-line-metadata';
+import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
+import { mergeEntityReferenceList } from '../utils/entity-property';
 
 type InlinePropertySuggestion = {
   label: string;
   key: string;
   icon: string;
   type: string;
+  acceptsKind?: string;
   action?: 'insert' | 'create';
 };
 
@@ -104,6 +107,11 @@ export class InlinePropertySuggest extends EditorSuggest<InlinePropertySuggestio
       await this.createInlineProperty(suggestion.key);
     }
 
+    if (suggestion.acceptsKind) {
+      this.openEntityPicker(context, suggestion);
+      return;
+    }
+
     if (this.usesDatePicker(suggestion)) {
       this.openDatePicker(context, suggestion);
       return;
@@ -114,6 +122,32 @@ export class InlinePropertySuggest extends EditorSuggest<InlinePropertySuggestio
     context.editor.setCursor({
       line: context.start.line,
       ch: context.start.ch + insertion.length - 1,
+    });
+  }
+
+  private openEntityPicker(context: EditorSuggestContext, suggestion: InlinePropertySuggestion): void {
+    const editor = context.editor;
+    const lineNumber = context.start.line;
+    editor.replaceRange('', context.start, context.end);
+    const sourceRevision = editor.getLine(lineNumber);
+    editor.setCursor({ line: lineNumber, ch: Math.min(context.start.ch, sourceRevision.length) });
+    openEntitySuggestModal(this.plugin.app, this.plugin, suggestion.acceptsKind, (choice) => {
+      const currentLine = editor.getLine(lineNumber);
+      if (currentLine !== sourceRevision) {
+        new Notice('The source line changed while the note picker was open.');
+        return;
+      }
+      const currentValue = readInlineFieldValue(currentLine, suggestion.key);
+      const nextValue = suggestion.type === 'list'
+        ? mergeEntityReferenceList(currentValue, choice.wikilink).join(', ')
+        : choice.wikilink;
+      const nextLine = setInlineFieldValueOnLine(currentLine, suggestion.key, nextValue);
+      editor.replaceRange(
+        nextLine,
+        { line: lineNumber, ch: 0 },
+        { line: lineNumber, ch: currentLine.length },
+      );
+      editor.setCursor({ line: lineNumber, ch: nextLine.length });
     });
   }
 
@@ -236,7 +270,7 @@ export class InlinePropertySuggest extends EditorSuggest<InlinePropertySuggestio
   }
 
   private normalizeProperty(property: CustomProperty | null | undefined): InlinePropertySuggestion | null {
-    if (!property || property.disabled || property.hidden || property.allowInlineSet === false) return null;
+    if (!property || property.disabled || property.hidden || property.allowInlineSet === false || property.type === 'kind') return null;
     const key = String(property.key || '').trim();
     if (!key) return null;
     if (DEFAULT_INLINE_DENY_KEYS.has(key.toLowerCase())) return null;
@@ -246,6 +280,7 @@ export class InlinePropertySuggest extends EditorSuggest<InlinePropertySuggestio
       key,
       icon: String(property.icon || '').trim() || 'braces',
       type: String(property.type || 'text').trim() || 'text',
+      acceptsKind: String(property.acceptsKind || '').trim() || undefined,
     };
   }
 

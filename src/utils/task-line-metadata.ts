@@ -16,6 +16,11 @@ export interface TaskInlineField {
   value: string;
 }
 
+export interface TaskInlineFieldRange extends TaskInlineField {
+  start: number;
+  end: number;
+}
+
 export const TASK_COMPLETED_DATE_FIELD = 'completedDate';
 
 export interface TaskLineTimestampOptions {
@@ -266,6 +271,16 @@ export function readTaskInlineFields(line: string): TaskInlineField[] {
   }));
 }
 
+/**
+ * Return inline fields with offsets relative to the supplied source.
+ *
+ * Unlike a flat regular expression, the scanner understands nested brackets,
+ * so values such as `[[Projects/Alpha]], [[Projects/Beta]]` stay intact.
+ */
+export function readInlineFieldRanges(source: string): TaskInlineFieldRange[] {
+  return scanTaskInlineFields(String(source || '')).map((field) => ({ ...field }));
+}
+
 export function setInlineFieldValueOnTaskLine(line: string, key: string, value: string | null): string {
   const parsed = parseTaskLine(line);
   if (!parsed) return line;
@@ -451,11 +466,6 @@ function getTaskEditorMetadataRanges(body: string): TaskTextRange[] {
 type TaskTextRange = {
   start: number;
   end: number;
-};
-
-type TaskInlineFieldRange = TaskTextRange & {
-  key: string;
-  value: string;
 };
 
 function scanTaskInlineFields(value: string): TaskInlineFieldRange[] {

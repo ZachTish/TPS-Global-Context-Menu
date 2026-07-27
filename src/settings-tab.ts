@@ -2311,6 +2311,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           .addOption('number', 'Number')
           .addOption('datetime', 'Date/Time')
           .addOption('selector', 'Selector (Dropdown)')
+          .addOption('kind', 'Kind (Note identity)')
           .addOption('list', 'List')
           .addOption('checkbox', 'Checkbox')
           .addOption('recurrence', 'Recurrence')
@@ -2319,9 +2320,35 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           .setValue(prop.type)
           .onChange(async (value: any) => {
             prop.type = value;
+            if (value === 'kind') {
+              delete prop.acceptsKind;
+              prop.allowInlineSet = false;
+            } else if (value === 'list' && prop.acceptsKind) {
+              prop.listItemType = 'link';
+            }
             await this.plugin.saveSettings();
             this.display();
           }));
+
+      if (prop.type !== 'kind') {
+        const knownKinds = this.plugin.entityIndexService?.getDimensionValues('kind') || [];
+        new Setting(fields)
+          .setName('Accepts kind')
+          .setDesc([
+            'Optional. When set, this property becomes a note picker and only offers notes registered with that Kind.',
+            knownKinds.length > 0 ? `Known: ${knownKinds.slice(0, 8).join(', ')}${knownKinds.length > 8 ? ', …' : ''}` : 'You can name a Kind before matching notes exist.',
+          ].join(' '))
+          .addText((text) => text
+            .setPlaceholder('project')
+            .setValue(prop.acceptsKind || '')
+            .onChange(async (value) => {
+              const acceptsKind = value.trim().toLowerCase();
+              if (acceptsKind) prop.acceptsKind = acceptsKind;
+              else delete prop.acceptsKind;
+              if (acceptsKind && prop.type === 'list') prop.listItemType = 'link';
+              await this.plugin.saveSettings();
+            }));
+      }
 
       // Icon
       new Setting(fields)
@@ -2530,22 +2557,28 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       if (prop.type === 'list') {
         const listOptionsDiv = div.createDiv();
         listOptionsDiv.style.gridColumn = '1 / -1';
-        new Setting(listOptionsDiv)
-          .setName('List values')
-          .setDesc('Choose whether this list stores Obsidian tags, plain text strings, or note links.')
-          .addDropdown((drop) => drop
-            .addOption('tag', 'Tags')
-            .addOption('text', 'Text strings')
-            .addOption('link', 'Links')
-            .setValue(prop.listItemType || 'tag')
-            .onChange(async (value: 'tag' | 'text' | 'link') => {
-              prop.listItemType = value;
-              await this.plugin.saveSettings();
-              this.display();
-            }));
+        if (prop.acceptsKind) {
+          new Setting(listOptionsDiv)
+            .setName('List values')
+            .setDesc(`Stored as note links because this property accepts Kind "${prop.acceptsKind}".`);
+        } else {
+          new Setting(listOptionsDiv)
+            .setName('List values')
+            .setDesc('Choose whether this list stores Obsidian tags, plain text strings, or note links.')
+            .addDropdown((drop) => drop
+              .addOption('tag', 'Tags')
+              .addOption('text', 'Text strings')
+              .addOption('link', 'Links')
+              .setValue(prop.listItemType || 'tag')
+              .onChange(async (value: 'tag' | 'text' | 'link') => {
+                prop.listItemType = value;
+                await this.plugin.saveSettings();
+                this.display();
+              }));
+        }
       }
 
-      if (prop.type === 'selector' || prop.type === 'list') {
+      if ((prop.type === 'selector' || prop.type === 'list' || prop.type === 'kind') && !prop.acceptsKind) {
         this.renderPropertyOptionSettings(div, prop);
       }
 
@@ -2635,7 +2668,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   private renderPropertyOptionSettings(container: HTMLElement, prop: CustomProperty): void {
     const optionsDiv = container.createDiv();
     optionsDiv.style.gridColumn = '1 / -1';
-    const vaultOptions = collectVaultPropertyOptions(this.app, prop);
+    const vaultOptions = prop.type === 'kind'
+      ? this.plugin.entityIndexService?.getDimensionValues('kind') || collectVaultPropertyOptions(this.app, prop)
+      : collectVaultPropertyOptions(this.app, prop);
     const manualOptions = normalizeManualPropertyOptions(prop.options || [], prop);
     const effectiveOptions = getEffectivePropertyOptions(this.app, prop);
 
@@ -2653,7 +2688,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         }));
 
     new Setting(optionsDiv)
-      .setName(prop.type === 'selector' ? 'Manual options' : 'Manual suggestions')
+      .setName(prop.type === 'selector' || prop.type === 'kind' ? 'Manual options' : 'Manual suggestions')
       .setDesc('Comma or newline separated values. These are merged with vault values when the option source includes the vault.')
       .addTextArea((text) => text
         .setValue(manualOptions.join(', '))

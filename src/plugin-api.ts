@@ -532,6 +532,22 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             hasCommand: (commandId: string) => hasCommand(plugin.app, commandId),
             executeCommandById: (commandId: string) => executeCommandById(plugin.app, commandId),
         },
+        entityIndex: {
+            version: 1,
+            query: (criteria: Parameters<typeof plugin.entityIndexService.query>[0]) =>
+                plugin.entityIndexService.query(criteria),
+            getById: (id: string) => plugin.entityIndexService.getById(id),
+            getByPath: (path: string) => plugin.entityIndexService.getByPath(path),
+            getDimensionValues: (dimension: string) =>
+                plugin.entityIndexService.getDimensionValues(dimension),
+            getRevision: () => plugin.entityIndexService.getRevision(),
+            onChanged: (callback: Parameters<typeof plugin.entityIndexService.onChanged>[0]) =>
+                plugin.entityIndexService.onChanged(callback),
+            registerDimension: (
+                definition: Parameters<typeof plugin.entityIndexService.registerDimension>[0],
+            ) => plugin.entityIndexService.registerDimension(definition),
+            invalidate: (paths?: string[]) => plugin.entityIndexService.invalidate(paths),
+        },
         overlays: {
             version: 1,
             invalidate: (request: any) => plugin.overlayRenderingService.invalidate(request),

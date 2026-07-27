@@ -66,6 +66,16 @@ import {
   type TaskEditorPropertyChange,
   type TaskEditorPropertyDescriptor,
 } from './task-editor-properties';
+import {
+  isEntityReferenceProperty,
+  mergeEntityReferenceList,
+  removeEntityReferenceListValues,
+} from '../utils/entity-property';
+import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
+import {
+  getWikilinkDisplayText,
+  parseLinkListInput,
+} from '../utils/list-utils';
 
 export type TaskLineContext = {
   file: TFile;
@@ -483,6 +493,40 @@ export class TaskLineContextMenuService {
         }
         const controlEl = propertyEl.createDiv({ cls: 'tps-gcm-task-editor-property-control' });
         const ariaLabel = `${descriptor.label} property`;
+
+        if (isEntityReferenceProperty(descriptor.property)) {
+          let value = descriptor.value;
+          const control = controlEl.createEl('button', {
+            cls: 'tps-gcm-task-editor-property-button',
+            attr: { type: 'button', 'aria-label': ariaLabel },
+          });
+          const renderValue = (): void => {
+            const links = descriptor.type === 'list' ? parseLinkListInput(value) : value ? [value] : [];
+            control.textContent = links.length > 0
+              ? links.map((link) => getWikilinkDisplayText(link)).join(', ')
+              : `Choose ${descriptor.label}…`;
+            control.toggleClass('is-empty', links.length === 0);
+            control.setAttribute('title', value || `Choose ${descriptor.label}`);
+          };
+          renderValue();
+          control.addEventListener('click', () => {
+            openEntitySuggestModal(this.plugin.app, this.plugin, descriptor.property, (choice) => {
+              value = descriptor.type === 'list'
+                ? mergeEntityReferenceList(value, choice.wikilink).join(', ')
+                : choice.wikilink;
+              renderValue();
+              this.taskEditorOverlay?.schedule();
+            });
+          });
+          configureControl(control);
+          addDraft(
+            descriptor,
+            () => value,
+            (disabled) => { control.disabled = disabled; },
+            () => control.focus(),
+          );
+          continue;
+        }
 
         if (descriptor.type === 'checkbox') {
           const control = controlEl.createEl('input', {
@@ -1707,7 +1751,9 @@ export class TaskLineContextMenuService {
       )
     ));
     for (const property of properties) {
-      if (property.type === 'selector') {
+      if (isEntityReferenceProperty(property)) {
+        this.addEntityPropertyMenu(menu, context, property);
+      } else if (property.type === 'selector') {
         this.addSelectorPropertyMenu(menu, context, property);
       } else if (property.type === 'datetime') {
         this.addDatetimePropertyMenu(menu, context, property);
@@ -1719,6 +1765,54 @@ export class TaskLineContextMenuService {
         this.addTextPropertyMenu(menu, context, property);
       }
     }
+  }
+
+  private addEntityPropertyMenu(menu: Menu, context: TaskLineContext, property: CustomProperty): void {
+    const isList = property.type === 'list';
+    const currentValue = readInlineFieldValue(context.rawLine, property.key);
+    const current = isList ? parseLinkListInput(currentValue) : currentValue ? [currentValue] : [];
+    menu.addItem((item) => {
+      item
+        .setTitle(current.length > 0
+          ? `${property.label}: ${current.map((value) => getWikilinkDisplayText(value)).join(', ')}`
+          : `${property.label} (create field)`)
+        .setIcon(property.icon || 'file-search');
+      const subMenu = (item as any).setSubmenu();
+      subMenu.addItem((sub: any) => {
+        sub.setTitle('(none)').setChecked(current.length === 0).onClick(() => {
+          void this.updateTaskLine(context, (line) => setInlineFieldValueOnTaskLine(line, property.key, null));
+        });
+      });
+      subMenu.addItem((sub: any) => {
+        sub.setTitle(isList ? `Add ${property.label}…` : `Choose ${property.label}…`).setIcon('search').onClick(() => {
+          openEntitySuggestModal(this.plugin.app, this.plugin, property, (choice) => {
+            void this.updateTaskLine(context, (line) => {
+              const nextValue = isList
+                ? mergeEntityReferenceList(readInlineFieldValue(line, property.key), choice.wikilink).join(', ')
+                : choice.wikilink;
+              return setInlineFieldValueOnTaskLine(line, property.key, nextValue);
+            });
+          });
+        });
+      });
+      if (isList && current.length > 0) {
+        subMenu.addSeparator();
+        for (const link of current) {
+          subMenu.addItem((sub: any) => {
+            sub.setTitle(`Remove ${getWikilinkDisplayText(link)}`).setIcon('x').onClick(() => {
+              void this.updateTaskLine(context, (line) => {
+                const remaining = removeEntityReferenceListValues(readInlineFieldValue(line, property.key), link);
+                return setInlineFieldValueOnTaskLine(
+                  line,
+                  property.key,
+                  remaining.length > 0 ? remaining.join(', ') : null,
+                );
+              });
+            });
+          });
+        }
+      }
+    });
   }
 
   private addSelectorPropertyMenu(menu: Menu, context: TaskLineContext, property: CustomProperty): void {
@@ -2624,7 +2718,14 @@ export class TaskLineContextMenuService {
     const key = String(property.key || '').trim().toLowerCase();
     const id = String(property.id || '').trim().toLowerCase();
     if (!key) return false;
-    if (key === 'title' || id === 'title' || key === 'folderpath' || property.type === 'folder' || property.type === 'snooze') return false;
+    if (
+      key === 'title'
+      || id === 'title'
+      || key === 'folderpath'
+      || property.type === 'folder'
+      || property.type === 'snooze'
+      || property.type === 'kind'
+    ) return false;
     if (key === statusKey || id === 'status') return false;
     return true;
   }

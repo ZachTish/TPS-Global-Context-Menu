@@ -240,5 +240,6 @@ function isTaskEditorPropertyHidden(property: CustomProperty | null): boolean {
     || property.showWhen === 'never'
     || property.type === 'folder'
     || property.type === 'snooze'
+    || property.type === 'kind'
   ));
 }

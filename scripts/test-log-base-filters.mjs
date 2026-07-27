@@ -40,6 +40,7 @@ async function loadViewModule() {
             const api = new Proxy(
               {
                 BasesView: Dummy,
+                FuzzySuggestModal: Dummy,
                 Modal: Dummy,
                 TFile: Dummy,
                 normalizePath: (value) => String(value),

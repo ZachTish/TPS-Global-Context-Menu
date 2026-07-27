@@ -22,6 +22,8 @@ import { getCheckboxStateMarker, normalizeCheckboxStateToken } from '../utils/ch
 import { getWikilinkDisplayText, isLinkListProperty, parseLinkListInput } from '../utils/list-utils';
 import { extractWebLink } from '../utils/web-link-utils';
 import { getPlainDisplayTitle } from '../utils/display-title';
+import { isEntityReferenceProperty } from '../utils/entity-property';
+import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
 
 interface SubitemNode {
   file: TFile;
@@ -230,6 +232,7 @@ class CreateCustomPropertyModal extends Modal {
         .addOption('number', 'Number')
         .addOption('datetime', 'Date/Time')
         .addOption('selector', 'Selector')
+        .addOption('kind', 'Kind (Note identity)')
         .addOption('list', 'List')
         .addOption('checkbox', 'Checkbox')
         .setValue(this.type)
@@ -350,7 +353,7 @@ class CreateCustomPropertyModal extends Modal {
       hidden: this.hidden || this.showWhen === 'never',
       showInCollapsed: !(this.hidden || this.showWhen === 'never'),
       showInContextMenu: !(this.hidden || this.showWhen === 'never'),
-      allowInlineSet: !(this.hidden || this.showWhen === 'never'),
+      allowInlineSet: this.type !== 'kind' && !(this.hidden || this.showWhen === 'never'),
       showWhen: this.showWhen || 'always',
     };
     if (this.inlineShowWhen) property.inlineShowWhen = this.inlineShowWhen;
@@ -627,28 +630,28 @@ export class PanelBuilder {
 
     // Status (if enabled)
     const statusProp = properties.find(p => p.id === 'status' || p.key === 'status');
-    if (showInlineProperties && statusProp && statusProp.showInCollapsed !== false) {
+    if (showInlineProperties && statusProp && statusProp.showInCollapsed !== false && !isEntityReferenceProperty(statusProp)) {
       strip.appendChild(this.createStatusChip(entries, statusProp));
       markRendered(statusProp);
     }
 
     // Priority (if enabled)
     const priorityProp = properties.find(p => p.id === 'priority' || p.key === 'priority');
-    if (showInlineProperties && priorityProp && priorityProp.showInCollapsed !== false) {
+    if (showInlineProperties && priorityProp && priorityProp.showInCollapsed !== false && !isEntityReferenceProperty(priorityProp)) {
       strip.appendChild(this.createPriorityChip(entries, priorityProp));
       markRendered(priorityProp);
     }
 
     // Date (if enabled)
     const dateProp = properties.find(p => p.type === 'datetime' || p.key === 'scheduled');
-    if (showInlineProperties && dateProp && dateProp.showInCollapsed !== false) {
+    if (showInlineProperties && dateProp && dateProp.showInCollapsed !== false && !isEntityReferenceProperty(dateProp)) {
       strip.appendChild(this.createDateChip(entries, dateProp));
       markRendered(dateProp);
     }
 
     // Tags (if enabled)
     const tagsProp = properties.find(p => p.id === 'tags' || p.key === 'tags');
-    if (showInlineProperties && tagsProp && tagsProp.showInCollapsed !== false) {
+    if (showInlineProperties && tagsProp && tagsProp.showInCollapsed !== false && !isEntityReferenceProperty(tagsProp)) {
       // Add the "+" button first
       strip.appendChild(this.createTagsChip(entries, tagsProp));
 
@@ -664,7 +667,7 @@ export class PanelBuilder {
 
     // Folder / Project (if enabled)
     const folderProp = properties.find(p => p.id === 'type' || p.type === 'folder');
-    if (showInlineProperties && folderProp && folderProp.showInCollapsed !== false) {
+    if (showInlineProperties && folderProp && folderProp.showInCollapsed !== false && !isEntityReferenceProperty(folderProp)) {
       strip.appendChild(this.createFolderChip(entries));
       markRendered(folderProp);
     }
@@ -1025,6 +1028,20 @@ export class PanelBuilder {
     const propKey = String(prop?.key || '').trim();
     const propKeyLower = propKey.toLowerCase();
 
+    if (isEntityReferenceProperty(prop)) {
+      if (prop.type === 'list') {
+        this.delegates.openAddListValueModal(entries, propKey, prop?.label || propKey || 'Value');
+        return;
+      }
+      openEntitySuggestModal(this.app, this.plugin, prop, async (choice) => {
+        const files = this.filesFromEntries(entries);
+        this.setEntryFrontmatterValue(entries, propKey, choice.wikilink);
+        this.refreshStackedPropertyValue(anchor, entries, prop);
+        await this.plugin.bulkEditService.updateFrontmatter(files, { [propKey]: choice.wikilink });
+        await this.afterStackedPropertyEdit(files, [propKey], false);
+      });
+      return;
+    }
     if (propId === 'status' || propKeyLower === 'status') {
       this.propertyRowService.openStatusSubmenu(anchor, entries, () => {
         this.refreshStackedPropertyValue(anchor, entries, prop);
@@ -1059,7 +1076,7 @@ export class PanelBuilder {
       this.delegates.openRecurrenceModalNative(entries);
       return;
     }
-    if (prop.type === 'selector') {
+    if (prop.type === 'selector' || prop.type === 'kind') {
       this.openStackedSelectorMenu(anchor, entries, prop);
       return;
     }
@@ -1197,6 +1214,16 @@ export class PanelBuilder {
     const propId = String(prop?.id || '').toLowerCase();
     const propKey = String(prop?.key || '').trim();
     const propKeyLower = propKey.toLowerCase();
+
+    if (isEntityReferenceProperty(prop) && prop.type !== 'list') {
+      const raw = propKey ? this.getFrontmatterValueCaseInsensitive(frontmatter, propKey) : undefined;
+      const text = getWikilinkDisplayText(String(raw || ''));
+      const value = document.createElement('span');
+      value.className = text ? 'tps-gcm-top-property-text' : 'tps-gcm-top-property-empty';
+      value.textContent = text || 'Empty';
+      target.appendChild(value);
+      return;
+    }
 
     if (propId === 'status' || propKeyLower === 'status') {
       target.appendChild(this.createStatusChip(entries, prop));
@@ -1449,7 +1476,12 @@ export class PanelBuilder {
     if (!key) return null;
 
     const raw = this.getFrontmatterValueCaseInsensitive(frontmatter, key);
-    const text = this.formatStackedPropertyValue(raw);
+    const text = isEntityReferenceProperty(prop)
+      ? (prop.type === 'list' ? parseLinkListInput(raw) : parseLinkListInput(raw).slice(0, 1))
+        .map((link) => getWikilinkDisplayText(link))
+        .filter(Boolean)
+        .join(', ')
+      : this.formatStackedPropertyValue(raw);
     if (!text) return null;
 
     const chip = document.createElement('div');

@@ -13,6 +13,8 @@ import { buildLinkedSubitemRow, getIconNameForState } from './linked-subitem-row
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { TextInputModal } from '../modals/text-input-modal';
 import { getCheckboxStateMarker, normalizeCheckboxStateToken } from '../utils/checkbox-state';
+import { isEntityReferenceProperty } from '../utils/entity-property';
+import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
 
 const VIRTUAL_CHECKBOX_CLASS = 'tps-gcm-linked-subitem-checkbox';
 const CM_WIDGET_CLASS = 'tps-gcm-linked-subitem-cm-widget';
@@ -448,10 +450,27 @@ export class LinkedSubitemCheckboxService {
     const entries = [{ file: childFile, frontmatter: (this.plugin.app.metadataCache.getFileCache(childFile)?.frontmatter || {}) as Record<string, unknown> }];
     const menuController = this.plugin.menuController as any;
     const propertyRowService = menuController?.propertyRowService as any;
+    const configuredProperty = propertyKey
+      ? this.resolveCustomProperty(entries, propertyKey, propertyKey)
+      : null;
 
     evt.preventDefault();
     evt.stopPropagation();
     evt.stopImmediatePropagation();
+
+    if (configuredProperty && isEntityReferenceProperty(configuredProperty)) {
+      openEntitySuggestModal(this.plugin.app, this.plugin, configuredProperty, async (choice) => {
+        if (configuredProperty.type === 'list') {
+          await this.plugin.bulkEditService.addListValues([childFile], choice.wikilink, configuredProperty.key);
+        } else {
+          await this.plugin.bulkEditService.updateFrontmatter([childFile], { [configuredProperty.key]: choice.wikilink });
+        }
+        await this.refreshReferencesForChild(childFile);
+        this.scheduleDecorateForActiveView();
+        this.refreshLivePreviewEditors();
+      });
+      return true;
+    }
 
     if ((kind === 'status' || (propertyType === 'selector' && propertyKey === 'status')) && propertyRowService?.openStatusSubmenu) {
       const statusProp = this.resolveCustomProperty(entries, 'status', 'status');

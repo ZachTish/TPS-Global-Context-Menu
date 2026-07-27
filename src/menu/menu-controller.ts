@@ -10,6 +10,8 @@ import * as logger from "../logger";
 import { PropertyRowService } from '../services/property-row-service';
 import { normalizeTagValue, parseTagInput } from '../utils/tag-utils';
 import { formatFileWikilink, isLinkListProperty, parseStringListInput } from '../utils/list-utils';
+import { isEntityReferenceProperty } from '../utils/entity-property';
+import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { BadgeRenderer, hashStringToHue } from './badge-renderer';
 import { PanelBuilder } from './panel-builder';
@@ -532,6 +534,17 @@ export class MenuController {
   openAddListValueModal(entries: any[], key: string, label = 'Value') {
     logger.log(`[TPS GCM] openAddListValueModal called with ${entries.length} entries`);
     const property = this.plugin.settings.properties?.find((prop) => prop.key.toLowerCase() === key.toLowerCase());
+    if (isEntityReferenceProperty(property)) {
+      openEntitySuggestModal(this.app, this.plugin, property, async (choice) => {
+        const files = this.filesFromEntries(entries);
+        const count = await this.plugin.bulkEditService.addListValues(files, choice.wikilink, key);
+        if (count > 0) {
+          this.plugin.bulkEditService.showNotice('added', `${label} ${choice.label}`, '', count);
+          await this.afterWholeNotePropertyEdit(files, [key]);
+        }
+      });
+      return;
+    }
     if (isLinkListProperty(property)) {
       new FileSuggestModal(this.app, async (file) => {
         const files = this.filesFromEntries(entries);

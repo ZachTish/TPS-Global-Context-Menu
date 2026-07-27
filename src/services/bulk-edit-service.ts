@@ -5,6 +5,7 @@ import * as logger from "../logger";
 import { TRACKER_RECURRENCE_RULE } from '../constants';
 import { normalizeTagValue, normalizeTagList, parseTagInput, mergeNormalizedTags } from '../utils/tag-utils';
 import { mergeLinkList, mergeStringList, parseLinkListInput, parseStringListInput, removeLinkListValues, removeStringListValues } from '../utils/list-utils';
+import { mergeEntityReferenceList, removeEntityReferenceListValues } from '../utils/entity-property';
 import { stripDatePrefix, stripDateSuffix } from '../utils/date-suffix-utils';
 import { setCompletedDateValue } from '../utils/completed-date-utils';
 import { ChecklistHandler } from '../handlers/checklist-handler';
@@ -1211,7 +1212,9 @@ export class BulkEditService {
         return this.applyToFiles(files, (fm) => {
             const targetKey = this.findFrontmatterKeyCaseInsensitive(fm, key) || key;
             fm[targetKey] = property?.listItemType === 'link'
-                ? mergeLinkList(fm[targetKey], values)
+                ? property.acceptsKind
+                    ? mergeEntityReferenceList(fm[targetKey], values)
+                    : mergeLinkList(fm[targetKey], values)
                 : mergeStringList(fm[targetKey], values);
             if (targetKey !== key && key in fm) {
                 delete fm[key];
@@ -1251,7 +1254,9 @@ export class BulkEditService {
         return this.applyToFiles(files, (fm) => {
             const targetKey = this.findFrontmatterKeyCaseInsensitive(fm, key) || key;
             const nextValues = property?.listItemType === 'link'
-                ? removeLinkListValues(fm[targetKey], values)
+                ? property.acceptsKind
+                    ? removeEntityReferenceListValues(fm[targetKey], values)
+                    : removeLinkListValues(fm[targetKey], values)
                 : removeStringListValues(fm[targetKey], values);
             if (nextValues.length === 0) {
                 delete fm[targetKey];

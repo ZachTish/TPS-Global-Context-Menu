@@ -30,6 +30,7 @@ import { installDateContainsPolyfill } from './compat';
 import * as logger from './logger';
 import { CommandQueueService, getErrorMessage, getPluginById } from './core';
 import { VaultQueryService } from './services/vault-query-service';
+import { EntityIndexService } from './services/entity-index-service';
 import { TaskIdentityService } from './services/task-identity-service';
 import { WorkspaceRibbonService } from './services/workspace-ribbon-service';
 import { LinkedSubitemCheckboxService } from './services/linked-subitem-checkbox-service';
@@ -102,6 +103,18 @@ import {
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
+const CUSTOM_PROPERTY_TYPES = new Set([
+  'text',
+  'number',
+  'datetime',
+  'selector',
+  'list',
+  'checkbox',
+  'recurrence',
+  'folder',
+  'snooze',
+  'kind',
+]);
 const LEGACY_HEALTH_CUSTOM_PROPERTY_IDS = new Set([
   'nutrition-food',
   'nutrition-qty',
@@ -267,6 +280,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   fieldInitializationService: FieldInitializationService;
   commandQueueService: CommandQueueService;
   vaultQueryService: VaultQueryService;
+  entityIndexService: EntityIndexService;
   taskIdentityService: TaskIdentityService;
   workspaceRibbonService: WorkspaceRibbonService;
   linkedSubitemCheckboxService: LinkedSubitemCheckboxService;
@@ -498,6 +512,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.fieldInitializationService = new FieldInitializationService(this);
     this.commandQueueService = new CommandQueueService();
     this.vaultQueryService = new VaultQueryService(this);
+    this.entityIndexService = new EntityIndexService(this);
+    this.configureEntityIndexDimensions();
+    this.entityIndexService.setup();
     this.taskIdentityService = new TaskIdentityService();
     this.workspaceRibbonService = new WorkspaceRibbonService(this);
     this.parentLinkResolutionService = new ParentLinkResolutionService(this);
@@ -2182,6 +2199,16 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     return source.map((property) => {
       const normalized = { ...(property as TPSGlobalContextMenuSettings['properties'][number] & { profiles?: unknown }) };
       delete normalized.profiles;
+      const normalizedKey = String(normalized.key || '').trim().toLowerCase();
+      const normalizedId = String(normalized.id || '').trim().toLowerCase();
+      const normalizedType = String(normalized.type || '').trim().toLowerCase();
+      normalized.type = (
+        (normalizedKey === 'kind' || normalizedId === 'kind') && normalizedType !== 'kind'
+          ? 'kind'
+          : CUSTOM_PROPERTY_TYPES.has(normalizedType)
+            ? normalizedType
+            : 'text'
+      ) as TPSGlobalContextMenuSettings['properties'][number]['type'];
       if (
         normalized.id === 'type' &&
         normalized.key === 'folderPath' &&
@@ -2190,12 +2217,22 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       ) {
         normalized.label = 'Folder';
       }
+      const acceptsKind = String(normalized.acceptsKind || '').trim().toLowerCase();
+      if (normalized.type === 'kind') {
+        delete normalized.acceptsKind;
+        normalized.allowInlineSet = false;
+      } else if (acceptsKind) {
+        normalized.acceptsKind = acceptsKind;
+      } else {
+        delete normalized.acceptsKind;
+      }
       if (normalized.type === 'list') {
         normalized.listItemType = normalized.listItemType === 'text'
           ? 'text'
           : normalized.listItemType === 'link'
             ? 'link'
             : 'tag';
+        if (normalized.acceptsKind) normalized.listItemType = 'link';
       } else {
         delete normalized.listItemType;
       }
@@ -2526,6 +2563,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   async saveSettings(): Promise<void> {
     this.settings.parentLinkFormat = normalizeParentLinkFormat(this.settings.parentLinkFormat);
     this.stripLegacySettingsFields(this.settings as unknown as Record<string, unknown>);
+    this.configureEntityIndexDimensions();
     logger.setLoggingEnabled(this.settings.enableLogging);
     if (this.settings.enableChecklistCompletionProperty !== true) {
       this.taskCheckboxHandler?.cancelChecklistPropertyUpdates();
@@ -2556,6 +2594,17 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         delayMs: 0,
       });
     }
+  }
+
+  private configureEntityIndexDimensions(): void {
+    if (!this.entityIndexService) return;
+    const propertyKeys = (this.settings.properties || [])
+      .filter((property) => property?.type === 'kind')
+      .map((property) => String(property.key || '').trim())
+      .filter(Boolean);
+    this.entityIndexService.configureDimensions([
+      { name: 'kind', propertyKeys },
+    ]);
   }
 
   isInMobileStartupGracePeriod(): boolean {

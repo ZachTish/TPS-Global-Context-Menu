@@ -7,7 +7,14 @@ import type { TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { resolveCustomProperties } from '../resolve-profiles';
 import { ViewModeService } from './view-mode-service';
-import { isTagListProperty, isTextListProperty, parseStringListInput } from '../utils/list-utils';
+import {
+  getWikilinkDisplayText,
+  isTagListProperty,
+  isTextListProperty,
+  parseLinkListInput,
+  parseStringListInput,
+} from '../utils/list-utils';
+import { isEntityReferenceProperty } from '../utils/entity-property';
 import { mapStatusToSubitemCheckboxState, normalizeLinkedSubitemMappings } from '../utils/linked-subitem-mapping';
 import * as logger from '../logger';
 
@@ -175,7 +182,31 @@ export class SubitemLineModelService {
     for (const prop of properties) {
       if (prop.hidden === true || prop.showInCollapsed === false) continue;
 
-      if (prop.type === 'selector') {
+      if (isEntityReferenceProperty(prop)) {
+        const links = parseLinkListInput(this.readFrontmatterValue(fm, prop.key));
+        const visibleLinks = prop.type === 'list' ? links : links.slice(0, 1);
+        for (const link of visibleLinks) {
+          pills.push({
+            label: getWikilinkDisplayText(link),
+            kind: 'selector',
+            value: link,
+            propertyKey: prop.key,
+            propertyType: prop.type,
+          });
+        }
+        if (visibleLinks.length === 0 || prop.type === 'list') {
+          pills.push({
+            label: visibleLinks.length === 0 ? `+ ${prop.label || prop.key}` : '+',
+            kind: 'action',
+            value: '+',
+            propertyKey: prop.key,
+            propertyType: prop.type,
+          });
+        }
+        continue;
+      }
+
+      if (prop.type === 'selector' || prop.type === 'kind') {
         const rawValue = this.readFrontmatterString(fm, prop.key);
         if (!rawValue) continue;
         if ((prop.id === 'status' || prop.key === this.getStatusKey() || prop.key === 'status') && lineKind === 'checkbox') {
@@ -284,10 +315,14 @@ export class SubitemLineModelService {
    * Read a string value from frontmatter (case-insensitive key lookup).
    */
   private readFrontmatterString(frontmatter: Record<string, unknown>, key: string): string {
-    const actualKey = Object.keys(frontmatter).find((candidate) => candidate.toLowerCase() === key.toLowerCase());
-    const raw = actualKey ? frontmatter[actualKey] : undefined;
+    const raw = this.readFrontmatterValue(frontmatter, key);
     if (typeof raw === 'string') return raw.trim();
     return '';
+  }
+
+  private readFrontmatterValue(frontmatter: Record<string, unknown>, key: string): unknown {
+    const actualKey = Object.keys(frontmatter).find((candidate) => candidate.toLowerCase() === key.toLowerCase());
+    return actualKey ? frontmatter[actualKey] : undefined;
   }
 
   /**

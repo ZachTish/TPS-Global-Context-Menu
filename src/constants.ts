@@ -64,6 +64,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   persistTaskVisibilityStateToFrontmatter: false,
   taskVisibilityStateFrontmatterKey: 'gcmTaskVisibility',
   properties: [
+    { id: 'kind', label: 'Kind', key: 'kind', type: 'kind', optionsSource: 'vault', icon: 'shapes', showInCollapsed: true, allowInlineSet: false },
     { id: 'status', label: 'Status', key: 'status', type: 'selector', options: ['todo', 'working', 'holding', 'wont-do', 'complete', MIGRATED_TASK_STATUS], icon: 'circle-check', showInCollapsed: true, allowInlineSet: true },
     { id: 'priority', label: 'Priority', key: 'priority', type: 'selector', options: ['high', 'medium', 'normal', 'low'], icon: 'flag', showInCollapsed: true, allowInlineSet: true },
     { id: 'tags', label: 'Tags', key: 'tags', type: 'list', listItemType: 'tag', icon: 'tag', showInCollapsed: true, allowInlineSet: true },

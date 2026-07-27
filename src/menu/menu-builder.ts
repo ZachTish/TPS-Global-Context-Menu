@@ -4,7 +4,7 @@ import { TextInputModal } from '../modals/text-input-modal';
 import { FileSuggestModal } from '../modals/FileSuggestModal';
 import { MultiFileSelectModal } from '../modals/MultiFileSelectModal';
 import { mergeNormalizedTags, normalizeTagValue } from '../utils/tag-utils';
-import { isTextListProperty, parseStringListInput } from '../utils/list-utils';
+import { isLinkListProperty, isTextListProperty, parseLinkListInput, parseStringListInput } from '../utils/list-utils';
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import * as logger from '../logger';
 import { resolveCustomProperties } from '../resolve-profiles';
@@ -12,6 +12,8 @@ import { ViewModeService } from '../services/view-mode-service';
 import { parseLinksFromFrontmatterValue } from '../services/link-target-service';
 import { promptAndCreateSubitemForParent } from '../services/subitem-creation-service';
 import { getPlainDisplayTitle } from '../utils/display-title';
+import { isEntityReferenceProperty } from '../utils/entity-property';
+import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
 
 export interface NativeMenuLabelOptions {
   archiveLabel?: string;
@@ -558,6 +560,11 @@ export class MenuBuilder {
           )
         ) return;
 
+        if (isEntityReferenceProperty(prop) && prop.type !== 'list') {
+          this.addEntityReferenceToMenu(menu, propertyEntries, prop, 'tps-props');
+          return;
+        }
+
         if (prop.key === 'snooze' || prop.type === 'snooze') {
           menu.addItem((item) => {
             const val = this.getValueCaseInsensitive(propertyEntries[0].frontmatter, prop.key);
@@ -584,7 +591,7 @@ export class MenuBuilder {
           return;
         }
 
-        if (prop.type === 'selector') {
+        if (prop.type === 'selector' || prop.type === 'kind') {
           this.addSelectorToMenu(menu, propertyEntries, prop, 'tps-props');
         } else if (prop.type === 'list') {
           this.addListToMenu(menu, propertyEntries, prop, 'tps-props');
@@ -902,11 +909,47 @@ export class MenuBuilder {
     });
   }
 
+  addEntityReferenceToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
+    menu.addItem((item) => {
+      const allValues = entries.map((entry: any) => this.getValueCaseInsensitive(entry.frontmatter, prop.key) || '');
+      const uniqueValues = new Set(allValues);
+      const current = uniqueValues.size === 1 ? String(allValues[0] || '') : 'Mixed';
+      const title = current && current !== 'Mixed'
+        ? `${prop.label}: ${current}`
+        : current === 'Mixed'
+          ? `${prop.label}: Mixed`
+          : `${prop.label} (create field)`;
+      item
+        .setTitle(title)
+        .setIcon(prop.icon || 'file-search')
+        .setSection(sectionId);
+      if (prop.disabled) {
+        item.setDisabled(true);
+        return;
+      }
+      const subMenu = (item as any).setSubmenu();
+      subMenu.addItem((sub: any) => {
+        sub.setTitle('(none)').setChecked(!current).onClick(async () => {
+          await this.removeContextProperty(entries, prop.key, 'context-entity-clear');
+        });
+      });
+      subMenu.addItem((sub: any) => {
+        sub.setTitle(`Choose ${prop.label || prop.key}…`).setIcon('search').onClick(() => {
+          openEntitySuggestModal(this.app, this.plugin, prop, async (choice) => {
+            await this.setContextPropertyValue(entries, prop, choice.wikilink, 'context-entity-option');
+          });
+        });
+      });
+    });
+  }
+
   addListToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
     menu.addItem((item) => {
       const listValues = this.getValueCaseInsensitive(entries[0].frontmatter, prop.key) || [];
       const items = isTextListProperty(prop)
         ? parseStringListInput(listValues)
+        : isLinkListProperty(prop)
+          ? parseLinkListInput(listValues)
         : Array.isArray(listValues)
           ? listValues
           : [];
@@ -932,6 +975,7 @@ export class MenuBuilder {
   populateListSubmenu(menu: Menu, entries: any[], prop: any, items: string[]) {
     const isUndefined = !this.plugin.fieldInitializationService.isFieldDefinedForEntries(entries, prop.key);
     const isTextList = isTextListProperty(prop);
+    const isLinkList = isLinkListProperty(prop);
 
     menu.addItem((sub) => {
       const title = isUndefined ? `Create field and add ${prop.label.toLowerCase()}...` : `Add ${prop.label}...`;
@@ -940,7 +984,7 @@ export class MenuBuilder {
         .onClick(async () => {
           // Initialize the field if it doesn't exist yet, then immediately open the modal.
           await this.plugin.fieldInitializationService.checkAndInitialize(entries, prop.key, []);
-          if (isTextList) {
+          if (isTextList || isLinkList) {
             this.delegates.openAddListValueModal(entries, prop.key, prop.label);
           } else {
             this.delegates.openAddTagModal(entries, prop.key);
@@ -956,7 +1000,7 @@ export class MenuBuilder {
               const nextItems = items.filter((existing) => String(existing) !== String(item));
               const files = this.getPropertyFiles(entries);
               if (files.length === 0) return;
-              if (isTextList) {
+              if (isTextList || isLinkList) {
                 await this.plugin.bulkEditService.removeListValues(files, item, prop.key);
               } else {
                 await this.plugin.bulkEditService.removeTag(files, item, prop.key);

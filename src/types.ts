@@ -4,10 +4,16 @@ export interface CustomProperty {
   id: string;
   label: string;
   key: string;
-  type: 'text' | 'number' | 'datetime' | 'selector' | 'list' | 'checkbox' | 'recurrence' | 'folder' | 'snooze';
+  type: 'text' | 'number' | 'datetime' | 'selector' | 'list' | 'checkbox' | 'recurrence' | 'folder' | 'snooze' | 'kind';
   options?: string[]; // For selector/list suggestions
   optionsSource?: 'manual' | 'vault';
   listItemType?: 'tag' | 'text' | 'link'; // For list
+  /**
+   * Restrict this property's values to indexed notes whose Kind identity
+   * matches this value. Constrained scalar values are stored as one wikilink;
+   * constrained lists are stored as link lists.
+   */
+  acceptsKind?: string;
   disabled?: boolean;
   hidden?: boolean;
   scopeTags?: string[];
@@ -41,7 +47,7 @@ export type TimeTrackingStorageMode = 'daily-note' | 'source-note' | 'dedicated-
 export type TpsBaseWriteFallbackMode = 'filter-required' | 'today-daily-note' | 'specific-note';
 type ExtensibleLiteral<T extends string> = T | (string & Record<never, never>);
 
-export type TpsRecordKind = 'note' | 'task' | 'project' | 'food' | 'log' | 'workflow' | 'run' | 'workout' | 'workout-plan';
+export type TpsRecordKind = ExtensibleLiteral<'note' | 'task' | 'project' | 'food' | 'log' | 'workflow' | 'run' | 'workout' | 'workout-plan'>;
 export type WorkflowRecurrenceMode = 'completion-triggered' | 'scheduled';
 export type WorkflowTemplateKind = 'workflow';
 export type WorkflowRunKind = 'run';

@@ -365,6 +365,23 @@ export const PLUGIN_STYLES = `
         background: var(--background-primary);
       }
 
+      .tps-log-base-cell--editable {
+        cursor: pointer;
+      }
+
+      .tps-log-base-cell--editable.is-empty {
+        color: var(--text-faint);
+        font-style: italic;
+      }
+
+      .tps-log-base-cell--editable:hover,
+      .tps-log-base-cell--editable:focus-visible {
+        color: var(--text-normal);
+        background: var(--background-modifier-hover);
+        outline: 2px solid var(--interactive-accent);
+        outline-offset: -2px;
+      }
+
       .tps-log-base-file-link {
         color: var(--link-color);
         text-decoration: var(--link-decoration);

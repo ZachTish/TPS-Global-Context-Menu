@@ -10,8 +10,14 @@ import {
   replaceExactLineRevision,
   type AtomicLineReplacementResult,
 } from '../utils/atomic-line-replacement';
+import { isEntityReferenceProperty, mergeEntityReferenceList } from '../utils/entity-property';
+import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
+import {
+  readInlineFieldRanges,
+  readInlineFieldValue,
+  setInlineFieldValueOnLine,
+} from '../utils/task-line-metadata';
 
-const INLINE_FIELD_RE = /\[([A-Za-z0-9_-]+)::\s*([^\]]*)]/g;
 const HIDDEN_INLINE_METADATA_RE = /(?:\[\^\s*tps-inline:[^\]]+\](?::\s*\S+)?|<span\b[^>]*data-tps-inline-props="[^"]*"[^>]*>\s*<\/span>|<!--\s*tps-inline-props:[\s\S]*?\s*-->|\s*%%\s*tps-inline-props:[\s\S]*?\s*%%)/g;
 const HIDDEN_INLINE_METADATA_LINE_RE = /^\s*(?:\[\^\s*tps-inline:[^\]]+\]:|tps-inline:[^\s:]+)\s*/;
 const DEFAULT_INLINE_DENY_KEYS = new Set([
@@ -245,15 +251,28 @@ export class InlinePropertyDecorationService {
     const menu = new Menu();
     menu.addItem((item) => {
       const isDatetime = property.type === 'datetime';
+      const isEntityReference = isEntityReferenceProperty(property);
       item
         .setTitle(`Edit ${property.label || key}`)
-        .setIcon(isDatetime ? 'calendar-clock' : 'pencil')
+        .setIcon(isEntityReference ? 'file-search' : isDatetime ? 'calendar-clock' : 'pencil')
         .onClick(() => {
-          if (isDatetime) this.openInlineScheduledModal(targetLine, key);
+          if (isEntityReference) {
+            openEntitySuggestModal(this.plugin.app, this.plugin, property, async (choice) => {
+              const current = this.readInlineFieldValueFromLine(targetLine.lineText, key);
+              const nextValue = property.type === 'list'
+                ? mergeEntityReferenceList(current, choice.wikilink).join(', ')
+                : choice.wikilink;
+              await this.replaceInlinePropertyLine(
+                targetLine,
+                this.setInlineFieldValue(targetLine.lineText, key, nextValue),
+              );
+            });
+          }
+          else if (isDatetime) this.openInlineScheduledModal(targetLine, key);
           else this.openInlineValueModal(targetLine, property, key);
         });
     });
-    if (property.type !== 'datetime') {
+    if (property.type !== 'datetime' || isEntityReferenceProperty(property)) {
       menu.addItem((item) => {
         item
           .setTitle(`Clear ${property.label || key}`)
@@ -345,7 +364,10 @@ export class InlinePropertyDecorationService {
   }
 
   private isInlinePropertyEditable(property: CustomProperty): boolean {
-    return property.type === 'datetime' || property.type === 'number' || property.type === 'text';
+    return isEntityReferenceProperty(property)
+      || property.type === 'datetime'
+      || property.type === 'number'
+      || property.type === 'text';
   }
 
   private async replaceInlinePropertyLine(targetLine: InlinePropertyLineTarget, nextLine: string): Promise<void> {
@@ -398,31 +420,16 @@ export class InlinePropertyDecorationService {
   }
 
   private setInlineFieldValue(lineText: string, key: string, value: string | null): string {
-    const regex = this.inlineFieldRegexForKey(key);
-    const trimmedValue = String(value || '').trim();
-    if (!trimmedValue) {
-      return lineText.replace(regex, '').replace(/\s{2,}/g, ' ').trimEnd();
-    }
-    if (regex.test(lineText)) {
-      regex.lastIndex = 0;
-      return lineText.replace(regex, `[${key}:: ${trimmedValue}]`);
-    }
-    return `${lineText.trimEnd()} [${key}:: ${trimmedValue}]`;
+    return setInlineFieldValueOnLine(lineText, key, value);
   }
 
   private lineContainsInlineKey(lineText: string, key: string): boolean {
-    const regex = this.inlineFieldRegexForKey(key);
-    return regex.test(lineText);
+    return readInlineFieldValue(lineText, key).length > 0
+      || readInlineFieldRanges(lineText).some((field) => field.key.toLowerCase() === key.trim().toLowerCase());
   }
 
   private readInlineFieldValueFromLine(lineText: string, key: string): string {
-    const regex = this.inlineFieldRegexForKey(key);
-    const match = regex.exec(lineText);
-    return String(match?.[1] || '').trim();
-  }
-
-  private inlineFieldRegexForKey(key: string): RegExp {
-    return new RegExp(`\\[${this.escapeRegExp(key)}::\\s*([^\\]]*)]`, 'i');
+    return readInlineFieldValue(lineText, key);
   }
 
   private readInlinePropertyElementKey(field: HTMLElement): string {
@@ -449,8 +456,8 @@ export class InlinePropertyDecorationService {
 
     const valueEl = field.querySelector<HTMLElement>('.dataview.inline-field-value, .metadata-property-value, .tps-gcm-live-inline-property-chip-value');
     const raw = valueEl?.textContent || field.textContent || '';
-    const bracketMatch = raw.match(/\[[A-Za-z0-9_-]+::\s*([^\]]*)]/);
-    if (bracketMatch) return bracketMatch[1].trim();
+    const inlineField = readInlineFieldRanges(raw)[0];
+    if (inlineField) return inlineField.value.trim();
     const colonMatch = raw.match(/^[A-Za-z0-9_-]+\s*::?\s*(.+)$/);
     return colonMatch?.[1]?.trim() || raw.trim();
   }
@@ -461,10 +468,6 @@ export class InlinePropertyDecorationService {
       const propertyKey = String(property?.key || '').trim().toLowerCase();
       return propertyKey === normalized && !property.disabled && !property.hidden && property.allowInlineSet !== false;
     }) || null;
-  }
-
-  private escapeRegExp(value: string): string {
-    return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   }
 
   private handleScheduledTaskContinuationKeydown(event: KeyboardEvent, view: EditorView): boolean {
@@ -498,9 +501,7 @@ export class InlinePropertyDecorationService {
 
   private isContinuationCandidateLine(lineText: string, cursorCh: number): boolean {
     if (!/^\s*[-*]\s+\[[^\]]*]\s+/.test(lineText)) return false;
-    INLINE_FIELD_RE.lastIndex = 0;
-    const hasInlineField = INLINE_FIELD_RE.test(lineText);
-    INLINE_FIELD_RE.lastIndex = 0;
+    const hasInlineField = readInlineFieldRanges(lineText).length > 0;
     if (
       !hasInlineField &&
       !/(?:\[\^\s*tps-inline:|^\s*tps-inline:|data-tps-inline-props=|<!--\s*tps-inline-props:|%%\s*tps-inline-props:)/.test(lineText)
@@ -569,19 +570,18 @@ export class InlinePropertyDecorationService {
     lineText: string,
     dateTimeKeys: Set<string>,
   ): void {
-    INLINE_FIELD_RE.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = INLINE_FIELD_RE.exec(lineText)) !== null) {
-      const propertyKey = String(match[1] || '').trim();
+    for (const field of readInlineFieldRanges(lineText)) {
+      const propertyKey = field.key.trim();
       if (!dateTimeKeys.has(propertyKey.toLowerCase())) continue;
 
-      const value = String(match[2] || '');
+      const value = field.value;
       const normalized = this.normalizeInlineDateTimeValue(value);
       if (normalized === value) continue;
 
-      const valueOffset = String(match[0]).indexOf(value);
+      const fieldSource = lineText.slice(field.start, field.end);
+      const valueOffset = fieldSource.indexOf(value);
       if (valueOffset < 0) continue;
-      const from = lineFrom + match.index + valueOffset;
+      const from = lineFrom + field.start + valueOffset;
       const to = from + value.length;
       if (this.selectionIntersects(view, from, to)) continue;
       changes.push({ from, to, insert: normalized });
@@ -630,15 +630,13 @@ export class InlinePropertyDecorationService {
     }
     HIDDEN_INLINE_METADATA_RE.lastIndex = 0;
 
-    INLINE_FIELD_RE.lastIndex = 0;
-    let match: RegExpExecArray | null;
     const isHealthFoodLine = this.isHealthFoodInlineLine(lineText);
     const isHealthWorkoutSetLine = this.isHealthWorkoutSetInlineLine(lineText);
-    while ((match = INLINE_FIELD_RE.exec(lineText)) !== null) {
-      const propertyKey = String(match[1] || '').trim();
-      const value = String(match[2] || '').trim();
-      const from = lineFrom + match.index;
-      const to = from + match[0].length;
+    for (const field of readInlineFieldRanges(lineText)) {
+      const propertyKey = field.key.trim();
+      const value = field.value.trim();
+      const from = lineFrom + field.start;
+      const to = lineFrom + field.end;
       const normalizedKey = propertyKey.toLowerCase();
       const isReservedMetadata = DEFAULT_INLINE_DENY_KEYS.has(normalizedKey)
         && (normalizedKey.startsWith('tps') || normalizedKey === 'subitemid');
@@ -824,15 +822,9 @@ export class InlinePropertyDecorationService {
     if (!combined.includes('::')) return;
     const isHealthFoodLine = this.isHealthFoodInlineLine(combined);
 
-    const matches: Array<{ from: number; to: number; key: string }> = [];
-    INLINE_FIELD_RE.lastIndex = 0;
-    let match: RegExpExecArray | null;
-    while ((match = INLINE_FIELD_RE.exec(combined)) !== null) {
-      const key = String(match[1] || '').trim();
-      if (!key) continue;
-      matches.push({ from: match.index, to: match.index + match[0].length, key });
-    }
-    INLINE_FIELD_RE.lastIndex = 0;
+    const matches = readInlineFieldRanges(combined)
+      .map((field) => ({ from: field.start, to: field.end, key: field.key.trim() }))
+      .filter((field) => field.key.length > 0);
     if (matches.length === 0) return;
 
     for (const item of matches.reverse()) {
@@ -984,9 +976,7 @@ export class InlinePropertyDecorationService {
   }
 
   private readInlineFieldValueFromRawText(rawText: string, key: string): string {
-    const regex = this.inlineFieldRegexForKey(key);
-    const match = regex.exec(rawText);
-    return String(match?.[1] || '').trim();
+    return readInlineFieldValue(rawText, key);
   }
 
   private findRenderedTextPosition(

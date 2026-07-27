@@ -31,6 +31,7 @@ export class FrontmatterMutationService {
 
     let changed = false;
     let nextTitle: string | null = null;
+    let indexedFrontmatter: FrontmatterRecord | null = null;
     const started = performance.now();
     await this.runSerialized(file, async () => {
       const attempt = await this.readParsedWithRetries(file);
@@ -84,6 +85,7 @@ export class FrontmatterMutationService {
         }
         await this.writeContent(file, nextContent);
         this.plugin.eventService.emitExplicitAction([file.path], { source: 'frontmatter' });
+        indexedFrontmatter = { ...sorted };
         changed = true;
       }
     });
@@ -94,6 +96,9 @@ export class FrontmatterMutationService {
       durationMs: Math.round(performance.now() - started),
       stack: changed ? compactStack(new Error().stack) : undefined,
     });
+    if (changed && indexedFrontmatter) {
+      this.plugin.entityIndexService?.upsertFile(file, indexedFrontmatter);
+    }
     if (changed && nextTitle && this.plugin.settings.enableAutoRename) {
       const liveFile = this.plugin.app.vault.getFileByPath(file.path);
       if (liveFile instanceof TFile) {

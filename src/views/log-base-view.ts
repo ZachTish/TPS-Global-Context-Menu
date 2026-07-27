@@ -10,6 +10,7 @@ import {
   readLogLineTags,
   removeLogLineTag,
   resolveEntryLineNumber,
+  setLogInlineFieldValue,
   setVisibleLineText,
   visibleLineText,
 } from './log-line-utils';
@@ -34,7 +35,12 @@ import {
   parseTpsListHeadingLine,
   setTpsListHeadingText,
 } from '../tps-list/heading-line-utils';
-import { getTaskDisplayTitle, parseTaskTagValues, readTaskLineTags } from '../utils/task-line-metadata';
+import {
+  getTaskDisplayTitle,
+  parseTaskTagValues,
+  readInlineFieldValue,
+  readTaskLineTags,
+} from '../utils/task-line-metadata';
 import { getTaskLineIdentity } from '../utils/task-line-resolution';
 import {
   getSourceNoteGroupValue,
@@ -45,6 +51,14 @@ import {
   type TpsBaseRowGroup,
 } from './base-row-grouping';
 import { resolveTpsBaseLineCreationPlan } from './base-line-creation-plan';
+import { getWikilinkDisplayText, parseLinkListInput } from '../utils/list-utils';
+import {
+  isEntityReferenceProperty,
+  mergeEntityReferenceList,
+  resolveConfiguredProperty,
+} from '../utils/entity-property';
+import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
+import type { CustomProperty } from '../types';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
 
@@ -1118,9 +1132,65 @@ export class TpsTableView extends BasesView {
           void this.openEntry(entry);
         });
       } else {
-        cell.setText(this.getEntryValue(entry, column.key));
+        const configuredProperty = resolveConfiguredProperty(this.plugin.settings.properties || [], column.key);
+        if (configuredProperty && isEntityReferenceProperty(configuredProperty)) {
+          const rawValue = entry.fields[normalizeInlineKey(configuredProperty.key)] ?? '';
+          const displayValue = this.formatEntityCellValue(rawValue, configuredProperty);
+          cell.addClass('tps-log-base-cell--editable');
+          cell.setAttr('role', 'button');
+          cell.setAttr('tabindex', '0');
+          cell.setAttr('aria-label', `${configuredProperty.label || column.label}: ${displayValue || 'empty'}`);
+          cell.setText(displayValue || `+ ${configuredProperty.label || column.label}`);
+          cell.toggleClass('is-empty', !displayValue);
+          cell.addEventListener('pointerdown', (event: PointerEvent) => event.stopPropagation());
+          cell.addEventListener('click', (event: MouseEvent) => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+            this.openEntityCellEditor(entry, column, configuredProperty);
+          });
+          cell.addEventListener('keydown', (event: KeyboardEvent) => {
+            if (event.key !== 'Enter' && event.key !== ' ') return;
+            event.preventDefault();
+            event.stopPropagation();
+            this.openEntityCellEditor(entry, column, configuredProperty);
+          });
+        } else {
+          cell.setText(this.getEntryValue(entry, column.key));
+        }
       }
     }
+  }
+
+  private formatEntityCellValue(value: string, property: CustomProperty): string {
+    const links = property.type === 'list'
+      ? parseLinkListInput(value)
+      : String(value || '').trim() ? [String(value).trim()] : [];
+    return links.map((link) => getWikilinkDisplayText(link)).filter(Boolean).join(', ');
+  }
+
+  private openEntityCellEditor(
+    entry: LogLineEntry,
+    column: LogTableColumn,
+    property: CustomProperty,
+  ): void {
+    openEntitySuggestModal(this.plugin.app, this.plugin, property, async (choice) => {
+      await this.updateEntryLine(entry, (line) => {
+        const current = readInlineFieldValue(line, property.key);
+        const nextValue = property.type === 'list'
+          ? mergeEntityReferenceList(current, choice.wikilink).join(', ')
+          : choice.wikilink;
+        return setLogInlineFieldValue(line, property.key, nextValue);
+      });
+      logger.flow('TpsTableView', 'entity-cell:set', {
+        path: entry.file.path,
+        lineNumber: entry.lineNumber + 1,
+        property: property.key,
+        acceptedKind: property.acceptsKind,
+        entityPath: choice.path,
+        column: column.key,
+      });
+    });
   }
 
   private renderGroupRow(
@@ -1478,12 +1548,21 @@ export class TpsTableView extends BasesView {
         && (entry.fields[column.normalized] != null || entry.queryFields?.[column.normalized] == null));
 
     for (const column of editableColumns) {
-      const current = entry.fields[column.normalized] ?? '';
+      const configuredProperty = resolveConfiguredProperty(this.plugin.settings.properties || [], column.key);
+      const current = configuredProperty && isEntityReferenceProperty(configuredProperty)
+        ? entry.fields[normalizeInlineKey(configuredProperty.key)] ?? ''
+        : entry.fields[column.normalized] ?? '';
       menu.addItem((item) => {
         item
           .setTitle(current ? `${column.label}: ${current}` : `${column.label} (create field)`)
-          .setIcon('pencil')
-          .onClick(() => this.promptEntryField(entry, column.key, column.label, current));
+          .setIcon(configuredProperty && isEntityReferenceProperty(configuredProperty) ? 'file-search' : 'pencil')
+          .onClick(() => {
+            if (configuredProperty && isEntityReferenceProperty(configuredProperty)) {
+              this.openEntityCellEditor(entry, column, configuredProperty);
+              return;
+            }
+            this.promptEntryField(entry, column.key, column.label, current);
+          });
       });
     }
 
@@ -1550,7 +1629,7 @@ export class TpsTableView extends BasesView {
               new Notice('Enter a valid tag.');
               return;
             }
-            await this.updateEntryLine(entry, (line) => setInlineFieldValue(
+            await this.updateEntryLine(entry, (line) => setLogInlineFieldValue(
               line,
               'tags',
               addLogLineTag(readInlineFields(line).tags, tag),
@@ -1562,7 +1641,7 @@ export class TpsTableView extends BasesView {
       for (const tag of current) {
         subMenu.addItem((sub: any) => {
           sub.setTitle(`Remove #${tag}`).setIcon('x').onClick(() => {
-            void this.updateEntryLine(entry, (line) => setInlineFieldValue(
+            void this.updateEntryLine(entry, (line) => setLogInlineFieldValue(
               line,
               'tags',
               removeLogLineTag(readInlineFields(line).tags, tag),
@@ -1575,7 +1654,7 @@ export class TpsTableView extends BasesView {
 
   private promptEntryField(entry: LogLineEntry, key: string, label: string, current: string): void {
     new TextInputModal(this.plugin.app, label, current, async (value) => {
-      await this.updateEntryLine(entry, (line) => setInlineFieldValue(line, key, String(value || '').trim() || null));
+      await this.updateEntryLine(entry, (line) => setLogInlineFieldValue(line, key, String(value || '').trim() || null));
     }).open();
   }
 
@@ -1695,28 +1774,6 @@ function isFoodLogEntry(entry: LogLineEntry): boolean {
   return Boolean(entry.fields.foodid || entry.fields.food || type === 'foodlog');
 }
 
-
-function setInlineFieldValue(line: string, key: string, value: string | null): string {
-  const cleanKey = String(key || '').replace(/^note\./, '').trim();
-  if (!cleanKey) return line;
-  const escaped = cleanKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const pattern = new RegExp(`\\[${escaped}\\s*::\\s*(?:\\[\\[[^\\]]+\\]\\]|[^\\]]*)\\]`, 'i');
-  if (value === null) {
-    return String(line || '')
-      .replace(pattern, '')
-      .replace(/<!--\s*-->/g, '')
-      .replace(/\s+(?=-->)/g, ' ')
-      .replace(/\s{2,}/g, ' ')
-      .trimEnd();
-  }
-  const nextField = `[${cleanKey}:: ${value}]`;
-  if (pattern.test(line)) return String(line || '').replace(pattern, nextField);
-  const commentMatch = String(line || '').match(/<!--([\s\S]*?)-->\s*$/);
-  if (commentMatch) {
-    return String(line || '').replace(/<!--([\s\S]*?)-->\s*$/, (_match, body: string) => `<!--${body.trimEnd()} ${nextField} -->`);
-  }
-  return `${String(line || '').trimEnd()} <!-- ${nextField} -->`;
-}
 
 function escapeAttrValue(value: string): string {
   return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');

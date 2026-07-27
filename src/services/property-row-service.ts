@@ -5,6 +5,8 @@ import { getWikilinkDisplayText, isLinkListProperty, isTextListProperty, parseLi
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { TextInputModal } from '../modals/text-input-modal';
 import { extractWebLink } from '../utils/web-link-utils';
+import { isEntityReferenceProperty } from '../utils/entity-property';
+import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
 import * as logger from '../logger';
 
 type Delegates = {
@@ -177,7 +179,9 @@ export class PropertyRowService {
       const current = uniqueValues.size === 1 ? allValues[0] : "Mixed";
       const isUndefined = entries.every((e: any) => !this.plugin.fieldInitializationService.isFieldDefinedForEntries([e], prop.key));
 
-      valueEl.textContent = current || "Select...";
+      valueEl.textContent = current && current !== 'Mixed' && isEntityReferenceProperty(prop)
+        ? getWikilinkDisplayText(String(current))
+        : current || "Select...";
       if (isUndefined) {
         valueEl.style.color = "var(--text-muted)";
         valueEl.style.fontStyle = "italic";
@@ -200,6 +204,17 @@ export class PropertyRowService {
         return value === '' || value === null || value === undefined;
       });
       const files = this.filesFromEntries(entries);
+
+      if (isEntityReferenceProperty(prop)) {
+        openEntitySuggestModal(this.app, this.plugin, prop, async (choice) => {
+          this.setEntryFrontmatterValue(entries, prop.key, choice.wikilink);
+          updateDisplay();
+          await this.plugin.bulkEditService.updateFrontmatter(files, { [prop.key]: choice.wikilink });
+          await this.afterWholeNotePropertyEdit(files, [prop.key]);
+          updateDisplay();
+        });
+        return;
+      }
 
       const menu = new Menu();
       const checkedItems: Array<{ item: any; value: string }> = [];
@@ -392,6 +407,7 @@ export class PropertyRowService {
   }
 
   createDatetimeRow(entries: any[], prop: any): HTMLElement {
+    if (isEntityReferenceProperty(prop)) return this.createSelectorRow(entries, prop);
     const row = document.createElement("div");
     row.className = "tps-gcm-row";
     const label = document.createElement("label");
@@ -431,6 +447,7 @@ export class PropertyRowService {
   }
 
   createTextRow(entries: any[], prop: any): HTMLElement {
+    if (isEntityReferenceProperty(prop)) return this.createSelectorRow(entries, prop);
     const row = document.createElement("div");
     row.className = "tps-gcm-row";
     const label = document.createElement("label");
@@ -468,6 +485,7 @@ export class PropertyRowService {
   }
 
   createNumberRow(entries: any[], prop: any): HTMLElement {
+    if (isEntityReferenceProperty(prop)) return this.createSelectorRow(entries, prop);
     const row = document.createElement("div");
     row.className = "tps-gcm-row";
     const label = document.createElement("label");
@@ -494,6 +512,7 @@ export class PropertyRowService {
   }
 
   createRecurrenceRow(entries: any[], prop?: any): HTMLElement {
+    if (isEntityReferenceProperty(prop)) return this.createSelectorRow(entries, prop);
     const row = document.createElement("div");
     row.className = "tps-gcm-row";
     const label = document.createElement("label");
@@ -512,6 +531,7 @@ export class PropertyRowService {
   }
 
   createTypeRow(entries: any[], prop?: any): HTMLElement {
+    if (isEntityReferenceProperty(prop)) return this.createSelectorRow(entries, prop);
     const row = document.createElement("div");
     row.className = "tps-gcm-row";
     const label = document.createElement("label");

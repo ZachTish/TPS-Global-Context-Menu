@@ -4,7 +4,17 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.8.1` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.9.0` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
+## 1.9.0
+
+- Custom fields now include **Kind (Note identity)**. Every configured Kind field contributes its frontmatter key to one global, generic entity index, so a note with `kind: project` becomes a queryable project entity without any hardcoded Kind values.
+- Any non-Kind custom field can declare **Accepts kind**. Its editors then offer only indexed notes carrying that exact Kind and write canonical Obsidian note links. A scalar field stores one link; a list field stores link values and deduplicates by note target even when an older alias differs.
+- The constrained picker is shared by note menus, stacked properties, linked-subitem pills, inline properties, the task quick editor, task menus, `@@`, and empty or populated TPS List/TPS Table cells. Table-cell activation is keyboard accessible and does not also open or select the row.
+- `plugin.api.entityIndex` exposes synchronous, immutable, revision-cached queries, path/ID lookup, dimension values, change subscriptions, invalidation, and generic dimension registration. The index updates for metadata, create, modify, rename, delete, and GCM frontmatter mutations.
+- Kind identities in this release are Markdown-note identities. Structural TPS task/header/bullet `kind` values remain row-shape filters, not registry entries; line-backed identities require a future stable block-reference contract so a picker never writes a link that can silently drift to another line.
+- This is a backward-compatible minor release. Existing values remain intact, including values that no longer match a newly added constraint; constrained pickers simply stop offering out-of-Kind targets. Minimum supported Obsidian remains 1.10.0.
+- Validation: all 383 declared tests pass at version 1.9.0, including focused entity-index, cache/invalidation, duplicate-identity, prototype-dimension, multi-link, empty-cell, and nested-task indentation coverage. The separate production-mode build deployed only byte-changed plugin artifacts to the test vault; Obsidian 1.12.7 was reloaded there, and the live settings UI exposed both **Kind (Note identity)** and **Accepts kind** without changing saved settings. The runtime `data.json` checksum remained unchanged, and production was not accessed.
 
 ## 1.8.1
 
@@ -273,6 +283,35 @@ Diagnostics:
 - Context-target resolution logs one concise decision per menu action with the selected source (`canvas`, `kanban`, explicit files, embed, explorer, active file, or none), file count, representative paths, fallback state, and Notebook Navigator selection source counts. These logs are intended to explain reports like "I right-clicked this item but the action used a different note" or "the menu did nothing from this surface."
 
 Agent integrations must not use fuzzy task titles or broad search results as mutation targets. If an agent needs to modify a line, it should first resolve or receive the exact `path`, `line`, and preferably `rawLine`, then pass that reference back into the API. Food and barcode-specific deterministic APIs live in TPS Health, where UPC/barcode and food-note paths are the stable identifiers.
+
+### Entity index and Kind references
+
+The note registry is intentionally named `entityIndex` in code and API. **Kind** is one indexed dimension rather than the registry itself, leaving the same engine available to future plugins and dimensions.
+
+To register notes and constrain a reference:
+
+1. Under **Rules & fields → Custom fields**, keep or create a field whose type is **Kind (Note identity)**. Its configured key—normally `kind`—is indexed.
+2. Give a Markdown note a matching frontmatter value, such as `kind: project`. Scalar and YAML-list Kind values are supported.
+3. On another custom field, set **Accepts kind** to `project`. Use a scalar field for one project or a list field for several projects.
+4. In any supported property editor, choose from the project notes. GCM stores a normal `[[path|title]]` link; it does not duplicate project titles into a separate option list.
+
+The index builds lazily from Obsidian's metadata cache, then updates incrementally. Queries are case-insensitive exact matches by dimension, deterministically sorted, immutable, and cached until the index revision changes. Renames replace the old path; deletes remove the entity; GCM frontmatter writes update the index immediately instead of waiting for a later cache event.
+
+```js
+const gcm = app.plugins.getPlugin('tps-global-context-menu');
+const projects = gcm.api.entityIndex.query({
+  dimensions: { kind: { anyOf: ['project'] } },
+});
+
+const unregister = gcm.api.entityIndex.registerDimension({
+  name: 'lifecycle',
+  propertyKeys: ['state'],
+});
+```
+
+The generic query contract supports `dimensions`/`allOf`, `anyOf`, and `noneOf`, plus `search` and `limit`. `getById`, `getByPath`, `getDimensionValues`, `getRevision`, `onChanged`, and `invalidate` are also public. `registerDimension` returns an unregister callback; external dimensions remain registered when GCM's custom-field configuration changes.
+
+Constraints govern selection, not destructive migration. Existing out-of-Kind links remain visible and stored until the user changes them. There is no free-text escape hatch in a constrained picker and no implicit note creation. Version 1.9.0 indexes Markdown notes/frontmatter only: tasks, headers, and bullets keep their existing structural Kind semantics but are not selectable entities.
 
 ## Settings Surface
 

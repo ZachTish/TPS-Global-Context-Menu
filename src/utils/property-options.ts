@@ -100,9 +100,23 @@ export function getEffectivePropertyOptions(app: App, property: Pick<CustomPrope
   if (property.optionsSource !== 'vault') return manual;
 
   const merged = new Map<string, string>();
-  for (const value of [...manual, ...collectVaultPropertyOptions(app, property)]) {
+  const discovered = property.type === 'kind'
+    ? getIndexedKindValues(app) ?? collectVaultPropertyOptions(app, property)
+    : collectVaultPropertyOptions(app, property);
+  for (const value of [...manual, ...discovered]) {
     const key = value.toLowerCase();
     if (!merged.has(key)) merged.set(key, value);
   }
   return Array.from(merged.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+}
+
+function getIndexedKindValues(app: App): string[] | null {
+  const plugins = (app as any)?.plugins;
+  const plugin = plugins?.getPlugin?.('tps-global-context-menu')
+    || plugins?.plugins?.['tps-global-context-menu']
+    || plugins?.getPlugin?.('TPS-Global-Context-Menu (Dev)')
+    || plugins?.plugins?.['TPS-Global-Context-Menu (Dev)'];
+  const index = plugin?.entityIndexService || plugin?.api?.entityIndex;
+  if (typeof index?.getDimensionValues !== 'function') return null;
+  return [...index.getDimensionValues('kind')];
 }

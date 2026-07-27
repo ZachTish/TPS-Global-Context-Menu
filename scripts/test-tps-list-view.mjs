@@ -9,6 +9,7 @@ const viewSource = readFileSync(new URL('../src/tps-list/views/TpsListView.ts', 
 const bridgeSource = readFileSync(new URL('../src/views/tps-list-bridge-view.ts', import.meta.url), 'utf8');
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const logBaseSource = readFileSync(new URL('../src/views/log-base-view.ts', import.meta.url), 'utf8');
+const logLineUtilsSource = readFileSync(new URL('../src/views/log-line-utils.ts', import.meta.url), 'utf8');
 const logBaseCreateSource = readFileSync(new URL('../src/views/log-base-create.ts', import.meta.url), 'utf8');
 const menuBuilderSource = readFileSync(new URL('../src/menu/menu-builder.ts', import.meta.url), 'utf8');
 const gcmStyles = readFileSync(new URL('../src/plugin-styles.ts', import.meta.url), 'utf8');
@@ -218,6 +219,7 @@ async function loadTpsListViewHarness() {
             const api = new Proxy(
               {
                 BasesView: Dummy,
+                FuzzySuggestModal: Dummy,
                 Modal: Dummy,
                 TFile: Dummy,
                 normalizePath: (value) => String(value),
@@ -775,7 +777,7 @@ test('TPS List and TPS Table row menus expose built-in tag actions', async () =>
   assert.match(viewSource, /`Line tags \(\$\{current\.length\}\)` : 'Line tags'/);
   assert.match(viewSource, /setTitle\('Add tag\.\.\.'\)/);
   assert.match(viewSource, /addInlineTagToTaskLine\(line, tag\)/);
-  assert.match(logBaseSource, /replace\(\/<!--\\s\*-->\/g, ''\)/);
+  assert.match(logLineUtilsSource, /replace\(\/\[ \\t\]\*<!--\[ \\t\]\*-->\[ \\t\]\*\/gu, ' '\)/);
   assert.match(viewSource, /removeInlineTagFromTaskLine\(line, tag\)/);
   assert.match(viewSource, /resolveExactLineRevisionIndex\(parts\.lines, lineIndex, rawLine\)/);
   assert.match(viewSource, /menuController\?\.addToNativeMenu\?\.\(menu, targets, \{ includeTags: true \}\)/);
@@ -785,7 +787,7 @@ test('TPS List and TPS Table row menus expose built-in tag actions', async () =>
   assert.match(logBaseSource, /setTitle\(current\.length > 0 \? `Tags \(\$\{current\.length\}\)` : 'Tags'\)/);
   assert.match(logBaseSource, /addLogLineTag\(readInlineFields\(line\)\.tags, tag\)/);
   assert.match(logBaseSource, /removeLogLineTag\(readInlineFields\(line\)\.tags, tag\)/);
-  assert.match(logBaseSource, /setInlineFieldValue\([\s\S]{0,80}'tags'/);
+  assert.match(logBaseSource, /setLogInlineFieldValue\([\s\S]{0,80}'tags'/);
   assert.match(logBaseSource, /column\.normalized !== 'linenumber'[\s\S]{0,120}column\.normalized !== 'tags'/);
   assert.doesNotMatch(logBaseSource, /column\.normalized !== 'tag'/);
 
