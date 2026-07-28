@@ -63,6 +63,7 @@ export class EntityIndexService {
   private readonly registeredDimensions = new Map<string, EntityIndexDimensionDefinition>();
   private isBuilt = false;
   private isSetup = false;
+  private hasObservedMetadataResolution = false;
   private isLineIndexReady = false;
   private lineBuildPromise: Promise<void> | null = null;
   private lineBuildEpoch = 0;
@@ -92,10 +93,23 @@ export class EntityIndexService {
     );
     this.plugin.registerEvent(
       metadataCache.on('resolved', () => {
-        // `resolved` can fire again after ordinary file changes. The matching
-        // `changed` event already upserts those notes, so only use this broad
-        // signal to recover an index that has not been built yet.
-        if (!this.isBuilt) this.rebuild();
+        const isFirstResolution = !this.hasObservedMetadataResolution;
+        this.hasObservedMetadataResolution = true;
+        if (!isFirstResolution) {
+          // `resolved` can fire again after ordinary file changes. The matching
+          // `changed` event already upserts those notes, so later broad signals
+          // only need to recover an index that is currently stale.
+          if (!this.isBuilt) this.rebuild();
+          return;
+        }
+
+        // A Base or picker can query during startup before MetadataCache has
+        // populated every file's frontmatter. That lazy read still marks the
+        // index built, so the first authoritative resolution must rebuild even
+        // when records already exist or those early empty dimensions persist.
+        const wasLineTracking = this.isLineTrackingActive();
+        this.rebuild();
+        if (wasLineTracking) void this.ensureReady();
       }),
     );
     this.plugin.registerEvent(

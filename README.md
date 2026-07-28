@@ -4,7 +4,15 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.10.2` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.10.3` is BRAT-ready after publication: its numeric tag and released manifest agree, and its GitHub release includes `main.js`, `manifest.json`, and `styles.css`. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
+## 1.10.3
+
+- The generic entity index now performs one authoritative rebuild when Obsidian reports that initial metadata resolution is complete. A TPS Table or relationship picker opened during startup can no longer permanently cache only the notes whose frontmatter happened to be ready first.
+- The repair also restarts an already-active line-entity scan, preserving note, task, bullet, and heading Kind records without duplicate or ghost rows. Later metadata-resolution signals keep the normal incremental index and its revision-scoped query cache intact.
+- Empty TPS Table cells with a real editor remain cell-owned: configured Selectors, Accepted-Kind relationships, Tags, and Scheduled open their picker instead of navigating to the containing note. A relationship field must explicitly set **Accepts kind**; an unconstrained text/list field intentionally remains a navigation cell.
+- This is a backward-compatible patch release with no settings or note-data migration. Minimum supported Obsidian remains 1.10.0. Final validation and release artifact hashes are recorded in `release-notes/1.10.3.md`; production is not directly modified.
+- Validation passed the 21-test typed Base editor suite, the 36-test entity-index suite, TypeScript, and all 433 declared tests, followed by the mandatory separate production-mode build. In reloaded Obsidian 1.12.7, clicking an empty Projects cell in the relational TPS Table opened the project-only picker with both note and line entities while the Base stayed open. The picker was canceled; the fixture and runtime-owned `data.json` retained their original SHA-256 values.
 
 ## 1.10.2
 

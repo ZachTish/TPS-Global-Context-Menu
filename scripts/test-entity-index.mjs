@@ -1067,6 +1067,122 @@ test('service uses case-insensitive frontmatter titles as display names', async 
   assert.equal(service.getByPath('Entities/Atlas.md')?.name, 'Atlas Program');
 });
 
+test('first metadata resolution repairs an index built before frontmatter was ready', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Early.md',
+    basename: 'Early',
+    frontmatter: { kind: 'Project' },
+  }]);
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  service.setup();
+
+  const file = fixture.files[0];
+  fixture.frontmatterByFile.set(file, {});
+  assert.deepEqual(
+    service.query({ dimensions: { kind: 'project' } }),
+    [],
+    'an early lazy build reproduces the partially populated startup cache',
+  );
+  assert.deepEqual(Object.keys(service.getByPath(file.path)?.dimensions ?? {}), []);
+
+  fixture.frontmatterByFile.set(file, { kind: 'Project' });
+  const revisionBeforeResolution = service.getRevision();
+  fixture.emitMetadata('resolved');
+
+  assert.deepEqual(
+    service.query({ dimensions: { kind: 'project' } }).map(({ path }) => path),
+    ['Entities/Early.md'],
+    'the first authoritative resolution rebuilds already-created note records',
+  );
+  assert.ok(service.getRevision() > revisionBeforeResolution);
+
+  const revisionAfterResolution = service.getRevision();
+  const cachedAfterResolution = service.query({ dimensions: { kind: 'project' } });
+  fixture.emitMetadata('resolved');
+  assert.equal(
+    service.getRevision(),
+    revisionAfterResolution,
+    'later metadata resolution events do not rescan a healthy index',
+  );
+  assert.equal(
+    service.query({ dimensions: { kind: 'project' } }),
+    cachedAfterResolution,
+    'later metadata resolution events preserve the revision-scoped query cache',
+  );
+});
+
+test('first metadata resolution rebuilds an active line index without ghosts or duplicates', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Startup.md',
+    basename: 'Startup',
+    frontmatter: { kind: 'Project' },
+    content: '- Startup line [kind:: Project] ^startup-project',
+  }]);
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  service.setup();
+
+  const file = fixture.files[0];
+  fixture.frontmatterByFile.set(file, {});
+  assert.deepEqual(
+    (await service.queryAsync({ dimensions: { kind: 'Project' } }))
+      .map(({ entityType, blockId }) => ({ entityType, blockId })),
+    [{ entityType: 'block', blockId: 'startup-project' }],
+    'an early async query reproduces line readiness beside incomplete note metadata',
+  );
+
+  fixture.frontmatterByFile.set(file, { kind: 'Project' });
+  fixture.emitMetadata('resolved');
+  await service.ensureReady();
+
+  const repaired = await service.queryAsync({ dimensions: { kind: 'Project' } });
+  assert.deepEqual(
+    repaired.map(({ entityType, path, sourcePath, blockId, referenceTarget }) => ({
+      entityType,
+      path,
+      sourcePath,
+      blockId,
+      referenceTarget,
+    })),
+    [
+      {
+        entityType: 'note',
+        path: 'Entities/Startup.md',
+        sourcePath: 'Entities/Startup.md',
+        blockId: '',
+        referenceTarget: 'Entities/Startup.md',
+      },
+      {
+        entityType: 'block',
+        path: 'Entities/Startup.md',
+        sourcePath: 'Entities/Startup.md',
+        blockId: 'startup-project',
+        referenceTarget: 'Entities/Startup.md#^startup-project',
+      },
+    ],
+    'the authoritative rebuild restores the note and exactly one ready line entity',
+  );
+  assert.deepEqual(
+    service.query({ dimensions: { kind: 'Project' } })
+      .map(({ entityType, path }) => ({ entityType, path })),
+    [{ entityType: 'note', path: 'Entities/Startup.md' }],
+    'synchronous queries stay note-only after line readiness restarts',
+  );
+
+  const revisionAfterRepair = service.getRevision();
+  const cachedAfterRepair = await service.queryAsync({ dimensions: { kind: 'Project' } });
+  fixture.emitMetadata('resolved');
+  assert.equal(service.getRevision(), revisionAfterRepair);
+  assert.equal(
+    await service.queryAsync({ dimensions: { kind: 'Project' } }),
+    cachedAfterRepair,
+    'later metadata resolution preserves the combined entity query cache',
+  );
+});
+
 test('metadata and vault events incrementally refresh, rename, and remove indexed notes', async () => {
   const { EntityIndexService, TFile } = await servicePromise;
   const fixture = createServiceHost(TFile, [{
@@ -1118,6 +1234,7 @@ test('metadata and vault events incrementally refresh, rename, and remove indexe
   fixture.emitVault('delete', created);
   assert.equal(service.getByPath(created.path), null);
 
+  fixture.emitMetadata('resolved');
   const revisionBeforeRepeatedResolution = service.getRevision();
   const cachedBeforeRepeatedResolution = service.query();
   fixture.emitMetadata('resolved');

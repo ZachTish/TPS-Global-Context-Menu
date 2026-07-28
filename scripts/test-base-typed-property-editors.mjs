@@ -115,6 +115,25 @@ test('TPS Table property cells own their click intent and configured selectors o
   assert.match(taskLineContext, /handleExternalChecklistStateMutation\(/);
 });
 
+test('empty Accepted-Kind TPS Table cells stay property-owned and open the entity picker', () => {
+  assert.match(
+    logBase,
+    /if \(configuredProperty && isEntityReferenceProperty\(configuredProperty\)\) \{[\s\S]*?cell\.dataset\.tpsTableCellIntent = 'property'[\s\S]*?displayValue \|\| `\+ \$\{configuredProperty\.label \|\| column\.label\}`[\s\S]*?this\.openEntityCellEditor\(entry, column, configuredProperty\)/,
+  );
+  assert.match(
+    logBase,
+    /private openEntityCellEditor\([\s\S]*?openEntitySuggestModal\(this\.plugin\.app, this\.plugin, property/,
+  );
+  assert.match(
+    logBase,
+    /target\?\.closest\('\[data-tps-table-cell-intent="property"\]'\)[\s\S]*?evt\.preventDefault\(\)[\s\S]*?evt\.stopPropagation\(\)[\s\S]*?return/,
+  );
+  assert.match(
+    main,
+    /private isBaseLinkPreviewExcludedTarget\([\s\S]*?'\[data-tps-table-cell-intent="property"\]'/,
+  );
+});
+
 test('TPS Table selector mutations preserve line identity and sibling fields', async () => {
   const logLines = await importBundled('../src/views/log-line-utils.ts');
   let line = '- [ ] Ship selector fix [tpsId:: selector-row] <!-- [contexts:: [[Contexts/Home]]] --> ^selector-row';
