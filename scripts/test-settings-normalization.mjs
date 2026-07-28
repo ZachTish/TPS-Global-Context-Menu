@@ -13,6 +13,8 @@ const stylesSource = readFileSync(new URL('../styles.css', import.meta.url), 'ut
 const parentLinkFormatSource = readFileSync(new URL('../src/handlers/parent-link-format.ts', import.meta.url), 'utf8');
 const registerEventsSource = readFileSync(new URL('../src/events/register-events.ts', import.meta.url), 'utf8');
 const panelBuilderSource = readFileSync(new URL('../src/menu/panel-builder.ts', import.meta.url), 'utf8');
+const menuBuilderSource = readFileSync(new URL('../src/menu/menu-builder.ts', import.meta.url), 'utf8');
+const archiveFileServiceSource = readFileSync(new URL('../src/services/archive-file-service.ts', import.meta.url), 'utf8');
 const notebookRuleServiceSource = readFileSync(new URL('../src/services/notebook-navigator-rule-service.ts', import.meta.url), 'utf8');
 const notebookRuleEngineSource = readFileSync(new URL('../src/services/notebook-navigator-rule-engine.ts', import.meta.url), 'utf8');
 const notebookRuleSettingsSource = readFileSync(new URL('../src/services/notebook-navigator-rule-settings.ts', import.meta.url), 'utf8');
@@ -647,11 +649,29 @@ test('archive action uses Controller two-stage source folder and moves files imm
   assert.match(mainSource, /settings\?\.twoStageArchive && typeof settings\.twoStageArchive\.sourceFolder === 'string'/);
   assert.match(mainSource, /return sourceFolder\.trim\(\);/);
   assert.match(mainSource, /const resolved = controller \|\| configured \|\| legacy;/);
-  assert.match(panelBuilderSource, /const archiveFolder = this\.plugin\.getArchiveFolderPath\(\);/);
-  assert.match(panelBuilderSource, /await this\.ensureFolderPath\(archiveFolder\);/);
-  assert.match(panelBuilderSource, /liveFile\.extension\?\.toLowerCase\(\) === 'md' && archiveTag/);
-  assert.match(panelBuilderSource, /frontmatter\.archiveOriginalFolder = originalFolder;/);
-  assert.match(panelBuilderSource, /await this\.app\.fileManager\.renameFile\(liveFile, targetPath\);/);
+  assert.match(mainSource, /this\.archiveFileService = new ArchiveFileService\(this\);/);
+  assert.match(panelBuilderSource, /this\.plugin\.archiveFileService\.archiveFiles\(files, 'persistent-panel'\)/);
+  assert.match(menuBuilderSource, /this\.plugin\.archiveFileService\.archiveFiles\(files, 'native-context-menu'\)/);
+  assert.match(menuBuilderSource, /this\.plugin\.archiveFileService\.unarchiveFiles\(files, 'native-context-menu'\)/);
+  assert.match(archiveFileServiceSource, /if \(!archiveFolder\)/);
+  assert.match(archiveFileServiceSource, /liveFile\.extension\?\.toLowerCase\(\) === 'md' && archiveTag/);
+  assert.match(archiveFileServiceSource, /frontmatter\.archiveOriginalFolder = originalFolder;/);
+  assert.match(archiveFileServiceSource, /Archive metadata write failed; continuing with immediate move/);
+  assert.match(archiveFileServiceSource, /await this\.plugin\.app\.fileManager\.renameFile\(liveFile, targetPath\);/);
+
+  const nativeArchiveStart = menuBuilderSource.indexOf('private async archiveFiles');
+  const nativeArchiveEnd = menuBuilderSource.indexOf('private async unarchiveFiles', nativeArchiveStart);
+  const nativeArchiveSource = menuBuilderSource.slice(nativeArchiveStart, nativeArchiveEnd);
+  assert.doesNotMatch(nativeArchiveSource, /Tagged .* for archive|Archive tag setting is not configured/);
+  assert.doesNotMatch(nativeArchiveSource, /extension\?\.toLowerCase\(\) !== 'md'/);
+
+  const unarchiveStart = archiveFileServiceSource.indexOf('async unarchiveFiles');
+  const unarchiveEnd = archiveFileServiceSource.indexOf('private getUniqueFiles', unarchiveStart);
+  const unarchiveSource = archiveFileServiceSource.slice(unarchiveStart, unarchiveEnd);
+  assert.ok(
+    unarchiveSource.indexOf('fileManager.renameFile') < unarchiveSource.indexOf('processFrontMatter'),
+    'unarchive must move successfully before removing restore metadata',
+  );
 });
 
 test('create-time title sync does not inject titles into blank new notes', () => {

@@ -3,7 +3,7 @@ import TPSGlobalContextMenuPlugin from '../main';
 import { TextInputModal } from '../modals/text-input-modal';
 import { FileSuggestModal } from '../modals/FileSuggestModal';
 import { MultiFileSelectModal } from '../modals/MultiFileSelectModal';
-import { mergeNormalizedTags, normalizeTagList, normalizeTagValue } from '../utils/tag-utils';
+import { normalizeTagList, normalizeTagValue } from '../utils/tag-utils';
 import {
   getWikilinkDisplayText,
   isLinkListProperty,
@@ -21,6 +21,7 @@ import { getPlainDisplayTitle } from '../utils/display-title';
 import { isEntityReferenceProperty } from '../utils/entity-property';
 import { addPropertyValueChoiceMenuItems } from './property-value-choice-menu';
 import { propertyUsesEntityOptions } from '../utils/property-option-source';
+import { isPathInArchiveFolder } from '../services/archive-file-service';
 
 export interface NativeMenuLabelOptions {
   archiveLabel?: string;
@@ -379,19 +380,6 @@ export class MenuBuilder {
     });
   }
 
-  private async ensureFolderPath(path: string): Promise<void> {
-    const clean = normalizePath(path).trim();
-    if (!clean) return;
-    const segments = clean.split('/').filter(Boolean);
-    let current = '';
-    for (const segment of segments) {
-      current = current ? `${current}/${segment}` : segment;
-      if (!this.app.vault.getAbstractFileByPath(current)) {
-        await this.app.vault.createFolder(current);
-      }
-    }
-  }
-
   private setFrontmatterValueCaseInsensitive(frontmatter: Record<string, any>, key: string, value: any): void {
     if (!frontmatter || typeof frontmatter !== 'object') return;
     if (key in frontmatter) {
@@ -404,129 +392,17 @@ export class MenuBuilder {
   }
 
   private async archiveFiles(files: TFile[]): Promise<void> {
-    const archiveTag = normalizeTagValue(this.plugin.settings.archiveTag || 'archive');
-    const archiveFolder = this.plugin.getArchiveFolderPath();
-    if (!archiveTag) {
-      new Notice('Archive tag setting is not configured.');
-      return;
-    }
-
-    let taggedCount = 0;
-    for (const file of files) {
-      if (!(file instanceof TFile)) continue;
-      if (archiveFolder && file.path.startsWith(`${archiveFolder}/`)) {
-        taggedCount += 1;
-        continue;
-      }
-      if (file.extension?.toLowerCase() !== 'md') continue;
-
-      const originalFolder = file.parent?.path ?? '';
-
-      try {
-        await this.app.fileManager.processFrontMatter(file, (frontmatter: any) => {
-          frontmatter.tags = mergeNormalizedTags(frontmatter.tags, archiveTag);
-          frontmatter.archiveOriginalFolder = originalFolder;
-        });
-        taggedCount += 1;
-      } catch (err) {
-        logger.error('[TPS GCM] Failed adding archive tag', file.path, err);
-      }
-    }
-
-    new Notice(taggedCount === 1 ? 'Tagged 1 file for archive' : `Tagged ${taggedCount} files for archive`);
+    await this.plugin.archiveFileService.archiveFiles(files, 'native-context-menu');
   }
 
   private async unarchiveFiles(files: TFile[]): Promise<void> {
-    const archiveTag = normalizeTagValue(this.plugin.settings.archiveTag || 'archive');
-    const archiveFolder = this.plugin.getArchiveFolderPath();
-    if (!archiveTag || !archiveFolder) {
-      new Notice('Archive tag/folder settings are not configured.');
-      return;
-    }
-
-    let unarchivedCount = 0;
-    await this.plugin.runQueuedMove(files, async () => {
-      for (const file of files) {
-        if (!(file instanceof TFile)) continue;
-        if (!file.path.startsWith(`${archiveFolder}/`)) {
-          continue; // Skip files not in archive
-        }
-
-        let originalFolder = '';
-
-        // Remove tag and restore the original folder.
-        if (file.extension?.toLowerCase() === 'md') {
-          try {
-            await this.app.fileManager.processFrontMatter(file, (frontmatter: any) => {
-              if (typeof frontmatter.archiveOriginalFolder === 'string') {
-                originalFolder = frontmatter.archiveOriginalFolder;
-                delete frontmatter.archiveOriginalFolder;
-              }
-
-              // Fallback for notes archived before archiveOriginalFolder existed.
-              const activityKey = String(this.plugin.settings.activityLogPropertyKey || 'activity').trim() || 'activity';
-              const activity = Array.isArray(frontmatter[activityKey])
-                ? frontmatter[activityKey]
-                : Array.isArray(frontmatter.activity)
-                  ? frontmatter.activity
-                  : [];
-              if (!originalFolder && activity.length > 0) {
-                for (let i = activity.length - 1; i >= 0; i--) {
-                  const entry = activity[i];
-                  if (entry.type === 'archive' && entry.folder !== undefined) {
-                    originalFolder = entry.folder;
-                    break;
-                  }
-                }
-              }
-
-              // Remove archive tag
-              const tags = Array.isArray(frontmatter.tags) ? frontmatter.tags : [];
-              frontmatter.tags = tags.filter((tag: any) => {
-                const normalized = normalizeTagValue(String(tag));
-                return normalized !== archiveTag;
-              });
-
-              // No need to log unarchive - the archive entry already tells us the history
-            });
-          } catch (err) {
-            logger.error('[TPS GCM] Failed processing frontmatter during unarchive', file.path, err);
-            continue;
-          }
-        }
-
-        // Validate and restore to original folder
-        try {
-          let targetFolder = originalFolder;
-
-          // Check if original folder still exists, fallback to root if not
-          if (targetFolder && !this.app.vault.getAbstractFileByPath(targetFolder)) {
-            logger.log(`[TPS GCM] Original folder "${targetFolder}" no longer exists, restoring to root`);
-            targetFolder = '';
-          }
-
-          const targetPath = targetFolder ? normalizePath(`${targetFolder}/${file.name}`) : file.name;
-
-          // Ensure target folder exists
-          if (targetFolder) {
-            await this.ensureFolderPath(targetFolder);
-          }
-
-          await this.app.fileManager.renameFile(file, targetPath);
-          unarchivedCount += 1;
-        } catch (err) {
-          logger.error('[TPS GCM] Failed moving unarchived file', file.path, err);
-        }
-      }
-    });
-
-    new Notice(unarchivedCount === 1 ? 'Unarchived 1 file' : `Unarchived ${unarchivedCount} files`);
+    await this.plugin.archiveFileService.unarchiveFiles(files, 'native-context-menu');
   }
 
   private isFileInArchive(files: TFile[]): boolean {
     const archiveFolder = this.plugin.getArchiveFolderPath();
     if (!archiveFolder) return false;
-    return files.some(file => file instanceof TFile && file.path.startsWith(`${archiveFolder}/`));
+    return files.some(file => file instanceof TFile && isPathInArchiveFolder(file.path, archiveFolder));
   }
 
   private buildRenameTargetPath(file: TFile, rawName: string): string | null {

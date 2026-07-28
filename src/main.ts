@@ -102,6 +102,7 @@ import {
 } from './services/tps-base-write-target-service';
 import { normalizePropertyOptionSources } from './utils/property-option-source';
 import { normalizeAcceptedKindSetting } from './utils/property-option-setting';
+import { ArchiveFileService } from './services/archive-file-service';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -316,6 +317,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   foldExpansionContextMenuService: FoldExpansionContextMenuService;
   homeCaptureService: HomeCaptureService;
   homeComponentActionService: HomeComponentActionService;
+  archiveFileService: ArchiveFileService;
   sharedServices: GcmSharedServices;
   styleEl: HTMLStyleElement | null = null;
   ignoreNextContext = false;
@@ -552,6 +554,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.foldExpansionContextMenuService = new FoldExpansionContextMenuService(this);
     this.homeCaptureService = new HomeCaptureService(this);
     this.homeComponentActionService = new HomeComponentActionService(this);
+    this.archiveFileService = new ArchiveFileService(this);
     this.register(this.homeComponentActionService.register(HOME_CAPTURE_COMMAND_ID, (context) => (
       this.homeCaptureService.openCaptureModalForContext(context)
     )));

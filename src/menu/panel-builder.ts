@@ -1,4 +1,4 @@
-﻿import { App, TFile, TFolder, Notice, Setting, setIcon, WorkspaceLeaf, normalizePath, Menu, MarkdownView, getAllTags, Modal } from 'obsidian';
+﻿import { App, TFile, Notice, Setting, setIcon, WorkspaceLeaf, normalizePath, Menu, MarkdownView, getAllTags, Modal } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
 import { BuildPanelOptions, CustomProperty } from '../types';
 import { SYSTEM_COMMANDS, STATUSES, PRIORITIES } from '../constants';
@@ -6,7 +6,7 @@ import { PropertyRowService } from '../services/property-row-service';
 import { FileSuggestModal } from '../modals/FileSuggestModal';
 import { MultiFileSelectModal } from '../modals/MultiFileSelectModal';
 import { addSafeClickListener } from './menu-controller';
-import { mergeNormalizedTags, normalizeTagValue, parseTagInput } from '../utils/tag-utils';
+import { normalizeTagValue, parseTagInput } from '../utils/tag-utils';
 import * as logger from '../logger';
 import { resolveCustomProperties } from '../resolve-profiles';
 import { ViewModeService } from '../services/view-mode-service';
@@ -452,99 +452,11 @@ export class PanelBuilder {
     return this.plugin.app;
   }
 
-  // ... (Archive helpers retained) ...
   private async archiveEntries(entries: any[]): Promise<void> {
-    const archiveTag = normalizeTagValue(this.plugin.settings.archiveTag || 'archive');
-    const archiveFolder = this.plugin.getArchiveFolderPath();
-    if (!archiveFolder) {
-      new Notice('Archive folder setting is not configured.');
-      return;
-    }
-
     const files = entries
       .map((entry: any) => entry?.file)
       .filter((candidate: unknown): candidate is TFile => candidate instanceof TFile);
-
-    await this.ensureFolderPath(archiveFolder);
-
-    let movedCount = 0;
-    let taggedCount = 0;
-    await this.plugin.runQueuedMove(files, async () => {
-      for (const file of files) {
-        const existing = this.app.vault.getAbstractFileByPath(file.path);
-        const liveFile = existing instanceof TFile ? existing : file;
-        if (this.isPathInFolder(liveFile.path, archiveFolder)) {
-          movedCount += 1;
-          continue;
-        }
-
-        try {
-          if (liveFile.extension?.toLowerCase() === 'md' && archiveTag) {
-            const originalFolder = liveFile.parent?.path ?? '';
-            await this.app.fileManager.processFrontMatter(liveFile, (frontmatter: any) => {
-              frontmatter.tags = mergeNormalizedTags(frontmatter.tags, archiveTag);
-              frontmatter.archiveOriginalFolder = originalFolder;
-            });
-            taggedCount += 1;
-          }
-
-          const targetPath = this.getUniqueArchiveTargetPath(liveFile, archiveFolder);
-          const targetFolder = targetPath.includes('/') ? targetPath.slice(0, targetPath.lastIndexOf('/')) : '';
-          if (targetFolder) {
-            await this.ensureFolderPath(targetFolder);
-          }
-          await this.app.fileManager.renameFile(liveFile, targetPath);
-          movedCount += 1;
-        } catch (err) {
-          logger.error('[TPS GCM] Failed archiving file', liveFile.path, err);
-        }
-      }
-    });
-
-    logger.log('[TPS GCM] Archive menu action complete', { movedCount, taggedCount, archiveFolder });
-    new Notice(movedCount === 1 ? 'Archived 1 file' : `Archived ${movedCount} files`);
-  }
-
-  private isPathInFolder(path: string, folder: string): boolean {
-    const normalizedPath = normalizePath(path);
-    const normalizedFolder = normalizePath(folder).replace(/\/+$/g, '');
-    return normalizedPath === normalizedFolder || normalizedPath.startsWith(`${normalizedFolder}/`);
-  }
-
-  private async ensureFolderPath(folderPath: string): Promise<void> {
-    let current = '';
-    for (const part of normalizePath(folderPath).split('/').filter(Boolean)) {
-      current = current ? `${current}/${part}` : part;
-      const existing = this.app.vault.getAbstractFileByPath(current);
-      if (!existing) {
-        await this.app.vault.createFolder(current);
-      } else if (!(existing instanceof TFolder)) {
-        throw new Error(`Archive folder path conflicts with an existing file: ${current}`);
-      }
-    }
-  }
-
-  private getUniqueArchiveTargetPath(file: TFile, archiveFolder: string): string {
-    const sourceFolder = file.parent?.path ?? '';
-    const relativeFolder = sourceFolder && sourceFolder !== '/'
-      ? sourceFolder
-      : '';
-    const targetFolder = relativeFolder && !this.isPathInFolder(sourceFolder, archiveFolder)
-      ? normalizePath(`${archiveFolder}/${relativeFolder}`)
-      : archiveFolder;
-    const extension = file.extension ? `.${file.extension}` : '';
-    const baseTarget = normalizePath(`${targetFolder}/${file.basename}${extension}`);
-    if (!this.app.vault.getAbstractFileByPath(baseTarget)) {
-      return baseTarget;
-    }
-
-    let counter = 1;
-    let targetPath = '';
-    do {
-      targetPath = normalizePath(`${targetFolder}/${file.basename} ${counter}${extension}`);
-      counter += 1;
-    } while (this.app.vault.getAbstractFileByPath(targetPath));
-    return targetPath;
+    await this.plugin.archiveFileService.archiveFiles(files, 'persistent-panel');
   }
 
   // --- NEW 2-ROW LAYOUT ---

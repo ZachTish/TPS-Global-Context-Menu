@@ -4,7 +4,16 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.11.0` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.11.1` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+
+## 1.11.1
+
+- Every file-level **Archive** entry point now uses one immediate-move service. The normal global/native context menu and the persistent GCM panel therefore behave identically instead of maintaining separate archive implementations.
+- Archive requires an effective archive folder, not an archive tag. Markdown, Base, Canvas, and other `TFile` formats move during the Archive click; Base and Canvas files never enter a frontmatter API.
+- Markdown keeps the configured archive tag and `archiveOriginalFolder` as best-effort compatibility metadata. A frontmatter write failure is logged but no longer prevents the requested move.
+- Relative source folders are preserved below the effective archive root, existing destinations receive a numeric suffix, duplicate selections are deduplicated, and files already in the archive are left in place.
+- Non-Markdown Unarchive can recover its original folder from the preserved archive-relative path even though those formats cannot store `archiveOriginalFolder`. Markdown Unarchive removes its restore metadata only after moving; if cleanup is refused or fails, GCM rolls the note back into the archive with its metadata intact for a safe retry.
+- This is a backward-compatible patch release with no settings or note-data migration. Minimum supported Obsidian remains 1.10.0.
 
 ## 1.11.0
 
@@ -282,7 +291,7 @@ Reusable note and task context menu surfaces for the vault, plus inline note chr
 - When `scheduled` is removed from a note, auto-rename treats the persisted frontmatter as intentionally unscheduled even if Obsidian's metadata cache still has the old value, so the next title/filename sync removes the stale scheduled date marker from the filename.
 - Title and filename maintenance is handled by the live title-sync services and settings-backed repair paths rather than extra command-palette maintenance actions.
 - Raw filename moves/renames should remain limited to folder moves, archive/unarchive, duplicate/create flows, and the auto-rename service.
-- The global context menu `Archive` action moves selected files directly into the effective archive folder. When TPS Controller is loaded, GCM uses Controller's two-stage archive `sourceFolder` as the first-level archive target, so Controller can later move those files onward to the cold archive destination. Markdown files receive the configured archive tag and `archiveOriginalFolder`; `.base`, `.canvas`, and other non-Markdown files are moved without frontmatter/tag edits.
+- Both the global/native context menu and persistent-panel `Archive` actions move selected files directly into the effective archive folder. When TPS Controller is loaded, GCM uses Controller's two-stage archive `sourceFolder` as the first-level archive target, so Controller can later move those files onward to the cold archive destination. Markdown files receive the configured archive tag and `archiveOriginalFolder` when that metadata write succeeds; `.base`, `.canvas`, and other non-Markdown files move without frontmatter/tag edits. Tagging is never a prerequisite for the move.
 - Obsidian-native filename rename interactions are treated as UI-sensitive. GCM defers Notebook Navigator rule writes, title sync, timestamp sync, and overlay refreshes until navigation rename/search text inputs have settled so the file list does not re-render underneath the inline rename field.
 - Notebook Navigator file clicks remain native opens. GCM does not use Notebook Navigator click activity as a reason to reroute `WorkspaceLeaf.openFile`; opener rerouting is limited to occupied/pinned leaf protection and GCM-owned open helpers. Daily Note Home observes genuine Navigator file-row selection and drag intent only to keep the exact selection-only leaf as Markdown, without canceling or replacing the native event.
 
