@@ -9,9 +9,11 @@ import { resolveCustomProperties } from '../resolve-profiles';
 import { ViewModeService } from './view-mode-service';
 import {
   getWikilinkDisplayText,
+  isLinkListProperty,
   isTagListProperty,
   isTextListProperty,
   parseLinkListInput,
+  parseMixedListInput,
   parseStringListInput,
 } from '../utils/list-utils';
 import { isEntityReferenceProperty } from '../utils/entity-property';
@@ -131,8 +133,9 @@ export class SubitemLineModelService {
    * Get the configured status key.
    */
   getStatusKey(): string {
-    const configured = this.plugin.settings.properties?.find((prop) => prop.id === 'status')?.key;
-    return String(configured || 'status').trim() || 'status';
+    return String(
+      this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status',
+    ).trim() || 'status';
   }
 
   /**
@@ -183,20 +186,23 @@ export class SubitemLineModelService {
       if (prop.hidden === true || prop.showInCollapsed === false) continue;
 
       if (isEntityReferenceProperty(prop)) {
-        const links = parseLinkListInput(this.readFrontmatterValue(fm, prop.key));
-        const visibleLinks = prop.type === 'list' ? links : links.slice(0, 1);
-        for (const link of visibleLinks) {
+        const rawValue = this.readFrontmatterValue(fm, prop.key);
+        const values = prop.type === 'list' && !isLinkListProperty(prop)
+          ? parseMixedListInput(rawValue)
+          : parseLinkListInput(rawValue);
+        const visibleValues = prop.type === 'list' ? values : values.slice(0, 1);
+        for (const value of visibleValues) {
           pills.push({
-            label: getWikilinkDisplayText(link),
+            label: /^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value,
             kind: 'selector',
-            value: link,
+            value,
             propertyKey: prop.key,
             propertyType: prop.type,
           });
         }
-        if (visibleLinks.length === 0 || prop.type === 'list') {
+        if (visibleValues.length === 0 || prop.type === 'list') {
           pills.push({
-            label: visibleLinks.length === 0 ? `+ ${prop.label || prop.key}` : '+',
+            label: visibleValues.length === 0 ? `+ ${prop.label || prop.key}` : '+',
             kind: 'action',
             value: '+',
             propertyKey: prop.key,

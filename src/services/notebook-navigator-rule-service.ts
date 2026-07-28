@@ -16,6 +16,10 @@ type RuleContext = {
     name: string;
     basename: string;
     extension: string;
+    stat: {
+      ctime: number;
+      mtime: number;
+    };
   };
   frontmatter: Record<string, unknown> | null;
   tags: string[];
@@ -409,6 +413,10 @@ export class NotebookNavigatorRuleService {
         name: file.name,
         basename: file.basename,
         extension: file.extension,
+        stat: {
+          ctime: file.stat.ctime,
+          mtime: file.stat.mtime,
+        },
       },
       frontmatter,
       tags: this.collectTags(file, frontmatter),
@@ -482,6 +490,10 @@ export class NotebookNavigatorRuleService {
         name: file.name,
         basename: file.basename,
         extension: file.extension,
+        stat: {
+          ctime: file.stat.ctime,
+          mtime: file.stat.mtime,
+        },
       },
       frontmatter,
       tags: this.collectTags(file, frontmatter),
@@ -516,11 +528,16 @@ export class NotebookNavigatorRuleService {
   private computeSortKey(ruleEngine: any, settings: any, context: RuleContext): string | null | undefined {
     const smartSort = settings.smartSort;
     if (!smartSort?.enabled) return undefined;
+    const enabledBuckets = Array.isArray(smartSort.buckets)
+      ? smartSort.buckets.filter((bucket: any) => bucket?.enabled)
+      : [];
+    if (enabledBuckets.length === 0) {
+      return smartSort.clearWhenNoMatch ? null : undefined;
+    }
     const sortResult = ruleEngine.composeSortKeyResult?.(smartSort, context);
     const sortKey = String((sortResult?.key ?? ruleEngine.composeSortKey(smartSort, context)) || '').trim();
-    if (sortResult && !sortResult.matched && smartSort.clearWhenNoMatch) return null;
     if (sortKey) return sortKey;
-    return smartSort.clearWhenNoMatch ? null : undefined;
+    return undefined;
   }
 
   private getIconField(settings: any): string {

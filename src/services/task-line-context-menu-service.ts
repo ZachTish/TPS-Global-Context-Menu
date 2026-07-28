@@ -71,13 +71,28 @@ import {
 import {
   isEntityReferenceProperty,
   mergeEntityReferenceList,
+  mergeMixedEntityReferenceList,
   removeEntityReferenceListValues,
+  removeMixedEntityReferenceListValues,
 } from '../utils/entity-property';
-import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
 import {
   getWikilinkDisplayText,
+  isLinkListProperty,
+  mergeLinkList,
+  mergeMixedList,
+  mergeStringList,
   parseLinkListInput,
+  parseMixedListInput,
+  parseStringListInput,
+  removeLinkListValues,
+  removeStringListValues,
 } from '../utils/list-utils';
+import {
+  findRelationalStatusProperty,
+  propertyUsesEntityOptions,
+} from '../utils/property-option-source';
+import { addPropertyValueChoiceMenuItems } from '../menu/property-value-choice-menu';
+import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
 
 export type TaskLineContext = {
   file: TFile;
@@ -497,28 +512,49 @@ export class TaskLineContextMenuService {
         const ariaLabel = `${descriptor.label} property`;
 
         if (isEntityReferenceProperty(descriptor.property)) {
+          const configuredProperty = descriptor.property!;
           let value = descriptor.value;
           const control = controlEl.createEl('button', {
             cls: 'tps-gcm-task-editor-property-button',
             attr: { type: 'button', 'aria-label': ariaLabel },
           });
           const renderValue = (): void => {
-            const links = descriptor.type === 'list' ? parseLinkListInput(value) : value ? [value] : [];
+            const links = descriptor.type === 'list'
+              ? isLinkListProperty(configuredProperty)
+                ? parseLinkListInput(value)
+                : parseMixedListInput(value)
+              : value ? [value] : [];
             control.textContent = links.length > 0
-              ? links.map((link) => getWikilinkDisplayText(link)).join(', ')
+              ? links.map((link) => (
+                  /^\[\[/u.test(link) ? getWikilinkDisplayText(link) : link
+                )).join(', ')
               : `Choose ${descriptor.label}…`;
             control.toggleClass('is-empty', links.length === 0);
             control.setAttribute('title', value || `Choose ${descriptor.label}`);
           };
           renderValue();
           control.addEventListener('click', () => {
-            openEntitySuggestModal(this.plugin.app, this.plugin, descriptor.property, (choice) => {
+            openPropertyValueSuggestModal(
+              this.plugin.app,
+              this.plugin,
+              configuredProperty,
+              value,
+              (choice) => {
               value = descriptor.type === 'list'
-                ? mergeEntityReferenceList(value, choice.wikilink).join(', ')
-                : choice.wikilink;
+                ? choice.kind === 'clear'
+                  ? ''
+                  : choice.kind === 'entity'
+                  ? isLinkListProperty(configuredProperty)
+                    ? mergeEntityReferenceList(value, choice.value).join(', ')
+                    : mergeMixedEntityReferenceList(value, choice.value).join(', ')
+                  : isLinkListProperty(configuredProperty)
+                    ? mergeLinkList(value, choice.value).join(', ')
+                    : mergeMixedList(value, choice.value).join(', ')
+                : choice.value;
               renderValue();
               this.taskEditorOverlay?.schedule();
-            });
+              },
+            );
           });
           configureControl(control);
           addDraft(
@@ -925,7 +961,11 @@ export class TaskLineContextMenuService {
 
   private setTaskStatusCheckboxState(line: string, checkboxState: string): string {
     let next = setTaskCheckboxToken(line, checkboxState);
+    const relationalStatusKey = String(
+      findRelationalStatusProperty(this.plugin.settings.properties)?.key || '',
+    ).trim().toLowerCase();
     for (const key of new Set([this.getStatusKey(), 'status', 'checkboxStatus'])) {
+      if (String(key || '').trim().toLowerCase() === relationalStatusKey) continue;
       next = setInlineFieldValueOnTaskLine(next, key, null);
     }
     return next;
@@ -1711,17 +1751,20 @@ export class TaskLineContextMenuService {
   }
 
   private addTaskStatusMenu(menu: Menu, context: TaskLineContext): void {
+    const statusLabel = findRelationalStatusProperty(this.plugin.settings.properties)
+      ? 'Task status'
+      : 'Status';
     menu.addItem((item) => {
       const current = this.getStatusForCheckboxToken(context.checkboxToken);
       item
-        .setTitle(current ? `Status: ${current}` : 'Status')
+        .setTitle(current ? `${statusLabel}: ${current}` : statusLabel)
         .setIcon('circle-check');
       const subMenu = (item as any).setSubmenu();
       const statusItems: Array<{ item: any; mapping: LinkedSubitemCheckboxMapping; label: string }> = [];
       const setSelectedToken = (token: string) => {
         context.checkboxToken = token;
         const selectedStatus = this.getStatusForCheckboxToken(token);
-        item.setTitle(selectedStatus ? `Status: ${selectedStatus}` : 'Status');
+        item.setTitle(selectedStatus ? `${statusLabel}: ${selectedStatus}` : statusLabel);
         for (const entry of statusItems) {
           const selected = entry.mapping.checkboxState === token;
           entry.item.setTitle(selected ? `${entry.label} — Selected` : entry.label);
@@ -1799,12 +1842,14 @@ export class TaskLineContextMenuService {
     for (const property of properties) {
       if (isEntityReferenceProperty(property)) {
         this.addEntityPropertyMenu(menu, context, property);
-      } else if (property.type === 'selector') {
+      } else if (property.type === 'selector' || property.type === 'kind') {
         this.addSelectorPropertyMenu(menu, context, property);
       } else if (property.type === 'datetime') {
         this.addDatetimePropertyMenu(menu, context, property);
       } else if (property.type === 'list') {
         this.addListPropertyMenu(menu, context, property);
+      } else if (property.type === 'checkbox') {
+        this.addCheckboxPropertyMenu(menu, context, property);
       } else if (property.type === 'recurrence') {
         this.addRecurrencePropertyMenu(menu, context, property);
       } else if (property.type === 'text' || property.type === 'number') {
@@ -1816,38 +1861,57 @@ export class TaskLineContextMenuService {
   private addEntityPropertyMenu(menu: Menu, context: TaskLineContext, property: CustomProperty): void {
     const isList = property.type === 'list';
     const currentValue = readInlineFieldValue(context.rawLine, property.key);
-    const current = isList ? parseLinkListInput(currentValue) : currentValue ? [currentValue] : [];
+    const current = isList
+      ? isLinkListProperty(property)
+        ? parseLinkListInput(currentValue)
+        : parseMixedListInput(currentValue)
+      : currentValue ? [currentValue] : [];
     menu.addItem((item) => {
       item
         .setTitle(current.length > 0
-          ? `${property.label}: ${current.map((value) => getWikilinkDisplayText(value)).join(', ')}`
+          ? `${property.label}: ${current.map((value) => (
+              /^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value
+            )).join(', ')}`
           : `${property.label} (create field)`)
         .setIcon(property.icon || 'file-search');
       const subMenu = (item as any).setSubmenu();
-      subMenu.addItem((sub: any) => {
-        sub.setTitle('(none)').setChecked(current.length === 0).onClick(() => {
-          void this.updateTaskLine(context, (line) => setInlineFieldValueOnTaskLine(line, property.key, null));
-        });
-      });
-      subMenu.addItem((sub: any) => {
-        sub.setTitle(isList ? `Add ${property.label}…` : `Choose ${property.label}…`).setIcon('search').onClick(() => {
-          openEntitySuggestModal(this.plugin.app, this.plugin, property, (choice) => {
-            void this.updateTaskLine(context, (line) => {
-              const nextValue = isList
-                ? mergeEntityReferenceList(readInlineFieldValue(line, property.key), choice.wikilink).join(', ')
-                : choice.wikilink;
-              return setInlineFieldValueOnTaskLine(line, property.key, nextValue);
-            });
-          });
-        });
+      const setChoice = (value: string, entity: boolean): Promise<boolean> => (
+        this.updateTaskLine(context, (line) => {
+          if (!isList) return setInlineFieldValueOnTaskLine(line, property.key, value);
+          const existing = readInlineFieldValue(line, property.key);
+          const nextValue = entity
+            ? isLinkListProperty(property)
+              ? mergeEntityReferenceList(existing, value)
+              : mergeMixedEntityReferenceList(existing, value)
+            : isLinkListProperty(property)
+              ? mergeLinkList(existing, value)
+              : mergeMixedList(existing, value);
+          return setInlineFieldValueOnTaskLine(line, property.key, nextValue.join(', '));
+        })
+      );
+      addPropertyValueChoiceMenuItems({
+        app: this.plugin.app,
+        source: this.plugin,
+        menu: subMenu,
+        property,
+        currentValue: isList ? '' : currentValue,
+        onClear: () => this.updateTaskLine(
+          context,
+          (line) => setInlineFieldValueOnTaskLine(line, property.key, null),
+        ),
+        onChooseLiteral: (value) => setChoice(value, false),
+        onChooseEntity: (choice) => setChoice(choice.wikilink, true),
       });
       if (isList && current.length > 0) {
         subMenu.addSeparator();
         for (const link of current) {
           subMenu.addItem((sub: any) => {
-            sub.setTitle(`Remove ${getWikilinkDisplayText(link)}`).setIcon('x').onClick(() => {
+            sub.setTitle(`Remove ${/^\[\[/u.test(link) ? getWikilinkDisplayText(link) : link}`).setIcon('x').onClick(() => {
               void this.updateTaskLine(context, (line) => {
-                const remaining = removeEntityReferenceListValues(readInlineFieldValue(line, property.key), link);
+                const existing = readInlineFieldValue(line, property.key);
+                const remaining = isLinkListProperty(property)
+                  ? removeEntityReferenceListValues(existing, link)
+                  : removeMixedEntityReferenceListValues(existing, link);
                 return setInlineFieldValueOnTaskLine(
                   line,
                   property.key,
@@ -1868,24 +1932,23 @@ export class TaskLineContextMenuService {
         .setTitle(current ? `${property.label}: ${current}` : `${property.label} (create field)`)
         .setIcon(property.icon || 'list');
       const subMenu = (item as any).setSubmenu();
-      subMenu.addItem((sub: any) => {
-        sub.setTitle('(none)').setChecked(!current).onClick(() => {
-          void this.updateTaskLine(context, (line) => setInlineFieldValueOnTaskLine(line, property.key, null));
-        });
+      const setChoice = (value: string): Promise<boolean> => this.updateTaskLine(
+        context,
+        (line) => setInlineFieldValueOnTaskLine(line, property.key, value),
+      );
+      addPropertyValueChoiceMenuItems({
+        app: this.plugin.app,
+        source: this.plugin,
+        menu: subMenu,
+        property,
+        currentValue: current,
+        onClear: () => this.updateTaskLine(
+          context,
+          (line) => setInlineFieldValueOnTaskLine(line, property.key, null),
+        ),
+        onChooseLiteral: setChoice,
+        onChooseEntity: (choice) => setChoice(choice.wikilink),
       });
-      subMenu.addItem((sub: any) => {
-        sub.setTitle('Set custom value...').setIcon('pencil').onClick(() => {
-          this.promptInlineValue(context, property, current);
-        });
-      });
-      subMenu.addSeparator();
-      for (const option of getEffectivePropertyOptions(this.plugin.app, property)) {
-        subMenu.addItem((sub: any) => {
-          sub.setTitle(option).setChecked(current === option).onClick(() => {
-            void this.updateTaskLine(context, (line) => setInlineFieldValueOnTaskLine(line, property.key, option));
-          });
-        });
-      }
     });
   }
 
@@ -1957,29 +2020,40 @@ export class TaskLineContextMenuService {
 
   private addListPropertyMenu(menu: Menu, context: TaskLineContext, property: CustomProperty): void {
     const isTags = String(property.key || '').trim().toLowerCase() === 'tags' || property.listItemType === 'tag';
-    const current = isTags ? readInlineTags(context.rawLine) : this.parseListValue(readInlineFieldValue(context.rawLine, property.key));
+    const isLinks = isLinkListProperty(property);
+    const current = isTags
+      ? readInlineTags(context.rawLine)
+      : isLinks
+        ? parseLinkListInput(readInlineFieldValue(context.rawLine, property.key))
+        : parseStringListInput(readInlineFieldValue(context.rawLine, property.key));
     menu.addItem((item) => {
       item
         .setTitle(current.length > 0 ? `${property.label} (${current.length})` : `${property.label} (create field)`)
         .setIcon(property.icon || 'tag');
       const subMenu = (item as any).setSubmenu();
-      subMenu.addItem((sub: any) => {
-        sub.setTitle(`Add ${property.label}...`).setIcon('plus').onClick(() => {
-          new TextInputModal(this.plugin.app, property.label || property.key, '', async (value) => {
-            const next = String(value || '').trim();
-            if (!next) return;
-            await this.updateTaskLine(context, (line) => isTags
-              ? addInlineTagToTaskLine(line, next)
-              : setInlineFieldValueOnTaskLine(
-                line,
-                property.key,
-                this.joinUnique([
-                  ...this.parseListValue(readInlineFieldValue(line, property.key)),
-                  next,
-                ]),
-              ));
-          }).open();
-        });
+      const addChoice = (value: string): Promise<boolean> => this.updateTaskLine(context, (line) => {
+        if (isTags) return addInlineTagToTaskLine(line, value);
+        const existing = readInlineFieldValue(line, property.key);
+        const nextValues = isLinks
+          ? mergeLinkList(existing, value)
+          : mergeStringList(existing, value);
+        return setInlineFieldValueOnTaskLine(line, property.key, nextValues.join(', '));
+      });
+      addPropertyValueChoiceMenuItems({
+        app: this.plugin.app,
+        source: this.plugin,
+        menu: subMenu,
+        property,
+        currentValue: current.length > 0 ? current.join(', ') : '',
+        onClear: () => this.updateTaskLine(context, (line) => {
+          if (!isTags) return setInlineFieldValueOnTaskLine(line, property.key, null);
+          return readInlineTags(line).reduce(
+            (nextLine, tag) => removeInlineTagFromTaskLine(nextLine, tag),
+            line,
+          );
+        }),
+        onChooseLiteral: addChoice,
+        onChooseEntity: (choice) => addChoice(choice.wikilink),
       });
       if (current.length > 0) subMenu.addSeparator();
       for (const value of current) {
@@ -1987,15 +2061,52 @@ export class TaskLineContextMenuService {
           sub.setTitle(`Remove ${value}`).setIcon('x').onClick(() => {
             void this.updateTaskLine(context, (line) => isTags
               ? removeInlineTagFromTaskLine(line, value)
-              : setInlineFieldValueOnTaskLine(
-                line,
-                property.key,
-                this.joinUnique(
-                  this.parseListValue(readInlineFieldValue(line, property.key))
-                    .filter((itemValue) => itemValue !== value),
-                ),
-              ));
+              : (() => {
+                  const remaining = isLinks
+                    ? removeLinkListValues(readInlineFieldValue(line, property.key), value)
+                    : removeStringListValues(readInlineFieldValue(line, property.key), value);
+                  return setInlineFieldValueOnTaskLine(
+                    line,
+                    property.key,
+                    remaining.length > 0 ? remaining.join(', ') : null,
+                  );
+                })());
           });
+        });
+      }
+    });
+  }
+
+  private addCheckboxPropertyMenu(menu: Menu, context: TaskLineContext, property: CustomProperty): void {
+    const current = readInlineFieldValue(context.rawLine, property.key).trim().toLowerCase();
+    const normalizedCurrent = !current
+      ? ''
+      : /^(?:true|yes|1|on)$/u.test(current)
+        ? 'true'
+        : 'false';
+    menu.addItem((item) => {
+      item
+        .setTitle(current
+          ? `${property.label}: ${normalizedCurrent === 'true' ? 'Yes' : 'No'}`
+          : `${property.label} (create field)`)
+        .setIcon(property.icon || 'square-check-big');
+      const subMenu = (item as any).setSubmenu();
+      const choices: Array<[string, string | null]> = [
+        ['(none)', null],
+        ['Yes', 'true'],
+        ['No', 'false'],
+      ];
+      for (const [label, value] of choices) {
+        subMenu.addItem((sub: any) => {
+          sub
+            .setTitle(label)
+            .setChecked(value == null ? !current : normalizedCurrent === value)
+            .onClick(() => {
+              void this.updateTaskLine(
+                context,
+                (line) => setInlineFieldValueOnTaskLine(line, property.key, value),
+              );
+            });
         });
       }
     });
@@ -2770,9 +2881,8 @@ export class TaskLineContextMenuService {
       || key === 'folderpath'
       || property.type === 'folder'
       || property.type === 'snooze'
-      || property.type === 'kind'
     ) return false;
-    if (key === statusKey || id === 'status') return false;
+    if ((key === statusKey || id === 'status') && !propertyUsesEntityOptions(property)) return false;
     return true;
   }
 
@@ -2805,26 +2915,6 @@ export class TaskLineContextMenuService {
     if (/^\[[^\]\r\n]?\]$/.test(raw)) return raw;
     if (raw.length <= 1) return `[${raw || ' '}]`;
     return '';
-  }
-
-  private parseListValue(value: string): string[] {
-    return String(value || '')
-      .split(',')
-      .map((item) => item.trim())
-      .filter(Boolean);
-  }
-
-  private joinUnique(values: string[]): string {
-    const seen = new Set<string>();
-    return values
-      .map((value) => String(value || '').trim())
-      .filter((value) => {
-        const key = value.toLowerCase();
-        if (!value || seen.has(key)) return false;
-        seen.add(key);
-        return true;
-      })
-      .join(', ');
   }
 
   private getTaskSearchTextVariants(value: string): string[] {

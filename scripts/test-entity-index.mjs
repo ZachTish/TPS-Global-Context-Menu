@@ -144,6 +144,40 @@ test('indexes scalar and array frontmatter without hardcoding dimension names or
   );
 });
 
+test('anyOf Kind queries return a Project-or-Area union and exclude unrelated entities', async () => {
+  const { EntityIndexCore } = await corePromise;
+  const index = configuredCore(EntityIndexCore);
+  index.upsert({
+    path: 'Areas/Operations.md',
+    basename: 'Operations',
+    frontmatter: {
+      kind: 'Area',
+      portfolio: 'Work',
+      state: 'Active',
+    },
+  });
+
+  const matches = index.query({
+    dimensions: {
+      kind: { anyOf: ['project', 'area'] },
+    },
+  });
+  assert.deepEqual(
+    matches.map((record) => record.path).sort((left, right) => left.localeCompare(right)),
+    [
+      'Areas/Operations.md',
+      'Projects/Archived.md',
+      'Projects/Atlas.md',
+      'Projects/beacon.md',
+    ],
+  );
+  assert.equal(
+    matches.some((record) => record.path === 'People/Ada.md'),
+    false,
+    'Person entities must not leak into a Project-or-Area picker',
+  );
+});
+
 test('combines allOf, anyOf, and noneOf with case-insensitive exact matching', async () => {
   const { EntityIndexCore } = await corePromise;
   const index = configuredCore(EntityIndexCore);

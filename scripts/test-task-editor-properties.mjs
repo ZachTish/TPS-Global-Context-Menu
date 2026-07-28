@@ -198,6 +198,25 @@ test('editor property values normalize without silently accepting or coercing in
     ),
     { key: 'estimate', value: '45' },
   );
+
+  const entityCheckbox = property('approval', 'checkbox', {
+    acceptsKind: 'status',
+    optionSources: ['manual', 'entity'],
+  });
+  assert.equal(
+    normalizeTaskEditorPropertyValue(
+      {
+        key: 'approval',
+        label: 'Approval',
+        type: 'checkbox',
+        value: '[[Statuses/Approved]]',
+        property: entityCheckbox,
+      },
+      '[[Statuses/Approved]]',
+    ),
+    '[[Statuses/Approved]]',
+    'an entity-enabled checkbox field is a relation editor and must not coerce its link to false',
+  );
 });
 
 test('generic datetime results cannot mutate scheduled companion drafts', async () => {

@@ -45,6 +45,11 @@ export type TpsBaseLineCreationOptions = {
   defaultOpenStatus?: string;
   defaultDoneStatus?: string;
   isDoneStatus?: (status: string) => boolean | null;
+  /**
+   * Distinguish virtual checkbox workflow status (for example task.status or
+   * checkboxStatus) from a configured relational field whose key is `status`.
+   */
+  isWorkflowStatusProperty?: (property: string) => boolean;
   nonTaskStatusAsField?: boolean;
 };
 
@@ -395,7 +400,11 @@ function applyCondition(
     });
   }
 
-  if (STATUS_PROPERTIES.has(semanticProperty) && EQUALITY_OPERATORS.has(semanticOperator)) {
+  if (
+    STATUS_PROPERTIES.has(semanticProperty)
+    && EQUALITY_OPERATORS.has(semanticOperator)
+    && (context.options.isWorkflowStatusProperty?.(property) ?? true)
+  ) {
     return applyAlternatives(state, resolvedValues, source, context, path, (candidate, rawValue) => (
       applyStatus(candidate, rawValue, effectivePositive, source, context)
     ));

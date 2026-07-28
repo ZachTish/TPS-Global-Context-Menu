@@ -24,6 +24,7 @@ import {
 } from '../utils/task-block-move';
 import { getLinkedSubitemCompleteMarkers, mapStatusToSubitemCheckboxState } from '../utils/linked-subitem-mapping';
 import * as logger from '../logger';
+import { findRelationalStatusProperty } from '../utils/property-option-source';
 
 const INLINE_FIELD_GLOBAL_RE = /(?:^|\s)([\[(])\s*([A-Za-z0-9_-]+)\s*::\s*([^\]\)]*)[\])]/g;
 
@@ -534,13 +535,18 @@ export class TaskApiService {
       next = updateTaskCompletedDateForCheckboxState(next, `[${marker}]`, {
         completeMarkers: Array.from(this.getCompleteMarkers()),
       });
-      next = setInlineFieldValueOnTaskLine(next, 'status', null);
+      if (!findRelationalStatusProperty(this.plugin.settings.properties)) {
+        next = setInlineFieldValueOnTaskLine(next, 'status', null);
+      }
     }
 
     if (input.fields && typeof input.fields === 'object') {
       for (const [key, value] of Object.entries(input.fields)) {
         if (!key.trim()) continue;
-        if (key.trim().toLowerCase() === 'status') {
+        if (
+          key.trim().toLowerCase() === 'status'
+          && !findRelationalStatusProperty(this.plugin.settings.properties)
+        ) {
           const status = value == null ? null : String(value);
           if (status) {
             const statusMarker = this.statusToCheckboxMarker(status);

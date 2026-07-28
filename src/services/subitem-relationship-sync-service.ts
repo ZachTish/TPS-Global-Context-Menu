@@ -307,7 +307,9 @@ export class SubitemRelationshipSyncService {
   }
 
   private resolveCheckboxStateForChild(childFile: TFile): string | null {
-    const statusKey = String(this.plugin.settings.properties?.find((prop) => prop.id === 'status')?.key || 'status').trim() || 'status';
+    const statusKey = String(
+      this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status',
+    ).trim() || 'status';
     const frontmatter = (this.plugin.app.metadataCache.getFileCache(childFile)?.frontmatter || {}) as Record<string, unknown>;
     const actualKey = Object.keys(frontmatter).find((candidate) => candidate.toLowerCase() === statusKey.toLowerCase());
     const statusValue = String(actualKey ? frontmatter[actualKey] : '').trim();

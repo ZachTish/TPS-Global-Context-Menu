@@ -104,71 +104,89 @@ export class EntitySuggestModal extends FuzzySuggestModal<EntityReferenceChoice>
   }
 
   private async chooseResolvedItem(item: EntityReferenceChoice): Promise<void> {
-    const currentEntity = (await this.queryAcceptedEntities()).find(
-      (entity) => String(entity.id || '').toLocaleLowerCase() === item.id.toLocaleLowerCase(),
+    const resolvedChoice = await resolveCurrentEntityReferenceChoice(
+      this.entityIndex,
+      this.acceptedKinds,
+      item,
     );
-    if (!currentEntity) {
-      new Notice('That entity was deleted or no longer matches this property. Nothing was updated.');
-      return;
-    }
-
-    let resolvedEntity = currentEntity;
-    const isLineEntity = currentEntity.entityType === 'block';
-    if (isLineEntity || currentEntity.referenceState === 'provisional') {
-      if (typeof this.entityIndex.materializeReference !== 'function') {
-        if (currentEntity.referenceState !== 'provisional') {
-          resolvedEntity = currentEntity;
-        } else {
-          new Notice('This line cannot be referenced until the entity index is fully available.');
-          return;
-        }
-      } else {
-        const materialized = await this.entityIndex.materializeReference(currentEntity);
-        if (!materialized) {
-          new Notice('That line changed or has a duplicate identity. Nothing was updated.');
-          return;
-        }
-        resolvedEntity = materialized;
-      }
-    }
-    if (!entityMatchesAcceptedKinds(resolvedEntity, this.acceptedKinds)) {
-      new Notice('That entity no longer matches this property’s accepted Kind. Nothing was updated.');
-      return;
-    }
-    const resolvedChoice = entityToReferenceChoice(resolvedEntity);
-    if (!resolvedChoice?.wikilink || resolvedChoice.referenceState !== 'ready') {
-      if (currentEntity.referenceState === 'provisional') {
-        new Notice('This line cannot be referenced until the entity index is fully available.');
-      }
-      return;
-    }
-    await this.onChoose(resolvedChoice);
+    if (resolvedChoice) await this.onChoose(resolvedChoice);
   }
 
   private async queryAcceptedEntities(): Promise<readonly EntityIndexRecordLike[]> {
-    const query = {
-      dimensions: {
-        kind: {
-          anyOf: [...this.acceptedKinds],
-        },
-      },
-    };
-    let result: EntityIndexQueryResult;
-    if (typeof this.entityIndex.queryAsync === 'function') {
-      result = await this.entityIndex.queryAsync(query);
-    } else {
-      if (typeof this.entityIndex.ensureReady === 'function') {
-        await this.entityIndex.ensureReady();
-      }
-      result = this.entityIndex.query(query);
-    }
-    return readQueryEntities(result);
+    return queryAcceptedEntityRecords(this.entityIndex, this.acceptedKinds);
   }
 
   private refreshSuggestions(): void {
     if (!this.inputEl) return;
     this.inputEl.dispatchEvent(new Event('input', { bubbles: true }));
   }
+}
+
+export async function queryAcceptedEntityRecords(
+  entityIndex: EntityIndexQueryable,
+  acceptedKinds: readonly string[],
+): Promise<readonly EntityIndexRecordLike[]> {
+  const query = {
+    dimensions: {
+      kind: {
+        anyOf: [...acceptedKinds],
+      },
+    },
+  };
+  let result: EntityIndexQueryResult;
+  if (typeof entityIndex.queryAsync === 'function') {
+    result = await entityIndex.queryAsync(query);
+  } else {
+    if (typeof entityIndex.ensureReady === 'function') {
+      await entityIndex.ensureReady();
+    }
+    result = entityIndex.query(query);
+  }
+  return readQueryEntities(result);
+}
+
+export async function resolveCurrentEntityReferenceChoice(
+  entityIndex: EntityIndexQueryable,
+  acceptedKinds: readonly string[],
+  item: EntityReferenceChoice,
+): Promise<EntityReferenceChoice | null> {
+  const currentEntity = (await queryAcceptedEntityRecords(entityIndex, acceptedKinds)).find(
+    (entity) => String(entity.id || '').toLocaleLowerCase() === item.id.toLocaleLowerCase(),
+  );
+  if (!currentEntity) {
+    new Notice('That entity was deleted or no longer matches this property. Nothing was updated.');
+    return null;
+  }
+
+  let resolvedEntity = currentEntity;
+  const isLineEntity = currentEntity.entityType === 'block';
+  if (isLineEntity || currentEntity.referenceState === 'provisional') {
+    if (typeof entityIndex.materializeReference !== 'function') {
+      if (currentEntity.referenceState === 'provisional') {
+        new Notice('This line cannot be referenced until the entity index is fully available.');
+        return null;
+      }
+    } else {
+      const materialized = await entityIndex.materializeReference(currentEntity);
+      if (!materialized) {
+        new Notice('That line changed or has a duplicate identity. Nothing was updated.');
+        return null;
+      }
+      resolvedEntity = materialized;
+    }
+  }
+  if (!entityMatchesAcceptedKinds(resolvedEntity, acceptedKinds)) {
+    new Notice('That entity no longer matches this property’s accepted Kind. Nothing was updated.');
+    return null;
+  }
+  const resolvedChoice = entityToReferenceChoice(resolvedEntity);
+  if (!resolvedChoice?.wikilink || resolvedChoice.referenceState !== 'ready') {
+    if (currentEntity.referenceState === 'provisional') {
+      new Notice('This line cannot be referenced until the entity index is fully available.');
+    }
+    return null;
+  }
+  return resolvedChoice;
 }
 
 export function openEntitySuggestModal(

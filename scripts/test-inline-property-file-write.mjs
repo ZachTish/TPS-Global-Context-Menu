@@ -71,6 +71,35 @@ test('inline property file edits refuse missing or ambiguously relocated source 
   });
 });
 
+test('live editor revision checks relocate unchanged lines but reject a line edited while its modal is open', async () => {
+  const { replaceExactLineRevision } = await importAtomicLineReplacement();
+  const capturedLine = '- item [project:: [[Projects/Alpha]]]';
+  const replacementLine = '- item [project:: [[Projects/Beta]]]';
+
+  const relocated = replaceExactLineRevision(
+    `Inserted above\n${capturedLine}\nTail`,
+    0,
+    capturedLine,
+    replacementLine,
+  );
+  assert.equal(relocated.route, 'relocated');
+  assert.equal(relocated.resolvedLineIndex, 1);
+  assert.equal(relocated.content, `Inserted above\n${replacementLine}\nTail`);
+
+  const changedWhileOpen = replaceExactLineRevision(
+    '- item edited elsewhere [project:: [[Projects/Alpha]]]\nTail',
+    0,
+    capturedLine,
+    replacementLine,
+  );
+  assert.equal(changedWhileOpen.route, 'conflict');
+  assert.equal(changedWhileOpen.conflictReason, 'missing');
+  assert.equal(
+    changedWhileOpen.content,
+    '- item edited elsewhere [project:: [[Projects/Alpha]]]\nTail',
+  );
+});
+
 test('rendered inline property writes use atomic revision checks and structured outcomes', () => {
   const source = readFileSync(new URL('../src/services/inline-property-decoration-service.ts', import.meta.url), 'utf8');
   const method = source.match(/private async replaceInlinePropertyLine[\s\S]*?\n  private setInlineFieldValue/)?.[0] || '';
@@ -83,4 +112,24 @@ test('rendered inline property writes use atomic revision checks and structured 
   assert.match(method, /file-edit:done/);
   assert.doesNotMatch(method, /vault\.cachedRead/);
   assert.doesNotMatch(method, /vault\.modify/);
+});
+
+test('live editor inline property writes re-resolve the captured revision before dispatching', () => {
+  const source = readFileSync(new URL('../src/services/inline-property-decoration-service.ts', import.meta.url), 'utf8');
+  const method = source.match(/private async replaceInlinePropertyLine[\s\S]*?\n  private setInlineFieldValue/)?.[0] || '';
+  const editorBranch = method.match(/if \(targetLine\.kind === 'editor'\)[\s\S]*?\n      return;\n    }/)?.[0] || '';
+
+  assert.match(source, /lineNumber: number;/);
+  assert.match(editorBranch, /currentDoc\.toString\(\)/);
+  assert.match(editorBranch, /replaceExactLineRevision\(/);
+  assert.match(editorBranch, /replacement\.route === 'conflict'/);
+  assert.match(editorBranch, /currentLine\.text !== targetLine\.lineText/);
+  assert.match(editorBranch, /from: currentLine\.from, to: currentLine\.to/);
+  assert.match(editorBranch, /editor-edit:conflict/);
+  assert.match(editorBranch, /editor-edit:failed/);
+  assert.match(editorBranch, /editor-edit:done/);
+  assert.doesNotMatch(
+    editorBranch,
+    /changes:\s*\{\s*from:\s*targetLine\.lineFrom,\s*to:\s*targetLine\.lineTo/u,
+  );
 });

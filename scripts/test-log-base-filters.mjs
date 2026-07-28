@@ -232,7 +232,8 @@ test('TPS Table derives task status fields and follows the active view without s
     ),
     true,
   );
-  assert.match(logBaseViewSource, /queryFields = \{[\s\S]{0,200}\.\.\.getTpsTableTaskQueryFields\(/);
+  assert.match(logBaseViewSource, /const taskQueryFields = getTpsTableTaskQueryFields\(/);
+  assert.match(logBaseViewSource, /queryFields = \{\s*\.\.\.queryFields,\s*\.\.\.taskQueryFields,\s*\}/);
   assert.match(
     logBaseViewSource,
     /createFilterContext\(\s*queryFields,\s*file,\s*line,\s*rowKind\s*\)/,

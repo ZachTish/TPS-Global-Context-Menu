@@ -1,13 +1,30 @@
 import { App, getAllTags } from 'obsidian';
 import type { CustomProperty } from '../types';
-import { isLinkListProperty, isTagListProperty, isTextListProperty, parseLinkListInput, parseStringListInput } from './list-utils';
+import {
+  isLinkListProperty,
+  isTagListProperty,
+  isTextListProperty,
+  parseLinkListInput,
+  parseMixedListInput,
+  parseStringListInput,
+} from './list-utils';
 import { parseTagInput } from './tag-utils';
+import {
+  propertyUsesEntityOptions,
+  propertyUsesManualOptions,
+  propertyUsesVaultOptions,
+} from './property-option-source';
 
 const MAX_VAULT_OPTIONS = 300;
 const VAULT_OPTION_CACHE_TTL_MS = 3000;
 const vaultOptionCache = new WeakMap<App, Map<string, { createdAt: number; values: string[] }>>();
 
-function normalizeOption(value: unknown, property?: Pick<CustomProperty, 'type' | 'listItemType'>): string {
+type OptionProperty = Pick<
+  CustomProperty,
+  'type' | 'listItemType' | 'acceptsKind' | 'optionSources' | 'optionsSource'
+>;
+
+function normalizeOption(value: unknown, property?: OptionProperty): string {
   if (value === null || value === undefined || value === false) return '';
   const raw = String(value).trim();
   if (!raw) return '';
@@ -20,9 +37,34 @@ function normalizeOption(value: unknown, property?: Pick<CustomProperty, 'type' 
   return raw;
 }
 
-function visitOptionValue(value: unknown, add: (value: string) => void, property?: Pick<CustomProperty, 'type' | 'listItemType'>): void {
+function visitOptionValue(
+  value: unknown,
+  add: (value: string) => void,
+  property?: OptionProperty,
+): void {
   if (Array.isArray(value)) {
     value.forEach((item) => visitOptionValue(item, add, property));
+    return;
+  }
+  if (
+    property?.type === 'list'
+    && !isLinkListProperty(property)
+    && propertyUsesEntityOptions(property)
+  ) {
+    parseMixedListInput(value).forEach((item) => {
+      if (/^!?\[\[/u.test(item)) {
+        add(item);
+        return;
+      }
+      const normalized = isTagListProperty(property)
+        ? parseTagInput(item)[0] || ''
+        : item.trim();
+      if (normalized) add(normalized);
+    });
+    return;
+  }
+  if (isTagListProperty(property)) {
+    parseTagInput(value).forEach(add);
     return;
   }
   if (isTextListProperty(property)) {
@@ -37,7 +79,7 @@ function visitOptionValue(value: unknown, add: (value: string) => void, property
   if (normalized) add(normalized);
 }
 
-export function normalizeManualPropertyOptions(options: unknown, property?: Pick<CustomProperty, 'type' | 'listItemType'>): string[] {
+export function normalizeManualPropertyOptions(options: unknown, property?: OptionProperty): string[] {
   const values = new Map<string, string>();
   const add = (value: string) => {
     const key = value.toLowerCase();
@@ -47,13 +89,23 @@ export function normalizeManualPropertyOptions(options: unknown, property?: Pick
   if (Array.isArray(options)) {
     options.forEach((option) => visitOptionValue(option, add, property));
   } else if (typeof options === 'string') {
-    options.split(/[,\n]+/).forEach((option) => visitOptionValue(option, add, property));
+    if (property?.type === 'list') {
+      visitOptionValue(options, add, property);
+    } else {
+      options.split(/[,\n]+/).forEach((option) => visitOptionValue(option, add, property));
+    }
   }
 
-  return Array.from(values.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  return Array.from(values.values());
 }
 
-export function collectVaultPropertyOptions(app: App, property: Pick<CustomProperty, 'key' | 'type' | 'listItemType'>): string[] {
+export function collectVaultPropertyOptions(
+  app: App,
+  property: Pick<
+    CustomProperty,
+    'key' | 'type' | 'listItemType' | 'acceptsKind' | 'optionSources' | 'optionsSource'
+  >,
+): string[] {
   const key = String(property.key || '').trim();
   if (!key) return [];
   const cacheKey = `${key.toLowerCase()}\u0000${String(property.type || '')}\u0000${String(property.listItemType || '')}`;
@@ -94,10 +146,18 @@ export function collectVaultPropertyOptions(app: App, property: Pick<CustomPrope
   return [...collected];
 }
 
-export function getEffectivePropertyOptions(app: App, property: Pick<CustomProperty, 'key' | 'type' | 'listItemType' | 'options' | 'optionsSource'> | null | undefined): string[] {
+export function getEffectivePropertyOptions(
+  app: App,
+  property: Pick<
+    CustomProperty,
+    'key' | 'type' | 'listItemType' | 'options' | 'optionSources' | 'optionsSource' | 'acceptsKind'
+  > | null | undefined,
+): string[] {
   if (!property) return [];
-  const manual = normalizeManualPropertyOptions(property.options || [], property);
-  if (property.optionsSource !== 'vault') return manual;
+  const manual = propertyUsesManualOptions(property)
+    ? normalizeManualPropertyOptions(property.options || [], property)
+    : [];
+  if (!propertyUsesVaultOptions(property)) return manual;
 
   const merged = new Map<string, string>();
   const discovered = property.type === 'kind'
@@ -107,7 +167,7 @@ export function getEffectivePropertyOptions(app: App, property: Pick<CustomPrope
     const key = value.toLowerCase();
     if (!merged.has(key)) merged.set(key, value);
   }
-  return Array.from(merged.values()).sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+  return Array.from(merged.values());
 }
 
 function getIndexedKindValues(app: App): string[] | null {

@@ -86,6 +86,39 @@ function splitLinkListText(value: string): string[] {
   return parts;
 }
 
+/**
+ * Parse a heterogeneous inline list without coercing plain values into links.
+ *
+ * Entity-enabled text lists may intentionally contain both literal values and
+ * canonical wikilinks. Unlike `parseStringListInput`, this parser does not
+ * split on commas that occur inside a wikilink.
+ */
+export function parseMixedListInput(raw: unknown): string[] {
+  const values: string[] = [];
+
+  const visit = (value: unknown): void => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (value === null || value === undefined || value === false) return;
+    splitLinkListText(String(value))
+      .map((item) => item.trim())
+      .filter(Boolean)
+      .forEach((item) => values.push(item));
+  };
+
+  visit(raw);
+  return Array.from(new Set(values));
+}
+
+export function mergeMixedList(existing: unknown, incoming: unknown): string[] {
+  return Array.from(new Set([
+    ...parseMixedListInput(existing),
+    ...parseMixedListInput(incoming),
+  ]));
+}
+
 export function normalizeLinkListValue(raw: unknown): string {
   const value = String(raw ?? '').trim();
   if (!value) return '';

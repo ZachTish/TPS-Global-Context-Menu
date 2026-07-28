@@ -4,6 +4,7 @@ import * as logger from "../logger";
 import { mergeNormalizedTags, normalizeTagValue } from "../utils/tag-utils";
 import { findExistingDailyNoteForIsoDate, getDailyNotePathForIsoDate, getDailyNoteScheduledValueForIsoDate, getIsoDateFromScheduledValue } from "../utils/daily-note-task-schedule";
 import type { CustomProperty } from "../types";
+import { propertyUsesEntityOptions } from "../utils/property-option-source";
 
 type HeaderTarget = {
     line: number;
@@ -74,8 +75,11 @@ export class NoteOperationService {
         for (const childFile of scheduledFiles) {
             // Check if the file has a status field
             const cache = this.app.metadataCache.getFileCache(childFile);
+            const workflowStatusKey = this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status';
             const fmKeys = Object.keys(cache?.frontmatter || {});
-            const hasStatus = fmKeys.some(k => k.trim().toLowerCase() === 'status');
+            const hasStatus = fmKeys.some(
+                (key) => key.trim().toLowerCase() === workflowStatusKey.trim().toLowerCase(),
+            );
 
             const changed = await this.plugin.subitemRelationshipSyncService.insertBodyLink(
                 dailyNote,
@@ -433,7 +437,10 @@ export class NoteOperationService {
             if (!property || property.disabled || property.hidden || property.allowInlineSet === false) return false;
             const key = String(property.key || "").trim();
             if (!key) return false;
-            if (["title", "status", "folderpath", "childof", "parentof"].includes(key.toLowerCase())) return false;
+            if (
+                ["title", "folderpath", "childof", "parentof"].includes(key.toLowerCase())
+                || (key.toLowerCase() === "status" && !propertyUsesEntityOptions(property))
+            ) return false;
             return !!this.findFrontmatterKey(frontmatter, key);
         });
 
@@ -500,7 +507,12 @@ export class NoteOperationService {
     }
 
     private getCheckboxMarkerForFrontmatter(frontmatter: Record<string, unknown>): string {
-        const statusKey = Object.keys(frontmatter || {}).find((key) => key.toLowerCase() === "status");
+        const workflowStatusKey = String(
+            this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || "status",
+        ).trim().toLowerCase();
+        const statusKey = Object.keys(frontmatter || {}).find(
+            (key) => key.toLowerCase() === workflowStatusKey,
+        );
         if (!statusKey) return "*";
         const rawStatus = frontmatter[statusKey];
         const status = Array.isArray(rawStatus) ? rawStatus.find((value) => String(value || "").trim()) : rawStatus;

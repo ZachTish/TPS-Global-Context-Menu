@@ -81,15 +81,34 @@ import type { CustomProperty } from '../../types';
 import {
   isEntityReferenceProperty,
   mergeEntityReferenceList,
+  mergeMixedEntityReferenceList,
   resolveConfiguredProperty,
 } from '../../utils/entity-property';
-import { openEntitySuggestModal } from '../../modals/EntitySuggestModal';
+import { openPropertyValueSuggestModal } from '../../modals/PropertyValueSuggestModal';
 import {
   addLineEntityPropertyMenus,
-  getConfiguredEntityReferencePropertyKeys,
+  getConfiguredLineContextPropertyKeys,
 } from '../../menu/line-entity-property-menu';
-import { getWikilinkDisplayText, isTagListProperty, parseLinkListInput } from '../../utils/list-utils';
+import {
+  getWikilinkDisplayText,
+  isLinkListProperty,
+  isTagListProperty,
+  mergeLinkList,
+  mergeMixedList,
+  mergeStringList,
+  parseLinkListInput,
+  parseMixedListInput,
+  parseStringListInput,
+} from '../../utils/list-utils';
 import { collectKnownVaultTags } from '../../utils/known-tags';
+import {
+  findRelationalStatusProperty,
+  propertyUsesEntityOptions,
+} from '../../utils/property-option-source';
+import {
+  isRelationalStatusFilterExpression,
+  isRelationalStatusPropertyReference as isRelationalStatusReference,
+} from '../relational-status-routing';
 
 export const TPS_LIST_VIEW_TYPE = 'tps-list';
 
@@ -538,6 +557,12 @@ export class TpsListView extends BasesView {
       defaultOpenStatus: 'todo',
       defaultDoneStatus: 'complete',
       isDoneStatus: (status) => this.getDoneStatuses().has(this.normalizeTaskStatus(status)),
+      isWorkflowStatusProperty: (property) => {
+        const normalized = String(property || '').trim().toLowerCase();
+        return normalized === 'task.status'
+          || normalized.endsWith('checkboxstatus')
+          || !findRelationalStatusProperty(this.getGcmSettings()?.properties);
+      },
     });
     if (linePlan.blockedReason) {
       flowWarn('CreateFile', 'blocked', {
@@ -1130,7 +1155,7 @@ export class TpsListView extends BasesView {
       const menuController = plugin?.menuController || this.getGcmApi()?.menuController;
       menuController?.addToNativeMenu?.(menu, [file], {
         includeTitle: false,
-        excludeCustomPropertyKeys: getConfiguredEntityReferencePropertyKeys(plugin),
+        excludeCustomPropertyKeys: getConfiguredLineContextPropertyKeys(plugin),
       });
       this.app.workspace.trigger('file-menu', menu as any, file as any);
       menu.showAtPosition({ x: event.clientX, y: event.clientY });
@@ -1272,7 +1297,7 @@ export class TpsListView extends BasesView {
         menuController.addToNativeMenu(menu, [menuTarget], {
           deleteLabel: `Delete ${targetLabel}`,
           includeTitle: false,
-          excludeCustomPropertyKeys: getConfiguredEntityReferencePropertyKeys(plugin),
+          excludeCustomPropertyKeys: getConfiguredLineContextPropertyKeys(plugin),
         });
       }
       this.app.workspace.trigger('file-menu', menu as any, menuTarget as any);
@@ -3030,6 +3055,7 @@ export class TpsListView extends BasesView {
   }
 
   private isStatusPropertyName(propName: string | null | undefined): boolean {
+    if (this.isRelationalStatusPropertyReference(propName)) return false;
     const normalized = this.normalizeInlinePropertyKey(this.getTaskInlinePropertyName(propName));
     if (!normalized) return false;
     if (normalized === 'status' || normalized === 'checkboxstatus') return true;
@@ -3040,6 +3066,15 @@ export class TpsListView extends BasesView {
         return id === 'status' || key === 'status';
       })?.key;
     return normalized === this.normalizeInlinePropertyKey(String(configuredKey || ''));
+  }
+
+  private isRelationalStatusPropertyReference(
+    propName: string | null | undefined,
+  ): boolean {
+    return isRelationalStatusReference(
+      propName,
+      this.getGcmSettings()?.properties,
+    );
   }
 
   private async openOrFocusFile(file: TFile): Promise<WorkspaceLeaf | null> {
@@ -3696,7 +3731,14 @@ export class TpsListView extends BasesView {
       return value === 'all' || value === 'mixed';
     }
 
-    if (task.itemKind === 'heading' && /^(?:task\.)?(?:status|checkboxstatus|open|isopen|done|isdone|completed|complete)\b/i.test(expr)) return false;
+    const headingWorkflowMatch = expr.match(
+      /^((?:task\.)?(?:status|checkboxstatus|open|isopen|done|isdone|completed|complete))\b/iu,
+    );
+    if (
+      task.itemKind === 'heading'
+      && headingWorkflowMatch
+      && !this.isRelationalStatusPropertyReference(headingWorkflowMatch[1])
+    ) return false;
     const status = this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo';
     const booleanMatch = expr.match(
       /^(?:task\.)?(open|isopen|done|isdone|completed|complete)\s*(==|=|!=|!==|is|equals?)\s*(true|false|1|0)$/i,
@@ -3711,8 +3753,10 @@ export class TpsListView extends BasesView {
       return booleanMatch[2].startsWith('!') ? !matched : matched;
     }
 
-    const statusResult = this.evaluateTaskValueFilterExpression(expr, 'status', [status], false);
-    if (statusResult != null) return statusResult;
+    if (!isRelationalStatusFilterExpression(expr, this.getGcmSettings()?.properties)) {
+      const statusResult = this.evaluateTaskValueFilterExpression(expr, 'status', [status], false);
+      if (statusResult != null) return statusResult;
+    }
     const tagsResult = this.evaluateTaskValueFilterExpression(expr, 'tags', this.getTaskInlineValues(task, 'tags'), false);
     if (tagsResult != null) return tagsResult;
     const fileResult = this.evaluateTaskFileFilterExpression(expr, file);
@@ -3812,7 +3856,10 @@ export class TpsListView extends BasesView {
     if (['level', 'headinglevel'].includes(normalized)) {
       return task.itemKind === 'heading' && task.headingLevel ? [String(task.headingLevel)] : [];
     }
-    if (['status', 'checkboxstatus'].includes(normalized)) {
+    if (
+      ['status', 'checkboxstatus'].includes(normalized)
+      && !this.isRelationalStatusPropertyReference(propRaw)
+    ) {
       if (task.itemKind === 'heading') return [];
       return [this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo'];
     }
@@ -4013,7 +4060,11 @@ export class TpsListView extends BasesView {
       const actual = ['open', 'isopen'].includes(normalizedProp) ? isOpen : !isOpen;
       const expected = values.find((value) => ['true', 'false', '1', '0'].includes(value.toLowerCase()));
       result = expected == null ? null : actual === ['true', '1'].includes(expected.toLowerCase());
-    } else if ((propRaw.toLowerCase().startsWith('task.') || normalizedProp === 'status' || normalizedProp === 'checkboxstatus') && ['status', 'checkboxstatus'].includes(normalizedProp)) {
+    } else if (
+      (propRaw.toLowerCase().startsWith('task.') || normalizedProp === 'status' || normalizedProp === 'checkboxstatus')
+      && ['status', 'checkboxstatus'].includes(normalizedProp)
+      && !this.isRelationalStatusPropertyReference(propRaw)
+    ) {
       if (task.itemKind === 'heading') return false;
       const status = this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo';
       if (this.isImplicitEmptyValueFilter(operator, values)) {
@@ -5786,7 +5837,17 @@ export class TpsListView extends BasesView {
       filter.includeDone = true;
     }
 
-    this.collectTaskValuesFromFilterExpression(expr, 'status', filter.statuses, filter.excludeStatuses, filter, isNegated, false);
+    if (!isRelationalStatusFilterExpression(expr, this.getGcmSettings()?.properties)) {
+      this.collectTaskValuesFromFilterExpression(
+        expr,
+        'status',
+        filter.statuses,
+        filter.excludeStatuses,
+        filter,
+        isNegated,
+        false,
+      );
+    }
     this.collectTaskValuesFromFilterExpression(expr, 'tags', filter.tags, filter.excludeTags, filter, isNegated, false);
   }
 
@@ -5871,7 +5932,11 @@ export class TpsListView extends BasesView {
       return;
     }
 
-    if ((propRaw.toLowerCase().startsWith('task.') || normalizedProp === 'status' || normalizedProp === 'checkboxstatus') && ['status', 'checkboxstatus'].includes(normalizedProp)) {
+    if (
+      (propRaw.toLowerCase().startsWith('task.') || normalizedProp === 'status' || normalizedProp === 'checkboxstatus')
+      && ['status', 'checkboxstatus'].includes(normalizedProp)
+      && !this.isRelationalStatusPropertyReference(propRaw)
+    ) {
       filter.hasTaskDirective = true;
       const target = isNegated ? filter.excludeStatuses : filter.statuses;
       for (const raw of values) {
@@ -6224,15 +6289,19 @@ export class TpsListView extends BasesView {
   private getTaskPropertyValue(file: TFile, task: OpenTaskSubitem, propId: string, hidden: Set<string>): TpsTaskPropertyDisplay | null {
     const normalized = this.normalizeTaskPropertyId(propId);
     if (!normalized || hidden.has(normalized)) return null;
+    const workflowStatusReference = this.isStatusPropertyName(propId);
+    const configuredForProperty = workflowStatusReference
+      ? null
+      : this.getConfiguredCustomProperty(propId);
 
-    if (normalized === 'status') {
+    if ((normalized === 'status' || normalized === 'checkboxstatus') && workflowStatusReference) {
       if (task.itemKind === 'heading') return null;
       const status = task.itemKind === 'bullet' ? 'bullet' : this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo';
       return status ? {
         text: status,
         kind: 'status',
         editable: task.itemKind !== 'bullet',
-        propName: this.getTaskInlinePropertyName(propId) || 'status',
+        propName: String(propId || '').trim() || 'status',
         rawValue: status,
       } : null;
     }
@@ -6263,13 +6332,13 @@ export class TpsListView extends BasesView {
         .map((tag) => tag.replace(/^#/, ''))
         .filter(Boolean);
       if (tags.length === 0) return null;
-      const configuredProperty = this.getConfiguredCustomProperty(propId)
+      const configuredProperty = configuredForProperty
         || this.getConfiguredCustomProperty('tags');
       return {
         text: tags.map((tag) => `#${tag}`).join(', '),
         title: tags.map((tag) => `#${tag}`).join(', '),
         kind: 'tag',
-        editable: task.itemKind !== 'heading',
+        editable: true,
         propName: configuredProperty?.key || 'tags',
         rawValue: tags.map((tag) => `#${tag}`).join(', '),
       };
@@ -6280,7 +6349,7 @@ export class TpsListView extends BasesView {
       if (!key || key !== normalized || hidden.has(key)) continue;
       const value = String(field.value || '').trim();
       if (!value) return null;
-      const configuredProperty = this.getConfiguredCustomProperty(propId)
+      const configuredProperty = configuredForProperty
         || this.getConfiguredCustomProperty(field.key);
       const entityReference = isEntityReferenceProperty(configuredProperty);
       const text = entityReference
@@ -6291,7 +6360,7 @@ export class TpsListView extends BasesView {
         text,
         title: key === 'tag' || key === 'tags' ? value : `${field.key}: ${value}`,
         kind: entityReference ? 'entity' : key === 'tag' || key === 'tags' ? 'tag' : key,
-        editable: task.itemKind !== 'heading',
+        editable: true,
         propName: field.key,
         rawValue: value,
       };
@@ -6716,7 +6785,11 @@ export class TpsListView extends BasesView {
     if (/^(?:task\.)?(?:done|isdone|completed|complete)\s*(?:==|=)\s*(true|1)$/i.test(expr)) {
       return { includeDone: true, status: 'complete', inlineFields: new Map(), tags: new Set(), excludedStatuses: new Set(), excludedTags: new Set() };
     }
-    return this.inferTaskValueCreationDefaultsFromString(expr, 'status')
+    return (
+      isRelationalStatusFilterExpression(expr, this.getGcmSettings()?.properties)
+        ? null
+        : this.inferTaskValueCreationDefaultsFromString(expr, 'status')
+    )
       ?? this.inferTaskValueCreationDefaultsFromString(expr, 'tags')
       ?? this.inferTaskPathCreationDefaultsFromString(expr)
       ?? this.inferTaskInlineFieldCreationDefaultsFromString(expr);
@@ -6763,7 +6836,14 @@ export class TpsListView extends BasesView {
     const match = expr.match(/^(?:task\.)?([A-Za-z][\w -]{0,40})\s*(==|=|is|equals?)\s*(?:"([^"]+)"|'([^']+)'|([^\s].*?))$/i);
     const rawKey = String(match?.[1] || '').trim();
     const value = String(this.resolveBaseContextToken(match?.[3] || match?.[4] || match?.[5]) || '').trim();
-    if (!rawKey || !value || this.isReservedTaskDefaultKey(rawKey)) return null;
+    if (
+      !rawKey
+      || !value
+      || (
+        this.isReservedTaskDefaultKey(rawKey)
+        && !this.isRelationalStatusPropertyReference(rawKey)
+      )
+    ) return null;
     return {
       inlineFields: new Map([[this.normalizeInlinePropertyKey(rawKey), { key: rawKey, value }]]),
       tags: new Set(),
@@ -6794,7 +6874,10 @@ export class TpsListView extends BasesView {
         ? { includeDone: false, inlineFields: new Map(), tags: new Set(), excludedStatuses: new Set(), excludedTags: new Set() }
         : null;
     }
-    if (['status', 'checkboxstatus'].includes(normalizedProp)) {
+    if (
+      ['status', 'checkboxstatus'].includes(normalizedProp)
+      && !this.isRelationalStatusPropertyReference(propRaw)
+    ) {
       const value = values[0].toLowerCase();
       return { status: excluded ? null : value, inlineFields: new Map(), tags: new Set(), excludedStatuses: new Set(excluded ? [value] : []), excludedTags: new Set() };
     }
@@ -6816,7 +6899,15 @@ export class TpsListView extends BasesView {
         : null;
     }
     if (propRaw.toLowerCase() === 'task.file.path') return null;
-    if (!excluded && !propRaw.toLowerCase().startsWith('note.') && !propRaw.toLowerCase().startsWith('file.') && !this.isReservedTaskDefaultKey(normalizedProp)) {
+    if (
+      !excluded
+      && !propRaw.toLowerCase().startsWith('note.')
+      && !propRaw.toLowerCase().startsWith('file.')
+      && (
+        !this.isReservedTaskDefaultKey(normalizedProp)
+        || this.isRelationalStatusPropertyReference(propRaw)
+      )
+    ) {
       return {
         inlineFields: new Map([[normalizedProp, { key: propRaw.replace(/^task\./i, '').replace(/^tps\./i, ''), value: values[0] }]]),
         tags: new Set(),
@@ -7170,7 +7261,7 @@ export class TpsListView extends BasesView {
     if (lower === 'file.name' || lower === 'file.basename' || lower === 'file.fullname' || lower === 'name' || normalized === 'path') {
       return item.file.basename.toLowerCase();
     }
-    if (normalized === 'status') {
+    if (normalized === 'status' && !this.isRelationalStatusPropertyReference(raw)) {
       if (item.task.itemKind === 'heading') return '';
       return item.task.itemKind === 'bullet' ? 'bullet' : (this.getStatusForCheckboxState(item.task.checkboxState || '[ ]') || 'todo');
     }
@@ -7270,14 +7361,12 @@ export class TpsListView extends BasesView {
       const propName = this.getFrontmatterPropNameFromId(propId) ?? propId;
       const configuredProperty = this.getConfiguredCustomProperty(propId);
       const entityReference = isEntityReferenceProperty(configuredProperty);
-      const typedEmptyTarget = entityReference
-        || this.isTagProperty(configuredProperty, propName)
-        || this.isDatetimeProperty(configuredProperty, propName);
+      const editable = this.isWritableNotePropertyId(propId);
+      const typedEmptyTarget = Boolean(configuredProperty) || editable;
       const value = entityReference
         ? this.formatEntityPropertyValue(rawValue, configuredProperty!)
         : this.formatCardPropertyValue(rawValue);
       if (!value && !typedEmptyTarget) continue;
-      const editable = this.isWritableNotePropertyId(propId);
       const span = parent.createSpan({
         cls: `tps-list-native-property${editable ? ' tps-list-native-property--editable' : ''}${!value ? ' is-empty' : ''}`,
         text: value || `+ ${configuredProperty?.label || propName}`,
@@ -7361,12 +7450,81 @@ export class TpsListView extends BasesView {
 
     const hidden = new Set(['tpsinlineprops', 'externalid', 'externaleventid', 'tpscalendaruid', 'tpscalendarsourceurl']);
     for (const propId of selectedProps) {
-      const property = this.getTaskPropertyValue(file, task, propId, hidden);
+      let property = this.getTaskPropertyValue(file, task, propId, hidden);
+      if (!property) {
+        const configuredProperty = this.getConfiguredCustomProperty(propId);
+        if (isEntityReferenceProperty(configuredProperty)) {
+          property = {
+            text: `+ ${configuredProperty?.label || configuredProperty?.key || propId}`,
+            kind: 'entity',
+            editable: true,
+            propName: configuredProperty?.key,
+            rawValue: '',
+          };
+        } else if (this.isTagProperty(configuredProperty, propId)) {
+          property = {
+            text: `+ ${configuredProperty?.label || configuredProperty?.key || propId}`,
+            kind: 'tag',
+            editable: true,
+            propName: configuredProperty?.key || propId,
+            rawValue: '',
+          };
+        } else if (this.isDatetimeProperty(configuredProperty, propId)) {
+          property = {
+            text: `+ ${configuredProperty?.label || configuredProperty?.key || propId}`,
+            kind: 'datetime',
+            editable: true,
+            propName: configuredProperty?.key || propId,
+            rawValue: '',
+          };
+        } else if (
+          configuredProperty
+          && !(
+            this.normalizeTaskPropertyId(propId) === 'status'
+            && !propertyUsesEntityOptions(configuredProperty)
+          )
+        ) {
+          property = {
+            text: `+ ${configuredProperty.label || configuredProperty.key || propId}`,
+            kind: configuredProperty.type,
+            editable: true,
+            propName: configuredProperty.key || propId,
+            rawValue: '',
+          };
+        } else if (!this.isStatusPropertyName(propId)) {
+          const writablePropertyName = this.getWritableTaskPropertyName(propId);
+          if (writablePropertyName) {
+            property = {
+              text: `+ ${writablePropertyName}`,
+              kind: 'text',
+              editable: true,
+              propName: writablePropertyName,
+              rawValue: '',
+            };
+          }
+        }
+      }
       if (!property) continue;
-      row.createSpan({
-        cls: `tps-list-native-property${property.kind ? ` tps-list-native-property--${property.kind}` : ''}`,
+      const span = row.createSpan({
+        cls: `tps-list-native-property${property.kind ? ` tps-list-native-property--${property.kind}` : ''}${property.editable ? ' tps-list-native-property--editable' : ''}`,
         text: property.text,
-        attr: { title: property.title || property.text },
+        attr: {
+          title: property.editable ? `Edit ${property.propName || propId}` : property.title || property.text,
+          ...(property.editable ? { role: 'button', tabindex: '0' } : {}),
+        },
+      });
+      if (!property.editable || !property.propName) continue;
+      span.addEventListener('pointerdown', (event: PointerEvent) => event.stopPropagation());
+      span.addEventListener('click', (event: MouseEvent) => {
+        event.preventDefault();
+        event.stopPropagation();
+        this.startListTaskPropertyEdit(span, file, task, property);
+      });
+      span.addEventListener('keydown', (event: KeyboardEvent) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        event.stopPropagation();
+        this.startListTaskPropertyEdit(span, file, task, property);
       });
     }
   }
@@ -7500,6 +7658,31 @@ export class TpsListView extends BasesView {
             propName: configuredProperty?.key || propId,
             rawValue: '',
           };
+        } else if (
+          configuredProperty
+          && !(
+            this.normalizeTaskPropertyId(propId) === 'status'
+            && !propertyUsesEntityOptions(configuredProperty)
+          )
+        ) {
+          property = {
+            text: `+ ${configuredProperty.label || configuredProperty.key || propId}`,
+            kind: configuredProperty.type,
+            editable: true,
+            propName: configuredProperty.key || propId,
+            rawValue: '',
+          };
+        } else {
+          const writablePropertyName = this.getWritableTaskPropertyName(propId);
+          if (writablePropertyName) {
+            property = {
+              text: `+ ${writablePropertyName}`,
+              kind: 'text',
+              editable: true,
+              propName: writablePropertyName,
+              rawValue: '',
+            };
+          }
         }
       }
       if (!property) continue;
@@ -7567,17 +7750,25 @@ export class TpsListView extends BasesView {
   ): void {
     const propName = String(property.propName || '').trim();
     if (!propName || span.hasClass('tps-list-native-property--editing')) return;
-    const configuredProperty = this.getConfiguredCustomProperty(propName);
-    if (configuredProperty && isEntityReferenceProperty(configuredProperty)) {
-      const gcm = this.getGcmPlugin();
-      void this.openListTaskEntityPicker(file, task, configuredProperty, gcm);
+    if (
+      task.itemKind !== 'heading'
+      && (property.kind === 'status' || this.isStatusPropertyName(propName))
+    ) {
+      void this.openListTaskWorkflowStatusPicker(span, file, task);
       return;
     }
-    if (this.isTagProperty(configuredProperty, propName)) {
+    const configuredProperty = this.getConfiguredCustomProperty(propName);
+    if (
+      !propertyUsesEntityOptions(configuredProperty)
+      && this.isTagProperty(configuredProperty, propName)
+    ) {
       void this.openListTaskTagPicker(file, task, configuredProperty?.key || propName);
       return;
     }
-    if (this.isDatetimeProperty(configuredProperty, propName)) {
+    if (
+      !propertyUsesEntityOptions(configuredProperty)
+      && this.isDatetimeProperty(configuredProperty, propName)
+    ) {
       void this.openListTaskScheduledPicker(
         file,
         task,
@@ -7585,9 +7776,74 @@ export class TpsListView extends BasesView {
       );
       return;
     }
-    this.startListPropertyInput(span, property.rawValue ?? property.text, async (nextValue) => {
-      await this.applyInlineTaskProperty(file, task.line, propName, nextValue);
-      this.render(false);
+    if (
+      configuredProperty
+      && (
+        isEntityReferenceProperty(configuredProperty)
+        || configuredProperty.type === 'selector'
+        || configuredProperty.type === 'kind'
+        || configuredProperty.type === 'list'
+      )
+    ) {
+      const gcm = this.getGcmPlugin();
+      void this.openListTaskEntityPicker(file, task, configuredProperty, gcm);
+      return;
+    }
+    void this.openListTaskScalarEditor(
+      span,
+      file,
+      task,
+      configuredProperty,
+      propName,
+      property.rawValue ?? property.text,
+    );
+  }
+
+  private async openListTaskWorkflowStatusPicker(
+    span: HTMLElement,
+    file: TFile,
+    task: OpenTaskSubitem,
+  ): Promise<void> {
+    const rawLine = await this.resolveRenderedTaskLine(file, task, 'workflow-status-picker');
+    if (!rawLine) return;
+    const service = this.getGcmPlugin()?.taskLineContextMenuService
+      || this.getGcmApi()?.taskLineContextMenuService;
+    if (typeof service?.openTaskStatusPicker !== 'function') {
+      new Notice('The task status picker is not available.');
+      return;
+    }
+    service.openTaskStatusPicker({
+      file,
+      lineNumber: task.line,
+      lineIndex: Math.max(0, task.line - 1),
+      rawLine,
+      title: this.getTaskVisibleTitle(task),
+    }, span, () => this.render(false));
+  }
+
+  private async openListTaskScalarEditor(
+    span: HTMLElement,
+    file: TFile,
+    task: OpenTaskSubitem,
+    property: CustomProperty | null,
+    propertyKey: string,
+    initialValue: string,
+  ): Promise<void> {
+    const expectedLine = await this.resolveRenderedTaskLine(file, task, 'scalar-editor');
+    if (!expectedLine) return;
+    this.startListPropertyInput(span, initialValue, async (nextValue) => {
+      if (property?.type === 'number' && nextValue && !Number.isFinite(Number(nextValue))) {
+        throw new Error('Enter a valid number.');
+      }
+      const changed = await this.mutateRenderedTaskLine(
+        file,
+        task.line,
+        expectedLine,
+        propertyKey,
+        'scalar-update',
+        (line) => setLogInlineFieldValue(line, propertyKey, nextValue || null),
+      );
+      if (changed) this.render(false);
     });
   }
 
@@ -7599,13 +7855,37 @@ export class TpsListView extends BasesView {
   ): Promise<void> {
     const expectedLine = await this.resolveRenderedTaskLine(file, task, 'entity-picker');
     if (!expectedLine) return;
-    openEntitySuggestModal(this.app, source, property, async (choice) => {
-      const changed = await this.applyEntityTaskProperty(
+    const currentValue = readInlineFieldValue(expectedLine, property.key);
+    openPropertyValueSuggestModal(this.app, source, property, currentValue, async (choice) => {
+      const changed = await this.mutateRenderedTaskLine(
         file,
         task.line,
         expectedLine,
-        property,
-        choice.wikilink,
+        property.key,
+        'property-choice-update',
+        (line) => {
+          if (choice.kind === 'clear') {
+            return setLogInlineFieldValue(line, property.key, null);
+          }
+          if (property.type !== 'list') {
+            return setLogInlineFieldValue(line, property.key, choice.value);
+          }
+          const current = readInlineFieldValue(line, property.key);
+          const next = choice.kind === 'entity'
+            ? isLinkListProperty(property)
+              ? mergeEntityReferenceList(current, choice.value)
+              : mergeMixedEntityReferenceList(current, choice.value)
+            : isLinkListProperty(property)
+              ? mergeLinkList(current, choice.value)
+              : propertyUsesEntityOptions(property)
+                ? mergeMixedList(current, choice.value)
+                : mergeStringList(current, choice.value);
+          return setLogInlineFieldValue(line, property.key, next.join(', '));
+        },
+        {
+          source: choice.kind,
+          acceptedKind: property.acceptsKind,
+        },
       );
       if (changed) this.render(false);
     });
@@ -7622,7 +7902,9 @@ export class TpsListView extends BasesView {
       const directLine = parts.lines[Math.max(0, task.line - 1)] || '';
       const taskText = String(task.text || '').replace(/\s+/g, ' ').trim();
       const matchesTask = (line: string): boolean => {
-        const parsed = this.parseLineItem(line, true);
+        const parsed = task.itemKind === 'heading'
+          ? parseTpsListHeadingLine(line)
+          : this.parseLineItem(line, true);
         return !!parsed
           && this.cleanTaskText(parsed.text).replace(/\s+/g, ' ').trim() === taskText;
       };
@@ -7643,32 +7925,6 @@ export class TpsListView extends BasesView {
     return '';
   }
 
-  private async applyEntityTaskProperty(
-    file: TFile,
-    line: number,
-    expectedLine: string,
-    property: CustomProperty,
-    wikilink: string,
-  ): Promise<boolean> {
-    return this.mutateRenderedTaskLine(
-      file,
-      line,
-      expectedLine,
-      property.key,
-      'entity-update',
-      (currentLine) => {
-      const currentValue = readInlineFieldValue(currentLine, property.key);
-      const nextValue = property.type === 'list'
-        ? mergeEntityReferenceList(currentValue, wikilink).join(', ')
-        : wikilink;
-        return setLogInlineFieldValue(currentLine, property.key, nextValue);
-      },
-      {
-        acceptedKind: property.acceptsKind,
-      },
-    );
-  }
-
   private async mutateRenderedTaskLine(
     file: TFile,
     line: number,
@@ -7679,6 +7935,7 @@ export class TpsListView extends BasesView {
     logContext: Record<string, unknown> = {},
   ): Promise<boolean> {
     const targetLine = Math.max(1, Math.floor(Number(line || 1)));
+    const expectedIsHeading = parseTpsListHeadingLine(expectedLine) != null;
     const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
     let resolvedLine = targetLine;
     await this.app.vault.process(file, (content) => {
@@ -7689,7 +7946,10 @@ export class TpsListView extends BasesView {
         return content;
       }
       const currentLine = parts.lines[index] || '';
-      if (!this.parseLineItem(currentLine, true)) return content;
+      const currentMatchesKind = expectedIsHeading
+        ? parseTpsListHeadingLine(currentLine) != null
+        : this.parseLineItem(currentLine, true) != null;
+      if (!currentMatchesKind) return content;
       const nextLine = updater(currentLine);
       if (nextLine === currentLine) return content;
       parts.lines[index] = nextLine;
@@ -7819,21 +8079,10 @@ export class TpsListView extends BasesView {
     const writableProp = this.getFrontmatterPropNameFromId(propName) ?? propName;
     if (!writableProp || span.hasClass('tps-list-native-property--editing')) return;
     const configuredProperty = this.getConfiguredCustomProperty(writableProp);
-    if (configuredProperty && isEntityReferenceProperty(configuredProperty)) {
-      const gcm = this.getGcmPlugin();
-      openEntitySuggestModal(this.app, gcm, configuredProperty, async (choice) => {
-        await this.app.fileManager.processFrontMatter(file, (fm) => {
-          const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, writableProp) || writableProp;
-          fm[actualKey] = configuredProperty.type === 'list'
-            ? mergeEntityReferenceList(fm[actualKey], choice.wikilink)
-            : choice.wikilink;
-        });
-        emitFilesUpdated(this.app, [file.path], 'tps-list');
-        this.render(false);
-      });
-      return;
-    }
-    if (this.isTagProperty(configuredProperty, writableProp)) {
+    if (
+      !propertyUsesEntityOptions(configuredProperty)
+      && this.isTagProperty(configuredProperty, writableProp)
+    ) {
       const current = parseTaskTagValues(rawValue);
       new TagSuggestModal(this.app, [...collectKnownVaultTags(this.app), ...current], async (tag, selected) => {
         await this.app.fileManager.processFrontMatter(file, (fm) => {
@@ -7854,7 +8103,10 @@ export class TpsListView extends BasesView {
       }).open();
       return;
     }
-    if (this.isDatetimeProperty(configuredProperty, writableProp)) {
+    if (
+      !propertyUsesEntityOptions(configuredProperty)
+      && this.isDatetimeProperty(configuredProperty, writableProp)
+    ) {
       const property = configuredProperty ?? this.createDatetimeProperty(writableProp);
       const cacheFrontmatter = (this.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, unknown>;
       const actualKey = this.findFrontmatterKeyCaseInsensitive(cacheFrontmatter, writableProp) || writableProp;
@@ -7883,11 +8135,64 @@ export class TpsListView extends BasesView {
       }).open();
       return;
     }
+    if (
+      configuredProperty
+      && (
+        isEntityReferenceProperty(configuredProperty)
+        || configuredProperty.type === 'selector'
+        || configuredProperty.type === 'kind'
+        || configuredProperty.type === 'list'
+      )
+    ) {
+      const gcm = this.getGcmPlugin();
+      openPropertyValueSuggestModal(
+        this.app,
+        gcm,
+        configuredProperty,
+        this.stringifyEditablePropertyValue(rawValue),
+        async (choice) => {
+        await this.app.fileManager.processFrontMatter(file, (fm) => {
+          const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, writableProp) || writableProp;
+          if (choice.kind === 'clear') {
+            delete fm[actualKey];
+          } else if (configuredProperty.type === 'list') {
+            fm[actualKey] = choice.kind === 'entity'
+              ? isLinkListProperty(configuredProperty)
+                ? mergeEntityReferenceList(fm[actualKey], choice.value)
+                : mergeMixedEntityReferenceList(fm[actualKey], choice.value)
+              : isLinkListProperty(configuredProperty)
+                ? mergeLinkList(fm[actualKey], choice.value)
+                : propertyUsesEntityOptions(configuredProperty)
+                  ? mergeMixedList(fm[actualKey], choice.value)
+                  : mergeStringList(fm[actualKey], choice.value);
+          } else {
+            fm[actualKey] = choice.value;
+          }
+        });
+        emitFilesUpdated(this.app, [file.path], 'tps-list');
+        this.render(false);
+        },
+      );
+      return;
+    }
     this.startListPropertyInput(span, this.stringifyEditablePropertyValue(rawValue), async (nextValue) => {
       await this.app.fileManager.processFrontMatter(file, (fm) => {
         const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, writableProp) || writableProp;
+        const currentValue = fm[actualKey];
         if (!nextValue.trim()) {
           delete fm[actualKey];
+        } else if (configuredProperty?.type === 'number') {
+          const numeric = Number(nextValue);
+          if (!Number.isFinite(numeric)) throw new Error('Enter a valid number.');
+          fm[actualKey] = numeric;
+        } else if (configuredProperty?.type === 'checkbox') {
+          fm[actualKey] = /^(?:true|yes|1|on)$/iu.test(nextValue);
+        } else if (configuredProperty?.type === 'list') {
+          fm[actualKey] = isLinkListProperty(configuredProperty)
+            ? parseLinkListInput(nextValue)
+            : parseStringListInput(nextValue);
+        } else if (!configuredProperty) {
+          fm[actualKey] = this.coerceUnconfiguredFrontmatterValue(currentValue, nextValue);
         } else {
           fm[actualKey] = nextValue.trim();
         }
@@ -7960,16 +8265,66 @@ export class TpsListView extends BasesView {
 
   private stringifyEditablePropertyValue(value: unknown): string {
     if (value == null) return '';
-    if (Array.isArray(value)) return value.map((item) => String(item ?? '').trim()).filter(Boolean).join(', ');
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => item instanceof Date ? item.toISOString() : String(item ?? '').trim())
+        .filter(Boolean)
+        .join(', ');
+    }
     if (value instanceof Date) return value.toISOString();
     return String(value).trim();
   }
 
+  private coerceUnconfiguredFrontmatterValue(currentValue: unknown, nextValue: string): unknown {
+    const trimmed = nextValue.trim();
+    if (Array.isArray(currentValue)) {
+      const values = parseMixedListInput(trimmed);
+      const existingValues = currentValue.filter((value) => value !== null && value !== undefined);
+      if (existingValues.length > 0 && existingValues.every((value) => typeof value === 'number')) {
+        return values.map((value) => {
+          const numeric = Number(value);
+          if (!Number.isFinite(numeric)) throw new Error('Enter valid numbers separated by commas.');
+          return numeric;
+        });
+      }
+      if (existingValues.length > 0 && existingValues.every((value) => typeof value === 'boolean')) {
+        return values.map((value) => this.parseEditableBoolean(value));
+      }
+      if (existingValues.length > 0 && existingValues.every((value) => value instanceof Date)) {
+        return values.map((value) => this.parseEditableDate(value));
+      }
+      return values;
+    }
+    if (typeof currentValue === 'boolean') return this.parseEditableBoolean(trimmed);
+    if (typeof currentValue === 'number') {
+      const numeric = Number(trimmed);
+      if (!Number.isFinite(numeric)) throw new Error('Enter a valid number.');
+      return numeric;
+    }
+    if (currentValue instanceof Date) return this.parseEditableDate(trimmed);
+    return trimmed;
+  }
+
+  private parseEditableBoolean(value: string): boolean {
+    const normalized = value.trim().toLowerCase();
+    if (/^(?:true|yes|1|on)$/u.test(normalized)) return true;
+    if (/^(?:false|no|0|off)$/u.test(normalized)) return false;
+    throw new Error('Enter true or false.');
+  }
+
+  private parseEditableDate(value: string): Date {
+    const parsed = new Date(value.trim());
+    if (Number.isNaN(parsed.getTime())) throw new Error('Enter a valid date.');
+    return parsed;
+  }
+
   private formatEntityPropertyValue(value: unknown, property: CustomProperty): string {
-    const links = parseLinkListInput(value);
-    const selected = property.type === 'list' ? links : links.slice(0, 1);
+    const values = property.type === 'list' && !isLinkListProperty(property)
+      ? parseMixedListInput(value)
+      : parseLinkListInput(value);
+    const selected = property.type === 'list' ? values : values.slice(0, 1);
     return selected
-      .map((link) => getWikilinkDisplayText(link))
+      .map((item) => /^\[\[/u.test(item) ? getWikilinkDisplayText(item) : item)
       .filter(Boolean)
       .join(', ');
   }
@@ -7995,6 +8350,40 @@ export class TpsListView extends BasesView {
       label: key.replace(/([a-z0-9])([A-Z])/gu, '$1 $2').replace(/\b\w/gu, (letter) => letter.toUpperCase()),
       type: 'datetime',
     };
+  }
+
+  private getWritableTaskPropertyName(reference: string): string | null {
+    const raw = String(reference || '').trim();
+    if (!raw) return null;
+    const lower = raw.toLowerCase();
+    if (
+      lower.startsWith('file.')
+      || lower.startsWith('formula.')
+      || lower.startsWith('source.')
+    ) return null;
+
+    const normalized = this.normalizeTaskPropertyId(raw);
+    if (
+      !normalized
+      || [
+        'title',
+        'text',
+        'linetext',
+        'headingtext',
+        'kind',
+        'itemkind',
+        'itemtype',
+        'path',
+        'file',
+        'source',
+        'line',
+        'level',
+        'headinglevel',
+        'taskstatus',
+      ].includes(normalized)
+    ) return null;
+
+    return this.getTaskInlinePropertyName(raw) || null;
   }
 
   private getConfiguredCustomProperty(reference: string): CustomProperty | null {

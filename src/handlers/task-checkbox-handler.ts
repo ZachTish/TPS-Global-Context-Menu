@@ -374,8 +374,10 @@ export class TaskCheckboxHandler {
         if (nextState === ' ') return;
         if (this.hasOpenChecklistItems(updatedLines)) return;
         const cache = this.app.metadataCache.getFileCache(file);
-        const status = String(cache?.frontmatter?.status ?? '').trim().toLowerCase();
-        if (!status || status === 'complete' || status === 'wont-do') return;
+        const statusService = this.plugin.sharedServices.status;
+        const workflowStatusKey = statusService.getStatusPropertyKey();
+        const status = statusService.getStatuses(cache?.frontmatter, workflowStatusKey)[0] || '';
+        if (!status || statusService.isDoneStatus(status)) return;
         const statusChoices = this.getChecklistFinalPromptStatuses();
         if (statusChoices.length === 0) return;
         const chosenStatus = await this.promptForFinalChecklistStatus(statusChoices);

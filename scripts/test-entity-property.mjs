@@ -45,6 +45,25 @@ test('accepted kinds normalize without hardcoded values', () => {
     ),
     false,
   );
+
+  const parentKinds = entityProperty.normalizeAcceptsKind('project, area');
+  assert.deepEqual(parentKinds, ['project', 'area']);
+  assert.equal(
+    entityProperty.entityMatchesAcceptedKinds(
+      { dimensions: { kind: 'Area' } },
+      parentKinds,
+    ),
+    true,
+    'an Area is a valid parent when either Project or Area is accepted',
+  );
+  assert.equal(
+    entityProperty.entityMatchesAcceptedKinds(
+      { dimensions: { kind: 'Context' } },
+      parentKinds,
+    ),
+    false,
+    'unrelated Kinds remain excluded from the parent picker',
+  );
 });
 
 test('configured properties resolve exact keys and supported Base prefixes', () => {

@@ -12,6 +12,14 @@ const taskLineContext = read('src/services/task-line-context-menu-service.ts');
 const tpsList = read('src/tps-list/views/TpsListView.ts');
 const tagModal = read('src/modals/TagSuggestModal.ts');
 
+function sourceBlock(source, startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  assert.notEqual(start, -1, `missing source marker: ${startMarker}`);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert.notEqual(end, -1, `missing source marker after ${startMarker}: ${endMarker}`);
+  return source.slice(start, end);
+}
+
 async function importBundled(relativePath) {
   const result = await build({
     entryPoints: [fileURLToPath(new URL(relativePath, import.meta.url))],
@@ -79,13 +87,27 @@ test('the Base tag chooser is a searchable vault list rather than a text propert
 });
 
 test('TPS Table renders empty Tags and Scheduled cells as isolated typed controls', () => {
-  assert.match(logBase, /this\.isTagColumn\(column, configuredProperty\)/);
-  assert.match(logBase, /this\.openTagCellEditor\(entry, configuredProperty\?\.key \|\| column\.key\)/);
-  assert.match(logBase, /this\.isDatetimeColumn\(column, configuredProperty\)/);
-  assert.match(logBase, /this\.openScheduledCellEditor\(/);
-  assert.match(logBase, /cell\.setAttr\('role', 'button'\)/);
-  assert.match(logBase, /cell\.addEventListener\('pointerdown',[\s\S]*?event\.stopPropagation\(\)/);
-  assert.match(logBase, /event\.key !== 'Enter' && event\.key !== ' '/);
+  const configuredRenderer = sourceBlock(
+    logBase,
+    'private renderConfiguredPropertyCell(',
+    'private formatConfiguredPropertyCellValue(',
+  );
+  const typedCell = sourceBlock(
+    logBase,
+    'private configureTypedCell(',
+    'private isTagColumn(',
+  );
+
+  assert.match(configuredRenderer, /this\.isTagColumn\(column, property\)/);
+  assert.match(configuredRenderer, /this\.openTagCellEditor\(entry, property\.key\)/);
+  assert.match(configuredRenderer, /this\.isDatetimeColumn\(column, property\)/);
+  assert.match(configuredRenderer, /this\.openScheduledCellEditor\(entry, property\)/);
+  assert.match(configuredRenderer, /display \|\| `\+ \$\{property\.label \|\| column\.label\}`/);
+  assert.match(configuredRenderer, /current \|\| `\+ \$\{property\.label \|\| column\.label\}`/);
+  assert.match(typedCell, /cell\.dataset\.tpsTableCellIntent = 'property'/);
+  assert.match(typedCell, /cell\.setAttr\('role', 'button'\)/);
+  assert.match(typedCell, /cell\.addEventListener\('pointerdown',[\s\S]*?event\.stopPropagation\(\)/);
+  assert.match(typedCell, /event\.key !== 'Enter' && event\.key !== ' '/);
   assert.match(logBase, /new TagSuggestModal\(this\.plugin\.app, available/);
   assert.match(logBase, /toggleLogLineSemanticTag\(line, key, tag, selected\)/);
   assert.match(logBase, /new ScheduledModal\(this\.plugin\.app, current, timeEstimate, allDay/);
@@ -94,14 +116,52 @@ test('TPS Table renders empty Tags and Scheduled cells as isolated typed control
 });
 
 test('TPS Table property cells own their click intent and configured selectors open a dropdown', () => {
+  const renderEntry = sourceBlock(
+    logBase,
+    'private renderEntry(',
+    'private renderConfiguredPropertyCell(',
+  );
+  const configuredRenderer = sourceBlock(
+    logBase,
+    'private renderConfiguredPropertyCell(',
+    'private renderGenericInlinePropertyCell(',
+  );
+  const dispatcher = sourceBlock(
+    logBase,
+    'private openConfiguredPropertyCellEditor(',
+    'private openChoiceCellEditor(',
+  );
+  const choiceEditor = sourceBlock(
+    logBase,
+    'private openChoiceCellEditor(',
+    'private openCheckboxCellEditor(',
+  );
+
   assert.match(logBase, /cell\.dataset\.tpsTableCellIntent = 'navigation'/);
   assert.match(logBase, /private configureTypedCell\([\s\S]*?cell\.dataset\.tpsTableCellIntent = 'property'/);
-  assert.match(logBase, /configuredProperty\?\.type === 'selector'/);
-  assert.match(logBase, /this\.openSelectorCellEditor\(entry, configuredProperty, cell\)/);
-  assert.match(logBase, /getEffectivePropertyOptions\(this\.plugin\.app, property\)/);
-  assert.match(logBase, /\.setTitle\('\(none\)'\)/);
-  assert.match(logBase, /\.setTitle\('Set custom value\.\.\.'\)/);
-  assert.match(logBase, /this\.setSelectorCellValue\(entry, property, option, 'option'\)/);
+  assert.match(
+    renderEntry,
+    /if \(configuredProperty\) \{\s*this\.renderConfiguredPropertyCell\(cell, entry, column, configuredProperty\)/,
+    'every configured column must be dispatched before any generic navigation cell',
+  );
+  assert.match(dispatcher, /property\.type === 'selector' && this\.isTaskStatusSelector\(entry, property\)/);
+  assert.match(dispatcher, /this\.openSelectorCellEditor\(entry, property, anchor\)/);
+  assert.match(
+    dispatcher,
+    /propertyUsesEntityOptions\(property\)[\s\S]*?property\.type === 'selector'[\s\S]*?property\.type === 'kind'[\s\S]*?this\.openChoiceCellEditor\(entry, property, anchor\)/,
+  );
+  assert.match(dispatcher, /property\.type === 'list'[\s\S]*?this\.openListCellEditor\(entry, property, anchor\)/);
+  assert.match(dispatcher, /property\.type === 'checkbox'[\s\S]*?this\.openCheckboxCellEditor\(entry, property, anchor\)/);
+  assert.match(dispatcher, /new TextInputModal\(/);
+  assert.match(dispatcher, /property\.type === 'number' && next && !Number\.isFinite\(Number\(next\)\)/);
+  assert.match(
+    configuredRenderer,
+    /const entityOptions = propertyUsesEntityOptions\(property\)[\s\S]*?!entityOptions && this\.isTagColumn\(column, property\)[\s\S]*?!entityOptions && this\.isDatetimeColumn\(column, property\)/,
+    'entity sources must own the cell before legacy tag or datetime editors',
+  );
+  assert.match(choiceEditor, /addPropertyValueChoiceMenuItems\(\{/);
+  assert.match(choiceEditor, /onChooseLiteral: \(value\) => this\.setConfiguredCellValue\(entry, property, value, 'literal'\)/);
+  assert.match(choiceEditor, /onChooseEntity: \(choice\) => this\.setConfiguredCellValue\([\s\S]*?choice\.wikilink,[\s\S]*?'entity'/);
   assert.match(logBase, /taskLineContextMenuService\.openTaskStatusPicker\(/);
   assert.match(logBase, /sharedServices\?\.status\?\.getStatusPropertyKey\?\.\(\)/);
   assert.match(logBase, /normalizedId === 'status'/);
@@ -110,19 +170,118 @@ test('TPS Table property cells own their click intent and configured selectors o
   assert.match(taskLineContext, /openTaskStatusPicker\(/);
   assert.match(taskLineContext, /this\.setTaskStatusCheckboxState\(line, mapping\.checkboxState\)/);
   assert.match(taskLineContext, /new Set\(\[this\.getStatusKey\(\), 'status', 'checkboxStatus'\]\)/);
+  assert.match(taskLineContext, /findRelationalStatusProperty\(this\.plugin\.settings\.properties\)/);
+  assert.match(taskLineContext, /if \(String\(key \|\| ''\)\.trim\(\)\.toLowerCase\(\) === relationalStatusKey\) continue/);
   assert.match(taskLineContext, /status-picker:change/);
   assert.match(taskLineContext, /checkboxMutation:\s*true/);
   assert.match(taskLineContext, /handleExternalChecklistStateMutation\(/);
 });
 
-test('empty Accepted-Kind TPS Table cells stay property-owned and open the entity picker', () => {
-  assert.match(
+test('task.status remains the editable checkbox workflow column when bare status is relational', () => {
+  const renderEntry = sourceBlock(
     logBase,
-    /if \(configuredProperty && isEntityReferenceProperty\(configuredProperty\)\) \{[\s\S]*?cell\.dataset\.tpsTableCellIntent = 'property'[\s\S]*?displayValue \|\| `\+ \$\{configuredProperty\.label \|\| column\.label\}`[\s\S]*?this\.openEntityCellEditor\(entry, column, configuredProperty\)/,
+    'private renderEntry(',
+    'private renderConfiguredPropertyCell(',
+  );
+  const statusResolver = sourceBlock(
+    logBase,
+    'private isExplicitTaskWorkflowStatusColumn(',
+    'private openTagCellEditor(',
+  );
+
+  assert.match(
+    renderEntry,
+    /this\.isExplicitTaskWorkflowStatusColumn\(column\.key\)[\s\S]*?this\.createTaskWorkflowStatusProperty\(column\)[\s\S]*?: resolveConfiguredProperty/,
+  );
+  assert.match(statusResolver, /normalized === 'task\.status'/);
+  assert.match(statusResolver, /normalized === 'checkboxstatus'/);
+  assert.match(statusResolver, /id: 'task\.status'/);
+  assert.match(statusResolver, /key: 'task\.status'/);
+  assert.match(statusResolver, /sharedServices\?\.status\?\.getStatusOptions/);
+
+  assert.match(tpsList, /const workflowStatusReference = this\.isStatusPropertyName\(propId\)/);
+  assert.match(tpsList, /property\.kind === 'status' \|\| this\.isStatusPropertyName\(propName\)/);
+  assert.match(tpsList, /openListTaskWorkflowStatusPicker/);
+  assert.match(tpsList, /service\.openTaskStatusPicker/);
+});
+
+test('TPS Table gives arbitrary nonstructural columns a safe raw-value editor', () => {
+  const renderEntry = sourceBlock(
+    logBase,
+    'private renderEntry(',
+    'private renderConfiguredPropertyCell(',
+  );
+  const genericEditor = sourceBlock(
+    logBase,
+    'private renderGenericInlinePropertyCell(',
+    'private getWritableInlineColumnKey(',
+  );
+  const writableResolver = sourceBlock(
+    logBase,
+    'private getWritableInlineColumnKey(',
+    'private formatConfiguredPropertyCellValue(',
+  );
+
+  assert.match(
+    renderEntry,
+    /else if \(this\.getWritableInlineColumnKey\(column\.key\)\) \{\s*this\.renderGenericInlinePropertyCell\(cell, entry, column\)/,
+    'an unregistered Base field must not fall through to note navigation',
+  );
+  assert.match(genericEditor, /this\.configureTypedCell\(/);
+  assert.match(genericEditor, /display \|\| `\+ \$\{column\.label\}`/);
+  assert.match(genericEditor, /new TextInputModal\(/);
+  assert.match(genericEditor, /setLogInlineFieldValue\(line, propertyKey, next \|\| null\)/);
+  assert.match(writableResolver, /\^\(\?:file\|formula\)\\\./);
+  assert.match(writableResolver, /\^task\\\.\(\?:status\|checkboxstatus\)\$/);
+  for (const structuralKey of ['title', 'path', 'line', 'kind', 'headinglevel', 'open', 'done', 'checkboxstatus']) {
+    assert.match(writableResolver, new RegExp(`'${structuralKey}'`));
+  }
+});
+
+test('empty Accepted-Kind TPS Table cells stay property-owned and open the entity picker', () => {
+  const renderEntry = sourceBlock(
+    logBase,
+    'private renderEntry(',
+    'private renderConfiguredPropertyCell(',
+  );
+  const configuredRenderer = sourceBlock(
+    logBase,
+    'private renderConfiguredPropertyCell(',
+    'private formatConfiguredPropertyCellValue(',
+  );
+  const dispatcher = sourceBlock(
+    logBase,
+    'private openConfiguredPropertyCellEditor(',
+    'private openChoiceCellEditor(',
+  );
+  const choiceEditor = sourceBlock(
+    logBase,
+    'private openChoiceCellEditor(',
+    'private openCheckboxCellEditor(',
+  );
+
+  assert.match(
+    renderEntry,
+    /if \(configuredProperty\) \{\s*this\.renderConfiguredPropertyCell\(cell, entry, column, configuredProperty\)/,
+    'an empty configured field must never fall through to row navigation',
   );
   assert.match(
-    logBase,
-    /private openEntityCellEditor\([\s\S]*?openEntitySuggestModal\(this\.plugin\.app, this\.plugin, property/,
+    configuredRenderer,
+    /propertyUsesEntityOptions\(property\)[\s\S]*?entry\.fields\[normalizeInlineKey\(property\.key\)\] \?\? ''/,
+    'entity-backed fields must read the stored field rather than a synthetic query value',
+  );
+  assert.match(
+    configuredRenderer,
+    /display \|\| `\+ \$\{property\.label \|\| column\.label\}`[\s\S]*?this\.openConfiguredPropertyCellEditor\(entry, column, property, cell\)/,
+  );
+  assert.match(
+    dispatcher,
+    /propertyUsesEntityOptions\(property\)[\s\S]*?this\.openChoiceCellEditor\(entry, property, anchor\)/,
+  );
+  assert.match(
+    choiceEditor,
+    /addPropertyValueChoiceMenuItems\(\{[\s\S]*?onChooseLiteral:[\s\S]*?onChooseEntity:[\s\S]*?choice\.wikilink/,
+    'mixed manual, vault, and entity sources must share one source-aware dropdown',
   );
   assert.match(
     logBase,
@@ -168,19 +327,177 @@ test('task Status selection clears stale inline status carriers before completio
 });
 
 test('TPS List renders empty typed cells and routes task and note edits through native pickers', () => {
-  assert.match(tpsList, /const typedEmptyTarget = entityReference/);
+  assert.match(tpsList, /const typedEmptyTarget = Boolean\(configuredProperty\) \|\| editable/);
+  assert.match(tpsList, /if \(!value && !typedEmptyTarget\) continue/);
+  assert.match(
+    tpsList,
+    /configuredProperty[\s\S]*?text: `\+ \$\{configuredProperty\.label \|\| configuredProperty\.key \|\| propId\}`[\s\S]*?editable: true/,
+    'all configured empty task properties must remain editable targets',
+  );
+  assert.match(tpsList, /openPropertyValueSuggestModal\(this\.app, source, property, currentValue/);
+  assert.match(tpsList, /openPropertyValueSuggestModal\(\s*this\.app,\s*gcm,\s*configuredProperty/);
   assert.match(tpsList, /this\.isTagProperty\(configuredProperty, propId\)/);
   assert.match(tpsList, /this\.isDatetimeProperty\(configuredProperty, propId\)/);
   assert.match(tpsList, /this\.openListTaskTagPicker\(file, task/);
   assert.match(tpsList, /this\.openListTaskScheduledPicker\(/);
+  assert.match(
+    tpsList,
+    /const writablePropertyName = this\.getWritableTaskPropertyName\(propId\)[\s\S]*?kind: 'text'[\s\S]*?editable: true[\s\S]*?propName: writablePropertyName/,
+    'empty unregistered writable columns must expose a generic line-field editor',
+  );
+  assert.match(
+    tpsList,
+    /configuredProperty\.type === 'kind'[\s\S]*?\|\| configuredProperty\.type === 'list'[\s\S]*?this\.openListTaskEntityPicker/,
+    'configured lists must use their manual, vault, and entity source picker for task lines',
+  );
+  assert.match(
+    tpsList,
+    /configuredProperty\.type === 'kind'[\s\S]*?\|\| configuredProperty\.type === 'list'[\s\S]*?openPropertyValueSuggestModal\(/,
+    'configured lists must use their manual, vault, and entity source picker for notes',
+  );
+  assert.match(
+    tpsList,
+    /private getWritableTaskPropertyName\([\s\S]*?lower\.startsWith\('file\.'\)[\s\S]*?lower\.startsWith\('formula\.'\)/,
+  );
   assert.match(tpsList, /new TagSuggestModal\(this\.app, \[\.\.\.collectKnownVaultTags\(this\.app\), \.\.\.current\]/);
   assert.match(tpsList, /toggleLogLineSemanticTag\(line, propertyKey, tag, selected\)/);
   assert.match(tpsList, /new ScheduledModal\(this\.app, current, timeEstimate, allDay/);
+  const taskEditor = sourceBlock(
+    tpsList,
+    'private startListTaskPropertyEdit(',
+    'private async openListTaskWorkflowStatusPicker(',
+  );
+  const noteEditor = sourceBlock(
+    tpsList,
+    'private startListNotePropertyEdit(',
+    'private startListPropertyInput(',
+  );
+  for (const [label, editor] of [['task', taskEditor], ['note', noteEditor]]) {
+    assert.ok(
+      editor.indexOf('this.isTagProperty(') < editor.indexOf("configuredProperty.type === 'list'"),
+      `${label} tag lists must keep the vault tag picker ahead of the generic list picker`,
+    );
+    assert.ok(
+      editor.indexOf('this.isDatetimeProperty(') < editor.indexOf("configuredProperty.type === 'list'"),
+      `${label} datetime fields must keep the scheduled picker ahead of the generic list picker`,
+    );
+  }
   assert.match(tpsList, /resolveExactLineRevisionIndex\(parts\.lines, targetLine - 1, expectedLine\)/);
   assert.match(tpsList, /source line changed while the property picker was open/);
-  assert.match(tpsList, /setLogInlineFieldValue\(currentLine, property\.key, nextValue\)/);
+  assert.match(
+    tpsList,
+    /choice\.kind === 'clear'[\s\S]*?setLogInlineFieldValue\(line, property\.key, null\)[\s\S]*?setLogInlineFieldValue\(line, property\.key, choice\.value\)[\s\S]*?setLogInlineFieldValue\(line, property\.key, next\.join\(', '\)\)/,
+    'the combined picker must clear, replace scalar values, and add list values through the exact-line mutation',
+  );
   assert.match(tpsList, /collectTpsListInlineFields\(text\)/);
   assert.doesNotMatch(tpsList, /mergeEntityReferenceList\(fm\[actualKey\] \?\? rawValue/);
+});
+
+test('TPS List generic note edits preserve the live frontmatter value type', () => {
+  const noteEditor = sourceBlock(
+    tpsList,
+    'private startListNotePropertyEdit(',
+    'private startListPropertyInput(',
+  );
+  const coercer = sourceBlock(
+    tpsList,
+    'private coerceUnconfiguredFrontmatterValue(',
+    'private formatEntityPropertyValue(',
+  );
+
+  assert.match(
+    noteEditor,
+    /processFrontMatter\(file, \(fm\) => \{[\s\S]*?const actualKey = this\.findFrontmatterKeyCaseInsensitive\(fm, writableProp\) \|\| writableProp;[\s\S]*?const currentValue = fm\[actualKey\]/,
+    'the fallback editor must re-read the current value inside the frontmatter transaction',
+  );
+  assert.match(
+    noteEditor,
+    /else if \(!configuredProperty\) \{\s*fm\[actualKey\] = this\.coerceUnconfiguredFrontmatterValue\(currentValue, nextValue\)/,
+    'only unconfigured fields should infer their stored type from the live value',
+  );
+  assert.match(coercer, /Array\.isArray\(currentValue\)[\s\S]*?parseMixedListInput\(trimmed\)/);
+  assert.match(coercer, /existingValues\.every\(\(value\) => typeof value === 'number'\)/);
+  assert.match(coercer, /existingValues\.every\(\(value\) => typeof value === 'boolean'\)/);
+  assert.match(coercer, /existingValues\.every\(\(value\) => value instanceof Date\)/);
+  assert.match(coercer, /typeof currentValue === 'boolean'[\s\S]*?this\.parseEditableBoolean\(trimmed\)/);
+  assert.match(coercer, /typeof currentValue === 'number'[\s\S]*?Number\(trimmed\)/);
+  assert.match(coercer, /currentValue instanceof Date[\s\S]*?this\.parseEditableDate\(trimmed\)/);
+  assert.match(coercer, /private parseEditableBoolean\([\s\S]*?\^\(\?:false\|no\|0\|off\)\$/);
+  assert.match(coercer, /private parseEditableDate\([\s\S]*?Number\.isNaN\(parsed\.getTime\(\)\)/);
+  assert.match(
+    coercer,
+    /if \(currentValue instanceof Date\)[\s\S]*?return trimmed/,
+    'date-looking strings must remain strings while Date objects remain Date objects',
+  );
+});
+
+test('TPS List heading cells keep populated and empty writable properties editable', async () => {
+  const propertyResolver = sourceBlock(
+    tpsList,
+    'private getTaskPropertyValue(',
+    'private normalizeTaskPropertyId(',
+  );
+  const headingRenderer = sourceBlock(
+    tpsList,
+    'private createListHeadingRow(',
+    'private createListTaskRow(',
+  );
+  const lineResolver = sourceBlock(
+    tpsList,
+    'private async resolveRenderedTaskLine(',
+    'private async mutateRenderedTaskLine(',
+  );
+  const lineMutator = sourceBlock(
+    tpsList,
+    'private async mutateRenderedTaskLine(',
+    'private async openListTaskTagPicker(',
+  );
+
+  assert.doesNotMatch(
+    propertyResolver,
+    /editable: task\.itemKind !== 'heading'/,
+    'existing heading tags and inline fields must not be rendered inert',
+  );
+  assert.match(
+    headingRenderer,
+    /const configuredProperty = this\.getConfiguredCustomProperty\(propId\)[\s\S]*?editable: true[\s\S]*?const writablePropertyName = this\.getWritableTaskPropertyName\(propId\)[\s\S]*?kind: 'text'[\s\S]*?editable: true/,
+    'empty configured and unregistered heading fields must render an editable target',
+  );
+  assert.match(
+    headingRenderer,
+    /tps-list-native-property--editable[\s\S]*?role: 'button', tabindex: '0'/,
+    'heading property cells must expose keyboard-operable button semantics',
+  );
+  assert.match(
+    headingRenderer,
+    /addEventListener\('pointerdown'[\s\S]*?event\.stopPropagation\(\)[\s\S]*?addEventListener\('click'[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?startListTaskPropertyEdit/,
+    'heading property pointers must remain property-owned instead of opening the note',
+  );
+  assert.match(
+    headingRenderer,
+    /addEventListener\('keydown'[\s\S]*?event\.key !== 'Enter' && event\.key !== ' '[\s\S]*?event\.preventDefault\(\)[\s\S]*?event\.stopPropagation\(\)[\s\S]*?startListTaskPropertyEdit/,
+    'Enter and Space must open the heading property editor without bubbling to row navigation',
+  );
+  assert.match(
+    lineResolver,
+    /task\.itemKind === 'heading'[\s\S]*?parseTpsListHeadingLine\(line\)[\s\S]*?this\.parseLineItem\(line, true\)/,
+  );
+  assert.match(
+    lineMutator,
+    /const expectedIsHeading = parseTpsListHeadingLine\(expectedLine\) != null[\s\S]*?expectedIsHeading[\s\S]*?parseTpsListHeadingLine\(currentLine\) != null/,
+    'stale-safe inline mutations must accept headings while still checking structural identity',
+  );
+
+  const logLines = await importBundled('../src/views/log-line-utils.ts');
+  const heading = '# Release QA [qaValue:: before] [contexts:: [[Contexts/Mobile]]] ^heading-edit';
+  const updated = logLines.setLogInlineFieldValue(heading, 'qaValue', 'after');
+  const added = logLines.setLogInlineFieldValue(updated, 'priority', 'high');
+
+  assert.match(added, /^# Release QA/u);
+  assert.equal(logLines.readInlineFields(added).qavalue, 'after');
+  assert.equal(logLines.readInlineFields(added).contexts, '[[Contexts/Mobile]]');
+  assert.equal(logLines.readInlineFields(added).priority, 'high');
+  assert.match(added, /\^heading-edit$/u);
 });
 
 test('typed task mutations preserve sibling hidden fields through a full entity, tag, and schedule sequence', async () => {

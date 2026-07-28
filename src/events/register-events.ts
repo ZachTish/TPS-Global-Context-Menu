@@ -443,7 +443,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             ).map((s: string) => String(s || '').trim().toLowerCase()),
         );
 
-        const currentStatus = String(fm.status ?? '').trim().toLowerCase();
+        const currentStatus = readConfiguredStatus(fm);
         const completedDateKey = Object.keys(fm).find((candidate) => candidate.toLowerCase() === 'completeddate');
         const completedDateValue = getCompletedDateValue(fm);
 

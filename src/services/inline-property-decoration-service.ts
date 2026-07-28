@@ -10,8 +10,13 @@ import {
   replaceExactLineRevision,
   type AtomicLineReplacementResult,
 } from '../utils/atomic-line-replacement';
-import { isEntityReferenceProperty, mergeEntityReferenceList } from '../utils/entity-property';
-import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
+import {
+  isEntityReferenceProperty,
+  mergeEntityReferenceList,
+  mergeMixedEntityReferenceList,
+} from '../utils/entity-property';
+import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
+import { isLinkListProperty, mergeLinkList, mergeMixedList } from '../utils/list-utils';
 import {
   readInlineFieldRanges,
   readInlineFieldValue,
@@ -91,7 +96,14 @@ const HEALTH_WORKOUT_VISIBLE_INLINE_KEYS = new Set([
 ]);
 
 type InlinePropertyLineTarget =
-  | { kind: 'editor'; view: EditorView; lineFrom: number; lineTo: number; lineText: string }
+  | {
+      kind: 'editor';
+      view: EditorView;
+      lineNumber: number;
+      lineFrom: number;
+      lineTo: number;
+      lineText: string;
+    }
   | { kind: 'file'; file: TFile; lineIndex: number; lineText: string };
 
 class InlinePropertyWidget extends WidgetType {
@@ -257,11 +269,25 @@ export class InlinePropertyDecorationService {
         .setIcon(isEntityReference ? 'file-search' : isDatetime ? 'calendar-clock' : 'pencil')
         .onClick(() => {
           if (isEntityReference) {
-            openEntitySuggestModal(this.plugin.app, this.plugin, property, async (choice) => {
+            const current = this.readInlineFieldValueFromLine(targetLine.lineText, key);
+            openPropertyValueSuggestModal(this.plugin.app, this.plugin, property, current, async (choice) => {
+              if (choice.kind === 'clear') {
+                await this.replaceInlinePropertyLine(
+                  targetLine,
+                  this.setInlineFieldValue(targetLine.lineText, key, null),
+                );
+                return;
+              }
               const current = this.readInlineFieldValueFromLine(targetLine.lineText, key);
               const nextValue = property.type === 'list'
-                ? mergeEntityReferenceList(current, choice.wikilink).join(', ')
-                : choice.wikilink;
+                ? choice.kind === 'entity'
+                  ? isLinkListProperty(property)
+                    ? mergeEntityReferenceList(current, choice.value).join(', ')
+                    : mergeMixedEntityReferenceList(current, choice.value).join(', ')
+                  : isLinkListProperty(property)
+                    ? mergeLinkList(current, choice.value).join(', ')
+                    : mergeMixedList(current, choice.value).join(', ')
+                : choice.value;
               await this.replaceInlinePropertyLine(
                 targetLine,
                 this.setInlineFieldValue(targetLine.lineText, key, nextValue),
@@ -289,12 +315,19 @@ export class InlinePropertyDecorationService {
     view: EditorView,
     event: MouseEvent,
     key: string,
-  ): { kind: 'editor'; view: EditorView; lineFrom: number; lineTo: number; lineText: string } | null {
+  ): Extract<InlinePropertyLineTarget, { kind: 'editor' }> | null {
     const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
     if (pos == null) return null;
     const clickedLine = view.state.doc.lineAt(pos);
     if (this.lineContainsInlineKey(clickedLine.text, key)) {
-      return { kind: 'editor', view, lineFrom: clickedLine.from, lineTo: clickedLine.to, lineText: clickedLine.text };
+      return {
+        kind: 'editor',
+        view,
+        lineNumber: clickedLine.number,
+        lineFrom: clickedLine.from,
+        lineTo: clickedLine.to,
+        lineText: clickedLine.text,
+      };
     }
 
     const fromLine = Math.max(1, clickedLine.number - 3);
@@ -302,7 +335,14 @@ export class InlinePropertyDecorationService {
     for (let lineNo = fromLine; lineNo <= toLine; lineNo += 1) {
       const line = view.state.doc.line(lineNo);
       if (this.lineContainsInlineKey(line.text, key)) {
-        return { kind: 'editor', view, lineFrom: line.from, lineTo: line.to, lineText: line.text };
+        return {
+          kind: 'editor',
+          view,
+          lineNumber: line.number,
+          lineFrom: line.from,
+          lineTo: line.to,
+          lineText: line.text,
+        };
       }
     }
     return null;
@@ -372,9 +412,52 @@ export class InlinePropertyDecorationService {
 
   private async replaceInlinePropertyLine(targetLine: InlinePropertyLineTarget, nextLine: string): Promise<void> {
     if (targetLine.kind === 'editor') {
-      targetLine.view.dispatch({
-        changes: { from: targetLine.lineFrom, to: targetLine.lineTo, insert: nextLine },
-      });
+      const requestedLineNumber = targetLine.lineNumber;
+      try {
+        const currentDoc = targetLine.view.state.doc;
+        const replacement = replaceExactLineRevision(
+          currentDoc.toString(),
+          requestedLineNumber - 1,
+          targetLine.lineText,
+          nextLine,
+        );
+        if (replacement.route === 'conflict' || replacement.resolvedLineIndex === null) {
+          logger.flowWarn('InlineProperty', 'editor-edit:conflict', {
+            requestedLine: requestedLineNumber,
+            reason: replacement.conflictReason || 'unresolved',
+          });
+          new Notice('Could not update inline property because the source line changed.');
+          return;
+        }
+
+        const currentLine = currentDoc.line(replacement.resolvedLineIndex + 1);
+        if (currentLine.text !== targetLine.lineText) {
+          logger.flowWarn('InlineProperty', 'editor-edit:conflict', {
+            requestedLine: requestedLineNumber,
+            reason: 'revision-mismatch',
+          });
+          new Notice('Could not update inline property because the source line changed.');
+          return;
+        }
+        targetLine.view.dispatch({
+          changes: { from: currentLine.from, to: currentLine.to, insert: nextLine },
+        });
+        const settledLine = targetLine.view.state.doc.line(replacement.resolvedLineIndex + 1);
+        targetLine.lineNumber = settledLine.number;
+        targetLine.lineFrom = settledLine.from;
+        targetLine.lineTo = settledLine.to;
+        targetLine.lineText = settledLine.text;
+        logger.flow('InlineProperty', 'editor-edit:done', {
+          requestedLine: requestedLineNumber,
+          resolvedLine: settledLine.number,
+          route: replacement.route,
+        });
+      } catch (error) {
+        logger.flowError('InlineProperty', 'editor-edit:failed', error, {
+          requestedLine: requestedLineNumber,
+        });
+        new Notice('Could not update inline property. The note was not changed.');
+      }
       return;
     }
 

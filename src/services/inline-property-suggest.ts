@@ -12,8 +12,17 @@ import * as logger from '../logger';
 import { ScheduledModal } from '../modals/scheduled-modal';
 import type { CustomProperty } from '../types';
 import { readInlineFieldValue, setInlineFieldValueOnLine } from '../utils/task-line-metadata';
-import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
-import { mergeEntityReferenceList } from '../utils/entity-property';
+import {
+  mergeEntityReferenceList,
+  mergeMixedEntityReferenceList,
+} from '../utils/entity-property';
+import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
+import { propertyUsesEntityOptions } from '../utils/property-option-source';
+import {
+  isLinkListProperty,
+  mergeLinkList,
+  mergeMixedList,
+} from '../utils/list-utils';
 
 type InlinePropertySuggestion = {
   label: string;
@@ -21,6 +30,7 @@ type InlinePropertySuggestion = {
   icon: string;
   type: string;
   acceptsKind?: string;
+  property?: CustomProperty;
   action?: 'insert' | 'create';
 };
 
@@ -66,6 +76,8 @@ export class InlinePropertySuggest extends EditorSuggest<InlinePropertySuggestio
         key: property.key,
         icon: property.icon || 'braces',
         type: property.type,
+        acceptsKind: property.acceptsKind,
+        property: property.property,
         action: 'insert' as const,
       }));
 
@@ -107,7 +119,7 @@ export class InlinePropertySuggest extends EditorSuggest<InlinePropertySuggestio
       await this.createInlineProperty(suggestion.key);
     }
 
-    if (suggestion.acceptsKind) {
+    if (propertyUsesEntityOptions(suggestion.property)) {
       this.openEntityPicker(context, suggestion);
       return;
     }
@@ -131,16 +143,26 @@ export class InlinePropertySuggest extends EditorSuggest<InlinePropertySuggestio
     editor.replaceRange('', context.start, context.end);
     const sourceRevision = editor.getLine(lineNumber);
     editor.setCursor({ line: lineNumber, ch: Math.min(context.start.ch, sourceRevision.length) });
-    openEntitySuggestModal(this.plugin.app, this.plugin, suggestion.acceptsKind, (choice) => {
+    const property = suggestion.property;
+    if (!property) return;
+    openPropertyValueSuggestModal(this.plugin.app, this.plugin, property, '', (choice) => {
       const currentLine = editor.getLine(lineNumber);
       if (currentLine !== sourceRevision) {
         new Notice('The source line changed while the entity picker was open.');
         return;
       }
       const currentValue = readInlineFieldValue(currentLine, suggestion.key);
-      const nextValue = suggestion.type === 'list'
-        ? mergeEntityReferenceList(currentValue, choice.wikilink).join(', ')
-        : choice.wikilink;
+      const nextValue = choice.kind === 'clear'
+        ? null
+        : suggestion.type === 'list'
+        ? choice.kind === 'entity'
+          ? isLinkListProperty(property)
+            ? mergeEntityReferenceList(currentValue, choice.value).join(', ')
+            : mergeMixedEntityReferenceList(currentValue, choice.value).join(', ')
+          : isLinkListProperty(property)
+            ? mergeLinkList(currentValue, choice.value).join(', ')
+            : mergeMixedList(currentValue, choice.value).join(', ')
+        : choice.value;
       const nextLine = setInlineFieldValueOnLine(currentLine, suggestion.key, nextValue);
       editor.replaceRange(
         nextLine,
@@ -281,6 +303,7 @@ export class InlinePropertySuggest extends EditorSuggest<InlinePropertySuggestio
       icon: String(property.icon || '').trim() || 'braces',
       type: String(property.type || 'text').trim() || 'text',
       acceptsKind: String(property.acceptsKind || '').trim() || undefined,
+      property,
     };
   }
 

@@ -198,6 +198,24 @@ export class RecurrenceService {
         this.sessionTracker.updateDuration(this.plugin.settings.recurrencePromptTimeout);
     }
 
+    private readWorkflowStatus(
+        frontmatter: Record<string, unknown> | null | undefined,
+    ): string {
+        if (!frontmatter) return '';
+        const statusKey = String(
+            this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status',
+        ).trim() || 'status';
+        const actualKey = Object.keys(frontmatter).find(
+            (candidate) => candidate.trim().toLowerCase() === statusKey.toLowerCase(),
+        );
+        const raw = actualKey ? frontmatter[actualKey] : undefined;
+        const value = Array.isArray(raw)
+            ? raw.find((entry) => String(entry ?? '').trim())
+            : raw;
+        return this.plugin.sharedServices?.status?.normalize?.(value)
+            || String(value ?? '').trim().toLowerCase();
+    }
+
     /**
      * Mark file as edited (called when frontmatter is changed via applyToFiles).
      * This prevents the edit prompt from appearing again in the current session.
@@ -334,7 +352,8 @@ export class RecurrenceService {
         if (await this.isNoteLevelRecurrenceSkipped(file, fm)) return;
 
         // 3. Ignore completed/wont-do items
-        if (fm.status === 'complete' || fm.status === 'wont-do') return;
+        const workflowStatus = this.readWorkflowStatus(fm);
+        if (workflowStatus === 'complete' || workflowStatus === 'wont-do') return;
 
         // 4. Prompt the user
         // We use a specific "Focus" prompt logic
@@ -373,7 +392,13 @@ export class RecurrenceService {
         const completionStatuses = this.plugin.settings.recurrenceCompletionStatuses?.length
             ? this.plugin.settings.recurrenceCompletionStatuses
             : ['complete', 'wont-do'];
-        if (completionStatuses.includes(fm.status)) return;
+        const completionSet = new Set(
+            completionStatuses
+                .map((status) => this.plugin.sharedServices?.status?.normalize?.(status)
+                    || String(status || '').trim().toLowerCase())
+                .filter(Boolean),
+        );
+        if (completionSet.has(this.readWorkflowStatus(fm))) return;
 
         // 5. Note the edit for session tracking so we don't fire duplicate events.
         //    The next instance is created from the series template when this note
@@ -401,7 +426,8 @@ export class RecurrenceService {
 
             if (fm && (fm.recurrenceRule || fm.recurrence)) {
                 // Ignore completed/wont-do items
-                if (fm.status === 'complete' || fm.status === 'wont-do') continue;
+                const workflowStatus = this.readWorkflowStatus(fm);
+                if (workflowStatus === 'complete' || workflowStatus === 'wont-do') continue;
 
                 // Mark as focused to suppress focus prompt on startup
                 this.sessionTracker.markAsFocused(file.path);

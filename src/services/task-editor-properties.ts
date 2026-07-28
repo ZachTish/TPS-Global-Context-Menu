@@ -3,6 +3,8 @@ import {
   readTaskInlineFields,
   setInlineFieldValueOnTaskLine,
 } from '../utils/task-line-metadata';
+import { isEntityReferenceProperty } from '../utils/entity-property';
+import { propertyUsesEntityOptions } from '../utils/property-option-source';
 
 export type TaskEditorPropertyType =
   | 'text'
@@ -115,15 +117,18 @@ export function collectTaskEditorProperties(
     && !isTaskEditorPropertyHidden(scheduledProperty);
   for (const field of inlineFields) {
     const normalizedKey = field.key.toLowerCase();
+    const property = configuredByKey.get(normalizedKey) || null;
     if (
       seen.has(normalizedKey)
-      || normalizedKey === normalizedStatusKey
+      || (
+        normalizedKey === normalizedStatusKey
+        && !propertyUsesEntityOptions(property)
+      )
       || protectedKeys.has(normalizedKey)
       || (scheduledOwnsCompanions && (normalizedKey === 'timeestimate' || normalizedKey === 'allday'))
     ) continue;
     seen.add(normalizedKey);
 
-    const property = configuredByKey.get(normalizedKey) || null;
     if (isTaskEditorPropertyHidden(property)) continue;
 
     descriptors.push({
@@ -188,10 +193,13 @@ export function applyTaskEditorScheduleResult<
 }
 
 export function normalizeTaskEditorPropertyValue(
-  descriptor: Pick<TaskEditorPropertyDescriptor, 'type'>,
+  descriptor: Pick<TaskEditorPropertyDescriptor, 'type'> & {
+    property?: CustomProperty | null;
+  },
   value: string,
 ): string {
   const raw = String(value ?? '').trim();
+  if (isEntityReferenceProperty(descriptor.property)) return raw;
   if (descriptor.type === 'checkbox') return isTruthyTaskPropertyValue(raw) ? 'true' : 'false';
   if (descriptor.type === 'number' && raw) {
     const parsed = Number(raw);

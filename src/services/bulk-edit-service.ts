@@ -4,8 +4,23 @@ import { RRule } from 'rrule';
 import * as logger from "../logger";
 import { TRACKER_RECURRENCE_RULE } from '../constants';
 import { normalizeTagValue, normalizeTagList, parseTagInput, mergeNormalizedTags } from '../utils/tag-utils';
-import { mergeLinkList, mergeStringList, parseLinkListInput, parseStringListInput, removeLinkListValues, removeStringListValues } from '../utils/list-utils';
-import { mergeEntityReferenceList, removeEntityReferenceListValues } from '../utils/entity-property';
+import {
+    mergeLinkList,
+    mergeMixedList,
+    mergeStringList,
+    parseLinkListInput,
+    parseMixedListInput,
+    parseStringListInput,
+    removeLinkListValues,
+    removeStringListValues,
+} from '../utils/list-utils';
+import {
+    mergeEntityReferenceList,
+    mergeMixedEntityReferenceList,
+    removeEntityReferenceListValues,
+    removeMixedEntityReferenceListValues,
+} from '../utils/entity-property';
+import { propertyUsesEntityOptions } from '../utils/property-option-source';
 import { stripDatePrefix, stripDateSuffix } from '../utils/date-suffix-utils';
 import { setCompletedDateValue } from '../utils/completed-date-utils';
 import { ChecklistHandler } from '../handlers/checklist-handler';
@@ -49,12 +64,36 @@ export class BulkEditService {
     constructor(plugin: TPSGlobalContextMenuPlugin) {
         this.plugin = plugin;
         this.checklistHandler = new ChecklistHandler(plugin.app);
-        this.parentLinkHandler = new ParentLinkHandler(plugin.app, () => plugin.settings);
+        this.parentLinkHandler = new ParentLinkHandler(
+            plugin.app,
+            () => plugin.settings,
+            (frontmatter) => this.getWorkflowStatusValue(frontmatter),
+        );
     }
 
     private isChecklistCompletionStatus(status: unknown): boolean {
         const normalized = this.plugin.sharedServices?.status?.normalize?.(status) || String(status ?? '').trim().toLowerCase();
         return normalized === 'complete' || normalized === 'completed' || normalized === 'done';
+    }
+
+    private getWorkflowStatusKey(): string {
+        return String(
+            this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status',
+        ).trim() || 'status';
+    }
+
+    private getWorkflowStatusValue(frontmatter: Record<string, any> | null | undefined): unknown {
+        if (!frontmatter) return undefined;
+        const key = this.findFrontmatterKeyCaseInsensitive(frontmatter, this.getWorkflowStatusKey());
+        return key ? frontmatter[key] : undefined;
+    }
+
+    private setWorkflowStatusValue(frontmatter: Record<string, any>, value: unknown): void {
+        this.setFrontmatterValueCaseInsensitive(frontmatter, this.getWorkflowStatusKey(), value);
+    }
+
+    private deleteWorkflowStatusValue(frontmatter: Record<string, any>): void {
+        this.deleteFrontmatterValueCaseInsensitive(frontmatter, this.getWorkflowStatusKey());
     }
 
     private isEasterRecurrenceRule(recurrenceRule: string): boolean {
@@ -948,10 +987,17 @@ export class BulkEditService {
     }
 
     async updateFrontmatter(files: TFile[], updates: Record<string, any>): Promise<number> {
+        const workflowStatusKey = this.getWorkflowStatusKey();
+        const workflowStatusUpdate = Object.entries(updates || {}).find(
+            ([key]) => key.trim().toLowerCase() === workflowStatusKey.toLowerCase(),
+        );
+        const hasStatusUpdate = workflowStatusUpdate !== undefined;
+        const statusUpdateValue = workflowStatusUpdate?.[1];
         logger.flow('BulkEdit', 'frontmatter:update-start', {
             files: files.length,
             keys: Object.keys(updates || {}).sort(),
-            status: updates?.status ?? '',
+            status: statusUpdateValue ?? '',
+            statusKey: workflowStatusKey,
         });
         const blockedKeys = Object.keys(updates).filter((key) => this.isProtectedIdentityKey(key));
         if (blockedKeys.length > 0) {
@@ -971,7 +1017,8 @@ export class BulkEditService {
         // Checklist Prompt Logic (Single file only to avoid spam)
         if (
             this.plugin.settings.checkOpenChecklistItems &&
-            this.isChecklistCompletionStatus(updates.status) &&
+            hasStatusUpdate &&
+            this.isChecklistCompletionStatus(statusUpdateValue) &&
             files.length === 1
         ) {
             const canProceed = await this.checklistHandler.handleChecklistCompletion(files[0]);
@@ -980,7 +1027,7 @@ export class BulkEditService {
                     files: files.length,
                     reason: 'open-checklist-guard',
                     path: files[0]?.path || '',
-                    status: updates.status,
+                    status: statusUpdateValue,
                 });
                 return 0;
             }
@@ -994,10 +1041,11 @@ export class BulkEditService {
                 const fm = cache?.frontmatter;
 
                 if (fm && (fm.recurrenceRule || fm.recurrence)) {
-                    if (fm.status === 'complete' || fm.status === 'wont-do') continue;
+                    const currentStatus = this.normalizeStatusValue(this.getWorkflowStatusValue(fm));
+                    if (currentStatus === 'complete' || currentStatus === 'wont-do') continue;
 
                     const changeKeys = Object.keys(updates);
-                    if (changeKeys.includes('status')) continue;
+                    if (hasStatusUpdate) continue;
 
                     let changeDesc = 'updating';
                     if (changeKeys.includes('scheduled')) changeDesc = 'changing the scheduled time of';
@@ -1024,8 +1072,7 @@ export class BulkEditService {
         const recurrenceCompletionSet = new Set(
             recurrenceStatuses.map((status) => this.normalizeStatusValue(status)).filter(Boolean),
         );
-        const hasStatusUpdate = Object.prototype.hasOwnProperty.call(updates, 'status');
-        const targetStatus = hasStatusUpdate ? this.normalizeStatusValue(updates.status) : '';
+        const targetStatus = hasStatusUpdate ? this.normalizeStatusValue(statusUpdateValue) : '';
 
         const shouldCreateRecurrenceOnStatusUpdate =
             this.plugin.settings.enableRecurrence &&
@@ -1043,13 +1090,14 @@ export class BulkEditService {
                 if (!recurrenceInfo.rule) continue;
                 if (await this.shouldSkipNoteLevelRecurrence(file, fm.scheduled)) continue;
 
-                const previousStatus = this.normalizeStatusValue(fm.status);
+                const rawPreviousStatus = this.getWorkflowStatusValue(fm);
+                const previousStatus = this.normalizeStatusValue(rawPreviousStatus);
                 if (recurrenceCompletionSet.has(previousStatus)) continue;
 
                 recurrenceCandidates.push({
                     file,
                     frontmatter: fm,
-                    previousStatus: typeof fm.status === 'string' ? fm.status : null,
+                    previousStatus: typeof rawPreviousStatus === 'string' ? rawPreviousStatus : null,
                 });
             }
         }
@@ -1104,7 +1152,8 @@ export class BulkEditService {
             files: files.length,
             changed: count,
             keys: Object.keys(updates).sort(),
-            status: updates.status ?? '',
+            status: statusUpdateValue ?? '',
+            statusKey: workflowStatusKey,
             recurrenceCandidates: recurrenceCandidates.length,
         });
         return count;
@@ -1138,7 +1187,7 @@ export class BulkEditService {
             }
         }
 
-        return this.updateFrontmatter(files, { status });
+        return this.updateFrontmatter(files, { [this.getWorkflowStatusKey()]: status });
     }
 
     async setPriority(files: TFile[], priority: string): Promise<number> {
@@ -1161,7 +1210,8 @@ export class BulkEditService {
                 const cache = this.plugin.app.metadataCache.getFileCache(file);
                 const fm = cache?.frontmatter;
 
-                if (fm && (fm.recurrenceRule || fm.recurrence) && fm.status !== 'complete' && fm.status !== 'wont-do') {
+                const workflowStatus = this.normalizeStatusValue(this.getWorkflowStatusValue(fm));
+                if (fm && (fm.recurrenceRule || fm.recurrence) && workflowStatus !== 'complete' && workflowStatus !== 'wont-do') {
                     const result = await this.plugin.recurrenceService.promptForFrontmatterChange(file, `adding tag(s) "${storedTags.join(', ')}" to`);
                     if (result === 'cancel') {
                         return 0;
@@ -1180,7 +1230,12 @@ export class BulkEditService {
         });
     }
 
-    async addListValues(files: TFile[], value: string, key: string): Promise<number> {
+    async addListValues(
+        files: TFile[],
+        value: string,
+        key: string,
+        entityReference = false,
+    ): Promise<number> {
         if (this.isProtectedIdentityKey(key)) {
             new Notice(`Blocked protected key edit: ${key}`);
             logger.warn('[TPS GCM] Blocked protected identity key edit in addListValues', { key });
@@ -1188,7 +1243,11 @@ export class BulkEditService {
         }
 
         const property = this.plugin.settings.properties?.find((prop) => String(prop.key || '').toLowerCase() === String(key || '').toLowerCase());
-        const values = property?.listItemType === 'link' ? parseLinkListInput(value) : parseStringListInput(value);
+        const values = property?.listItemType === 'link' || entityReference
+            ? parseLinkListInput(value)
+            : propertyUsesEntityOptions(property)
+                ? parseMixedListInput(value)
+                : parseStringListInput(value);
         if (!values.length) return 0;
 
         if (this.plugin.settings.enableRecurrence && this.plugin.settings.promptOnRecurrenceEdit) {
@@ -1196,7 +1255,8 @@ export class BulkEditService {
                 const cache = this.plugin.app.metadataCache.getFileCache(file);
                 const fm = cache?.frontmatter;
 
-                if (fm && (fm.recurrenceRule || fm.recurrence) && fm.status !== 'complete' && fm.status !== 'wont-do') {
+                const workflowStatus = this.normalizeStatusValue(this.getWorkflowStatusValue(fm));
+                if (fm && (fm.recurrenceRule || fm.recurrence) && workflowStatus !== 'complete' && workflowStatus !== 'wont-do') {
                     const result = await this.plugin.recurrenceService.promptForFrontmatterChange(
                         file,
                         `adding value(s) "${values.join(', ')}" to ${key} on`
@@ -1212,10 +1272,14 @@ export class BulkEditService {
         return this.applyToFiles(files, (fm) => {
             const targetKey = this.findFrontmatterKeyCaseInsensitive(fm, key) || key;
             fm[targetKey] = property?.listItemType === 'link'
-                ? property.acceptsKind
+                ? entityReference && propertyUsesEntityOptions(property)
                     ? mergeEntityReferenceList(fm[targetKey], values)
                     : mergeLinkList(fm[targetKey], values)
-                : mergeStringList(fm[targetKey], values);
+                : entityReference && propertyUsesEntityOptions(property)
+                    ? mergeMixedEntityReferenceList(fm[targetKey], values)
+                    : propertyUsesEntityOptions(property)
+                        ? mergeMixedList(fm[targetKey], values)
+                        : mergeStringList(fm[targetKey], values);
             if (targetKey !== key && key in fm) {
                 delete fm[key];
             }
@@ -1230,7 +1294,11 @@ export class BulkEditService {
         }
 
         const property = this.plugin.settings.properties?.find((prop) => String(prop.key || '').toLowerCase() === String(key || '').toLowerCase());
-        const values = property?.listItemType === 'link' ? parseLinkListInput(value) : parseStringListInput(value);
+        const values = property?.listItemType === 'link'
+            ? parseLinkListInput(value)
+            : propertyUsesEntityOptions(property)
+                ? parseMixedListInput(value)
+                : parseStringListInput(value);
         if (!values.length) return 0;
 
         if (this.plugin.settings.enableRecurrence && this.plugin.settings.promptOnRecurrenceEdit) {
@@ -1238,7 +1306,8 @@ export class BulkEditService {
                 const cache = this.plugin.app.metadataCache.getFileCache(file);
                 const fm = cache?.frontmatter;
 
-                if (fm && (fm.recurrenceRule || fm.recurrence) && fm.status !== 'complete' && fm.status !== 'wont-do') {
+                const workflowStatus = this.normalizeStatusValue(this.getWorkflowStatusValue(fm));
+                if (fm && (fm.recurrenceRule || fm.recurrence) && workflowStatus !== 'complete' && workflowStatus !== 'wont-do') {
                     const result = await this.plugin.recurrenceService.promptForFrontmatterChange(
                         file,
                         `removing value(s) "${values.join(', ')}" from ${key} on`
@@ -1254,10 +1323,12 @@ export class BulkEditService {
         return this.applyToFiles(files, (fm) => {
             const targetKey = this.findFrontmatterKeyCaseInsensitive(fm, key) || key;
             const nextValues = property?.listItemType === 'link'
-                ? property.acceptsKind
+                ? propertyUsesEntityOptions(property)
                     ? removeEntityReferenceListValues(fm[targetKey], values)
                     : removeLinkListValues(fm[targetKey], values)
-                : removeStringListValues(fm[targetKey], values);
+                : propertyUsesEntityOptions(property)
+                    ? removeMixedEntityReferenceListValues(fm[targetKey], values)
+                    : removeStringListValues(fm[targetKey], values);
             if (nextValues.length === 0) {
                 delete fm[targetKey];
             } else {
@@ -1284,7 +1355,8 @@ export class BulkEditService {
                 const cache = this.plugin.app.metadataCache.getFileCache(file);
                 const fm = cache?.frontmatter;
 
-                if (fm && (fm.recurrenceRule || fm.recurrence) && fm.status !== 'complete' && fm.status !== 'wont-do') {
+                const workflowStatus = this.normalizeStatusValue(this.getWorkflowStatusValue(fm));
+                if (fm && (fm.recurrenceRule || fm.recurrence) && workflowStatus !== 'complete' && workflowStatus !== 'wont-do') {
                     const result = await this.plugin.recurrenceService.promptForFrontmatterChange(
                         file,
                         `removing tag(s) "${normalizedTags.map((value) => `#${value}`).join(', ')}" from`
@@ -1424,7 +1496,8 @@ export class BulkEditService {
                 setTimeout(async () => {
                     const cache = this.plugin.app.metadataCache.getFileCache(file);
                     const fm = cache?.frontmatter;
-                    if (fm && recurrenceStatuses.includes(fm.status) && !(await this.shouldSkipNoteLevelRecurrence(file, fm.scheduled))) {
+                    const workflowStatus = this.normalizeStatusValue(this.getWorkflowStatusValue(fm));
+                    if (fm && recurrenceStatuses.includes(workflowStatus) && !(await this.shouldSkipNoteLevelRecurrence(file, fm.scheduled))) {
                         await this.createNextRecurrenceInstance(file, fm);
                     }
                 }, 200);
@@ -1475,7 +1548,7 @@ export class BulkEditService {
                         this.deleteFrontmatterValueCaseInsensitive(fmw, 'recurrenceEnds');
                     }
                     this.deleteFrontmatterValueCaseInsensitive(fmw, 'scheduled');
-                    this.deleteFrontmatterValueCaseInsensitive(fmw, 'status');
+                    this.deleteWorkflowStatusValue(fmw);
                     this.deleteFrontmatterValueCaseInsensitive(fmw, 'completedDate');
                 });
             });
@@ -1551,7 +1624,7 @@ export class BulkEditService {
                 this.deleteFrontmatterValueCaseInsensitive(fmw, 'recurrenceEnds');
             }
             this.deleteFrontmatterValueCaseInsensitive(fmw, 'scheduled');
-            this.deleteFrontmatterValueCaseInsensitive(fmw, 'status');
+            this.deleteWorkflowStatusValue(fmw);
             this.deleteFrontmatterValueCaseInsensitive(fmw, 'completedDate');
             for (const key of Object.keys(fmw)) {
                 if (['sort', 'hidden', 'icon', 'color'].includes(key.toLowerCase())) {
@@ -1628,7 +1701,7 @@ export class BulkEditService {
                     this.markRecurrenceTemplate(fmw);
                     // Remove fields that belong to a specific instance, not the series
                     this.deleteFrontmatterValueCaseInsensitive(fmw, 'scheduled');
-                    this.deleteFrontmatterValueCaseInsensitive(fmw, 'status');
+                    this.deleteWorkflowStatusValue(fmw);
                     this.deleteFrontmatterValueCaseInsensitive(fmw, 'completedDate');
                     // Strip Companion display properties — recalculated fresh for each instance
                     for (const key of Object.keys(fmw)) {
@@ -1803,7 +1876,7 @@ export class BulkEditService {
             );
             this.clearLegacyRecurrenceTemplateMarker(fmw);
             this.deleteFrontmatterValueCaseInsensitive(fmw, 'completedDate');
-            this.deleteFrontmatterValueCaseInsensitive(fmw, 'status');
+            this.deleteWorkflowStatusValue(fmw);
         });
 
         logger.log(`[TPS GCM] Bootstrapped recurring series from template ${templateFile.path} -> ${created.path}`);
@@ -1973,10 +2046,10 @@ export class BulkEditService {
                 }
                 // Only write status if a default was explicitly configured
                 if (newStatus) {
-                    this.setFrontmatterValueCaseInsensitive(fm, 'status', newStatus);
+                    this.setWorkflowStatusValue(fm, newStatus);
                 } else {
                     // Ensure no stale status is inherited from the template file content
-                    this.deleteFrontmatterValueCaseInsensitive(fm, 'status');
+                    this.deleteWorkflowStatusValue(fm);
                 }
 
                 // Restore the recurrenceTemplate back-link (may be absent if content
@@ -2060,12 +2133,13 @@ export class BulkEditService {
         // Fields that must NEVER be copied from the template to instances
         const SKIP_KEYS = new Set([
             'isrecurrencetemplate', 'recurrencestarted', 'recurrenceends',
-            'recurrencetemplate', 'scheduled', 'status', 'completeddate',
+            'recurrencetemplate', 'scheduled', 'completeddate',
             'sort', 'icon', 'color', 'hidden', 'datecreated', 'datemodified',
             'startedat', 'endedat', 'durationseconds', 'timeestimate',
             'previouscompleteddate', 'secondssincepreviouscompletion',
             'lastcompleteddate', 'lastsessionpath', 'nextelegibledate',
         ]);
+        SKIP_KEYS.add(this.getWorkflowStatusKey().toLowerCase());
 
         // Build propagatable update set from the template's frontmatter
         const updates: Record<string, any> = {};
@@ -2097,7 +2171,7 @@ export class BulkEditService {
             if (!this.frontmatterReferencesSeriesTemplate(fm, seriesName, templateFile)) continue;
 
             // Skip completed/wont-do instances
-            const status = String(fm.status ?? '').trim().toLowerCase();
+            const status = this.normalizeStatusValue(this.getWorkflowStatusValue(fm));
             if (completionSet.has(status)) continue;
 
             openInstances.push(file);
@@ -2152,7 +2226,7 @@ export class BulkEditService {
                                 await this.plugin.app.fileManager.processFrontMatter(file, (fmw) => {
                                     this.markRecurrenceTemplate(fmw);
                                     this.deleteFrontmatterValueCaseInsensitive(fmw, 'scheduled');
-                                    this.deleteFrontmatterValueCaseInsensitive(fmw, 'status');
+                                    this.deleteWorkflowStatusValue(fmw);
                                     this.deleteFrontmatterValueCaseInsensitive(fmw, 'completedDate');
                                 });
                             });
@@ -2169,7 +2243,7 @@ export class BulkEditService {
                 if (this.isRecurrenceTemplateFrontmatter(fm)) continue;
 
                 const isCompleted = recurrenceStatuses.includes(
-                    String(fm.status ?? '').trim().toLowerCase()
+                    this.normalizeStatusValue(this.getWorkflowStatusValue(fm))
                 );
 
                 if (isCompleted) {

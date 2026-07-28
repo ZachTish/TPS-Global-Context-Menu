@@ -154,6 +154,15 @@ export class RuleEngine {
   }
 
   composeSortKeyResult(settings: SmartSortSettings, context: RuleEvaluationContext): SortKeyResult {
+    if (this.getEnabledBuckets(settings).length === 0) {
+      return {
+        key: "",
+        matched: false,
+        bucketIndex: null,
+        bucketName: null,
+      };
+    }
+
     const separator = String(settings.separator || "").trim() || "_";
     const bucketInfo = this.getEffectiveMatchedBucketForSortResult(settings, context);
     const key = settings.relationshipGrouping === "children-under-parent"
@@ -247,14 +256,20 @@ export class RuleEngine {
   }
 
   private getMatchedBucketForContext(settings: SmartSortSettings, context: RuleEvaluationContext): { bucket: SortBucket; index: number } | null {
-    for (let i = 0; i < settings.buckets.length; i++) {
-      const bucket = settings.buckets[i];
-      if (!bucket.enabled) continue;
+    const enabledBuckets = this.getEnabledBuckets(settings);
+    for (let i = 0; i < enabledBuckets.length; i++) {
+      const bucket = enabledBuckets[i];
       if (this.matchesBucket(bucket, context)) {
         return { bucket, index: i };
       }
     }
     return null;
+  }
+
+  private getEnabledBuckets(settings: SmartSortSettings): SortBucket[] {
+    return Array.isArray(settings.buckets)
+      ? settings.buckets.filter((bucket) => bucket.enabled)
+      : [];
   }
 
   private createRelationshipNodeFromContext(context: RuleEvaluationContext): RelationshipLineageNode {
@@ -303,16 +318,17 @@ export class RuleEngine {
     separator: string,
   ): string[] {
     const parts: string[] = [];
+    const enabledBuckets = this.getEnabledBuckets(settings);
+    if (enabledBuckets.length === 0) {
+      return parts;
+    }
 
     // Find the first matching bucket
     let matchedBucket: SortBucket | null = null;
     let bucketIndex = -1;
 
-    for (let i = 0; i < settings.buckets.length; i++) {
-      const bucket = settings.buckets[i];
-      if (!bucket.enabled) {
-        continue;
-      }
+    for (let i = 0; i < enabledBuckets.length; i++) {
+      const bucket = enabledBuckets[i];
       if (this.matchesBucket(bucket, context)) {
         matchedBucket = bucket;
         bucketIndex = i;
@@ -320,12 +336,17 @@ export class RuleEngine {
       }
     }
 
-    // Add bucket index as the first part (zero-padded to 3 digits)
+    // Add the enabled-bucket ordinal as the first part. Disabled buckets do not
+    // leave ordering gaps, and the unmatched ordinal is always after every
+    // configured category.
+    const bucketIndexWidth = Math.max(3, String(enabledBuckets.length).length);
+
+    // Add bucket index as the first part (zero-padded to a common width)
     // For A-Z sorting: lower index = higher priority = lower sort value = appears first
     // Example: Bucket 0 (highest priority) → "000" (sorts to top in A-Z)
     //          Bucket 12 (lowest priority) → "012" (sorts to bottom in A-Z)
     if (matchedBucket) {
-      parts.push(String(bucketIndex).padStart(3, "0"));
+      parts.push(String(bucketIndex).padStart(bucketIndexWidth, "0"));
 
       // Apply sort criteria from the matched bucket
       for (const criteria of matchedBucket.sortCriteria) {
@@ -336,8 +357,9 @@ export class RuleEngine {
         }
       }
     } else {
-      // No bucket matched - use a high bucket number to sort unmatched items last
-      parts.push("999");
+      // No bucket matched. Still emit a stable category so every note remains
+      // sortable, after all notes that matched an enabled bucket.
+      parts.push(String(enabledBuckets.length).padStart(bucketIndexWidth, "0"));
     }
 
     if (settings.appendBasename) {
@@ -555,13 +577,15 @@ export class RuleEngine {
     }
 
     if (source === "date-created") {
+      const ctime = this.getFileStatTimestamp(context.file, "ctime");
       // @ts-ignore
-      return [window.moment(context.file.stat.ctime).format()];
+      return ctime === null ? [] : [window.moment(ctime).format()];
     }
 
     if (source === "date-modified") {
+      const mtime = this.getFileStatTimestamp(context.file, "mtime");
       // @ts-ignore
-      return [window.moment(context.file.stat.mtime).format()];
+      return mtime === null ? [] : [window.moment(mtime).format()];
     }
 
     if (source === "parent-frontmatter") {
@@ -588,6 +612,17 @@ export class RuleEngine {
     }
 
     return this.toComparableValues(this.getFrontmatterValue(context.frontmatter, key));
+  }
+
+  private getFileStatTimestamp(
+    file: RuleEvaluationContext["file"],
+    field: "ctime" | "mtime",
+  ): number | null {
+    const stat = (file as RuleEvaluationContext["file"] & {
+      stat?: { ctime?: unknown; mtime?: unknown };
+    }).stat;
+    const value = Number(stat?.[field]);
+    return Number.isFinite(value) ? value : null;
   }
 
   private collectCheckboxStates(body: string): string[] {

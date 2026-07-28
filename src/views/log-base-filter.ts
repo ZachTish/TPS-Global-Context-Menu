@@ -113,6 +113,13 @@ function readComparableValues(rawProperty: string, context: LogBaseFilterContext
     if (fileKey === 'tag' || fileKey === 'tags') return context.file.tags;
     return readRecordValues(context.file.frontmatter, property.replace(/^file\./i, ''));
   }
+  // Exact virtual keys such as `task.status` must win over their bare-key
+  // aliases so a row can carry both checkbox workflow state and a relational
+  // `status` value. Structural Kind and task-tag aliases stay above this check
+  // because they intentionally synthesize additional comparable values.
+  const exactLineValue = Object.entries(context.fields)
+    .find(([key]) => normalizeKey(key) === normalized)?.[1];
+  if (exactLineValue != null) return toValues(exactLineValue);
   const lineKey = normalizeKey(property.replace(/^(?:note|line|log|task)\./i, ''));
   const lineValue = Object.entries(context.fields).find(([key]) => normalizeKey(key) === lineKey)?.[1];
   if (lineValue != null) return toValues(lineValue);

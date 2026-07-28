@@ -11,7 +11,7 @@ import { PropertyRowService } from '../services/property-row-service';
 import { normalizeTagValue, parseTagInput } from '../utils/tag-utils';
 import { formatFileWikilink, isLinkListProperty, parseStringListInput } from '../utils/list-utils';
 import { isEntityReferenceProperty } from '../utils/entity-property';
-import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
+import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { BadgeRenderer, hashStringToHue } from './badge-renderer';
 import { PanelBuilder } from './panel-builder';
@@ -293,13 +293,28 @@ export class MenuController {
 
   openStatusSubmenu(anchor: HTMLElement | MouseEvent | KeyboardEvent, entries: any[], onUpdate?: (val: string) => void) {
     const menu = new Menu();
-    const currentStatus = typeof entries[0]?.frontmatter?.status === 'string'
-      ? String(entries[0].frontmatter.status).trim()
+    const statusKey = this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status';
+    const readStatus = (entry: any): unknown => {
+      const frontmatter = entry?.frontmatter;
+      if (!frontmatter || typeof frontmatter !== 'object') return undefined;
+      const actualKey = Object.keys(frontmatter)
+        .find((key) => key.toLowerCase() === statusKey.toLowerCase());
+      return actualKey ? frontmatter[actualKey] : undefined;
+    };
+    const hasStatus = (entry: any): boolean => {
+      const frontmatter = entry?.frontmatter;
+      return !!frontmatter
+        && typeof frontmatter === 'object'
+        && Object.keys(frontmatter).some((key) => key.toLowerCase() === statusKey.toLowerCase());
+    };
+    const currentValue = readStatus(entries[0]);
+    const currentStatus = typeof currentValue === 'string'
+      ? currentValue.trim()
       : '';
     const files = this.filesFromEntries(entries);
-    const allWithoutKey = entries.every((entry: any) => !Object.prototype.hasOwnProperty.call(entry?.frontmatter || {}, 'status'));
+    const allWithoutKey = entries.every((entry: any) => !hasStatus(entry));
     const allEmpty = !allWithoutKey && entries.every((entry: any) => {
-      const value = entry?.frontmatter?.status;
+      const value = readStatus(entry);
       return value === '' || value === null || value === undefined;
     });
 
@@ -307,26 +322,28 @@ export class MenuController {
       item.setTitle('(none)')
         .setChecked(allWithoutKey)
         .onClick(async () => {
-          await this.plugin.bulkEditService.removeFrontmatterKey(files, 'status');
+          await this.plugin.bulkEditService.removeFrontmatterKey(files, statusKey);
           entries.forEach((entry: any) => {
             if (!entry.frontmatter || typeof entry.frontmatter !== 'object') return;
-            delete entry.frontmatter.status;
+            const actualKey = Object.keys(entry.frontmatter)
+              .find((key) => key.toLowerCase() === statusKey.toLowerCase());
+            if (actualKey) delete entry.frontmatter[actualKey];
           });
           if (onUpdate) onUpdate('');
-          await this.afterWholeNotePropertyEdit(files, ['status', 'completedDate']);
+          await this.afterWholeNotePropertyEdit(files, [statusKey, 'completedDate']);
         });
     });
     menu.addItem(item => {
       item.setTitle('(empty)')
         .setChecked(allEmpty)
         .onClick(async () => {
-          await this.plugin.bulkEditService.updateFrontmatter(files, { status: '' });
+          await this.plugin.bulkEditService.updateFrontmatter(files, { [statusKey]: '' });
           entries.forEach((entry: any) => {
             if (!entry.frontmatter || typeof entry.frontmatter !== 'object') entry.frontmatter = {};
-            entry.frontmatter.status = '';
+            entry.frontmatter[statusKey] = '';
           });
           if (onUpdate) onUpdate('');
-          await this.afterWholeNotePropertyEdit(files, ['status', 'completedDate']);
+          await this.afterWholeNotePropertyEdit(files, [statusKey, 'completedDate']);
         });
     });
     menu.addSeparator();
@@ -338,11 +355,11 @@ export class MenuController {
           .onClick(async () => {
             entries.forEach((entry: any) => {
               if (!entry.frontmatter || typeof entry.frontmatter !== 'object') entry.frontmatter = {};
-              entry.frontmatter.status = status;
+              entry.frontmatter[statusKey] = status;
             });
             if (onUpdate) onUpdate(status);
             await this.plugin.bulkEditService.setStatus(files, status);
-            await this.afterWholeNotePropertyEdit(files, ['status', 'completedDate']);
+            await this.afterWholeNotePropertyEdit(files, [statusKey, 'completedDate']);
           });
       });
     });
@@ -535,9 +552,19 @@ export class MenuController {
     logger.log(`[TPS GCM] openAddListValueModal called with ${entries.length} entries`);
     const property = this.plugin.settings.properties?.find((prop) => prop.key.toLowerCase() === key.toLowerCase());
     if (isEntityReferenceProperty(property)) {
-      openEntitySuggestModal(this.app, this.plugin, property, async (choice) => {
+      openPropertyValueSuggestModal(this.app, this.plugin, property!, '', async (choice) => {
         const files = this.filesFromEntries(entries);
-        const count = await this.plugin.bulkEditService.addListValues(files, choice.wikilink, key);
+        if (choice.kind === 'clear') {
+          const count = await this.plugin.bulkEditService.removeFrontmatterKey(files, key);
+          if (count > 0) await this.afterWholeNotePropertyEdit(files, [key]);
+          return;
+        }
+        const count = await this.plugin.bulkEditService.addListValues(
+          files,
+          choice.value,
+          key,
+          choice.kind === 'entity',
+        );
         if (count > 0) {
           this.plugin.bulkEditService.showNotice('added', `${label} ${choice.label}`, '', count);
           await this.afterWholeNotePropertyEdit(files, [key]);

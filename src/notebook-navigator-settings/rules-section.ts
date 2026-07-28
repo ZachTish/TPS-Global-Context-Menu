@@ -195,12 +195,22 @@ export class RulesSectionRenderer {
     });
 
     const matchesActive = plugin.getRuleMatchForActiveFile(rule);
+    const activePreview = plugin.getRulePreviewForActiveFile?.();
+    const winningOutputs = [
+      activePreview?.iconRuleId === rule.id ? "icon" : "",
+      activePreview?.colorRuleId === rule.id ? "color" : "",
+    ].filter(Boolean);
+    const winnerText = winningOutputs.length > 0
+      ? ` Wins ${winningOutputs.join(" and ")}.`
+      : matchesActive
+        ? " An earlier matching rule supplies any winning output."
+        : "";
     editorPane.createEl("div", {
       cls: "tps-nn-callout",
       text:
         matchesActive == null
           ? "Active note preview unavailable."
-          : `Active note preview: ${matchesActive ? "matches" : "does not match"}.`
+          : `Active note preview: ${matchesActive ? "matches" : "does not match"}.${winnerText}`
     });
 
     new Setting(editorPane)
@@ -229,7 +239,8 @@ export class RulesSectionRenderer {
               return;
             }
             live.enabled = value;
-            await persistRuleChange(true);
+            await persistRuleChange(false);
+            await plugin.applyRulesToAllFiles(true);
             refresh();
           });
       });
@@ -666,7 +677,8 @@ export class RulesSectionRenderer {
               return;
             }
             live.enabled = !live.enabled;
-            await persistRuleChange(true);
+            await persistRuleChange(false);
+            await plugin.applyRulesToAllFiles(true);
             refresh();
           })();
         });
@@ -683,6 +695,7 @@ export class RulesSectionRenderer {
             const rules = plugin.settings.notebookNavigatorRules.rules;
             [rules[index - 1], rules[index]] = [rules[index], rules[index - 1]];
             await persistRuleChange(false);
+            await plugin.applyRulesToAllFiles(true);
             refresh();
           })();
         });
@@ -698,6 +711,7 @@ export class RulesSectionRenderer {
             const rules = plugin.settings.notebookNavigatorRules.rules;
             [rules[index + 1], rules[index]] = [rules[index], rules[index + 1]];
             await persistRuleChange(false);
+            await plugin.applyRulesToAllFiles(true);
             refresh();
           })();
         });
@@ -742,6 +756,7 @@ export class RulesSectionRenderer {
               selectedRuleId = plugin.settings.notebookNavigatorRules.rules[0]?.id ?? null;
             }
             await persistRuleChange(false);
+            await plugin.applyRulesToAllFiles(true);
             refresh();
           })();
         });

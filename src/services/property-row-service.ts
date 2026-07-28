@@ -1,12 +1,19 @@
 import { App, Menu, TFile } from "obsidian";
 import TPSGlobalContextMenuPlugin from "../main";
 import { normalizeTagValue, parseTagInput } from '../utils/tag-utils';
-import { getWikilinkDisplayText, isLinkListProperty, isTextListProperty, parseLinkListInput, parseStringListInput } from '../utils/list-utils';
+import {
+  getWikilinkDisplayText,
+  isLinkListProperty,
+  isTextListProperty,
+  parseLinkListInput,
+  parseMixedListInput,
+  parseStringListInput,
+} from '../utils/list-utils';
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { TextInputModal } from '../modals/text-input-modal';
 import { extractWebLink } from '../utils/web-link-utils';
 import { isEntityReferenceProperty } from '../utils/entity-property';
-import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
+import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
 import * as logger from '../logger';
 
 type Delegates = {
@@ -179,7 +186,10 @@ export class PropertyRowService {
       const current = uniqueValues.size === 1 ? allValues[0] : "Mixed";
       const isUndefined = entries.every((e: any) => !this.plugin.fieldInitializationService.isFieldDefinedForEntries([e], prop.key));
 
-      valueEl.textContent = current && current !== 'Mixed' && isEntityReferenceProperty(prop)
+      valueEl.textContent = current
+        && current !== 'Mixed'
+        && isEntityReferenceProperty(prop)
+        && /^\[\[/u.test(String(current))
         ? getWikilinkDisplayText(String(current))
         : current || "Select...";
       if (isUndefined) {
@@ -206,13 +216,27 @@ export class PropertyRowService {
       const files = this.filesFromEntries(entries);
 
       if (isEntityReferenceProperty(prop)) {
-        openEntitySuggestModal(this.app, this.plugin, prop, async (choice) => {
-          this.setEntryFrontmatterValue(entries, prop.key, choice.wikilink);
+        openPropertyValueSuggestModal(
+          this.app,
+          this.plugin,
+          prop,
+          current === 'Mixed' ? '' : String(current || ''),
+          async (choice) => {
+          if (choice.kind === 'clear') {
+            this.removeEntryFrontmatterValue(entries, prop.key);
+            updateDisplay();
+            await this.plugin.bulkEditService.removeFrontmatterKey(files, prop.key);
+            await this.afterWholeNotePropertyEdit(files, [prop.key]);
+            updateDisplay();
+            return;
+          }
+          this.setEntryFrontmatterValue(entries, prop.key, choice.value);
           updateDisplay();
-          await this.plugin.bulkEditService.updateFrontmatter(files, { [prop.key]: choice.wikilink });
+          await this.plugin.bulkEditService.updateFrontmatter(files, { [prop.key]: choice.value });
           await this.afterWholeNotePropertyEdit(files, [prop.key]);
           updateDisplay();
-        });
+          },
+        );
         return;
       }
 
@@ -293,9 +317,12 @@ export class PropertyRowService {
         : this.app.metadataCache.getFileCache(entryFile ?? entries[0].file)?.frontmatter || {};
       const isTextList = isTextListProperty(prop);
       const isLinkList = isLinkListProperty(prop);
+      const isEntityList = isEntityReferenceProperty(prop);
       const rawListValue = this.getValueCaseInsensitive(freshFm, prop.key);
       const tagList = isLinkList
         ? parseLinkListInput(rawListValue)
+        : isEntityList
+        ? parseMixedListInput(rawListValue)
         : isTextList
         ? parseStringListInput(rawListValue)
         : parseTagInput([
@@ -306,9 +333,9 @@ export class PropertyRowService {
 
       const normalizedMap = new Map<string, string>();
       for (const tag of tagList) {
-        const normalized = isTextList || isLinkList ? String(tag).trim() : normalizeTagValue(tag);
+        const normalized = isTextList || isLinkList || isEntityList ? String(tag).trim() : normalizeTagValue(tag);
         if (!normalized) continue;
-        if (!normalizedMap.has(normalized)) normalizedMap.set(normalized, isTextList || isLinkList ? String(tag).trim() : `#${normalized}`);
+        if (!normalizedMap.has(normalized)) normalizedMap.set(normalized, isTextList || isLinkList || isEntityList ? String(tag).trim() : `#${normalized}`);
       }
 
       Array.from(normalizedMap.values()).forEach((tag: string) => {
@@ -319,12 +346,13 @@ export class PropertyRowService {
         tagText.className = "tps-gcm-tag-text tps-gcm-tag-link";
         const webLink = extractWebLink(tag);
         tagText.href = webLink?.url || "#";
-        tagText.textContent = webLink?.label || (isLinkList ? this.getLinkListDisplayText(tag) : tag);
+        const entityLink = isEntityList && /^\[\[/u.test(tag);
+        tagText.textContent = webLink?.label || (isLinkList || entityLink ? this.getLinkListDisplayText(tag) : tag);
         if (webLink) {
           tagText.classList.add('tps-gcm-external-link');
           tagText.setAttribute('target', '_blank');
           tagText.setAttribute('rel', 'noopener noreferrer');
-        } else if (isLinkList) {
+        } else if (isLinkList || entityLink) {
           this.configureInternalLink(tagText, tag);
         }
         this.d.addSafeClickListener(tagText, (e) => {
@@ -334,12 +362,12 @@ export class PropertyRowService {
             window.open(webLink.url, '_blank', 'noopener,noreferrer');
             return;
           }
-          if (isLinkList) {
+          if (isLinkList || entityLink) {
             const file = this.resolveLinkListValueToFile(tag);
             if (file) void this.plugin.openFileInLeaf(file, false, () => this.app.workspace.getLeaf(false), { revealLeaf: true });
             return;
           }
-          if (!isTextList) this.d.triggerTagSearch(normalizeTagValue(tag));
+          if (!isTextList && !isEntityList) this.d.triggerTagSearch(normalizeTagValue(tag));
         });
         tagEl.appendChild(tagText);
 
@@ -351,7 +379,7 @@ export class PropertyRowService {
           e.stopPropagation();
           tagEl.remove();
           const files = this.filesFromEntries(entries);
-          if (isTextList || isLinkList) {
+          if (isTextList || isLinkList || isEntityList) {
             await this.plugin.bulkEditService.removeListValues(
               files,
               tag,
@@ -369,8 +397,8 @@ export class PropertyRowService {
         });
         tagEl.appendChild(removeBtn);
 
-        if (!isTextList && !isLinkList) this.applyNotebookNavigatorTagStyle(tagEl, normalizeTagValue(tag));
-        if (isLinkList) tagEl.classList.add('tps-gcm-tag-link-value');
+        if (!isTextList && !isLinkList && !isEntityList) this.applyNotebookNavigatorTagStyle(tagEl, normalizeTagValue(tag));
+        if (isLinkList || entityLink) tagEl.classList.add('tps-gcm-tag-link-value');
 
         container.appendChild(tagEl);
       });
@@ -380,17 +408,33 @@ export class PropertyRowService {
       addBtn.className = "tps-gcm-tag-add";
       if (isUndefined) {
         addBtn.style.fontStyle = "italic";
-        addBtn.title = isLinkList ? "Create field and add link" : isTextList ? "Create field and add value" : "Create field and add tag";
+        addBtn.title = isEntityList ? "Create field and choose value" : isLinkList ? "Create field and add link" : isTextList ? "Create field and add value" : "Create field and add tag";
       } else {
         addBtn.style.fontStyle = "";
-        addBtn.title = isLinkList ? "Add link" : isTextList ? "Add value" : "Add tag";
+        addBtn.title = isEntityList ? "Choose value" : isLinkList ? "Add link" : isTextList ? "Add value" : "Add tag";
       }
       this.d.addSafeClickListener(addBtn, async () => {
         // Initialize the field if it doesn't exist yet, then immediately open the modal.
         // (No two-click required — the label difference "Create" vs "Set" is cosmetic only.)
         await this.plugin.fieldInitializationService.checkAndInitialize(entries, prop.key, []);
         refreshTags();
-        if (isTextList || isLinkList) {
+        if (isEntityList) {
+          openPropertyValueSuggestModal(this.app, this.plugin, prop, '', async (choice) => {
+            const files = this.filesFromEntries(entries);
+            if (choice.kind === 'clear') {
+              await this.plugin.bulkEditService.removeFrontmatterKey(files, prop.key);
+            } else {
+              await this.plugin.bulkEditService.addListValues(
+                files,
+                choice.value,
+                prop.key,
+                choice.kind === 'entity',
+              );
+            }
+            await this.afterWholeNotePropertyEdit(files, [prop.key]);
+            refreshTags();
+          });
+        } else if (isTextList || isLinkList) {
           this.d.openAddListValueModal(entries, prop.key, prop.label);
         } else {
           this.d.openAddTagModal(entries, prop.key);

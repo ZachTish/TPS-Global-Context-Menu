@@ -1,5 +1,6 @@
 import {
   DEFAULT_NOTEBOOK_NAVIGATOR_RULE_SETTINGS,
+  ConditionGroup,
   HideRule,
   IconColorRule,
   NotebookNavigatorRuleConditionSource,
@@ -158,6 +159,7 @@ function sanitizeSortBuckets(rawBuckets: unknown): SortBucket[] {
         name: `Migrated: ${field || 'Unnamed'}`,
         match,
         conditions,
+        conditionGroups: sanitizeConditionGroups(record.conditionGroups),
         sortCriteria: [{
           source,
           field,
@@ -176,10 +178,23 @@ function sanitizeSortBuckets(rawBuckets: unknown): SortBucket[] {
       name: normalizeString(record.name, 'Unnamed Bucket'),
       match,
       conditions,
+      conditionGroups: sanitizeConditionGroups(record.conditionGroups),
       sortCriteria: sanitizeSortCriteria(record.sortCriteria),
     });
   }
   return buckets;
+}
+
+function sanitizeConditionGroups(rawGroups: unknown): ConditionGroup[] {
+  if (!Array.isArray(rawGroups)) return [];
+  return rawGroups.map((rawGroup, index): ConditionGroup => {
+    const record = asRecord(rawGroup);
+    return {
+      id: normalizeString(record.id, `condition-group-${index + 1}`),
+      match: normalizeMatchMode(record.match),
+      conditions: sanitizeConditions(record.conditions),
+    };
+  });
 }
 
 function sanitizeSortSegments(rawSegments: unknown): SortSegmentRule[] {

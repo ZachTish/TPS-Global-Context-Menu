@@ -14,7 +14,7 @@ import { getEffectivePropertyOptions } from '../utils/property-options';
 import { TextInputModal } from '../modals/text-input-modal';
 import { getCheckboxStateMarker, normalizeCheckboxStateToken } from '../utils/checkbox-state';
 import { isEntityReferenceProperty } from '../utils/entity-property';
-import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
+import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
 
 const VIRTUAL_CHECKBOX_CLASS = 'tps-gcm-linked-subitem-checkbox';
 const CM_WIDGET_CLASS = 'tps-gcm-linked-subitem-cm-widget';
@@ -459,16 +459,32 @@ export class LinkedSubitemCheckboxService {
     evt.stopImmediatePropagation();
 
     if (configuredProperty && isEntityReferenceProperty(configuredProperty)) {
-      openEntitySuggestModal(this.plugin.app, this.plugin, configuredProperty, async (choice) => {
-        if (configuredProperty.type === 'list') {
-          await this.plugin.bulkEditService.addListValues([childFile], choice.wikilink, configuredProperty.key);
+      openPropertyValueSuggestModal(
+        this.plugin.app,
+        this.plugin,
+        configuredProperty,
+        String((entries[0]?.frontmatter || {})[configuredProperty.key] || ''),
+        async (choice) => {
+        if (choice.kind === 'clear') {
+          await this.plugin.bulkEditService.removeFrontmatterKey([childFile], configuredProperty.key);
+        } else if (configuredProperty.type === 'list') {
+          await this.plugin.bulkEditService.addListValues(
+            [childFile],
+            choice.value,
+            configuredProperty.key,
+            choice.kind === 'entity',
+          );
         } else {
-          await this.plugin.bulkEditService.updateFrontmatter([childFile], { [configuredProperty.key]: choice.wikilink });
+          await this.plugin.bulkEditService.updateFrontmatter(
+            [childFile],
+            { [configuredProperty.key]: choice.value },
+          );
         }
         await this.refreshReferencesForChild(childFile);
         this.scheduleDecorateForActiveView();
         this.refreshLivePreviewEditors();
-      });
+        },
+      );
       return true;
     }
 
@@ -1137,13 +1153,8 @@ export class LinkedSubitemCheckboxService {
   }
 
   private getStatusOptions(): string[] {
-    const statusProp = this.plugin.settings.properties?.find((prop) => prop.id === 'status');
-    const options = Array.isArray(statusProp?.options) ? statusProp.options : [];
-    const normalized = options
-      .map((option) => String(option || '').trim())
-      .filter(Boolean);
-    if (normalized.length > 0) return normalized;
-    return ['todo', 'working', 'holding', 'wont-do', 'complete'];
+    return this.plugin.sharedServices?.status?.getStatusOptions?.()
+      || ['todo', 'working', 'holding', 'wont-do', 'complete'];
   }
 
   private async setLinkedSubitemStatus(file: TFile, status: string): Promise<void> {

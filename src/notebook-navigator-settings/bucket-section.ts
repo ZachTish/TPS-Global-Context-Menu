@@ -128,8 +128,8 @@ export class BucketSectionRenderer {
             });
 
         new Setting(section)
-            .setName("Clear key when empty")
-            .setDesc("Remove sort field when no bucket matched.")
+            .setName("Clear key with no buckets")
+            .setDesc("Remove the sort field only when no enabled buckets exist. Unmatched notes otherwise receive a fallback category after every bucket.")
             .addToggle((toggle) => {
                 toggle
                     .setValue(smartSort.clearWhenNoMatch)
@@ -151,6 +151,9 @@ export class BucketSectionRenderer {
         }, true);
         this.createActionButton(toolbar, "Apply active note", async () => {
             await plugin.applyRulesToActiveFile(true);
+        });
+        this.createActionButton(toolbar, "Apply all notes", async () => {
+            await plugin.applyRulesToAllFiles(true);
         });
 
         if (smartSort.buckets.length === 0) {
@@ -843,7 +846,7 @@ export class BucketSectionRenderer {
                     void (async () => {
                         bucket.enabled = !bucket.enabled;
                         await plugin.saveSettings();
-                        await plugin.applyRulesToActiveFile(false);
+                        await plugin.applyRulesToAllFiles(true);
                         refresh();
                     })();
                 });
@@ -862,6 +865,7 @@ export class BucketSectionRenderer {
                         const buckets = plugin.settings.notebookNavigatorRules.smartSort.buckets;
                         [buckets[index - 1], buckets[index]] = [buckets[index], buckets[index - 1]];
                         await plugin.saveSettings();
+                        await plugin.applyRulesToAllFiles(true);
                         refresh();
                     })();
                 });
@@ -878,6 +882,7 @@ export class BucketSectionRenderer {
                         const buckets = plugin.settings.notebookNavigatorRules.smartSort.buckets;
                         [buckets[index + 1], buckets[index]] = [buckets[index], buckets[index + 1]];
                         await plugin.saveSettings();
+                        await plugin.applyRulesToAllFiles(true);
                         refresh();
                     })();
                 });
@@ -921,6 +926,7 @@ export class BucketSectionRenderer {
                             selectedBucketId = plugin.settings.notebookNavigatorRules.smartSort.buckets[0]?.id ?? null;
                         }
                         await plugin.saveSettings();
+                        await plugin.applyRulesToAllFiles(true);
                         refresh();
                     })();
                 });

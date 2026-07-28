@@ -152,8 +152,9 @@ export class TaskStatusCheckboxReconcileService extends Component {
   }
 
   private getStatusKey(): string {
-    const configured = this.plugin.settings.properties?.find((prop) => prop.id === 'status')?.key;
-    return String(configured || 'status').trim() || 'status';
+    return String(
+      this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status',
+    ).trim() || 'status';
   }
 
   private getCompleteMarkers(mappings: Array<{ checkboxState?: string; statuses?: string[] }>): string[] {

@@ -146,7 +146,24 @@ function createPlugin(properties, showCustomPropertiesInContextMenu = true) {
   };
 }
 
-test('line relationship visibility honors context rules, semantic tags, and @@ independence', async () => {
+function createOptionApp(frontmatters) {
+  const files = frontmatters.map((frontmatter, index) => ({
+    path: `Options/${index + 1}.md`,
+    basename: String(index + 1),
+  }));
+  return {
+    vault: {
+      getMarkdownFiles: () => files,
+    },
+    metadataCache: {
+      getFileCache: (file) => ({
+        frontmatter: frontmatters[files.indexOf(file)] || {},
+      }),
+    },
+  };
+}
+
+test('line property visibility honors context rules, semantic tags, and @@ independence', async () => {
   const { resolveLineEntityContextProperties } = await loadHarness();
   const properties = [
     {
@@ -211,8 +228,8 @@ test('line relationship visibility honors context rules, semantic tags, and @@ i
   assert.deepEqual(
     resolveLineEntityContextProperties(createPlugin(properties), file, line)
       .map((property) => property.id),
-    ['projects', 'contexts', 'owner'],
-    'blank and missing fields remain distinct, hidden fields stay hidden, and semantic inline tags satisfy scope',
+    ['projects', 'contexts', 'owner', 'identity'],
+    'blank and missing fields remain distinct, hidden fields stay hidden, semantic inline tags satisfy scope, and Kind remains writable',
   );
   assert.deepEqual(
     resolveLineEntityContextProperties(createPlugin(properties, false), file, line),
@@ -277,10 +294,268 @@ test('line relationship list menus remove one value or clear the field without d
   assert.match(line, /\^rel-row$/u);
 });
 
+test('line selector menus honor a vault-only source without exposing raw custom input', async () => {
+  const harness = await loadHarness();
+  const property = {
+    id: 'priority',
+    key: 'priority',
+    label: 'Priority',
+    type: 'selector',
+    optionSources: ['vault'],
+    showInContextMenu: true,
+  };
+  const app = createOptionApp([
+    { priority: 'low' },
+    { priority: 'high' },
+  ]);
+  const file = { path: 'Examples/Relational Records.md' };
+  let line = '- Relational row [priority:: low] [owner:: Zach] ^vault-selector';
+  const menu = new FakeMenu();
+  harness.addLineEntityPropertyMenus({
+    app,
+    plugin: createPlugin([property]),
+    menu,
+    file,
+    rawLine: line,
+    mutateLine: async (updater) => {
+      line = updater(line);
+      return true;
+    },
+  });
+
+  assert.equal(menu.items.length, 1);
+  assert.equal(menu.items[0].title, 'Priority: low');
+  const submenuTitles = menu.items[0].submenu.items
+    .filter((item) => !item.separator)
+    .map((item) => item.title);
+  assert.deepEqual(submenuTitles, ['(none)', 'high', 'low']);
+  assert.equal(
+    submenuTitles.includes('Set custom value…'),
+    false,
+    'vault-only selectors must not fall back to a raw text editor',
+  );
+
+  menu.items[0].submenu.items.find((item) => item.title === 'high').click();
+  assert.equal(harness.readInlineFieldValue(line, 'priority'), 'high');
+  assert.equal(harness.readInlineFieldValue(line, 'owner'), 'Zach');
+  assert.match(line, /\^vault-selector$/u);
+});
+
+test('line text-list menus merge manual and vault choices instead of replacing the field', async () => {
+  const harness = await loadHarness();
+  const property = {
+    id: 'labels',
+    key: 'labels',
+    label: 'Labels',
+    type: 'list',
+    listItemType: 'text',
+    optionSources: ['manual', 'vault'],
+    options: ['manual-first'],
+    showInContextMenu: true,
+  };
+  const app = createOptionApp([
+    { labels: ['vault-alpha'] },
+    { labels: 'vault-beta' },
+  ]);
+  const file = { path: 'Examples/Relational Records.md' };
+  let line = '- Bullet row [labels:: existing] [priority:: high] ^vault-list';
+  const menu = new FakeMenu();
+  harness.addLineEntityPropertyMenus({
+    app,
+    plugin: createPlugin([property]),
+    menu,
+    file,
+    rawLine: line,
+    mutateLine: async (updater) => {
+      line = updater(line);
+      return true;
+    },
+  });
+
+  const submenuTitles = menu.items[0].submenu.items
+    .filter((item) => !item.separator)
+    .map((item) => item.title);
+  assert.deepEqual(
+    submenuTitles,
+    [
+      '(none)',
+      'Set custom value…',
+      'manual-first',
+      'vault-alpha',
+      'vault-beta',
+      'Remove existing',
+    ],
+  );
+
+  menu.items[0].submenu.items.find((item) => item.title === 'vault-beta').click();
+  assert.equal(harness.readInlineFieldValue(line, 'labels'), 'existing, vault-beta');
+  assert.equal(harness.readInlineFieldValue(line, 'priority'), 'high');
+  assert.match(line, /\^vault-list$/u);
+});
+
+test('entity-enabled tag lists keep literals and relational wikilinks in mixed inline storage', async () => {
+  const harness = await loadHarness();
+  const property = {
+    id: 'tags',
+    key: 'tags',
+    label: 'Tags',
+    type: 'list',
+    listItemType: 'tag',
+    acceptsKind: 'status',
+    optionSources: ['manual', 'entity'],
+    options: ['manual-literal'],
+    showInContextMenu: true,
+  };
+  const file = { path: 'Examples/Relational Records.md' };
+  let line = '- Relational row [tags:: #waiting, [[Statuses/Smith|Smith, Jane]]] [priority:: high] ^entity-tag-list';
+  const buildMenu = () => {
+    const menu = new FakeMenu();
+    harness.addLineEntityPropertyMenus({
+      app: {},
+      plugin: createPlugin([property]),
+      menu,
+      file,
+      rawLine: line,
+      mutateLine: async (updater) => {
+        line = updater(line);
+        return true;
+      },
+    });
+    return menu;
+  };
+
+  const addMenu = buildMenu();
+  assert.equal(addMenu.items[0].title, 'Tags: #waiting, Smith, Jane');
+  addMenu.items[0].submenu.items
+    .find((item) => item.title === 'manual-literal')
+    .click();
+  assert.equal(
+    harness.readInlineFieldValue(line, 'tags'),
+    '#waiting, [[Statuses/Smith|Smith, Jane]], manual-literal',
+    'a manual value must merge without splitting the entity alias at its comma',
+  );
+  assert.equal(harness.readInlineFieldValue(line, 'priority'), 'high');
+  assert.match(line, /\^entity-tag-list$/u);
+
+  const removeMenu = buildMenu();
+  const removeEntity = removeMenu.items[0].submenu.items.find(
+    (item) => item.title === 'Remove Smith, Jane',
+  );
+  assert.equal(typeof removeEntity?.click, 'function');
+  removeEntity.click();
+  assert.equal(
+    harness.readInlineFieldValue(line, 'tags'),
+    '#waiting, manual-literal',
+    'removing one entity must preserve literal values in the relational tag field',
+  );
+
+  const clearMenu = buildMenu();
+  clearMenu.items[0].submenu.items.find((item) => item.title === '(none)').click();
+  assert.equal(harness.readInlineFieldValue(line, 'tags'), '');
+  assert.equal(harness.readInlineFieldValue(line, 'priority'), 'high');
+  assert.match(line, /\^entity-tag-list$/u);
+});
+
+test('line context menus compose manual and Kind-constrained entity sources without hardcoded field behavior', async () => {
+  const harness = await loadHarness();
+  const property = {
+    id: 'status',
+    key: 'status',
+    label: 'Status',
+    type: 'selector',
+    acceptsKind: 'status',
+    optionSources: ['manual', 'entity'],
+    options: ['working', 'blocked'],
+    showInContextMenu: true,
+  };
+  const file = { path: 'Examples/Relational Records.md' };
+  let line = '- Relational row [status:: [[Statuses/Todo|Todo]]] [priority:: high] ^rel-status';
+  const menu = new FakeMenu();
+  harness.addLineEntityPropertyMenus({
+    app: {},
+    plugin: createPlugin([property]),
+    menu,
+    file,
+    rawLine: line,
+    mutateLine: async (updater) => {
+      line = updater(line);
+      return true;
+    },
+  });
+
+  assert.equal(menu.items.length, 1);
+  assert.equal(menu.items[0].title, 'Status: Todo');
+  const submenuTitles = menu.items[0].submenu.items
+    .filter((item) => !item.separator)
+    .map((item) => item.title);
+  assert.deepEqual(
+    submenuTitles,
+    ['(none)', 'Set custom value…', 'working', 'blocked', 'Choose status entity…'],
+    'manual values and the constrained entity route must coexist in the configured order',
+  );
+
+  const working = menu.items[0].submenu.items.find((item) => item.title === 'working');
+  assert.equal(typeof working?.click, 'function');
+  working.click();
+  assert.equal(harness.readInlineFieldValue(line, 'status'), 'working');
+  assert.equal(harness.readInlineFieldValue(line, 'priority'), 'high');
+  assert.match(line, /\^rel-status$/u);
+});
+
+test('line context menus prioritize entity sources over native property-type editors', async () => {
+  const harness = await loadHarness();
+  const file = { path: 'Examples/Relational Records.md' };
+  for (const type of ['datetime', 'snooze', 'recurrence', 'checkbox']) {
+    const property = {
+      id: `related-${type}`,
+      key: `related${type}`,
+      label: `Related ${type}`,
+      type,
+      acceptsKind: 'project, area',
+      optionSources: ['entity'],
+      showInContextMenu: true,
+    };
+    const menu = new FakeMenu();
+    harness.addLineEntityPropertyMenus({
+      app: {},
+      plugin: createPlugin([property]),
+      menu,
+      file,
+      rawLine: '- Relational row ^typed-entity',
+      mutateLine: async () => true,
+    });
+
+    assert.equal(menu.items.length, 1, type);
+    assert.ok(menu.items[0].submenu, `${type} must use the relational submenu`);
+    assert.deepEqual(
+      menu.items[0].submenu.items
+        .filter((item) => !item.separator)
+        .map((item) => item.title),
+      ['(none)', 'Choose matching entity (project or area)…'],
+      `${type} must not route to its native type editor when entity options are enabled`,
+    );
+  }
+});
+
 test('every synthesized non-task row routes configured relationships to its own stale-safe line menu', () => {
-  assert.match(source, /openEntitySuggestModal/);
+  assert.match(source, /addPropertyValueChoiceMenuItems/);
+  assert.match(
+    source,
+    /const entityOptions = propertyUsesEntityOptions\(property\);[\s\S]*?if \(!entityOptions && \(property\.type === 'datetime' \|\| property\.type === 'snooze'\)\)/,
+  );
+  assert.match(source, /onChooseLiteral: \(value\) => setChoice\(value, false\)/);
+  assert.match(source, /onChooseEntity: \(choice\) => setChoice\(choice\.wikilink, true\)/);
   assert.match(source, /mergeEntityReferenceList/);
+  assert.match(source, /mergeMixedEntityReferenceList/);
+  assert.match(source, /mergeLinkList/);
+  assert.match(source, /mergeMixedList/);
   assert.match(source, /removeEntityReferenceListValues/);
+  assert.match(source, /removeMixedEntityReferenceListValues/);
+  assert.match(source, /mergeStringList/);
+  assert.match(source, /removeStringListValues/);
+  assert.match(source, /addLineCheckboxPropertyMenu/);
+  assert.match(source, /addLineDatetimePropertyMenu/);
+  assert.match(source, /addLineRecurrencePropertyMenu/);
   assert.doesNotMatch(source, /TextInputModal|freeText|customValue/);
 
   const listMenuRoutes = listSource.match(/addLineEntityPropertyMenus\(\{/gu) || [];
@@ -296,27 +571,51 @@ test('every synthesized non-task row routes configured relationships to its own 
     /target\.closest\('\[data-tps-task-context="true"\], \[data-tps-line-context="true"\]'\)/,
     'the document-level note interceptor yields to task and non-task line menus',
   );
-  assert.match(listSource, /excludeCustomPropertyKeys:\s*getConfiguredEntityReferencePropertyKeys\(plugin\)/);
+  assert.match(listSource, /excludeCustomPropertyKeys:\s*getConfiguredLineContextPropertyKeys\(plugin\)/);
   assert.match(menuBuilderSource, /excludeCustomPropertyKeys\?:\s*readonly string\[\]/);
   assert.match(menuBuilderSource, /excludedPropertyKeys\.has\(String\(prop\.key/);
 
   assert.match(tableSource, /addLineEntityPropertyMenus\(\{[\s\S]*?this\.updateEntryLine\(entry, updater\)/);
   assert.match(
     tableSource,
-    /!isEntityReferenceProperty\(\s*resolveConfiguredProperty\(this\.plugin\.settings\.properties \|\| \[\], column\.key\)/,
-    'configured entity columns cannot leak back to the generic free-text context editor',
+    /!resolveConfiguredProperty\(this\.plugin\.settings\.properties \|\| \[\], column\.key\)/,
+    'no configured column can leak back to the generic free-text context editor',
   );
 });
 
-test('whole-note list relationships also reach the constrained picker before generic list input', () => {
+test('whole-note selector and list menus enforce configured value sources', () => {
   const listModalStart = menuControllerSource.indexOf('openAddListValueModal(');
   const listModalEnd = menuControllerSource.indexOf('\n  openRecurrenceModalNative(', listModalStart);
   assert.notEqual(listModalStart, -1);
   assert.notEqual(listModalEnd, -1);
   const listModal = menuControllerSource.slice(listModalStart, listModalEnd);
   assert.match(listModal, /if \(isEntityReferenceProperty\(property\)\)/);
-  assert.match(listModal, /openEntitySuggestModal\(this\.app, this\.plugin, property/);
-  assert.match(listModal, /this\.plugin\.bulkEditService\.addListValues\(files, choice\.wikilink, key\)/);
+  assert.match(listModal, /openPropertyValueSuggestModal\(this\.app, this\.plugin, property!, ''/);
+  assert.match(listModal, /if \(choice\.kind === 'clear'\)[\s\S]*?removeFrontmatterKey\(files, key\)[\s\S]*?return;/);
+  assert.match(
+    listModal,
+    /this\.plugin\.bulkEditService\.addListValues\([\s\S]*?files,[\s\S]*?choice\.value,[\s\S]*?key,[\s\S]*?choice\.kind === 'entity'/,
+  );
+  assert.match(listModal, /\$\{label\} \$\{choice\.label\}/);
   assert.match(listModal, /return;[\s\S]*?if \(isLinkListProperty\(property\)\)/);
-  assert.match(menuBuilderSource, /this\.delegates\.openAddListValueModal\(entries, prop\.key, prop\.label\)/);
+
+  const selectorStart = menuBuilderSource.indexOf('  addSelectorToMenu(menu: Menu');
+  const selectorEnd = menuBuilderSource.indexOf('\n  addEntityReferenceToMenu(', selectorStart);
+  const selector = menuBuilderSource.slice(selectorStart, selectorEnd);
+  assert.match(selector, /addPropertyValueChoiceMenuItems/);
+  assert.match(selector, /onChooseLiteral: \(value\) => this\.setContextPropertyValue/);
+  assert.match(selector, /onChooseEntity: \(choice\) => this\.setContextPropertyValue/);
+  assert.doesNotMatch(selector, /TextInputModal|Set custom value|getEffectivePropertyOptions/);
+
+  const listStart = menuBuilderSource.indexOf('  addListToMenu(menu: Menu');
+  const listEnd = menuBuilderSource.indexOf('\n  addDatetimeToMenu(', listStart);
+  const list = menuBuilderSource.slice(listStart, listEnd);
+  assert.match(list, /this\.populateListSubmenu\(subMenu, entries, prop, items\)/);
+  assert.match(list, /addPropertyValueChoiceMenuItems/);
+  assert.match(list, /this\.addContextTagValue/);
+  assert.match(list, /this\.addContextListValue/);
+  assert.match(list, /this\.removeContextProperty/);
+  assert.match(list, /this\.removeContextTagValue/);
+  assert.match(list, /this\.removeContextListValue/);
+  assert.doesNotMatch(list, /openAddListValueModal|openAddTagModal|TextInputModal/);
 });

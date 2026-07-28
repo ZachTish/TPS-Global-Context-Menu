@@ -5,6 +5,7 @@ import { ViewModeService } from '../services/view-mode-service';
 import * as logger from '../logger';
 import { parseLinksFromFrontmatterValue, resolveLinkTargetToFile } from '../services/link-target-service';
 import type { ResolvedParentLink } from '../services/subitem-types';
+import { propertyUsesEntityOptions } from '../utils/property-option-source';
 
 export type SubitemRelationKind = 'child' | 'attachment';
 
@@ -200,8 +201,15 @@ export class SubitemMetadataService {
   getStatusPropertyKeyForFile(file: TFile, existingEntry?: any): string {
     const entry = existingEntry ?? this.delegates.createFileEntries([file])[0];
     const properties = resolveCustomProperties(this.plugin.settings.properties || [], entry ? [entry] : [], new ViewModeService(), 'inline');
-    const statusProp = properties.find((property) => property.id === 'status' || property.key === 'status');
-    return String(statusProp?.key || 'status').trim() || 'status';
+    const statusProp = properties.find((property) => (
+      (property.id === 'status' || property.key === 'status')
+      && !propertyUsesEntityOptions(property)
+    ));
+    return String(
+      statusProp?.key
+      || this.plugin.sharedServices?.status?.getStatusPropertyKey?.()
+      || 'status',
+    ).trim() || 'status';
   }
 
   createSubitemIcon(iconEl: HTMLElement, file: TFile, frontmatter: Record<string, any>): void {

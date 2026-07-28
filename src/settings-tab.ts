@@ -6,6 +6,20 @@ import { HideSectionRenderer } from './notebook-navigator-settings/hide-section'
 import { RulesSectionRenderer } from './notebook-navigator-settings/rules-section';
 import type { BindCommittedText, SettingsSectionContext } from './notebook-navigator-settings/ui-common';
 import { collectVaultPropertyOptions, getEffectivePropertyOptions, normalizeManualPropertyOptions } from './utils/property-options';
+import {
+  decodePropertyOptionSources,
+  encodePropertyOptionSources,
+  getPropertyOptionSources,
+  isEntityOnlyProperty,
+  propertyUsesEntityOptions,
+  propertyUsesManualOptions,
+  propertyUsesVaultOptions,
+} from './utils/property-option-source';
+import {
+  applyAcceptedKindSetting,
+  normalizeAcceptedKindSetting,
+} from './utils/property-option-setting';
+import { normalizeAcceptsKind } from './utils/entity-property';
 import { mergeLinkedSubitemMappingPresentation } from './utils/linked-subitem-mapping';
 import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { FileSuggestModal } from './modals/FileSuggestModal';
@@ -19,6 +33,14 @@ import {
 
 const NN_TEXT_COMMIT_DEBOUNCE_MS = 300;
 const NN_SETTINGS_STYLE_ID = 'tps-gcm-notebook-navigator-rule-settings-style';
+
+function formatAcceptedKindConstraint(value: unknown): string {
+  const kinds = normalizeAcceptsKind(value);
+  const formatted = kinds.map((kind) => `"${kind}"`);
+  if (formatted.length === 0) return 'the configured Kinds';
+  if (formatted.length === 1) return `Kind ${formatted[0]}`;
+  return `Kinds ${formatted.slice(0, -1).join(', ')} or ${formatted[formatted.length - 1]}`;
+}
 
 type SettingsPageId = 'rules-fields' | 'menus-surfaces' | 'workflows' | 'appearance' | 'advanced';
 type RulesFieldsPageId = 'frontmatter' | 'custom-fields' | 'view-mode';
@@ -2236,6 +2258,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       summaryTitle.createSpan({ text: `  ${prop.key || '(no key)'} · ${prop.type || 'text'}` });
 
       const div = details.createDiv({ cls: 'tps-collapsible-section-content' });
+      let valueSettingsHost: HTMLElement | null = null;
       div.style.padding = '10px';
       div.style.display = 'flex';
       div.style.flexDirection = 'column';
@@ -2322,8 +2345,10 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             prop.type = value;
             if (value === 'kind') {
               delete prop.acceptsKind;
+              prop.optionSources = getPropertyOptionSources(prop)
+                .filter((source) => source !== 'entity');
               prop.allowInlineSet = false;
-            } else if (value === 'list' && prop.acceptsKind) {
+            } else if (value === 'list' && isEntityOnlyProperty(prop)) {
               prop.listItemType = 'link';
             }
             await this.plugin.saveSettings();
@@ -2332,22 +2357,93 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
       if (prop.type !== 'kind') {
         const knownKinds = this.plugin.entityIndexService?.getDimensionValues('kind') || [];
-        new Setting(fields)
-          .setName('Accepts kind')
+        const acceptedKindsSetting = new Setting(fields)
+          .setName('Accepted kinds')
           .setDesc([
-            'Optional. When set, this property becomes an entity picker and only offers notes or lines registered with that Kind.',
+            'Optional. Enter one or more Kind identities separated by commas or new lines. First setting accepted Kinds defaults this field to Entities only. Use Value sources below to combine entities with manual or discovered vault values.',
             knownKinds.length > 0 ? `Known: ${knownKinds.slice(0, 8).join(', ')}${knownKinds.length > 8 ? ', …' : ''}` : 'You can name a Kind before matching entities exist.',
           ].join(' '))
-          .addText((text) => text
-            .setPlaceholder('project')
-            .setValue(prop.acceptsKind || '')
-            .onChange(async (value) => {
-              const acceptsKind = value.trim().toLowerCase();
-              if (acceptsKind) prop.acceptsKind = acceptsKind;
-              else delete prop.acceptsKind;
-              if (acceptsKind && prop.type === 'list') prop.listItemType = 'link';
+          .addTextArea((text) => {
+            let committedAcceptedKinds = normalizeAcceptedKindSetting(prop.acceptsKind);
+            let draftAcceptedKinds = committedAcceptedKinds;
+            let lastAcceptedKindSources = committedAcceptedKinds
+              ? getPropertyOptionSources(prop)
+              : null;
+            const applyAcceptedKindsDraft = (value: unknown): string => {
+              const currentAcceptedKinds = normalizeAcceptedKindSetting(prop.acceptsKind);
+              if (currentAcceptedKinds) {
+                lastAcceptedKindSources = getPropertyOptionSources(prop);
+              }
+              const previousListItemType = prop.listItemType;
+              const nextAcceptedKinds = normalizeAcceptedKindSetting(value);
+              applyAcceptedKindSetting(prop, nextAcceptedKinds);
+              if (nextAcceptedKinds && lastAcceptedKindSources) {
+                prop.optionSources = [...lastAcceptedKindSources];
+                prop.optionsSource = prop.optionSources.includes('vault') ? 'vault' : 'manual';
+                if (prop.type === 'list' && !isEntityOnlyProperty(prop)) {
+                  prop.listItemType = previousListItemType;
+                }
+              }
+              return nextAcceptedKinds;
+            };
+            const commitAcceptedKinds = async (nextFocus: EventTarget | null): Promise<void> => {
+              const nextAcceptedKinds = normalizeAcceptedKindSetting(draftAcceptedKinds);
+              const currentAcceptedKinds = normalizeAcceptedKindSetting(prop.acceptsKind);
+              if (
+                nextAcceptedKinds === committedAcceptedKinds
+                && currentAcceptedKinds === committedAcceptedKinds
+              ) {
+                draftAcceptedKinds = committedAcceptedKinds;
+                text.setValue(committedAcceptedKinds);
+                return;
+              }
+
+              applyAcceptedKindsDraft(nextAcceptedKinds);
+              committedAcceptedKinds = normalizeAcceptedKindSetting(prop.acceptsKind);
+              draftAcceptedKinds = committedAcceptedKinds;
+              text.setValue(committedAcceptedKinds);
+              if (valueSettingsHost) {
+                const sourceSelectUpdated = this.syncPropertyValueSourceSelect(valueSettingsHost, prop);
+                if (!sourceSelectUpdated) {
+                  this.refreshCustomPropertyValueSettings(valueSettingsHost, prop);
+                } else if (nextFocus instanceof Node && valueSettingsHost.contains(nextFocus)) {
+                  this.refreshPropertyValueSettingsWhenFocusLeaves(valueSettingsHost, prop);
+                } else {
+                  this.refreshCustomPropertyValueSettings(valueSettingsHost, prop);
+                }
+              }
               await this.plugin.saveSettings();
-            }));
+            };
+
+            text
+              .setPlaceholder('project, area')
+              .setValue(committedAcceptedKinds)
+              .onChange(async (value) => {
+                draftAcceptedKinds = value;
+                applyAcceptedKindsDraft(value);
+                await this.plugin.saveSettings();
+              });
+            text.inputEl.rows = 2;
+            text.inputEl.style.minHeight = '3.5em';
+            text.inputEl.style.resize = 'vertical';
+            text.inputEl.addEventListener('blur', (event: FocusEvent) => {
+              void commitAcceptedKinds(event.relatedTarget);
+            });
+            text.inputEl.addEventListener('keydown', (event: KeyboardEvent) => {
+              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                text.inputEl.blur();
+                return;
+              }
+              if (event.key === 'Escape') {
+                event.preventDefault();
+                draftAcceptedKinds = committedAcceptedKinds;
+                text.setValue(committedAcceptedKinds);
+                text.inputEl.blur();
+              }
+            });
+          });
+        acceptedKindsSetting.settingEl.style.gridColumn = '1 / -1';
       }
 
       // Icon
@@ -2554,33 +2650,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           text.inputEl.cols = 30;
         });
 
-      if (prop.type === 'list') {
-        const listOptionsDiv = div.createDiv();
-        listOptionsDiv.style.gridColumn = '1 / -1';
-        if (prop.acceptsKind) {
-          new Setting(listOptionsDiv)
-            .setName('List values')
-            .setDesc(`Stored as entity links because this property accepts Kind "${prop.acceptsKind}".`);
-        } else {
-          new Setting(listOptionsDiv)
-            .setName('List values')
-            .setDesc('Choose whether this list stores Obsidian tags, plain text strings, or note links.')
-            .addDropdown((drop) => drop
-              .addOption('tag', 'Tags')
-              .addOption('text', 'Text strings')
-              .addOption('link', 'Links')
-              .setValue(prop.listItemType || 'tag')
-              .onChange(async (value: 'tag' | 'text' | 'link') => {
-                prop.listItemType = value;
-                await this.plugin.saveSettings();
-                this.display();
-              }));
-        }
-      }
-
-      if ((prop.type === 'selector' || prop.type === 'list' || prop.type === 'kind') && !prop.acceptsKind) {
-        this.renderPropertyOptionSettings(div, prop);
-      }
+      valueSettingsHost = div.createDiv({ cls: 'tps-gcm-property-value-settings' });
+      valueSettingsHost.style.gridColumn = '1 / -1';
+      this.renderCustomPropertyValueSettings(valueSettingsHost, prop);
 
     });
   }
@@ -2665,7 +2737,130 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     });
   }
 
-  private renderPropertyOptionSettings(container: HTMLElement, prop: CustomProperty): void {
+  private renderCustomPropertyValueSettings(
+    container: HTMLElement,
+    prop: CustomProperty,
+  ): void {
+    container.empty();
+    if (prop.type === 'list') {
+      const listOptionsDiv = container.createDiv();
+      listOptionsDiv.style.gridColumn = '1 / -1';
+      if (isEntityOnlyProperty(prop)) {
+        new Setting(listOptionsDiv)
+          .setName('List values')
+          .setDesc(`Stored as entity links because this property accepts entities matching ${formatAcceptedKindConstraint(prop.acceptsKind)}.`);
+      } else {
+        new Setting(listOptionsDiv)
+          .setName('List values')
+          .setDesc('Choose whether this list stores Obsidian tags, plain text strings, or note links.')
+          .addDropdown((drop) => {
+            drop.selectEl.dataset.tpsGcmPropertyListStorage = 'true';
+            drop
+              .addOption('tag', 'Tags')
+              .addOption('text', 'Text strings')
+              .addOption('link', 'Links')
+              .setValue(prop.listItemType || 'tag')
+              .onChange(async (value: 'tag' | 'text' | 'link') => {
+                prop.listItemType = value;
+                await this.plugin.saveSettings();
+                this.refreshCustomPropertyValueSettings(
+                  container,
+                  prop,
+                  document.activeElement === drop.selectEl ? 'list-storage' : undefined,
+                );
+              });
+          });
+      }
+    }
+
+    if (
+      prop.type === 'selector'
+      || prop.type === 'list'
+      || prop.type === 'kind'
+      || Boolean(prop.acceptsKind)
+    ) {
+      this.renderPropertyOptionSettings(container, prop, (restoreFocus) => {
+        this.refreshCustomPropertyValueSettings(
+          container,
+          prop,
+          restoreFocus ? 'value-sources' : undefined,
+        );
+      });
+    }
+  }
+
+  private refreshCustomPropertyValueSettings(
+    container: HTMLElement,
+    prop: CustomProperty,
+    focusControl?: 'value-sources' | 'list-storage',
+  ): void {
+    const scrollTop = this.containerEl.scrollTop;
+    delete container.dataset.tpsGcmPendingValueRefresh;
+    this.renderCustomPropertyValueSettings(container, prop);
+    this.containerEl.scrollTop = scrollTop;
+
+    const selector = focusControl === 'value-sources'
+      ? '[data-tps-gcm-property-value-sources="true"]'
+      : focusControl === 'list-storage'
+        ? '[data-tps-gcm-property-list-storage="true"]'
+        : '';
+    if (!selector) return;
+    container.querySelector<HTMLElement>(selector)?.focus({ preventScroll: true });
+    this.containerEl.scrollTop = scrollTop;
+  }
+
+  private refreshPropertyValueSettingsWhenFocusLeaves(
+    container: HTMLElement,
+    prop: CustomProperty,
+  ): void {
+    container.dataset.tpsGcmPendingValueRefresh = 'true';
+    if (container.dataset.tpsGcmValueRefreshListener === 'true') return;
+    container.dataset.tpsGcmValueRefreshListener = 'true';
+    container.addEventListener('focusout', (event: FocusEvent) => {
+      const nextFocus = event.relatedTarget;
+      if (nextFocus instanceof Node && container.contains(nextFocus)) return;
+      if (container.dataset.tpsGcmPendingValueRefresh !== 'true') return;
+      this.refreshCustomPropertyValueSettings(container, prop);
+    });
+  }
+
+  private syncPropertyValueSourceSelect(
+    container: HTMLElement,
+    prop: CustomProperty,
+  ): boolean {
+    const select = container.querySelector<HTMLSelectElement>(
+      '[data-tps-gcm-property-value-sources="true"]',
+    );
+    if (!select) return false;
+
+    const choices: Array<[string, string]> = [
+      ['manual', 'Manual only'],
+      ['vault', 'Vault values only'],
+      ['manual+vault', 'Manual + vault'],
+    ];
+    if (prop.type !== 'kind' && normalizeAcceptsKind(prop.acceptsKind).length > 0) {
+      choices.push(
+        ['entity', 'Entities only'],
+        ['manual+entity', 'Manual + entities'],
+        ['vault+entity', 'Vault + entities'],
+        ['manual+vault+entity', 'Manual + vault + entities'],
+      );
+    }
+    select.replaceChildren(...choices.map(([value, label]) => {
+      const option = document.createElement('option');
+      option.value = value;
+      option.text = label;
+      return option;
+    }));
+    select.value = encodePropertyOptionSources(getPropertyOptionSources(prop));
+    return true;
+  }
+
+  private renderPropertyOptionSettings(
+    container: HTMLElement,
+    prop: CustomProperty,
+    refresh: (restoreFocus: boolean) => void,
+  ): void {
     const optionsDiv = container.createDiv();
     optionsDiv.style.gridColumn = '1 / -1';
     const vaultOptions = prop.type === 'kind'
@@ -2673,37 +2868,66 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       : collectVaultPropertyOptions(this.app, prop);
     const manualOptions = normalizeManualPropertyOptions(prop.options || [], prop);
     const effectiveOptions = getEffectivePropertyOptions(this.app, prop);
+    const sources = getPropertyOptionSources(prop);
+    const sourceValue = encodePropertyOptionSources(sources);
+    const normalizedId = String(prop.id || '').trim().toLowerCase();
+    const normalizedKey = String(prop.key || '').trim().toLowerCase();
+    const relationalStatus = propertyUsesEntityOptions(prop)
+      && (normalizedId === 'status' || normalizedKey === 'status');
 
     new Setting(optionsDiv)
-      .setName('Option source')
-      .setDesc('Manual values are always kept; vault values are discovered from existing markdown frontmatter for this key.')
-      .addDropdown((drop) => drop
-        .addOption('manual', 'Manual values only')
-        .addOption('vault', 'Manual + vault values')
-        .setValue(prop.optionsSource || 'manual')
-        .onChange(async (value: 'manual' | 'vault') => {
-          prop.optionsSource = value;
+      .setName('Value sources')
+      .setDesc(relationalStatus
+        ? 'This Status field stores the relationship in status. Task checkbox workflow remains separate as task.status.'
+        : 'Combine entered choices, values already used for this property, and indexed entities of the accepted Kinds.')
+      .addDropdown((drop) => {
+        drop.selectEl.dataset.tpsGcmPropertyValueSources = 'true';
+        drop
+          .addOption('manual', 'Manual only')
+          .addOption('vault', 'Vault values only')
+          .addOption('manual+vault', 'Manual + vault');
+        if (prop.type !== 'kind' && normalizeAcceptsKind(prop.acceptsKind).length > 0) {
+          drop
+            .addOption('entity', 'Entities only')
+            .addOption('manual+entity', 'Manual + entities')
+            .addOption('vault+entity', 'Vault + entities')
+            .addOption('manual+vault+entity', 'Manual + vault + entities');
+        }
+        drop.setValue(sourceValue).onChange(async (value) => {
+          prop.optionSources = decodePropertyOptionSources(value);
+          prop.optionsSource = prop.optionSources.includes('vault') ? 'vault' : 'manual';
+          if (prop.type === 'list' && isEntityOnlyProperty(prop)) prop.listItemType = 'link';
           await this.plugin.saveSettings();
-          this.display();
-        }));
+          refresh(document.activeElement === drop.selectEl);
+        });
+      });
 
-    new Setting(optionsDiv)
-      .setName(prop.type === 'selector' || prop.type === 'kind' ? 'Manual options' : 'Manual suggestions')
-      .setDesc('Comma or newline separated values. These are merged with vault values when the option source includes the vault.')
-      .addTextArea((text) => text
-        .setValue(manualOptions.join(', '))
-        .onChange(async (value) => {
-          prop.options = normalizeManualPropertyOptions(value, prop);
-          await this.plugin.saveSettings();
-        }));
+    if (propertyUsesManualOptions(prop)) {
+      new Setting(optionsDiv)
+        .setName(prop.type === 'selector' || prop.type === 'kind' ? 'Manual options' : 'Manual suggestions')
+        .setDesc('Comma or newline separated values. Their order is preserved.')
+        .addTextArea((text) => text
+          .setValue(manualOptions.join(', '))
+          .onChange(async (value) => {
+            prop.options = normalizeManualPropertyOptions(value, prop);
+            await this.plugin.saveSettings();
+          }));
+    }
 
     const preview = optionsDiv.createDiv({ cls: 'setting-item-description' });
-    const sourceLabel = prop.optionsSource === 'vault'
+    const sourceLabel = propertyUsesVaultOptions(prop)
       ? `${vaultOptions.length} vault value${vaultOptions.length === 1 ? '' : 's'} found`
       : 'Vault values are available after switching the source above';
     preview.createSpan({ text: sourceLabel });
+    if (propertyUsesEntityOptions(prop)) {
+      preview.createSpan({ text: ` · Entities are limited to ${formatAcceptedKindConstraint(prop.acceptsKind)}.` });
+    }
     const chips = optionsDiv.createDiv({ cls: 'tps-gcm-property-options-preview' });
-    const displayedOptions = prop.optionsSource === 'vault' ? effectiveOptions : manualOptions;
+    const displayedOptions = propertyUsesVaultOptions(prop)
+      ? effectiveOptions
+      : propertyUsesManualOptions(prop)
+        ? manualOptions
+        : [];
     const previewValues = displayedOptions.slice(0, 18);
     previewValues.forEach((option) => chips.createSpan({ cls: 'tps-gcm-property-option-chip', text: option }));
     if (displayedOptions.length > previewValues.length) {

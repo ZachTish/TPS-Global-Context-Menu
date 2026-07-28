@@ -50,19 +50,24 @@ test('rendered checkbox and drag fallbacks require exactly one text match', () =
   }
 });
 
-test('last-checklist-item status prompt requires an existing nonblank note status', () => {
+test('last-checklist-item status prompt reads only the configured workflow status', () => {
   const promptFlow = sourceBetween(
     checkboxSource,
     'private async maybePromptToCompleteNote(',
     'private hasOpenChecklistItems(',
   );
-  const statusReadIndex = promptFlow.indexOf("const status = String(cache?.frontmatter?.status ?? '').trim().toLowerCase();");
-  const statusGuardIndex = promptFlow.indexOf("if (!status || status === 'complete' || status === 'wont-do') return;");
+  const serviceIndex = promptFlow.indexOf('const statusService = this.plugin.sharedServices.status;');
+  const keyIndex = promptFlow.indexOf('const workflowStatusKey = statusService.getStatusPropertyKey();');
+  const statusReadIndex = promptFlow.indexOf('statusService.getStatuses(cache?.frontmatter, workflowStatusKey)[0]');
+  const statusGuardIndex = promptFlow.indexOf('if (!status || statusService.isDoneStatus(status)) return;');
   const promptIndex = promptFlow.indexOf('promptForFinalChecklistStatus(statusChoices)');
 
-  assert.ok(statusReadIndex >= 0, 'the prompt must read only the note-level frontmatter status');
+  assert.ok(serviceIndex >= 0, 'the prompt must use the shared status service');
+  assert.ok(keyIndex > serviceIndex, 'the prompt must resolve the configured workflow-status key');
+  assert.ok(statusReadIndex > keyIndex, 'the prompt must read the configured workflow-status value');
   assert.ok(statusGuardIndex > statusReadIndex, 'missing, null, empty, and whitespace-only status values must stop the prompt');
   assert.ok(promptIndex > statusGuardIndex, 'the status-presence guard must run before opening the modal');
+  assert.doesNotMatch(promptFlow, /frontmatter\?\.status|frontmatter\.status/u);
 });
 
 test('TPS Table keeps Health precedence and lets task rows reach the shared task menu', () => {

@@ -536,7 +536,18 @@ export class HomeCaptureService {
         ? this.plugin.app.metadataCache.getFileCache(target)?.frontmatter
         : null;
       const title = String(frontmatter?.title || path.split('/').pop()?.replace(/\.md$/i, '') || 'Workout');
-      const abandoned = String(frontmatter?.status || '').trim().toLowerCase() === 'wont-do';
+      const workflowStatusKey = this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status';
+      const actualStatusKey = frontmatter
+        ? Object.keys(frontmatter).find((key) => key.toLowerCase() === workflowStatusKey.toLowerCase())
+        : undefined;
+      const workflowStatus = actualStatusKey
+        ? frontmatter?.[actualStatusKey]
+        : workflowStatusKey.toLowerCase() === 'status'
+          ? frontmatter?.status
+          : undefined;
+      const normalizedWorkflowStatus = this.plugin.sharedServices?.status?.normalize(workflowStatus)
+        ?? String(workflowStatus || '').trim().toLowerCase();
+      const abandoned = normalizedWorkflowStatus === 'wont-do';
       const startedLabel = this.formatWorkoutStart(startedAt);
       element.addClass('tps-home-workout-log-item');
       element.empty();

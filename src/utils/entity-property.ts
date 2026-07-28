@@ -1,7 +1,12 @@
 import type { TFile } from 'obsidian';
 import type { EntityIndexQuery as EntityIndexQueryContract } from '../services/entity-index-core';
 import type { CustomProperty } from '../types';
-import { formatFileWikilink, parseLinkListInput } from './list-utils';
+import {
+  formatFileWikilink,
+  parseLinkListInput,
+  parseMixedListInput,
+} from './list-utils';
+import { propertyUsesEntityOptions } from './property-option-source';
 
 const PROPERTY_PREFIXES = new Set([
   'task',
@@ -115,9 +120,10 @@ export function normalizeAcceptsKind(value: unknown): string[] {
 }
 
 export function isEntityReferenceProperty(
-  property: Pick<CustomProperty, 'acceptsKind'> | null | undefined,
+  property: Partial<Pick<CustomProperty, 'acceptsKind' | 'optionSources' | 'optionsSource' | 'type'>> | null | undefined,
 ): boolean {
-  return normalizeAcceptsKind(property?.acceptsKind).length > 0;
+  return normalizeAcceptsKind(property?.acceptsKind).length > 0
+    && propertyUsesEntityOptions(property);
 }
 
 export function entityMatchesAcceptedKinds(
@@ -273,6 +279,35 @@ export function mergeEntityReferenceList(existing: unknown, incoming: unknown): 
   return merged;
 }
 
+/**
+ * Add entity links to a mixed text list while preserving every literal value.
+ *
+ * Only actual wikilinks participate in target-based replacement. This keeps a
+ * value such as `waiting` as `waiting` instead of silently rewriting it to
+ * `[[waiting]]` when an entity is selected.
+ */
+export function mergeMixedEntityReferenceList(existing: unknown, incoming: unknown): string[] {
+  const merged = parseMixedListInput(existing);
+  const indexByTarget = new Map<string, number>();
+  merged.forEach((value, index) => {
+    const target = getEntityReferenceTargetIdentity(value);
+    if (target && !indexByTarget.has(target)) indexByTarget.set(target, index);
+  });
+
+  for (const value of parseLinkListInput(incoming)) {
+    const target = getEntityReferenceTargetIdentity(value);
+    if (!target) continue;
+    const currentIndex = indexByTarget.get(target);
+    if (currentIndex === undefined) {
+      indexByTarget.set(target, merged.length);
+      merged.push(value);
+    } else {
+      merged[currentIndex] = value;
+    }
+  }
+  return merged;
+}
+
 export function removeEntityReferenceListValues(existing: unknown, valuesToRemove: unknown): string[] {
   const removals = new Set(
     parseLinkListInput(valuesToRemove)
@@ -281,6 +316,24 @@ export function removeEntityReferenceListValues(existing: unknown, valuesToRemov
   );
   return parseLinkListInput(existing)
     .filter((value) => !removals.has(getEntityReferenceTargetIdentity(value)));
+}
+
+export function removeMixedEntityReferenceListValues(
+  existing: unknown,
+  valuesToRemove: unknown,
+): string[] {
+  const rawRemovals = new Set(parseMixedListInput(valuesToRemove));
+  const targetRemovals = new Set(
+    parseMixedListInput(valuesToRemove)
+      .map(getEntityReferenceTargetIdentity)
+      .filter(Boolean),
+  );
+  return parseMixedListInput(existing).filter((value) => {
+    const target = getEntityReferenceTargetIdentity(value);
+    return target
+      ? !targetRemovals.has(target)
+      : !rawRemovals.has(value);
+  });
 }
 
 export function entityToReferenceChoice(

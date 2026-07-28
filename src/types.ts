@@ -6,12 +6,19 @@ export interface CustomProperty {
   key: string;
   type: 'text' | 'number' | 'datetime' | 'selector' | 'list' | 'checkbox' | 'recurrence' | 'folder' | 'snooze' | 'kind';
   options?: string[]; // For selector/list suggestions
+  /**
+   * Composable sources for selectable values. `optionsSource` remains for
+   * backwards compatibility with releases where `vault` meant manual + vault.
+   */
+  optionSources?: PropertyOptionSource[];
   optionsSource?: 'manual' | 'vault';
   listItemType?: 'tag' | 'text' | 'link'; // For list
   /**
    * Restrict this property's values to indexed notes or structural Markdown
-   * lines whose Kind identity matches this value. Constrained scalar values
-   * are stored as one wikilink; constrained lists are stored as link lists.
+   * lines whose Kind identity matches any configured value. Persisted as a
+   * lowercase, comma-separated string for backward compatibility. Entity
+   * choices are stored as canonical wikilinks. Mixed source modes keep literal
+   * values unchanged; entity-only lists use link-list storage.
    */
   acceptsKind?: string;
   disabled?: boolean;
@@ -30,6 +37,8 @@ export interface CustomProperty {
   inlineShowWhen?: 'always' | 'populated' | 'exists' | 'empty' | 'blank' | 'missing' | 'never'; // Optional inline/header visibility override
   contextMenuShowWhen?: 'always' | 'populated' | 'exists' | 'empty' | 'blank' | 'missing' | 'never'; // Optional right-click menu visibility override
 }
+
+export type PropertyOptionSource = 'manual' | 'vault' | 'entity';
 
 export type VirtualBaseEmbedPlacement = 'top' | 'bottom' | 'hover';
 

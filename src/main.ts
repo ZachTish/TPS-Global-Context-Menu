@@ -100,6 +100,8 @@ import {
   type ResolveTpsBaseWriteTargetOptions,
   type TpsBaseWriteTargetResolution,
 } from './services/tps-base-write-target-service';
+import { normalizePropertyOptionSources } from './utils/property-option-source';
+import { normalizeAcceptedKindSetting } from './utils/property-option-setting';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -2218,7 +2220,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       ) {
         normalized.label = 'Folder';
       }
-      const acceptsKind = String(normalized.acceptsKind || '').trim().toLowerCase();
+      const acceptsKind = normalizeAcceptedKindSetting(normalized.acceptsKind);
       if (normalized.type === 'kind') {
         delete normalized.acceptsKind;
         normalized.allowInlineSet = false;
@@ -2227,13 +2229,23 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       } else {
         delete normalized.acceptsKind;
       }
+      normalized.optionSources = normalizePropertyOptionSources(normalized);
+      normalized.optionsSource = normalized.optionSources.includes('vault')
+        ? 'vault'
+        : 'manual';
       if (normalized.type === 'list') {
         normalized.listItemType = normalized.listItemType === 'text'
           ? 'text'
           : normalized.listItemType === 'link'
             ? 'link'
             : 'tag';
-        if (normalized.acceptsKind) normalized.listItemType = 'link';
+        if (
+          normalized.acceptsKind
+          && normalized.optionSources.length === 1
+          && normalized.optionSources[0] === 'entity'
+        ) {
+          normalized.listItemType = 'link';
+        }
       } else {
         delete normalized.listItemType;
       }

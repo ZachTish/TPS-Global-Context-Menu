@@ -7,10 +7,18 @@ import type { ParentLinkFormat } from '../types';
 export class ParentLinkHandler {
   private app: App;
   private getSettings: () => any;
+  private getWorkflowStatusValue: (frontmatter: Record<string, unknown>) => unknown;
 
-  constructor(app: App, getSettings: () => any) {
+  constructor(
+    app: App,
+    getSettings: () => any,
+    getWorkflowStatusValue: (frontmatter: Record<string, unknown>) => unknown = (
+      frontmatter,
+    ) => frontmatter.status,
+  ) {
     this.app = app;
     this.getSettings = getSettings;
+    this.getWorkflowStatusValue = getWorkflowStatusValue;
   }
 
   isCompletionStatus(status: string): boolean {
@@ -75,7 +83,7 @@ export class ParentLinkHandler {
       const values = Array.isArray(raw) ? raw : [raw];
       const matches = values.some((val: any) => this.parentValueMatchesTarget(val, file.path, target));
       if (!matches) continue;
-      const statusValue = this.normalizeStatusValue(fm.status);
+      const statusValue = this.normalizeStatusValue(this.getWorkflowStatusValue(fm));
       if (!completionSet.has(statusValue)) {
         issues.push({ path: file.path, status: statusValue || 'unset' });
       }

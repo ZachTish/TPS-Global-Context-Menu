@@ -3,6 +3,7 @@ import TPSGlobalContextMenuPlugin from '../main';
 import { TextInputModal } from '../modals/text-input-modal';
 import { ScheduledModal } from '../modals/scheduled-modal';
 import { TagSuggestModal } from '../modals/TagSuggestModal';
+import { FileSuggestModal } from '../modals/FileSuggestModal';
 import * as logger from '../logger';
 import {
   addLogLineTag,
@@ -57,17 +58,39 @@ import {
   type TpsBaseRowGroup,
 } from './base-row-grouping';
 import { resolveTpsBaseLineCreationPlan } from './base-line-creation-plan';
-import { getWikilinkDisplayText, parseLinkListInput } from '../utils/list-utils';
 import {
-  isEntityReferenceProperty,
+  formatFileWikilink,
+  getWikilinkDisplayText,
+  isLinkListProperty,
+  mergeLinkList,
+  mergeMixedList,
+  mergeStringList,
+  parseLinkListInput,
+  parseMixedListInput,
+  parseStringListInput,
+  removeLinkListValues,
+  removeStringListValues,
+} from '../utils/list-utils';
+import {
   mergeEntityReferenceList,
+  mergeMixedEntityReferenceList,
+  removeEntityReferenceListValues,
+  removeMixedEntityReferenceListValues,
   resolveConfiguredProperty,
 } from '../utils/entity-property';
-import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
 import type { CustomProperty } from '../types';
 import { isTagListProperty } from '../utils/list-utils';
 import { collectKnownVaultTags } from '../utils/known-tags';
 import { getEffectivePropertyOptions } from '../utils/property-options';
+import {
+  findRelationalStatusProperty,
+  propertyUsesEntityOptions,
+  propertyUsesManualOptions,
+} from '../utils/property-option-source';
+import {
+  addPropertyValueChoiceMenuItems,
+  showPropertyValueChoiceMenuAtElement,
+} from '../menu/property-value-choice-menu';
 import { splitLineItemContent } from '../utils/line-item-deletion';
 import { addLineEntityPropertyMenus } from '../menu/line-entity-property-menu';
 import type { TaskLineContext } from '../services/task-line-context-menu-service';
@@ -263,12 +286,19 @@ export class TpsTableView extends BasesView {
       return true;
     }
     const statusService = this.plugin.sharedServices?.status;
+    const relationalStatus = findRelationalStatusProperty(this.plugin.settings.properties);
     const defaults = resolveTpsBaseLineCreationPlan(filterRoots, {
       resolveValue: (value) => this.resolveLineCreateToken(value),
       defaultOpenStatus: 'todo',
       defaultDoneStatus: 'complete',
       isDoneStatus: (status) => statusService?.isDoneStatus?.(status)
         ?? (status === 'complete' || status === 'wont-do'),
+      isWorkflowStatusProperty: (property) => {
+        const normalized = String(property || '').trim().toLowerCase();
+        return normalized === 'task.status'
+          || normalized.endsWith('checkboxstatus')
+          || !relationalStatus;
+      },
       nonTaskStatusAsField: true,
     });
     if (defaults.blockedReason) {
@@ -351,20 +381,31 @@ export class TpsTableView extends BasesView {
       queryFields.headingpath = targetFile.path;
     }
     if (defaults.kind === 'task') {
+      const taskQueryFields = getTpsTableTaskQueryFields(
+        line,
+        (state) => {
+          const mapped = getKanbanStatusForCheckboxState(state, this.getTaskCheckboxMappings())
+            || statusService?.checkboxStateToStatus?.(state)
+            || '';
+          return statusService?.normalize?.(mapped) || mapped;
+        },
+        (status) => statusService?.isDoneStatus?.(status)
+          ?? (status === 'complete' || status === 'wont-do'),
+      );
       queryFields = {
         ...queryFields,
-        ...getTpsTableTaskQueryFields(
-          line,
-          (state) => {
-            const mapped = getKanbanStatusForCheckboxState(state, this.getTaskCheckboxMappings())
-              || statusService?.checkboxStateToStatus?.(state)
-              || '';
-            return statusService?.normalize?.(mapped) || mapped;
-          },
-          (status) => statusService?.isDoneStatus?.(status)
-            ?? (status === 'complete' || status === 'wont-do'),
-        ),
+        ...taskQueryFields,
       };
+      if (relationalStatus) {
+        if (fields[normalizeInlineKey(relationalStatus.key)] == null) {
+          delete queryFields[normalizeInlineKey(relationalStatus.key)];
+        } else {
+          queryFields[normalizeInlineKey(relationalStatus.key)] = fields[
+            normalizeInlineKey(relationalStatus.key)
+          ];
+        }
+        queryFields['task.status'] = taskQueryFields.status;
+      }
     }
     const prospectiveMatch = evaluateLogBaseFilterRoots(
       filterRoots,
@@ -558,20 +599,32 @@ export class TpsTableView extends BasesView {
         }
         if (markdownKind === 'task') {
           const statusService = this.plugin.sharedServices?.status;
+          const taskQueryFields = getTpsTableTaskQueryFields(
+            line,
+            (checkboxState) => {
+              const mappedStatus = getKanbanStatusForCheckboxState(checkboxState, checkboxMappings)
+                || statusService?.checkboxStateToStatus?.(checkboxState)
+                || '';
+              return statusService?.normalize?.(mappedStatus) || mappedStatus;
+            },
+            (status) => statusService?.isDoneStatus?.(status)
+              ?? (status === 'complete' || status === 'wont-do'),
+          );
+          const relationalStatus = findRelationalStatusProperty(this.plugin.settings.properties);
           queryFields = {
             ...queryFields,
-            ...getTpsTableTaskQueryFields(
-              line,
-              (checkboxState) => {
-                const mappedStatus = getKanbanStatusForCheckboxState(checkboxState, checkboxMappings)
-                  || statusService?.checkboxStateToStatus?.(checkboxState)
-                  || '';
-                return statusService?.normalize?.(mappedStatus) || mappedStatus;
-              },
-              (status) => statusService?.isDoneStatus?.(status)
-                ?? (status === 'complete' || status === 'wont-do'),
-            ),
+            ...taskQueryFields,
           };
+          if (relationalStatus) {
+            if (fields[normalizeInlineKey(relationalStatus.key)] == null) {
+              delete queryFields[normalizeInlineKey(relationalStatus.key)];
+            } else {
+              queryFields[normalizeInlineKey(relationalStatus.key)] = fields[
+                normalizeInlineKey(relationalStatus.key)
+              ];
+            }
+            queryFields['task.status'] = taskQueryFields.status;
+          }
         }
         if (!this.lineMatches(queryFields) && !(markdownKind && hasTpsTableLineKindFilter(filterRoots))) return;
         const filterResult = evaluateLogBaseFilterRoots(
@@ -1145,74 +1198,447 @@ export class TpsTableView extends BasesView {
           void this.openEntry(entry);
         });
       } else {
-        const configuredProperty = resolveConfiguredProperty(this.plugin.settings.properties || [], column.key);
-        if (configuredProperty && isEntityReferenceProperty(configuredProperty)) {
-          cell.dataset.tpsTableCellIntent = 'property';
-          const rawValue = entry.fields[normalizeInlineKey(configuredProperty.key)] ?? '';
-          const displayValue = this.formatEntityCellValue(rawValue, configuredProperty);
-          cell.addClass('tps-log-base-cell--editable');
-          cell.setAttr('role', 'button');
-          cell.setAttr('tabindex', '0');
-          cell.setAttr('aria-label', `${configuredProperty.label || column.label}: ${displayValue || 'empty'}`);
-          cell.setText(displayValue || `+ ${configuredProperty.label || column.label}`);
-          cell.toggleClass('is-empty', !displayValue);
-          cell.addEventListener('pointerdown', (event: PointerEvent) => event.stopPropagation());
-          cell.addEventListener('click', (event: MouseEvent) => {
-            event.preventDefault();
-            event.stopPropagation();
-            event.stopImmediatePropagation();
-            this.openEntityCellEditor(entry, column, configuredProperty);
-          });
-          cell.addEventListener('keydown', (event: KeyboardEvent) => {
-            if (event.key !== 'Enter' && event.key !== ' ') return;
-            event.preventDefault();
-            event.stopPropagation();
-            this.openEntityCellEditor(entry, column, configuredProperty);
-          });
-        } else if (this.isTagColumn(column, configuredProperty)) {
+        const configuredProperty = this.isExplicitTaskWorkflowStatusColumn(column.key)
+          ? this.createTaskWorkflowStatusProperty(column)
+          : resolveConfiguredProperty(this.plugin.settings.properties || [], column.key);
+        if (configuredProperty) {
+          this.renderConfiguredPropertyCell(cell, entry, column, configuredProperty);
+        } else if (this.isTagColumn(column, null)) {
           const currentTags = readLogLinePropertyTags(
             entry.line,
-            configuredProperty?.key || column.key,
-            entry.fields[normalizeInlineKey(configuredProperty?.key || column.key)]
-              ?? entry.queryFields?.[normalizeInlineKey(configuredProperty?.key || column.key)]
+            column.key,
+            entry.fields[normalizeInlineKey(column.key)]
+              ?? entry.queryFields?.[normalizeInlineKey(column.key)]
               ?? '',
           );
           this.configureTypedCell(
             cell,
-            `${configuredProperty?.label || column.label}: ${currentTags.length > 0 ? currentTags.map((tag) => `#${tag}`).join(', ') : 'empty'}`,
-            currentTags.length > 0 ? currentTags.map((tag) => `#${tag}`).join(', ') : `+ ${configuredProperty?.label || column.label}`,
-            () => this.openTagCellEditor(entry, configuredProperty?.key || column.key),
+            `${column.label}: ${currentTags.length > 0 ? currentTags.map((tag) => `#${tag}`).join(', ') : 'empty'}`,
+            currentTags.length > 0 ? currentTags.map((tag) => `#${tag}`).join(', ') : `+ ${column.label}`,
+            () => this.openTagCellEditor(entry, column.key),
           );
-        } else if (this.isDatetimeColumn(column, configuredProperty)) {
-          const current = entry.fields[normalizeInlineKey(configuredProperty?.key || column.key)]
-            ?? entry.queryFields?.[normalizeInlineKey(configuredProperty?.key || column.key)]
+        } else if (this.isDatetimeColumn(column, null)) {
+          const current = entry.fields[normalizeInlineKey(column.key)]
+            ?? entry.queryFields?.[normalizeInlineKey(column.key)]
             ?? '';
           this.configureTypedCell(
             cell,
-            `${configuredProperty?.label || column.label}: ${current || 'empty'}`,
-            this.getEntryValue(entry, column.key) || `+ ${configuredProperty?.label || column.label}`,
+            `${column.label}: ${current || 'empty'}`,
+            this.getEntryValue(entry, column.key) || `+ ${column.label}`,
             () => this.openScheduledCellEditor(
               entry,
-              configuredProperty ?? this.createDatetimeColumnProperty(column),
+              this.createDatetimeColumnProperty(column),
             ),
           );
-        } else if (configuredProperty?.type === 'selector') {
-          const current = this.isTaskStatusSelector(entry, configuredProperty)
-            ? entry.queryFields?.status ?? entry.queryFields?.checkboxstatus ?? ''
-            : entry.fields[normalizeInlineKey(configuredProperty.key)]
-              ?? entry.queryFields?.[normalizeInlineKey(configuredProperty.key)]
-              ?? '';
-          this.configureTypedCell(
-            cell,
-            `${configuredProperty.label || column.label}: ${current || 'empty'}`,
-            current || `+ ${configuredProperty.label || column.label}`,
-            () => this.openSelectorCellEditor(entry, configuredProperty, cell),
-          );
+        } else if (this.getWritableInlineColumnKey(column.key)) {
+          this.renderGenericInlinePropertyCell(cell, entry, column);
         } else {
           cell.setText(this.getEntryValue(entry, column.key));
         }
       }
     }
+  }
+
+  private renderConfiguredPropertyCell(
+    cell: HTMLElement,
+    entry: LogLineEntry,
+    column: LogTableColumn,
+    property: CustomProperty,
+  ): void {
+    const entityOptions = propertyUsesEntityOptions(property);
+    if (!entityOptions && this.isTagColumn(column, property)) {
+      const currentTags = readLogLinePropertyTags(
+        entry.line,
+        property.key,
+        entry.fields[normalizeInlineKey(property.key)]
+          ?? entry.queryFields?.[normalizeInlineKey(property.key)]
+          ?? '',
+      );
+      const display = currentTags.map((tag) => `#${tag}`).join(', ');
+      this.configureTypedCell(
+        cell,
+        `${property.label || column.label}: ${display || 'empty'}`,
+        display || `+ ${property.label || column.label}`,
+        () => this.openTagCellEditor(entry, property.key),
+      );
+      return;
+    }
+
+    if (!entityOptions && this.isDatetimeColumn(column, property)) {
+      const current = entry.fields[normalizeInlineKey(property.key)]
+        ?? entry.queryFields?.[normalizeInlineKey(property.key)]
+        ?? '';
+      this.configureTypedCell(
+        cell,
+        `${property.label || column.label}: ${current || 'empty'}`,
+        current || `+ ${property.label || column.label}`,
+        () => this.openScheduledCellEditor(entry, property),
+      );
+      return;
+    }
+
+    const taskWorkflowStatus = this.isTaskStatusSelector(entry, property);
+    const current = taskWorkflowStatus
+      ? entry.queryFields?.status ?? entry.queryFields?.checkboxstatus ?? ''
+      : propertyUsesEntityOptions(property)
+        ? entry.fields[normalizeInlineKey(property.key)] ?? ''
+        : entry.fields[normalizeInlineKey(property.key)]
+          ?? entry.queryFields?.[normalizeInlineKey(property.key)]
+          ?? '';
+    const display = this.formatConfiguredPropertyCellValue(current, property);
+    this.configureTypedCell(
+      cell,
+      `${property.label || column.label}: ${display || 'empty'}`,
+      display || `+ ${property.label || column.label}`,
+      () => this.openConfiguredPropertyCellEditor(entry, column, property, cell),
+    );
+  }
+
+  private renderGenericInlinePropertyCell(
+    cell: HTMLElement,
+    entry: LogLineEntry,
+    column: LogTableColumn,
+  ): void {
+    const propertyKey = this.getWritableInlineColumnKey(column.key);
+    if (!propertyKey) {
+      cell.setText(this.getEntryValue(entry, column.key));
+      return;
+    }
+    const current = readInlineFieldValue(entry.line, propertyKey);
+    const display = current || this.getEntryValue(entry, column.key);
+    this.configureTypedCell(
+      cell,
+      `${column.label}: ${display || 'empty'}`,
+      display || `+ ${column.label}`,
+      () => {
+        new TextInputModal(
+          this.plugin.app,
+          column.label || labelForKey(propertyKey),
+          current,
+          (value) => {
+            const next = String(value || '').trim();
+            void this.updateEntryLine(
+              entry,
+              (line) => setLogInlineFieldValue(line, propertyKey, next || null),
+            ).then(() => {
+              logger.flow('TpsTableView', 'generic-property-cell:set', {
+                path: entry.file.path,
+                lineNumber: entry.lineNumber + 1,
+                property: propertyKey,
+                cleared: !next,
+              });
+            });
+          },
+        ).open();
+      },
+    );
+  }
+
+  /**
+   * Resolve a Base column to an ordinary inline field. Only synthesized,
+   * computed, file, and structural task columns stay read-only/navigation
+   * targets. Everything else remains editable even before it is added to the
+   * custom-property registry.
+   */
+  private getWritableInlineColumnKey(rawColumnKey: string): string | null {
+    const raw = String(rawColumnKey || '').trim();
+    if (!raw || isSourceNoteGroupProperty(raw)) return null;
+    if (/^(?:file|formula)\./iu.test(raw)) return null;
+    if (/^task\.(?:status|checkboxstatus)$/iu.test(raw.replace(/[\s_-]+/gu, ''))) {
+      return null;
+    }
+    const key = raw.replace(/^(?:note|task|line|log|tps|kanban)\./iu, '').trim();
+    const normalized = normalizeInlineKey(key);
+    if (!normalized) return null;
+    const readOnly = new Set([
+      'title',
+      'text',
+      'linetext',
+      'source',
+      'path',
+      'filepath',
+      'filename',
+      'basename',
+      'filelink',
+      'line',
+      'linenumber',
+      'kind',
+      'itemkind',
+      'itemtype',
+      'headinglevel',
+      'headingtext',
+      'headingline',
+      'headingpath',
+      'open',
+      'isopen',
+      'done',
+      'isdone',
+      'completed',
+      'complete',
+      'checkboxstatus',
+      'taskstatus',
+      'tpsinlineprops',
+    ]);
+    return readOnly.has(normalized) ? null : key;
+  }
+
+  private formatConfiguredPropertyCellValue(value: string, property: CustomProperty): string {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    if (property.type === 'list') {
+      const items = propertyUsesEntityOptions(property)
+        ? isLinkListProperty(property)
+          ? parseLinkListInput(raw)
+          : parseMixedListInput(raw)
+        : isLinkListProperty(property)
+          ? parseLinkListInput(raw)
+          : parseStringListInput(raw);
+      return items
+        .map((item) => /^\[\[/u.test(item)
+          ? getWikilinkDisplayText(item)
+          : item)
+        .join(', ');
+    }
+    if (propertyUsesEntityOptions(property) && /^\[\[/u.test(raw)) {
+      return getWikilinkDisplayText(raw);
+    }
+    if (property.type === 'checkbox') {
+      return /^(?:true|yes|1|on)$/iu.test(raw) ? 'Yes' : 'No';
+    }
+    return raw;
+  }
+
+  private openConfiguredPropertyCellEditor(
+    entry: LogLineEntry,
+    column: LogTableColumn,
+    property: CustomProperty,
+    anchor: HTMLElement,
+  ): void {
+    if (property.type === 'selector' && this.isTaskStatusSelector(entry, property)) {
+      this.openSelectorCellEditor(entry, property, anchor);
+      return;
+    }
+    if (
+      propertyUsesEntityOptions(property)
+      || property.type === 'selector'
+      || property.type === 'kind'
+    ) {
+      this.openChoiceCellEditor(entry, property, anchor);
+      return;
+    }
+    if (property.type === 'list') {
+      this.openListCellEditor(entry, property, anchor);
+      return;
+    }
+    if (property.type === 'checkbox') {
+      this.openCheckboxCellEditor(entry, property, anchor);
+      return;
+    }
+
+    const current = readInlineFieldValue(entry.line, property.key);
+    new TextInputModal(
+      this.plugin.app,
+      property.label || column.label,
+      current,
+      (value) => {
+        const next = String(value || '').trim();
+        if (property.type === 'number' && next && !Number.isFinite(Number(next))) {
+          new Notice('Enter a valid number.');
+          return;
+        }
+        void this.setConfiguredCellValue(entry, property, next || null, 'text');
+      },
+    ).open();
+  }
+
+  private openChoiceCellEditor(
+    entry: LogLineEntry,
+    property: CustomProperty,
+    anchor: HTMLElement,
+  ): void {
+    const current = readInlineFieldValue(entry.line, property.key);
+    const menu = new Menu();
+    addPropertyValueChoiceMenuItems({
+      app: this.plugin.app,
+      source: this.plugin,
+      menu,
+      property,
+      currentValue: current,
+      onClear: () => this.setConfiguredCellValue(entry, property, null, 'clear'),
+      onChooseLiteral: (value) => this.setConfiguredCellValue(entry, property, value, 'literal'),
+      onChooseEntity: (choice) => this.setConfiguredCellValue(
+        entry,
+        property,
+        choice.wikilink,
+        'entity',
+      ),
+    });
+    showPropertyValueChoiceMenuAtElement(menu, anchor);
+  }
+
+  private openCheckboxCellEditor(
+    entry: LogLineEntry,
+    property: CustomProperty,
+    anchor: HTMLElement,
+  ): void {
+    const current = readInlineFieldValue(entry.line, property.key).trim().toLowerCase();
+    const menu = new Menu();
+    const choices: Array<[string, string | null]> = [
+      ['(none)', null],
+      ['Yes', 'true'],
+      ['No', 'false'],
+    ];
+    for (const [label, value] of choices) {
+      menu.addItem((item) => {
+        item
+          .setTitle(label)
+          .setChecked(value === null ? !current : current === value)
+          .onClick(() => {
+            void this.setConfiguredCellValue(entry, property, value, 'checkbox');
+          });
+      });
+    }
+    showPropertyValueChoiceMenuAtElement(menu, anchor);
+  }
+
+  private openListCellEditor(
+    entry: LogLineEntry,
+    property: CustomProperty,
+    anchor: HTMLElement,
+  ): void {
+    const current = readInlineFieldValue(entry.line, property.key);
+    const items = propertyUsesEntityOptions(property)
+      ? isLinkListProperty(property)
+        ? parseLinkListInput(current)
+        : parseMixedListInput(current)
+      : isLinkListProperty(property)
+        ? parseLinkListInput(current)
+        : parseStringListInput(current);
+    const menu = new Menu();
+    addPropertyValueChoiceMenuItems({
+      app: this.plugin.app,
+      source: this.plugin,
+      menu,
+      property,
+      currentValue: '',
+      onClear: () => this.setConfiguredCellValue(entry, property, null, 'list-clear'),
+      onChooseLiteral: (value) => this.addConfiguredListCellValue(entry, property, value, 'literal'),
+      onChooseEntity: (choice) => this.addConfiguredListCellValue(
+        entry,
+        property,
+        choice.wikilink,
+        'entity',
+      ),
+    });
+    if (isLinkListProperty(property) && propertyUsesManualOptions(property)) {
+      menu.addItem((item) => {
+        item
+          .setTitle('Choose note…')
+          .setIcon('file-search')
+          .onClick(() => {
+            new FileSuggestModal(this.plugin.app, (file) => {
+              const title = String(
+                this.plugin.app.metadataCache.getFileCache(file)?.frontmatter?.title || file.basename,
+              ).trim();
+              void this.addConfiguredListCellValue(
+                entry,
+                property,
+                formatFileWikilink(file.path, title),
+                'file',
+              );
+            }).open();
+          });
+      });
+    }
+    if (items.length > 0) {
+      menu.addSeparator();
+      for (const itemValue of items) {
+        menu.addItem((item) => {
+          item
+            .setTitle(`Remove ${isLinkListProperty(property)
+              ? getWikilinkDisplayText(itemValue)
+              : itemValue}`)
+            .setIcon('x')
+            .onClick(() => {
+              void this.removeConfiguredListCellValue(entry, property, itemValue);
+            });
+        });
+      }
+    }
+    showPropertyValueChoiceMenuAtElement(menu, anchor);
+  }
+
+  private async addConfiguredListCellValue(
+    entry: LogLineEntry,
+    property: CustomProperty,
+    value: string,
+    route: 'literal' | 'entity' | 'file',
+  ): Promise<void> {
+    await this.updateEntryLine(entry, (line) => {
+      const current = readInlineFieldValue(line, property.key);
+      const next = route === 'entity'
+        ? isLinkListProperty(property)
+          ? mergeEntityReferenceList(current, value)
+          : mergeMixedEntityReferenceList(current, value)
+        : isLinkListProperty(property)
+          ? mergeLinkList(current, value)
+          : propertyUsesEntityOptions(property)
+            ? mergeMixedList(current, value)
+            : mergeStringList(current, value);
+      return setLogInlineFieldValue(line, property.key, next.join(', '));
+    });
+    logger.flow('TpsTableView', 'list-cell:add', {
+      path: entry.file.path,
+      lineNumber: entry.lineNumber + 1,
+      property: property.key,
+      route,
+    });
+  }
+
+  private async removeConfiguredListCellValue(
+    entry: LogLineEntry,
+    property: CustomProperty,
+    value: string,
+  ): Promise<void> {
+    await this.updateEntryLine(entry, (line) => {
+      const current = readInlineFieldValue(line, property.key);
+      const next = propertyUsesEntityOptions(property)
+        ? isLinkListProperty(property)
+          ? removeEntityReferenceListValues(current, value)
+          : removeMixedEntityReferenceListValues(current, value)
+        : isLinkListProperty(property)
+          ? removeLinkListValues(current, value)
+          : removeStringListValues(current, value);
+      return setLogInlineFieldValue(
+        line,
+        property.key,
+        next.length > 0 ? next.join(', ') : null,
+      );
+    });
+    logger.flow('TpsTableView', 'list-cell:remove', {
+      path: entry.file.path,
+      lineNumber: entry.lineNumber + 1,
+      property: property.key,
+    });
+  }
+
+  private async setConfiguredCellValue(
+    entry: LogLineEntry,
+    property: CustomProperty,
+    value: string | null,
+    route: string,
+  ): Promise<void> {
+    await this.updateEntryLine(
+      entry,
+      (line) => setLogInlineFieldValue(line, property.key, value),
+    );
+    logger.flow('TpsTableView', 'property-cell:set', {
+      path: entry.file.path,
+      lineNumber: entry.lineNumber + 1,
+      property: property.key,
+      cleared: value == null,
+      route,
+    });
   }
 
   private configureTypedCell(
@@ -1263,35 +1689,25 @@ export class TpsTableView extends BasesView {
     };
   }
 
-  private formatEntityCellValue(value: string, property: CustomProperty): string {
-    const links = property.type === 'list'
-      ? parseLinkListInput(value)
-      : String(value || '').trim() ? [String(value).trim()] : [];
-    return links.map((link) => getWikilinkDisplayText(link)).filter(Boolean).join(', ');
+  private isExplicitTaskWorkflowStatusColumn(reference: unknown): boolean {
+    const normalized = String(reference || '')
+      .trim()
+      .toLowerCase()
+      .replace(/[\s_-]+/gu, '');
+    return normalized === 'task.status'
+      || normalized === 'task.checkboxstatus'
+      || normalized === 'checkboxstatus';
   }
 
-  private openEntityCellEditor(
-    entry: LogLineEntry,
-    column: LogTableColumn,
-    property: CustomProperty,
-  ): void {
-    openEntitySuggestModal(this.plugin.app, this.plugin, property, async (choice) => {
-      await this.updateEntryLine(entry, (line) => {
-        const current = readInlineFieldValue(line, property.key);
-        const nextValue = property.type === 'list'
-          ? mergeEntityReferenceList(current, choice.wikilink).join(', ')
-          : choice.wikilink;
-        return setLogInlineFieldValue(line, property.key, nextValue);
-      });
-      logger.flow('TpsTableView', 'entity-cell:set', {
-        path: entry.file.path,
-        lineNumber: entry.lineNumber + 1,
-        property: property.key,
-        acceptedKind: property.acceptsKind,
-        entityPath: choice.path,
-        column: column.key,
-      });
-    });
+  private createTaskWorkflowStatusProperty(column: LogTableColumn): CustomProperty {
+    return {
+      id: 'task.status',
+      key: 'task.status',
+      label: column.label || 'Task status',
+      type: 'selector',
+      options: this.plugin.sharedServices?.status?.getStatusOptions?.() || [],
+      optionSources: ['manual'],
+    };
   }
 
   private openTagCellEditor(entry: LogLineEntry, key = 'tags'): void {
@@ -1458,13 +1874,16 @@ export class TpsTableView extends BasesView {
   }
 
   private isTaskStatusSelector(entry: LogLineEntry, property: CustomProperty): boolean {
+    if (propertyUsesEntityOptions(property)) return false;
     const normalizedKey = normalizeInlineKey(property.key);
     const normalizedId = normalizeInlineKey(property.id);
     const configuredStatusKey = normalizeInlineKey(
       this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status',
     );
     return (
-      normalizedId === 'status'
+      this.isExplicitTaskWorkflowStatusColumn(property.key)
+      || this.isExplicitTaskWorkflowStatusColumn(property.id)
+      || normalizedId === 'status'
       || normalizedKey === 'status'
       || normalizedKey === 'checkboxstatus'
       || normalizedKey === configuredStatusKey
@@ -1841,6 +2260,7 @@ export class TpsTableView extends BasesView {
       file: entry.file,
       rawLine: entry.line,
       mutateLine: (updater) => this.updateEntryLine(entry, updater),
+      excludePropertyKeys: ['tag', 'tags'],
     });
 
     const editableColumns = columns
@@ -1852,31 +2272,20 @@ export class TpsTableView extends BasesView {
         && column.normalized !== 'path'
         && column.normalized !== 'linenumber'
         && column.normalized !== 'tags'
-        && !isEntityReferenceProperty(
-          resolveConfiguredProperty(this.plugin.settings.properties || [], column.key),
-        )
+        && !resolveConfiguredProperty(this.plugin.settings.properties || [], column.key)
         && (entry.fields[column.normalized] != null || entry.queryFields?.[column.normalized] == null));
 
     for (const column of editableColumns) {
-      const configuredProperty = resolveConfiguredProperty(this.plugin.settings.properties || [], column.key);
-      const current = configuredProperty && isEntityReferenceProperty(configuredProperty)
-        ? entry.fields[normalizeInlineKey(configuredProperty.key)] ?? ''
-        : entry.fields[column.normalized] ?? '';
+      const current = entry.fields[column.normalized] ?? '';
       menu.addItem((item) => {
         item
           .setTitle(current ? `${column.label}: ${current}` : `${column.label} (create field)`)
-          .setIcon(configuredProperty && isEntityReferenceProperty(configuredProperty)
-            ? 'file-search'
-            : this.isDatetimeColumn(column, configuredProperty) ? 'calendar' : 'pencil')
+          .setIcon(this.isDatetimeColumn(column, null) ? 'calendar' : 'pencil')
           .onClick(() => {
-            if (configuredProperty && isEntityReferenceProperty(configuredProperty)) {
-              this.openEntityCellEditor(entry, column, configuredProperty);
-              return;
-            }
-            if (this.isDatetimeColumn(column, configuredProperty)) {
+            if (this.isDatetimeColumn(column, null)) {
               this.openScheduledCellEditor(
                 entry,
-                configuredProperty ?? this.createDatetimeColumnProperty(column),
+                this.createDatetimeColumnProperty(column),
               );
               return;
             }

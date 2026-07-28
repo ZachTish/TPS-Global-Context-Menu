@@ -1317,7 +1317,10 @@ test('note-level recurrence skips configured daily notes instead of creating dai
     bulkEditSource.indexOf('const isTrackerRecurrence = this.isTrackerRecurrenceRule(recurrenceRule);'),
     'daily-note skip must happen before RRULE parsing',
   );
-  assert.match(bulkEditSource, /recurrenceStatuses\.includes\(fm\.status\) && !\(await this\.shouldSkipNoteLevelRecurrence\(file, fm\.scheduled\)\)/);
+  assert.match(
+    bulkEditSource,
+    /const workflowStatus = this\.normalizeStatusValue\(this\.getWorkflowStatusValue\(fm\)\);[\s\S]{0,120}recurrenceStatuses\.includes\(workflowStatus\) && !\(await this\.shouldSkipNoteLevelRecurrence\(file, fm\.scheduled\)\)/,
+  );
   assert.doesNotMatch(bulkEditSource, /return await this\.createNextDailyNoteRecurrenceInstance\(file, frontmatter, nextDate, recurrenceRule\)/);
   assert.match(readFileSync(new URL('../src/services/recurrence-service.ts', import.meta.url), 'utf8'), /isNoteLevelRecurrenceSkipped\(file, fm\)/);
   assert.match(fileNamingSource, /shouldSkipNoteLevelRecurrence\(liveFile, scheduled\)\) return "skipped"/);
@@ -1553,4 +1556,43 @@ test('task recurrence is wired into checkbox mutation, context menus, and modal 
   assert.match(taskRecurrenceServiceSource, /ensureTaskRecurrenceIdOnLine\(value, recurrenceTaskId\)/);
   assert.match(recurrenceModalSource, /GCM-AFTER-COMPLETION:P1D/);
   assert.match(recurrenceModalSource, /Next Occurrences From Completion Time/);
+});
+
+test('task right-click custom properties honor value sources and keep every configured type editable', () => {
+  const configuredStart = serviceSource.indexOf('private addConfiguredPropertyMenus');
+  const configuredEnd = serviceSource.indexOf('private addEntityPropertyMenu', configuredStart);
+  const configured = serviceSource.slice(configuredStart, configuredEnd);
+  assert.match(configured, /property\.type === 'selector' \|\| property\.type === 'kind'/);
+  assert.match(configured, /property\.type === 'checkbox'[\s\S]*?this\.addCheckboxPropertyMenu/);
+
+  const selectorStart = serviceSource.indexOf('private addSelectorPropertyMenu');
+  const selectorEnd = serviceSource.indexOf('private addDatetimePropertyMenu', selectorStart);
+  const selector = serviceSource.slice(selectorStart, selectorEnd);
+  assert.match(selector, /addPropertyValueChoiceMenuItems/);
+  assert.match(selector, /onChooseLiteral: setChoice/);
+  assert.match(selector, /onChooseEntity: \(choice\) => setChoice\(choice\.wikilink\)/);
+  assert.doesNotMatch(selector, /TextInputModal|Set custom value/);
+
+  const listStart = serviceSource.indexOf('private addListPropertyMenu');
+  const listEnd = serviceSource.indexOf('private addCheckboxPropertyMenu', listStart);
+  const list = serviceSource.slice(listStart, listEnd);
+  assert.match(list, /addPropertyValueChoiceMenuItems/);
+  assert.match(list, /mergeLinkList/);
+  assert.match(list, /mergeStringList/);
+  assert.match(list, /removeLinkListValues/);
+  assert.match(list, /removeStringListValues/);
+  assert.match(list, /readInlineTags\(line\)\.reduce/);
+  assert.doesNotMatch(list, /TextInputModal|Set custom value/);
+
+  const checkboxStart = serviceSource.indexOf('private addCheckboxPropertyMenu');
+  const checkboxEnd = serviceSource.indexOf('private addRecurrencePropertyMenu', checkboxStart);
+  const checkbox = serviceSource.slice(checkboxStart, checkboxEnd);
+  assert.match(checkbox, /\['\(none\)', null\]/);
+  assert.match(checkbox, /\['Yes', 'true'\]/);
+  assert.match(checkbox, /\['No', 'false'\]/);
+
+  const filterStart = serviceSource.indexOf('private isTaskMenuProperty');
+  const filterEnd = serviceSource.indexOf('private getContextTaskTitle', filterStart);
+  const filter = serviceSource.slice(filterStart, filterEnd);
+  assert.doesNotMatch(filter, /property\.type === 'kind'/);
 });

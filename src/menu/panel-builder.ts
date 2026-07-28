@@ -19,11 +19,28 @@ import { SubitemMetadataService, SubitemRelationEntry, SubitemRelationKind } fro
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { TextInputModal } from '../modals/text-input-modal';
 import { getCheckboxStateMarker, normalizeCheckboxStateToken } from '../utils/checkbox-state';
-import { getWikilinkDisplayText, isLinkListProperty, parseLinkListInput } from '../utils/list-utils';
+import {
+  getWikilinkDisplayText,
+  isLinkListProperty,
+  mergeLinkList,
+  mergeMixedList,
+  parseLinkListInput,
+  parseMixedListInput,
+} from '../utils/list-utils';
 import { extractWebLink } from '../utils/web-link-utils';
 import { getPlainDisplayTitle } from '../utils/display-title';
-import { isEntityReferenceProperty } from '../utils/entity-property';
-import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
+import {
+  isEntityReferenceProperty,
+  mergeEntityReferenceList,
+  mergeMixedEntityReferenceList,
+  removeEntityReferenceListValues,
+  removeMixedEntityReferenceListValues,
+} from '../utils/entity-property';
+import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
+import {
+  addPropertyValueChoiceMenuItems,
+  showPropertyValueChoiceMenuAtElement,
+} from './property-value-choice-menu';
 
 interface SubitemNode {
   file: TFile;
@@ -1030,14 +1047,24 @@ export class PanelBuilder {
 
     if (isEntityReferenceProperty(prop)) {
       if (prop.type === 'list') {
-        this.delegates.openAddListValueModal(entries, propKey, prop?.label || propKey || 'Value');
+        this.openStackedEntityListEditor(anchor, entries, prop);
         return;
       }
-      openEntitySuggestModal(this.app, this.plugin, prop, async (choice) => {
+      const current = String(
+        this.getFrontmatterValueCaseInsensitive(entries[0]?.frontmatter || {}, propKey) || '',
+      );
+      openPropertyValueSuggestModal(this.app, this.plugin, prop, current, async (choice) => {
         const files = this.filesFromEntries(entries);
-        this.setEntryFrontmatterValue(entries, propKey, choice.wikilink);
+        if (choice.kind === 'clear') {
+          this.removeEntryFrontmatterValue(entries, propKey);
+          this.refreshStackedPropertyValue(anchor, entries, prop);
+          await this.plugin.bulkEditService.removeFrontmatterKey(files, propKey);
+          await this.afterStackedPropertyEdit(files, [propKey], false);
+          return;
+        }
+        this.setEntryFrontmatterValue(entries, propKey, choice.value);
         this.refreshStackedPropertyValue(anchor, entries, prop);
-        await this.plugin.bulkEditService.updateFrontmatter(files, { [propKey]: choice.wikilink });
+        await this.plugin.bulkEditService.updateFrontmatter(files, { [propKey]: choice.value });
         await this.afterStackedPropertyEdit(files, [propKey], false);
       });
       return;
@@ -1085,6 +1112,124 @@ export class PanelBuilder {
       return;
     }
     this.openStackedTextEditor(entries, prop);
+  }
+
+  private openStackedEntityListEditor(anchor: HTMLElement, entries: any[], prop: CustomProperty): void {
+    const key = String(prop.key || '').trim();
+    if (!key) return;
+    const raw = this.getFrontmatterValueCaseInsensitive(entries[0]?.frontmatter || {}, key);
+    const current = isLinkListProperty(prop)
+      ? parseLinkListInput(raw)
+      : parseMixedListInput(raw);
+    const menu = new Menu();
+    addPropertyValueChoiceMenuItems({
+      app: this.app,
+      source: this.plugin,
+      menu,
+      property: prop,
+      currentValue: '',
+      onClear: () => this.clearStackedEntityList(anchor, entries, prop),
+      onChooseLiteral: (value) => this.addStackedEntityListValue(
+        anchor,
+        entries,
+        prop,
+        value,
+        false,
+      ),
+      onChooseEntity: (choice) => this.addStackedEntityListValue(
+        anchor,
+        entries,
+        prop,
+        choice.wikilink,
+        true,
+      ),
+    });
+    if (current.length > 0) {
+      menu.addSeparator();
+      current.forEach((value) => {
+        menu.addItem((item) => item
+          .setTitle(`Remove ${/^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value}`)
+          .setIcon('x')
+          .onClick(() => {
+            void this.removeStackedEntityListValue(anchor, entries, prop, value);
+          }));
+      });
+    }
+    showPropertyValueChoiceMenuAtElement(menu, anchor);
+  }
+
+  private async addStackedEntityListValue(
+    anchor: HTMLElement,
+    entries: any[],
+    prop: CustomProperty,
+    value: string,
+    entityReference: boolean,
+  ): Promise<void> {
+    const key = String(prop.key || '').trim();
+    const files = this.filesFromEntries(entries);
+    const changed = await this.plugin.bulkEditService.addListValues(
+      files,
+      value,
+      key,
+      entityReference,
+    );
+    if (changed <= 0) return;
+    for (const entry of entries || []) {
+      if (!entry.frontmatter || typeof entry.frontmatter !== 'object') entry.frontmatter = {};
+      const current = this.getFrontmatterValueCaseInsensitive(entry?.frontmatter || {}, key);
+      const next = entityReference
+        ? isLinkListProperty(prop)
+          ? mergeEntityReferenceList(current, value)
+          : mergeMixedEntityReferenceList(current, value)
+        : isLinkListProperty(prop)
+          ? mergeLinkList(current, value)
+          : mergeMixedList(current, value);
+      this.setFrontmatterValueCaseInsensitive(entry.frontmatter, key, next);
+    }
+    this.refreshStackedPropertyValue(anchor, entries, prop);
+    await this.afterStackedPropertyEdit(files, [key], false);
+  }
+
+  private async removeStackedEntityListValue(
+    anchor: HTMLElement,
+    entries: any[],
+    prop: CustomProperty,
+    value: string,
+  ): Promise<void> {
+    const key = String(prop.key || '').trim();
+    const files = this.filesFromEntries(entries);
+    const changed = await this.plugin.bulkEditService.removeListValues(files, value, key);
+    if (changed <= 0) return;
+    for (const entry of entries || []) {
+      if (!entry.frontmatter || typeof entry.frontmatter !== 'object') entry.frontmatter = {};
+      const current = this.getFrontmatterValueCaseInsensitive(entry?.frontmatter || {}, key);
+      const next = isLinkListProperty(prop)
+        ? removeEntityReferenceListValues(current, value)
+        : removeMixedEntityReferenceListValues(current, value);
+      if (next.length > 0) {
+        this.setFrontmatterValueCaseInsensitive(entry.frontmatter, key, next);
+      } else {
+        const matching = Object.keys(entry?.frontmatter || {})
+          .find((candidate) => candidate.toLowerCase() === key.toLowerCase());
+        if (matching) delete entry.frontmatter[matching];
+      }
+    }
+    this.refreshStackedPropertyValue(anchor, entries, prop);
+    await this.afterStackedPropertyEdit(files, [key], false);
+  }
+
+  private async clearStackedEntityList(
+    anchor: HTMLElement,
+    entries: any[],
+    prop: CustomProperty,
+  ): Promise<void> {
+    const key = String(prop.key || '').trim();
+    const files = this.filesFromEntries(entries);
+    const changed = await this.plugin.bulkEditService.removeFrontmatterKey(files, key);
+    if (changed <= 0) return;
+    this.removeEntryFrontmatterValue(entries, key);
+    this.refreshStackedPropertyValue(anchor, entries, prop);
+    await this.afterStackedPropertyEdit(files, [key], false);
   }
 
   private openStackedSelectorMenu(anchor: HTMLElement, entries: any[], prop: any): void {
@@ -1215,9 +1360,17 @@ export class PanelBuilder {
     const propKey = String(prop?.key || '').trim();
     const propKeyLower = propKey.toLowerCase();
 
-    if (isEntityReferenceProperty(prop) && prop.type !== 'list') {
+    if (isEntityReferenceProperty(prop)) {
       const raw = propKey ? this.getFrontmatterValueCaseInsensitive(frontmatter, propKey) : undefined;
-      const text = getWikilinkDisplayText(String(raw || ''));
+      const values = prop.type === 'list'
+        ? isLinkListProperty(prop)
+          ? parseLinkListInput(raw)
+          : parseMixedListInput(raw)
+        : raw ? [String(raw)] : [];
+      const text = values
+        .map((value) => /^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value)
+        .filter(Boolean)
+        .join(', ');
       const value = document.createElement('span');
       value.className = text ? 'tps-gcm-top-property-text' : 'tps-gcm-top-property-empty';
       value.textContent = text || 'Empty';
@@ -1464,7 +1617,7 @@ export class PanelBuilder {
     if (propId === 'priority' || propKey === 'priority') return 'flag';
     if (prop?.type === 'datetime' || propKey === 'scheduled' || propKey === 'date') return 'clock';
     if (propId === 'tags' || propKey === 'tags' || propKey === 'tag') return 'tags';
-    if (prop?.type === 'list' && isLinkListProperty(prop)) return 'link';
+    if (prop?.type === 'list' && (isLinkListProperty(prop) || isEntityReferenceProperty(prop))) return 'link';
     if (prop?.type === 'folder') return 'folder';
     if (prop?.type === 'checkbox' || prop?.type === 'boolean') return 'square-check';
     if (prop?.type === 'recurrence') return 'repeat';
@@ -1477,8 +1630,10 @@ export class PanelBuilder {
 
     const raw = this.getFrontmatterValueCaseInsensitive(frontmatter, key);
     const text = isEntityReferenceProperty(prop)
-      ? (prop.type === 'list' ? parseLinkListInput(raw) : parseLinkListInput(raw).slice(0, 1))
-        .map((link) => getWikilinkDisplayText(link))
+      ? (prop.type === 'list'
+        ? isLinkListProperty(prop) ? parseLinkListInput(raw) : parseMixedListInput(raw)
+        : raw ? [String(raw)] : [])
+        .map((value) => /^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value)
         .filter(Boolean)
         .join(', ')
       : this.formatStackedPropertyValue(raw);
@@ -4847,7 +5002,10 @@ export class PanelBuilder {
       ? String(statusRaw.find((value) => String(value ?? '').trim()) ?? '').trim()
       : String(statusRaw ?? '').trim();
     if (statusProp && statusProp.showInCollapsed !== false && currentStatus) {
-      strip.appendChild(this.createStatusChip(entries, statusProp));
+      const statusChip = isEntityReferenceProperty(statusProp)
+        ? this.createGenericContextPropertyChip(entries, statusProp, fm)
+        : this.createStatusChip(entries, statusProp);
+      if (statusChip) strip.appendChild(statusChip);
     }
 
     const priorityProp = properties.find((p) => p.id === 'priority' || p.key === 'priority');

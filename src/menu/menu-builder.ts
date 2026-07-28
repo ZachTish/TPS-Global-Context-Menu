@@ -3,9 +3,15 @@ import TPSGlobalContextMenuPlugin from '../main';
 import { TextInputModal } from '../modals/text-input-modal';
 import { FileSuggestModal } from '../modals/FileSuggestModal';
 import { MultiFileSelectModal } from '../modals/MultiFileSelectModal';
-import { mergeNormalizedTags, normalizeTagValue } from '../utils/tag-utils';
-import { isLinkListProperty, isTextListProperty, parseLinkListInput, parseStringListInput } from '../utils/list-utils';
-import { getEffectivePropertyOptions } from '../utils/property-options';
+import { mergeNormalizedTags, normalizeTagList, normalizeTagValue } from '../utils/tag-utils';
+import {
+  getWikilinkDisplayText,
+  isLinkListProperty,
+  isTextListProperty,
+  parseLinkListInput,
+  parseMixedListInput,
+  parseStringListInput,
+} from '../utils/list-utils';
 import * as logger from '../logger';
 import { resolveCustomProperties } from '../resolve-profiles';
 import { ViewModeService } from '../services/view-mode-service';
@@ -13,7 +19,8 @@ import { parseLinksFromFrontmatterValue } from '../services/link-target-service'
 import { promptAndCreateSubitemForParent } from '../services/subitem-creation-service';
 import { getPlainDisplayTitle } from '../utils/display-title';
 import { isEntityReferenceProperty } from '../utils/entity-property';
-import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
+import { addPropertyValueChoiceMenuItems } from './property-value-choice-menu';
+import { propertyUsesEntityOptions } from '../utils/property-option-source';
 
 export interface NativeMenuLabelOptions {
   archiveLabel?: string;
@@ -173,7 +180,7 @@ export class MenuBuilder {
     }
 
     const key = String(prop.key || '');
-    const count = key.toLowerCase() === 'status'
+    const count = key.toLowerCase() === 'status' && !propertyUsesEntityOptions(prop)
       ? await this.plugin.bulkEditService.setStatus(files, String(value ?? '').trim())
       : await this.plugin.bulkEditService.updateFrontmatter(files, { [key]: value });
     await this.finalizeContextPropertyWrite(files, [key], reason, count);
@@ -188,6 +195,80 @@ export class MenuBuilder {
     }
 
     const count = await this.plugin.bulkEditService.removeFrontmatterKey(files, key);
+    await this.finalizeContextPropertyWrite(files, [key], reason, count);
+    return count;
+  }
+
+  private async addContextListValue(
+    entries: any[],
+    prop: any,
+    value: string,
+    entityReference: boolean,
+    reason: string,
+  ): Promise<number> {
+    const files = this.getPropertyFiles(entries);
+    const key = String(prop?.key || '').trim();
+    if (files.length === 0 || !key) {
+      await this.finalizeContextPropertyWrite(files, [key], reason, 0);
+      return 0;
+    }
+    const count = await this.plugin.bulkEditService.addListValues(
+      files,
+      value,
+      key,
+      entityReference,
+    );
+    await this.finalizeContextPropertyWrite(files, [key], reason, count);
+    return count;
+  }
+
+  private async removeContextListValue(
+    entries: any[],
+    prop: any,
+    value: string,
+    reason: string,
+  ): Promise<number> {
+    const files = this.getPropertyFiles(entries);
+    const key = String(prop?.key || '').trim();
+    if (files.length === 0 || !key) {
+      await this.finalizeContextPropertyWrite(files, [key], reason, 0);
+      return 0;
+    }
+    const count = await this.plugin.bulkEditService.removeListValues(files, value, key);
+    await this.finalizeContextPropertyWrite(files, [key], reason, count);
+    return count;
+  }
+
+  private async addContextTagValue(
+    entries: any[],
+    prop: any,
+    value: string,
+    reason: string,
+  ): Promise<number> {
+    const files = this.getPropertyFiles(entries);
+    const key = String(prop?.key || '').trim();
+    if (files.length === 0 || !key) {
+      await this.finalizeContextPropertyWrite(files, [key], reason, 0);
+      return 0;
+    }
+    const count = await this.plugin.bulkEditService.addTag(files, value, key);
+    await this.finalizeContextPropertyWrite(files, [key], reason, count);
+    return count;
+  }
+
+  private async removeContextTagValue(
+    entries: any[],
+    prop: any,
+    value: string,
+    reason: string,
+  ): Promise<number> {
+    const files = this.getPropertyFiles(entries);
+    const key = String(prop?.key || '').trim();
+    if (files.length === 0 || !key) {
+      await this.finalizeContextPropertyWrite(files, [key], reason, 0);
+      return 0;
+    }
+    const count = await this.plugin.bulkEditService.removeTag(files, value, key);
     await this.finalizeContextPropertyWrite(files, [key], reason, count);
     return count;
   }
@@ -570,7 +651,7 @@ export class MenuBuilder {
           )
         ) return;
 
-        if (isEntityReferenceProperty(prop) && prop.type !== 'list') {
+        if (isEntityReferenceProperty(prop)) {
           this.addEntityReferenceToMenu(menu, propertyEntries, prop, 'tps-props');
           return;
         }
@@ -856,12 +937,7 @@ export class MenuBuilder {
       const allValues = entries.map((e: any) => this.getValueCaseInsensitive(e.frontmatter, prop.key) || '');
       const uniqueValues = new Set(allValues);
       const current = uniqueValues.size === 1 ? allValues[0] : 'Mixed';
-      const allHaveKey = entries.every((e: any) => this.hasKeyCaseInsensitive(e.frontmatter, prop.key));
       const allWithoutKey = entries.every((e: any) => !this.hasKeyCaseInsensitive(e.frontmatter, prop.key));
-      const allEmpty = allHaveKey && entries.every((e: any) => {
-        const value = this.getValueCaseInsensitive(e.frontmatter, prop.key);
-        return value === '' || value === null || value === undefined;
-      });
       const isUndefined = allWithoutKey;
       const title = isUndefined ? `${prop.label} (create field)` : `${prop.label}: ${current}`;
 
@@ -876,56 +952,44 @@ export class MenuBuilder {
       }
 
       const subMenu = (item as any).setSubmenu();
-
-      subMenu.addItem((sub: any) => {
-        sub.setTitle('(none)')
-          .setChecked(allWithoutKey)
-          .onClick(async () => {
-            await this.removeContextProperty(entries, prop.key, 'context-selector-clear');
-          });
+      addPropertyValueChoiceMenuItems({
+        app: this.app,
+        source: this.plugin,
+        menu: subMenu,
+        property: prop,
+        currentValue: current === 'Mixed' ? '' : String(current || ''),
+        onClear: () => this.removeContextProperty(entries, prop.key, 'context-selector-clear'),
+        onChooseLiteral: (value) => this.setContextPropertyValue(
+          entries,
+          prop,
+          value,
+          'context-selector-literal',
+        ),
+        onChooseEntity: (choice) => this.setContextPropertyValue(
+          entries,
+          prop,
+          choice.wikilink,
+          'context-selector-entity',
+        ),
       });
-      subMenu.addItem((sub: any) => {
-        sub.setTitle('Set custom value...')
-          .setIcon('pencil')
-          .setChecked(allEmpty)
-          .onClick(() => {
-            new TextInputModal(
-              this.app,
-              prop.label || prop.key,
-              current === 'Mixed' ? '' : String(current || ''),
-              async (value) => {
-                const next = String(value ?? '').trim();
-                if (!next) {
-                  new Notice('Value cannot be empty.');
-                  return;
-                }
-                await this.setContextPropertyValue(entries, prop, next, 'custom-selector-value');
-              },
-            ).open();
-          });
-      });
-      subMenu.addSeparator();
-
-      getEffectivePropertyOptions(this.app, prop).forEach((opt: string) => {
-        subMenu.addItem((sub: any) => {
-          sub.setTitle(opt)
-            .setChecked(current === opt)
-            .onClick(async () => {
-              await this.setContextPropertyValue(entries, prop, opt, 'context-selector-option');
-            });
-        });
-      });
-
     });
   }
 
   addEntityReferenceToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
     menu.addItem((item) => {
+      const isList = prop.type === 'list';
       const allValues = entries.map((entry: any) => this.getValueCaseInsensitive(entry.frontmatter, prop.key) || '');
       const uniqueValues = new Set(allValues);
       const current = uniqueValues.size === 1 ? String(allValues[0] || '') : 'Mixed';
-      const title = current && current !== 'Mixed'
-        ? `${prop.label}: ${current}`
+      const currentItems = isList
+        ? isLinkListProperty(prop)
+          ? parseLinkListInput(allValues[0])
+          : parseMixedListInput(allValues[0])
+        : [];
+      const title = isList
+        ? `${prop.label}${currentItems.length > 0 ? ` (${currentItems.length})` : ' (create field)'}`
+        : current && current !== 'Mixed'
+          ? `${prop.label}: ${/^\[\[/u.test(current) ? getWikilinkDisplayText(current) : current}`
         : current === 'Mixed'
           ? `${prop.label}: Mixed`
           : `${prop.label} (create field)`;
@@ -938,18 +1002,37 @@ export class MenuBuilder {
         return;
       }
       const subMenu = (item as any).setSubmenu();
-      subMenu.addItem((sub: any) => {
-        sub.setTitle('(none)').setChecked(!current).onClick(async () => {
-          await this.removeContextProperty(entries, prop.key, 'context-entity-clear');
-        });
+      addPropertyValueChoiceMenuItems({
+        app: this.app,
+        source: this.plugin,
+        menu: subMenu,
+        property: prop,
+        currentValue: isList || current === 'Mixed' ? '' : current,
+        onClear: () => this.removeContextProperty(entries, prop.key, 'context-entity-clear'),
+        onChooseLiteral: (value) => isList
+          ? this.addContextListValue(entries, prop, value, false, 'context-list-literal-option')
+          : this.setContextPropertyValue(entries, prop, value, 'context-literal-option'),
+        onChooseEntity: (choice) => isList
+          ? this.addContextListValue(
+              entries,
+              prop,
+              choice.wikilink,
+              true,
+              'context-list-entity-option',
+            )
+          : this.setContextPropertyValue(entries, prop, choice.wikilink, 'context-entity-option'),
       });
-      subMenu.addItem((sub: any) => {
-        sub.setTitle(`Choose ${prop.label || prop.key}…`).setIcon('search').onClick(() => {
-          openEntitySuggestModal(this.app, this.plugin, prop, async (choice) => {
-            await this.setContextPropertyValue(entries, prop, choice.wikilink, 'context-entity-option');
-          });
+      if (isList && currentItems.length > 0) {
+        subMenu.addSeparator();
+        currentItems.forEach((value) => {
+          subMenu.addItem((sub) => sub
+            .setTitle(`Remove ${/^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value}`)
+            .setIcon('x')
+            .onClick(() => {
+              void this.removeContextListValue(entries, prop, value, 'context-list-remove');
+            }));
         });
-      });
+      }
     });
   }
 
@@ -960,9 +1043,7 @@ export class MenuBuilder {
         ? parseStringListInput(listValues)
         : isLinkListProperty(prop)
           ? parseLinkListInput(listValues)
-        : Array.isArray(listValues)
-          ? listValues
-          : [];
+          : normalizeTagList(listValues);
       const count = items.length;
       const isUndefined = !this.plugin.fieldInitializationService.isFieldDefinedForEntries(entries, prop.key);
       const title = isUndefined ? `${prop.label} (create field)` : `${prop.label} (${count})`;
@@ -983,43 +1064,39 @@ export class MenuBuilder {
   }
 
   populateListSubmenu(menu: Menu, entries: any[], prop: any, items: string[]) {
-    const isUndefined = !this.plugin.fieldInitializationService.isFieldDefinedForEntries(entries, prop.key);
-    const isTextList = isTextListProperty(prop);
-    const isLinkList = isLinkListProperty(prop);
-
-    menu.addItem((sub) => {
-      const title = isUndefined ? `Create field and add ${prop.label.toLowerCase()}...` : `Add ${prop.label}...`;
-      sub.setTitle(title)
-        .setIcon('plus')
-        .onClick(async () => {
-          // Initialize the field if it doesn't exist yet, then immediately open the modal.
-          await this.plugin.fieldInitializationService.checkAndInitialize(entries, prop.key, []);
-          if (isTextList || isLinkList) {
-            this.delegates.openAddListValueModal(entries, prop.key, prop.label);
-          } else {
-            this.delegates.openAddTagModal(entries, prop.key);
-          }
-        });
+    const isTags = !isTextListProperty(prop) && !isLinkListProperty(prop);
+    const addLiteral = (value: string): Promise<number> => isTags
+      ? this.addContextTagValue(entries, prop, value, 'context-list-tag-option')
+      : this.addContextListValue(entries, prop, value, false, 'context-list-literal-option');
+    addPropertyValueChoiceMenuItems({
+      app: this.app,
+      source: this.plugin,
+      menu,
+      property: prop,
+      currentValue: items.length > 0 ? items.join(', ') : '',
+      onClear: () => this.removeContextProperty(entries, prop.key, 'context-list-clear'),
+      onChooseLiteral: addLiteral,
+      onChooseEntity: (choice) => this.addContextListValue(
+        entries,
+        prop,
+        choice.wikilink,
+        true,
+        'context-list-entity-option',
+      ),
     });
-    if (Array.isArray(items)) {
-      items.forEach(item => {
-        menu.addItem((sub: any) => {
-          sub.setTitle(String(item))
-            .setIcon('cross')
-            .onClick(async () => {
-              const nextItems = items.filter((existing) => String(existing) !== String(item));
-              const files = this.getPropertyFiles(entries);
-              if (files.length === 0) return;
-              if (isTextList || isLinkList) {
-                await this.plugin.bulkEditService.removeListValues(files, item, prop.key);
-              } else {
-                await this.plugin.bulkEditService.removeTag(files, item, prop.key);
-              }
-            });
-        });
+    if (items.length > 0) menu.addSeparator();
+    items.forEach((value) => {
+      menu.addItem((sub: any) => {
+        sub
+          .setTitle(`Remove ${String(value)}`)
+          .setIcon('x')
+          .onClick(() => {
+            void (isTags
+              ? this.removeContextTagValue(entries, prop, value, 'context-list-tag-remove')
+              : this.removeContextListValue(entries, prop, value, 'context-list-remove'));
+          });
       });
-    }
-
+    });
   }
 
   addDatetimeToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {

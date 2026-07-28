@@ -3,6 +3,10 @@ import type TPSGlobalContextMenuPlugin from '../../main';
 import { STATUSES } from '../../constants';
 import { findKeyCaseInsensitive, setValueCaseInsensitive, deleteValueCaseInsensitive } from '../../core';
 import { setCompletedDateValue } from '../../utils/completed-date-utils';
+import {
+  findRelationalStatusProperty,
+  propertyUsesEntityOptions,
+} from '../../utils/property-option-source';
 
 export type StatusSet = {
   canonical: string[];
@@ -59,8 +63,12 @@ export class SharedStatusService {
     const configured = (this.plugin.settings.properties || []).find((property) => {
       const id = String(property?.id || '').trim().toLowerCase();
       const key = String(property?.key || '').trim().toLowerCase();
-      return id === 'status' || key === 'status';
+      return (id === 'status' || key === 'status')
+        && !propertyUsesEntityOptions(property);
     });
+    if (!configured && findRelationalStatusProperty(this.plugin.settings.properties)) {
+      return 'taskStatus';
+    }
     return String(configured?.key || 'status').trim() || 'status';
   }
 
@@ -69,7 +77,8 @@ export class SharedStatusService {
     const configured = (this.plugin.settings.properties || []).find((property) => {
       const id = String(property?.id || '').trim().toLowerCase();
       const propertyKey = String(property?.key || '').trim().toLowerCase();
-      return id === 'status' || propertyKey === key;
+      return (id === 'status' || propertyKey === key)
+        && !propertyUsesEntityOptions(property);
     });
     const options = Array.isArray(configured?.options)
       ? configured.options.map((value) => String(value || '').trim()).filter(Boolean)
