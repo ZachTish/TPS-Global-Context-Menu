@@ -2,6 +2,7 @@ import { normalizePath, TFile } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
 import * as logger from "../logger";
 import { extractDatePrefix, extractDateSuffix, stripDatePrefix, stripDateSuffix, FULL_DATE_REGEX } from '../utils/date-suffix-utils';
+import { getDailyNotePathDateCandidate } from '../utils/daily-note-creation';
 
 /**
  * Handles automatic file naming based on title and scheduled date
@@ -13,9 +14,12 @@ export class FileNamingService {
     private recentTimestampWrites: Map<string, number> = new Map();
     private timestampWriteStateByPath: Map<string, { fingerprint: string; modifiedValue: string }> = new Map();
     private inferredDailyNoteFormat: string | null = null;
+    private knownDailyNoteConfigurations = new Map<string, { folder: string; format: string }>();
+    private dailyNoteConfigurationReady: Promise<void>;
 
     constructor(plugin: TPSGlobalContextMenuPlugin) {
         this.plugin = plugin;
+        this.dailyNoteConfigurationReady = this.loadPersistedDailyNoteConfiguration();
     }
 
     private static readonly TEMPLATE_TITLE_MARKERS: RegExp[] = [
@@ -28,7 +32,7 @@ export class FileNamingService {
     public getDailyNoteDateFormat(): string {
         const configured = String((this.plugin as any)?.settings?.dailyNoteDateFormat || '').trim();
         if (configured) return configured;
-        const dailyNotesFormat = String((this.plugin.app as any)?.internalPlugins?.plugins?.["daily-notes"]?.instance?.options?.format || '').trim();
+        const dailyNotesFormat = String(this.getCoreDailyNoteOptions()?.format || '').trim();
         if (dailyNotesFormat) return dailyNotesFormat;
         if (!this.inferredDailyNoteFormat) {
             const hasPrettyDaily = this.plugin.app.vault.getFiles().some((file) =>
@@ -48,6 +52,82 @@ export class FileNamingService {
         return !!parsed?.isValid?.() && parsed.isValid();
     }
 
+    private getCoreDailyNoteOptions(): Record<string, unknown> | null {
+        const internalPlugins = (this.plugin.app as any)?.internalPlugins;
+        const dailyNotes = internalPlugins?.getPluginById?.('daily-notes')
+            ?? internalPlugins?.plugins?.['daily-notes'];
+        const options = dailyNotes?.instance?.options;
+        return options && typeof options === 'object'
+            ? options as Record<string, unknown>
+            : null;
+    }
+
+    public registerDailyNoteConfiguration(folder: unknown, format: unknown): void {
+        const normalizedFolder = normalizePath(String(folder || '').trim()).replace(/^\/+|\/+$/g, '');
+        const normalizedFormat = String(format || '').trim() || 'YYYY-MM-DD';
+        this.knownDailyNoteConfigurations.set(
+            `${normalizedFolder}\u0000${normalizedFormat}`,
+            { folder: normalizedFolder, format: normalizedFormat },
+        );
+    }
+
+    private getPeriodicDailyNoteOptions(): Record<string, unknown> | null {
+        const periodic = (this.plugin.app as any)?.plugins?.getPlugin?.('periodic-notes')
+            ?? (this.plugin.app as any)?.plugins?.plugins?.['periodic-notes'];
+        const options = periodic?.settings?.daily;
+        return options && typeof options === 'object'
+            ? options as Record<string, unknown>
+            : null;
+    }
+
+    private async loadPersistedDailyNoteConfiguration(): Promise<void> {
+        try {
+            const configDir = String((this.plugin.app.vault as any)?.configDir || '.obsidian').trim() || '.obsidian';
+            const raw = await this.plugin.app.vault.adapter.read(normalizePath(`${configDir}/daily-notes.json`));
+            const parsed = JSON.parse(raw);
+            if (parsed && typeof parsed === 'object') {
+                this.registerDailyNoteConfiguration(
+                    (parsed as Record<string, unknown>).folder,
+                    (parsed as Record<string, unknown>).format,
+                );
+            }
+        } catch {
+            // Core Daily Notes may be disabled or may not have written settings yet.
+        }
+    }
+
+    private isConfiguredDailyNotePath(file: TFile): boolean {
+        const coreOptions = this.getCoreDailyNoteOptions();
+        const periodicOptions = this.getPeriodicDailyNoteOptions();
+        if (coreOptions) {
+            this.registerDailyNoteConfiguration(coreOptions.folder, coreOptions.format);
+        }
+        if (periodicOptions) {
+            this.registerDailyNoteConfiguration(periodicOptions.folder, periodicOptions.format);
+        }
+
+        const configurations = Array.from(this.knownDailyNoteConfigurations.values());
+        if (configurations.length === 0) {
+            configurations.push({
+                folder: '',
+                format: String((this.plugin as any)?.settings?.dailyNoteDateFormat || '').trim()
+                    || this.getDailyNoteDateFormat(),
+            });
+        }
+        return configurations.some(({ folder, format }) => {
+            const candidate = getDailyNotePathDateCandidate(file.path, folder);
+            if (!candidate) return false;
+            const formats = Array.from(new Set([
+                format,
+                String((this.plugin as any)?.settings?.dailyNoteDateFormat || '').trim(),
+            ].filter(Boolean)));
+            return formats.some((candidateFormat) => {
+                const parsed = window.moment(candidate, candidateFormat, true);
+                return Boolean(parsed?.isValid?.() && parsed.isValid());
+            });
+        });
+    }
+
     private isDailyNoteFrontmatter(frontmatter: Record<string, unknown> | undefined | null): boolean {
         if (!frontmatter) return false;
         if (this.isProcessRunFrontmatter(frontmatter)) return false;
@@ -56,7 +136,15 @@ export class FileNamingService {
         if (tags.some((tag) => tag === 'type/note/daily' || tag === 'dailynote')) return true;
         const types = this.normalizeFrontmatterStringList((frontmatter as any).type || (frontmatter as any).types)
             .map((value) => value.replace(/^#/, '').trim().toLowerCase());
-        return types.some((value) => value === 'daily' || value === 'note/daily' || value === 'type/note/daily');
+        if (types.some((value) => value === 'daily' || value === 'note/daily' || value === 'type/note/daily')) return true;
+        const kinds = this.normalizeFrontmatterStringList((frontmatter as any).kind || (frontmatter as any).kinds)
+            .map((value) => value.replace(/^#/, '').trim().toLowerCase());
+        return kinds.some((value) =>
+            value === 'dailynote'
+            || value === 'daily'
+            || value === 'note/daily'
+            || value === 'type/note/daily'
+        );
     }
 
     private isProcessRunFrontmatter(frontmatter: Record<string, unknown> | undefined | null): boolean {
@@ -275,7 +363,11 @@ export class FileNamingService {
     /**
      * Process a file when it's opened - update filename and folder path
      */
-    async processFileOnOpen(file: TFile, options: { bypassCreationGrace?: boolean } = {}): Promise<void> {
+    async processFileOnOpen(
+        file: TFile,
+        options: { bypassCreationGrace?: boolean; preserveDailyNoteIdentity?: boolean } = {},
+    ): Promise<void> {
+        await this.dailyNoteConfigurationReady;
         const started = performance.now();
         if (!this.shouldProcess(file, options)) return;
         const liveFile = this.getLiveFile(file);
@@ -316,14 +408,18 @@ export class FileNamingService {
             }
 
             // Keep frontmatter title aligned with filename only when explicitly enabled.
-            if (this.plugin.settings.autoSyncTitleFromFilename && !skipFrontmatterWrites) {
+            if (
+                this.plugin.settings.autoSyncTitleFromFilename
+                && !skipFrontmatterWrites
+                && options.preserveDailyNoteIdentity !== true
+            ) {
                 await logger.timeAsync('fileNaming:syncTitleFromFilename', { file: liveFile.path }, () => this.syncTitleFromFilename(liveFile, {
                     bypassCreationGrace: options.bypassCreationGrace,
                     onlyIfTemplateDerived: this.plugin.settings.enableAutoRename,
                 }));
             }
 
-            if (this.plugin.settings.enableAutoRename) {
+            if (this.plugin.settings.enableAutoRename && options.preserveDailyNoteIdentity !== true) {
                 await logger.timeAsync('fileNaming:updateFilenameIfNeeded', { file: liveFile.path }, () => this.updateFilenameIfNeeded(liveFile, {
                     bypassCreationGrace: options.bypassCreationGrace,
                     bypassProcessingLock: true,
@@ -603,6 +699,7 @@ export class FileNamingService {
         file: TFile,
         options: { onlyIfTemplateDerived?: boolean; onlyIfMissing?: boolean; onlyIfHasFrontmatter?: boolean; force?: boolean; bypassCreationGrace?: boolean },
     ): Promise<"updated" | "skipped"> {
+        await this.dailyNoteConfigurationReady;
         if (!options.force && !this.plugin.settings.autoSyncTitleFromFilename) return "skipped";
         if (!this.shouldProcess(file, options)) return "skipped";
         const liveFile = this.getLiveFile(file);
@@ -630,7 +727,7 @@ export class FileNamingService {
             // Date-only files (daily notes) are owned by the Companion
             // plugin for title sync. Skip them here to avoid fighting over title values.
             const isProcessRun = this.isProcessRunFrontmatter(fm);
-            if (this.isDateOnlyBasename(rawBasename) && !isProcessRun) return "skipped";
+            if ((this.isDateOnlyBasename(rawBasename) || this.isConfiguredDailyNotePath(liveFile)) && !isProcessRun) return "skipped";
             if (this.isDailyNoteFrontmatter(fm) && !isProcessRun) return "skipped";
             if (await this.plugin.bulkEditService.shouldSkipNoteLevelRecurrence(liveFile, scheduled)) return "skipped";
 
@@ -722,6 +819,7 @@ export class FileNamingService {
      * Update filename based on title and scheduled date
      */
     async updateFilenameIfNeeded(file: TFile, options: { bypassCreationGrace?: boolean; titleOverride?: string; bypassProcessingLock?: boolean } = {}): Promise<void> {
+        await this.dailyNoteConfigurationReady;
         if (!this.shouldProcess(file, options)) return;
         const liveFile = this.getLiveFile(file);
         if (!liveFile || !this.shouldProcess(liveFile, options)) return;
@@ -753,7 +851,13 @@ export class FileNamingService {
         // Date-only files (daily notes) should never be renamed based on
         // title/scheduled logic. Their filename IS the canonical identifier.
         const isProcessRun = this.isProcessRunFrontmatter(fm);
-        if (this.isDateOnlyBasename(String(liveFile.basename).trim()) && !isProcessRun) return;
+        if (
+            (
+                this.isDateOnlyBasename(String(liveFile.basename).trim())
+                || this.isConfiguredDailyNotePath(liveFile)
+            )
+            && !isProcessRun
+        ) return;
         if (this.isDailyNoteFrontmatter(fm) && !isProcessRun) return;
 
         const expectedBasename = this.buildExpectedBasename(title, scheduled);

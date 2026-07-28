@@ -1,4 +1,4 @@
-import { Notice, TFile, moment, normalizePath } from 'obsidian';
+import { Notice, TFile, moment } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { CreateTaskModal, type CreateTaskModalResult } from '../modals/create-task-modal';
 import { insertLineAfterFrontmatter, updateTaskLineTimestamps } from '../utils/task-line-metadata';
@@ -8,8 +8,12 @@ export class CreateTaskService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
   openCreateTaskModal(): void {
-    const defaultTarget = this.getTodayDailyNoteIfExists();
-    const defaultLabel = defaultTarget?.path || this.getTodayDailyNotePathLabel();
+    void this.openCreateTaskModalWithCanonicalTarget();
+  }
+
+  private async openCreateTaskModalWithCanonicalTarget(): Promise<void> {
+    const defaultTarget = await this.ensureTodayDailyNote();
+    const defaultLabel = defaultTarget?.path || "Today's Daily Note";
     new CreateTaskModal(this.plugin.app, {
       defaultTargetFile: defaultTarget,
       defaultTargetLabel: defaultLabel,
@@ -54,36 +58,10 @@ export class CreateTaskService {
   }
 
   private async ensureTodayDailyNote(): Promise<TFile | null> {
-    const dateStr = this.getTodayDailyNoteDateString();
-    return await this.plugin.noteOperationService.ensureDailyNote(dateStr);
-  }
-
-  private getTodayDailyNoteIfExists(): TFile | null {
-    const path = this.getTodayDailyNotePathLabel();
-    const file = this.plugin.app.vault.getAbstractFileByPath(path);
-    return file instanceof TFile ? file : null;
-  }
-
-  private getTodayDailyNotePathLabel(): string {
-    const folder = this.getDailyNoteFolder();
-    return normalizePath(`${folder}/${this.getTodayDailyNoteDateString()}.md`);
-  }
-
-  private getTodayDailyNoteDateString(): string {
-    const format = this.plugin.fileNamingService.getDailyNoteDateFormat();
     const momentLib = (window as any).moment || (moment as any);
-    return momentLib().format(format || 'YYYY-MM-DD');
-  }
-
-  private getDailyNoteFolder(): string {
-    try {
-      const dailyNotesPlugin = (this.plugin.app as any).internalPlugins?.plugins?.['daily-notes'];
-      const folder = String(dailyNotesPlugin?.instance?.options?.folder || '').trim();
-      if (folder) return folder;
-    } catch (error) {
-      logger.warn('[TPS GCM] Failed to resolve Daily Notes folder for Create task', error);
-    }
-    return 'System/Dailynotes';
+    return this.plugin.noteOperationService.ensureDailyNote(
+      `${momentLib().format('YYYY-MM-DD')} 00:00:00`,
+    );
   }
 
   private async focusLineBeforeInsertedTask(file: TFile, taskLine: string): Promise<void> {

@@ -1,5 +1,6 @@
 import { App, TFile, moment, normalizePath } from 'obsidian';
 import { parseDateFromFilename } from './daily-file-date';
+import { getDailyNotePathDateCandidate } from './daily-note-creation';
 import { readInlineFieldValue } from './task-line-metadata';
 
 type FileLike = {
@@ -39,8 +40,9 @@ function getCoreDailyNotesOptions(app: App): Record<string, unknown> | null {
 }
 
 export function parseDailyNoteFileDate(app: App, settings: unknown, file: FileLike): string | null {
-  if (!isFileInDailyNoteFolder(app, file)) return null;
-  const parsed = parseDateFromFilename(file.basename, getDailyNoteDateFormat(app, settings));
+  const candidate = getDailyNotePathDateCandidate(file.path, getDailyNoteFolder(app));
+  if (!candidate) return null;
+  const parsed = parseDateFromFilename(candidate, getDailyNoteDateFormat(app, settings));
   return parsed?.isValid?.() && parsed.isValid() ? parsed.format('YYYY-MM-DD') : null;
 }
 
@@ -105,12 +107,6 @@ export function getDailyNotePathForIsoDate(app: App, settings: unknown, isoDate:
     : isoDate;
   const folder = normalizeDailyFolder(getDailyNoteFolder(app));
   return normalizePath(folder ? `${folder}/${basename}.md` : `${basename}.md`);
-}
-
-function isFileInDailyNoteFolder(app: App, file: FileLike): boolean {
-  const folder = normalizeDailyFolder(getDailyNoteFolder(app));
-  if (!folder) return !String(file.path || '').includes('/');
-  return String(file.path || '') === `${folder}/${file.basename}.md`;
 }
 
 export function normalizeDailyFolder(folder: string): string {

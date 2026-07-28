@@ -251,7 +251,15 @@ export class BulkEditService {
         if (tags.some((tag) => tag === "type/note/daily" || tag === "dailynote")) return true;
         const type = this.normalizeStringList((frontmatter as any).type || (frontmatter as any).types)
             .map((value) => value.replace(/^#/, "").trim().toLowerCase());
-        return type.some((value) => value === "daily" || value === "note/daily" || value === "type/note/daily");
+        if (type.some((value) => value === "daily" || value === "note/daily" || value === "type/note/daily")) return true;
+        const kind = this.normalizeStringList((frontmatter as any).kind || (frontmatter as any).kinds)
+            .map((value) => value.replace(/^#/, "").trim().toLowerCase());
+        return kind.some((value) =>
+            value === "dailynote"
+            || value === "daily"
+            || value === "note/daily"
+            || value === "type/note/daily"
+        );
     }
 
     private isProcessRunFrontmatter(frontmatter: Record<string, unknown> | undefined): boolean {

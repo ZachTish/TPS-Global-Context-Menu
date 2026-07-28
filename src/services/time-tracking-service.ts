@@ -195,7 +195,7 @@ export class TimeTrackingService {
     const now = new Date();
     const targetFile = target === 'source-note' && noteFile instanceof TFile
       ? noteFile
-      : await this.ensureMarkdownFile(this.getDailyNotePath(now), this.getDailyNoteTitle(now));
+      : await this.ensureDailyNoteForDate(now);
     const tpsId = this.createId('task');
     const taskTitle = String(title || '').replace(/\s+/g, ' ').trim() || 'Untitled timer';
     const lineNumber = await this.insertTimerTask(targetFile, tpsId, taskTitle);
@@ -994,7 +994,16 @@ export class TimeTrackingService {
         'Time Tracking',
       );
     }
-    return this.ensureMarkdownFile(this.getDailyNotePath(start), this.getDailyNoteTitle(start));
+    return this.ensureDailyNoteForDate(start);
+  }
+
+  private async ensureDailyNoteForDate(date: Date): Promise<TFile> {
+    const isoDate = this.formatYmd(date);
+    const file = await this.plugin.noteOperationService.ensureDailyNote(`${isoDate} 00:00:00`);
+    if (!(file instanceof TFile)) {
+      throw new Error(`Failed to create Daily Note for time tracking: ${isoDate}`);
+    }
+    return file;
   }
 
   private async ensureMarkdownFile(path: string, title: string): Promise<TFile> {
@@ -1025,29 +1034,6 @@ export class TimeTrackingService {
         await this.plugin.app.vault.createFolder(current);
       }
     }
-  }
-
-  private getDailyNoteTitle(date: Date): string {
-    const moment = (window as any).moment;
-    const format = this.getDailyNoteFormat();
-    return moment ? moment(date).format(format) : this.formatYmd(date);
-  }
-
-  private getDailyNotePath(date: Date): string {
-    const daily = this.getDailyNoteOptions();
-    const title = this.getDailyNoteTitle(date);
-    const folder = normalizePath(String(daily?.folder || '').trim()).replace(/^\/+|\/+$/g, '');
-    return normalizePath(`${folder ? `${folder}/` : ''}${title}.md`);
-  }
-
-  private getDailyNoteFormat(): string {
-    const daily = this.getDailyNoteOptions();
-    return String(daily?.format || 'YYYY-MM-DD').trim() || 'YYYY-MM-DD';
-  }
-
-  private getDailyNoteOptions(): Record<string, unknown> | null {
-    const dailyPlugin = (this.plugin.app as any)?.internalPlugins?.plugins?.['daily-notes']?.instance;
-    return dailyPlugin?.options || null;
   }
 
   private async scanStoredSessions(): Promise<StoredSession[]> {

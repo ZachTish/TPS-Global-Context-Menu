@@ -78,7 +78,14 @@ export class HomeCaptureService {
       }
       return this.openCaptureModalForTarget(requested, date, options);
     }
-    return this.openCaptureModalForTarget(this.getDailyNoteFile(date), date, options);
+    try {
+      return this.openCaptureModalForTarget(await this.ensureDailyNote(date), date, options);
+    } catch (error) {
+      logger.flowError('HomeCapture', 'capture-modal:daily-note-unavailable', error, {
+        date: date.format?.('YYYY-MM-DD') ?? null,
+      });
+      return false;
+    }
   }
 
   async openCaptureModalForCurrentNote(): Promise<boolean> {
@@ -298,7 +305,16 @@ export class HomeCaptureService {
       new Notice('The capture target no longer exists. Nothing was written.', 8000);
       return null;
     }
-    const file = requestedFile instanceof TFile ? requestedFile : await this.ensureDailyNote(date);
+    let file: TFile;
+    try {
+      file = requestedFile instanceof TFile ? requestedFile : await this.ensureDailyNote(date);
+    } catch (error) {
+      logger.flowError('HomeCapture', 'capture:daily-note-unavailable', error, {
+        date: date.format?.('YYYY-MM-DD') ?? null,
+        task: options.task === true,
+      });
+      return null;
+    }
     const timestamp = getMoment()().format('YYYY-MM-DD HH:mm:ss');
     const block = options.preserveMarkdown === true
       ? formatCaptureMarkdownForWrite(value, timestamp)
@@ -602,46 +618,13 @@ export class HomeCaptureService {
   }
 
   private async ensureDailyNote(date: any): Promise<TFile> {
-    const existing = this.getDailyNoteFile(date);
-    if (existing) return existing;
-
-    const path = this.getDailyNotePath(date);
-    const folder = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-    if (folder) await this.ensureFolder(folder);
-    const content = `---\nscheduled: ${date.format('YYYY-MM-DD')} 00:00:00\n---\n\n`;
-    logger.flow('HomeCapture', 'daily-note:created', {
-      path,
-      date: date.format('YYYY-MM-DD'),
-      forcedHeading: false,
-    });
-    return this.plugin.app.vault.create(path, content);
-  }
-
-  private getDailyNoteFile(date: any): TFile | null {
-    const path = this.getDailyNotePath(date);
-    const file = this.plugin.app.vault.getAbstractFileByPath(path);
-    return file instanceof TFile ? file : null;
-  }
-
-  private getDailyNotePath(date: any): string {
-    const dailyNotes = (this.plugin.app as any).internalPlugins?.plugins?.['daily-notes']?.instance?.options ?? {};
-    const format = typeof dailyNotes.format === 'string' && dailyNotes.format.trim() ? dailyNotes.format.trim() : 'YYYY-MM-DD';
-    const folder = typeof dailyNotes.folder === 'string' && dailyNotes.folder.trim()
-      ? dailyNotes.folder.trim().replace(/^\/+|\/+$/g, '')
-      : '';
-    const basename = date.format(format);
-    return folder ? `${folder}/${basename}.md` : `${basename}.md`;
-  }
-
-  private async ensureFolder(folderPath: string): Promise<void> {
-    const parts = folderPath.split('/').filter(Boolean);
-    let current = '';
-    for (const part of parts) {
-      current = current ? `${current}/${part}` : part;
-      if (!this.plugin.app.vault.getAbstractFileByPath(current)) {
-        await this.plugin.app.vault.createFolder(current);
-      }
+    const isoDate = date?.format?.('YYYY-MM-DD');
+    if (!isoDate) throw new Error('Home capture could not resolve the Daily Note date.');
+    const file = await this.plugin.noteOperationService.ensureDailyNote(`${isoDate} 00:00:00`);
+    if (!(file instanceof TFile)) {
+      throw new Error(`Daily Note creation failed for ${isoDate}.`);
     }
+    return file;
   }
 
 }

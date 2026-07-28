@@ -494,42 +494,56 @@ export class TpsHomeView extends ItemView {
   }
 
   private async navigateToDailyNoteHome(date: any): Promise<void> {
-    const dailyNote = await this.plugin.homeCaptureService.getDailyNoteForCapture(date);
-    logger.flow('DailyNoteHome', 'navigate', {
-      from: this.dailyNotePath,
-      to: dailyNote.path,
-      dateIso: date.format('YYYY-MM-DD'),
-    });
-    await this.leaf.setViewState({
-      type: TPS_HOME_VIEW_TYPE,
-      active: true,
-      pinned: this.leaf.getViewState().pinned,
-      state: {
-        dailyNotePath: dailyNote.path,
+    try {
+      const dailyNote = await this.plugin.homeCaptureService.getDailyNoteForCapture(date);
+      logger.flow('DailyNoteHome', 'navigate', {
+        from: this.dailyNotePath,
+        to: dailyNote.path,
         dateIso: date.format('YYYY-MM-DD'),
-      },
-    });
+      });
+      await this.leaf.setViewState({
+        type: TPS_HOME_VIEW_TYPE,
+        active: true,
+        pinned: this.leaf.getViewState().pinned,
+        state: {
+          dailyNotePath: dailyNote.path,
+          dateIso: date.format('YYYY-MM-DD'),
+        },
+      });
+    } catch (error) {
+      logger.flowError('DailyNoteHome', 'navigate:daily-note-unavailable', error, {
+        from: this.dailyNotePath,
+        dateIso: date.format?.('YYYY-MM-DD') ?? null,
+      });
+    }
   }
 
   private async openSelectedDailyNoteForEditing(date: any): Promise<void> {
-    if (!this.isDailyNoteBacked()) {
-      await this.plugin.homeCaptureService.openDailyNote(date);
-      return;
+    try {
+      if (!this.isDailyNoteBacked()) {
+        await this.plugin.homeCaptureService.openDailyNote(date);
+        return;
+      }
+      const dailyNote = this.getBackedDailyNoteFile()
+        ?? await this.plugin.homeCaptureService.getDailyNoteForCapture(date);
+      logger.flow('DailyNoteHome', 'edit:live-preview', { path: dailyNote.path });
+      this.plugin.dailyNoteHomeService.allowLivePreview(this.leaf, dailyNote.path);
+      await this.leaf.setViewState({
+        type: 'markdown',
+        active: true,
+        pinned: this.leaf.getViewState().pinned,
+        state: {
+          file: dailyNote.path,
+          mode: 'source',
+          source: false,
+        },
+      });
+    } catch (error) {
+      logger.flowError('DailyNoteHome', 'edit:daily-note-unavailable', error, {
+        path: this.dailyNotePath,
+        dateIso: date.format?.('YYYY-MM-DD') ?? null,
+      });
     }
-    const dailyNote = this.getBackedDailyNoteFile()
-      ?? await this.plugin.homeCaptureService.getDailyNoteForCapture(date);
-    logger.flow('DailyNoteHome', 'edit:live-preview', { path: dailyNote.path });
-    this.plugin.dailyNoteHomeService.allowLivePreview(this.leaf, dailyNote.path);
-    await this.leaf.setViewState({
-      type: 'markdown',
-      active: true,
-      pinned: this.leaf.getViewState().pinned,
-      state: {
-        file: dailyNote.path,
-        mode: 'source',
-        source: false,
-      },
-    });
   }
 
   private async refreshHomeActiveTimerButton(): Promise<void> {
@@ -667,7 +681,22 @@ export class TpsHomeView extends ItemView {
       return;
     }
 
-    const dailyNote = await this.plugin.homeCaptureService.getDailyNoteForCapture(today.clone());
+    let dailyNote: TFile;
+    try {
+      dailyNote = await this.plugin.homeCaptureService.getDailyNoteForCapture(today.clone());
+    } catch (error) {
+      logger.flowError('HomeView', 'quick-capture:daily-note-unavailable', error, {
+        dateIso: today.format?.('YYYY-MM-DD') ?? null,
+      });
+      editorHost.empty();
+      editorHost.createDiv({
+        cls: 'tps-home-empty',
+        text: 'Daily Note unavailable. Check the Daily Notes template setting.',
+      });
+      addButton.disabled = true;
+      taskButton.disabled = true;
+      return;
+    }
     if (!this.isHomeRenderCurrent(generation)) return;
     const editTarget = this.homeCaptureEditTarget?.path === dailyNote.path ? this.homeCaptureEditTarget : null;
     let dailyContent = await this.app.vault.read(dailyNote);
@@ -1629,8 +1658,23 @@ export class TpsHomeView extends ItemView {
     host.dataset.tpsBasePath = baseFile.path;
     host.dataset.path = baseFile.path;
     host.dataset.src = baseFile.path;
-    const dailyNote = this.getBackedDailyNoteFile()
-      ?? await this.plugin.homeCaptureService.getDailyNoteForCapture(today?.clone ? today.clone() : today);
+    let dailyNote: TFile;
+    try {
+      dailyNote = this.getBackedDailyNoteFile()
+        ?? await this.plugin.homeCaptureService.getDailyNoteForCapture(today?.clone ? today.clone() : today);
+    } catch (error) {
+      logger.flowError('HomeView', 'base:daily-note-unavailable', error, {
+        basePath: baseFile.path,
+        dateIso: today?.format?.('YYYY-MM-DD') ?? null,
+      });
+      host.empty();
+      host.createDiv({
+        cls: 'tps-home-empty',
+        text: 'Daily Note unavailable. Check the Daily Notes template setting.',
+      });
+      this.finishComponentPanel(panel, component);
+      return;
+    }
     const sourcePath = dailyNote.path;
     panel.dataset.tpsContextPath = sourcePath;
     host.dataset.tpsContextPath = sourcePath;

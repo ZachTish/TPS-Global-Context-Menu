@@ -1285,7 +1285,7 @@ test('daily note task scheduled inheritance is configurable and shared across ta
   assert.match(serviceSource, /resolveTaskScheduledValue\(this\.plugin\.app, this\.plugin\.settings, context\.file, context\.rawLine\)/);
   assert.match(serviceSource, /maybePromptMoveScheduledDailyNoteTask\(context, result\.date\)/);
   assert.match(serviceSource, /DailyNoteTaskMovePromptModal/);
-  assert.match(noteOperationSource, /getDailyNotePathForIsoDate\(this\.app, this\.plugin\.settings, isoDate\)/);
+  assert.match(noteOperationSource, /findExistingDailyNoteForIsoDate\(this\.app, this\.plugin\.settings, isoDate\)/);
 });
 
 test('daily note creation reuses equivalent D/DD daily note paths before creating duplicates', () => {
@@ -1294,10 +1294,9 @@ test('daily note creation reuses equivalent D/DD daily note paths before creatin
   assert.match(dailyNoteScheduleSource, /parseDailyNoteFileDate\(app, settings, file\) === wanted/);
   assert.match(dailyNoteScheduleSource, /export function getDailyNoteScheduledValueForIsoDate/);
   assert.match(noteOperationSource, /findExistingDailyNoteForIsoDate\(this\.app, this\.plugin\.settings, isoDate\)/);
-  assert.match(noteOperationSource, /normalizeCreatedDailyNote\(existingDailyNote, titleValue, folder, isoDate\)/);
+  assert.match(noteOperationSource, /normalizeCreatedDailyNote\([\s\S]{0,180}existingDailyNote[\s\S]{0,180}isoDate/);
   assert.match(noteOperationSource, /getDailyNoteScheduledValueForIsoDate\(isoDate\)/);
-  assert.match(dailyNavSource, /findExistingDailyNoteForIsoDate\(this\.plugin\.app, this\.plugin\.settings, isoDate\)/);
-  assert.match(dailyNavSource, /normalizeCreatedDailyNote\(existingEquivalent, titleValue, folder, isoDate\)/);
+  assert.match(dailyNavSource, /noteOperationService\.ensureDailyNote\(`\$\{isoDate\} 00:00:00`\)/);
   assert.match(bulkEditSource, /findExistingDailyNoteForIsoDate\(this\.plugin\.app, this\.plugin\.settings, nextIsoDate\)/);
 });
 
@@ -1334,8 +1333,8 @@ test('daily-note-marked files are not renamed or title-synced by scheduled note 
   assert.match(fileNamingSource, /value === 'daily' \|\| value === 'note\/daily' \|\| value === 'type\/note\/daily'/);
   assert.match(bulkEditSource, /const title = typeof frontmatter\?\.title === "string" \? frontmatter\.title\.trim\(\) : "";/);
   assert.match(bulkEditSource, /if \(titleIsDailyNoteDate\) return true;/);
-  assert.match(fileNamingSource, /if \(this\.isDateOnlyBasename\(rawBasename\) && !isProcessRun\) return "skipped";\s*if \(this\.isDailyNoteFrontmatter\(fm\) && !isProcessRun\) return "skipped";/);
-  assert.match(fileNamingSource, /if \(this\.isDateOnlyBasename\(String\(liveFile\.basename\)\.trim\(\)\) && !isProcessRun\) return;\s*if \(this\.isDailyNoteFrontmatter\(fm\) && !isProcessRun\) return;/);
+  assert.match(fileNamingSource, /this\.isDateOnlyBasename\(rawBasename\) \|\| this\.isConfiguredDailyNotePath\(liveFile\)/);
+  assert.match(fileNamingSource, /this\.isDateOnlyBasename\(String\(liveFile\.basename\)\.trim\(\)\)[\s\S]{0,120}\|\| this\.isConfiguredDailyNotePath\(liveFile\)/);
   assert.match(bulkEditSource, /private isProcessRunFrontmatter\(frontmatter: Record<string, unknown> \| undefined\): boolean/);
   assert.match(bulkEditSource, /if \(this\.isProcessRunFrontmatter\(frontmatter\)\) return false;/);
 });
@@ -1406,10 +1405,10 @@ test('create task command appends to today daily note and does not create task s
   assert.match(commandsSource, /plugin\.createTaskService\.openCreateTaskModal\(\)/);
   assert.match(mainSource, /createTaskService: CreateTaskService/);
   assert.match(mainSource, /new CreateTaskService\(this\)/);
-  assert.match(createTaskServiceSource, /noteOperationService\.ensureDailyNote\(dateStr\)/);
+  assert.match(createTaskServiceSource, /noteOperationService\.ensureDailyNote\([\s\S]{0,100}format\('YYYY-MM-DD'\)[\s\S]{0,40}00:00:00/);
   assert.match(createTaskServiceSource, /updateTaskLineTimestamps\(taskLine/);
   assert.match(createTaskServiceSource, /vault\.process\(targetFile, \(content\) => insertLineAfterFrontmatter\(content, stampedTaskLine\)\)/);
-  assert.match(createTaskServiceSource, /fileNamingService\.getDailyNoteDateFormat\(\)/);
+  assert.match(createTaskServiceSource, /openCreateTaskModalWithCanonicalTarget/);
   assert.match(createTaskModalSource, /Natural language schedule text is parsed into the Scheduled field/);
   assert.match(createTaskModalSource, /parseCreateTaskInput\(this\.titleInput\?\.getValue\?\.\(\) \|\| ''\)/);
   assert.match(createTaskModalSource, /this\.previewEl\.createEl\('mark'/);

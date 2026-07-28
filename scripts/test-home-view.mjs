@@ -257,7 +257,8 @@ test('TPS Home separates dashboard UI from daily-note capture storage', () => {
   assert.doesNotMatch(viewSource, /const next = this\.insertUnderHeading\(existing, 'Capture', block\)/);
   assert.doesNotMatch(captureServiceSource, /const next = this\.insertUnderHeading\(existing, 'Capture', block\)/);
   assert.doesNotMatch(captureServiceSource, /## Capture\\n\\n/);
-  assert.match(captureServiceSource, /getDailyNotePath/);
+  assert.match(captureServiceSource, /noteOperationService\.ensureDailyNote/);
+  assert.doesNotMatch(captureServiceSource, /getDailyNotePath/);
   assert.doesNotMatch(viewSource, /private async appendCapture/);
   assert.doesNotMatch(viewSource, /private insertCaptureBlock/);
   assert.doesNotMatch(viewSource, /private async ensureDailyNote/);

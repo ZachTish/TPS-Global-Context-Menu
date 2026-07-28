@@ -99,10 +99,16 @@ function installMomentStub() {
   globalThis.window = { moment: (value) => (value === undefined ? wrap(fixedNow) : wrap(value)) };
 }
 
-function createPluginHarness({ existingFiles = {}, dailyNotes = {}, activeFilePath = '' } = {}) {
+function createPluginHarness({
+  existingFiles = {},
+  dailyNotes = {},
+  activeFilePath = '',
+  dailyNoteTemplateContent = null,
+} = {}) {
   const files = new Map(Object.entries(existingFiles));
   const folders = new Set();
   const opened = [];
+  const dailyNoteEnsures = [];
   class FakeFile {
     constructor(path) {
       this.path = path;
@@ -167,7 +173,31 @@ function createPluginHarness({ existingFiles = {}, dailyNotes = {}, activeFilePa
       opened.push({ file: file.path, preview, leaf: leafFactory?.(), options });
     },
   };
-  return { plugin, files, folders, opened };
+  plugin.noteOperationService = {
+    async ensureDailyNote(dateValue) {
+      const isoDate = String(dateValue || '').slice(0, 10);
+      dailyNoteEnsures.push(isoDate);
+      const date = window.moment(isoDate);
+      const format = String(dailyNotes.format || '').trim() || 'YYYY-MM-DD';
+      const folder = String(dailyNotes.folder || '').trim().replace(/^\/+|\/+$/g, '');
+      const path = `${folder ? `${folder}/` : ''}${date.format(format)}.md`;
+      if (!files.has(path)) {
+        const parts = folder.split('/').filter(Boolean);
+        let current = '';
+        for (const part of parts) {
+          current = current ? `${current}/${part}` : part;
+          folders.add(current);
+        }
+        files.set(
+          path,
+          dailyNoteTemplateContent
+            ?? `---\nscheduled: ${isoDate} 00:00:00\n---\n\n`,
+        );
+      }
+      return new FakeFile(path);
+    },
+  };
+  return { plugin, files, folders, opened, dailyNoteEnsures };
 }
 
 const { HomeCaptureService } = await loadCaptureServiceModule();
@@ -200,6 +230,43 @@ test('Home capture writes selected-day daily notes through Daily Notes settings'
     ].join('\n'),
   );
   assert.deepEqual(globalThis.__notices.slice(-1), ['Added to 2026-07-08.']);
+});
+
+test('Home capture delegates creation and preserves the complete Daily Notes template', async () => {
+  installMomentStub();
+  const template = [
+    '---',
+    'title: Wednesday planning',
+    'kind: dailynote',
+    '---',
+    '',
+    '# Plan',
+    '',
+    'Template body',
+    '',
+  ].join('\n');
+  const { plugin, files, dailyNoteEnsures } = createPluginHarness({
+    dailyNotes: {
+      folder: 'Inbox/TPS Home QA',
+      format: 'YYYY-MM-DD',
+    },
+    dailyNoteTemplateContent: template,
+  });
+  const service = new HomeCaptureService(plugin);
+
+  const file = await service.capture('Preserve the template', window.moment('2026-07-08'));
+
+  assert.equal(file.path, 'Inbox/TPS Home QA/2026-07-08.md');
+  assert.deepEqual(dailyNoteEnsures, ['2026-07-08']);
+  assert.equal(
+    files.get(file.path),
+    `${template}\n- Preserve the template %% tps-inline-props:{"createdDate":"2026-07-04 12:34:00"} %%\n`,
+  );
+  const ensureMethod = globalThis.__homeCaptureServiceSource.match(
+    /private async ensureDailyNote\(date: any\): Promise<TFile> \{([\s\S]*?)\n  \}/u,
+  )?.[1] ?? '';
+  assert.match(ensureMethod, /noteOperationService\.ensureDailyNote/u);
+  assert.doesNotMatch(ensureMethod, /vault\.create/u);
 });
 
 test('Home capture stores createdDate on every root Markdown line and leaves nested descendants unstamped', async () => {

@@ -1,7 +1,6 @@
 import { App, Component, Modal, TFile, WorkspaceLeaf, setIcon, normalizePath, Notice, Platform } from "obsidian";
 import TPSGlobalContextMenuPlugin from "../main";
 import * as logger from "../logger";
-import { findExistingDailyNoteForIsoDate, getDailyNoteScheduledValueForIsoDate } from "../utils/daily-note-task-schedule";
 
 type DailyNavTarget = {
     leaf: WorkspaceLeaf;
@@ -671,218 +670,16 @@ export class DailyNoteNavManager extends Component {
         el.addEventListener("touchstart", suppressPointerDown, { capture: true, passive: false, signal } as any);
     }
 
-    private async ensureFolderPath(path: string): Promise<void> {
-        const clean = normalizePath(path).trim();
-        if (!clean) return;
-        const parts = clean.split("/").filter(Boolean);
-        let current = "";
-        for (const part of parts) {
-            current = current ? `${current}/${part}` : part;
-            if (!this.plugin.app.vault.getAbstractFileByPath(current)) {
-                await this.plugin.app.vault.createFolder(current);
-            }
-        }
-    }
-
-    private async createViaCorePlugin(targetDate: any): Promise<TFile | null> {
-        try {
-            // Try core Daily Notes internal plugin first
-            const internalPlugins = (this.plugin.app as any).internalPlugins;
-            const dailyNotes = internalPlugins?.getPluginById("daily-notes");
-            if (dailyNotes?.instance?.createNote) {
-                const file = await dailyNotes.instance.createNote(targetDate);
-                if (file instanceof TFile) return file;
-            }
-
-            // Try Periodic Notes community plugin
-            // @ts-ignore
-            const periodicNotes = this.plugin.app.plugins.getPlugin("periodic-notes");
-            if (periodicNotes?.createDailyNote) {
-                const file = await periodicNotes.createDailyNote(targetDate);
-                if (file instanceof TFile) return file;
-            }
-        } catch (err) {
-            logger.warn("Core plugin daily note creation failed, falling back to manual", err);
-        }
-        return null;
-    }
-
     private async ensureDailyNoteExists(targetPath: string, titleValue: string, targetDate: any): Promise<TFile | null> {
-        const normalizedPath = normalizePath(targetPath);
         const isoDate = targetDate?.format?.("YYYY-MM-DD") ?? null;
-        const existingEquivalent = isoDate
-            ? findExistingDailyNoteForIsoDate(this.plugin.app, this.plugin.settings, isoDate)
-            : null;
-        if (existingEquivalent instanceof TFile) {
-            const slash = existingEquivalent.path.lastIndexOf("/");
-            const folder = slash >= 0 ? existingEquivalent.path.substring(0, slash) : "";
-            await this.normalizeCreatedDailyNote(existingEquivalent, titleValue, folder, isoDate);
-            return existingEquivalent;
-        }
-
-        const existing = this.plugin.app.vault.getAbstractFileByPath(normalizedPath);
-        if (existing instanceof TFile) {
-            const slash = normalizedPath.lastIndexOf("/");
-            const folder = slash >= 0 ? normalizedPath.substring(0, slash) : "";
-            await this.normalizeCreatedDailyNote(existing, titleValue, folder, isoDate);
-            return existing;
-        }
-
-        // Prefer delegating to the core/periodic plugin so folder, template, and
-        // Templater/Dataview hooks are all respected correctly.
-        const coreFile = await this.createViaCorePlugin(targetDate);
-        if (coreFile instanceof TFile) {
-            const slash = normalizedPath.lastIndexOf("/");
-            const folder = slash >= 0 ? normalizedPath.substring(0, slash) : "";
-            await this.normalizeCreatedDailyNote(coreFile, titleValue, folder, isoDate);
-            return coreFile;
-        }
-
-        // Fallback: manual creation
-        const slash = normalizedPath.lastIndexOf("/");
-        const folder = slash >= 0 ? normalizedPath.substring(0, slash) : "";
-        if (folder) {
-            await this.ensureFolderPath(folder);
-        }
-
-        const { template } = this.getDailyNoteSettings();
-        let content = "";
-        let hasFrontmatter = false;
-        let shouldWriteTitleViaFrontmatterApi = false;
-        const adapter = this.plugin.app.vault.adapter as any;
-
-        try {
-            // Core plugin stores template path without .md extension — resolve both forms
-            let templatePath = normalizePath(template || "");
-            if (templatePath) {
-                const withMd = templatePath.endsWith(".md") ? templatePath : templatePath + ".md";
-                const resolvedPath = (await adapter.exists(withMd)) ? withMd
-                    : (await adapter.exists(templatePath)) ? templatePath
-                    : null;
-                if (resolvedPath) {
-                    content = await adapter.read(resolvedPath);
-                    hasFrontmatter = content.trimStart().startsWith("---");
-                }
-            }
-        } catch (err) {
-            logger.warn("Failed reading daily note template", err);
-        }
-
-        if (!content) {
-            content = `---\ntitle: ${titleValue}\ntags: [dailynote]\n---\n\n`;
-        } else if (hasFrontmatter) {
-            // Preserve template text exactly; update title via processFrontMatter after create.
-            shouldWriteTitleViaFrontmatterApi = true;
-        } else {
-            content = `---\ntitle: ${titleValue}\ntags: [dailynote]\n---\n\n${content}`;
-        }
-
-        try {
-            const created = await this.plugin.app.vault.create(normalizedPath, content);
-
-            // Run Templater explicitly so <% tp.* %> expressions in the template are evaluated.
-            await this.runTemplaterOnFile(created);
-
-            if (shouldWriteTitleViaFrontmatterApi) {
-                try {
-                    await this.plugin.app.fileManager.processFrontMatter(created, (fm) => {
-                        fm.title = titleValue;
-                    });
-                } catch (error) {
-                    logger.warn("Failed to set daily note title via processFrontMatter", error);
-                }
-            }
-            await this.normalizeCreatedDailyNote(created, titleValue, folder, isoDate);
-            return created;
-        } catch (err) {
-            logger.error("Failed creating daily note from template", normalizedPath, err);
+        if (!isoDate) {
+            logger.warn("Daily Note navigation could not resolve the requested date", {
+                targetPath,
+                titleValue,
+            });
             return null;
         }
-    }
-
-    /**
-     * Explicitly invoke Templater's "Replace templates in file" on a newly-created
-     * file so <% tp.* %> expressions are evaluated in-place.
-     * Safe no-op when Templater is not installed.
-     *
-     * Uses overwrite_file_commands(file, false) — same code path as "Replace templates
-     * in the active file" but works on any file object without an active editor view.
-     */
-    private async runTemplaterOnFile(file: TFile): Promise<void> {
-        const templater = (this.plugin.app as any)?.plugins?.plugins?.['templater-obsidian'];
-        if (!templater?.templater) return;
-        try {
-            await templater.templater.overwrite_file_commands(file, false);
-            await this.normalizeLeadingWhitespaceBeforeFrontmatter(file);
-        } catch (e) {
-            logger.warn('[DailyNoteNavManager] Templater failed to process file (non-fatal):', file.path, e);
-        }
-    }
-
-    private async normalizeCreatedDailyNote(file: TFile, titleValue: string, folder: string, isoDate: string | null = null): Promise<void> {
-        const targetFolder = String(folder || file.parent?.path || '/').trim() || '/';
-        const scheduledValue = isoDate ? getDailyNoteScheduledValueForIsoDate(isoDate) : `${titleValue} 00:00:00`;
-
-        await this.normalizeLeadingWhitespaceBeforeFrontmatter(file);
-
-        try {
-            await this.plugin.app.fileManager.processFrontMatter(file, (fm: any) => {
-                fm.title = titleValue;
-                const scheduled = String(fm?.scheduled ?? '').trim();
-                if (!scheduled || /<%[\s\S]*%>/.test(scheduled) || /\{\{[\s\S]*\}\}/.test(scheduled)) {
-                    fm.scheduled = scheduledValue;
-                }
-                if (this.plugin.settings.autoSaveFolderPath) {
-                    fm.folderPath = targetFolder;
-                }
-            });
-        } catch (error) {
-            logger.warn('Failed normalizing daily note after creation', { file: file.path, error });
-        }
-
-        try {
-            await this.plugin.fileNamingService.processFileOnOpen(file, { bypassCreationGrace: true });
-        } catch (error) {
-            logger.warn('Failed running file naming normalization for daily note', { file: file.path, error });
-        }
-
-        try {
-            await this.plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
-                reason: 'gcm-daily-note-normalize',
-                force: true,
-                bypassCreationGrace: true,
-            });
-        } catch (error) {
-            logger.warn('Failed applying NN rules to daily note', { file: file.path, error });
-        }
-    }
-
-    private async normalizeLeadingWhitespaceBeforeFrontmatter(file: TFile): Promise<void> {
-        let content = '';
-        try {
-            content = await this.plugin.app.vault.cachedRead(file);
-        } catch {
-            return;
-        }
-
-        if (!content) return;
-
-        const normalized = content.replace(/\r\n/g, '\n');
-        const bom = normalized.startsWith('\uFEFF') ? '\uFEFF' : '';
-        const body = bom ? normalized.slice(1) : normalized;
-        if (body.startsWith('---\n')) return;
-
-        const trimmedLeading = body.replace(/^\s*/, '');
-        const leadingOffset = body.length - trimmedLeading.length;
-        if (leadingOffset <= 0 || !trimmedLeading.startsWith('---\n')) return;
-
-        const prefix = body.slice(0, leadingOffset);
-        if (/\S/.test(prefix)) return;
-
-        const liveFile = this.plugin.app.vault.getAbstractFileByPath(file.path);
-        if (!(liveFile instanceof TFile)) return;
-
-        await this.plugin.app.vault.modify(liveFile, `${bom}${trimmedLeading}`);
+        return this.plugin.noteOperationService.ensureDailyNote(`${isoDate} 00:00:00`);
     }
 
     async goToDate(baseIsoDateStr: string | null, offset: number, sourceLeaf?: WorkspaceLeaf | null) {
