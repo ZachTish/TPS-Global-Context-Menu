@@ -929,6 +929,63 @@ test('task-only source-note grouping keeps synthesized tasks reachable by canoni
   ]);
 });
 
+test('TPS List task lane synthesis reuses one full-vault task build without changing task results', async () => {
+  const renderAsyncStart = viewSource.indexOf('  private async renderAsync(');
+  const renderAsyncEnd = viewSource.indexOf('\n  private ', renderAsyncStart + '  private async renderAsync('.length);
+  assert.ok(renderAsyncStart >= 0 && renderAsyncEnd > renderAsyncStart);
+  const renderAsyncSource = viewSource.slice(renderAsyncStart, renderAsyncEnd);
+  assert.equal((renderAsyncSource.match(/this\.buildTaskRenderItemsByLane\(/g) || []).length, 1);
+  const buildAt = renderAsyncSource.indexOf('const taskRenderItemsByLane = this.buildTaskRenderItemsByLane(');
+  const synthesizeAt = renderAsyncSource.indexOf('groups = this.ensureGroupsForTaskLanes(', buildAt);
+  const parentsAt = renderAsyncSource.indexOf('parentByChild = this.buildParentByChild(groups)', synthesizeAt);
+  const lanesAt = renderAsyncSource.indexOf('this.buildLaneRenderItemsByLane(groups, parentByChild)', parentsAt);
+  assert.ok(buildAt >= 0 && buildAt < synthesizeAt && synthesizeAt < parentsAt && parentsAt < lanesAt);
+
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const file = { path: 'Inbox/Tasks.md' };
+  const tasks = [
+    { text: 'First task', laneIds: ['key:todo'] },
+    { text: 'Second task', laneIds: ['key:doing', 'key:done'] },
+  ];
+  let fullVaultVisits = 0;
+  view.app = { vault: { getMarkdownFiles: () => (fullVaultVisits += 1, [file]) } };
+  Object.assign(view, {
+    isBaseFileFilterReady: () => true,
+    getActiveBasesSearchQuery: () => '',
+    getExplicitTaskSourceFiles: () => [],
+    shouldScanVaultForTaskFilters: () => true,
+    getAllLineItemsForFile: () => tasks,
+    taskMatchesRootFilter: () => true,
+    taskMatchesSearchQuery: () => true,
+    getTaskLaneIds: (task) => task.laneIds,
+    getGroupByPropId: (propName) => propName,
+    getLaneId: (group) => group.key == null ? 'ungrouped' : `key:${String(group.key).toLowerCase()}`,
+    applyManualLaneOrder: (groups) => groups,
+  });
+  const groups = [{ key: 'todo', entries: [{ file }], hasKey: () => true }];
+  const buildTasks = (sourceGroups) => view.buildTaskRenderItemsByLane(
+    sourceGroups, 'status', new Set([file.path]), { mode: 'tasks', hasTaskDirective: true },
+  );
+  const beforeSynthesis = buildTasks(groups);
+  assert.equal(fullVaultVisits, 1);
+  const groupsWithTaskLanes = view.ensureGroupsForTaskLanes(groups, beforeSynthesis);
+  assert.deepEqual(
+    groupsWithTaskLanes.map((group) => [view.getLaneId(group), group.entries.length]),
+    [['key:todo', 1], ['key:doing', 0], ['key:done', 0]],
+  );
+  const afterSynthesisOracle = buildTasks(groupsWithTaskLanes);
+  assert.equal(fullVaultVisits, 2);
+  const snapshot = (map) => Array.from(map, ([laneId, items]) => [
+    laneId,
+    items.map(({ task }) => tasks.indexOf(task)),
+  ]);
+  assert.deepEqual(snapshot(beforeSynthesis), [
+    ['key:todo', [0]], ['key:doing', [1]], ['key:done', [1]],
+  ]);
+  assert.deepEqual(snapshot(afterSynthesisOracle), snapshot(beforeSynthesis));
+});
+
 test('bullet source-note resolution prefers explicit record paths and ignores dailyNotePath', async () => {
   const { resolveBulletLineSourceTarget } = await loadBulletLineSourceTarget();
   const line = '- [[_assets/Yogurt|Yogurt]] [type:: foodLog] [foodPath:: _assets/Yogurt.md] [dailyNotePath:: 2026-07-13.md]';

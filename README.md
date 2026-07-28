@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.11.3
+
+- TPS List task-lane rendering now performs one full task-index build and reuses that result after adding empty synthetic lanes instead of immediately rebuilding the same task map.
+- Synthetic task lanes, task identity and order, note grouping, parent relationships, settings, and stored data remain unchanged.
+- This patch records the already validated single-build implementation in the tagged source so source, release metadata, and BRAT artifacts are aligned. Minimum supported Obsidian remains 1.10.0, with no migration.
+- Validation at 1.11.3 passed all 514 declared tests and a separate production-mode build in the isolated test vault. After reloading Obsidian 1.12.7, TPS List still rendered the expected three lanes and two synthetic tasks; runtime-owned `data.json` remained unchanged.
+
 ## 1.11.2
 
 - Daily Note creation now has one canonical, single-flight path across Home navigation and capture, Create task, time tracking, and the public GCM API. Each route copies the configured Daily Notes template before returning a writable file instead of creating a bare scheduled note.
