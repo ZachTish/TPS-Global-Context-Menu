@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.11.4
+
+- Clicking a populated or empty entity-backed TPS Table cell now opens the searchable Manual/Vault/Entity picker directly. The intermediate `(none)` / `Choose <kind> entity…` menu introduced in 1.11.0 is removed from this cell-editing path, restoring one-click parity with TPS List.
+- Entity-backed list cells add the selected literal or entity through the list-aware mutation path instead of replacing the entire field as though it were scalar. Existing literals, wikilinks, comma-bearing aliases, sibling inline fields, hidden TPS metadata, and native block IDs remain intact.
+- TPS List explicitly resolves the configured property before its task-workflow Status branch, so an entity-backed bare `status` field cannot be intercepted by the checkbox-status picker. Exact `task.status` and `checkboxStatus` continue to use the workflow picker.
+- Populated and empty property cells retain pointer, Enter, and Space ownership; title/source cells retain their existing note-opening behavior. No settings or note-data migration is required, and minimum supported Obsidian remains 1.10.0.
+- Validation passed 61 focused entity/property/status regressions, the complete declared suite, TypeScript, and the required separate production-mode build. In reloaded Obsidian 1.12.7, populated and empty relational TPS Table cells and a TPS List relational property opened the project-only searchable picker directly on the first click while the Base remained active; every picker was canceled without changing the fixtures or runtime settings.
+
 ## 1.11.3
 
 - TPS List task-lane rendering now performs one full task-index build and reuses that result after adding empty synthetic lanes instead of immediately rebuilding the same task map.
@@ -21,7 +29,7 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.11.2` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.11.4` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
 
 ## 1.11.1
 

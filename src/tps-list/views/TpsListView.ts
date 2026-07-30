@@ -7744,14 +7744,15 @@ export class TpsListView extends BasesView {
   ): void {
     const propName = String(property.propName || '').trim();
     if (!propName || span.hasClass('tps-list-native-property--editing')) return;
+    const configuredProperty = this.getConfiguredCustomProperty(propName);
     if (
       task.itemKind !== 'heading'
+      && !propertyUsesEntityOptions(configuredProperty)
       && (property.kind === 'status' || this.isStatusPropertyName(propName))
     ) {
       void this.openListTaskWorkflowStatusPicker(span, file, task);
       return;
     }
-    const configuredProperty = this.getConfiguredCustomProperty(propName);
     if (
       !propertyUsesEntityOptions(configuredProperty)
       && this.isTagProperty(configuredProperty, propName)

@@ -11,6 +11,7 @@ const main = read('src/main.ts');
 const taskLineContext = read('src/services/task-line-context-menu-service.ts');
 const tpsList = read('src/tps-list/views/TpsListView.ts');
 const tagModal = read('src/modals/TagSuggestModal.ts');
+const propertyChoice = read('src/views/log-base-property-choice.ts');
 
 function sourceBlock(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
@@ -129,6 +130,11 @@ test('TPS Table property cells own their click intent and configured selectors o
   const dispatcher = sourceBlock(
     logBase,
     'private openConfiguredPropertyCellEditor(',
+    'private openConfiguredPropertyValuePicker(',
+  );
+  const propertyValuePicker = sourceBlock(
+    logBase,
+    'private openConfiguredPropertyValuePicker(',
     'private openChoiceCellEditor(',
   );
   const choiceEditor = sourceBlock(
@@ -144,11 +150,15 @@ test('TPS Table property cells own their click intent and configured selectors o
     /if \(configuredProperty\) \{\s*this\.renderConfiguredPropertyCell\(cell, entry, column, configuredProperty\)/,
     'every configured column must be dispatched before any generic navigation cell',
   );
-  assert.match(dispatcher, /property\.type === 'selector' && this\.isTaskStatusSelector\(entry, property\)/);
+  assert.match(
+    dispatcher,
+    /propertyUsesEntityOptions\(property\)[\s\S]*?this\.openConfiguredPropertyValuePicker\(entry, property\)[\s\S]*?property\.type === 'selector' && this\.isTaskStatusSelector\(entry, property\)/,
+    'entity-backed fields must reach the searchable picker before checkbox workflow status routing',
+  );
   assert.match(dispatcher, /this\.openSelectorCellEditor\(entry, property, anchor\)/);
   assert.match(
     dispatcher,
-    /propertyUsesEntityOptions\(property\)[\s\S]*?property\.type === 'selector'[\s\S]*?property\.type === 'kind'[\s\S]*?this\.openChoiceCellEditor\(entry, property, anchor\)/,
+    /property\.type === 'selector'[\s\S]*?property\.type === 'kind'[\s\S]*?this\.openChoiceCellEditor\(entry, property, anchor\)/,
   );
   assert.match(dispatcher, /property\.type === 'list'[\s\S]*?this\.openListCellEditor\(entry, property, anchor\)/);
   assert.match(dispatcher, /property\.type === 'checkbox'[\s\S]*?this\.openCheckboxCellEditor\(entry, property, anchor\)/);
@@ -158,6 +168,20 @@ test('TPS Table property cells own their click intent and configured selectors o
     configuredRenderer,
     /const entityOptions = propertyUsesEntityOptions\(property\)[\s\S]*?!entityOptions && this\.isTagColumn\(column, property\)[\s\S]*?!entityOptions && this\.isDatetimeColumn\(column, property\)/,
     'entity sources must own the cell before legacy tag or datetime editors',
+  );
+  assert.match(
+    propertyValuePicker,
+    /openPropertyValueSuggestModal\([\s\S]*?this\.plugin\.app,[\s\S]*?this\.plugin,[\s\S]*?property,[\s\S]*?currentValue/,
+    'TPS Table entity cells must open the combined searchable picker directly',
+  );
+  assert.match(
+    propertyValuePicker,
+    /this\.updateEntryLine\([\s\S]*?applyLogBasePropertyValueChoice\(line, property, choice\)/,
+  );
+  assert.match(
+    propertyChoice,
+    /choice\.kind === 'clear'[\s\S]*?property\.type !== 'list'[\s\S]*?choice\.kind === 'entity'[\s\S]*?mergeEntityReferenceList[\s\S]*?mergeMixedEntityReferenceList/,
+    'entity-list choices must merge into the existing list rather than replace it as a scalar',
   );
   assert.match(choiceEditor, /addPropertyValueChoiceMenuItems\(\{/);
   assert.match(choiceEditor, /onChooseLiteral: \(value\) => this\.setConfiguredCellValue\(entry, property, value, 'literal'\)/);
@@ -175,6 +199,107 @@ test('TPS Table property cells own their click intent and configured selectors o
   assert.match(taskLineContext, /status-picker:change/);
   assert.match(taskLineContext, /checkboxMutation:\s*true/);
   assert.match(taskLineContext, /handleExternalChecklistStateMutation\(/);
+});
+
+test('TPS Table combined picker choices execute clear, scalar replacement, and additive list storage', async () => {
+  const { applyLogBasePropertyValueChoice } = await importBundled('../src/views/log-base-property-choice.ts');
+  const { readInlineFields } = await importBundled('../src/views/log-line-utils.ts');
+  const metadata = '%% tps-inline-props:{"createdDate":"2026-07-30 09:15:00"} %%';
+  const linkListProperty = {
+    id: 'projects',
+    key: 'projects',
+    label: 'Projects',
+    type: 'list',
+    listItemType: 'link',
+    acceptsKind: 'project',
+    optionSources: ['manual', 'entity'],
+  };
+  let line = `- [ ] Preserve relations [projects:: [[Projects/Alpha]], [[Projects/Two|Two, Inc.]]] [priority:: high] ${metadata} ^picker-row`;
+
+  line = applyLogBasePropertyValueChoice(line, linkListProperty, {
+    kind: 'entity',
+    value: '[[Projects/Three|Three, LLC]]',
+    label: 'Three, LLC',
+    detail: 'Project',
+    entity: {},
+  });
+  let fields = readInlineFields(line);
+  assert.equal(
+    fields.projects,
+    '[[Projects/Alpha]], [[Projects/Two|Two, Inc.]], [[Projects/Three|Three, LLC]]',
+  );
+  assert.equal(fields.priority, 'high');
+  assert.match(line, /"createdDate":"2026-07-30 09:15:00"/u);
+  assert.match(line, /\^picker-row$/u);
+
+  line = applyLogBasePropertyValueChoice(line, linkListProperty, {
+    kind: 'literal',
+    value: '[[Projects/Four|Four, Co.]]',
+    label: 'Four, Co.',
+    detail: 'Manual',
+  });
+  fields = readInlineFields(line);
+  assert.equal(
+    fields.projects,
+    '[[Projects/Alpha]], [[Projects/Two|Two, Inc.]], [[Projects/Three|Three, LLC]], [[Projects/Four|Four, Co.]]',
+  );
+
+  const mixedListProperty = {
+    ...linkListProperty,
+    id: 'parents',
+    key: 'parents',
+    label: 'Parents',
+    listItemType: 'text',
+  };
+  let mixed = `- [ ] Mixed parents [parents:: waiting, [[Projects/Alpha]]] ${metadata} ^mixed-row`;
+  mixed = applyLogBasePropertyValueChoice(mixed, mixedListProperty, {
+    kind: 'entity',
+    value: '[[Areas/Home|Home, Area]]',
+    label: 'Home, Area',
+    detail: 'Area',
+    entity: {},
+  });
+  assert.equal(
+    readInlineFields(mixed).parents,
+    'waiting, [[Projects/Alpha]], [[Areas/Home|Home, Area]]',
+  );
+
+  const scalarProperty = {
+    id: 'owner',
+    key: 'owner',
+    label: 'Owner',
+    type: 'text',
+    acceptsKind: 'person',
+    optionSources: ['entity'],
+  };
+  let scalar = '- [ ] Scalar owner [owner:: [[People/Alex]]] [priority:: medium] ^scalar-row';
+  scalar = applyLogBasePropertyValueChoice(scalar, scalarProperty, {
+    kind: 'entity',
+    value: '[[People/Jules]]',
+    label: 'Jules',
+    detail: 'Person',
+    entity: {},
+  });
+  assert.equal(readInlineFields(scalar).owner, '[[People/Jules]]');
+  assert.equal(readInlineFields(scalar).priority, 'medium');
+
+  const unchanged = applyLogBasePropertyValueChoice(scalar, scalarProperty, {
+    kind: 'custom',
+    value: '',
+    label: 'Set custom value…',
+    detail: 'Manual',
+  });
+  assert.equal(unchanged, scalar);
+
+  scalar = applyLogBasePropertyValueChoice(scalar, scalarProperty, {
+    kind: 'clear',
+    value: '',
+    label: '(none)',
+    detail: 'Clear value',
+  });
+  assert.equal(readInlineFields(scalar).owner, undefined);
+  assert.equal(readInlineFields(scalar).priority, 'medium');
+  assert.match(scalar, /\^scalar-row$/u);
 });
 
 test('task.status remains the editable checkbox workflow column when bare status is relational', () => {
@@ -252,12 +377,12 @@ test('empty Accepted-Kind TPS Table cells stay property-owned and open the entit
   const dispatcher = sourceBlock(
     logBase,
     'private openConfiguredPropertyCellEditor(',
-    'private openChoiceCellEditor(',
+    'private openConfiguredPropertyValuePicker(',
   );
-  const choiceEditor = sourceBlock(
+  const propertyValuePicker = sourceBlock(
     logBase,
+    'private openConfiguredPropertyValuePicker(',
     'private openChoiceCellEditor(',
-    'private openCheckboxCellEditor(',
   );
 
   assert.match(
@@ -276,12 +401,12 @@ test('empty Accepted-Kind TPS Table cells stay property-owned and open the entit
   );
   assert.match(
     dispatcher,
-    /propertyUsesEntityOptions\(property\)[\s\S]*?this\.openChoiceCellEditor\(entry, property, anchor\)/,
+    /propertyUsesEntityOptions\(property\)[\s\S]*?this\.openConfiguredPropertyValuePicker\(entry, property\)/,
   );
   assert.match(
-    choiceEditor,
-    /addPropertyValueChoiceMenuItems\(\{[\s\S]*?onChooseLiteral:[\s\S]*?onChooseEntity:[\s\S]*?choice\.wikilink/,
-    'mixed manual, vault, and entity sources must share one source-aware dropdown',
+    propertyValuePicker,
+    /openPropertyValueSuggestModal\([\s\S]*?applyLogBasePropertyValueChoice\(line, property, choice\)/,
+    'mixed manual, vault, and entity sources must share one searchable source-aware dropdown',
   );
   assert.match(
     logBase,
@@ -366,6 +491,11 @@ test('TPS List renders empty typed cells and routes task and note edits through 
     tpsList,
     'private startListTaskPropertyEdit(',
     'private async openListTaskWorkflowStatusPicker(',
+  );
+  assert.match(
+    taskEditor,
+    /const configuredProperty = this\.getConfiguredCustomProperty\(propName\)[\s\S]*?task\.itemKind !== 'heading'[\s\S]*?!propertyUsesEntityOptions\(configuredProperty\)[\s\S]*?this\.openListTaskWorkflowStatusPicker/,
+    'a relational bare status must bypass the checkbox workflow picker',
   );
   const noteEditor = sourceBlock(
     tpsList,

@@ -91,9 +91,11 @@ import {
   addPropertyValueChoiceMenuItems,
   showPropertyValueChoiceMenuAtElement,
 } from '../menu/property-value-choice-menu';
+import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
 import { splitLineItemContent } from '../utils/line-item-deletion';
 import { addLineEntityPropertyMenus } from '../menu/line-entity-property-menu';
 import type { TaskLineContext } from '../services/task-line-context-menu-service';
+import { applyLogBasePropertyValueChoice } from './log-base-property-choice';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
 
@@ -1414,13 +1416,16 @@ export class TpsTableView extends BasesView {
     property: CustomProperty,
     anchor: HTMLElement,
   ): void {
+    if (propertyUsesEntityOptions(property)) {
+      this.openConfiguredPropertyValuePicker(entry, property);
+      return;
+    }
     if (property.type === 'selector' && this.isTaskStatusSelector(entry, property)) {
       this.openSelectorCellEditor(entry, property, anchor);
       return;
     }
     if (
-      propertyUsesEntityOptions(property)
-      || property.type === 'selector'
+      property.type === 'selector'
       || property.type === 'kind'
     ) {
       this.openChoiceCellEditor(entry, property, anchor);
@@ -1449,6 +1454,41 @@ export class TpsTableView extends BasesView {
         void this.setConfiguredCellValue(entry, property, next || null, 'text');
       },
     ).open();
+  }
+
+  private openConfiguredPropertyValuePicker(
+    entry: LogLineEntry,
+    property: CustomProperty,
+  ): void {
+    const currentValue = readInlineFieldValue(entry.line, property.key);
+    logger.flow('TpsTableView', 'property-picker:open', {
+      path: entry.file.path,
+      lineNumber: entry.lineNumber + 1,
+      property: property.key,
+      acceptedKind: property.acceptsKind || '',
+      list: property.type === 'list',
+    });
+    openPropertyValueSuggestModal(
+      this.plugin.app,
+      this.plugin,
+      property,
+      currentValue,
+      async (choice) => {
+        if (choice.kind === 'custom') return;
+        await this.updateEntryLine(
+          entry,
+          (line) => applyLogBasePropertyValueChoice(line, property, choice),
+        );
+        logger.flow('TpsTableView', 'property-picker:apply', {
+          path: entry.file.path,
+          lineNumber: entry.lineNumber + 1,
+          property: property.key,
+          source: choice.kind,
+          cleared: choice.kind === 'clear',
+          list: property.type === 'list',
+        });
+      },
+    );
   }
 
   private openChoiceCellEditor(

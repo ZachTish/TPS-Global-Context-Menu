@@ -384,6 +384,55 @@ test('checkbox mutation integration preserves a configured relational status fie
   );
 });
 
+test('TPS Table and TPS List open entity-backed status before workflow status', () => {
+  const tableSource = readFileSync(
+    new URL('../src/views/log-base-view.ts', import.meta.url),
+    'utf8',
+  );
+  const tpsListSource = readFileSync(
+    new URL('../src/tps-list/views/TpsListView.ts', import.meta.url),
+    'utf8',
+  );
+  const tableDispatcher = methodSource(
+    tableSource,
+    'private openConfiguredPropertyCellEditor(',
+    'private openConfiguredPropertyValuePicker(',
+  );
+  const tableStatusClassifier = methodSource(
+    tableSource,
+    'private isTaskStatusSelector(',
+    'private createTaskLineContext(',
+  );
+  const listDispatcher = methodSource(
+    tpsListSource,
+    'private startListTaskPropertyEdit(',
+    'private async openListTaskWorkflowStatusPicker(',
+  );
+
+  assert.ok(
+    tableDispatcher.indexOf('propertyUsesEntityOptions(property)')
+      < tableDispatcher.indexOf('this.isTaskStatusSelector(entry, property)'),
+    'TPS Table must dispatch relational status to the entity picker before checkbox status',
+  );
+  assert.match(
+    tableStatusClassifier,
+    /if \(propertyUsesEntityOptions\(property\)\) return false;/u,
+  );
+  assert.match(
+    listDispatcher,
+    /const configuredProperty = this\.getConfiguredCustomProperty\(propName\)[\s\S]*?!propertyUsesEntityOptions\(configuredProperty\)[\s\S]*?this\.openListTaskWorkflowStatusPicker/u,
+  );
+  assert.ok(
+    listDispatcher.indexOf('!propertyUsesEntityOptions(configuredProperty)')
+      < listDispatcher.indexOf('this.openListTaskWorkflowStatusPicker'),
+    'TPS List must reserve the workflow picker for nonentity status fields',
+  );
+  assert.match(
+    listDispatcher,
+    /this\.openListTaskEntityPicker\(file, task, configuredProperty, gcm\)/u,
+  );
+});
+
 test('note workflow and recurrence services never treat relational status as checkbox state', () => {
   const bulkEditSource = readFileSync(
     new URL('../src/services/bulk-edit-service.ts', import.meta.url),

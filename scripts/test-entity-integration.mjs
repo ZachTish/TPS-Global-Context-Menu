@@ -245,12 +245,12 @@ test('TPS Table constrained cells render when empty and isolate picker clicks fr
   const dispatcher = sourceBlock(
     sources.logBase,
     'private openConfiguredPropertyCellEditor(',
-    'private openChoiceCellEditor(',
+    'private openConfiguredPropertyValuePicker(',
   );
-  const choiceEditor = sourceBlock(
+  const propertyValuePicker = sourceBlock(
     sources.logBase,
+    'private openConfiguredPropertyValuePicker(',
     'private openChoiceCellEditor(',
-    'private openCheckboxCellEditor(',
   );
   const typedCell = sourceBlock(
     sources.logBase,
@@ -269,10 +269,10 @@ test('TPS Table constrained cells render when empty and isolate picker clicks fr
     /cell\.addEventListener\('click',[\s\S]*?event\.preventDefault\(\);[\s\S]*?event\.stopPropagation\(\);[\s\S]*?event\.stopImmediatePropagation\(\);[\s\S]*?activate\(\)/,
   );
   assert.match(typedCell, /event\.key !== 'Enter' && event\.key !== ' '/);
-  assert.match(dispatcher, /propertyUsesEntityOptions\(property\)[\s\S]*?this\.openChoiceCellEditor\(entry, property, anchor\)/);
-  assert.match(choiceEditor, /addPropertyValueChoiceMenuItems\(\{/);
-  assert.match(choiceEditor, /onChooseLiteral:/);
-  assert.match(choiceEditor, /onChooseEntity:[\s\S]*?choice\.wikilink/);
+  assert.match(dispatcher, /propertyUsesEntityOptions\(property\)[\s\S]*?this\.openConfiguredPropertyValuePicker\(entry, property\)/);
+  assert.match(propertyValuePicker, /openPropertyValueSuggestModal\(/);
+  assert.match(propertyValuePicker, /applyLogBasePropertyValueChoice\(line, property, choice\)/);
+  assert.match(propertyValuePicker, /source: choice\.kind/);
 });
 
 test('TPS List renders empty constrained note and task properties as editable picker targets', () => {
