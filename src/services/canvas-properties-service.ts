@@ -171,15 +171,9 @@ export class CanvasPropertiesService {
   private resolveFrontmatterWriter(): ((file: TFile, mutator: CanvasFrontmatterMutator) => Promise<unknown>) | null {
     const fileManager = this.plugin.app.fileManager as any;
     const current = fileManager?.processFrontMatter;
-    if (typeof current === 'function' && current.__tpsGcmFrontmatterPatch !== true) {
+    if (typeof current === 'function') {
       return async (file, mutator) => await current.call(fileManager, file, mutator);
     }
-
-    const delegate = this.plugin.processFrontmatterWithNativeDelegate;
-    if (typeof delegate === 'function') {
-      return async (file, mutator) => await delegate.call(this.plugin, file, mutator);
-    }
-
     return null;
   }
 

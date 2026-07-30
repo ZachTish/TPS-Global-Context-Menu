@@ -258,7 +258,7 @@ export class LinkedSubitemCheckboxService {
     if (!nextStatus) return false;
 
     const statusKey = this.getStatusKey();
-    await this.plugin.app.fileManager.processFrontMatter(childFile, (fm) => {
+    await this.plugin.frontmatterMutationService.process(childFile, (fm) => {
       fm[statusKey] = nextStatus;
     });
 
@@ -296,7 +296,7 @@ export class LinkedSubitemCheckboxService {
     if (!nextStatus) return false;
 
     const statusKey = this.getStatusKey();
-    await this.plugin.app.fileManager.processFrontMatter(childFile, (fm) => {
+    await this.plugin.frontmatterMutationService.process(childFile, (fm) => {
       fm[statusKey] = nextStatus;
     });
 

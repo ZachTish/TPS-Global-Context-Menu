@@ -45,7 +45,7 @@ export class ParentLinkResolutionService {
     const linkValue = buildParentFrontmatterLinkValue(this.plugin.app, parentFile, childFile.path);
     let changed = false;
 
-    await this.plugin.app.fileManager.processFrontMatter(childFile, (fm) => {
+    await this.plugin.frontmatterMutationService.process(childFile, (fm) => {
       const values = this.getParentValuesFromFrontmatter(fm as Record<string, unknown>);
       const existingFiles = this.resolveFilesFromFrontmatterValue(values, childFile.path);
       const alreadyLinked = existingFiles.some((file) => file.path === parentFile.path);
@@ -91,7 +91,7 @@ export class ParentLinkResolutionService {
     const selfLink = buildParentFrontmatterLinkValue(this.plugin.app, parentFile, parentFile.path);
     let changed = false;
 
-    await this.plugin.app.fileManager.processFrontMatter(parentFile, (fm) => {
+    await this.plugin.frontmatterMutationService.process(parentFile, (fm) => {
       const values = this.getParentValuesFromFrontmatter(fm as Record<string, unknown>);
       const normalizedValues = values.map((value) => {
         const resolved = resolveLinkValueToFile(this.plugin.app, value, parentFile.path);
@@ -128,7 +128,7 @@ export class ParentLinkResolutionService {
     const key = this.getParentKey();
     let changed = false;
 
-    await this.plugin.app.fileManager.processFrontMatter(childFile, (fm) => {
+    await this.plugin.frontmatterMutationService.process(childFile, (fm) => {
       const values = this.getParentValuesFromFrontmatter(fm as Record<string, unknown>);
       if (!values.length) return;
       const filtered = values.filter((value) => !this.valueMatchesFile(value, childFile.path, parentFile));

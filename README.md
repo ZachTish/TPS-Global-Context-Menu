@@ -1,5 +1,15 @@
 # TPS Global Context Menu
 
+## 1.11.7
+
+- GCM no longer replaces the application-wide `app.fileManager.processFrontMatter` method. All 42 GCM-owned Markdown mutation sites now call the owned frontmatter service explicitly, retaining serialization, malformed-YAML refusal, normalization, activity tracking, entity-index updates, explicit events, and title/filename follow-ups without changing Obsidian's API for unrelated plugins.
+- Advanced Canvas writes resolve the current third-party writer at the moment of use and preserve its receiver and function identity. GCM no longer stores a bound delegate, marks a host function, or restores an older function during unload, so a later plugin load/reload cannot be overwritten by GCM teardown. The separate Advanced Canvas persistence compatibility fallback remains unchanged in this patch.
+- Commands, settings, public GCM frontmatter APIs, Canvas property behavior, note data, and GCM-owned workflows are unchanged. Other plugins' direct calls now receive Obsidian's documented native return/error/identity semantics; cooperating TPS plugins continue to use the explicit `plugin.api.frontmatter` contract.
+- The exact 1.11.6 source had 42 owned native-call sites and performed one global assignment on load plus one restoration on unload. The 1.11.7 ownership gate finds zero GCM Markdown calls or host mutations outside the single read-only Advanced Canvas writer lookup. A Proxy-backed behavioral test proves success, no-op, and failure paths make zero property assignments/deletions and retain the exact writer identity and receiver.
+- A controlled 200,000-call dispatch-only benchmark reduced median time from 22.097 ms through the released wrapper to 10.316 ms through direct service dispatch, removing 200,000 redundant wrapper calls. This isolates call-routing overhead rather than claiming a whole-workflow speedup.
+- Before deployment, the exact 1.11.6 runtime passed all 533 declared checks and an actual test-vault native write reported the GCM patch marker and returned GCM's boolean. The candidate passes all 536 declared checks; the same live native write keeps the original unmarked writer, returns native `undefined`, and stores the same requested fields, while a separate public GCM API write still returns `true` and uses the owned normalized path. Both synthetic notes were moved directly to `_archive`, runtime-owned settings remained byte-identical, and production was not accessed.
+- This is a backward-compatible patch release. Minimum supported Obsidian remains 1.10.0 and no migration is required.
+
 ## 1.11.6
 
 - Reactive note-level `completedDate` reconciliation is now a lossless keyed batch. A metadata burst keeps one pending entry per Markdown file instead of Obsidian's prior vault-wide debounce retaining only the final file; repeated events for one file still coalesce behind the existing trailing 400 ms quiet period.
@@ -46,7 +56,7 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.11.4` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.11.7` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
 
 ## 1.11.1
 

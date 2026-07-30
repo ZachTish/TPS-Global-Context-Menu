@@ -245,7 +245,7 @@ export class FileNamingService {
 
         let changed = false;
         await this.plugin.bulkEditService.runSerializedFrontmatterWrite(file, async () => {
-            await this.plugin.app.fileManager.processFrontMatter(file, (frontmatter) => {
+            await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
                 const currentRaw = String(frontmatter.scheduled ?? '').trim();
                 const currentIso = this.parseScheduledToIso(currentRaw);
                 if (currentIso === expectedDate && currentRaw === expectedScheduled) return;
@@ -497,7 +497,7 @@ export class FileNamingService {
         this.rememberRecentTimestampWrite(liveFile.path);
         try {
             await this.plugin.bulkEditService.runSerializedFrontmatterWrite(liveFile, async () => {
-                await this.plugin.app.fileManager.processFrontMatter(liveFile, (frontmatter) => {
+                await this.plugin.frontmatterMutationService.process(liveFile, (frontmatter) => {
                     this.setFrontmatterValueCaseInsensitive(frontmatter, createdKey, createdValue);
                     this.setFrontmatterValueCaseInsensitive(frontmatter, modifiedKey, modifiedValue);
                 });
@@ -594,7 +594,7 @@ export class FileNamingService {
         try {
             logger.debug(`[FILE-DRAG] Writing folderPath to frontmatter: ${currentFolder}`);
             await this.plugin.bulkEditService.runSerializedFrontmatterWrite(liveFile, async () => {
-                await this.plugin.app.fileManager.processFrontMatter(liveFile, (frontmatter) => {
+                await this.plugin.frontmatterMutationService.process(liveFile, (frontmatter) => {
                     frontmatter.folderPath = currentFolder;
                     for (const key of Object.keys(frontmatter)) {
                         const normalized = String(key || '').trim().toLowerCase();
@@ -786,7 +786,7 @@ export class FileNamingService {
                     return "skipped";
                 }
                 await this.plugin.bulkEditService.runSerializedFrontmatterWrite(targetFile, async () => {
-                    await this.plugin.app.fileManager.processFrontMatter(targetFile, (frontmatter) => {
+                    await this.plugin.frontmatterMutationService.process(targetFile, (frontmatter) => {
                         const existingTitleKeys = Object.keys(frontmatter).filter(
                             (key) => key.trim().toLowerCase() === 'title',
                         );

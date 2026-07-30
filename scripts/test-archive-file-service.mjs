@@ -106,6 +106,7 @@ function createArchiveHarness({
   const entries = new Map();
   const frontmatterByFile = new WeakMap();
   const processFrontMatterCalls = [];
+  const nativeProcessFrontMatterCalls = [];
   const renameCalls = [];
   const queuedMoves = [];
   const failingMetadataPaths = new Set(failMetadataFor.map(normalizeTestPath));
@@ -190,8 +191,25 @@ function createArchiveHarness({
     renameCalls.push({ from: sourcePath, to: normalizedTarget });
   }
 
+  async function processOwnedFrontmatter(file, mutator) {
+    processFrontMatterCalls.push(file.path);
+    if (failingMetadataPaths.has(file.path)) {
+      throw new Error(`Synthetic frontmatter failure for ${file.path}`);
+    }
+    const frontmatter = structuredClone(frontmatterByFile.get(file) || {});
+    await mutator(frontmatter);
+    if (falseMetadataPaths.has(file.path)) {
+      return false;
+    }
+    frontmatterByFile.set(file, frontmatter);
+    return true;
+  }
+
   const plugin = {
     settings: { archiveTag },
+    frontmatterMutationService: {
+      process: processOwnedFrontmatter,
+    },
     app: {
       metadataCache: {
         getFileCache(file) {
@@ -210,18 +228,9 @@ function createArchiveHarness({
         },
       },
       fileManager: {
-        async processFrontMatter(file, mutator) {
-          processFrontMatterCalls.push(file.path);
-          if (failingMetadataPaths.has(file.path)) {
-            throw new Error(`Synthetic frontmatter failure for ${file.path}`);
-          }
-          const frontmatter = structuredClone(frontmatterByFile.get(file) || {});
-          await mutator(frontmatter);
-          if (falseMetadataPaths.has(file.path)) {
-            return false;
-          }
-          frontmatterByFile.set(file, frontmatter);
-          return true;
+        async processFrontMatter(file) {
+          nativeProcessFrontMatterCalls.push(file.path);
+          throw new Error('Archive service bypassed the owned frontmatter mutation service.');
         },
         async renameFile(file, targetPath) {
           await renameFile(file, targetPath);
@@ -244,6 +253,7 @@ function createArchiveHarness({
     renameCalls,
     queuedMoves,
     processFrontMatterCalls,
+    nativeProcessFrontMatterCalls,
     getFile(path) {
       const entry = entries.get(normalizeTestPath(path));
       return entry instanceof TFile ? entry : null;
@@ -301,6 +311,7 @@ test('archives Markdown, Base, and Canvas files immediately while metadata stays
   assert.ok(harness.getFile('_archive/Boards/Dashboard.base'));
   assert.ok(harness.getFile('_archive/Maps/Plan.canvas'));
   assert.deepEqual(harness.processFrontMatterCalls, ['Inbox/Note.md']);
+  assert.deepEqual(harness.nativeProcessFrontMatterCalls, []);
   assert.deepEqual(
     harness.getFrontmatter(sourceFiles[0]),
     {

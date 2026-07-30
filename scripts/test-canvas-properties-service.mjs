@@ -9,17 +9,17 @@ test('canvas properties bridge delegates to Advanced Canvas metadata compatibili
   const main = read('src/main.ts');
   assert.match(service, /Bridges GCM canvas property reads\/writes to Advanced Canvas/);
   assert.match(service, /getFileCache\(file\)\?\.frontmatter/);
-  assert.match(service, /processFrontmatterWithNativeDelegate/);
   assert.match(service, /resolveFrontmatterWriter/);
-  assert.match(service, /__tpsGcmFrontmatterPatch !== true/);
+  assert.match(service, /current\.call\(fileManager, file, mutator\)/);
   assert.match(service, /canvasMetadataCompatibilityEnabled/);
   assert.doesNotMatch(service, /readCanvasDocument/);
   assert.match(service, /Advanced Canvas bridge did not persist canvas metadata; applying compatibility fallback/);
   assert.match(service, /writeCanvasMetadataCompatibilityFallback/);
   assert.match(service, /metadata\.frontmatter = \{ \.\.\.frontmatter \}/);
   assert.match(service, /if \(!\(await this\.waitForCanvasMetadata\(file, sorted\)\)\)/);
-  assert.match(main, /nativeProcessFrontmatterDelegate/);
-  assert.match(main, /__tpsGcmFrontmatterPatch = true/);
+  assert.doesNotMatch(main, /nativeProcessFrontmatterDelegate/);
+  assert.doesNotMatch(main, /__tpsGcmFrontmatterPatch/);
+  assert.doesNotMatch(main, /installProcessFrontmatterPatch/);
   assert.match(service, /tps:gcm-canvas-properties-updated/);
 });
 

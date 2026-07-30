@@ -669,7 +669,7 @@ test('archive action uses Controller two-stage source folder and moves files imm
   const unarchiveEnd = archiveFileServiceSource.indexOf('private getUniqueFiles', unarchiveStart);
   const unarchiveSource = archiveFileServiceSource.slice(unarchiveStart, unarchiveEnd);
   assert.ok(
-    unarchiveSource.indexOf('fileManager.renameFile') < unarchiveSource.indexOf('processFrontMatter'),
+    unarchiveSource.indexOf('fileManager.renameFile') < unarchiveSource.indexOf('frontmatterMutationService.process'),
     'unarchive must move successfully before removing restore metadata',
   );
 });

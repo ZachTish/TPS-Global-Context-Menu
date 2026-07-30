@@ -325,8 +325,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private archiveSweepTimerId: number | null = null;
   private restoreMenuPatch: (() => void) | null = null;
   private restoreCanvasOpenGuard: (() => void) | null = null;
-  private restoreProcessFrontmatterPatch: (() => void) | null = null;
-  private nativeProcessFrontmatterDelegate: ((file: TFile, mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>, options?: unknown) => Promise<unknown>) | null = null;
   private basesPreviewPropertiesObserver: MutationObserver | null = null;
   private basesPreviewPropertiesRefreshTimer: number | null = null;
   private basesPreviewPropertiesRetryTimers: number[] = [];
@@ -565,7 +563,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.linkedSubitemCheckboxService = new LinkedSubitemCheckboxService(this);
     this.frontmatterMutationService = new FrontmatterMutationService(this);
     this.sharedServices = createSharedServices(this);
-    this.restoreProcessFrontmatterPatch = this.installProcessFrontmatterPatch();
     this.registerEditorExtension(this.linkedSubitemCheckboxService.getEditorExtension());
     this.registerEditorExtension(this.hideCompletedCheckboxesService.getEditorExtension());
     this.registerEditorExtension(this.inlinePropertyDecorationService.getEditorExtension());
@@ -1872,10 +1869,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       this.restoreCanvasOpenGuard();
       this.restoreCanvasOpenGuard = null;
     }
-    if (this.restoreProcessFrontmatterPatch) {
-      this.restoreProcessFrontmatterPatch();
-      this.restoreProcessFrontmatterPatch = null;
-    }
     if (this.restoreMenuPatch) {
       this.restoreMenuPatch();
       this.restoreMenuPatch = null;
@@ -2906,41 +2899,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         workspace.openLinkText = originalOpenLinkText;
       }
     };
-  }
-
-  private installProcessFrontmatterPatch(): () => void {
-    const fileManager = this.app.fileManager as any;
-    const original = fileManager.processFrontMatter?.bind(fileManager);
-    if (typeof original !== 'function') {
-      return () => {};
-    }
-    this.nativeProcessFrontmatterDelegate = original;
-
-    const plugin = this;
-    const gcmProcessFrontmatterPatch = async function (
-      file: TFile,
-      mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>,
-    ) {
-      return await plugin.frontmatterMutationService.process(file, mutator);
-    };
-    (gcmProcessFrontmatterPatch as any).__tpsGcmFrontmatterPatch = true;
-    fileManager.processFrontMatter = gcmProcessFrontmatterPatch;
-
-    return () => {
-      fileManager.processFrontMatter = original;
-      this.nativeProcessFrontmatterDelegate = null;
-    };
-  }
-
-  async processFrontmatterWithNativeDelegate(
-    file: TFile,
-    mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>,
-    options?: unknown,
-  ): Promise<unknown> {
-    if (typeof this.nativeProcessFrontmatterDelegate !== 'function') {
-      throw new Error('Native frontmatter delegate is not available.');
-    }
-    return await this.nativeProcessFrontmatterDelegate(file, mutator, options);
   }
 
   private stopArchiveTagAutomation(): void {

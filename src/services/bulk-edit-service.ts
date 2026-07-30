@@ -399,7 +399,7 @@ export class BulkEditService {
             const newFile = await this.plugin.app.vault.create(newFilePath, content);
             if (!(newFile instanceof TFile)) return false;
 
-            await this.plugin.app.fileManager.processFrontMatter(newFile, (fm) => {
+            await this.plugin.frontmatterMutationService.process(newFile, (fm) => {
                 this.setFrontmatterValueCaseInsensitive(fm, "scheduled", newScheduled);
                 this.setFrontmatterValueCaseInsensitive(fm, "recurrenceRule", recurrenceRule);
                 this.deleteFrontmatterValueCaseInsensitive(fm, "recurrence");
@@ -438,7 +438,7 @@ export class BulkEditService {
     private async markRecurrenceGenerated(file: TFile, scheduledValue: string): Promise<void> {
         if (!(await this.canMutateFrontmatterSafely(file))) return;
         await this.runSerializedFrontmatterWrite(file, async () => {
-            await this.plugin.app.fileManager.processFrontMatter(file, (fm) => {
+            await this.plugin.frontmatterMutationService.process(file, (fm) => {
                 this.setFrontmatterValueCaseInsensitive(fm, this.recurrenceLastGeneratedKey, scheduledValue);
             });
         });
@@ -1521,7 +1521,7 @@ export class BulkEditService {
     private async applyRecurrenceDirectly(file: TFile, rule: string, endsOn: string | null): Promise<boolean> {
         if (!(await this.canMutateFrontmatterSafely(file))) return false;
         await this.runSerializedFrontmatterWrite(file, async () => {
-            await this.plugin.app.fileManager.processFrontMatter(file, (fmw) => {
+            await this.plugin.frontmatterMutationService.process(file, (fmw) => {
                 this.setFrontmatterValueCaseInsensitive(fmw, 'recurrenceRule', rule);
                 this.deleteFrontmatterValueCaseInsensitive(fmw, 'recurrence');
                 this.deleteFrontmatterValueCaseInsensitive(fmw, 'recurrenceTemplate');
@@ -1545,7 +1545,7 @@ export class BulkEditService {
             const seriesBaseName = stripDateSuffix(file.basename).trim() || file.basename;
             if (!(await this.canMutateFrontmatterSafely(file))) return false;
             await this.runSerializedFrontmatterWrite(file, async () => {
-                await this.plugin.app.fileManager.processFrontMatter(file, (fmw) => {
+                await this.plugin.frontmatterMutationService.process(file, (fmw) => {
                     this.markRecurrenceTemplate(fmw);
                     this.setFrontmatterValueCaseInsensitive(fmw, 'title', seriesBaseName);
                     this.setFrontmatterValueCaseInsensitive(fmw, 'recurrenceRule', rule);
@@ -1569,7 +1569,7 @@ export class BulkEditService {
         if (!(await this.canMutateFrontmatterSafely(file))) return false;
         const seriesBaseName = templateFile.basename;
         await this.runSerializedFrontmatterWrite(file, async () => {
-            await this.plugin.app.fileManager.processFrontMatter(file, (fmw) => {
+            await this.plugin.frontmatterMutationService.process(file, (fmw) => {
                 this.setFrontmatterValueCaseInsensitive(
                     fmw,
                     'recurrenceTemplate',
@@ -1621,7 +1621,7 @@ export class BulkEditService {
         }
         if (!(templateFile instanceof TFile)) return null;
 
-        await this.plugin.app.fileManager.processFrontMatter(templateFile, (fmw) => {
+        await this.plugin.frontmatterMutationService.process(templateFile, (fmw) => {
             this.markRecurrenceTemplate(fmw);
             this.setFrontmatterValueCaseInsensitive(fmw, 'title', seriesBaseName);
             this.setFrontmatterValueCaseInsensitive(fmw, 'recurrenceRule', rule);
@@ -1683,7 +1683,7 @@ export class BulkEditService {
                     if (fm && existingTemplate instanceof TFile && !this.frontmatterReferencesSeriesTemplate(fm, seriesBaseName, existingTemplate)) {
                         if (await this.canMutateFrontmatterSafely(file)) {
                             await this.runSerializedFrontmatterWrite(file, async () => {
-                                await this.plugin.app.fileManager.processFrontMatter(file, (fmw) => {
+                                await this.plugin.frontmatterMutationService.process(file, (fmw) => {
                                     this.setFrontmatterValueCaseInsensitive(
                                         fmw,
                                         'recurrenceTemplate',
@@ -1705,7 +1705,7 @@ export class BulkEditService {
 
                 // Mark the template copy — strip all instance-specific fields so it
                 // represents a clean "blueprint" for every future instance in this series.
-                await this.plugin.app.fileManager.processFrontMatter(templateFile, (fmw) => {
+                await this.plugin.frontmatterMutationService.process(templateFile, (fmw) => {
                     this.markRecurrenceTemplate(fmw);
                     // Remove fields that belong to a specific instance, not the series
                     this.deleteFrontmatterValueCaseInsensitive(fmw, 'scheduled');
@@ -1729,7 +1729,7 @@ export class BulkEditService {
                 // Add back-link from instance to the series template
                 if (await this.canMutateFrontmatterSafely(file)) {
                     await this.runSerializedFrontmatterWrite(file, async () => {
-                        await this.plugin.app.fileManager.processFrontMatter(file, (fmw) => {
+                        await this.plugin.frontmatterMutationService.process(file, (fmw) => {
                             this.setFrontmatterValueCaseInsensitive(
                                 fmw,
                                 'recurrenceTemplate',
@@ -1875,7 +1875,7 @@ export class BulkEditService {
         if (!(created instanceof TFile)) return false;
 
         const scheduled = window.moment(firstOccurrence).format('YYYY-MM-DD HH:mm:ss');
-        await this.plugin.app.fileManager.processFrontMatter(created, (fmw) => {
+        await this.plugin.frontmatterMutationService.process(created, (fmw) => {
             this.setFrontmatterValueCaseInsensitive(fmw, 'scheduled', scheduled);
             this.setFrontmatterValueCaseInsensitive(
                 fmw,
@@ -2046,7 +2046,7 @@ export class BulkEditService {
                 throw new Error(`Invalid title value: ${baseName}`);
             }
 
-            await this.plugin.app.fileManager.processFrontMatter(newFile, (fm) => {
+            await this.plugin.frontmatterMutationService.process(newFile, (fm) => {
                 if (isTrackerRecurrence) {
                     this.deleteFrontmatterValueCaseInsensitive(fm, 'scheduled');
                 } else {
@@ -2231,7 +2231,7 @@ export class BulkEditService {
                     if (!this.isRecurrenceTemplateFrontmatter(fm)) {
                         if (await this.canMutateFrontmatterSafely(file)) {
                             await this.runSerializedFrontmatterWrite(file, async () => {
-                                await this.plugin.app.fileManager.processFrontMatter(file, (fmw) => {
+                                await this.plugin.frontmatterMutationService.process(file, (fmw) => {
                                     this.markRecurrenceTemplate(fmw);
                                     this.deleteFrontmatterValueCaseInsensitive(fmw, 'scheduled');
                                     this.deleteWorkflowStatusValue(fmw);
@@ -2307,7 +2307,7 @@ export class BulkEditService {
                     const { file, templateFile, seriesBaseName } = row;
                     if (!(await this.canMutateFrontmatterSafely(file))) continue;
                     await this.runSerializedFrontmatterWrite(file, async () => {
-                        await this.plugin.app.fileManager.processFrontMatter(file, (fmw) => {
+                        await this.plugin.frontmatterMutationService.process(file, (fmw) => {
                             this.setFrontmatterValueCaseInsensitive(
                                 fmw,
                                 'recurrenceTemplate',
@@ -2326,7 +2326,7 @@ export class BulkEditService {
     async clearRecurrenceRule(file: TFile): Promise<void> {
         if (!(await this.canMutateFrontmatterSafely(file))) return;
         await this.runSerializedFrontmatterWrite(file, async () => {
-            await this.plugin.app.fileManager.processFrontMatter(file, (fm) => {
+            await this.plugin.frontmatterMutationService.process(file, (fm) => {
                 this.deleteFrontmatterValueCaseInsensitive(fm, 'recurrenceRule');
                 this.deleteFrontmatterValueCaseInsensitive(fm, 'recurrence');
             });
@@ -2358,7 +2358,7 @@ export class BulkEditService {
 
                 let didChange = false;
                 await this.runSerializedFrontmatterWrite(parentFile, async () => {
-                    await this.plugin.app.fileManager.processFrontMatter(parentFile, (fm) => {
+                    await this.plugin.frontmatterMutationService.process(parentFile, (fm) => {
                         if (!fm || typeof fm !== 'object') return;
 
                         const existingTagKey = this.findFrontmatterKeyCaseInsensitive(fm, 'tags');
@@ -2427,7 +2427,7 @@ export class BulkEditService {
 
                 let didChange = false;
                 await this.runSerializedFrontmatterWrite(childFile, async () => {
-                    await this.plugin.app.fileManager.processFrontMatter(childFile, (fm) => {
+                    await this.plugin.frontmatterMutationService.process(childFile, (fm) => {
                         if (!fm || typeof fm !== 'object') return;
 
                         const existingTagKey = this.findFrontmatterKeyCaseInsensitive(fm, 'tags');
@@ -2466,7 +2466,7 @@ export class BulkEditService {
                 changedFiles.set(file.path, file);
             }
             if (this.plugin.settings.autoSaveFolderPath) {
-                await this.plugin.app.fileManager.processFrontMatter(file, (fm) => {
+                await this.plugin.frontmatterMutationService.process(file, (fm) => {
                     this.setFrontmatterValueCaseInsensitive(fm as Record<string, any>, 'folderPath', file.parent?.path || '/');
                 });
             }
@@ -2529,7 +2529,7 @@ export class BulkEditService {
         }
         let changed = false;
         await this.runSerializedFrontmatterWrite(parentFile, async () => {
-            await this.plugin.app.fileManager.processFrontMatter(parentFile, (fm) => {
+            await this.plugin.frontmatterMutationService.process(parentFile, (fm) => {
                 const existingKey = this.findFrontmatterKeyCaseInsensitive(fm, parentKey);
                 const existingRaw = existingKey ? fm[existingKey] : undefined;
                 const currentValues: string[] = [];
@@ -2595,7 +2595,7 @@ export class BulkEditService {
         if (!(await this.canMutateFrontmatterSafely(parentFile))) return false;
         let changed = false;
         await this.runSerializedFrontmatterWrite(parentFile, async () => {
-            await this.plugin.app.fileManager.processFrontMatter(parentFile, (fm) => {
+            await this.plugin.frontmatterMutationService.process(parentFile, (fm) => {
                 const key = Object.keys(fm).find((k) => k.toLowerCase() === childKey.toLowerCase());
                 if (!key) return;
                 const raw = fm[key];
@@ -2744,7 +2744,7 @@ export class BulkEditService {
                     await this.plugin.app.vault.modify(parentFile, nextContent);
                 }
                 if (await this.canMutateFrontmatterSafely(parentFile)) {
-                    await this.plugin.app.fileManager.processFrontMatter(parentFile, (fm) => {
+                    await this.plugin.frontmatterMutationService.process(parentFile, (fm) => {
                         const key = Object.keys(fm).find(k => k.toLowerCase() === attachmentsKey.toLowerCase());
                         if (!key) return;
                         const raw = fm[key];
@@ -2868,7 +2868,7 @@ export class BulkEditService {
 
             if (hasPk || hasAk) {
                 try {
-                    await this.plugin.app.fileManager.processFrontMatter(file, (frontmatter) => {
+                    await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
                         // Clean childOf (single parent ref)
                         const pk = Object.keys(frontmatter).find(k => k.toLowerCase() === parentKey.toLowerCase());
                         if (pk && isMatch(frontmatter[pk], file.path, frontmatterRemovedReferences)) {

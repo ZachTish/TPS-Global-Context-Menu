@@ -8,6 +8,12 @@ import {
 
 export interface ArchiveFileServiceHost {
   app: App;
+  frontmatterMutationService: {
+    process(
+      file: TFile,
+      mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>,
+    ): Promise<boolean>;
+  };
   settings: {
     archiveTag?: string;
     activityLogPropertyKey?: string;
@@ -122,7 +128,7 @@ export class ArchiveFileService {
         const originalFolder = liveFile.parent?.path === '/' ? '' : liveFile.parent?.path ?? '';
         if (liveFile.extension?.toLowerCase() === 'md' && archiveTag) {
           try {
-            await this.plugin.app.fileManager.processFrontMatter(liveFile, (frontmatter: Record<string, unknown>) => {
+            await this.plugin.frontmatterMutationService.process(liveFile, (frontmatter: Record<string, unknown>) => {
               frontmatter.tags = mergeNormalizedTags(frontmatter.tags, archiveTag);
               frontmatter.archiveOriginalFolder = originalFolder;
             });
@@ -249,7 +255,7 @@ export class ArchiveFileService {
           try {
             let cleanupRequiredByMutation = false;
             const cleanupResult = await (
-              this.plugin.app.fileManager.processFrontMatter(liveFile, (frontmatter: Record<string, unknown>) => {
+              this.plugin.frontmatterMutationService.process(liveFile, (frontmatter: Record<string, unknown>) => {
                 cleanupRequiredByMutation = this.hasArchiveCleanupMetadataInRecord(frontmatter, archiveTag);
                 this.deleteValueCaseInsensitive(frontmatter, 'archiveOriginalFolder');
                 if (archiveTag) {

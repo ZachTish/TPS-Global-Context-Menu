@@ -46,7 +46,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     const writeConfiguredStatus = async (file: TFile, status: string): Promise<void> => {
         markChecklistCompletionPromptHandled(file);
         const statusKey = plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status';
-        await plugin.app.fileManager.processFrontMatter(file, (frontmatter) => {
+        await plugin.frontmatterMutationService.process(file, (frontmatter) => {
             const actualKey = Object.keys(frontmatter).find((key) => key.toLowerCase() === String(statusKey).toLowerCase()) || statusKey;
             const completedDateKey = Object.keys(frontmatter).find((key) => key.toLowerCase() === 'completeddate');
             if (status) {

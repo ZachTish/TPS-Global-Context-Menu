@@ -484,7 +484,7 @@ export class TaskCheckboxHandler {
 
         try {
             await this.plugin.bulkEditService.runSerializedFrontmatterWrite(file, async () => {
-                await this.plugin.app.fileManager.processFrontMatter(file, (fm) => {
+                await this.plugin.frontmatterMutationService.process(file, (fm) => {
                     fm[propKey] = hasOpenChecklistItem;
                 });
             });

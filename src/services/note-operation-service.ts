@@ -1001,7 +1001,7 @@ export class NoteOperationService {
         await this.normalizeLeadingWhitespaceBeforeFrontmatter(file);
 
         try {
-            await this.app.fileManager.processFrontMatter(file, (fm: any) => {
+            await this.plugin.frontmatterMutationService.process(file, (fm: any) => {
                 ensureDailyNoteTitleFallback(fm, titleValue);
                 const scheduled = String(fm?.scheduled ?? '').trim();
                 if (!scheduled || /<%[\s\S]*%>/.test(scheduled) || /\{\{[\s\S]*\}\}/.test(scheduled)) {
@@ -1541,7 +1541,7 @@ export class NoteOperationService {
             }
 
             try {
-                await this.app.fileManager.processFrontMatter(liveFile, (frontmatter: any) => {
+                await this.plugin.frontmatterMutationService.process(liveFile, (frontmatter: any) => {
                     frontmatter.tags = mergeNormalizedTags(frontmatter.tags, archiveTag);
                 });
                 archived += 1;

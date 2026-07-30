@@ -537,8 +537,8 @@ test('TPS List generic note edits preserve the live frontmatter value type', () 
 
   assert.match(
     noteEditor,
-    /processFrontMatter\(file, \(fm\) => \{[\s\S]*?const actualKey = this\.findFrontmatterKeyCaseInsensitive\(fm, writableProp\) \|\| writableProp;[\s\S]*?const currentValue = fm\[actualKey\]/,
-    'the fallback editor must re-read the current value inside the frontmatter transaction',
+    /processFrontmatter\(file, \(fm\) => \{[\s\S]*?const actualKey = this\.findFrontmatterKeyCaseInsensitive\(fm, writableProp\) \|\| writableProp;[\s\S]*?const currentValue = fm\[actualKey\]/,
+    'the editor must re-read the current value inside the owned frontmatter transaction',
   );
   assert.match(
     noteEditor,

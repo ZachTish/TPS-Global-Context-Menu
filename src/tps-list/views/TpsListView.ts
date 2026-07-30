@@ -731,6 +731,17 @@ export class TpsListView extends BasesView {
     return gcm?.services || gcm?.sharedServices || null;
   }
 
+  private async processFrontmatter(
+    file: TFile,
+    mutator: (frontmatter: Record<string, any>) => void | Promise<void>,
+  ): Promise<boolean> {
+    const service = this.getGcmPlugin()?.frontmatterMutationService;
+    if (typeof service?.process !== 'function') {
+      throw new Error('TPS GCM frontmatter mutation service is unavailable.');
+    }
+    return await service.process(file, mutator);
+  }
+
   private openTaskLineContextMenu(evt: MouseEvent, fallbackPath?: string | null, fallbackLine?: number | null): boolean {
     const plugin = this.getGcmPlugin();
     const contextTargetService = plugin?.contextTargetService || this.getGcmApi()?.contextTargetService;
@@ -8080,7 +8091,7 @@ export class TpsListView extends BasesView {
     ) {
       const current = parseTaskTagValues(rawValue);
       new TagSuggestModal(this.app, [...collectKnownVaultTags(this.app), ...current], async (tag, selected) => {
-        await this.app.fileManager.processFrontMatter(file, (fm) => {
+        await this.processFrontmatter(file, (fm) => {
           const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, writableProp) || writableProp;
           const existing = parseTaskTagValues(fm[actualKey]);
           const normalizedTag = tag.toLocaleLowerCase();
@@ -8110,7 +8121,7 @@ export class TpsListView extends BasesView {
       const allDay = cacheFrontmatter.allDay === true || /^true$/iu.test(String(cacheFrontmatter.allDay || ''));
       const isScheduled = this.normalizeInlinePropertyKey(property.key) === 'scheduled';
       new ScheduledModal(this.app, current, timeEstimate, allDay, async (result) => {
-        await this.app.fileManager.processFrontMatter(file, (fm) => {
+        await this.processFrontmatter(file, (fm) => {
           const destinationKey = this.findFrontmatterKeyCaseInsensitive(fm, writableProp) || writableProp;
           if (result.date) fm[destinationKey] = result.date;
           else delete fm[destinationKey];
@@ -8146,7 +8157,7 @@ export class TpsListView extends BasesView {
         configuredProperty,
         this.stringifyEditablePropertyValue(rawValue),
         async (choice) => {
-        await this.app.fileManager.processFrontMatter(file, (fm) => {
+        await this.processFrontmatter(file, (fm) => {
           const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, writableProp) || writableProp;
           if (choice.kind === 'clear') {
             delete fm[actualKey];
@@ -8171,7 +8182,7 @@ export class TpsListView extends BasesView {
       return;
     }
     this.startListPropertyInput(span, this.stringifyEditablePropertyValue(rawValue), async (nextValue) => {
-      await this.app.fileManager.processFrontMatter(file, (fm) => {
+      await this.processFrontmatter(file, (fm) => {
         const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, writableProp) || writableProp;
         const currentValue = fm[actualKey];
         if (!nextValue.trim()) {

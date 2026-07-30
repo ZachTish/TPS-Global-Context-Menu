@@ -360,9 +360,23 @@ function createDailyNoteServiceHarness(TFile, {
       },
     },
   };
+  let nativeProcessFrontMatterCalls = 0;
+  const processOwnedFrontmatter = async (file, mutator) => {
+    const parsed = parseFrontmatter(files.get(file.path) || '');
+    await mutator(parsed.frontmatter);
+    files.set(file.path, writeFrontmatter(parsed.frontmatter, parsed.body));
+    return true;
+  };
+  app.fileManager.processFrontMatter = async () => {
+    nativeProcessFrontMatterCalls += 1;
+    throw new Error('Daily-note creation bypassed the owned frontmatter mutation service.');
+  };
   const plugin = {
     app,
     settings: { autoSaveFolderPath: false },
+    frontmatterMutationService: {
+      process: processOwnedFrontmatter,
+    },
     fileNamingService: {
       registerDailyNoteConfiguration() {},
       async processFileOnOpen() {},
@@ -386,6 +400,7 @@ function createDailyNoteServiceHarness(TFile, {
       get templaterRuns() { return templaterRuns; },
       get templaterAutoRuns() { return templaterAutoRuns; },
       get templaterExplicitRuns() { return templaterExplicitRuns; },
+      get nativeProcessFrontMatterCalls() { return nativeProcessFrontMatterCalls; },
     },
   };
 }
@@ -606,6 +621,7 @@ test('canonical GCM creation inserts the template once and preserves its readabl
   );
   assert.equal(harness.stats.templaterRuns, 1, 'reusing an existing Daily Note must not rerun Templater');
   assert.match(harness.files.get(first.path), /title: "Tuesday planning"/);
+  assert.equal(harness.stats.nativeProcessFrontMatterCalls, 0, 'daily-note normalization must stay on the owned mutation service');
 });
 
 test('Templater local auto-create processing settles before a later capture mutation', async () => {

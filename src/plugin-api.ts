@@ -324,7 +324,7 @@ async function applyChecklistPromotionMetadata(
 ): Promise<void> {
     if (!promotion.scheduled && promotion.tags.length === 0) return;
     await plugin.bulkEditService.runSerializedFrontmatterWrite(created, async () => {
-        await plugin.app.fileManager.processFrontMatter(created, (frontmatter) => {
+        await plugin.frontmatterMutationService.process(created, (frontmatter) => {
             if (promotion.scheduled) frontmatter.scheduled = promotion.scheduled;
             if (promotion.tags.length > 0) frontmatter.tags = mergeNormalizedTags(frontmatter.tags, promotion.tags);
         });
