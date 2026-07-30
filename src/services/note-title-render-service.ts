@@ -47,13 +47,22 @@ export class NoteTitleRenderService {
   }
 
   refreshInlineTitles(): void {
+    const renderedRootSelector =
+      '.markdown-preview-view, .markdown-reading-view, .markdown-rendered, .markdown-preview-section';
     for (const leaf of this.plugin.app.workspace.getLeavesOfType('markdown')) {
       const view = leaf.view as MarkdownView;
       if (!(view?.file instanceof TFile) || !(view?.contentEl instanceof HTMLElement)) continue;
       this.refreshInlineTitleAndIcon(view);
-      for (const renderedRoot of Array.from(view.contentEl.querySelectorAll<HTMLElement>(
-        '.markdown-preview-view, .markdown-reading-view, .markdown-rendered, .markdown-preview-section',
-      ))) {
+      const renderedRoots = Array.from(
+        view.contentEl.querySelectorAll<HTMLElement>(renderedRootSelector),
+      );
+      const renderedRootSet = new Set(renderedRoots);
+      for (const renderedRoot of renderedRoots) {
+        let ancestor = renderedRoot.parentElement;
+        while (ancestor && !renderedRootSet.has(ancestor)) {
+          ancestor = ancestor.parentElement;
+        }
+        if (ancestor) continue;
         this.processRenderedNoteLinks(renderedRoot, view.file.path);
       }
     }

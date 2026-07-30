@@ -1,5 +1,15 @@
 # TPS Global Context Menu
 
+## 1.11.9
+
+- The 900 ms rendered-title compatibility sweep now processes only the outermost roots from its existing per-view candidate list. Nested Reading, Preview, Rendered, and Preview Section containers no longer make GCM revisit the same links and subtrees several times in one tick.
+- Every released compatibility surface remains: the public Markdown postprocessor, all four host-DOM selectors, the mobile remount sweep, once-per-leaf title/icon reconciliation, per-view source paths, disjoint embeds, aliases, excluded menus/modals, link targets, settings, commands, APIs, and stored data.
+- The filter is invocation-local and walks only parent elements against the current candidate set. It adds no persistent DOM cache, observer, timer, retry, monkeypatch, or unsupported Obsidian API.
+- In the identical 500-section/10,000-link compiled-service workload, exact 1.11.8 performed 503 DOM queries and 30,000 link-target resolutions per sweep; 1.11.9 performs 2 and 10,000. Across 100 iterations, median time fell from 45.385 ms to 19.166 ms (57.8%). Empty nested views improved 34.1%; 500 disjoint roots retained their 501 queries and 10,000 resolutions and remained effectively neutral (13.392 ms versus 12.913 ms in this run).
+- The exact released source failed the new nested-root gate by processing 502 candidates. The candidate passes eight compiled behavioral gates covering nested/disjoint/boundary DOM shapes, split and invalid leaves, refresh ordering, DOM replacement, link behavior, source paths, and the unchanged 900 ms contract, plus the complete 551-check declared suite.
+- Obsidian 1.12.7 was reloaded in the isolated test vault. The existing Base Filter Lab guide rendered normally in Reading mode with its GCM title and content intact; no note, setting, command action, or outbound automation was changed.
+- This is a backward-compatible patch release. Minimum supported Obsidian remains 1.10.0 and no migration is required.
+
 ## 1.11.8
 
 - `Collapse headings on first open` now dispatches one public `Editor.exec('foldAll')` request. GCM no longer probes Obsidian's private application command registry or falls back to scanning every editor line, unfolding the note, moving the cursor to every heading, and toggling folds one by one.
@@ -66,7 +76,7 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.11.8` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.11.9` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
 
 ## 1.11.1
 
