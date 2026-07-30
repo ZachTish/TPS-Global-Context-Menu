@@ -1,5 +1,14 @@
 # TPS Global Context Menu
 
+## 1.11.6
+
+- Reactive note-level `completedDate` reconciliation is now a lossless keyed batch. A metadata burst keeps one pending entry per Markdown file instead of Obsidian's prior vault-wide debounce retaining only the final file; repeated events for one file still coalesce behind the existing trailing 400 ms quiet period.
+- Batches run sequentially through GCM's owned frontmatter mutation service. Each file is resolved from the vault immediately before mutation, and the live parsed frontmatter is checked again before adding, normalizing, or removing `completedDate`. Rename, delete, replacement, unload, stale-cache, slow-write, and per-file failure cases therefore fail safely without parallel iCloud writes.
+- This workflow now uses the shared canonical done-status contract, so configured aliases such as `done` behave like `complete`, and it no longer depends on GCM's global `fileManager.processFrontMatter` patch. The broader compatibility patch remains unchanged for other workflows and is a separate future cleanup.
+- No command, setting, API, note-data, or workflow was removed or migrated. Statusless dates remain untouched, scalar completed dates remain stable, completion-date arrays still normalize to their last nonblank value, and reopened notes still remove the date.
+- The exact released 1.11.5 event source passed two of seven initial compiled-code batching/lifecycle checks: 100 distinct events produced one mutation and lost 99 files. The final implementation passes all 11 expanded checks: the same burst produces 100 unique serialized mutations, while 100 events for one file remain one mutation. All 533 declared checks, TypeScript, and the required production-mode builds pass.
+- Obsidian 1.12.7 was reloaded in the isolated test vault. The device remained in its existing `TPS: User` role, so a synthetic background-automation probe correctly stayed disabled rather than changing the role or enabling unrelated automation; the notes were moved directly to `_archive`. Runtime-owned settings remained byte-identical and production was not accessed.
+
 ## 1.11.5
 
 - Event-driven time-tracker status refreshes are no longer discarded while an authoritative status read is active. Any burst now schedules exactly one trailing read, so pause, resume, stop, start, clear, and settings changes cannot leave the status bar stale until the 30-second poll.

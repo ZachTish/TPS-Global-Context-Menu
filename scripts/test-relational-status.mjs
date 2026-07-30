@@ -520,7 +520,15 @@ test('note workflow and recurrence services never treat relational status as che
   );
   assert.match(
     eventSource,
-    /const currentStatus = readConfiguredStatus\(fm\);/u,
+    /const currentStatus = readConfiguredStatus\(frontmatter\);/u,
+  );
+  assert.match(
+    eventSource,
+    /const doneStatuses = new Set\(plugin\.sharedServices\.status\.getDoneStatuses\(\)\);/u,
+  );
+  assert.match(
+    eventSource,
+    /plugin\.frontmatterMutationService\.process\(file,/u,
   );
   assert.match(
     parentLinkSource,
