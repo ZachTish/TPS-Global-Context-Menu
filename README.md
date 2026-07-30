@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.11.5
+
+- Event-driven time-tracker status refreshes are no longer discarded while an authoritative status read is active. Any burst now schedules exactly one trailing read, so pause, resume, stop, start, clear, and settings changes cannot leave the status bar stale until the 30-second poll.
+- Periodic one-second display ticks and overlapping setup/poll reads retain their existing coalescing behavior and do not create a redundant trailing full status scan. Successful status-bar actions rely on the Time Tracking service's post-persistence refresh; no-op actions still request reconciliation.
+- A status read that fails no longer creates an unhandled promise rejection, and a refresh already requested behind that failure still runs. Detaching or replacing the status item prevents an older asynchronous read from mutating stale UI.
+- This is a backward-compatible patch release with no command, setting, API, note-data, or workflow migration. Minimum supported Obsidian remains 1.10.0.
+- The exact 1.11.4 implementation passed only two of six new compiled-code concurrency/lifecycle checks: 100 overlapping refreshes performed one stale read, read failure was unhandled, and detach/re-setup lost the replacement refresh. The 1.11.5 implementation passes all six and bounds the same burst to two authoritative reads—the active read plus one necessary latest-state read. All 522 declared checks, TypeScript, and the required production-mode builds pass. Obsidian 1.12.7 was reloaded in the isolated test vault for the final timer/status-bar verification; runtime-owned settings remained byte-identical and production was not accessed.
+
 ## 1.11.4
 
 - Clicking a populated or empty entity-backed TPS Table cell now opens the searchable Manual/Vault/Entity picker directly. The intermediate `(none)` / `Choose <kind> entity…` menu introduced in 1.11.0 is removed from this cell-editing path, restoring one-click parity with TPS List.

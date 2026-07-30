@@ -2,6 +2,7 @@ import { Menu, Notice, setIcon } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import type { TimeTrackingPausedSessionState } from '../types';
 import type { TimeTrackingSession } from './time-tracking-service';
+import * as logger from '../logger';
 
 type StatusBarTimerState =
   | { kind: 'active'; session: TimeTrackingSession; elapsedMs: number }
@@ -10,6 +11,7 @@ type StatusBarTimerState =
 export class TimeTrackingStatusBarService {
   private itemEl: HTMLElement | null = null;
   private updateInFlight = false;
+  private refreshPending = false;
   private lastRenderKey = '';
   private cachedState: StatusBarTimerState | null = null;
 
@@ -32,30 +34,40 @@ export class TimeTrackingStatusBarService {
       this.reposition();
       void this.update(true, true);
     });
-    void this.update(true, true);
+    this.refresh();
   }
 
   detach(): void {
     this.itemEl?.remove();
     this.itemEl = null;
+    this.refreshPending = false;
+    this.lastRenderKey = '';
+    this.cachedState = null;
   }
 
   refresh(): void {
+    if (!this.itemEl) return;
+    if (this.updateInFlight) {
+      this.refreshPending = true;
+      return;
+    }
     void this.update(true, true);
   }
 
   private async update(force = false, fetchStatus = true): Promise<void> {
     if (this.updateInFlight || !this.itemEl) return;
+    const itemEl = this.itemEl;
     this.updateInFlight = true;
     try {
       const state = fetchStatus
         ? await this.getTimerState()
         : this.refreshCachedElapsed(this.cachedState);
+      if (this.itemEl !== itemEl) return;
       this.cachedState = state;
       if (!state) {
         this.lastRenderKey = '';
-        this.itemEl.style.display = 'none';
-        this.itemEl.empty();
+        itemEl.style.display = 'none';
+        itemEl.empty();
         return;
       }
 
@@ -67,8 +79,16 @@ export class TimeTrackingStatusBarService {
       this.lastRenderKey = renderKey;
       this.render(state);
       this.reposition();
+    } catch (error) {
+      logger.warn('[TPS GCM] Failed to refresh time tracking status bar', { error });
     } finally {
       this.updateInFlight = false;
+      if (this.refreshPending && this.itemEl) {
+        this.refreshPending = false;
+        void this.update(true, true);
+      } else if (!this.itemEl) {
+        this.refreshPending = false;
+      }
     }
   }
 
@@ -141,12 +161,10 @@ export class TimeTrackingStatusBarService {
     toggleButton.addEventListener('click', async (evt) => {
       evt.preventDefault();
       evt.stopPropagation();
-      if (state.kind === 'active') {
-        await this.plugin.timeTrackingService.pauseActiveTimer();
-      } else {
-        await this.plugin.timeTrackingService.resumePausedTimer();
-      }
-      this.refresh();
+      const changed = state.kind === 'active'
+        ? await this.plugin.timeTrackingService.pauseActiveTimer()
+        : await this.plugin.timeTrackingService.resumePausedTimer();
+      if (!changed) this.refresh();
     });
 
     const stopButton = container.createEl('button', {
@@ -161,12 +179,10 @@ export class TimeTrackingStatusBarService {
     stopButton.addEventListener('click', async (evt) => {
       evt.preventDefault();
       evt.stopPropagation();
-      if (state.kind === 'active') {
-        await this.plugin.timeTrackingService.stopActiveTimer();
-      } else {
-        await this.plugin.timeTrackingService.clearPausedTimer();
-      }
-      this.refresh();
+      const changed = state.kind === 'active'
+        ? await this.plugin.timeTrackingService.stopActiveTimer()
+        : await this.plugin.timeTrackingService.clearPausedTimer();
+      if (!changed) this.refresh();
     });
   }
 
@@ -198,12 +214,10 @@ export class TimeTrackingStatusBarService {
         .setTitle(state.kind === 'active' ? 'Pause timer' : 'Resume timer')
         .setIcon(state.kind === 'active' ? 'pause' : 'play')
         .onClick(async () => {
-          if (state.kind === 'active') {
-            await this.plugin.timeTrackingService.pauseActiveTimer();
-          } else {
-            await this.plugin.timeTrackingService.resumePausedTimer();
-          }
-          this.refresh();
+          const changed = state.kind === 'active'
+            ? await this.plugin.timeTrackingService.pauseActiveTimer()
+            : await this.plugin.timeTrackingService.resumePausedTimer();
+          if (!changed) this.refresh();
         });
     });
     menu.addItem((item) => {
@@ -211,12 +225,10 @@ export class TimeTrackingStatusBarService {
         .setTitle('Stop timer')
         .setIcon('square')
         .onClick(async () => {
-          if (state.kind === 'active') {
-            await this.plugin.timeTrackingService.stopActiveTimer();
-          } else {
-            await this.plugin.timeTrackingService.clearPausedTimer();
-          }
-          this.refresh();
+          const changed = state.kind === 'active'
+            ? await this.plugin.timeTrackingService.stopActiveTimer()
+            : await this.plugin.timeTrackingService.clearPausedTimer();
+          if (!changed) this.refresh();
         });
     });
     menu.showAtMouseEvent(evt);
