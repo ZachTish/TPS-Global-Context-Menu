@@ -1,5 +1,15 @@
 # TPS Global Context Menu
 
+## 1.11.8
+
+- `Collapse headings on first open` now dispatches one public `Editor.exec('foldAll')` request. GCM no longer probes Obsidian's private application command registry or falls back to scanning every editor line, unfolding the note, moving the cursor to every heading, and toggling folds one by one.
+- The delayed request retains the live `TFile`, so a supported title-sync rename during the existing 700 ms delay no longer leaves the timer comparing an obsolete path. Mobile, already-open tabs, rapid file switches, the one 1,200 ms retry, focus behavior, commands, settings, and stored data remain unchanged.
+- A missing editor, wrong active file, or thrown focus/fold dispatch still fails safely. Thrown requests return `false` so the existing bounded retry can run; logs describe a requested collapse instead of claiming that the void-returning editor command verified the rendered result.
+- The shipped service is 77 net lines smaller. In the retired fallback-only path, plugin work changes from one private-registry probe plus an O(lines + headings) scan/cursor loop to one supported editor dispatch with zero line, cursor, or scroll calls.
+- The exact released 1.11.7 source failed the new supported-API gate after one private `app.commands` read, and its delayed-path regression performed zero fold calls after a pre-timer rename. The candidate passes all 10 focused lifecycle/API checks and the complete 543-check declared suite.
+- In Obsidian 1.12.7, 1.11.7 missed a synthetic note's first-open collapse when title sync renamed it, then collapsed it after close/reopen. The candidate collapsed the renamed fixture on its first open, preserved an intentionally expanded heading while switching between already-open tabs, and collapsed the existing 215-line Base Filter Lab guide. Fenced heading/list text remained ordinary code content.
+- This is a backward-compatible patch release. The setting remains disabled by default and desktop-only, minimum supported Obsidian remains 1.10.0, and no migration is required.
+
 ## 1.11.7
 
 - GCM no longer replaces the application-wide `app.fileManager.processFrontMatter` method. All 42 GCM-owned Markdown mutation sites now call the owned frontmatter service explicitly, retaining serialization, malformed-YAML refusal, normalization, activity tracking, entity-index updates, explicit events, and title/filename follow-ups without changing Obsidian's API for unrelated plugins.
@@ -56,7 +66,7 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.11.7` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.11.8` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
 
 ## 1.11.1
 
