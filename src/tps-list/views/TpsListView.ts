@@ -2762,10 +2762,11 @@ export class TpsListView extends BasesView {
       return [file.extension.toLowerCase()];
     }
     if (['tag', 'tags', 'filetags'].includes(normalized) || raw.toLowerCase() === 'file.tags') {
-      const fm = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+      const cache = this.app.metadataCache.getFileCache(file);
+      const fm = cache?.frontmatter as Record<string, unknown> | undefined;
       const rawTags = [
         ...this.asArray(fm?.tags),
-        ...(this.app.metadataCache.getFileCache(file)?.tags ?? []).map((tag) => tag.tag),
+        ...(cache?.tags ?? []).map((tag) => tag.tag),
       ];
       const tags = new Set<string>();
       for (const rawTag of rawTags) {

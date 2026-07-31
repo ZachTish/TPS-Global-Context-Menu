@@ -597,6 +597,69 @@ test('TPS List task tag filters use exact task-tag membership across aliases and
   );
 });
 
+test('TPS List fallback note tags reuse one coherent metadata snapshot', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const file = {
+    path: 'Inbox/Tagged Note.md',
+    name: 'Tagged Note.md',
+    basename: 'Tagged Note',
+    extension: 'md',
+  };
+  let lookups = 0;
+  view.app = {
+    metadataCache: {
+      getFileCache: () => {
+        lookups++;
+        return {
+          frontmatter: { tags: ['#Alpha', 'beta'] },
+          tags: [{ tag: '#Gamma' }, { tag: 'beta' }],
+        };
+      },
+    },
+  };
+  assert.deepEqual(
+    view.getNoteComparableValues(file, 'file.tags'),
+    ['#alpha', 'alpha', '#beta', 'beta', '#gamma', 'gamma'],
+  );
+  assert.equal(lookups, 1, 'frontmatter and body tags should share one cache snapshot');
+
+  lookups = 0;
+  view.app.metadataCache.getFileCache = () => {
+    lookups++;
+    return null;
+  };
+  assert.deepEqual(view.getNoteComparableValues(file, 'tags'), []);
+  assert.equal(lookups, 1, 'a missing cache should still be read only once');
+
+  const rotatingCaches = [
+    {
+      frontmatter: { tags: ['#First'] },
+      tags: [{ tag: '#Same-Snapshot' }],
+    },
+    {
+      frontmatter: { tags: ['#Later'] },
+      tags: [{ tag: '#Mixed-Generation' }],
+    },
+  ];
+  lookups = 0;
+  view.app.metadataCache.getFileCache = () => rotatingCaches[Math.min(lookups++, rotatingCaches.length - 1)];
+  assert.deepEqual(
+    view.getNoteComparableValues(file, 'file.tags'),
+    ['#first', 'first', '#same-snapshot', 'same-snapshot'],
+  );
+  assert.equal(lookups, 1, 'tag evaluation must not blend two cache generations');
+
+  const method = viewSource.slice(
+    viewSource.indexOf('private getNoteComparableValues('),
+    viewSource.indexOf('private groupEntriesByProperty(', viewSource.indexOf('private getNoteComparableValues(')),
+  );
+  assert.equal(method.match(/metadataCache\.getFileCache\(file\)/g)?.length ?? 0, 1);
+  assert.match(method, /const cache = this\.app\.metadataCache\.getFileCache\(file\);/);
+  assert.match(method, /const fm = cache\?\.frontmatter/);
+  assert.match(method, /\.\.\.\(cache\?\.tags \?\? \[\]\)/);
+});
+
 test('TPS List normalizes configured checkbox status aliases before completion checks', async () => {
   const { TpsListView } = await loadTpsListViewHarness();
   const view = Object.create(TpsListView.prototype);

@@ -1,5 +1,14 @@
 # TPS Global Context Menu
 
+## 1.11.11
+
+- TPS List fallback note-tag evaluation now reads one Obsidian metadata-cache snapshot for both frontmatter tags and body tags instead of querying the same note twice.
+- Every released tag alias, filter operator, normalization rule, result order, setting, command, API, and stored value remains unchanged. A missing metadata record still yields no comparable tags.
+- Reusing one synchronous snapshot also prevents a metadata refresh from mixing frontmatter tags from one generation with body tags from another.
+- In actual-class differential coverage, 11 predicate forms and seven full-scan scenarios produced identical stable-cache output. Tag-specific metadata reads fell from two to one per evaluated predicate; a 200,000-iteration informational benchmark improved median elapsed time by 6.44%.
+- The exact 1.11.10 release passed all 555 declared checks before the change. The candidate adds one focused compiled regression and passes the complete 556-check release suite, TypeScript, final builds, and before/after test-vault UI verification.
+- This is a backward-compatible patch release. Minimum supported Obsidian remains 1.10.0 and no migration is required.
+
 ## 1.11.10
 
 - The disabled-by-default Canvas drag guard no longer installs any workspace or `WorkspaceLeaf` wrappers or its nine global drag-tracking listeners. Normal GCM startup therefore leaves all ten workspace methods and all three leaf prototype methods at their exact native identities and performs no Canvas-guard pointer/drag tracking.
@@ -86,7 +95,7 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.11.10` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.11.11` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
 
 ## 1.11.1
 
