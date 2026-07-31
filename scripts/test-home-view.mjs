@@ -25,6 +25,7 @@ const tpsListViewSource = readFileSync(new URL('../src/tps-list/views/TpsListVie
 const baseEmbedContextSource = readFileSync(new URL('../src/views/base-embed-context.ts', import.meta.url), 'utf8');
 const dailyNoteHomeSource = readFileSync(new URL('../src/services/daily-note-home-service.ts', import.meta.url), 'utf8');
 const viewModeManagerSource = readFileSync(new URL('../src/handlers/view-mode-manager.ts', import.meta.url), 'utf8');
+const fileSuggestModalSource = readFileSync(new URL('../src/modals/FileSuggestModal.ts', import.meta.url), 'utf8');
 const openTasksBaseSource = readOptionalSource(new URL('../../../../Open Unscheduled Tasks.base', import.meta.url));
 const foodLogBaseSource = readOptionalSource(new URL('../../../../Food Log.base', import.meta.url));
 const tasksBaseSource = readOptionalSource(new URL('../../../../Tasks.base', import.meta.url));
@@ -58,6 +59,42 @@ async function loadPureModule(relativePath) {
     platform: 'node',
     format: 'esm',
     logLevel: 'silent',
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
+async function loadFileSuggestModal() {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/modals/FileSuggestModal.ts', import.meta.url))],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+    plugins: [{
+      name: 'file-suggest-modal-test-stubs',
+      setup(builder) {
+        builder.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian', namespace: 'file-suggest-obsidian' }));
+        builder.onLoad({ filter: /.*/, namespace: 'file-suggest-obsidian' }, () => ({
+          loader: 'js',
+          contents: `
+            export class FuzzySuggestModal {
+              constructor(app) { this.app = app; }
+            }
+            export class TFile {
+              constructor(path, extension) { this.path = path; this.extension = extension; }
+            }
+            export class Notice {}
+            globalThis.__homeFileSuggestTestTFile = TFile;
+          `,
+        }));
+        builder.onResolve({ filter: /^\.\.\/logger$/ }, () => ({ path: 'logger', namespace: 'file-suggest-logger' }));
+        builder.onLoad({ filter: /^logger$/, namespace: 'file-suggest-logger' }, () => ({
+          loader: 'js',
+          contents: 'export function flowError() {}',
+        }));
+      },
+    }],
   });
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
@@ -115,13 +152,17 @@ test('TPS Home is registered as a rendered Obsidian view', () => {
 test('Daily Note reading mode becomes a date-backed TPS Home view', () => {
   assert.match(mainSource, /new DailyNoteHomeService\(this\)/);
   assert.match(dailyNoteHomeSource, /leaf\.view instanceof MarkdownView/);
-  assert.match(dailyNoteHomeSource, /state\.state\?\.mode !== 'preview'/);
+  assert.match(dailyNoteHomeSource, /leaf\.view\.getMode\(\) !== 'preview'/);
   assert.match(dailyNoteHomeSource, /parseDailyNoteFileDate\(this\.plugin\.app, this\.plugin\.settings, file\)/);
   assert.match(dailyNoteHomeSource, /type: TPS_HOME_VIEW_TYPE/);
-  assert.match(dailyNoteHomeSource, /dailyNotePath: file\.path/);
+  assert.match(dailyNoteHomeSource, /dailyNotePath: targetPath/);
   assert.match(dailyNoteHomeSource, /reading:render-home/);
   assert.match(viewSource, /getState\(\): Record<string, unknown>/);
   assert.match(viewSource, /async setState\(state: Record<string, unknown>\): Promise<void>/);
+  assert.match(viewSource, /private unresolvedDailyNotePath: string \| null = null/);
+  assert.match(viewSource, /const statePath = this\.dailyNotePath \?\? this\.unresolvedDailyNotePath/);
+  assert.match(viewSource, /this\.unresolvedDailyNotePath = file instanceof TFile \? null : requestedPath \|\| null/);
+  assert.match(viewSource, /isDailyNoteBacked\(\): boolean \{\s*return this\.dailyNotePath !== null;/);
   assert.match(viewSource, /\(this\.leaf as any\)\.updateHeader\?\.\(\)/);
   assert.match(viewSource, /private async navigateToDailyNoteHome\(date: any\): Promise<void>/);
   assert.match(viewSource, /homeCaptureService\.getDailyNoteForCapture\(date\)/);
@@ -472,6 +513,108 @@ test('TPS Home can move, remove, and add components', () => {
   assert.match(stylesSource, /\.tps-home-panel-file/);
 });
 
+test('TPS Home edit mode owns the configured Base for each built-in Base panel', () => {
+  assert.match(viewSource, /import \{ FileSuggestModal \} from '\.\.\/modals\/FileSuggestModal'/);
+  assert.match(
+    viewSource,
+    /if \(this\.editMode\) \{\s*const controls = panel\.createDiv\(\{ cls: 'tps-home-component-controls' \}\);\s*this\.createHomeBuiltInBasePickerButton\(controls, component\)/,
+  );
+  assert.match(viewSource, /cls: 'tps-home-secondary-button tps-home-component-base-button'/);
+  assert.match(viewSource, /const accessibleLabel = `\$\{label\} for \$\{title\}`/);
+  assert.match(viewSource, /attr: \{ 'aria-label': accessibleLabel, title: accessibleLabel, type: 'button' \}/);
+  assert.match(viewSource, /button\.createSpan\(\{ text: label \}\)/);
+  assert.match(viewSource, /new FileSuggestModal\(this\.app, async \(file\) => \{/);
+  assert.match(viewSource, /\{ extensions: \['base'\], caseSensitiveExtensions: true \}/);
+  assert.match(viewSource, /if \(!this\.editMode \|\| file\.extension !== 'base'\) return;/);
+  assert.match(viewSource, /this\.homeBaseSettingWriter\.write\(settingKey, selectedPath/);
+  assert.match(viewSource, /set: \(path\) => \{\s*this\.plugin\.settings\[settingKey\] = path/);
+  assert.match(viewSource, /persist: \(\) => this\.plugin\.saveSettings\(\)/);
+  assert.match(viewSource, /if \(result !== 'applied'\) return/);
+  assert.match(viewSource, /const scrollTop = this\.contentEl\.scrollTop/);
+  assert.match(viewSource, /await this\.render\(\);\s*this\.restoreHomeBuiltInBasePickerFocus\(componentId, scrollTop\)/);
+  assert.match(viewSource, /candidate\.dataset\.tpsHomeComponentKey === componentId/);
+  assert.match(viewSource, /querySelector<HTMLButtonElement>\('\.tps-home-component-base-button'\)/);
+  assert.match(viewSource, /focus\(\{ preventScroll: true \}\)/);
+
+  const focusRestoreStart = viewSource.indexOf('  private restoreHomeBuiltInBasePickerFocus(');
+  const focusRestoreEnd = viewSource.indexOf('  private openHomeComponentBaseContextMenu(', focusRestoreStart);
+  assert.ok(focusRestoreStart >= 0 && focusRestoreEnd > focusRestoreStart);
+  const focusRestoreSource = viewSource.slice(focusRestoreStart, focusRestoreEnd);
+  assert.equal((focusRestoreSource.match(/this\.contentEl\.scrollTop = scrollTop/gu) || []).length, 2);
+  assert.doesNotMatch(focusRestoreSource, /setTimeout|requestAnimationFrame/);
+
+  assert.match(stylesSource, /\.tps-home-component-base-button \{[\s\S]*height: auto;[\s\S]*white-space: normal;/);
+  assert.match(stylesSource, /\.tps-home-component-controls button:focus-visible/);
+  assert.match(stylesSource, /body\.is-mobile \.tps-home-component-controls,[\s\S]*body\.is-phone \.tps-home-component-controls \{[\s\S]*flex-wrap: wrap;/);
+  assert.match(stylesSource, /body\.is-mobile \.tps-home-component-base-button,[\s\S]*body\.is-phone \.tps-home-component-base-button \{[\s\S]*flex: 1 1 100%;[\s\S]*min-height: 40px;[\s\S]*height: auto;/);
+  assert.match(stylesSource, /body\.is-mobile \.tps-home-component-controls \.tps-home-icon-button,[\s\S]*body\.is-phone \.tps-home-component-controls \.tps-home-icon-button \{[\s\S]*flex: 0 0 40px;[\s\S]*width: 40px;[\s\S]*min-height: 40px;/);
+
+  assert.match(viewSource, /if \(componentId === 'calendar'\) return 'homeCalendarBasePath'/);
+  assert.match(viewSource, /if \(componentId === 'food-tracker'\) return 'homeFoodBasePath'/);
+  assert.match(viewSource, /if \(componentId === 'workout-tracker'\) return 'homeWorkoutBasePath'/);
+  assert.match(viewSource, /if \(componentId === 'open-unscheduled-tasks'\) return 'homeOpenTasksBasePath'/);
+
+  const pickerStart = viewSource.indexOf('  private openHomeBuiltInBasePicker(');
+  const pickerEnd = viewSource.indexOf('  private openHomeComponentBaseContextMenu(', pickerStart);
+  assert.ok(pickerStart >= 0 && pickerEnd > pickerStart);
+  const pickerSource = viewSource.slice(pickerStart, pickerEnd);
+  assert.doesNotMatch(
+    pickerSource,
+    /settings\.(?:homeComponents|homeComponentLayouts|homeComponentActions)\s*=/,
+    'choosing a built-in Base must not replace component, layout, or action collections',
+  );
+});
+
+test('TPS Home treats configured built-in Base paths as authoritative', () => {
+  assert.match(
+    viewSource,
+    /private getHomeCalendarBaseFile\(\): TFile \| null \{\s*return this\.getBaseFileFromSetting\(this\.plugin\.settings\.homeCalendarBasePath\);\s*\}/,
+  );
+  assert.match(
+    viewSource,
+    /const configuredFile = this\.getBaseFileFromSetting\(configuredPath\);\s*if \(configuredFile\) return configuredFile;\s*if \(!this\.isCanonicalHomeBasePath\(configuredPath, DEFAULT_SETTINGS\.homeFoodBasePath\)\) return null;\s*return await this\.ensureDefaultFoodLogBaseFile\(\)/,
+  );
+  assert.match(
+    viewSource,
+    /const configuredFile = this\.getBaseFileFromSetting\(configuredPath\);\s*if \(configuredFile\) return configuredFile;\s*if \(!this\.isCanonicalHomeBasePath\(configuredPath, DEFAULT_SETTINGS\.homeWorkoutBasePath\)\) return null;\s*return await this\.ensureDefaultWorkoutLogBaseFile\(\)/,
+  );
+  assert.match(
+    viewSource,
+    /private getHomeOpenTasksBaseFile\(\): TFile \| null \{\s*return this\.getBaseFileFromSetting\(this\.plugin\.settings\.homeOpenTasksBasePath\);\s*\}/,
+  );
+  assert.match(viewSource, /private getBaseFileFromSetting\(path: string \| undefined\): TFile \| null/);
+  assert.match(viewSource, /let baseFile = this\.getBaseFileFromSetting\(component\.path\)/);
+  assert.match(viewSource, /baseFile = await this\.ensureHomeDailyNoteFeedBaseFile\(\)/);
+  assert.match(viewSource, /normalizePath\(component\.path\) === HOME_DAILY_NOTE_FEED_BASE_PATH/);
+  assert.doesNotMatch(viewSource, /normalizePath\(component\.path\)\.toLowerCase\(\) === HOME_DAILY_NOTE_FEED_BASE_PATH\.toLowerCase\(\)/);
+  assert.doesNotMatch(viewSource, /calendarPlugin\?\.settings\?\.sidebarBasePath/);
+  assert.doesNotMatch(viewSource, /'home-schedule\.base'/);
+  assert.doesNotMatch(viewSource, /'scheduled\.base'/);
+  assert.doesNotMatch(viewSource, /getBaseFileFromSetting\([^\n]+,\s*'[^']+\.base'/);
+});
+
+test('Home Base selection uses the exact lowercase extension supported by Calendar Base', async () => {
+  const { FileSuggestModal } = await loadFileSuggestModal();
+  const TestTFile = globalThis.__homeFileSuggestTestTFile;
+  const files = [
+    new TestTFile('Supported.base', 'base'),
+    new TestTFile('Unsupported.BASE', 'BASE'),
+    new TestTFile('Note.md', 'md'),
+  ];
+  const app = { vault: { getAllLoadedFiles: () => files } };
+
+  const legacy = new FileSuggestModal(app, () => {}, { extensions: ['base'] });
+  assert.deepEqual(legacy.getItems().map((file) => file.path), ['Supported.base', 'Unsupported.BASE']);
+
+  const exact = new FileSuggestModal(app, () => {}, {
+    extensions: ['base'],
+    caseSensitiveExtensions: true,
+  });
+  assert.deepEqual(exact.getItems().map((file) => file.path), ['Supported.base']);
+  assert.match(fileSuggestModalSource, /caseSensitiveExtensions\?: boolean/);
+  assert.match(viewSource, /configured === canonical/);
+});
+
 test('TPS Home can add and run command modal components', () => {
   assert.match(viewSource, /private renderCommandPanel\(parent: HTMLElement, component: HomeCommandComponent\): void/);
   assert.match(viewSource, /const command = this\.getCommand\(component\.commandId\)/);
@@ -613,9 +756,10 @@ test('TPS Home calendar renders an actual Base embed', () => {
   assert.match(viewSource, /MarkdownRenderer/);
   assert.match(viewSource, /getHomeCalendarBaseFile/);
   assert.match(viewSource, /homeCalendarBasePath/);
-  assert.match(viewSource, /calendarPlugin\?\.settings\?\.sidebarBasePath/);
+  assert.doesNotMatch(viewSource, /calendarPlugin\?\.settings\?\.sidebarBasePath/);
   assert.match(viewSource, /calendarPlugin\?\.api\?\.renderBaseCalendarEmbed \|\| calendarPlugin\?\.renderBaseCalendarEmbed/);
-  assert.match(viewSource, /preserveDayCount: true/);
+  assert.doesNotMatch(viewSource, /preserveDayCount/);
+  assert.match(viewSource, /renderCalendarEmbed\.call\([\s\S]*?host,\s*baseFile\.path,\s*\)/);
   assert.match(viewSource, /Object\.values\(plugins\.plugins\)/);
   assert.match(viewSource, /manifestId === 'tps-calendar-base'/);
   assert.match(viewSource, /tps-home-calendar-base-host tps-home-scroll-host tps-auto-base-embed__panel/);
@@ -795,7 +939,8 @@ test('TPS Home activity log delegates to the configured TPS Health Activity Base
   assert.match(homeWorkoutBaseSource, /'\s+- or:'[\s\S]*'\s+- kind == "workout"'[\s\S]*'\s+- runKind == "run"'[\s\S]*'\s+- runType == "workout"'[\s\S]*'\s+- workflowType == "workout"'/);
   assert.doesNotMatch(viewSource, /if \(runKind === 'run' && runType === 'workout'\) return true/);
   assert.match(viewSource, /this\.plugin\.settings\.homeWorkoutBasePath/);
-  assert.match(viewSource, /'Activity Log\.base'/);
+  assert.match(constantsSource, /homeWorkoutBasePath: 'Activity Log\.base'/);
+  assert.match(viewSource, /DEFAULT_SETTINGS\.homeWorkoutBasePath/);
   assert.match(viewSource, /ensureDefaultWorkoutLogBaseFile/);
   assert.match(viewSource, /ensureActivityLogBase \|\| healthApi\?\.ensureWorkoutLogBase/);
   assert.doesNotMatch(viewSource, /scheduleHomeWorkoutDateFilter/);
@@ -804,8 +949,7 @@ test('TPS Home activity log delegates to the configured TPS Health Activity Base
   assert.doesNotMatch(stylesSource, /\.tps-home-filtered-row-hidden/);
   assert.match(viewSource, /typeof \(value as any\)\.format === 'function'/);
   assert.match(viewSource, /format\('YYYY-MM-DD'\)/);
-  assert.match(settingsTabSource, /Activity log component/);
-  assert.match(settingsTabSource, /Activity Log\.base/);
+  assert.doesNotMatch(settingsTabSource, /Home activity Base path/);
   assert.match(mainSource, /this\.settings\.homeWorkoutBasePath/);
   assert.match(mainSource, /'workout-tracker'/);
   assert.doesNotMatch(viewSource, /class HomeWorkoutLogsModal/);

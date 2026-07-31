@@ -107,6 +107,13 @@ import { ArchiveFileService } from './services/archive-file-service';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
+const AUTHORITATIVE_HOME_SETTING_KEYS: readonly (keyof TPSGlobalContextMenuSettings)[] = [
+  'enableDailyNoteHome',
+  'homeCalendarBasePath',
+  'homeFoodBasePath',
+  'homeWorkoutBasePath',
+  'homeOpenTasksBasePath',
+];
 const CUSTOM_PROPERTY_TYPES = new Set([
   'text',
   'number',
@@ -1919,6 +1926,12 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
     const preNormalizationSettings = JSON.parse(JSON.stringify(this.settings)) as SettingsRecord;
+    const loadedSettingsRecord = (loaded ?? {}) as SettingsRecord;
+    for (const key of AUTHORITATIVE_HOME_SETTING_KEYS) {
+      if (!Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key)) {
+        delete preNormalizationSettings[key];
+      }
+    }
     this.stripLegacySettingsFields(this.settings as unknown as Record<string, unknown>);
     const normalizedProperties = this.normalizeCustomProperties(this.settings.properties);
     this.settings.properties = this.removeRetiredBundledCustomProperties(normalizedProperties);
@@ -1956,6 +1969,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.parentLinkFormat = normalizeParentLinkFormat(this.settings.parentLinkFormat);
     this.settings.enableBasesForcedLinkPreview = this.settings.enableBasesForcedLinkPreview === true;
     this.settings.collapseHeadingsOnOpen = this.settings.collapseHeadingsOnOpen === true;
+    this.settings.enableDailyNoteHome = this.settings.enableDailyNoteHome !== false;
     this.settings.homeComponents = this.normalizeHomeComponents(this.settings.homeComponents);
     this.settings.homeComponentLayouts = this.normalizeHomeComponentLayouts(this.settings.homeComponentLayouts);
     this.settings.homeComponentActions = normalizeHomeComponentActions(this.settings.homeComponentActions);
@@ -2060,9 +2074,14 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       this.settings.linkedSubitemCheckboxMappings = this.getStrictLinkedSubitemMappings();
     }
     logger.setLoggingEnabled(this.settings.enableLogging);
+    const normalizedAuthoritativeHomeSettingKeys = AUTHORITATIVE_HOME_SETTING_KEYS.filter((key) =>
+      !Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key)
+      || loadedSettingsRecord[key] !== this.settings[key],
+    );
     const needsSettingsMigration =
       hadRetiredHomeCaptureHeadingSettings ||
       needsActivityBasePathMigration ||
+      normalizedAuthoritativeHomeSettingKeys.length > 0 ||
       removedRetiredPropertyCount > 0;
     this.settingsPersistence = null;
     this.ensureSettingsPersistence(
@@ -2076,6 +2095,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }
     if (needsActivityBasePathMigration) {
       logger.flow('Settings', 'migration:activity-base-path');
+    }
+    if (normalizedAuthoritativeHomeSettingKeys.length > 0) {
+      logger.flow('Settings', 'migration:authoritative-home-settings', {
+        count: normalizedAuthoritativeHomeSettingKeys.length,
+      });
     }
     if (removedRetiredPropertyCount > 0) {
       logger.flow('Settings', 'migration:removed-retired-bundled-properties', {

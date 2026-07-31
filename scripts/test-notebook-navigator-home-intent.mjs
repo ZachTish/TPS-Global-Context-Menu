@@ -101,7 +101,7 @@ test('Daily Note Home observes Notebook Navigator without taking over its events
   assert.match(serviceSource, /getSelectedFiles\(target\.scopeRoot\)/);
   assert.match(serviceSource, /selectionApi\?\.getCurrent/);
   assert.match(serviceSource, /collectNotebookNavigatorSelectionPaths\(currentSelection/);
-  assert.match(serviceSource, /notebookNavigatorHomeIntent\.shouldSuppress\(candidate\.leaf, candidate\.file\.path\)/);
+  assert.match(serviceSource, /notebookNavigatorHomeIntent\.shouldSuppress\(leaf, file\.path\)/);
   assert.match(serviceSource, /\.nn-quick-action-item/);
   assert.doesNotMatch(serviceSource, /preventDefault\(|stopPropagation\(|stopImmediatePropagation\(/);
 });

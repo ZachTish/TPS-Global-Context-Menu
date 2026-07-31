@@ -99,6 +99,41 @@ test('settings persistence merges only locally changed keys into the newest disk
   assert.equal(disk.lastArchiveTagSweepDate, '2026-07-21');
 });
 
+test('authoritative Home defaults persist before an unrelated setting save', async () => {
+  const {
+    reconcilePersistedSettingsInPlace,
+    SettingsPersistenceCoordinator,
+  } = await importModule('../src/settings-persistence.ts');
+  const homeDefaults = {
+    enableDailyNoteHome: true,
+    homeCalendarBasePath: 'home-schedule.base',
+    homeFoodBasePath: 'Food Log.base',
+    homeWorkoutBasePath: 'Activity Log.base',
+    homeOpenTasksBasePath: 'Open Unscheduled Tasks.base',
+  };
+  let disk = { unrelatedSetting: 'old' };
+  const live = { ...structuredClone(disk), ...homeDefaults };
+  const coordinator = new SettingsPersistenceCoordinator(
+    async () => structuredClone(disk),
+    async (next) => {
+      disk = structuredClone(next);
+    },
+    (requested, persisted) => {
+      reconcilePersistedSettingsInPlace(live, requested, persisted);
+    },
+  );
+  coordinator.setBaseline({ unrelatedSetting: 'old' });
+
+  await coordinator.request(live);
+  assert.deepEqual(disk, { unrelatedSetting: 'old', ...homeDefaults });
+  assert.deepEqual(live, disk);
+
+  live.unrelatedSetting = 'new';
+  await coordinator.request(live);
+  assert.deepEqual(disk, { unrelatedSetting: 'new', ...homeDefaults });
+  assert.deepEqual(live, disk);
+});
+
 test('settings persistence keeps rendered custom-property references live across sequential saves', async () => {
   const {
     reconcilePersistedSettingsInPlace,
@@ -629,9 +664,25 @@ test('settings use shallow routed pages with responsive, accessible selectors', 
   assert.doesNotMatch(stylesSource, /(?:^|\n)\.tps-settings-(?:hub|subnav|route|page|editor|callout)/);
 });
 
-test('TPS Home capture settings expose plain-line insertion defaults and retire heading routing', () => {
+test('TPS Home settings keep Base ownership in Home edit mode and expose the Daily Note toggle', () => {
   assert.match(mainSource, /homeCalendarBasePath =\s*typeof this\.settings\.homeCalendarBasePath === 'string'/);
-  assert.match(settingsTabSource, /setName\('Home calendar Base path'\)/);
+  assert.doesNotMatch(settingsTabSource, /setName\('Home (?:calendar|food|activity|open tasks) Base path'\)/);
+  assert.match(constantsSource, /enableDailyNoteHome:\s*true/);
+  assert.match(mainSource, /this\.settings\.enableDailyNoteHome = this\.settings\.enableDailyNoteHome !== false/);
+  assert.match(mainSource, /AUTHORITATIVE_HOME_SETTING_KEYS[\s\S]*'homeOpenTasksBasePath'/);
+  assert.match(mainSource, /if \(!Object\.prototype\.hasOwnProperty\.call\(loadedSettingsRecord, key\)\) \{\s*delete preNormalizationSettings\[key\]/);
+  assert.match(mainSource, /normalizedAuthoritativeHomeSettingKeys\.length > 0/);
+  assert.match(mainSource, /migration:authoritative-home-settings/);
+  assert.match(settingsTabSource, /setName\('Use TPS Home for Daily Notes'\)/);
+  assert.match(settingsTabSource, /runDailyNoteHomeSettingTransaction\(\{/);
+  assert.match(settingsTabSource, /const generation = \+\+this\.dailyNoteHomeToggleGeneration/);
+  assert.match(settingsTabSource, /const previousValue = this\.plugin\.settings\.enableDailyNoteHome !== false/);
+  assert.match(settingsTabSource, /applyEnabled: \(enabled\) => service\?\.setEnabled\(enabled\)/);
+  assert.match(settingsTabSource, /setSetting: \(enabled\) => \{\s*this\.plugin\.settings\.enableDailyNoteHome = enabled/);
+  assert.match(settingsTabSource, /isCurrent: \(\) => generation === this\.dailyNoteHomeToggleGeneration/);
+  assert.match(settingsTabSource, /isAvailable: \(\) => service\?\.isAvailable\(\) \?\? true/);
+  assert.match(settingsTabSource, /toggle\.setValue\(result\.effectiveValue\)/);
+  assert.doesNotMatch(settingsTabSource, /if \(value === previous\) return/);
   assert.match(mainSource, /homeCaptureInsertPosition === 'top' \? 'top' : 'bottom'/);
   assert.match(mainSource, /delete record\.homeCaptureAddHeading/);
   assert.match(mainSource, /delete record\.homeCaptureHeading/);

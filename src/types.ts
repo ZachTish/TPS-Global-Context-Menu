@@ -450,6 +450,7 @@ export interface TPSGlobalContextMenuSettings {
   enableCanvasOpenGuard: boolean;
   enableBasesForcedLinkPreview: boolean;
   collapseHeadingsOnOpen: boolean;
+  enableDailyNoteHome: boolean;
   homeComponents: HomeComponentId[];
   homeComponentLayouts: Record<string, HomeComponentLayout>;
   homeComponentActions: HomeComponentActionMap;

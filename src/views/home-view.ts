@@ -19,6 +19,8 @@ import { withBaseEmbedRenderContext } from './base-embed-context';
 import { DEFAULT_SETTINGS, HOME_DAILY_NOTE_FEED_BASE_CONTENT, HOME_DAILY_NOTE_FEED_BASE_PATH } from '../constants';
 import { normalizeHomeComponentActions } from '../services/home-component-action-core';
 import { addHomeBaseContextFilter, resolveHomeBaseDefinitionSourcePath } from './home-base-context';
+import { FileSuggestModal } from '../modals/FileSuggestModal';
+import { SerializedLatestSettingWriter } from '../services/serialized-latest-setting-writer';
 import {
   preserveTpsInlinePropsMetadata,
   stripTaskInlinePropsMetadata,
@@ -38,6 +40,12 @@ const HOME_PANEL_MAX_HEIGHT = 1200;
 const HOME_CAPTURE_PREVIEW_MIN_HEIGHT = 120;
 const HOME_CAPTURE_PREVIEW_MAX_HEIGHT = 900;
 const HOME_CAPTURE_HIDDEN_LINE_CLASS = 'tps-home-capture-hidden-source-line';
+
+type HomeBuiltInBasePathSettingKey =
+  | 'homeCalendarBasePath'
+  | 'homeFoodBasePath'
+  | 'homeWorkoutBasePath'
+  | 'homeOpenTasksBasePath';
 
 type HomeCaptureTrigger = {
   id: string;
@@ -176,6 +184,7 @@ export class TpsHomeView extends ItemView {
   private embedComponents: Component[] = [];
   private selectedDate: any | null = null;
   private dailyNotePath: string | null = null;
+  private unresolvedDailyNotePath: string | null = null;
   private lastHomeModalOutsideTouchY: number | null = null;
   private homeActiveTimerButton: HTMLButtonElement | null = null;
   private homeAddComponentButton: HTMLButtonElement | null = null;
@@ -193,6 +202,10 @@ export class TpsHomeView extends ItemView {
   private homeRenderGeneration = 0;
   private homeInitialRenderTimer: number | null = null;
   private homeClosing = false;
+  private readonly homeBaseSettingWriter = new SerializedLatestSettingWriter<
+    HomeBuiltInBasePathSettingKey,
+    string
+  >();
 
   constructor(
     leaf: WorkspaceLeaf,
@@ -215,13 +228,14 @@ export class TpsHomeView extends ItemView {
   }
 
   getState(): Record<string, unknown> {
-    return this.dailyNotePath
-      ? { dailyNotePath: this.dailyNotePath, dateIso: this.getSelectedDate().format('YYYY-MM-DD') }
+    const statePath = this.dailyNotePath ?? this.unresolvedDailyNotePath;
+    return statePath
+      ? { dailyNotePath: statePath, dateIso: this.getSelectedDate().format('YYYY-MM-DD') }
       : {};
   }
 
   async setState(state: Record<string, unknown>): Promise<void> {
-    const previousPath = this.dailyNotePath;
+    const previousPath = this.dailyNotePath ?? this.unresolvedDailyNotePath;
     const previousDateIso = this.selectedDate?.format?.('YYYY-MM-DD') || '';
     const requestedPath = String(state?.dailyNotePath || '').trim();
     const file = requestedPath ? this.plugin.app.vault.getAbstractFileByPath(requestedPath) : null;
@@ -229,6 +243,7 @@ export class TpsHomeView extends ItemView {
       ? parseDailyNoteFileDate(this.plugin.app, this.plugin.settings, file)
       : String(state?.dateIso || '').trim();
     this.dailyNotePath = file instanceof TFile ? file.path : null;
+    this.unresolvedDailyNotePath = file instanceof TFile ? null : requestedPath || null;
     this.selectedDate = dateIso
       ? getMoment()(dateIso, 'YYYY-MM-DD', true).startOf('day')
       : null;
@@ -238,7 +253,8 @@ export class TpsHomeView extends ItemView {
 
     const coalescedInitialRender = this.cancelInitialHomeRender('state');
     const nextDateIso = this.selectedDate?.format?.('YYYY-MM-DD') || '';
-    const stateChanged = previousPath !== this.dailyNotePath || previousDateIso !== nextDateIso;
+    const nextPath = this.dailyNotePath ?? this.unresolvedDailyNotePath;
+    const stateChanged = previousPath !== nextPath || previousDateIso !== nextDateIso;
     if (!coalescedInitialRender && !stateChanged && this.rootEl.hasChildNodes()) {
       logger.flow('HomeView', 'state:render-skipped', {
         path: this.dailyNotePath,
@@ -1519,9 +1535,11 @@ export class TpsHomeView extends ItemView {
       const calendarPlugin = this.getCalendarPlugin();
       const renderCalendarEmbed = calendarPlugin?.api?.renderBaseCalendarEmbed || calendarPlugin?.renderBaseCalendarEmbed;
       if (typeof renderCalendarEmbed === 'function') {
-        calendarComponent = await renderCalendarEmbed.call(calendarPlugin?.api?.renderBaseCalendarEmbed ? calendarPlugin.api : calendarPlugin, host, baseFile.path, {
-          preserveDayCount: true,
-        });
+        calendarComponent = await renderCalendarEmbed.call(
+          calendarPlugin?.api?.renderBaseCalendarEmbed ? calendarPlugin.api : calendarPlugin,
+          host,
+          baseFile.path,
+        );
         if (calendarComponent) {
           this.embedComponents.push(calendarComponent);
         }
@@ -1597,8 +1615,8 @@ export class TpsHomeView extends ItemView {
   }
 
   private async renderCustomBase(parent: HTMLElement, component: HomeBaseComponent, today: any): Promise<void> {
-    let baseFile = this.getBaseFileFromSetting(component.path, component.path);
-    if (!baseFile && normalizePath(component.path).toLowerCase() === HOME_DAILY_NOTE_FEED_BASE_PATH.toLowerCase()) {
+    let baseFile = this.getBaseFileFromSetting(component.path);
+    if (!baseFile && normalizePath(component.path) === HOME_DAILY_NOTE_FEED_BASE_PATH) {
       baseFile = await this.ensureHomeDailyNoteFeedBaseFile();
     }
     await this.renderBasePanel(parent, component, baseFile, today);
@@ -1957,6 +1975,7 @@ export class TpsHomeView extends ItemView {
 
     if (this.editMode) {
       const controls = panel.createDiv({ cls: 'tps-home-component-controls' });
+      this.createHomeBuiltInBasePickerButton(controls, component);
       this.createIconButton(controls, 'arrow-up', 'Move component up', () => void this.moveComponent(component, -1));
       this.createIconButton(controls, 'arrow-down', 'Move component down', () => void this.moveComponent(component, 1));
       this.createIconButton(
@@ -1969,6 +1988,90 @@ export class TpsHomeView extends ItemView {
       this.createIconButton(controls, 'x', 'Remove component from Home', () => void this.removeComponent(component));
     }
     return panel;
+  }
+
+  private createHomeBuiltInBasePickerButton(parent: HTMLElement, component: HomeComponentId): void {
+    const settingKey = this.getHomeBuiltInBasePathSettingKey(component);
+    if (!settingKey) return;
+
+    const componentId = this.getHomeComponentKey(component);
+    const title = this.getComponentDefinition(componentId)?.title || componentId;
+    const label = this.getBaseFileFromSetting(this.plugin.settings[settingKey]) ? 'Change Base' : 'Choose Base';
+    const accessibleLabel = `${label} for ${title}`;
+    const button = parent.createEl('button', {
+      cls: 'tps-home-secondary-button tps-home-component-base-button',
+      attr: { 'aria-label': accessibleLabel, title: accessibleLabel, type: 'button' },
+    });
+    const icon = button.createSpan({ cls: 'tps-home-component-base-button-icon' });
+    setIcon(icon, 'database');
+    button.createSpan({ text: label });
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      event.stopImmediatePropagation();
+      this.openHomeBuiltInBasePicker(component);
+    });
+  }
+
+  private openHomeBuiltInBasePicker(component: HomeComponentId): void {
+    if (!this.editMode) return;
+    const settingKey = this.getHomeBuiltInBasePathSettingKey(component);
+    if (!settingKey) return;
+
+    const componentId = this.getHomeComponentKey(component);
+    const title = this.getComponentDefinition(componentId)?.title || componentId;
+    const picker = new FileSuggestModal(this.app, async (file) => {
+      if (!this.editMode || file.extension !== 'base') return;
+      const componentStillPresent = this.getHomeComponents()
+        .some((candidate) => this.getHomeComponentKey(candidate) === componentId);
+      if (!componentStillPresent) return;
+
+      const selectedPath = this.normalizeHomeBasePath(file.path);
+      if (!selectedPath) return;
+      const scrollTop = this.contentEl.scrollTop;
+      let result: 'applied' | 'superseded';
+      try {
+        result = await this.homeBaseSettingWriter.write(settingKey, selectedPath, {
+          get: () => this.plugin.settings[settingKey],
+          set: (path) => {
+            this.plugin.settings[settingKey] = path;
+          },
+          persist: () => this.plugin.saveSettings(),
+        });
+      } catch (error) {
+        const componentRemainsPresent = this.editMode && this.getHomeComponents()
+          .some((candidate) => this.getHomeComponentKey(candidate) === componentId);
+        if (componentRemainsPresent) {
+          await this.render();
+          this.restoreHomeBuiltInBasePickerFocus(componentId, scrollTop);
+        }
+        throw error;
+      }
+      if (result !== 'applied') return;
+      if (!this.editMode) return;
+      const componentRemainsPresent = this.getHomeComponents()
+        .some((candidate) => this.getHomeComponentKey(candidate) === componentId);
+      if (!componentRemainsPresent) return;
+      logger.flow('HomeView', 'component-base:changed', {
+        componentId,
+        basePath: selectedPath,
+      });
+      await this.render();
+      this.restoreHomeBuiltInBasePickerFocus(componentId, scrollTop);
+    }, { extensions: ['base'], caseSensitiveExtensions: true });
+    picker.setPlaceholder(`Choose Base for ${title}`);
+    picker.open();
+  }
+
+  private restoreHomeBuiltInBasePickerFocus(componentId: string, scrollTop: number): void {
+    this.contentEl.scrollTop = scrollTop;
+    const panel = Array.from(
+      this.rootEl?.querySelectorAll<HTMLElement>('.tps-home-panel') ?? [],
+    ).find((candidate) => candidate.dataset.tpsHomeComponentKey === componentId);
+    panel
+      ?.querySelector<HTMLButtonElement>('.tps-home-component-base-button')
+      ?.focus({ preventScroll: true });
+    this.contentEl.scrollTop = scrollTop;
   }
 
   private openHomeComponentBaseContextMenu(
@@ -2112,12 +2215,17 @@ export class TpsHomeView extends ItemView {
 
   private getHomeComponentBasePath(component: HomeComponentId): string | undefined {
     if (this.isHomeBaseComponent(component)) return component.path;
+    const settingKey = this.getHomeBuiltInBasePathSettingKey(component);
+    return settingKey ? this.plugin.settings[settingKey] : undefined;
+  }
+
+  private getHomeBuiltInBasePathSettingKey(component: HomeComponentId): HomeBuiltInBasePathSettingKey | null {
     const componentId = this.getHomeComponentKey(component);
-    if (componentId === 'calendar') return this.plugin.settings.homeCalendarBasePath;
-    if (componentId === 'food-tracker') return this.plugin.settings.homeFoodBasePath;
-    if (componentId === 'workout-tracker') return this.plugin.settings.homeWorkoutBasePath;
-    if (componentId === 'open-unscheduled-tasks') return this.plugin.settings.homeOpenTasksBasePath;
-    return undefined;
+    if (componentId === 'calendar') return 'homeCalendarBasePath';
+    if (componentId === 'food-tracker') return 'homeFoodBasePath';
+    if (componentId === 'workout-tracker') return 'homeWorkoutBasePath';
+    if (componentId === 'open-unscheduled-tasks') return 'homeOpenTasksBasePath';
+    return null;
   }
 
   private showHomeActionCommandPicker(
@@ -2694,53 +2802,48 @@ export class TpsHomeView extends ItemView {
   }
 
   private getHomeCalendarBaseFile(): TFile | null {
-    const calendarPlugin = this.getCalendarPlugin();
-    const candidates = [
-      this.plugin.settings.homeCalendarBasePath,
-      calendarPlugin?.settings?.sidebarBasePath,
-      'home-schedule.base',
-      'scheduled.base',
-    ]
-      .map((value) => normalizePath(String(value || '').trim()).replace(/^\/+/, ''))
-      .filter(Boolean);
-    const seen = new Set<string>();
-    for (const candidate of candidates) {
-      if (seen.has(candidate)) continue;
-      seen.add(candidate);
-      const withExtension = candidate.toLowerCase().endsWith('.base') ? candidate : `${candidate}.base`;
-      const file = this.app.vault.getAbstractFileByPath(withExtension);
-      if (file instanceof TFile && file.extension === 'base') return file;
-    }
-    return null;
+    return this.getBaseFileFromSetting(this.plugin.settings.homeCalendarBasePath);
   }
 
   private async getHomeFoodBaseFile(): Promise<TFile | null> {
-    return this.getBaseFileFromSetting(this.plugin.settings.homeFoodBasePath, 'Food Log.base')
-      ?? await this.ensureDefaultFoodLogBaseFile();
+    const configuredPath = this.plugin.settings.homeFoodBasePath;
+    const configuredFile = this.getBaseFileFromSetting(configuredPath);
+    if (configuredFile) return configuredFile;
+    if (!this.isCanonicalHomeBasePath(configuredPath, DEFAULT_SETTINGS.homeFoodBasePath)) return null;
+    return await this.ensureDefaultFoodLogBaseFile();
   }
 
   private async getHomeWorkoutBaseFile(): Promise<TFile | null> {
-    return this.getBaseFileFromSetting(this.plugin.settings.homeWorkoutBasePath, 'Activity Log.base')
-      ?? await this.ensureDefaultWorkoutLogBaseFile();
+    const configuredPath = this.plugin.settings.homeWorkoutBasePath;
+    const configuredFile = this.getBaseFileFromSetting(configuredPath);
+    if (configuredFile) return configuredFile;
+    if (!this.isCanonicalHomeBasePath(configuredPath, DEFAULT_SETTINGS.homeWorkoutBasePath)) return null;
+    return await this.ensureDefaultWorkoutLogBaseFile();
   }
 
   private getHomeOpenTasksBaseFile(): TFile | null {
-    return this.getBaseFileFromSetting(this.plugin.settings.homeOpenTasksBasePath, 'Open Unscheduled Tasks.base');
+    return this.getBaseFileFromSetting(this.plugin.settings.homeOpenTasksBasePath);
   }
 
-  private getBaseFileFromSetting(path: string | undefined, fallback: string): TFile | null {
-    const candidates = [path, fallback]
-      .map((value) => normalizePath(String(value || '').trim()).replace(/^\/+/, ''))
-      .filter(Boolean);
-    const seen = new Set<string>();
-    for (const candidate of candidates) {
-      if (seen.has(candidate)) continue;
-      seen.add(candidate);
-      const withExtension = candidate.toLowerCase().endsWith('.base') ? candidate : `${candidate}.base`;
-      const file = this.app.vault.getAbstractFileByPath(withExtension);
-      if (file instanceof TFile && file.extension === 'base') return file;
-    }
-    return null;
+  private getBaseFileFromSetting(path: string | undefined): TFile | null {
+    const normalized = this.normalizeHomeBasePath(path);
+    if (!normalized) return null;
+    const file = this.app.vault.getAbstractFileByPath(normalized);
+    return file instanceof TFile && file.extension === 'base' ? file : null;
+  }
+
+  private isCanonicalHomeBasePath(path: string | undefined, canonicalPath: string): boolean {
+    const configured = this.normalizeHomeBasePath(path);
+    const canonical = this.normalizeHomeBasePath(canonicalPath);
+    return Boolean(configured) && configured === canonical;
+  }
+
+  private normalizeHomeBasePath(path: string | undefined): string {
+    const rawPath = String(path || '').trim();
+    if (!rawPath) return '';
+    const normalized = normalizePath(rawPath).replace(/^\/+/, '');
+    if (!normalized) return '';
+    return normalized.toLowerCase().endsWith('.base') ? normalized : `${normalized}.base`;
   }
 
   private getCalendarPlugin(): any {

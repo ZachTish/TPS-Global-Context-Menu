@@ -4,12 +4,20 @@ import * as logger from '../logger';
 export class FileSuggestModal extends FuzzySuggestModal<TFile> {
     private onChoose: (file: TFile) => void | Promise<void>;
     private readonly allowedExtensions: Set<string> | null;
+    private readonly caseSensitiveExtensions: boolean;
 
-    constructor(app: App, onChoose: (file: TFile) => void | Promise<void>, options?: { extensions?: string[] }) {
+    constructor(
+        app: App,
+        onChoose: (file: TFile) => void | Promise<void>,
+        options?: { extensions?: string[]; caseSensitiveExtensions?: boolean },
+    ) {
         super(app);
         this.onChoose = onChoose;
+        this.caseSensitiveExtensions = options?.caseSensitiveExtensions === true;
         this.allowedExtensions = Array.isArray(options?.extensions) && options.extensions.length > 0
-            ? new Set(options.extensions.map((value) => String(value || '').trim().toLowerCase()).filter(Boolean))
+            ? new Set(options.extensions
+                .map((value) => this.normalizeExtension(value))
+                .filter(Boolean))
             : null;
     }
 
@@ -18,7 +26,7 @@ export class FileSuggestModal extends FuzzySuggestModal<TFile> {
         if (!this.allowedExtensions) {
             return files.filter((file) => file.extension?.toLowerCase() === 'md');
         }
-        return files.filter((file) => this.allowedExtensions!.has(String(file.extension || '').trim().toLowerCase()));
+        return files.filter((file) => this.allowedExtensions!.has(this.normalizeExtension(file.extension)));
     }
 
     getItemText(item: TFile): string {
@@ -30,5 +38,10 @@ export class FileSuggestModal extends FuzzySuggestModal<TFile> {
             logger.flowError('FileSuggestModal', 'choose:failed', error, { path: item.path });
             new Notice('Could not complete the file action.');
         });
+    }
+
+    private normalizeExtension(value: unknown): string {
+        const extension = String(value || '').trim();
+        return this.caseSensitiveExtensions ? extension : extension.toLowerCase();
     }
 }

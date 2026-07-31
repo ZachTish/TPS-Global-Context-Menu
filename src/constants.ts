@@ -36,6 +36,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   enableCanvasOpenGuard: false,
   enableBasesForcedLinkPreview: false,
   collapseHeadingsOnOpen: false,
+  enableDailyNoteHome: true,
   homeComponents: [
     { type: 'base', path: HOME_DAILY_NOTE_FEED_BASE_PATH },
     'calendar',

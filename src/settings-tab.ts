@@ -1,4 +1,4 @@
-import { App, PluginSettingTab, Setting, TextComponent } from 'obsidian';
+import { App, Notice, PluginSettingTab, Setting, TextComponent } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
 import type { AppearanceSettingKey, CustomProperty, LinkedSubitemCheckboxMapping, ViewModeConditionOperator, ViewModeConditionType, ViewModeRule, ViewModeRuleCondition } from './types';
 import { BucketSectionRenderer } from './notebook-navigator-settings/bucket-section';
@@ -23,6 +23,8 @@ import { normalizeAcceptsKind } from './utils/entity-property';
 import { mergeLinkedSubitemMappingPresentation } from './utils/linked-subitem-mapping';
 import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { FileSuggestModal } from './modals/FileSuggestModal';
+import * as logger from './logger';
+import { runDailyNoteHomeSettingTransaction } from './services/daily-note-home-setting-transaction';
 import {
   BASE_QUERY_GUIDE_GOTCHAS,
   BASE_QUERY_GUIDE_SECTIONS,
@@ -91,6 +93,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   private activeWorkflowPage: WorkflowPageId = 'home-daily';
   private activeBaseQuerySection = BASE_QUERY_GUIDE_SECTIONS[0]?.title || '';
   private readonly nnTextCommitTimers = new Map<string, number>();
+  private dailyNoteHomeToggleGeneration = 0;
 
   constructor(app: App, plugin: TPSGlobalContextMenuPlugin) {
     super(app, plugin);
@@ -2061,59 +2064,64 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       navigationAutomation.dataset.tpsSettingsRoute = 'home-daily';
       navigationAutomation.createEl('h4', { text: 'Home & daily notes' });
       navigationAutomation.createEl('p', {
-        text: 'TPS Home Base paths, capture placement, Daily Note navigation, and scheduled-task inheritance.',
+        text: 'Choose whether Daily Notes use TPS Home, then configure capture, navigation, and scheduled-task behavior. Base cards are selected directly from Home edit mode.',
         cls: 'setting-item-description',
       });
 
       new Setting(navigationAutomation)
-        .setName('Home calendar Base path')
-        .setDesc('Base file rendered by the Calendar component in TPS Home.')
-        .addText((text) =>
-          text
-            .setPlaceholder('home-schedule.base')
-            .setValue(this.plugin.settings.homeCalendarBasePath || 'home-schedule.base')
+        .setName('Use TPS Home for Daily Notes')
+        .setDesc('Replace Daily Notes in Reading view with their date-backed Home dashboard. Turn this off to keep normal Markdown Reading view; standalone TPS Home remains available on demand.')
+        .addToggle((toggle) =>
+          toggle
+            .setValue(this.plugin.settings.enableDailyNoteHome !== false)
             .onChange(async (value) => {
-              this.plugin.settings.homeCalendarBasePath = value.trim() || 'home-schedule.base';
-              await this.plugin.saveSettings();
-            })
-        );
+              const generation = ++this.dailyNoteHomeToggleGeneration;
+              const previousValue = this.plugin.settings.enableDailyNoteHome !== false;
+              const service = this.plugin.dailyNoteHomeService;
+              const result = await runDailyNoteHomeSettingTransaction({
+                requestedValue: value,
+                previousValue,
+                applyEnabled: (enabled) => service?.setEnabled(enabled) ?? Promise.resolve(true),
+                getEnabled: () => service?.isEnabled() ?? this.plugin.settings.enableDailyNoteHome !== false,
+                setSetting: (enabled) => {
+                  this.plugin.settings.enableDailyNoteHome = enabled;
+                },
+                persist: () => this.plugin.saveSettings(),
+                isCurrent: () => generation === this.dailyNoteHomeToggleGeneration,
+                isAvailable: () => service?.isAvailable() ?? true,
+              });
+              if (result.status === 'applied' || result.status === 'stale' || result.status === 'unavailable') return;
 
-      new Setting(navigationAutomation)
-        .setName('Home food Base path')
-        .setDesc('Base file rendered by the Food tracker component in TPS Home.')
-        .addText((text) =>
-          text
-            .setPlaceholder('Food Log.base')
-            .setValue(this.plugin.settings.homeFoodBasePath || 'Food Log.base')
-            .onChange(async (value) => {
-              this.plugin.settings.homeFoodBasePath = value.trim() || 'Food Log.base';
-              await this.plugin.saveSettings();
-            })
-        );
+              toggle.setValue(result.effectiveValue);
+              logger.flowError('Settings', 'daily-note-home-toggle-failed', result.error, {
+                requested: value,
+                status: result.status,
+                effectiveValue: result.effectiveValue,
+                persisted: result.persisted,
+              });
+              if (result.rollbackError) {
+                logger.flowError('Settings', 'daily-note-home-toggle-rollback-failed', result.rollbackError);
+              }
+              if (result.recoveryError) {
+                logger.flowError('Settings', 'daily-note-home-toggle-recovery-failed', result.recoveryError);
+              }
+              if (result.persistenceError) {
+                logger.flowError('Settings', 'daily-note-home-toggle-compensating-save-failed', result.persistenceError, {
+                  effectiveValue: result.effectiveValue,
+                });
+              }
 
-      new Setting(navigationAutomation)
-        .setName('Home activity Base path')
-        .setDesc('Base file rendered by the Activity log component in TPS Home.')
-        .addText((text) =>
-          text
-            .setPlaceholder('Activity Log.base')
-            .setValue(this.plugin.settings.homeWorkoutBasePath || 'Activity Log.base')
-            .onChange(async (value) => {
-              this.plugin.settings.homeWorkoutBasePath = value.trim() || 'Activity Log.base';
-              await this.plugin.saveSettings();
-            })
-        );
-
-      new Setting(navigationAutomation)
-        .setName('Home open tasks Base path')
-        .setDesc('Base file rendered by the Open unscheduled tasks component in TPS Home.')
-        .addText((text) =>
-          text
-            .setPlaceholder('Open Unscheduled Tasks.base')
-            .setValue(this.plugin.settings.homeOpenTasksBasePath || 'Open Unscheduled Tasks.base')
-            .onChange(async (value) => {
-              this.plugin.settings.homeOpenTasksBasePath = value.trim() || 'Open Unscheduled Tasks.base';
-              await this.plugin.saveSettings();
+              if (result.status === 'rolled-back') {
+                new Notice(result.persisted
+                  ? 'Could not change Daily Note Home. The previous setting was restored.'
+                  : 'Daily Note Home returned to its previous state, but saving that rollback failed. Try again before restarting Obsidian.');
+              } else if (result.status === 'recovered-requested') {
+                new Notice(result.persisted
+                  ? 'The previous Daily Note Home view state could not be restored, so the requested state was kept and saved.'
+                  : 'Could not save the Daily Note Home change, and the previous view state could not be restored. The requested state remains active for this session.');
+              } else {
+                new Notice('Could not change Daily Note Home or fully restore the previous view state. Review open Home tabs, then try again.');
+              }
             })
         );
 

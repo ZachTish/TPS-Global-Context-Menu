@@ -7627,6 +7627,19 @@ export const PLUGIN_STYLES = `
         background: var(--background-primary-alt);
       }
 
+      .tps-home-component-base-button {
+        height: auto;
+        max-width: 100%;
+        min-width: 0;
+        white-space: normal;
+      }
+
+      .tps-home-component-controls button:focus-visible {
+        border-color: var(--interactive-accent);
+        outline: 2px solid color-mix(in srgb, var(--interactive-accent) 68%, transparent);
+        outline-offset: 1px;
+      }
+
       .tps-home-calendar-today-button {
         appearance: none;
         border: 1px solid var(--background-modifier-border);
@@ -8302,6 +8315,32 @@ export const PLUGIN_STYLES = `
       body.is-phone .tps-home-root {
         --tps-home-base-host-max-height: 68vh;
         padding: 0 12px 72px;
+      }
+
+      body.is-mobile .tps-home-component-controls,
+      body.is-phone .tps-home-component-controls {
+        flex-wrap: wrap;
+        gap: 6px;
+        padding: 8px;
+      }
+
+      body.is-mobile .tps-home-component-base-button,
+      body.is-phone .tps-home-component-base-button {
+        flex: 1 1 100%;
+        min-width: 0;
+        min-height: 40px;
+        height: auto;
+        justify-content: flex-start;
+        padding: 6px 10px;
+        text-align: left;
+      }
+
+      body.is-mobile .tps-home-component-controls .tps-home-icon-button,
+      body.is-phone .tps-home-component-controls .tps-home-icon-button {
+        flex: 0 0 40px;
+        width: 40px;
+        min-height: 40px;
+        opacity: 1;
       }
 
       body.is-mobile .tps-home-header,
