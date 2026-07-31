@@ -18,6 +18,12 @@ import {
   preserveTpsInlinePropsMetadata,
   stripTaskInlinePropsMetadata,
 } from '../utils/task-line-metadata';
+import {
+  MAX_BASE_LINE_SOURCE_BYTES,
+  isWithinUtf8ByteLimit,
+  resolveUniqueBaseLineFingerprint,
+  sha256BaseLine,
+} from './base-line-edit-protocol-core';
 import * as logger from '../logger';
 
 const getMoment = (): any => (window as any).moment;
@@ -47,6 +53,11 @@ interface HomeCaptureEditorHandle {
   unload(): void;
 }
 
+interface HomeCaptureLineEditorOptions {
+  expectedFingerprint?: string;
+  redactDiagnostics?: boolean;
+}
+
 type HomeCaptureSuggestion =
   | { type: 'tag'; value: string; label: string }
   | { type: 'note'; file: TFile; matchedText: string; display: string; label: string; replaceStart: number; replaceEnd: number };
@@ -54,18 +65,53 @@ type HomeCaptureSuggestion =
 export class HomeCaptureService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
-  async openLineEditor(file: TFile, zeroBasedLine: number): Promise<boolean> {
+  async openLineEditor(
+    file: TFile,
+    zeroBasedLine: number,
+    options: HomeCaptureLineEditorOptions = {},
+  ): Promise<boolean> {
     if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return false;
-    const content = await this.plugin.app.vault.cachedRead(file);
+    const content = await this.plugin.app.vault.read(file);
     const range = resolveHomeCaptureLineRange(content, zeroBasedLine);
     if (!range) {
-      logger.flowWarn('HomeCapture', 'line-editor:unresolved', { path: file.path, line: zeroBasedLine + 1 });
+      logger.flowWarn('HomeCapture', 'line-editor:unresolved', this.getLineEditorDiagnostics(file, zeroBasedLine, options));
       new Notice('Could not resolve the selected line.');
       return false;
     }
+    const expectedFingerprint = String(options.expectedFingerprint || '');
+    if (expectedFingerprint) {
+      if (!isWithinUtf8ByteLimit(content, MAX_BASE_LINE_SOURCE_BYTES)) {
+        logger.flowWarn('HomeCapture', 'line-editor:source-too-large', this.getLineEditorDiagnostics(file, zeroBasedLine, options));
+        new Notice('The selected note is too large to open safely from a widget.', 8000);
+        return false;
+      }
+      const actualFingerprint = await sha256BaseLine(content.slice(range.from, range.to), zeroBasedLine === 0);
+      if (!/^[0-9a-f]{64}$/u.test(expectedFingerprint) || actualFingerprint !== expectedFingerprint) {
+        logger.flowWarn('HomeCapture', 'line-editor:digest-conflict', this.getLineEditorDiagnostics(file, zeroBasedLine, options));
+        new Notice('The selected line changed. Refresh the widget and try again.', 8000);
+        return false;
+      }
+    }
     const snapshot = createHomeCaptureRangeSnapshot(content, range.from, range.to);
-    logger.flow('HomeCapture', 'line-editor:open', { path: file.path, line: zeroBasedLine + 1 });
-    return new HomeCaptureLineEditModal(this.plugin, file, zeroBasedLine, snapshot).openAndWait();
+    logger.flow('HomeCapture', 'line-editor:open', this.getLineEditorDiagnostics(file, zeroBasedLine, options));
+    return new HomeCaptureLineEditModal(
+      this.plugin,
+      file,
+      zeroBasedLine,
+      snapshot,
+      expectedFingerprint || null,
+      options.redactDiagnostics === true,
+    ).openAndWait();
+  }
+
+  private getLineEditorDiagnostics(
+    file: TFile,
+    zeroBasedLine: number,
+    options: HomeCaptureLineEditorOptions,
+  ): Record<string, unknown> {
+    return options.redactDiagnostics === true
+      ? { route: 'external-base-line' }
+      : { path: file.path, line: zeroBasedLine + 1 };
   }
 
   async openCaptureModal(date = getMoment()(), options: HomeCaptureOptions = {}): Promise<boolean> {
@@ -1204,6 +1250,8 @@ class HomeCaptureLineEditModal extends Modal {
     private readonly file: TFile,
     private readonly zeroBasedLine: number,
     private readonly snapshot: { prefix: string; value: string; suffix: string },
+    private readonly expectedFingerprint: string | null,
+    private readonly redactDiagnostics: boolean,
   ) {
     super(plugin.app);
   }
@@ -1246,6 +1294,43 @@ class HomeCaptureLineEditModal extends Modal {
       }
       saving = true;
       update();
+      if (this.expectedFingerprint) {
+        try {
+          const current = await this.plugin.app.vault.read(this.file);
+          if (!isWithinUtf8ByteLimit(current, MAX_BASE_LINE_SOURCE_BYTES)) {
+            saving = false;
+            update();
+            logger.flowWarn('HomeCapture', 'line-editor:source-too-large', this.getDiagnostics());
+            new Notice('The selected note is too large to edit safely from a widget.', 8000);
+            return;
+          }
+          const resolution = await resolveUniqueBaseLineFingerprint(
+            current,
+            this.expectedFingerprint,
+            this.zeroBasedLine + 1,
+          );
+          if (resolution.status !== 'unique') {
+            saving = false;
+            update();
+            logger.flowWarn('HomeCapture', 'line-editor:digest-conflict', this.getDiagnostics());
+            new Notice('The selected line changed. Refresh the widget and try again.', 8000);
+            return;
+          }
+        } catch (error) {
+          saving = false;
+          update();
+          if (this.redactDiagnostics) {
+            logger.flowWarn('HomeCapture', 'line-editor:digest-check-failed', {
+              ...this.getDiagnostics(),
+              reason: 'digest-check-failed',
+            });
+          } else {
+            logger.flowError('HomeCapture', 'line-editor:digest-check-failed', error, this.getDiagnostics());
+          }
+          new Notice('The selected line could not be rechecked. Nothing was changed.', 8000);
+          return;
+        }
+      }
       let changed = false;
       await this.plugin.app.vault.process(this.file, (current) => {
         const next = replaceHomeCaptureRangeIfUnchanged(current, this.snapshot, [this.snapshot.value], replacement);
@@ -1256,7 +1341,7 @@ class HomeCaptureLineEditModal extends Modal {
       if (!changed) {
         saving = false;
         update();
-        logger.flowWarn('HomeCapture', 'line-editor:conflict', { path: this.file.path, line: this.zeroBasedLine + 1 });
+        logger.flowWarn('HomeCapture', 'line-editor:conflict', this.getDiagnostics());
         new Notice('The line changed outside the editor. Refresh the feed and try again.', 8000);
         return;
       }
@@ -1269,7 +1354,7 @@ class HomeCaptureLineEditModal extends Modal {
         refreshLivePreviewEditors: true,
         delayMs: 80,
       });
-      logger.flow('HomeCapture', 'line-editor:saved', { path: this.file.path, line: this.zeroBasedLine + 1 });
+      logger.flow('HomeCapture', 'line-editor:saved', this.getDiagnostics());
       this.saved = true;
       this.close();
     };
@@ -1288,6 +1373,12 @@ class HomeCaptureLineEditModal extends Modal {
     cancelButton.addEventListener('click', () => this.close());
     update();
     window.requestAnimationFrame(() => this.markdownEditor?.focus());
+  }
+
+  private getDiagnostics(): Record<string, unknown> {
+    return this.redactDiagnostics
+      ? { route: 'external-base-line' }
+      : { path: this.file.path, line: this.zeroBasedLine + 1 };
   }
 
   onClose(): void {

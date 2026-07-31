@@ -65,6 +65,7 @@ import { VirtualBaseEmbedService } from './services/virtual-base-embed-service';
 import { HeadingCollapseOnOpenService } from './services/heading-collapse-on-open-service';
 import { FoldExpansionContextMenuService } from './services/fold-expansion-context-menu-service';
 import { HomeCaptureService } from './services/home-capture-service';
+import { BaseLineEditProtocolService } from './services/base-line-edit-protocol-service';
 import {
   HOME_ADD_TASK_COMMAND_ID,
   HOME_CAPTURE_COMMAND_ID,
@@ -316,6 +317,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   headingCollapseOnOpenService: HeadingCollapseOnOpenService;
   foldExpansionContextMenuService: FoldExpansionContextMenuService;
   homeCaptureService: HomeCaptureService;
+  baseLineEditProtocolService: BaseLineEditProtocolService;
   homeComponentActionService: HomeComponentActionService;
   archiveFileService: ArchiveFileService;
   sharedServices: GcmSharedServices;
@@ -534,6 +536,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.addChild(this.headingCollapseOnOpenService);
     this.foldExpansionContextMenuService = new FoldExpansionContextMenuService(this);
     this.homeCaptureService = new HomeCaptureService(this);
+    this.baseLineEditProtocolService = new BaseLineEditProtocolService(this);
+    this.baseLineEditProtocolService.register();
     this.homeComponentActionService = new HomeComponentActionService(this);
     this.archiveFileService = new ArchiveFileService(this);
     this.register(this.homeComponentActionService.register(HOME_CAPTURE_COMMAND_ID, (context) => (
