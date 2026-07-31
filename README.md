@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.13.1
+
+- The public Task API now resolves every path or file-like input back through GCM's own vault before reading, writing, moving, or focusing a task. Valid Markdown files are recognized structurally instead of by JavaScript constructor identity, so integrations loaded in another Obsidian realm—including TPS Notebook Navigator row providers—can query and mutate their exact task lines.
+- An omitted `pathPrefix` now means no prefix filter. It is no longer normalized into `/`, which previously removed every result even after an explicit `paths` or `files` target had resolved successfully.
+- Explicit missing, folder, or non-Markdown create/move targets fail closed. They no longer redirect a requested write to today's Daily Note or back into the source note.
+- This is a backward-compatible patch release. Task API version 1, call shapes, settings, note data, and minimum supported Obsidian 1.10.0 are unchanged.
+
 ## 1.13.0
 
 - **Use TPS Home for Daily Notes** now appears under Home & daily notes. Turning it off removes Home's listeners and restores date-backed Home leaves to normal Markdown Reading view after the workspace layout is ready; the standalone **Open TPS Home** command remains available.
@@ -450,6 +457,8 @@ Stable task operations:
 - `tasks.setFields({ path, line, rawLine }, fields)` writes or clears multiple explicit inline fields on the resolved task line.
 - `tasks.list({ paths, pathPrefix, fields, tags, status, includeCompleted })` queries existing task lines without mutating them.
 - `tasks.findByField(property, value, filter)` queries existing task lines by one explicit inline field.
+
+Path strings and file objects are canonicalized through GCM's own vault before use. Callers may pass an Obsidian file object from another plugin realm; GCM uses its path rather than relying on constructor identity. Explicit create or move targets that do not resolve to an existing Markdown file are rejected instead of falling back to another note.
 
 Diagnostics:
 

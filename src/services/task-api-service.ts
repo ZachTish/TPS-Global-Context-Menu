@@ -1,4 +1,5 @@
-import { Notice, normalizePath, TFile } from 'obsidian';
+import { Notice, normalizePath } from 'obsidian';
+import type { TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import {
   addInlineTagToTaskLine,
@@ -146,15 +147,14 @@ export class TaskApiService {
       return { ok: false, changed: false, task: null, error: 'Task title is required.' };
     }
 
-    const targetFile = input.targetFile instanceof TFile
-      ? input.targetFile
-      : input.targetPath
-        ? this.plugin.app.vault.getFileByPath(normalizePath(input.targetPath))
-        : await this.ensureTodayDailyNote();
-    if (!(targetFile instanceof TFile) || targetFile.extension !== 'md') {
+    const hasExplicitTarget = input.targetFile != null || !!String(input.targetPath || '').trim();
+    const targetFile = this.resolveMarkdownFile(input.targetFile)
+      ?? this.resolveMarkdownFile(input.targetPath)
+      ?? (hasExplicitTarget ? null : this.resolveMarkdownFile(await this.ensureTodayDailyNote()));
+    if (!targetFile) {
       logger.flowWarn('TaskApi', 'create:target-unresolved', {
         targetPath: input.targetPath || '',
-        hasTargetFile: input.targetFile instanceof TFile,
+        hasTargetFile: input.targetFile != null,
       });
       return { ok: false, changed: false, task: null, error: 'Target markdown file could not be resolved.' };
     }
@@ -322,16 +322,15 @@ export class TaskApiService {
       logger.flowWarn('TaskApi', 'move:source-unresolved', this.summarizeRef(ref));
       return { ok: false, changed: false, task: null, error: 'Task line could not be resolved.' };
     }
-    const targetFile = target.targetFile instanceof TFile
-      ? target.targetFile
-      : target.targetPath
-        ? this.plugin.app.vault.getFileByPath(normalizePath(target.targetPath))
-        : resolved.file;
-    if (!(targetFile instanceof TFile) || targetFile.extension !== 'md') {
+    const hasExplicitTarget = target.targetFile != null || !!String(target.targetPath || '').trim();
+    const targetFile = this.resolveMarkdownFile(target.targetFile)
+      ?? this.resolveMarkdownFile(target.targetPath)
+      ?? (hasExplicitTarget ? null : resolved.file);
+    if (!targetFile) {
       logger.flowWarn('TaskApi', 'move:target-unresolved', {
         ...this.summarizeRef(ref),
         targetPath: target.targetPath || '',
-        hasTargetFile: target.targetFile instanceof TFile,
+        hasTargetFile: target.targetFile != null,
       });
       return { ok: false, changed: false, task: null, before: resolved.record, error: 'Target markdown file could not be resolved.' };
     }
@@ -493,9 +492,8 @@ export class TaskApiService {
   }
 
   private async resolveTask(ref: GcmTaskRef): Promise<{ file: TFile; record: GcmTaskRecord } | null> {
-    const path = normalizePath(String(ref.path || '').trim());
-    const file = this.plugin.app.vault.getFileByPath(path);
-    if (!(file instanceof TFile) || file.extension !== 'md') return null;
+    const file = this.resolveMarkdownFile(ref.path);
+    if (!file) return null;
     const content = await this.plugin.app.vault.cachedRead(file);
     const lines = content.split(/\r?\n/);
     const preferred = typeof ref.lineNumber === 'number'
@@ -602,11 +600,13 @@ export class TaskApiService {
     const explicit = [...(filter.files || []), ...(filter.paths || [])];
     const files = explicit.length
       ? explicit
-          .map((entry) => entry instanceof TFile ? entry : this.plugin.app.vault.getFileByPath(normalizePath(String(entry || ''))))
-          .filter((file): file is TFile => file instanceof TFile && file.extension === 'md')
+          .map((entry) => this.resolveMarkdownFile(entry))
+          .filter((file): file is TFile => file !== null)
       : this.plugin.app.vault.getMarkdownFiles();
-    const prefix = normalizePath(String(filter.pathPrefix || '').trim());
-    return prefix ? files.filter((file) => file.path.startsWith(prefix)) : files;
+    const rawPrefix = String(filter.pathPrefix || '').trim();
+    if (!rawPrefix) return files;
+    const prefix = normalizePath(rawPrefix);
+    return files.filter((file) => file.path.startsWith(prefix));
   }
 
   private matchesFilter(record: GcmTaskRecord, filter: GcmTaskListFilter): boolean {
@@ -683,8 +683,8 @@ export class TaskApiService {
   }
 
   private async focusTask(task: GcmTaskRecord): Promise<void> {
-    const file = this.plugin.app.vault.getFileByPath(task.path);
-    if (!(file instanceof TFile)) return;
+    const file = this.resolveMarkdownFile(task.path);
+    if (!file) return;
     await this.plugin.openFileInLeaf(file, false, () => this.plugin.app.workspace.getLeaf(false), { revealLeaf: true });
     const leaf = this.plugin.findOpenLeafForFile(file);
     const editor = (leaf?.view as any)?.editor;
@@ -692,6 +692,18 @@ export class TaskApiService {
     editor.setCursor?.({ line: task.lineNumber, ch: 0 });
     editor.scrollIntoView?.({ from: { line: task.lineNumber, ch: 0 }, to: { line: task.lineNumber, ch: 0 } }, true);
     editor.focus?.();
+  }
+
+  /**
+   * Canonicalize public API file inputs through this plugin's vault. Obsidian can
+   * expose file objects from a different JavaScript realm, where constructor
+   * identity is not stable even though the vault path is valid.
+   */
+  private resolveMarkdownFile(value: unknown): TFile | null {
+    const rawPath = getFilePath(value);
+    if (!rawPath) return null;
+    const file = this.plugin.app.vault.getFileByPath(normalizePath(rawPath));
+    return isMarkdownFileLike(file) ? file : null;
   }
 
   private notifyChanged(paths: string[], reason: string): void {
@@ -706,6 +718,21 @@ export class TaskApiService {
       delayMs: 80,
     });
   }
+}
+
+function getFilePath(value: unknown): string | null {
+  if (typeof value === 'string') return value.trim() || null;
+  if (!value || typeof value !== 'object') return null;
+  const path = (value as { path?: unknown }).path;
+  return typeof path === 'string' ? path.trim() || null : null;
+}
+
+function isMarkdownFileLike(value: unknown): value is TFile {
+  if (!value || typeof value !== 'object') return false;
+  const file = value as { path?: unknown; extension?: unknown };
+  return typeof file.path === 'string'
+    && typeof file.extension === 'string'
+    && file.extension.toLowerCase() === 'md';
 }
 
 function readInlineFields(line: string): Record<string, string> {
