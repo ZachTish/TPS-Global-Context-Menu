@@ -4567,26 +4567,36 @@ export class PanelBuilder {
       return { ...entry, hidden: isHidden };
     });
 
+    const sortField = markedEntries.length > 1 ? this.getSortField() : '';
+    const sortValues = sortField ? new Map<string, unknown>() : null;
+    if (sortValues) {
+      const lowerSortField = sortField.toLowerCase();
+      for (const entry of markedEntries) {
+        const frontmatter = this.app.metadataCache.getFileCache(entry.file)?.frontmatter as
+          | Record<string, unknown>
+          | undefined;
+        let value: unknown;
+        if (frontmatter) {
+          if (sortField in frontmatter) {
+            value = frontmatter[sortField];
+          } else {
+            for (const key of Object.keys(frontmatter)) {
+              if (key.toLowerCase() === lowerSortField) {
+                value = frontmatter[key];
+                break;
+              }
+            }
+          }
+        }
+        sortValues.set(entry.file.path, value);
+      }
+    }
+
     const relationEntries = markedEntries.sort((a, b) => {
       // 1. Custom Sort Key from Companion (if configured)
-      const sortField = this.getSortField();
-      if (sortField) {
-        const aCache = this.app.metadataCache.getFileCache(a.file);
-        const bCache = this.app.metadataCache.getFileCache(b.file);
-
-        // Case-insensitive lookup
-        const getVal = (fm: any, key: string) => {
-          if (!fm) return undefined;
-          if (key in fm) return fm[key];
-          const lowerKey = key.toLowerCase();
-          for (const k of Object.keys(fm)) {
-            if (k.toLowerCase() === lowerKey) return fm[k];
-          }
-          return undefined;
-        };
-
-        const aVal = getVal(aCache?.frontmatter, sortField);
-        const bVal = getVal(bCache?.frontmatter, sortField);
+      if (sortValues) {
+        const aVal = sortValues.get(a.file.path);
+        const bVal = sortValues.get(b.file.path);
 
         const hasA = aVal !== undefined && aVal !== null && aVal !== '';
         const hasB = bVal !== undefined && bVal !== null && bVal !== '';
@@ -4599,19 +4609,17 @@ export class PanelBuilder {
           if (!isNaN(aNum) && !isNaN(bNum)) {
             return aNum - bNum;
           }
-          // Fallback to string sort
+          // Compare non-numeric values as strings
           return String(aVal).localeCompare(String(bVal));
         }
         if (hasA && !hasB) return -1; // A comes first
         if (!hasA && hasB) return 1;  // B comes first
       }
 
-      // 2. Existing fallback logic
+      // 2. Stable secondary ordering
       const aChild = a.relations.has('child') ? 0 : 1;
       const bChild = b.relations.has('child') ? 0 : 1;
       if (aChild !== bChild) return aChild - bChild;
-      const aMd = a.file.extension?.toLowerCase() === 'md' ? 0 : 1;
-      const bMd = b.file.extension?.toLowerCase() === 'md' ? 0 : 1;
       // Status sort
       const statusWeight = (file: TFile) => {
         const identity = getIdentity(file);
