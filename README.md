@@ -1,5 +1,15 @@
 # TPS Global Context Menu
 
+## 1.11.10
+
+- The disabled-by-default Canvas drag guard no longer installs any workspace or `WorkspaceLeaf` wrappers or its nine global drag-tracking listeners. Normal GCM startup therefore leaves all ten workspace methods and all three leaf prototype methods at their exact native identities and performs no Canvas-guard pointer/drag tracking.
+- The saved opt-in behavior remains available. Its thirteen existing suppression routes still block accidental opens during the configured recent-drag window, while expired windows forward the original receiver, arguments, result, and call count unchanged.
+- Opt-in teardown now restores the exact original workspace methods instead of bound substitutes and removes wrapper properties when the originals were inherited. Its fallback leaf selection calls captured originals directly, avoiding recursion when `getUnpinnedLeaf` is unavailable.
+- Removed an unreachable native Base-open interception branch, its two no-op helpers, two unused state fields, and an unregistered Canvas-click helper. Commands, settings, Base previews, Canvas behavior, APIs, note data, and every other released feature remain unchanged.
+- Exact 1.11.9 passed its complete 551-check suite before the change. The release adds four compiled behavior/performance gates and passes all 555 checks, TypeScript, final builds, and test-vault reload/UI verification.
+- In the identical structural gate, exact 1.11.9 installs thirteen wrappers and performs one guard check per default `getLeaf(false)` dispatch; 1.11.10 installs zero wrappers and performs zero guard checks. Independent 14-million-call informational runs varied from roughly 5–16% lower dispatch-only time; wall-clock timing is not a correctness gate.
+- This is a backward-compatible patch release. Minimum supported Obsidian remains 1.10.0 and no migration is required.
+
 ## 1.11.9
 
 - The 900 ms rendered-title compatibility sweep now processes only the outermost roots from its existing per-view candidate list. Nested Reading, Preview, Rendered, and Preview Section containers no longer make GCM revisit the same links and subtrees several times in one tick.
@@ -76,7 +86,7 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.11.9` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.11.10` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
 
 ## 1.11.1
 

@@ -333,8 +333,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private basesLinkPreviewArmedPath: string | null = null;
   private basesLinkPreviewArmedUntil = 0;
   private basesLinkPreviewSuppressClickUntil = 0;
-  private basesLinkPreviewNativeOpenPath: string | null = null;
-  private basesLinkPreviewNativeOpenUntil = 0;
   private recentBaseLinkPreviewAnchorEl: HTMLElement | null = null;
   private recentBaseLinkPreviewPointerUntil = 0;
   private recentBaseLinkPreviewPointerPoint: { x: number; y: number } | null = null;
@@ -465,21 +463,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       route: created ? 'created' : 'reused',
       refreshed: !created,
     });
-  }
-
-  private suppressCanvasActivationEvent(evt: MouseEvent): boolean {
-    if (!this.shouldSuppressOpenForRecentCanvasDrag()) return false;
-    if (!this.isCanvasOrBasesInteractionTarget(evt.target)) return false;
-
-    evt.preventDefault();
-    evt.stopImmediatePropagation();
-    evt.stopPropagation();
-
-    logger.log('[TPS GCM] Suppressed click activation after recent canvas drag', {
-      eventType: evt.type,
-      target: evt.target instanceof HTMLElement ? evt.target.className : null,
-    });
-    return true;
   }
 
   async onload(): Promise<void> {
@@ -692,88 +675,90 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       this.contextTargetService.recordContextTarget(evt.target);
     }, { capture: true });
 
-    this.registerDomEvent(document, 'mousedown', (evt: MouseEvent) => {
-      if (evt.button !== 0) return;
-      if (!this.isCanvasOrBasesInteractionTarget(evt.target)) {
-        this.canvasMouseSession = null;
-        return;
-      }
-      this.canvasMouseSession = {
-        startX: evt.clientX,
-        startY: evt.clientY,
-        moved: false,
-      };
-    }, { capture: true });
+    if (this.shouldInstallWorkspaceOpenPatch()) {
+      this.registerDomEvent(document, 'mousedown', (evt: MouseEvent) => {
+        if (evt.button !== 0) return;
+        if (!this.isCanvasOrBasesInteractionTarget(evt.target)) {
+          this.canvasMouseSession = null;
+          return;
+        }
+        this.canvasMouseSession = {
+          startX: evt.clientX,
+          startY: evt.clientY,
+          moved: false,
+        };
+      }, { capture: true });
 
-    this.registerDomEvent(document, 'pointerdown', (evt: PointerEvent) => {
-      if (evt.button !== 0) return;
-      if (!this.isCanvasOrBasesInteractionTarget(evt.target)) {
+      this.registerDomEvent(document, 'pointerdown', (evt: PointerEvent) => {
+        if (evt.button !== 0) return;
+        if (!this.isCanvasOrBasesInteractionTarget(evt.target)) {
+          this.canvasPointerSession = null;
+          return;
+        }
+        this.canvasPointerSession = {
+          pointerId: evt.pointerId,
+          startX: evt.clientX,
+          startY: evt.clientY,
+          moved: false,
+        };
+      }, { capture: true });
+
+      this.registerDomEvent(document, 'pointermove', (evt: PointerEvent) => {
+        const session = this.canvasPointerSession;
+        if (!session || session.pointerId !== evt.pointerId) return;
+        const dx = evt.clientX - session.startX;
+        const dy = evt.clientY - session.startY;
+        if (!session.moved && Math.hypot(dx, dy) >= 6) {
+          session.moved = true;
+          this.markRecentCanvasDrag(1500);
+        }
+      }, { capture: true, passive: true });
+
+      this.registerDomEvent(document, 'mousemove', (evt: MouseEvent) => {
+        const session = this.canvasMouseSession;
+        if (!session || (evt.buttons & 1) === 0) return;
+        const dx = evt.clientX - session.startX;
+        const dy = evt.clientY - session.startY;
+        if (!session.moved && Math.hypot(dx, dy) >= 6) {
+          session.moved = true;
+          this.markRecentCanvasDrag(1500);
+        }
+      }, { capture: true, passive: true });
+
+      const finishCanvasPointerSession = (evt: PointerEvent) => {
+        const session = this.canvasPointerSession;
+        if (!session || session.pointerId !== evt.pointerId) return;
+        if (session.moved) {
+          this.markRecentCanvasDrag(1200);
+        }
         this.canvasPointerSession = null;
-        return;
-      }
-      this.canvasPointerSession = {
-        pointerId: evt.pointerId,
-        startX: evt.clientX,
-        startY: evt.clientY,
-        moved: false,
       };
-    }, { capture: true });
 
-    this.registerDomEvent(document, 'pointermove', (evt: PointerEvent) => {
-      const session = this.canvasPointerSession;
-      if (!session || session.pointerId !== evt.pointerId) return;
-      const dx = evt.clientX - session.startX;
-      const dy = evt.clientY - session.startY;
-      if (!session.moved && Math.hypot(dx, dy) >= 6) {
-        session.moved = true;
-        this.markRecentCanvasDrag(1500);
-      }
-    }, { capture: true, passive: true });
+      const finishCanvasMouseSession = () => {
+        const session = this.canvasMouseSession;
+        if (!session) return;
+        if (session.moved) {
+          this.markRecentCanvasDrag(1200);
+        }
+        this.canvasMouseSession = null;
+      };
 
-    this.registerDomEvent(document, 'mousemove', (evt: MouseEvent) => {
-      const session = this.canvasMouseSession;
-      if (!session || (evt.buttons & 1) === 0) return;
-      const dx = evt.clientX - session.startX;
-      const dy = evt.clientY - session.startY;
-      if (!session.moved && Math.hypot(dx, dy) >= 6) {
-        session.moved = true;
-        this.markRecentCanvasDrag(1500);
-      }
-    }, { capture: true, passive: true });
-
-    const finishCanvasPointerSession = (evt: PointerEvent) => {
-      const session = this.canvasPointerSession;
-      if (!session || session.pointerId !== evt.pointerId) return;
-      if (session.moved) {
-        this.markRecentCanvasDrag(1200);
-      }
-      this.canvasPointerSession = null;
-    };
-
-    const finishCanvasMouseSession = () => {
-      const session = this.canvasMouseSession;
-      if (!session) return;
-      if (session.moved) {
-        this.markRecentCanvasDrag(1200);
-      }
-      this.canvasMouseSession = null;
-    };
-
-    this.registerDomEvent(document, 'pointerup', finishCanvasPointerSession, { capture: true, passive: true });
-    this.registerDomEvent(document, 'pointercancel', finishCanvasPointerSession, { capture: true, passive: true });
-    this.registerDomEvent(document, 'mouseup', finishCanvasMouseSession, { capture: true, passive: true });
-    this.registerDomEvent(document, 'dragstart', (evt: DragEvent) => {
-      if (this.isCanvasOrBasesInteractionTarget(evt.target)) {
-        this.markRecentCanvasDrag(1800);
-      }
-    }, { capture: true });
-    this.registerDomEvent(document, 'dragend', (evt: DragEvent) => {
-      if (this.isCanvasOrBasesInteractionTarget(evt.target)) {
-        this.markRecentCanvasDrag(1400);
-      }
-      this.canvasMouseSession = null;
-      this.canvasPointerSession = null;
-    }, { capture: true });
+      this.registerDomEvent(document, 'pointerup', finishCanvasPointerSession, { capture: true, passive: true });
+      this.registerDomEvent(document, 'pointercancel', finishCanvasPointerSession, { capture: true, passive: true });
+      this.registerDomEvent(document, 'mouseup', finishCanvasMouseSession, { capture: true, passive: true });
+      this.registerDomEvent(document, 'dragstart', (evt: DragEvent) => {
+        if (this.isCanvasOrBasesInteractionTarget(evt.target)) {
+          this.markRecentCanvasDrag(1800);
+        }
+      }, { capture: true });
+      this.registerDomEvent(document, 'dragend', (evt: DragEvent) => {
+        if (this.isCanvasOrBasesInteractionTarget(evt.target)) {
+          this.markRecentCanvasDrag(1400);
+        }
+        this.canvasMouseSession = null;
+        this.canvasPointerSession = null;
+      }, { capture: true });
+    }
 
     this.registerBasesLinkPreviewHandler();
     this.registerInteractionHandlers();
@@ -1058,7 +1043,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   private shouldInstallWorkspaceOpenPatch(): boolean {
-    return true;
+    return this.settings.enableCanvasOpenGuard === true;
   }
 
   private getActiveBaseLeafRootForTarget(target: HTMLElement | null): HTMLElement | null {
@@ -1109,17 +1094,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       return touch ? { x: touch.clientX, y: touch.clientY } : null;
     }
     return { x: evt.clientX, y: evt.clientY };
-  }
-
-  private shouldAllowNativeBaseLinkOpen(file: TFile): boolean {
-    void file;
-    return true;
-  }
-
-  private interceptNativeBaseLinkOpen(file: TFile, leaf: WorkspaceLeaf): boolean {
-    void file;
-    void leaf;
-    return false;
   }
 
   private async openBaseLinkInHoverEditor(file: TFile, anchorEl: HTMLElement): Promise<boolean> {
@@ -2633,16 +2607,21 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   private installCanvasOpenGuard(): () => void {
     const workspace = this.app.workspace as any;
-    const originalOpenLinkText = workspace.openLinkText?.bind(workspace);
-    const originalGetLeaf = workspace.getLeaf?.bind(workspace);
-    const originalGetUnpinnedLeaf = workspace.getUnpinnedLeaf?.bind(workspace);
-    const originalGetRightLeaf = workspace.getRightLeaf?.bind(workspace);
-    const originalGetLeftLeaf = workspace.getLeftLeaf?.bind(workspace);
-    const originalCreateLeafBySplit = workspace.createLeafBySplit?.bind(workspace);
-    const originalCreateLeafInParent = workspace.createLeafInParent?.bind(workspace);
-    const originalSplitActiveLeaf = workspace.splitActiveLeaf?.bind(workspace);
-    const originalDuplicateLeaf = workspace.duplicateLeaf?.bind(workspace);
-    const originalOpenPopoutLeaf = workspace.openPopoutLeaf?.bind(workspace);
+    const workspaceMethodOwnership = new Map<string, boolean>();
+    const captureWorkspaceMethod = (name: string): any => {
+      workspaceMethodOwnership.set(name, Object.prototype.hasOwnProperty.call(workspace, name));
+      return workspace[name];
+    };
+    const originalOpenLinkText = captureWorkspaceMethod('openLinkText');
+    const originalGetLeaf = captureWorkspaceMethod('getLeaf');
+    const originalGetUnpinnedLeaf = captureWorkspaceMethod('getUnpinnedLeaf');
+    const originalGetRightLeaf = captureWorkspaceMethod('getRightLeaf');
+    const originalGetLeftLeaf = captureWorkspaceMethod('getLeftLeaf');
+    const originalCreateLeafBySplit = captureWorkspaceMethod('createLeafBySplit');
+    const originalCreateLeafInParent = captureWorkspaceMethod('createLeafInParent');
+    const originalSplitActiveLeaf = captureWorkspaceMethod('splitActiveLeaf');
+    const originalDuplicateLeaf = captureWorkspaceMethod('duplicateLeaf');
+    const originalOpenPopoutLeaf = captureWorkspaceMethod('openPopoutLeaf');
     const originalLeafOpenFile = WorkspaceLeaf.prototype.openFile;
     const originalLeafOpen = WorkspaceLeaf.prototype.open;
     const originalLeafSetViewState = WorkspaceLeaf.prototype.setViewState;
@@ -2673,12 +2652,16 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     const fallbackLeaf = (): WorkspaceLeaf | null => {
       try {
-        const leaf = (typeof originalGetUnpinnedLeaf === 'function' ? originalGetUnpinnedLeaf() : undefined)
-          ?? (typeof workspace.getLeaf === 'function' ? workspace.getLeaf('tab') : undefined)
+        const leaf = (typeof originalGetUnpinnedLeaf === 'function'
+          ? originalGetUnpinnedLeaf.call(workspace)
+          : undefined)
+          ?? (typeof originalGetLeaf === 'function' ? originalGetLeaf.call(workspace, 'tab') : undefined)
           ?? workspace.activeLeaf;
         return leaf ?? null;
       } catch {
-        return workspace.activeLeaf ?? (workspace.getLeaf ? workspace.getLeaf('tab') : null) ?? null;
+        return workspace.activeLeaf
+          ?? (typeof originalGetLeaf === 'function' ? originalGetLeaf.call(workspace, 'tab') : null)
+          ?? null;
       }
     };
 
@@ -2723,7 +2706,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
           logSuppressedOpen('workspace.getLeaf', String(target));
           return fallbackLeaf();
         }
-        return originalGetLeaf(...args);
+        return originalGetLeaf.apply(workspace, args);
       };
     }
 
@@ -2737,9 +2720,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
           } catch (_e) {
             // ignore and return safe active leaf below
           }
-          return workspace.activeLeaf ?? (typeof originalGetLeaf === 'function' ? originalGetLeaf('tab') : null);
+          return workspace.activeLeaf
+            ?? (typeof originalGetLeaf === 'function' ? originalGetLeaf.call(workspace, 'tab') : null);
         }
-        return originalGetUnpinnedLeaf(...args);
+        return originalGetUnpinnedLeaf.apply(workspace, args);
       };
     }
 
@@ -2749,7 +2733,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
           logSuppressedOpen('workspace.getRightLeaf', 'split');
           return fallbackLeaf();
         }
-        return originalGetRightLeaf(...args);
+        return originalGetRightLeaf.apply(workspace, args);
       };
     }
 
@@ -2759,7 +2743,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
           logSuppressedOpen('workspace.getLeftLeaf', 'split');
           return fallbackLeaf();
         }
-        return originalGetLeftLeaf(...args);
+        return originalGetLeftLeaf.apply(workspace, args);
       };
     }
 
@@ -2769,7 +2753,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
           logSuppressedOpen('workspace.createLeafBySplit', String(args[1] ?? 'split'));
           return fallbackLeaf();
         }
-        return originalCreateLeafBySplit(...args);
+        return originalCreateLeafBySplit.apply(workspace, args);
       };
     }
 
@@ -2779,7 +2763,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
           logSuppressedOpen('workspace.createLeafInParent', 'parent');
           return fallbackLeaf();
         }
-        return originalCreateLeafInParent(...args);
+        return originalCreateLeafInParent.apply(workspace, args);
       };
     }
 
@@ -2789,7 +2773,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
           logSuppressedOpen('workspace.splitActiveLeaf', String(args[0] ?? 'split'));
           return fallbackLeaf();
         }
-        return originalSplitActiveLeaf(...args);
+        return originalSplitActiveLeaf.apply(workspace, args);
       };
     }
 
@@ -2799,7 +2783,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
           logSuppressedOpen('workspace.duplicateLeaf', String(args[1] ?? 'duplicate'));
           return Promise.resolve(fallbackLeaf());
         }
-        return originalDuplicateLeaf(...args);
+        return originalDuplicateLeaf.apply(workspace, args);
       };
     }
 
@@ -2809,7 +2793,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
           logSuppressedOpen('workspace.openPopoutLeaf', 'window');
           return fallbackLeaf();
         }
-        return originalOpenPopoutLeaf(...args);
+        return originalOpenPopoutLeaf.apply(workspace, args);
       };
     }
 
@@ -2819,9 +2803,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       if (plugin.shouldSuppressOpenForRecentCanvasDrag()) {
         logSuppressedOpen('leaf.openFile', target);
         cleanupSuppressedLeaf(this);
-        return Promise.resolve(undefined as any);
-      }
-      if (targetFile && !plugin.shouldAllowNativeBaseLinkOpen(targetFile) && plugin.interceptNativeBaseLinkOpen(targetFile, this)) {
         return Promise.resolve(undefined as any);
       }
       return originalLeafOpenFile.apply(this, args as any);
@@ -2860,43 +2841,51 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
           logSuppressedOpen('openLinkText', target);
           return Promise.resolve(undefined);
         }
-        return originalOpenLinkText(...args);
+        return originalOpenLinkText.apply(workspace, args);
       };
     }
+
+    const restoreWorkspaceMethod = (name: string, original: any): void => {
+      if (workspaceMethodOwnership.get(name)) {
+        workspace[name] = original;
+      } else {
+        delete workspace[name];
+      }
+    };
 
     return () => {
       WorkspaceLeaf.prototype.openFile = originalLeafOpenFile;
       WorkspaceLeaf.prototype.open = originalLeafOpen;
       WorkspaceLeaf.prototype.setViewState = originalLeafSetViewState;
       if (typeof originalGetLeaf === 'function') {
-        workspace.getLeaf = originalGetLeaf;
+        restoreWorkspaceMethod('getLeaf', originalGetLeaf);
       }
       if (typeof originalGetUnpinnedLeaf === 'function') {
-        workspace.getUnpinnedLeaf = originalGetUnpinnedLeaf;
+        restoreWorkspaceMethod('getUnpinnedLeaf', originalGetUnpinnedLeaf);
       }
       if (typeof originalGetRightLeaf === 'function') {
-        workspace.getRightLeaf = originalGetRightLeaf;
+        restoreWorkspaceMethod('getRightLeaf', originalGetRightLeaf);
       }
       if (typeof originalGetLeftLeaf === 'function') {
-        workspace.getLeftLeaf = originalGetLeftLeaf;
+        restoreWorkspaceMethod('getLeftLeaf', originalGetLeftLeaf);
       }
       if (typeof originalCreateLeafBySplit === 'function') {
-        workspace.createLeafBySplit = originalCreateLeafBySplit;
+        restoreWorkspaceMethod('createLeafBySplit', originalCreateLeafBySplit);
       }
       if (typeof originalCreateLeafInParent === 'function') {
-        workspace.createLeafInParent = originalCreateLeafInParent;
+        restoreWorkspaceMethod('createLeafInParent', originalCreateLeafInParent);
       }
       if (typeof originalSplitActiveLeaf === 'function') {
-        workspace.splitActiveLeaf = originalSplitActiveLeaf;
+        restoreWorkspaceMethod('splitActiveLeaf', originalSplitActiveLeaf);
       }
       if (typeof originalDuplicateLeaf === 'function') {
-        workspace.duplicateLeaf = originalDuplicateLeaf;
+        restoreWorkspaceMethod('duplicateLeaf', originalDuplicateLeaf);
       }
       if (typeof originalOpenPopoutLeaf === 'function') {
-        workspace.openPopoutLeaf = originalOpenPopoutLeaf;
+        restoreWorkspaceMethod('openPopoutLeaf', originalOpenPopoutLeaf);
       }
       if (typeof originalOpenLinkText === 'function') {
-        workspace.openLinkText = originalOpenLinkText;
+        restoreWorkspaceMethod('openLinkText', originalOpenLinkText);
       }
     };
   }

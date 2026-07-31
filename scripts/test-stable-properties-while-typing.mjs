@@ -109,10 +109,6 @@ test('plugin-owned file opens reuse existing tabs or the current unpinned tab wi
     mainSource.indexOf('private registerBasesLinkPreviewHandler('),
     mainSource.indexOf('private isBasesForcedLinkPreviewEnabled('),
   );
-  const nativeBaseOpenSource = mainSource.slice(
-    mainSource.indexOf('private shouldAllowNativeBaseLinkOpen('),
-    mainSource.indexOf('private async openBaseLinkInHoverEditor('),
-  );
   const nativeSetViewStateSource = mainSource.slice(
     mainSource.indexOf('WorkspaceLeaf.prototype.setViewState = function'),
     mainSource.indexOf('if (typeof originalOpenLinkText ==='),
@@ -248,8 +244,12 @@ test('plugin-owned file opens reuse existing tabs or the current unpinned tab wi
   assert.match(baseLinkPreviewHandlerSource, /this\.resolveBasesNoteLinkTarget\(target\)/);
   assert.match(baseLinkPreviewHandlerSource, /openBaseLinkInHoverEditor/);
   assert.match(baseLinkPreviewHandlerSource, /this\.basesLinkPreviewArmedUntil = now \+ 900/);
-  assert.match(nativeBaseOpenSource, /private shouldAllowNativeBaseLinkOpen\(file: TFile\): boolean \{\s*void file;\s*return true;\s*\}/);
-  assert.match(nativeBaseOpenSource, /private interceptNativeBaseLinkOpen\(file: TFile, leaf: WorkspaceLeaf\): boolean \{\s*void file;\s*void leaf;\s*return false;\s*\}/);
+  assert.match(
+    mainSource,
+    /private shouldInstallWorkspaceOpenPatch\(\): boolean \{\s*return this\.settings\.enableCanvasOpenGuard === true;\s*\}/,
+  );
+  assert.doesNotMatch(mainSource, /shouldAllowNativeBaseLinkOpen/);
+  assert.doesNotMatch(mainSource, /interceptNativeBaseLinkOpen/);
 });
 
 test('mobile gesture collapse keeps persistent note header properties visible', () => {
