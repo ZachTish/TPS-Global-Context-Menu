@@ -1,6 +1,14 @@
-import { combineFilterTreeResults } from '../tps-list/base-filter-roots';
+import { evaluateOrderedFilterChildren } from '../tps-list/base-filter-roots';
 import { parseTaskTagValues } from '../utils/task-line-metadata';
 import { resolveTpsBaseDateExpression } from './base-line-creation-plan';
+import {
+  compareTpsFormulaValues,
+  getTpsFormulaComparableValues,
+  hasTpsFormulaReference,
+  isTpsFormulaTruthy,
+  type TpsFormulaResult,
+  type TpsFormulaRowSession,
+} from '../services/tps-base-formula-service';
 
 export type LogBaseFilterFile = {
   path: string;
@@ -18,28 +26,39 @@ export type LogBaseFilterContext = {
   contextDate?: string | null;
   rowKind?: string | null;
   taskTags?: string[];
+  formulaSession?: TpsFormulaRowSession;
+  formulaFailed?: boolean;
+  onFormulaFailure?: (result: TpsFormulaResult) => void;
 };
 
 export function evaluateLogBaseFilterRoots(roots: unknown[], context: LogBaseFilterContext): boolean | null {
-  return combineFilterTreeResults(roots.map((root) => evaluateLogBaseFilterNode(root, context)), 'and');
+  context.formulaFailed = false;
+  const result = evaluateOrderedFilterChildren(roots, 'and', (root) => evaluateLogBaseFilterNodeInternal(root, context));
+  return context.formulaFailed ? false : result;
 }
 
 export function evaluateLogBaseFilterNode(node: unknown, context: LogBaseFilterContext): boolean | null {
+  context.formulaFailed = false;
+  const result = evaluateLogBaseFilterNodeInternal(node, context);
+  return context.formulaFailed ? false : result;
+}
+
+function evaluateLogBaseFilterNodeInternal(node: unknown, context: LogBaseFilterContext): boolean | null {
   if (!node) return null;
   if (typeof node === 'string') return evaluateStringFilter(node, context);
-  if (Array.isArray(node)) return combineFilterTreeResults(node.map((child) => evaluateLogBaseFilterNode(child, context)), 'and');
+  if (Array.isArray(node)) return evaluateOrderedFilterChildren(node, 'and', (child) => evaluateLogBaseFilterNodeInternal(child, context));
   if (typeof node !== 'object') return null;
   const record = node as Record<string, unknown>;
   if (Object.prototype.hasOwnProperty.call(record, 'and') || Object.prototype.hasOwnProperty.call(record, 'all')) {
     const children = Object.prototype.hasOwnProperty.call(record, 'and') ? record.and : record.all;
-    return combineFilterTreeResults(asArray(children).map((child) => evaluateLogBaseFilterNode(child, context)), 'and');
+    return evaluateOrderedFilterChildren(asArray(children), 'and', (child) => evaluateLogBaseFilterNodeInternal(child, context));
   }
   if (Object.prototype.hasOwnProperty.call(record, 'or') || Object.prototype.hasOwnProperty.call(record, 'any')) {
     const children = Object.prototype.hasOwnProperty.call(record, 'or') ? record.or : record.any;
-    return combineFilterTreeResults(asArray(children).map((child) => evaluateLogBaseFilterNode(child, context)), 'or');
+    return evaluateOrderedFilterChildren(asArray(children), 'or', (child) => evaluateLogBaseFilterNodeInternal(child, context));
   }
   if (Object.prototype.hasOwnProperty.call(record, 'not')) {
-    const result = evaluateLogBaseFilterNode(record.not, context);
+    const result = evaluateLogBaseFilterNodeInternal(record.not, context);
     return result == null ? null : !result;
   }
   return evaluateObjectFilter(record, context);
@@ -48,6 +67,18 @@ export function evaluateLogBaseFilterNode(node: unknown, context: LogBaseFilterC
 function evaluateStringFilter(rawExpression: string, context: LogBaseFilterContext): boolean | null {
   const raw = String(rawExpression || '').trim();
   if (!raw) return null;
+  if (hasTpsFormulaReference(raw)) {
+    if (!context.formulaSession) {
+      markFormulaFailure(context, unavailableFormulaResult(raw));
+      return null;
+    }
+    const result = context.formulaSession.evaluateExpression(raw, '$filter');
+    if (result.status === 'error' || result.status === 'unsupported') {
+      markFormulaFailure(context, result);
+      return null;
+    }
+    return isTpsFormulaTruthy(result.value);
+  }
   const negated = raw.startsWith('!');
   const expression = (negated ? raw.slice(1) : raw).trim();
   const call = expression.match(/^([\w.\s-]+)\.(containsAny|contains|startsWith|endsWith|equals|isEmpty|empty|isNotEmpty|exists)\((.*)\)$/i);
@@ -88,6 +119,9 @@ function evaluateObjectFilter(record: Record<string, unknown>, context: LogBaseF
   const rawExpected = record.values ?? record.value ?? record.expected ?? record.right ?? record.rhs ?? record.target;
   const expected = asArray(rawExpected).map((value) => resolveLiteral(value, context));
   const result = evaluateValues(values, operator, expected, isExactContainsProperty(property, context));
+  if (result == null && /^formula\./iu.test(property)) {
+    markFormulaFailure(context, unsupportedFormulaFilterResult(property, operator));
+  }
   const negated = record.negated === true || record.exclude === true;
   return result == null ? null : negated ? !result : result;
 }
@@ -96,8 +130,26 @@ function readComparableValues(rawProperty: string, context: LogBaseFilterContext
   const property = String(rawProperty || '').trim();
   const normalized = normalizeKey(property);
   if (!normalized) return null;
+  if (/^formula\./iu.test(property)) {
+    if (!context.formulaSession) {
+      markFormulaFailure(context, unavailableFormulaResult(property));
+      return null;
+    }
+    const result = context.formulaSession.get(property);
+    if (result.status === 'error' || result.status === 'unsupported') {
+      markFormulaFailure(context, result);
+      return null;
+    }
+    return getTpsFormulaComparableValues(result.value);
+  }
   const semanticProperty = normalizeKey(property.replace(/^(?:tps|kanban|task|line|heading)\./iu, ''));
   if (['kind', 'itemkind', 'itemtype'].includes(semanticProperty) && context.rowKind) {
+    if (semanticProperty === 'kind') {
+      return Array.from(new Set([
+        ...getStructuralKindValues(context.rowKind),
+        ...getExplicitKindValues(context),
+      ]));
+    }
     return getStructuralKindValues(context.rowKind);
   }
   if (/^(?:task|line|heading)\.(?:path|file\.path)$/iu.test(property)) return [context.file.path];
@@ -126,6 +178,31 @@ function readComparableValues(rawProperty: string, context: LogBaseFilterContext
   return readRecordValues(context.file.frontmatter, property.replace(/^note\./i, '')) ?? [];
 }
 
+function markFormulaFailure(context: LogBaseFilterContext, result: TpsFormulaResult): void {
+  context.formulaFailed = true;
+  context.onFormulaFailure?.(result);
+}
+
+function unavailableFormulaResult(rawFormula: string): TpsFormulaResult {
+  return {
+    status: 'error',
+    value: null,
+    formula: String(rawFormula || '').replace(/^formula\./iu, ''),
+    code: 'formula-session-unavailable',
+    message: 'TPS formula context is unavailable for this filter',
+  };
+}
+
+function unsupportedFormulaFilterResult(property: string, operator: string): TpsFormulaResult {
+  return {
+    status: 'unsupported',
+    value: null,
+    formula: String(property || '').replace(/^formula\./iu, ''),
+    code: 'unsupported-formula-filter-operator',
+    message: `Unsupported formula filter operator: ${String(operator || '(empty)')}`,
+  };
+}
+
 function getStructuralKindValues(rawKind: unknown): string[] {
   const kind = String(rawKind ?? '').trim().toLowerCase();
   const heading = kind.match(/^h([1-6])$/u);
@@ -136,6 +213,17 @@ function getStructuralKindValues(rawKind: unknown): string[] {
   return kind ? [kind] : [];
 }
 
+function getExplicitKindValues(context: LogBaseFilterContext): string[] {
+  const exact = Object.entries(context.fields)
+    .find(([key]) => ['explicitkind', 'entitykind'].includes(normalizeKey(key)))?.[1];
+  if (exact == null) return [];
+  return String(exact)
+    .replace(/^\[|\]$/gu, '')
+    .split(/[,\n]/gu)
+    .map((value) => value.trim().replace(/^(?:["'])|(?:["'])$/gu, ''))
+    .filter(Boolean);
+}
+
 function isTaskTagProperty(rawProperty: string, context: LogBaseFilterContext): boolean {
   if (!/^(?:task\.)?tags?$/iu.test(String(rawProperty || '').trim())) return false;
   const rowKind = normalizeKey(context.rowKind ?? context.fields.kind);
@@ -144,7 +232,9 @@ function isTaskTagProperty(rawProperty: string, context: LogBaseFilterContext): 
 
 function isExactContainsProperty(rawProperty: string, context: LogBaseFilterContext): boolean {
   return isTaskTagProperty(rawProperty, context)
-    || /^file\.tags?$/iu.test(String(rawProperty || '').trim());
+    || /^file\.tags?$/iu.test(String(rawProperty || '').trim())
+    || (/^formula\./iu.test(String(rawProperty || '').trim())
+      && Array.isArray(context.formulaSession?.get(rawProperty).value));
 }
 
 function readTaskTagValues(context: LogBaseFilterContext): string[] {
@@ -190,6 +280,12 @@ function evaluateValues(
 }
 
 function compareValues(left: unknown, right: unknown): number {
+  if (
+    left instanceof Date
+    || right instanceof Date
+    || (left && typeof left === 'object')
+    || (right && typeof right === 'object')
+  ) return compareTpsFormulaValues(left, right);
   const leftNumber = Number(left);
   const rightNumber = Number(right);
   if (String(left).trim() !== '' && String(right).trim() !== '' && Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber === rightNumber ? 0 : leftNumber < rightNumber ? -1 : 1;

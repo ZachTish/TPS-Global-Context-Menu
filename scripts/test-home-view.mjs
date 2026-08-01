@@ -26,18 +26,9 @@ const baseEmbedContextSource = readFileSync(new URL('../src/views/base-embed-con
 const dailyNoteHomeSource = readFileSync(new URL('../src/services/daily-note-home-service.ts', import.meta.url), 'utf8');
 const viewModeManagerSource = readFileSync(new URL('../src/handlers/view-mode-manager.ts', import.meta.url), 'utf8');
 const fileSuggestModalSource = readFileSync(new URL('../src/modals/FileSuggestModal.ts', import.meta.url), 'utf8');
-const openTasksBaseSource = readOptionalSource(new URL('../../../../Open Unscheduled Tasks.base', import.meta.url));
-const foodLogBaseSource = readOptionalSource(new URL('../../../../Food Log.base', import.meta.url));
-const tasksBaseSource = readOptionalSource(new URL('../../../../Tasks.base', import.meta.url));
-
-function readOptionalSource(url) {
-  try {
-    return readFileSync(url, 'utf8');
-  } catch (error) {
-    if (error?.code === 'ENOENT') return null;
-    throw error;
-  }
-}
+const openTasksBaseSource = readFileSync(new URL('./fixtures/Open Unscheduled Tasks.base', import.meta.url), 'utf8');
+const foodLogBaseSource = readFileSync(new URL('./fixtures/Food Log.base', import.meta.url), 'utf8');
+const tasksBaseSource = readFileSync(new URL('./fixtures/Tasks.base', import.meta.url), 'utf8');
 
 async function loadHomeContextModule() {
   const result = await build({
@@ -866,9 +857,10 @@ test('GCM owns TPS List Bases registration and bundles the task-aware renderer',
   assert.match(tpsListBridgeSource, /containerEl\.addEventListener\('click'/);
   assert.match(tpsListBridgeSource, /plugin\.openBaseNotePreviewFromClick\(event, file, link, true\)/);
   assert.match(tpsListBridgeSource, /plugin\.openBaseNotePreviewFromClick\(event, file, anchorEl, true\)/);
-  assert.match(stylesSource, /\.tps-list-native-rows\s*\{[\s\S]*list-style:\s*disc;/);
-  assert.match(stylesSource, /\.tps-list-native-row--task\s*\{[\s\S]*display:\s*grid;/);
-  assert.match(stylesSource, /\.tps-list-native-row--task\s*\{[\s\S]*margin-left:\s*calc\(-18px \+ var\(--tps-list-task-indent, 0px\)\);/);
+  assert.match(stylesSource, /\.tps-list-native-rows\s*\{[\s\S]*list-style:\s*none;[\s\S]*padding:\s*0;/);
+  assert.match(stylesSource, /\.tps-list-native-row\s*\{[\s\S]*display:\s*grid;[\s\S]*grid-template-columns:\s*14px minmax\(0, 1fr\);/);
+  assert.match(stylesSource, /\.tps-list-native-row--task\s*\{[\s\S]*padding-inline-start:\s*var\(--tps-list-task-indent, 0px\);/);
+  assert.doesNotMatch(stylesSource, /\.tps-list-native-row--task\s*\{[\s\S]*margin-left:\s*calc\(-18px/);
 });
 
 test('TPS Home food tracker uses TPS Table totals and keeps selected-day logging', () => {

@@ -1,0 +1,9 @@
+filters:
+  and:
+    - kind == "task"
+views:
+  - type: tps-list
+    order:
+      - title
+      - file.name
+      - scheduled

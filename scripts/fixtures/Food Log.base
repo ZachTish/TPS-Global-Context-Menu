@@ -1,0 +1,13 @@
+filters:
+  and:
+    - file.path == "Food Log.md"
+    - file.folder == "Daily Notes"
+views:
+  - type: tps-table
+    lineFilterKey: food
+    totalsRow: top
+    createAction: command
+    createCommandId: tps-health:log-food
+    order:
+      - file.name
+      - title

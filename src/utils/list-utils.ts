@@ -30,8 +30,7 @@ export function parseStringListInput(raw: unknown): string[] {
       return;
     }
     if (value === null || value === undefined || value === false) return;
-    String(value)
-      .split(/[,\n]+/)
+    splitStringListText(String(value))
       .map((item) => item.trim())
       .filter(Boolean)
       .forEach((item) => values.push(item));
@@ -39,6 +38,102 @@ export function parseStringListInput(raw: unknown): string[] {
 
   visit(raw);
   return Array.from(new Set(values));
+}
+
+/**
+ * Split persisted list text without cutting commas inside wikilinks, Markdown
+ * links, nested collection syntax, or quoted text. A single balanced outer
+ * `[ ... ]` pair is treated as list notation, while `[[ ... ]]` remains a
+ * scalar wikilink. Exact spelling and case are preserved; only exact duplicate
+ * values are removed by `parseStringListInput`.
+ */
+function splitStringListText(value: string): string[] {
+  let source = String(value || '').trim();
+  if (hasBalancedOuterListBrackets(source)) source = source.slice(1, -1).trim();
+  if (!source) return [];
+
+  const parts: string[] = [];
+  let current = '';
+  let quote = '';
+  let escaped = false;
+  let squareDepth = 0;
+  let roundDepth = 0;
+  let curlyDepth = 0;
+  for (const character of source) {
+    if (escaped) {
+      current += character;
+      escaped = false;
+      continue;
+    }
+    if (character === '\\') {
+      current += character;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += character;
+      if (character === quote) quote = '';
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      current += character;
+      quote = character;
+      continue;
+    }
+    if (character === '[') squareDepth += 1;
+    else if (character === ']') squareDepth = Math.max(0, squareDepth - 1);
+    else if (character === '(') roundDepth += 1;
+    else if (character === ')') roundDepth = Math.max(0, roundDepth - 1);
+    else if (character === '{') curlyDepth += 1;
+    else if (character === '}') curlyDepth = Math.max(0, curlyDepth - 1);
+
+    if (
+      (character === ',' || character === '\n')
+      && squareDepth === 0
+      && roundDepth === 0
+      && curlyDepth === 0
+    ) {
+      const item = current.trim();
+      if (item) parts.push(item);
+      current = '';
+      continue;
+    }
+    current += character;
+  }
+  const item = current.trim();
+  if (item) parts.push(item);
+  return parts;
+}
+
+function hasBalancedOuterListBrackets(value: string): boolean {
+  if (!value.startsWith('[') || !value.endsWith(']') || value.startsWith('[[')) return false;
+  let depth = 0;
+  let quote = '';
+  let escaped = false;
+  for (let index = 0; index < value.length; index += 1) {
+    const character = value[index];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (character === '\\') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (character === quote) quote = '';
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      continue;
+    }
+    if (character === '[') depth += 1;
+    else if (character === ']') depth -= 1;
+    if (depth === 0 && index < value.length - 1) return false;
+    if (depth < 0) return false;
+  }
+  return depth === 0 && !quote && !escaped;
 }
 
 export function mergeStringList(existing: unknown, incoming: unknown): string[] {

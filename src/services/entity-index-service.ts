@@ -20,6 +20,25 @@ import {
 } from './line-entity-source-provider';
 import * as logger from '../logger';
 
+const LINE_SCAN_CONCURRENCY = 8;
+const LINE_SCAN_ATTEMPTS_PER_READINESS = 2;
+
+interface LineFileSnapshot {
+  readonly path: string;
+  readonly pathIdentity: string;
+  readonly content: string;
+  readonly generation: number;
+}
+
+export class EntityIndexIncompleteError extends Error {
+  readonly code = 'entity-index-incomplete';
+
+  constructor(readonly failedPaths: readonly string[]) {
+    super(`The line entity index is incomplete for ${failedPaths.length} Markdown source(s).`);
+    this.name = 'EntityIndexIncompleteError';
+  }
+}
+
 export type {
   EntityIndexChangeListener,
   EntityIndexDimensionPredicate,
@@ -290,41 +309,39 @@ export class EntityIndexService {
    */
   async ensureReady(): Promise<void> {
     this.ensureBuilt();
-    let attemptedLineScan = false;
-    while (true) {
-      while (!this.isLineIndexReady) {
-        if (!this.lineBuildPromise) {
-          const epoch = this.lineBuildEpoch;
-          const files = [...this.plugin.app.vault.getMarkdownFiles()];
-          this.startLineBuild(files, epoch, true);
+    // A dimension reconfiguration can cancel a build while a caller awaits it.
+    // Restart only for a genuinely newer epoch; source read failures are
+    // bounded and surface explicitly instead of spinning or returning partial.
+    for (let restart = 0; restart < 8; restart += 1) {
+      const epoch = this.lineBuildEpoch;
+      if (!this.isLineIndexReady && !this.lineBuildPromise) {
+        const filesByPath = new Map(
+          this.plugin.app.vault.getMarkdownFiles()
+            .map((file) => [normalizePath(file.path), file]),
+        );
+        const files = this.failedLineScanPaths.size > 0
+          ? [...this.failedLineScanPaths]
+              .map((path) => filesByPath.get(path))
+              .filter((file): file is TFile => Boolean(file))
+          : [...filesByPath.values()];
+        for (const path of [...this.failedLineScanPaths]) {
+          if (!filesByPath.has(path)) this.failedLineScanPaths.delete(path);
         }
-        const activeBuild = this.lineBuildPromise;
-        if (activeBuild) await activeBuild;
-        attemptedLineScan = true;
+        this.startLineBuild(files, epoch, true);
       }
-      if (!attemptedLineScan && this.failedLineScanPaths.size > 0) {
-        if (!this.lineBuildPromise) {
-          const epoch = this.lineBuildEpoch;
-          const filesByPath = new Map(
-            this.plugin.app.vault.getMarkdownFiles()
-              .map((file) => [normalizePath(file.path), file]),
-          );
-          const retryFiles: TFile[] = [];
-          for (const path of [...this.failedLineScanPaths]) {
-            const file = filesByPath.get(path);
-            if (file) retryFiles.push(file);
-            else this.failedLineScanPaths.delete(path);
-          }
-          if (retryFiles.length > 0) this.startLineBuild(retryFiles, epoch, false);
-        }
-        const retryBuild = this.lineBuildPromise;
-        if (retryBuild) await retryBuild;
-        attemptedLineScan = true;
-      }
+      const activeBuild = this.lineBuildPromise;
+      if (activeBuild) await activeBuild;
+      if (epoch !== this.lineBuildEpoch) continue;
       await this.awaitPendingLineRefreshes();
-      if (this.isLineIndexReady) return;
-      attemptedLineScan = false;
+      if (epoch !== this.lineBuildEpoch) continue;
+      if (this.failedLineScanPaths.size === 0 && this.isLineIndexReady) return;
+      throw new EntityIndexIncompleteError(
+        Object.freeze([...this.failedLineScanPaths].sort()),
+      );
     }
+    throw new EntityIndexIncompleteError(
+      Object.freeze([...this.failedLineScanPaths].sort()),
+    );
   }
 
   getRevision(): number {
@@ -431,20 +448,44 @@ export class EntityIndexService {
     epoch: number,
     markReady: boolean,
   ): void {
-    const build = Promise.all(
-      files.map(async (file) => {
-        try {
-          await this.refreshLineFile(file, undefined, epoch);
-        } catch (error) {
-          logger.flowError('EntityIndex', 'line-scan:failed', error, {
-            path: file.path,
-            retryPending: true,
-          });
+    const build = (async () => {
+      const snapshots = new Map<string, LineFileSnapshot>();
+      let pending = [...files];
+      for (let attempt = 1; attempt <= LINE_SCAN_ATTEMPTS_PER_READINESS && pending.length > 0; attempt += 1) {
+        const failed: TFile[] = [];
+        await runBounded(pending, LINE_SCAN_CONCURRENCY, async (file) => {
+          try {
+            const snapshot = await this.readLineFileSnapshot(file, undefined, epoch);
+            if (snapshot) snapshots.set(snapshot.pathIdentity, snapshot);
+          } catch (error) {
+            failed.push(file);
+            logger.flowError('EntityIndex', 'line-scan:failed', error, {
+              path: file.path,
+              attempt,
+              maxAttempts: LINE_SCAN_ATTEMPTS_PER_READINESS,
+              retryPending: attempt < LINE_SCAN_ATTEMPTS_PER_READINESS,
+            });
+          }
+        });
+        if (this.lineBuildEpoch !== epoch) return;
+        pending = failed;
+      }
+      if (this.lineBuildEpoch !== epoch) return;
+      this.core.batchMutations(() => {
+        for (const snapshot of snapshots.values()) {
+          if (
+            this.lineBuildEpoch !== epoch
+            || this.lineRefreshGeneration.get(snapshot.pathIdentity) !== snapshot.generation
+          ) {
+            continue;
+          }
+          this.applyLineSnapshot(snapshot.path, snapshot.content);
         }
-      }),
-    ).then(() => {
-      if (markReady && this.lineBuildEpoch === epoch) this.isLineIndexReady = true;
-    }).finally(() => {
+      });
+      if (markReady && this.lineBuildEpoch === epoch) {
+        this.isLineIndexReady = this.failedLineScanPaths.size === 0;
+      }
+    })().finally(() => {
       if (this.lineBuildPromise === build) this.lineBuildPromise = null;
     });
     this.lineBuildPromise = build;
@@ -458,7 +499,13 @@ export class EntityIndexService {
 
   private scheduleLineRefresh(file: TFile, suppliedContent?: string): void {
     const refresh = this.refreshLineFile(file, suppliedContent)
+      .then(() => {
+        if (this.failedLineScanPaths.size === 0 && this.lineBuildPromise === null) {
+          this.isLineIndexReady = true;
+        }
+      })
       .catch((error) => {
+        this.isLineIndexReady = false;
         logger.flowError('EntityIndex', 'line-refresh:failed', error, {
           path: file.path,
         });
@@ -480,6 +527,16 @@ export class EntityIndexService {
     suppliedContent?: string,
     epoch = this.lineBuildEpoch,
   ): Promise<void> {
+    const snapshot = await this.readLineFileSnapshot(file, suppliedContent, epoch);
+    if (!snapshot) return;
+    this.applyLineSnapshot(snapshot.path, snapshot.content);
+  }
+
+  private async readLineFileSnapshot(
+    file: TFile,
+    suppliedContent?: string,
+    epoch = this.lineBuildEpoch,
+  ): Promise<LineFileSnapshot | null> {
     const pathIdentity = normalizePath(file.path);
     const generation = (this.lineRefreshGeneration.get(pathIdentity) || 0) + 1;
     this.lineRefreshGeneration.set(pathIdentity, generation);
@@ -503,7 +560,12 @@ export class EntityIndexService {
     ) {
       return;
     }
-    this.applyLineSnapshot(file.path, content);
+    return Object.freeze({
+      path: file.path,
+      pathIdentity,
+      content,
+      generation,
+    });
   }
 
   private applyLineSnapshot(path: string, content: string): void {
@@ -544,4 +606,24 @@ function normalizePath(path: string): string {
 
 function lineSourceKey(path: string): string {
   return `lines:${normalizePath(path)}`;
+}
+
+async function runBounded<T>(
+  items: readonly T[],
+  concurrency: number,
+  run: (item: T) => Promise<void>,
+): Promise<void> {
+  let cursor = 0;
+  const workerCount = Math.min(
+    items.length,
+    Math.max(1, Math.floor(Number(concurrency) || 1)),
+  );
+  const workers = Array.from({ length: workerCount }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      await run(items[index]);
+    }
+  });
+  await Promise.all(workers);
 }

@@ -8,16 +8,15 @@ import type {
 import {
   appendLineBlockId,
   parseTaskLine,
-  readInlineFieldValue,
+  readLineSemanticMetadata,
   readLineBlockId,
-  readSemanticInlineFieldRanges,
   stripLineBlockId,
-  stripTaskInlinePropsMetadata,
+  type TaskInlineField,
 } from '../utils/task-line-metadata';
+import { parseStringListInput } from '../utils/list-utils';
 
 const MARKDOWN_LINE_PREFIX_RE = /^([ \t]*)(?:[-+*]|\d+[.)])[ \t]+/u;
 const MARKDOWN_HEADING_RE = /^[ \t]{0,3}(#{1,6})[ \t]+(.+)$/u;
-const TAG_RE = /(?:^|[ \t])(#[\p{L}\p{N}_/-]+)/gu;
 const FENCE_RE = /^[ \t]{0,3}(`{3,}|~{3,})/u;
 
 export interface LineEntityDescriptor {
@@ -33,6 +32,13 @@ export interface LineEntityDescriptor {
 export interface LineEntityLegacyIdentity {
   readonly key: 'tpsId' | 'subitemId';
   readonly value: string;
+}
+
+export interface ParsedLineEntityMetadata {
+  readonly kind: EntityIndexLineKind;
+  readonly fields: TaskInlineField[];
+  readonly tags: string[];
+  readonly displayTitle: string;
 }
 
 export interface LineEntityMaterializationResult {
@@ -70,7 +76,8 @@ export class LineEntityResolutionError extends Error {
  *
  * It is deliberately dimension-agnostic. Any configured dimension may source
  * values from inline fields; Kind is just the dimension used by current entity
- * reference pickers. Lines without a configured inline dimension are omitted.
+ * reference pickers. When Kind is registered, every supported Markdown line
+ * receives its structural identity even when it has no inline fields.
  */
 export class LineEntitySourceProvider {
   private readonly descriptorsById = new Map<string, LineEntityDescriptor>();
@@ -109,7 +116,13 @@ export class LineEntitySourceProvider {
         .map(normalizeLookupValue)
         .filter(Boolean),
     );
-    if (configuredKeys.size === 0) return Object.freeze([]);
+    const kindDimension = (definitions || []).find(
+      (definition) => normalizeLookupValue(definition.name) === 'kind',
+    );
+    const kindPropertyKeys = new Set(
+      (kindDimension?.propertyKeys || []).map(normalizeLookupValue).filter(Boolean),
+    );
+    if (configuredKeys.size === 0 && !kindDimension) return Object.freeze([]);
 
     const sources: EntityIndexSource[] = [];
     const descriptorIds = new Set<string>();
@@ -142,21 +155,34 @@ export class LineEntitySourceProvider {
 
       const lineKind = getLineEntityKind(rawLine);
       if (!lineKind) continue;
-      const fields = readSemanticInlineFieldRanges(rawLine)
+      const semantic = parseLineEntityMetadata(rawLine, lineKind);
+      if (!semantic) continue;
+      const fields = semantic.fields
         .filter((field) => configuredKeys.has(normalizeLookupValue(field.key)));
-      if (fields.length === 0) continue;
+      // Structural identity is additive: every supported line can satisfy its
+      // native kind while an explicit inline Kind (for example `project`)
+      // remains a second identity. Notes with `kind: task` continue to enter
+      // through the note provider, so neither record shape is excluded.
+      const structuralDimensions = kindDimension
+        ? { [kindDimension.name]: [lineKind] }
+        : null;
+      if (fields.length === 0 && !structuralDimensions) continue;
 
       const inlineProperties = Object.create(null) as Record<string, unknown>;
       for (const field of fields) {
+        const fieldValues: unknown[] = kindPropertyKeys.has(normalizeLookupValue(field.key))
+          ? parseStringListInput(field.value)
+          : [field.value];
+        if (fieldValues.length === 0) continue;
         const existing = findCaseInsensitiveKey(inlineProperties, field.key);
         if (!existing) {
-          inlineProperties[field.key] = field.value;
+          inlineProperties[field.key] = fieldValues.length === 1 ? fieldValues[0] : fieldValues;
           continue;
         }
         const values = Array.isArray(inlineProperties[existing])
           ? [...inlineProperties[existing] as unknown[]]
           : [inlineProperties[existing]];
-        values.push(field.value);
+        values.push(...fieldValues);
         inlineProperties[existing] = values;
       }
 
@@ -174,7 +200,7 @@ export class LineEntitySourceProvider {
       const locatorKey = blockId
         ? readyLineEntityLocator(sourcePath, blockId)
         : provisionalLineEntityLocator(sourcePath, lineNumber, rawLine);
-      const label = getLineEntityLabel(rawLine, lineKind) || `Line ${lineNumber}`;
+      const label = semantic.displayTitle || `Line ${lineNumber}`;
       const descriptor: LineEntityDescriptor = Object.freeze({
         id,
         sourcePath,
@@ -186,7 +212,7 @@ export class LineEntitySourceProvider {
           (['tpsId', 'subitemId'] as const)
             .map((key) => Object.freeze({
               key,
-              value: readInlineFieldValue(rawLine, key).trim(),
+              value: semantic.fields.find((field) => normalizeLookupValue(field.key) === normalizeLookupValue(key))?.value.trim() || '',
             }))
             .filter((identity) => Boolean(identity.value)),
         ),
@@ -199,6 +225,7 @@ export class LineEntitySourceProvider {
         name: label,
         basename: label,
         frontmatter: inlineProperties,
+        ...(structuralDimensions ? { dimensions: structuralDimensions } : {}),
         entityType: 'block',
         subpath: blockId ? `#^${blockId}` : '',
         blockId,
@@ -310,6 +337,14 @@ export function getLineEntityLabel(
   line: string,
   lineKind: EntityIndexLineKind = getLineEntityKind(line) || 'bullet',
 ): string {
+  return parseLineEntityMetadata(line, lineKind)?.displayTitle || '';
+}
+
+export function parseLineEntityMetadata(
+  line: string,
+  lineKind: EntityIndexLineKind | null = getLineEntityKind(line),
+): ParsedLineEntityMetadata | null {
+  if (!lineKind) return null;
   let source = stripLineBlockId(String(line || ''));
   if (lineKind === 'task') {
     source = parseTaskLine(source)?.body || source;
@@ -319,18 +354,21 @@ export function getLineEntityLabel(
   } else {
     source = source.replace(MARKDOWN_LINE_PREFIX_RE, '');
   }
+  const semantic = readLineSemanticMetadata(source);
+  return Object.freeze({
+    kind: lineKind,
+    fields: semantic.fields,
+    tags: semantic.tags,
+    displayTitle: semantic.displayText,
+  });
+}
 
-  const ranges = readSemanticInlineFieldRanges(source)
-    .sort((left, right) => right.start - left.start);
-  for (const range of ranges) {
-    source = `${source.slice(0, range.start)} ${source.slice(range.end)}`;
-  }
-  source = stripTaskInlinePropsMetadata(source);
-  source = source.replace(/<!--\s*-->/gu, ' ');
-  TAG_RE.lastIndex = 0;
-  source = source.replace(TAG_RE, ' ');
-  TAG_RE.lastIndex = 0;
-  return source.replace(/[ \t]+/gu, ' ').trim();
+export function readLineEntityInlineFieldValue(line: string, key: string): string | null {
+  const wanted = String(key || '').trim().toLocaleLowerCase();
+  if (!wanted) return null;
+  const field = parseLineEntityMetadata(line)?.fields
+    .find((candidate) => candidate.key.trim().toLocaleLowerCase() === wanted);
+  return field ? field.value : null;
 }
 
 export function createLineEntityBlockId(existingIds: ReadonlySet<string>): string {
@@ -397,7 +435,7 @@ function resolveLineEntityTarget(
     for (let index = 0; index < lines.length; index += 1) {
       if (getLineEntityKind(lines[index].text) !== descriptor.lineKind) continue;
       const hasIdentity = normalizeLookupValue(
-        readInlineFieldValue(lines[index].text, identity.key),
+        readLineEntityInlineFieldValue(lines[index].text, identity.key),
       ) === normalizeLookupValue(identity.value);
       if (hasIdentity) matches.push(index);
     }

@@ -126,12 +126,14 @@ test('the generic entity index is configured from every Kind property and is exp
   assert.match(sources.entityIndexCore, /anyOf\?:\s*EntityIndexFilter;/);
   assert.match(sources.entityIndexCore, /noneOf\?:\s*EntityIndexFilter;/);
   assert.match(sources.entityIndexCore, /dimensions\?:\s*EntityIndexFilter;/);
+  assert.match(sources.entityIndexCore, /entityTypes\?:/);
+  assert.match(sources.entityIndexCore, /lineKinds\?:/);
   assert.match(sources.entityIndexService, /registerDimension\(definition: EntityIndexDimensionDefinition\): \(\) => void/);
   assert.match(sources.entityIndexService, /metadataCache\.on\('changed'/);
   assert.match(sources.entityIndexService, /vault\.on\('rename'/);
 
   const api = sourceBlock(sources.pluginApi, 'entityIndex: {', 'overlays: {');
-  assert.match(api, /version:\s*2/);
+  assert.match(api, /version:\s*3/);
   for (const method of [
     'query',
     'queryAsync',

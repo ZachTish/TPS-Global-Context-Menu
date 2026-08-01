@@ -20,7 +20,7 @@ async function importServiceBundled() {
   const build = await esbuild.build({
     stdin: {
       contents: `
-        export { EntityIndexService } from '../src/services/entity-index-service.ts';
+        export { EntityIndexIncompleteError, EntityIndexService } from '../src/services/entity-index-service.ts';
         export { TAbstractFile, TFile } from 'obsidian';
       `,
       resolveDir: fileURLToPath(new URL('.', import.meta.url)),
@@ -424,6 +424,43 @@ test('search and limit operate after dimension filtering without changing determ
   assert.deepEqual(index.query({ limit: 0 }), []);
 });
 
+test('entity type and structural line-kind constraints select line candidates without note materialization', async () => {
+  const { EntityIndexCore } = await corePromise;
+  const index = new EntityIndexCore();
+  index.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  index.rebuild([
+    { path: 'Inbox/Note.md', frontmatter: { kind: 'task' } },
+    {
+      id: 'line:inbox/note.md#^task',
+      path: 'Inbox/Note.md',
+      entityType: 'block',
+      blockId: 'task',
+      lineKind: 'task',
+      name: 'Task row',
+      dimensions: { kind: 'task' },
+    },
+    {
+      id: 'line:inbox/note.md#^bullet',
+      path: 'Inbox/Note.md',
+      entityType: 'block',
+      blockId: 'bullet',
+      lineKind: 'bullet',
+      name: 'Bullet row',
+      dimensions: { kind: 'bullet' },
+    },
+  ]);
+
+  assert.deepEqual(
+    index.query({ entityTypes: ['block'], lineKinds: ['task'] }).map(({ name }) => name),
+    ['Task row'],
+  );
+  assert.deepEqual(
+    index.query({ entityTypes: 'note', lineKinds: ['task'] }),
+    [],
+    'lineKinds never reinterpret a note as a structural line row',
+  );
+});
+
 test('source snapshots atomically replace multiple line entities without displacing their note', async () => {
   const { EntityIndexCore } = await corePromise;
   const index = new EntityIndexCore();
@@ -574,6 +611,93 @@ test('line provider scans task, bullet, and heading entities but skips frontmatt
   assert.equal(provider.getDescriptor(sources[0].id)?.lineNumber, 4);
 });
 
+test('Kind task is the union of checkbox lines and note properties without erasing other line identities', async () => {
+  const { EntityIndexCore } = await corePromise;
+  const { LineEntitySourceProvider } = await lineProviderPromise;
+  const definitions = [{ name: 'kind', propertyKeys: ['kind', 'entityKind'] }];
+  const provider = new LineEntitySourceProvider(() => 'unused');
+  const lineSources = provider.scanFile(
+    'Inbox/Task Registry.md',
+    [
+      '- [ ] Structural task only',
+      '- [x] Project task [entityKind:: Project, task] ^project-task',
+      '- Ordinary bullet without identity',
+    ].join('\n'),
+    definitions,
+  );
+
+  assert.equal(lineSources.length, 3);
+  assert.deepEqual(lineSources.map((source) => source.dimensions), [
+    { kind: ['task'] },
+    { kind: ['task'] },
+    { kind: ['bullet'] },
+  ]);
+
+  const index = new EntityIndexCore();
+  index.configureDimensions(definitions);
+  index.rebuild([
+    {
+      path: 'Inbox/Task Note.md',
+      basename: 'Task Note',
+      frontmatter: { kind: 'task' },
+    },
+    ...lineSources,
+  ]);
+
+  assert.deepEqual(
+    index.query({ dimensions: { kind: 'task' } })
+      .map(({ entityType, lineKind, name }) => ({ entityType, lineKind, name })),
+    [
+      { entityType: 'block', lineKind: 'task', name: 'Project task' },
+      { entityType: 'block', lineKind: 'task', name: 'Structural task only' },
+      { entityType: 'note', lineKind: undefined, name: 'Task Note' },
+    ],
+  );
+  assert.deepEqual(
+    index.query({ dimensions: { kind: 'project' } }).map(({ name }) => name),
+    ['Project task'],
+    'the structural task identity must not replace an explicit project identity',
+  );
+  assert.deepEqual(
+    index.query({ dimensions: { kind: 'bullet' } }).map(({ name }) => name),
+    ['Ordinary bullet without identity'],
+    'a bullet-only file is still a complete structural candidate source',
+  );
+});
+
+test('line Kind list syntax has note-parity dimensions without splitting wikilink commas', async () => {
+  const { EntityIndexCore } = await corePromise;
+  const { LineEntitySourceProvider } = await lineProviderPromise;
+  const definitions = [{ name: 'kind', propertyKeys: ['kind'] }];
+  const provider = new LineEntitySourceProvider();
+  const lineSources = provider.scanFile(
+    'Entities/Lists.md',
+    '- Multi identity [kind:: [Project, Area, [[People/Beta|Beta, LLC]]]]',
+    definitions,
+  );
+  const index = new EntityIndexCore();
+  index.configureDimensions(definitions);
+  index.rebuild([
+    { path: 'Entities/Note.md', frontmatter: { kind: ['project', 'Area'] } },
+    ...lineSources,
+  ]);
+
+  assert.deepEqual(lineSources[0].frontmatter.kind, [
+    'Project',
+    'Area',
+    '[[People/Beta|Beta, LLC]]',
+  ]);
+  assert.deepEqual(
+    index.query({ dimensions: { kind: 'project' } }).map(({ entityType }) => entityType),
+    ['block', 'note'],
+    'note arrays and line list text share exact case-insensitive Kind membership',
+  );
+  assert.deepEqual(
+    index.query({ dimensions: { kind: '[[People/Beta|Beta, LLC]]' } }).map(({ name }) => name),
+    ['Multi identity'],
+  );
+});
+
 test('line provider ignores inline-code and protected-metadata field lookalikes', async () => {
   const { LineEntitySourceProvider } = await lineProviderPromise;
   const provider = new LineEntitySourceProvider();
@@ -593,11 +717,15 @@ test('line provider ignores inline-code and protected-metadata field lookalikes'
     [{ name: 'kind', propertyKeys: ['kind'] }],
   );
 
+  assert.equal(sources.length, 9, 'every supported bullet keeps its structural identity');
+  assert.equal(sources.every((source) => source.dimensions.kind.includes('bullet')), true);
   assert.deepEqual(
-    sources.map(({ name, frontmatter }) => ({ name, kind: frontmatter.kind })),
+    sources
+      .filter(({ frontmatter }) => frontmatter.kind !== undefined)
+      .map(({ name, frontmatter }) => ({ name, kind: frontmatter.kind })),
     [
       {
-        name: 'Visible `example [kind:: Project]`',
+        name: 'Visible example [kind:: Project]',
         kind: 'Context',
       },
       {
@@ -1504,7 +1632,7 @@ test('dimension reconfiguration restarts an in-flight line readiness build', asy
   );
 });
 
-test('transient line scan failures retry once per later readiness request', async () => {
+test('one transient line scan failure recovers inside the same bounded readiness request', async () => {
   const { EntityIndexService, TFile } = await servicePromise;
   const fixture = createServiceHost(TFile, [{
     path: 'Entities/Transient.md',
@@ -1514,7 +1642,7 @@ test('transient line scan failures retry once per later readiness request', asyn
   let readAttempts = 0;
   fixture.host.app.vault.cachedRead = async (file) => {
     readAttempts += 1;
-    if (readAttempts <= 2) throw new Error(`transient read ${readAttempts}`);
+    if (readAttempts === 1) throw new Error('transient read');
     return fixture.contentByFile.get(file) ?? '';
   };
   const service = new EntityIndexService(fixture.host);
@@ -1523,25 +1651,154 @@ test('transient line scan failures retry once per later readiness request', asyn
   console.error = () => {};
   try {
     assert.deepEqual(
-      await service.queryAsync({ dimensions: { kind: 'Project' } }),
-      [],
-      'the initial failed scan returns a bounded partial result',
-    );
-    assert.equal(readAttempts, 1);
-    assert.deepEqual(
-      await service.queryAsync({ dimensions: { kind: 'Project' } }),
-      [],
-      'one later query makes one bounded retry rather than looping forever',
-    );
-    assert.equal(readAttempts, 2);
-    assert.deepEqual(
       (await service.queryAsync({ dimensions: { kind: 'Project' } }))
         .map(({ name, entityType }) => ({ name, entityType })),
       [{ name: 'Retry project', entityType: 'block' }],
     );
+    assert.equal(readAttempts, 2);
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
+test('persistent line scan failure rejects partial queries and a later readiness request can recover', async () => {
+  const { EntityIndexIncompleteError, EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Persistent.md',
+    basename: 'Persistent',
+    content: '- Complete project [kind:: Project]',
+  }]);
+  let readAttempts = 0;
+  fixture.host.app.vault.cachedRead = async (file) => {
+    readAttempts += 1;
+    if (readAttempts <= 2) throw new Error(`unavailable ${readAttempts}`);
+    return fixture.contentByFile.get(file) ?? '';
+  };
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    await assert.rejects(
+      service.queryAsync({ dimensions: { kind: 'Project' } }),
+      (error) => error instanceof EntityIndexIncompleteError
+        && error.failedPaths.includes('entities/persistent.md'),
+      'an incomplete provider snapshot must never be returned as an empty authoritative result',
+    );
+    assert.equal(readAttempts, 2, 'one readiness request has a strict retry bound');
+    assert.deepEqual(
+      (await service.queryAsync({ dimensions: { kind: 'Project' } }))
+        .map(({ name, entityType }) => ({ name, entityType })),
+      [{ name: 'Complete project', entityType: 'block' }],
+    );
     assert.equal(readAttempts, 3);
   } finally {
     console.error = originalConsoleError;
+  }
+});
+
+test('failed scheduled refresh closes synchronous line queries and a later async query repairs the source', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Refresh.md',
+    basename: 'Refresh',
+    frontmatter: { kind: 'Registry' },
+    content: '- Stale project [kind:: Project] ^stale-project',
+  }]);
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  service.setup();
+
+  assert.deepEqual(
+    (await service.queryAsync({
+      entityTypes: 'block',
+      dimensions: { kind: 'Project' },
+    })).map(({ name }) => name),
+    ['Stale project'],
+    'the fixture starts from a complete ready line snapshot',
+  );
+
+  const file = fixture.files[0];
+  fixture.contentByFile.set(
+    file,
+    '- Repaired project [kind:: Project] ^repaired-project',
+  );
+  let refreshReadAttempts = 0;
+  fixture.host.app.vault.cachedRead = async (target) => {
+    refreshReadAttempts += 1;
+    if (refreshReadAttempts === 1) throw new Error('scheduled refresh unavailable');
+    return fixture.contentByFile.get(target) ?? '';
+  };
+
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  try {
+    fixture.emitVault('modify', file);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(refreshReadAttempts, 1, 'the scheduled refresh attempted one content read');
+    assert.deepEqual(
+      service.query({
+        entityTypes: 'block',
+        dimensions: { kind: 'Project' },
+      }),
+      [],
+      'a synchronous caller cannot observe the stale line snapshot after refresh failure',
+    );
+
+    const repaired = await service.queryAsync({
+      entityTypes: 'block',
+      dimensions: { kind: 'Project' },
+    });
+    assert.deepEqual(
+      repaired.map(({ name, blockId }) => ({ name, blockId })),
+      [{ name: 'Repaired project', blockId: 'repaired-project' }],
+      'the next async caller rebuilds the failed source instead of serving stale data',
+    );
+    assert.equal(refreshReadAttempts, 2, 'recovery re-reads only the failed source');
+    assert.equal(
+      service.getByReferenceTarget('Entities/Refresh#^stale-project'),
+      null,
+      'the repaired source removes the stale block identity',
+    );
+  } finally {
+    console.error = originalConsoleError;
+  }
+});
+
+test('cold line indexing bounds read concurrency and publishes one complete revision at 1k and 5k files', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  for (const fileCount of [1_000, 5_000]) {
+    const fixture = createServiceHost(
+      TFile,
+      Array.from({ length: fileCount }, (_, index) => ({
+        path: `Scale/${String(index).padStart(4, '0')}.md`,
+        content: `- Bullet ${index}`,
+      })),
+    );
+    let activeReads = 0;
+    let maxReads = 0;
+    fixture.host.app.vault.cachedRead = async (file) => {
+      activeReads += 1;
+      maxReads = Math.max(maxReads, activeReads);
+      await Promise.resolve();
+      activeReads -= 1;
+      return fixture.contentByFile.get(file) ?? '';
+    };
+    const service = new EntityIndexService(fixture.host);
+    service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+    service.query();
+    const before = service.getRevision();
+    const revisions = [];
+    service.onChanged((revision) => revisions.push(revision));
+
+    const records = await service.queryAsync({
+      entityTypes: 'block',
+      lineKinds: 'bullet',
+    });
+    assert.equal(records.length, fileCount);
+    assert.ok(maxReads > 1 && maxReads <= 8, `max cold-read concurrency was ${maxReads}`);
+    assert.equal(service.getRevision(), before + 1);
+    assert.deepEqual(revisions, [before + 1], 'consumers see one complete snapshot notification');
   }
 });
 
@@ -1599,7 +1856,7 @@ test('ready line selection revalidates whole-file uniqueness and current Kind st
   const changedKind = '- Project entity [kind:: Context] [tpsId:: entity-1] ^entity-ready';
   fixture.contentByFile.set(fixture.files[0], changedKind);
   const refreshed = await service.materializeReference(ready);
-  assert.deepEqual(refreshed?.dimensions.kind, ['Context']);
+  assert.deepEqual(refreshed?.dimensions.kind, ['Context', 'bullet']);
   assert.deepEqual(
     await service.queryAsync({ dimensions: { kind: 'Project' } }),
     [],
@@ -1673,7 +1930,7 @@ test('generic index sources contain no hardcoded entity-kind values', () => {
     'utf8',
   );
   for (const source of [coreSource, serviceSource]) {
-    for (const value of ['project', 'person', 'task', 'area']) {
+    for (const value of ['project', 'person', 'area']) {
       assert.doesNotMatch(
         source,
         new RegExp(`(?:===|!==|case\\\\s+)\\\\s*['"\`]${value}['"\`]`, 'i'),

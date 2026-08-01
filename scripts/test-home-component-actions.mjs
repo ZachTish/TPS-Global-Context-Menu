@@ -150,14 +150,22 @@ test('Home Base source substitution preserves whole-base and active-view filter 
   const { addHomeBaseContextFilter, resolveHomeBaseDefinitionSourcePath } = await loadPure('../src/views/home-base-context.ts');
   const source = JSON.stringify({
     filters: { and: ['file.path == this.file.path', 'file.ext == "md"'] },
-    views: [{ type: 'tps-list', filters: { or: ['kind == "task"', 'kind == "bullet"'] } }],
+    formulas: {
+      sourcePath: 'this.file.path',
+      literal: '"this.file.path"',
+    },
+    views: [{ type: 'tps-list', filters: { or: ['file.path == this.file.path', 'kind == "bullet"'] } }],
   });
   const resolved = JSON.parse(resolveHomeBaseDefinitionSourcePath(source, 'Daily Notes/2026-07-12.md'));
   assert.deepEqual(resolved.filters, {
     and: ['file.path == "Daily Notes/2026-07-12.md"', 'file.ext == "md"'],
   });
   assert.deepEqual(resolved.views[0].filters, {
-    or: ['kind == "task"', 'kind == "bullet"'],
+    or: ['file.path == "Daily Notes/2026-07-12.md"', 'kind == "bullet"'],
+  });
+  assert.deepEqual(resolved.formulas, {
+    sourcePath: 'this.file.path',
+    literal: '"this.file.path"',
   });
   const workout = JSON.parse(addHomeBaseContextFilter(source, 'workoutDate == date("2026-07-12")'));
   assert.deepEqual(workout.filters, {
@@ -167,8 +175,14 @@ test('Home Base source substitution preserves whole-base and active-view filter 
     ],
   });
   assert.deepEqual(workout.views[0].filters, {
-    or: ['kind == "task"', 'kind == "bullet"'],
+    or: ['file.path == this.file.path', 'kind == "bullet"'],
   });
+  const homeViewSource = readFileSync(new URL('../src/views/home-view.ts', import.meta.url), 'utf8');
+  assert.match(
+    homeViewSource,
+    /JSON\.stringify\(\{[\s\S]{0,300}filters:\s*parsed\?\.filters,[\s\S]{0,300}formulas:\s*parsed\?\.formulas,[\s\S]{0,300}properties:\s*parsed\?\.properties,[\s\S]{0,300}views:\s*parsed\?\.views/u,
+    'Home must stamp the formula and property definitions used by its embedded Base',
+  );
 });
 
 test('Home UI, capture writer, and feed Base keep selected-note context explicit', () => {

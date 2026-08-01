@@ -353,6 +353,11 @@ function applyCondition(
   };
   const property = normalizeProperty(condition.property);
   const semanticProperty = normalizeSemanticProperty(property);
+  if (property.startsWith('formula.') || property.startsWith('formula[')) {
+    // Formula outputs are computed, read-only values. They may validate a
+    // prospective row later, but they can never become Markdown defaults.
+    return [markUnsupported(state, context, `${path}: ${condition.expression}`)];
+  }
   if (
     effectivePositive
     && property.startsWith('task.')

@@ -17,6 +17,14 @@ const kanbanSource = readFileSync(new URL('../../TPS-Kanban (Dev)/src/views/Kanb
 const kanbanMain = readFileSync(new URL('../../TPS-Kanban (Dev)/src/main.ts', import.meta.url), 'utf8');
 const kanbanStyles = readFileSync(new URL('../../TPS-Kanban (Dev)/src/styles.css', import.meta.url), 'utf8');
 
+function sourceBlock(source, startMarker, endMarker) {
+  const start = source.indexOf(startMarker);
+  assert.notEqual(start, -1, `missing source marker: ${startMarker}`);
+  const end = source.indexOf(endMarker, start + startMarker.length);
+  assert.notEqual(end, -1, `missing source marker after ${startMarker}: ${endMarker}`);
+  return source.slice(start, end);
+}
+
 async function loadHierarchy() {
   const result = await build({
     entryPoints: [fileURLToPath(new URL('../src/tps-list/tps-list-hierarchy.ts', import.meta.url))],
@@ -216,9 +224,11 @@ async function loadTpsListViewHarness() {
         builder.onLoad({ filter: /.*/, namespace: 'tps-list-test' }, () => ({
           contents: `
             class Dummy {}
+            globalThis.__TpsListFormulaTestFile = Dummy;
             const api = new Proxy(
               {
                 BasesView: Dummy,
+                FileView: Dummy,
                 FuzzySuggestModal: Dummy,
                 Modal: Dummy,
                 TFile: Dummy,
@@ -237,6 +247,18 @@ async function loadTpsListViewHarness() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
+async function loadFormulaService() {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/services/tps-base-formula-service.ts', import.meta.url))],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
 test('GCM is the sole TPS List source and runtime owner', () => {
   assert.match(bridgeSource, /new TpsListView/);
   assert.match(viewSource, /export class TpsListView extends BasesView/);
@@ -249,6 +271,54 @@ test('GCM is the sole TPS List source and runtime owner', () => {
   assert.doesNotMatch(kanbanMain, /TPS_LIST_VIEW_TYPE|createTpsListBasesView/);
   assert.doesNotMatch(kanbanSource, /TPS_LIST_VIEW_TYPE|tps-list-native|renderTpsList|createTpsList/);
   assert.doesNotMatch(kanbanStyles, /\.tps-list/);
+});
+
+test('TPS List aligns note, task, bullet, and heading rows through one semantic leading slot', () => {
+  const listRenderer = sourceBlock(
+    viewSource,
+    'private renderList(',
+    'private formatListGroupLabel(',
+  );
+  const noteRenderer = sourceBlock(
+    viewSource,
+    'private createListNoteRow(',
+    'private openListNoteContextMenu(',
+  );
+  const headingRenderer = sourceBlock(
+    viewSource,
+    'private createListHeadingRow(',
+    'private createListTaskRow(',
+  );
+  const taskRenderer = sourceBlock(
+    viewSource,
+    'private createListTaskRow(',
+    'private renderListTaskBooleanProperty(',
+  );
+
+  assert.match(listRenderer, /createEl\('ul',[\s\S]*?cls: 'tps-list-native-rows',[\s\S]*?attr: \{ role: 'list' \}/u);
+  for (const renderer of [noteRenderer, headingRenderer, taskRenderer]) {
+    assert.match(renderer, /createEl\('li'/u);
+    assert.match(renderer, /tps-list-native-row-body/u);
+  }
+  assert.match(noteRenderer, /tps-list-native-leading tps-list-native-file-marker/u);
+  assert.match(headingRenderer, /tps-list-native-leading tps-list-native-heading-marker/u);
+  assert.match(taskRenderer, /tps-list-native-leading tps-list-native-bullet-marker/u);
+  assert.match(taskRenderer, /tps-list-native-leading tps-list-native-checkbox/u);
+  assert.match(taskRenderer, /--tps-list-task-indent', `\$\{depth \* 22\}px`/u);
+
+  assert.match(
+    gcmStyles,
+    /\.tps-list-native-rows\s*\{[\s\S]*?list-style:\s*none;[\s\S]*?margin:\s*0;[\s\S]*?padding:\s*0;/u,
+  );
+  assert.match(
+    gcmStyles,
+    /\.tps-list-native-row\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*14px minmax\(0, 1fr\);[\s\S]*?margin:\s*0;[\s\S]*?padding:\s*0;/u,
+  );
+  assert.match(gcmStyles, /\.tps-list-native-leading\s*\{[\s\S]*?width:\s*14px;[\s\S]*?min-width:\s*14px;[\s\S]*?margin:\s*0;/u);
+  assert.match(gcmStyles, /\.tps-list-native-row-body\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?display:\s*flex;/u);
+  assert.match(gcmStyles, /\.tps-list-native-row--task\s*\{[\s\S]*?padding-inline-start:\s*var\(--tps-list-task-indent, 0px\);/u);
+  assert.doesNotMatch(gcmStyles, /\.tps-list-native-row--note\s*\{[^}]*?(?:margin-left|padding-left|text-indent)\s*:/u);
+  assert.doesNotMatch(gcmStyles, /\.tps-list-native-(?:row|leading|file-marker)[^}]*margin-left:\s*-/u);
 });
 
 test('TPS List Shift-click selects every visible row kind in one persistent DOM order', () => {
@@ -517,7 +587,8 @@ test('TPS List task tag filters use exact task-tag membership across aliases and
     'Plural home [tags:: #home]',
   ];
   const sharedText = 'Multi waiting and home [tags:: #waiting, #home]';
-  const waitingText = [...waitingOnlyText, sharedText];
+  const semanticTaskBulletText = 'Bullet with additive task identity [kind:: task] #waiting';
+  const waitingText = [...waitingOnlyText, sharedText, semanticTaskBulletText];
   const homeText = [sharedText, ...homeOnlyText];
   const taskText = [
     ...waitingOnlyText,
@@ -529,7 +600,7 @@ test('TPS List task tag filters use exact task-tag membership across aliases and
   ];
   const source = [
     ...taskText.map((text) => `- [ ] ${text}`),
-    '- Bullet cannot spoof task kind [kind:: task] #waiting',
+    `- ${semanticTaskBulletText}`,
   ].join('\n');
   const fileFrontmatter = new Map([
     [taggedFile.path, { tags: ['#waiting', '#home'] }],
@@ -582,7 +653,7 @@ test('TPS List task tag filters use exact task-tag membership across aliases and
 
   assert.deepEqual(
     select('file.tags.contains(waiting)', taggedFile),
-    taskText,
+    [...taskText, semanticTaskBulletText],
     'file.tags should select tasks by source-note metadata without becoming a task tag',
   );
   assert.deepEqual(
@@ -597,67 +668,31 @@ test('TPS List task tag filters use exact task-tag membership across aliases and
   );
 });
 
-test('TPS List fallback note tags reuse one coherent metadata snapshot', async () => {
+test('TPS List treats native Bases rows as the sole note-inclusion authority', async () => {
   const { TpsListView } = await loadTpsListViewHarness();
   const view = Object.create(TpsListView.prototype);
-  const file = {
-    path: 'Inbox/Tagged Note.md',
-    name: 'Tagged Note.md',
-    basename: 'Tagged Note',
-    extension: 'md',
-  };
-  let lookups = 0;
+  const included = { file: { path: 'Inbox/Included.md' }, getValue: () => null };
+  const excluded = { file: { path: 'Inbox/Excluded.md' }, getValue: () => null };
+  const nativeGroups = [{ key: null, entries: [included] }];
+  let vaultScans = 0;
   view.app = {
-    metadataCache: {
-      getFileCache: () => {
-        lookups++;
-        return {
-          frontmatter: { tags: ['#Alpha', 'beta'] },
-          tags: [{ tag: '#Gamma' }, { tag: 'beta' }],
-        };
+    vault: {
+      getMarkdownFiles: () => {
+        vaultScans++;
+        return [included.file, excluded.file];
       },
     },
   };
-  assert.deepEqual(
-    view.getNoteComparableValues(file, 'file.tags'),
-    ['#alpha', 'alpha', '#beta', 'beta', '#gamma', 'gamma'],
-  );
-  assert.equal(lookups, 1, 'frontmatter and body tags should share one cache snapshot');
+  view.data = { data: [included], groupedData: nativeGroups };
 
-  lookups = 0;
-  view.app.metadataCache.getFileCache = () => {
-    lookups++;
-    return null;
-  };
-  assert.deepEqual(view.getNoteComparableValues(file, 'tags'), []);
-  assert.equal(lookups, 1, 'a missing cache should still be read only once');
-
-  const rotatingCaches = [
-    {
-      frontmatter: { tags: ['#First'] },
-      tags: [{ tag: '#Same-Snapshot' }],
-    },
-    {
-      frontmatter: { tags: ['#Later'] },
-      tags: [{ tag: '#Mixed-Generation' }],
-    },
-  ];
-  lookups = 0;
-  view.app.metadataCache.getFileCache = () => rotatingCaches[Math.min(lookups++, rotatingCaches.length - 1)];
-  assert.deepEqual(
-    view.getNoteComparableValues(file, 'file.tags'),
-    ['#first', 'first', '#same-snapshot', 'same-snapshot'],
+  assert.deepEqual(view.getSourceGroupsForRender(null, false), nativeGroups);
+  assert.equal(vaultScans, 0, 'note rendering must never recreate rows by scanning the vault');
+  assert.equal(
+    view.getSourceGroupsForRender(null, false).flatMap((group) => group.entries).includes(excluded),
+    false,
+    'a note excluded by native Bases filters/search/formulas cannot be re-added by TPS',
   );
-  assert.equal(lookups, 1, 'tag evaluation must not blend two cache generations');
-
-  const method = viewSource.slice(
-    viewSource.indexOf('private getNoteComparableValues('),
-    viewSource.indexOf('private groupEntriesByProperty(', viewSource.indexOf('private getNoteComparableValues(')),
-  );
-  assert.equal(method.match(/metadataCache\.getFileCache\(file\)/g)?.length ?? 0, 1);
-  assert.match(method, /const cache = this\.app\.metadataCache\.getFileCache\(file\);/);
-  assert.match(method, /const fm = cache\?\.frontmatter/);
-  assert.match(method, /\.\.\.\(cache\?\.tags \?\? \[\]\)/);
+  assert.doesNotMatch(viewSource, /getFallbackNoteEntriesFromBaseFilters|getFallbackNoteFormulaSession|__tpsFormulaFallback/u);
 });
 
 test('TPS List normalizes configured checkbox status aliases before completion checks', async () => {
@@ -804,9 +839,7 @@ test('TPS List parses, displays, and safely renames Markdown headings', async ()
   );
   assert.match(viewSource, /item\.task\.itemKind === 'heading' \? 'heading' as const : 'task' as const/);
   assert.match(viewSource, /if \(task\.itemKind === 'heading'\) return true;/);
-  assert.match(viewSource, /!propRaw\.toLowerCase\(\)\.startsWith\('note\.'\) && \['itemtype', 'itemkind', 'kind'\]\.includes\(normalizedProp\)/);
-  assert.match(viewSource, /if \(\/\^note\\\.kind\\b\/i\.test\(expr\)\) return false;/);
-  assert.match(viewSource, /if \(propRaw\.toLowerCase\(\) === 'note\.kind'\) return false;/);
+  assert.match(viewSource, /Obsidian Bases is the sole authority for note inclusion/u);
   assert.match(gcmStyles, /\.tps-list-native-row--heading/);
 });
 
@@ -1379,6 +1412,16 @@ test('TPS List creation waits for persisted Base filters before resolving settin
   assert.match(viewSource, /getRootTaskCreationDefaults\(effectiveTaskFilter, effectiveFilterRoots\)/);
 });
 
+test('TPS List uses the shared public FileView owner resolver', () => {
+  const resolverBlock = sourceBlock(
+    viewSource,
+    '  private getRuntimeBaseFile(): TFile | null {',
+    '  private getEmbeddedBasePathFromDom(): string | null {',
+  );
+  assert.match(resolverBlock, /getOwningWorkspaceFile\(this\.app, this\.containerEl, 'base'\)/);
+  assert.doesNotMatch(resolverBlock, /controller|queryController|activeLeaf|getViewState/);
+});
+
 test('TPS List never falls through to native note creation when mobile loses the Base identity', async () => {
   const { TpsListView } = await loadTpsListViewHarness();
   const view = Object.create(TpsListView.prototype);
@@ -1431,4 +1474,267 @@ test('TPS List measures Markdown indentation consistently', async () => {
   assert.equal(getMarkdownIndentColumns('    - [ ] task'), 4);
   assert.equal(getMarkdownIndentColumns('\t- [ ] task'), 4);
   assert.equal(getMarkdownIndentColumns('  \t- [ ] task'), 4);
+});
+
+test('TPS List formulas power synthesized task display, filtering, grouping, sorting, and search without becoming writable', async () => {
+  const [{ TpsListView }, { tpsBaseFormulaService }] = await Promise.all([
+    loadTpsListViewHarness(),
+    loadFormulaService(),
+  ]);
+  const File = globalThis.__TpsListFormulaTestFile;
+  const file = new File();
+  Object.assign(file, {
+    path: 'Inbox/Formula Tasks.md',
+    name: 'Formula Tasks.md',
+    basename: 'Formula Tasks',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+    stat: { size: 100, ctime: 1_786_000_000_000, mtime: 1_786_000_100_000 },
+  });
+  const task = {
+    itemKind: 'task',
+    line: 4,
+    checkboxState: '[ ]',
+    text: 'Ship formulas #qa [points:: 5] [status:: blocked] [kind:: project]',
+    rawLine: '- [ ] Ship formulas #qa [points:: 5] [status:: blocked] [kind:: project] [Project:: Alpha] [project:: Beta] [blank:: ]',
+    displayText: 'Ship formulas',
+    inlineFields: [
+      { key: 'points', value: '5' },
+      { key: 'status', value: 'blocked' },
+      { key: 'kind', value: 'project' },
+      { key: 'Project', value: 'Alpha' },
+      { key: 'project', value: 'Beta' },
+      { key: 'blank', value: '' },
+    ],
+  };
+  const compiled = tpsBaseFormulaService.compile({
+    total: 'number(points) + number(note.parentPoints)',
+    bucket: 'if(formula.total >= 7, "High", "Low")',
+    search_label: 'title.lower() + " ready"',
+    ready: 'formula.total >= 7 && task.open',
+    relational_status: 'status',
+    workflow_status: 'task.status',
+    raw_tag: 'tags.contains("#qa")',
+    day: 'date("2026-08-10")',
+    owner: 'link("People/Ada.md", "Ada")',
+    labels: '["alpha", "beta"]',
+    at_expected_line: 'line.number == 4',
+    task_identity: 'kinds.contains("task")',
+    project_identity: 'kinds.contains("project")',
+    canonical_kinds: 'kinds.length == 2 && kinds[0] == "task" && kinds[1] == "project"',
+    aliases_share_aggregate: 'Project.length == 2 && project.length == 2 && Project[0] == "Alpha" && project[1] == "Beta"',
+    blank_is_present: 'blank == ""',
+    raw_is_source: 'line.raw.startsWith("- [ ] Ship formulas")',
+    raw_checkbox_state: 'checkboxState == "[ ]" && task.checkboxState == "[ ]"',
+    false_value: 'false',
+    empty_value: 'null',
+  }, 'list-formula-integration');
+  const view = Object.create(TpsListView.prototype);
+  view.taskFormulaSessions = new WeakMap();
+  view.formulaDiagnostics = new Set();
+  view.config = { groupBy: { property: 'formula.bucket', direction: 'asc' } };
+  view.plugin = { settings: {}, app: null };
+  view.app = {
+    vault: { getFileByPath: () => null },
+    workspace: { getActiveFile: () => null },
+    metadataCache: {
+      getFileCache: () => ({ frontmatter: { parentPoints: 2, kind: 'task' }, tags: [], links: [] }),
+    },
+  };
+  view.getActiveFormulaSet = () => compiled;
+  view.getStatusForCheckboxState = () => 'todo';
+  view.getDoneStatuses = () => new Set(['complete']);
+  view.getBaseContextFile = () => null;
+  view.getBaseFile = () => null;
+  view.getBaseSourcePath = () => 'Formula Tasks.base';
+  view.getConfiguredBaseViewName = () => 'Formula QA';
+  view.createFormulaThisValue = () => null;
+  view.getConfiguredCustomProperty = () => null;
+
+  const property = view.getTaskPropertyValue(file, task, 'formula.total', new Set());
+  assert.deepEqual(property, { text: '7', title: '7', kind: 'formula', editable: false });
+  assert.deepEqual(
+    view.getTaskPropertyValue(file, task, 'formula.ready', new Set()),
+    { text: 'Yes', title: 'formula.ready: Yes', kind: 'checkbox', editable: false, rawValue: true },
+  );
+  assert.deepEqual(
+    view.getTaskPropertyValue(file, task, 'formula.false_value', new Set()),
+    { text: 'No', title: 'formula.false_value: No', kind: 'checkbox', editable: false, rawValue: false },
+  );
+  assert.equal(view.getTaskPropertyValue(file, task, 'formula.empty_value', new Set()), null);
+  assert.equal(view.getTaskPropertyValue(file, task, 'formula.missing', new Set())?.kind, 'formula-error');
+  assert.equal(view.getTaskPropertyValue(file, task, 'line', new Set()).text, '4');
+  assert.equal(view.evaluateGenericTaskValueFilterExpression('formula.total >= 7', task, file), true);
+  assert.equal(view.evaluateGenericTaskValueFilterExpression('formula.total > 7', task, file), false);
+  assert.equal(view.evaluateTaskFilterString('formula.ready', task, file), true);
+  assert.equal(view.evaluateTaskFilterString('!formula.ready', task, file), false);
+  assert.equal(view.evaluateTaskFilterObject({ property: 'formula.day', operator: '==', value: '2026-08-10' }, task, file), true);
+  assert.equal(view.evaluateTaskFilterObject({ property: 'formula.owner', operator: '==', value: '[[People/Ada]]' }, task, file), true);
+  assert.equal(view.evaluateTaskFilterObject({ property: 'formula.labels', operator: 'contains', value: 'beta' }, task, file), true);
+  assert.equal(view.evaluateTaskFilterString('kind == task', task, file), true);
+  assert.equal(view.evaluateTaskFilterString('kind == project', task, file), true);
+  assert.equal(view.evaluateTaskFilterString('itemKind == task', task, file), true);
+  assert.equal(view.evaluateTaskFilterObject({ property: 'kind', operator: 'is', value: 'project' }, task, file), true);
+  const additiveKindFilter = view.getTaskRootFilterFromBaseFilters(['kind == project']);
+  assert.equal(additiveKindFilter.mode, 'mixed');
+  assert.equal(additiveKindFilter.hasTaskDirective, true);
+  assert.equal(additiveKindFilter.includeBullets, true);
+  assert.equal(additiveKindFilter.includeHeadings, true);
+  view.getBaseFilterRoots = () => ['kind == project'];
+  assert.equal(view.taskMatchesRootFilter(task, additiveKindFilter, file), true);
+  const bulletIdentity = {
+    ...task,
+    itemKind: 'bullet',
+    checkboxState: undefined,
+    text: 'Project record [kind:: project]',
+    inlineFields: [{ key: 'kind', value: 'project' }],
+  };
+  assert.equal(view.taskMatchesRootFilter(bulletIdentity, additiveKindFilter, file), true);
+  assert.equal(view.getTaskFormulaSession(file, task).get('task_identity').value, true);
+  assert.equal(view.getTaskFormulaSession(file, task).get('project_identity').value, true);
+  assert.equal(view.getTaskFormulaSession(file, task).get('canonical_kinds').value, true);
+  const mixedCasePluralKindTask = {
+    ...task,
+    inlineFields: [
+      ...task.inlineFields.filter((field) => field.key.toLowerCase() !== 'kind'),
+      { key: 'kind', value: '[Project, project, Tasks, task]' },
+    ],
+  };
+  assert.equal(
+    view.getTaskFormulaSession(file, mixedCasePluralKindTask).get('canonical_kinds').value,
+    true,
+    'additive row.kinds canonicalizes case and structural plurals without duplicates',
+  );
+  view.getBaseFilterRoots = () => [{ not: 'formula.missing' }];
+  assert.equal(
+    view.taskMatchesStructuredBaseFilters(task, file),
+    false,
+    'a broken formula cannot be negated into an included synthetic row',
+  );
+  view.getBaseFilterRoots = () => [{ or: ['formula.missing', 'formula.total == 7'] }];
+  assert.equal(
+    view.taskMatchesStructuredBaseFilters(task, file),
+    false,
+    'an evaluated broken branch fails closed before a later true sibling',
+  );
+  view.getBaseFilterRoots = () => [{ or: ['formula.total == 7', 'formula.missing'] }];
+  assert.equal(
+    view.taskMatchesStructuredBaseFilters(task, file),
+    true,
+    'a decisive true branch short-circuits an unreachable broken sibling',
+  );
+  view.getBaseFilterRoots = () => [{ property: 'formula.total', operator: 'approximately', value: 7 }];
+  assert.equal(view.taskMatchesStructuredBaseFilters(task, file), false, 'unsupported formula operators fail closed');
+  view.getBaseFilterRoots = () => [{ property: 'formula.total', operator: 'notMatchesRegex', value: 7 }];
+  assert.equal(view.taskMatchesStructuredBaseFilters(task, file), false, 'unknown negated operators cannot become inequality fallbacks');
+  assert.equal(
+    view.evaluateTaskFilterObject({ property: 'formula.total', operator: 'is not', value: 8 }, task, file),
+    true,
+    'the explicit negative-equality allowlist remains supported',
+  );
+  assert.equal(
+    view.evaluateTaskFilterObject({ property: 'formula.labels', operator: 'not contains', value: 'gamma' }, task, file),
+    true,
+    'the explicit negative-contains allowlist remains supported',
+  );
+  assert.equal(
+    view.lineMatchesCreationFilters('- [ ] Created [points:: 5]', file, [{ not: 'formula.missing' }], 4),
+    null,
+    'creation reports an unresolved formula instead of treating it as an ordinary mismatch',
+  );
+  assert.equal(view.getTaskFormulaSession(file, task).get('relational_status').value, 'blocked');
+  assert.equal(view.getTaskFormulaSession(file, task).get('workflow_status').value, 'todo');
+  assert.equal(view.getTaskFormulaSession(file, task).get('raw_tag').value, true);
+  assert.equal(view.getTaskFormulaSession(file, task).get('aliases_share_aggregate').value, true);
+  assert.equal(view.getTaskFormulaSession(file, task).get('blank_is_present').value, true);
+  assert.equal(view.getTaskFormulaSession(file, task).get('raw_is_source').value, true);
+  assert.equal(view.getTaskFormulaSession(file, task).get('raw_checkbox_state').value, true);
+  assert.deepEqual(view.getTaskLaneIds(task, 'formula.bucket', file), ['key:High']);
+  view.config = { groupBy: { property: 'formula.owner', direction: 'asc' } };
+  assert.deepEqual(view.getTaskLaneIds(task, 'formula.owner', file), ['key:People/Ada.md']);
+  assert.ok(view.getTaskSortValue({ file, task, laneId: 'key:High' }, 'formula.total'));
+  const nativeEntry = { file, getValue: () => new Date(2026, 7, 10) };
+  assert.equal(
+    view.getListSortValue({ kind: 'note', item: { entry: nativeEntry }, nativeIndex: 0 }, 'formula.day'),
+    view.getTaskSortValue({ file, task, laneId: 'key:High' }, 'formula.day'),
+  );
+  assert.equal(view.taskMatchesSearchQuery(file, task, 'ready'), true);
+  assert.equal(view.getAppendedLineNumber('one\ntwo\nthree\n'), 4);
+  assert.equal(
+    view.lineMatchesCreationFilters('- [ ] Created [points:: 5]', file, ['formula.at_expected_line'], 4),
+    true,
+  );
+  assert.equal(
+    view.lineMatchesCreationFilters('- [ ] Created [points:: 5]', file, ['formula.at_expected_line'], 1),
+    false,
+  );
+  assert.equal(view.getWritableTaskPropertyName('formula.total'), null);
+  assert.equal(view.isWritableTaskGroupingProperty('formula.bucket'), false);
+});
+
+test('a formula-only Base filter discovers checkbox, bullet, and heading rows even with zero native note rows', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const File = globalThis.__TpsListFormulaTestFile;
+  const file = new File();
+  Object.assign(file, {
+    path: 'Inbox/Formula Only.md',
+    name: 'Formula Only.md',
+    basename: 'Formula Only',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+  });
+  const rows = [
+    { itemKind: 'task', line: 1, checkboxState: '[ ]', text: 'Task', inlineFields: [] },
+    { itemKind: 'bullet', line: 2, text: 'Bullet', inlineFields: [] },
+    { itemKind: 'heading', headingLevel: 2, line: 3, text: 'Heading', inlineFields: [] },
+  ];
+  const view = Object.create(TpsListView.prototype);
+  view.data = { data: [], groupedData: [] };
+  view.app = { vault: { getMarkdownFiles: () => [file] } };
+  view.getBaseFilterRoots = () => ['formula.include'];
+  view.shouldShowCompletedTasks = () => false;
+  view.getDoneStatuses = () => new Set(['complete']);
+  view.isEmbeddedScheduledDailyTaskBoard = () => false;
+  view.isBaseFileFilterReady = () => true;
+  view.getActiveBasesSearchQuery = () => '';
+  view.getExplicitTaskSourceFiles = () => [];
+  view.getAllLineItemsForFile = () => rows;
+  view.taskMatchesRootFilter = () => true;
+  view.taskMatchesSearchQuery = () => true;
+  view.getTaskLaneIds = () => ['ungrouped'];
+  view.getGroupByPropId = () => null;
+
+  const taskFilter = view.getTaskRootFilterFromBaseFilters();
+  assert.equal(taskFilter.hasTaskDirective, true);
+  assert.equal(taskFilter.includeBullets, true);
+  assert.equal(taskFilter.includeHeadings, true);
+  assert.equal(view.shouldScanVaultForTaskFilters(taskFilter), true);
+  const result = view.buildTaskRenderItemsByLane(
+    view.getSourceGroupsForRender(null, false),
+    null,
+    new Set(),
+    taskFilter,
+  );
+  assert.deepEqual(
+    result.get('ungrouped')?.map(({ task }) => task.itemKind),
+    ['task', 'bullet', 'heading'],
+  );
+
+  view.getBaseFilterRoots = () => ['note.title == "formula.fake"'];
+  const quotedLiteralFilter = view.getTaskRootFilterFromBaseFilters();
+  assert.equal(quotedLiteralFilter.hasTaskDirective, false);
+  assert.equal(view.shouldScanVaultForTaskFilters(quotedLiteralFilter), false);
+});
+
+test('GCM exposes the canonical nesting-aware line metadata parser as a versioned read-only API', () => {
+  const pluginApiSource = readFileSync(new URL('../src/plugin-api.ts', import.meta.url), 'utf8');
+  assert.match(pluginApiSource, /lineMetadata:\s*\{\s*version:\s*1/u);
+  assert.match(pluginApiSource, /readInlineFields:\s*\(line:\s*string\)\s*=>\s*parseLineEntityMetadata\(line\)\?\.fields\s*\?\?\s*\[\]/u);
+  assert.match(pluginApiSource, /readInlineFieldValue:\s*\(line:\s*string,\s*key:\s*string\)\s*=>\s*readLineEntityInlineFieldValue\(line,\s*key\)/u);
+  assert.match(pluginApiSource, /readTags:\s*\(line:\s*string\)\s*=>\s*parseLineEntityMetadata\(line\)\?\.tags\s*\?\?\s*\[\]/u);
+  assert.match(pluginApiSource, /parseStringList:\s*\(value:\s*unknown\)\s*=>\s*parseStringListInput\(value\)/u);
+  assert.match(pluginApiSource, /parseTags:\s*\(value:\s*unknown\)\s*=>\s*parseTaskTagValues\(value\)/u);
+  assert.match(pluginApiSource, /getDisplayTitle:\s*\(line:\s*string\)\s*=>\s*getSharedLineDisplayTitle\(line\)/u);
+  assert.match(pluginApiSource, /parseLine:\s*\(line:\s*string\)\s*=>\s*\{\s*const parsed = parseLineEntityMetadata\(line\);[\s\S]*?fields:\s*parsed\?\.fields\s*\?\?\s*\[\],[\s\S]*?tags:\s*parsed\?\.tags\s*\?\?\s*\[\],[\s\S]*?displayTitle:\s*parsed\?\.displayTitle\s*\?\?\s*''/u);
+  assert.doesNotMatch(pluginApiSource, /parseLine:[\s\S]{0,500}readTaskInlineFields|parseLine:[\s\S]{0,500}readTaskLineTags/u);
 });

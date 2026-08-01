@@ -5,11 +5,28 @@ import type { BodySubitemLink, ResolvedParentLink } from './services/subitem-typ
 import { createSubitemForParentWithTitle, getDefaultSubitemFolderPath } from './services/subitem-creation-service';
 import { mergeNormalizedTags, parseTagInput } from './utils/tag-utils';
 import { executeCommandById, getInternalPlugin, getPluginById, hasCommand } from './core';
-import { mapSubitemCheckboxStateToStatus } from './utils/linked-subitem-mapping';
+import {
+    mapStatusToSubitemCheckboxState,
+    mapSubitemCheckboxStateToStatus,
+    normalizeLinkedSubitemMappings,
+} from './utils/linked-subitem-mapping';
 import { TPS_EVENTS, TPS_LEGACY_EVENTS } from './tps-contracts';
 import { findExistingDailyNoteForIsoDate, getDailyNotePathForIsoDate } from './utils/daily-note-task-schedule';
+import { tpsBaseFormulaService } from './services/tps-base-formula-service';
+import {
+    parseTaskTagValues,
+} from './utils/task-line-metadata';
+import { parseStringListInput } from './utils/list-utils';
+import {
+    parseLineEntityMetadata,
+    readLineEntityInlineFieldValue,
+} from './services/line-entity-source-provider';
 
 type ChecklistTaskState = string;
+
+function getSharedLineDisplayTitle(line: string): string {
+    return parseLineEntityMetadata(line)?.displayTitle || '';
+}
 
 export interface ChecklistPromotionInput {
     lineNumber: number;
@@ -515,6 +532,53 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             TPS_EVENTS,
             TPS_LEGACY_EVENTS,
         },
+        formulas: {
+            version: tpsBaseFormulaService.version,
+            compile: (definitions: unknown, sourceId?: string) =>
+                tpsBaseFormulaService.compile(definitions, sourceId),
+            createSession: (
+                compiled: Parameters<typeof tpsBaseFormulaService.createSession>[0],
+                context: Parameters<typeof tpsBaseFormulaService.createSession>[1],
+            ) => tpsBaseFormulaService.createSession(compiled, context),
+            evaluate: (
+                compiled: Parameters<typeof tpsBaseFormulaService.evaluate>[0],
+                formula: string,
+                context: Parameters<typeof tpsBaseFormulaService.evaluate>[2],
+            ) => tpsBaseFormulaService.evaluate(compiled, formula, context),
+            evaluateAll: (
+                compiled: Parameters<typeof tpsBaseFormulaService.evaluateAll>[0],
+                context: Parameters<typeof tpsBaseFormulaService.evaluateAll>[1],
+            ) => tpsBaseFormulaService.evaluateAll(compiled, context),
+            evaluateExpression: (
+                compiled: Parameters<typeof tpsBaseFormulaService.evaluateExpression>[0],
+                expression: string,
+                context: Parameters<typeof tpsBaseFormulaService.evaluateExpression>[2],
+            ) => tpsBaseFormulaService.evaluateExpression(compiled, expression, context),
+            format: (value: unknown) => tpsBaseFormulaService.format(value),
+            comparableValues: (value: unknown) => tpsBaseFormulaService.comparableValues(value),
+            sortKey: (value: unknown) => tpsBaseFormulaService.sortKey(value),
+            groupValues: (value: unknown) => tpsBaseFormulaService.groupValues(value),
+            compare: (left: unknown, right: unknown) => tpsBaseFormulaService.compare(left, right),
+            isTruthy: (value: unknown) => tpsBaseFormulaService.isTruthy(value),
+            hasReference: (value: unknown) => tpsBaseFormulaService.hasReference(value),
+        },
+        lineMetadata: {
+            version: 1,
+            readInlineFields: (line: string) => parseLineEntityMetadata(line)?.fields ?? [],
+            readInlineFieldValue: (line: string, key: string) => readLineEntityInlineFieldValue(line, key),
+            readTags: (line: string) => parseLineEntityMetadata(line)?.tags ?? [],
+            parseStringList: (value: unknown) => parseStringListInput(value),
+            parseTags: (value: unknown) => parseTaskTagValues(value),
+            getDisplayTitle: (line: string) => getSharedLineDisplayTitle(line),
+            parseLine: (line: string) => {
+                const parsed = parseLineEntityMetadata(line);
+                return {
+                    fields: parsed?.fields ?? [],
+                    tags: parsed?.tags ?? [],
+                    displayTitle: parsed?.displayTitle ?? '',
+                };
+            },
+        },
         events: eventsApi,
         registry: {
             getPluginById: (pluginId: string) => getPluginById(plugin.app, pluginId),
@@ -533,7 +597,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             executeCommandById: (commandId: string) => executeCommandById(plugin.app, commandId),
         },
         entityIndex: {
-            version: 2,
+            version: 3,
             query: (criteria: Parameters<typeof plugin.entityIndexService.query>[0]) =>
                 plugin.entityIndexService.query(criteria),
             queryAsync: (criteria: Parameters<typeof plugin.entityIndexService.queryAsync>[0]) =>
@@ -598,6 +662,30 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             pathForIsoDate: (isoDate: string) => getDailyNotePathForIsoDate(plugin.app, plugin.settings, isoDate),
             ensureForIsoDate: (isoDate: string) => plugin.noteOperationService.ensureDailyNote(`${isoDate} 00:00:00`),
         },
+        configuration: {
+            version: 1,
+            isInlinePropertyAllowed: (key: unknown): boolean => {
+                const normalizedKey = String(key ?? '').trim().toLowerCase();
+                if (!normalizedKey) return false;
+                const property = (plugin.settings.properties || []).find((candidate) => {
+                    const candidateKey = String(candidate?.key || '').trim().toLowerCase();
+                    const candidateId = String(candidate?.id || '').trim().toLowerCase();
+                    return candidateKey === normalizedKey || candidateId === normalizedKey;
+                });
+                return Boolean(
+                    property
+                    && !property.disabled
+                    && !property.hidden
+                    && property.allowInlineSet !== false
+                    && property.type !== 'kind',
+                );
+            },
+            getParentLinkPolicy: () => ({
+                format: plugin.settings.parentLinkFormat,
+                tag: String(plugin.settings.parentTagOnChildLink || '').trim(),
+                autoSelfLink: plugin.settings.autoSelfLinkParentInParentKey === true,
+            }),
+        },
         openFileInLeaf: (
             file: TFile,
             context: 'tab' | 'split' | 'window' | false,
@@ -615,6 +703,57 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         identityMigration: plugin.identityMigrationService,
         cardContent: plugin.cardContentService,
         timeTracking: plugin.timeTrackingService,
+        menus: {
+            version: 1,
+            addToNativeMenu: (
+                menu: Parameters<typeof plugin.menuController.addToNativeMenu>[0],
+                files: Parameters<typeof plugin.menuController.addToNativeMenu>[1],
+                options?: Parameters<typeof plugin.menuController.addToNativeMenu>[2],
+            ) => plugin.menuController.addToNativeMenu(menu, files, options),
+        },
+        taskLines: {
+            version: 1,
+            handleContextMenu: (event: MouseEvent): boolean =>
+                plugin.taskLineContextMenuService.handleContextMenu(event),
+            openQuickEditorForElement: (
+                taskEl: HTMLElement,
+                sourceEl: HTMLElement | null = taskEl,
+            ): Promise<boolean> => plugin.taskLineContextMenuService.openQuickEditorForElement(taskEl, sourceEl),
+            addMenuItems: (
+                menu: Parameters<typeof plugin.taskLineContextMenuService.addTaskLineMenuItems>[0],
+                context: Parameters<typeof plugin.taskLineContextMenuService.addTaskLineMenuItems>[1],
+                options?: Parameters<typeof plugin.taskLineContextMenuService.addTaskLineMenuItems>[2],
+            ) => plugin.taskLineContextMenuService.addTaskLineMenuItems(menu, context, options),
+            createNoteForLine: (
+                context: Parameters<typeof plugin.dailyInboxLineService.createNoteForLine>[0],
+            ) => plugin.dailyInboxLineService.createNoteForLine(context),
+        },
+        taskCheckboxes: {
+            version: 1,
+            getMappings: () => normalizeLinkedSubitemMappings(
+                plugin.settings.linkedSubitemCheckboxMappings || [],
+                { enforceStrictDefaults: true },
+            ).map((mapping) => ({
+                ...mapping,
+                statuses: [...mapping.statuses],
+            })),
+            stateForStatus: (status: unknown): string => {
+                const configured = mapStatusToSubitemCheckboxState(
+                    plugin.settings.linkedSubitemCheckboxMappings || [],
+                    plugin.sharedServices.status.normalize(status),
+                );
+                if (configured) return configured;
+                const marker = plugin.sharedServices.status.statusToCheckboxState(status);
+                return `[${String(marker ?? '').trim() || ' '}]`;
+            },
+            statusForState: (state: unknown): string => {
+                const configured = mapSubitemCheckboxStateToStatus(
+                    plugin.settings.linkedSubitemCheckboxMappings || [],
+                    String(state ?? ''),
+                );
+                return configured || plugin.sharedServices.status.checkboxStateToStatus(state);
+            },
+        },
         tasks: plugin.taskApiService,
         ui: {
             shouldForceBaseLinkPreview: () => plugin.settings.enableBasesForcedLinkPreview === true,

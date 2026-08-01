@@ -83,6 +83,7 @@ import { sanitizeNotebookNavigatorRuleSettings } from './services/notebook-navig
 import { registerGcmEvents } from './events/register-events';
 import { registerGcmCommands } from './commands/register-commands';
 import { setupPluginApi } from './plugin-api';
+import { TPS_EVENTS } from './tps-contracts';
 import { createSharedServices, type GcmSharedServices } from './services/shared';
 import { ViewModeService } from './services/view-mode-service';
 import { resolveCustomProperties } from './resolve-profiles';
@@ -474,6 +475,23 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     });
   }
 
+  private emitGcmApiChanged(available: boolean): void {
+    const api = available ? (this as any).api ?? null : null;
+    this.app.workspace.trigger(TPS_EVENTS.GCM_API_CHANGED, {
+      source: 'tps-global-context-menu',
+      sourcePluginId: this.manifest.id,
+      timestamp: Date.now(),
+      available: available && api !== null,
+      api,
+      formulasVersion: Number(api?.formulas?.version) || null,
+      lineMetadataVersion: Number(api?.lineMetadata?.version) || null,
+      entityIndexVersion: Number(api?.entityIndex?.version) || null,
+      configurationVersion: Number(api?.configuration?.version) || null,
+      taskLinesVersion: Number(api?.taskLines?.version) || null,
+      taskCheckboxesVersion: Number(api?.taskCheckboxes?.version) || null,
+    });
+  }
+
   async onload(): Promise<void> {
     this.ignoreNextContext = false;
 
@@ -631,6 +649,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     // Expose inter-plugin API
     setupPluginApi(this);
+    this.registerEvent(this.app.workspace.on(TPS_EVENTS.GCM_API_REQUEST as any, () => {
+      this.emitGcmApiChanged(true);
+    }));
+    this.emitGcmApiChanged(true);
     this.timeTrackingService.setup();
     this.timeTrackingStatusBarService.setup();
     this.registerEvent(this.app.metadataCache.on('resolved', () => {
@@ -1850,6 +1872,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.closeBaseLinkHoverEditor(getPluginById(this.app, 'obsidian-hover-editor') as any);
     this.workspaceRibbonService?.teardown();
     delete (this as any).api;
+    this.emitGcmApiChanged(false);
     if (this.restoreCanvasOpenGuard) {
       this.restoreCanvasOpenGuard();
       this.restoreCanvasOpenGuard = null;

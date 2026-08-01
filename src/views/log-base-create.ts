@@ -1,4 +1,5 @@
 import { parseTpsListHeadingLine } from '../tps-list/heading-line-utils';
+import { getLineEntityKind } from '../services/line-entity-source-provider';
 
 export type TpsTableLineKind = 'bullet' | 'task' | 'heading';
 
@@ -36,10 +37,7 @@ export function hasTpsTableLineKindFilter(roots: unknown[]): boolean {
 }
 
 export function getTpsTableMarkdownLineKind(line: string): TpsTableLineKind | null {
-  if (parseTpsListHeadingLine(line)) return 'heading';
-  if (/^\s*[-+*]\s+\[[^\]]\]\s*/u.test(line)) return 'task';
-  if (/^\s*[-+*]\s+/u.test(line)) return 'bullet';
-  return null;
+  return getLineEntityKind(line);
 }
 
 export function getTpsTableTaskQueryFields(
@@ -47,7 +45,7 @@ export function getTpsTableTaskQueryFields(
   resolveStatus: (checkboxState: string) => string = defaultStatusForCheckboxState,
   isDoneStatus: (status: string) => boolean = defaultIsDoneStatus,
 ): Record<string, string> {
-  const markerMatch = String(line || '').match(/^\s*[-+*]\s+\[([^\]])\]\s*/u);
+  const markerMatch = String(line || '').match(/^\s*(?:[-+*]|\d+[.)])\s+\[([^\]])\]\s*/u);
   if (!markerMatch) return {};
   const checkboxState = `[${markerMatch[1]}]`;
   const status = String(resolveStatus(checkboxState) || defaultStatusForCheckboxState(checkboxState))
@@ -57,6 +55,7 @@ export function getTpsTableTaskQueryFields(
   return {
     status,
     checkboxstatus: status,
+    checkboxstate: checkboxState,
     open: String(!done),
     isopen: String(!done),
     done: String(done),

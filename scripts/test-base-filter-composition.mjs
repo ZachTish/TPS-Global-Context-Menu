@@ -78,6 +78,25 @@ test('unknown filter results cannot become a definite match or bypass a known fa
   assert.equal(combineFilterTreeResults([null, true], 'or'), true);
 });
 
+test('ordered filter evaluation short-circuits only unreachable children', async () => {
+  const { evaluateOrderedFilterChildren } = await loadFilterModule();
+  const calls = [];
+  assert.equal(evaluateOrderedFilterChildren(['true', 'error'], 'or', (child) => {
+    calls.push(child);
+    if (child === 'error') throw new Error('unreachable');
+    return true;
+  }), true);
+  assert.deepEqual(calls, ['true']);
+
+  const evaluated = [];
+  assert.throws(() => evaluateOrderedFilterChildren(['error', 'true'], 'or', (child) => {
+    evaluated.push(child);
+    if (child === 'error') throw new Error('evaluated');
+    return true;
+  }), /evaluated/u);
+  assert.deepEqual(evaluated, ['error']);
+});
+
 test('missing requested view does not borrow filters from another named view', async () => {
   const { extractPersistedFilterRoots } = await loadFilterModule();
   const parsed = {

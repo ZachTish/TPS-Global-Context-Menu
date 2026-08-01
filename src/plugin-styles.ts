@@ -73,14 +73,18 @@ export const PLUGIN_STYLES = `
       }
 
       .tps-list-native-rows {
-        list-style: disc;
+        list-style: none;
         margin: 0;
-        padding: 0 0 0 18px;
+        padding: 0;
       }
 
       .tps-list-native-row {
         content-visibility: auto;
         contain-intrinsic-block-size: 24px;
+        display: grid;
+        grid-template-columns: 14px minmax(0, 1fr);
+        column-gap: 6px;
+        align-items: center;
         min-height: 0;
         margin: 0;
         padding: 0;
@@ -91,25 +95,28 @@ export const PLUGIN_STYLES = `
       }
 
       .tps-list-native-row--task {
-        list-style: none;
-        display: grid;
-        grid-template-columns: 14px max-content;
-        grid-auto-flow: column;
-        grid-auto-columns: max-content;
-        align-items: center;
-        column-gap: 6px;
-        margin-left: calc(-18px + var(--tps-list-task-indent, 0px));
+        padding-inline-start: var(--tps-list-task-indent, 0px);
       }
 
       .tps-list-native-row--heading {
-        list-style: none;
-        display: grid;
-        grid-template-columns: 22px minmax(0, max-content);
-        grid-auto-flow: column;
-        grid-auto-columns: max-content;
+        margin: 7px 0 2px;
+      }
+
+      .tps-list-native-leading {
+        width: 14px;
+        height: 14px;
+        min-width: 14px;
+        margin: 0;
+        align-self: center;
+      }
+
+      .tps-list-native-row-body {
+        min-width: 0;
+        display: flex;
+        flex-wrap: wrap;
         align-items: baseline;
-        column-gap: 6px;
-        margin: 7px 0 2px -18px;
+        column-gap: 8px;
+        row-gap: 2px;
       }
 
       .tps-list-native-heading-marker {
@@ -143,20 +150,23 @@ export const PLUGIN_STYLES = `
 
       .tps-list-native-checkbox {
         display: block;
-        width: 14px;
-        height: 14px;
-        margin: 0;
-        align-self: center;
       }
 
-      .tps-list-native-bullet-marker {
+      .tps-list-native-bullet-marker,
+      .tps-list-native-file-marker,
+      .tps-list-native-heading-marker {
         display: flex;
         align-items: center;
         justify-content: center;
+      }
+
+      .tps-list-native-bullet-marker,
+      .tps-list-native-file-marker {
         color: var(--text-muted);
       }
 
-      .tps-list-native-bullet-marker svg {
+      .tps-list-native-bullet-marker svg,
+      .tps-list-native-file-marker svg {
         width: 12px;
         height: 12px;
         stroke-width: 2;
@@ -211,7 +221,7 @@ export const PLUGIN_STYLES = `
 
       .tps-list-native-property {
         display: inline;
-        margin-left: 8px;
+        margin-left: 0;
         align-self: center;
         color: var(--text-muted);
         font-size: var(--font-ui-smaller);
@@ -222,6 +232,28 @@ export const PLUGIN_STYLES = `
       .tps-list-native-property--editable {
         cursor: text;
         border-radius: 4px;
+      }
+
+      .tps-list-native-property--checkbox {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        cursor: pointer;
+      }
+
+      .tps-list-native-property-checkbox {
+        width: 1em;
+        height: 1em;
+        margin: 0;
+      }
+
+      .tps-list-native-property--readonly {
+        cursor: default;
+      }
+
+      .tps-list-native-property--readonly .tps-list-native-property-checkbox:disabled {
+        opacity: 1;
+        pointer-events: none;
       }
 
       .tps-list-native-property--editable:hover,
@@ -271,7 +303,8 @@ export const PLUGIN_STYLES = `
         overflow-y: auto;
         border: 1px solid var(--background-modifier-border);
         border-radius: 6px;
-        overscroll-behavior: contain;
+        overscroll-behavior-x: contain;
+        overscroll-behavior-y: auto;
         -webkit-overflow-scrolling: touch;
         scrollbar-gutter: stable;
         scrollbar-width: thin;
@@ -315,7 +348,8 @@ export const PLUGIN_STYLES = `
         min-width: 0 !important;
         overflow-x: auto !important;
         overflow-y: auto !important;
-        overscroll-behavior: contain !important;
+        overscroll-behavior-x: contain !important;
+        overscroll-behavior-y: auto !important;
         touch-action: pan-x pan-y !important;
       }
 
@@ -380,6 +414,30 @@ export const PLUGIN_STYLES = `
         background: var(--background-modifier-hover);
         outline: 2px solid var(--interactive-accent);
         outline-offset: -2px;
+      }
+
+      .tps-log-base-boolean-control {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 24px;
+        min-height: 24px;
+        margin: -4px 0;
+      }
+
+      .tps-log-base-boolean-control--editable {
+        cursor: pointer;
+      }
+
+      .tps-log-base-boolean-checkbox {
+        width: 16px;
+        height: 16px;
+        margin: 0;
+      }
+
+      .tps-log-base-boolean-control--readonly .tps-log-base-boolean-checkbox:disabled {
+        opacity: 1;
+        pointer-events: none;
       }
 
       .tps-log-base-file-link {
@@ -491,12 +549,6 @@ export const PLUGIN_STYLES = `
       .tps-log-base--resizing,
       .tps-log-base--resizing * {
         cursor: col-resize !important;
-        user-select: none !important;
-      }
-
-      .tps-log-base--panning,
-      .tps-log-base--panning * {
-        cursor: grabbing !important;
         user-select: none !important;
       }
 

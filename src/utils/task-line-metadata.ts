@@ -22,6 +22,12 @@ export interface TaskInlineFieldRange extends TaskInlineField {
   end: number;
 }
 
+export interface LineSemanticMetadata {
+  fields: TaskInlineField[];
+  tags: string[];
+  displayText: string;
+}
+
 export const TASK_COMPLETED_DATE_FIELD = 'completedDate';
 
 export interface TaskLineTimestampOptions {
@@ -305,6 +311,37 @@ export function readTaskInlineFields(line: string): TaskInlineField[] {
 }
 
 /**
+ * Parse the reusable semantic portions of one already de-prefixed Markdown
+ * line. Inline fields are scanned once, then reused for tags and visible text.
+ * This is the canonical read path for cross-plugin synthetic Base rows.
+ */
+export function readLineSemanticMetadata(line: string): LineSemanticMetadata {
+  const source = String(line || '');
+  const fieldRanges = readSemanticInlineFieldRanges(source);
+  const visibleTagRanges = getVisibleTaskTagRanges(source, fieldRanges);
+  const fields = fieldRanges.map((field) => ({ key: field.key, value: field.value.trim() }));
+  const tags = parseTaskTagValues([
+    ...visibleTagRanges.map((range) => range.tag),
+    ...fields
+      .filter((field) => /^(?:tag|tags)$/iu.test(field.key.trim()))
+      .map((field) => field.value),
+  ]);
+  const displaySource = removeTaskTextRanges(source, normalizeTaskTextRanges([
+    ...getTaskInlinePropsMetadataRanges(source),
+    ...fieldRanges,
+    ...visibleTagRanges,
+    ...getLineBlockIdRanges(source),
+  ]), ' ')
+    .replace(/<!--\s*-->/gu, ' ');
+  const displayText = getPlainTaskTitle(displaySource)
+    .replace(/`([^`]+)`/gu, '$1')
+    .replace(/[*_~]{1,3}([^*_~]+)[*_~]{1,3}/gu, '$1')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  return { fields, tags, displayText };
+}
+
+/**
  * Read semantic inline fields as a key-preserving record for visibility and
  * scope evaluation. Empty values remain present so callers can distinguish a
  * blank `[key:: ]` field from a missing field.
@@ -400,14 +437,8 @@ export function readInlineTags(line: string): string[] {
  * `readInlineTags`, which intentionally represents writable raw hashtags.
  */
 export function readTaskLineTags(line: string): string[] {
-  const source = String(line || '');
-  const fields = readSemanticInlineFieldRanges(source);
-  const inlineFieldTags = fields
-    .filter((field) => /^(?:tag|tags)$/iu.test(field.key.trim()))
-    .flatMap((field) => parseTaskTagValues(field.value));
-  const visibleTags = getVisibleTaskTagRanges(source)
-    .map((range) => range.tag);
-  return parseTaskTagValues([...visibleTags, ...inlineFieldTags]);
+  const source = parseTaskLine(line)?.body ?? String(line || '');
+  return readLineSemanticMetadata(source).tags;
 }
 
 /**
@@ -637,12 +668,15 @@ function getTaskInlinePropsMetadataRanges(value: string): TaskTextRange[] {
   return ranges;
 }
 
-function getVisibleTaskTagRanges(value: string): TaskTagTextRange[] {
+function getVisibleTaskTagRanges(
+  value: string,
+  semanticFields: readonly TaskInlineFieldRange[] = readSemanticInlineFieldRanges(String(value || '')),
+): TaskTagTextRange[] {
   const source = String(value || '');
   const protectedRanges = getTaskInlinePropsMetadataRanges(source);
   const excludedRanges = normalizeTaskTextRanges([
     ...protectedRanges,
-    ...readSemanticInlineFieldRanges(source),
+    ...semanticFields,
     ...getHtmlCommentRanges(source),
     ...getClosedInlineCodeRanges(source),
   ]);

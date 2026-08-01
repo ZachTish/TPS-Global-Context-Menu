@@ -35,8 +35,8 @@ import {
 } from '../filter-kind-utils';
 import { getTpsListHeadingDisplayTitle, parseTpsListHeadingLine, setTpsListHeadingText } from '../heading-line-utils';
 import {
-  combineFilterTreeResults,
   composeEffectiveFilterRoots,
+  evaluateOrderedFilterChildren,
   extractPersistedFilterRoots,
   isPersistedFilterCacheMatch,
 } from '../base-filter-roots';
@@ -102,6 +102,12 @@ import {
 } from '../../utils/list-utils';
 import { collectKnownVaultTags } from '../../utils/known-tags';
 import {
+  getBooleanPropertyPresentation,
+  getNextBooleanPropertyValue,
+  getReadOnlyBooleanFormulaPresentation,
+  isBooleanPropertyType,
+} from '../../utils/boolean-property';
+import {
   findRelationalStatusProperty,
   propertyUsesEntityOptions,
 } from '../../utils/property-option-source';
@@ -109,6 +115,22 @@ import {
   isRelationalStatusFilterExpression,
   isRelationalStatusPropertyReference as isRelationalStatusReference,
 } from '../relational-status-routing';
+import {
+  compareTpsFormulaValues,
+  extractTpsBaseFormulaDefinitions,
+  formatTpsFormulaValue,
+  getTpsFormulaComparableValues,
+  getTpsFormulaGroupValues,
+  getTpsFormulaSortKey,
+  hasTpsFormulaReference,
+  isTpsFormulaTruthy,
+  tpsBaseFormulaService,
+  type TpsCompiledFormulaSet,
+  type TpsFormulaRecordContext,
+  type TpsFormulaResult,
+  type TpsFormulaRowSession,
+} from '../../services/tps-base-formula-service';
+import { getOwningWorkspaceFile } from '../../views/base-view-owner';
 
 export const TPS_LIST_VIEW_TYPE = 'tps-list';
 
@@ -147,7 +169,7 @@ type TpsTaskPropertyDisplay = {
   kind?: string;
   editable?: boolean;
   propName?: string;
-  rawValue?: string;
+  rawValue?: unknown;
 };
 
 type ActiveTaskPointerDrag = {
@@ -201,6 +223,7 @@ type OpenTaskSubitem = {
   parentLine?: number;
   checkboxState?: string;
   text: string;
+  rawLine?: string;
   displayText?: string;
   inlineFields?: Array<{ key: string; value: string }>;
 };
@@ -235,6 +258,16 @@ type TaskCreationDefaults = {
   tags: Set<string>;
   excludedStatuses: Set<string>;
   excludedTags: Set<string>;
+};
+
+type TpsBaseDefinitionCache = {
+  path: string;
+  mtime: number;
+  viewName: string;
+  viewNames: string[];
+  filters: unknown[] | null;
+  formulas: Record<string, string>;
+  formulaSet: TpsCompiledFormulaSet;
 };
 
 type NoteCreationDefaults = {
@@ -494,10 +527,11 @@ export class TpsListView extends BasesView {
   private allTasksByPath = new Map<string, OpenTaskSubitem[]>();
   private openTaskOverflowByPath = new Map<string, number>();
   private openTasksLoading = new Set<string>();
-  private baseFileFilterCache: { path: string; mtime: number; viewName: string; viewNames: string[]; filters: unknown[] | null } | null = null;
+  private baseFileFilterCache: TpsBaseDefinitionCache | null = null;
   private baseFileFiltersLoadingKey: string | null = null;
   private baseFileFiltersLoadingPromise: Promise<boolean> | null = null;
-  private embeddedBaseFilterCache: { path: string; mtime: number; viewName: string; viewNames: string[]; filters: unknown[] | null } | null = null;
+  private embeddedBaseFilterCache: TpsBaseDefinitionCache | null = null;
+  private stampedFormulaSet: TpsCompiledFormulaSet | null = null;
   private embeddedBaseFiltersLoadingKey: string | null = null;
   private embeddedBaseFiltersLoadingPromise: Promise<boolean> | null = null;
   private baseFilterSignature = '';
@@ -515,6 +549,12 @@ export class TpsListView extends BasesView {
   private mobileKeyboardTimeout: number | null = null;
   private mobileGestureRevealTimeout: number | null = null;
   private activeTaskPointerDrag: ActiveTaskPointerDrag | null = null;
+  private taskFormulaSessions = new WeakMap<OpenTaskSubitem, TpsFormulaRowSession>();
+  private formulaFileContexts = new Map<string, NonNullable<TpsFormulaRecordContext['file']>>();
+  private formulaThisValue: Record<string, unknown> | null | undefined;
+  private formulaDiagnostics = new Set<string>();
+  private formulaFilterFailureSequence = 0;
+  private formulaNow: Date | undefined;
 
   constructor(controller: QueryController, scrollEl: HTMLElement, plugin: any) {
     super(controller);
@@ -602,6 +642,15 @@ export class TpsListView extends BasesView {
         creationFilterRoots,
         lineDefaults,
       );
+      return;
+    }
+
+    if (hasTpsFormulaReference(creationFilterRoots)) {
+      flowWarn('CreateFile', 'blocked', {
+        reason: 'formula-filtered-note-creation-unverifiable',
+        viewName: this.getConfiguredBaseViewName(),
+      });
+      new Notice('TPS List did not create the note because its formula filter cannot be validated before the file exists.');
       return;
     }
 
@@ -711,19 +760,11 @@ export class TpsListView extends BasesView {
   }
 
   private getGcmApi(): any {
-    return this.getGcmPlugin()?.api || this.getGcmPlugin() || null;
+    return this.plugin?.api ?? null;
   }
 
   private getGcmPlugin(): any {
-    if (this.plugin?.gcmPlugin) return this.plugin.gcmPlugin;
-    const plugins = (this.app as any)?.plugins;
-    return (
-      plugins?.getPlugin?.('tps-global-context-menu') ||
-      plugins?.plugins?.['tps-global-context-menu'] ||
-      plugins?.getPlugin?.('TPS-Global-Context-Menu (Dev)') ||
-      plugins?.plugins?.['TPS-Global-Context-Menu (Dev)'] ||
-      null
-    );
+    return this.plugin ?? null;
   }
 
   private getGcmServices(): any {
@@ -1402,27 +1443,8 @@ export class TpsListView extends BasesView {
     const directFile = this.getRuntimeBaseFile();
     if (directFile) return directFile.path;
 
-    const activeFile = this.app.workspace.getActiveFile?.();
-    if (this.isEmbeddedKanbanContext() && activeFile instanceof TFile && activeFile.extension === 'md') {
-      return activeFile.path;
-    }
-
     const embeddedMarkdownContext = this.getWorkspaceLeafMarkdownContextPath();
-    if (embeddedMarkdownContext) return embeddedMarkdownContext;
-
-    const controller: any = (this as any)?.controller;
-    const queryController: any = (this as any)?.queryController;
-    const sourcePath = [
-      controller?.file?.path,
-      controller?.baseFile?.path,
-      controller?.source?.path,
-      queryController?.query?.file?.path,
-      queryController?.currentFile?.path,
-      (this as any)?.file?.path,
-      this.getWorkspaceLeafBasePath(),
-      this.getActiveWorkspaceBasePath(),
-    ].find((value) => typeof value === 'string' && value.length > 0);
-    return sourcePath ?? null;
+    return this.isEmbeddedKanbanContext() ? embeddedMarkdownContext : null;
   }
 
   private getBaseFile(): TFile | null {
@@ -1452,16 +1474,10 @@ export class TpsListView extends BasesView {
   }
 
   private getStampedBaseContextPath(): string | null {
-    const controller: any = (this as any)?.controller;
-    const queryController: any = (this as any)?.queryController;
     const contextHost = this.containerEl?.closest<HTMLElement>('[data-tps-context-path]');
     return resolveBaseEmbedSourcePath([
       this.containerEl?.dataset.tpsContextPath,
       contextHost?.dataset.tpsContextPath,
-      controller?.context?.file?.path,
-      controller?.sourceFile?.path,
-      queryController?.context?.file?.path,
-      queryController?.currentFile?.path,
     ]);
   }
 
@@ -1513,36 +1529,7 @@ export class TpsListView extends BasesView {
       if (embeddedBaseFile instanceof TFile) return embeddedBaseFile;
     }
 
-    const controller: any = (this as any)?.controller;
-    const queryController: any = (this as any)?.queryController;
-    const candidates = [
-      controller?.file,
-      controller?.baseFile,
-      controller?.source,
-      queryController?.query?.file,
-      queryController?.currentFile,
-      (this as any)?.file,
-    ];
-    for (const candidate of candidates) {
-      if (candidate instanceof TFile && (candidate.extension === 'base' || candidate.path.endsWith('.base'))) {
-        return candidate;
-      }
-    }
-
-    const leafEl = this.containerEl?.closest('.workspace-leaf');
-    if (!leafEl) return null;
-    let found: TFile | null = null;
-    this.app.workspace.iterateAllLeaves((leaf) => {
-      if (found) return;
-      const leafContainer = (leaf as any).containerEl as HTMLElement | undefined;
-      if (!leafContainer) return;
-      if (leafContainer !== leafEl && !leafContainer.contains(leafEl) && !leafEl.contains(leafContainer)) return;
-      const file = (leaf.view as any)?.file;
-      if (file instanceof TFile && (file.extension === 'base' || file.path.endsWith('.base'))) {
-        found = file;
-      }
-    });
-    return found;
+    return getOwningWorkspaceFile(this.app, this.containerEl, 'base');
   }
 
   private getEmbeddedBasePathFromDom(): string | null {
@@ -1559,96 +1546,10 @@ export class TpsListView extends BasesView {
     return this.resolveBasePathFromName(rawPath);
   }
 
-  private getWorkspaceLeafBasePath(): string | null {
-    const leafEl = this.containerEl?.closest('.workspace-leaf');
-    let found: string | null = null;
-    this.app.workspace.iterateAllLeaves((leaf) => {
-      if (found) return;
-      const leafContainer = (leaf as any).containerEl as HTMLElement | undefined;
-      if (leafEl && leafContainer && leafContainer !== leafEl && !leafContainer.contains(leafEl) && !leafEl.contains(leafContainer)) return;
-      const state = typeof (leaf as any).getViewState === 'function' ? (leaf as any).getViewState() : null;
-      const path = [
-        (leaf.view as any)?.file?.path,
-        (leaf.view as any)?.getState?.()?.file,
-        state?.state?.file,
-        state?.file,
-        this.resolveBasePathFromName((leaf as any)?.getDisplayText?.()),
-        this.resolveBasePathFromName((leaf.view as any)?.getDisplayText?.()),
-      ].find((value) => typeof value === 'string' && value.endsWith('.base'));
-      if (path) found = path;
-    });
-    return found;
-  }
-
   private getWorkspaceLeafMarkdownContextPath(): string | null {
     const markdownContextEl = this.containerEl?.closest('.markdown-reading-view, .markdown-source-view, .markdown-preview-view, .markdown-embed, .internal-embed, .cm-embed-block, .sync-embed, .sync-container');
     if (!markdownContextEl) return null;
-    const leafEl = this.containerEl?.closest('.workspace-leaf');
-    if (!leafEl) return null;
-    let found: string | null = null;
-    this.app.workspace.iterateAllLeaves((leaf) => {
-      if (found) return;
-      const leafContainer = (leaf as any).containerEl as HTMLElement | undefined;
-      if (!leafContainer || (leafContainer !== leafEl && !leafContainer.contains(leafEl) && !leafEl.contains(leafContainer))) return;
-      const file = (leaf.view as any)?.file;
-      if (file instanceof TFile && file.extension === 'md') {
-        found = file.path;
-        return;
-      }
-      const state = typeof (leaf as any).getViewState === 'function' ? (leaf as any).getViewState() : null;
-      const path = [
-        (leaf.view as any)?.getState?.()?.file,
-        state?.state?.file,
-        state?.file,
-      ].find((value) => typeof value === 'string' && value.endsWith('.md'));
-      if (path) found = path;
-    });
-    return found;
-  }
-
-  private getActiveWorkspaceBasePath(): string | null {
-    const activeFile = this.app.workspace.getActiveFile?.();
-    if (activeFile instanceof TFile && (activeFile.extension === 'base' || activeFile.path.endsWith('.base'))) return activeFile.path;
-    const activeLeaf: any = this.app.workspace.activeLeaf || this.app.workspace.getMostRecentLeaf?.();
-    const candidates = [
-      activeLeaf?.view?.file?.path,
-      activeLeaf?.getViewState?.()?.state?.file,
-      activeLeaf?.getViewState?.()?.file,
-      this.resolveBasePathFromName(activeLeaf?.getDisplayText?.()),
-      this.resolveBasePathFromName(activeLeaf?.view?.getDisplayText?.()),
-      this.resolveBasePathFromDomTitle(),
-      this.resolveBasePathFromDocumentTitle(),
-    ];
-    return candidates.find((value) => typeof value === 'string' && value.endsWith('.base')) ?? null;
-  }
-
-  private resolveBasePathFromDomTitle(): string | null {
-    const leafEl = this.containerEl?.closest('.workspace-leaf') as HTMLElement | null;
-    if (!leafEl) return null;
-    const selectors = [
-      '.view-header-title',
-      '.workspace-tab-header.is-active .workspace-tab-header-inner-title',
-      '.workspace-tab-header-inner-title',
-      '[data-path$=".base"]',
-      'input',
-      '[contenteditable="true"]',
-    ];
-    for (const selector of selectors) {
-      for (const el of Array.from(leafEl.querySelectorAll<HTMLElement>(selector))) {
-        const text = el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement
-          ? el.value
-          : el.getAttribute('data-path') || el.textContent || '';
-        const path = this.resolveBasePathFromName(text);
-        if (path) return path;
-      }
-    }
-    return null;
-  }
-
-  private resolveBasePathFromDocumentTitle(): string | null {
-    const title = String(this.containerEl?.ownerDocument?.title || '').trim();
-    if (!title) return null;
-    return this.resolveBasePathFromName(title.split(' - ')[0]);
+    return getOwningWorkspaceFile(this.app, this.containerEl, 'md')?.path || null;
   }
 
   private resolveBasePathFromName(rawName: unknown): string | null {
@@ -1699,6 +1600,7 @@ export class TpsListView extends BasesView {
         const content = await this.app.vault.cachedRead(file);
         const parsed = parseYaml(content) as Record<string, unknown> | null | undefined;
         const extracted = this.extractBaseFileFilterRoots(parsed, viewName);
+        const formulas = extractTpsBaseFormulaDefinitions(parsed);
         if (this.baseFileFiltersLoadingKey !== loadingKey) return;
         const previous = this.baseFileFilterCache;
         this.baseFileFilterCache = {
@@ -1707,6 +1609,8 @@ export class TpsListView extends BasesView {
           viewName: extracted.viewName,
           viewNames: extracted.viewNames,
           filters: extracted.filters,
+          formulas,
+          formulaSet: tpsBaseFormulaService.compile(formulas, `${file.path}:${mtime}`),
         };
         if (previous?.path !== file.path || previous?.mtime !== mtime || previous?.viewName !== extracted.viewName || previous?.filters !== extracted.filters) {
           flow('BaseFilters', 'loaded', {
@@ -1714,6 +1618,7 @@ export class TpsListView extends BasesView {
             viewName: extracted.viewName,
             viewCount: extracted.viewNames.length,
             filterRoots: extracted.filters?.length || 0,
+            formulas: Object.keys(formulas).length,
           });
           this.refreshDebounced();
         }
@@ -1721,7 +1626,15 @@ export class TpsListView extends BasesView {
       } catch (error) {
         flowError('BaseFilters', 'read-failed', error, { path: file.path, viewName });
         if (this.baseFileFiltersLoadingKey === loadingKey) {
-          this.baseFileFilterCache = { path: file.path, mtime, viewName, viewNames: [], filters: null };
+          this.baseFileFilterCache = {
+            path: file.path,
+            mtime,
+            viewName,
+            viewNames: [],
+            filters: null,
+            formulas: {},
+            formulaSet: tpsBaseFormulaService.compile({}, `${file.path}:${mtime}:read-error`),
+          };
         }
         return false;
       }
@@ -2340,6 +2253,7 @@ export class TpsListView extends BasesView {
         parentLine,
         checkboxState,
         text,
+        rawLine: line,
         displayText: this.cleanTaskDisplayText(this.stripTaskInlineFields(text)),
         inlineFields,
       });
@@ -2439,7 +2353,8 @@ export class TpsListView extends BasesView {
       if (dot === -1) return raw;                    // plain "status"
       const prefix = raw.slice(0, dot);
       if (prefix === 'note') return raw.slice(dot + 1); // "note.status" → "status"
-      return null; // 'file.*' or 'formula.*' — not writable via frontmatter
+      if (prefix === 'formula') return raw;
+      return null; // other file namespaces are not line-level group values
     }
 
     // Fallback: find which allProperty's value matches .key for the first real group
@@ -2459,7 +2374,8 @@ export class TpsListView extends BasesView {
           const prefix = dot !== -1 ? propId.slice(0, dot) : '';
           if (propId.toLowerCase() === 'file.tags') return 'tags';
           if (isSourceNoteGroupProperty(propId)) return propId;
-          if (prefix === 'file' || prefix === 'formula') return null;
+          if (prefix === 'formula') return propId;
+          if (prefix === 'file') return null;
           return dot !== -1 ? propId.slice(dot + 1) : propId;
         }
       }
@@ -2519,27 +2435,15 @@ export class TpsListView extends BasesView {
 
     const groupedEntries = nativeGroups.flatMap((group) => group.entries ?? []);
     const nativeEntries: BasesEntry[] = groupedEntries.length ? groupedEntries : (this.data?.data ?? []);
-    const fallbackEntries = this.getFallbackNoteEntriesFromBaseFilters();
-
-    const entriesByPath = new Map<string, BasesEntry>();
-    for (const entry of nativeEntries) {
-      if (entry?.file?.path) entriesByPath.set(entry.file.path, entry);
-    }
-    for (const entry of fallbackEntries) {
-      if (entry?.file?.path && !entriesByPath.has(entry.file.path)) entriesByPath.set(entry.file.path, entry);
-    }
     if (propId && isSourceNoteGroupProperty(propId)) {
-      return entriesByPath.size
-        ? this.groupEntriesBySourceNote(Array.from(entriesByPath.values()), propId)
+      return nativeEntries.length
+        ? this.groupEntriesBySourceNote(nativeEntries, propId)
         : nativeGroups;
     }
-    if (!fallbackEntries.length && this.groupsContainEntries(nativeGroups)) return nativeGroups;
-    if (entriesByPath.size) {
-      return this.includeNativeEmptyGroups(
-        this.groupEntriesByProperty(Array.from(entriesByPath.values()), propId),
-        nativeGroups,
-      );
-    }
+    // Obsidian Bases is the sole authority for note inclusion, native formula
+    // evaluation, filtering, grouping, sorting, and search. TPS augments that
+    // result with synthesized line rows later; it never recreates note rows
+    // that Bases intentionally excluded.
     return nativeGroups;
   }
 
@@ -2547,240 +2451,9 @@ export class TpsListView extends BasesView {
     return groups.some((group) => (group.entries ?? []).length > 0);
   }
 
-  private includeNativeEmptyGroups(groups: BasesEntryGroup[], nativeGroups: BasesEntryGroup[]): BasesEntryGroup[] {
-    if (!nativeGroups.length) return groups;
-    const existingLaneIds = new Set(groups.map((group) => this.getLaneId(group)));
-    const nextGroups = [...groups];
-    for (const nativeGroup of nativeGroups) {
-      if ((nativeGroup.entries ?? []).length > 0) continue;
-      const laneId = this.getLaneId(nativeGroup);
-      if (existingLaneIds.has(laneId)) continue;
-      nextGroups.push(nativeGroup);
-      existingLaneIds.add(laneId);
-    }
-    return nextGroups;
-  }
-
   private shouldRenderNoteEntriesForGroups(groups: BasesEntryGroup[], taskFilter: KanbanTaskRootFilter): boolean {
     if (taskFilter.mode !== 'tasks') return true;
     return this.groupsContainEntries(groups);
-  }
-
-  private getFallbackNoteEntriesFromBaseFilters(): BasesEntry[] {
-    const searchQuery = this.getActiveBasesSearchQuery();
-    const entries: BasesEntry[] = [];
-    for (const file of this.app.vault.getMarkdownFiles()) {
-      if (!this.noteMatchesStructuredBaseFilters(file)) continue;
-      if (!this.noteMatchesSearchQuery(file, searchQuery)) continue;
-      entries.push(this.createFallbackBasesEntry(file));
-    }
-    return this.sortEntriesForView(entries);
-  }
-
-  private createFallbackBasesEntry(file: TFile): BasesEntry {
-    return {
-      file,
-      getValue: (propId: string) => this.getFallbackNoteValue(file, propId),
-    } as unknown as BasesEntry;
-  }
-
-  private getFallbackNoteValue(file: TFile, propId: string): unknown {
-    const raw = String(propId || '').trim();
-    const sourceNoteValue = getSourceNoteGroupValue(file, raw);
-    if (sourceNoteValue !== undefined) return sourceNoteValue;
-    const lower = raw.toLowerCase();
-    if (lower === 'file.name' || lower === 'name') return file.name;
-    if (lower === 'file.basename' || lower === 'basename' || lower === 'title') return file.basename;
-    if (lower === 'file.path' || lower === 'path' || this.normalizeInlinePropertyKey(raw) === 'filepath') return file.path;
-    if (lower === 'file.extension' || lower === 'file.ext' || lower === 'extension' || lower === 'ext') return file.extension;
-    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
-    if (!fm) return undefined;
-    const frontmatterKey = raw.startsWith('note.') ? raw.slice(5) : raw;
-    return this.getFrontmatterValueCaseInsensitive(fm, frontmatterKey);
-  }
-
-  private noteMatchesSearchQuery(file: TFile, query: string): boolean {
-    const normalizedQuery = String(query || '').trim().toLowerCase();
-    if (!normalizedQuery) return true;
-    const fm = this.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
-    const haystack = [
-      file.basename,
-      file.name,
-      file.path,
-      ...(fm ? Object.entries(fm).flatMap(([key, value]) => [key, Array.isArray(value) ? value.join(' ') : String(value ?? '')]) : []),
-    ].join('\n').toLowerCase();
-    return normalizedQuery
-      .split(/\s+/g)
-      .filter(Boolean)
-      .every((part) => haystack.includes(part));
-  }
-
-  private noteMatchesStructuredBaseFilters(file: TFile): boolean {
-    let hasKnownFilter = false;
-    for (const root of this.getBaseFilterRoots()) {
-      const result = this.evaluateNoteFilterNode(root, file);
-      if (result == null) continue;
-      hasKnownFilter = true;
-      if (!result) return false;
-    }
-    return hasKnownFilter;
-  }
-
-  private evaluateNoteFilterNode(node: unknown, file: TFile): boolean | null {
-    if (!node) return null;
-    if (typeof node === 'string') return this.evaluateNoteFilterString(node, file);
-    if (Array.isArray(node)) return this.combineTaskFilterResults(node.map((child) => this.evaluateNoteFilterNode(child, file)), 'and');
-    if (typeof node !== 'object') return null;
-    const record = node as Record<string, unknown>;
-    if (Object.prototype.hasOwnProperty.call(record, 'and') || Object.prototype.hasOwnProperty.call(record, 'all')) {
-      const children = Object.prototype.hasOwnProperty.call(record, 'and') ? record.and : record.all;
-      return this.combineTaskFilterResults(this.asArray(children).map((child) => this.evaluateNoteFilterNode(child, file)), 'and');
-    }
-    if (Object.prototype.hasOwnProperty.call(record, 'or') || Object.prototype.hasOwnProperty.call(record, 'any')) {
-      const children = Object.prototype.hasOwnProperty.call(record, 'or') ? record.or : record.any;
-      return this.combineTaskFilterResults(this.asArray(children).map((child) => this.evaluateNoteFilterNode(child, file)), 'or');
-    }
-    if (Object.prototype.hasOwnProperty.call(record, 'not')) {
-      const result = this.evaluateNoteFilterNode(record.not, file);
-      return result == null ? null : !result;
-    }
-    return this.evaluateNoteFilterObject(record, file);
-  }
-
-  private evaluateNoteFilterString(rawExpr: string, file: TFile): boolean | null {
-    const raw = String(rawExpr || '').trim();
-    const isNegated = raw.startsWith('!');
-    const expr = (isNegated ? raw.slice(1) : raw).trim();
-    let result: boolean | null = null;
-    const kindMatch = expr.match(/^(?:(?:tps|kanban)\.)?(?:itemtype|itemkind|kind)\s*(?:==|=|is|equals?)\s*["']?(task|tasks|bullet|bullets|note|notes|all|mixed|heading|headings|header|headers|h[1-6])["']?$/i);
-    if (kindMatch?.[1]) {
-      const value = kindMatch[1].toLowerCase();
-      result = value.startsWith('task') || value.startsWith('bullet') || normalizeTpsListHeadingKind(value) != null
-        ? false
-        : value.startsWith('note') || value === 'all' || value === 'mixed';
-    } else {
-      result = this.evaluateNoteValueFilterExpression(expr, file);
-    }
-    return result == null ? null : isNegated ? !result : result;
-  }
-
-  private evaluateNoteFilterObject(node: Record<string, unknown>, file: TFile): boolean | null {
-    const propRaw = this.readFilterObjectProperty(node);
-    if (!propRaw) return null;
-    const normalizedProp = this.normalizeInlinePropertyKey(propRaw.replace(/^note\./i, ''));
-    const operator = this.readFilterObjectOperator(node);
-    const values = this.readFilterObjectValues(node);
-    const isNegated = this.isNegatedFilterOperator(operator);
-    let result: boolean | null = null;
-
-    if (isBareSemanticKindFilter(propRaw, values)) {
-      const currentValues = this.getNoteComparableValues(file, propRaw);
-      result = values.some((value) => currentValues.includes(value.toLowerCase()));
-    } else if (!propRaw.toLowerCase().startsWith('note.') && ['itemtype', 'itemkind', 'kind'].includes(normalizedProp)) {
-      result = values.some((value) => {
-        const normalized = value.toLowerCase();
-        return normalizeTpsListHeadingKind(normalized) == null
-          && (normalized.startsWith('note') || normalized === 'all' || normalized === 'mixed');
-      });
-    } else if (propRaw.toLowerCase().startsWith('task.')) {
-      result = false;
-    } else if (['extension', 'ext', 'fileextension', 'fileext'].includes(normalizedProp) || propRaw.toLowerCase() === 'file.extension' || propRaw.toLowerCase() === 'file.ext') {
-      result = values.some((value) => value.toLowerCase().replace(/^\./, '') === file.extension.toLowerCase());
-    } else if (['path', 'file', 'filepath'].includes(normalizedProp) || propRaw.toLowerCase() === 'file.path') {
-      if (!this.isPathComparisonOperator(operator)) return null;
-      result = this.isStartsWithFilterOperator(operator)
-        ? values.some((value) => this.taskFilePathStartsWith(file, value))
-        : values.some((value) => this.taskFilePathMatches(file, value));
-    } else {
-      const currentValues = this.getNoteComparableValues(file, propRaw);
-      if (this.isImplicitEmptyValueFilter(operator, values)) {
-        result = currentValues.length === 0;
-      } else if (this.isImplicitNotEmptyValueFilter(operator, values)) {
-        result = currentValues.length > 0;
-      } else if (this.isEmptyFilterOperator(operator)) {
-        result = currentValues.length === 0;
-      } else if (this.isExistsFilterOperator(operator)) {
-        result = currentValues.length > 0;
-      } else if (this.isContainsFilterOperator(operator)) {
-        result = values.some((value) => currentValues.some((current) => current.includes(value.toLowerCase()) || current === this.normalizeTaskTag(value)));
-      } else {
-        result = values.some((value) => currentValues.includes(value.toLowerCase()));
-      }
-    }
-
-    return result == null ? null : isNegated ? !result : result;
-  }
-
-  private evaluateNoteValueFilterExpression(expr: string, file: TFile): boolean | null {
-    const callMatch = expr.match(/^([\w.\s-]+)\.(contains|containsAny|equals)\((.*)\)$/i);
-    if (callMatch?.[1]) {
-      const prop = callMatch[1].trim();
-      if (prop.toLowerCase().startsWith('task.')) return false;
-      const values = this.getNoteComparableValues(file, prop);
-      const tokens = this.extractFilterTokens(callMatch[3] || '').map((value) => (this.resolveBaseContextToken(value) || value).toLowerCase());
-      if (callMatch[2].toLowerCase().includes('contains')) {
-        return tokens.some((token) => values.some((value) => value.includes(token)));
-      }
-      return tokens.some((token) => values.includes(token));
-    }
-    const emptyMatch = expr.match(/^([\w.\s-]+)\.(isEmpty|empty|exists|isNotEmpty)\(\)$/i);
-    if (emptyMatch?.[1]) {
-      const values = this.getNoteComparableValues(file, emptyMatch[1].trim());
-      const op = emptyMatch[2].toLowerCase();
-      return op.includes('empty') && !op.includes('not') ? values.length === 0 : values.length > 0;
-    }
-    const wordOperatorMatch = expr.match(/^([\w.\s-]+)\s+(contains|has|is not empty|is empty|isNotEmpty|exists|empty|is|equals?)\s*(.*)$/i);
-    if (wordOperatorMatch?.[1]) {
-      const prop = wordOperatorMatch[1].trim();
-      if (prop.toLowerCase().startsWith('task.')) return false;
-      const op = wordOperatorMatch[2].trim().toLowerCase().replace(/\s+/g, '');
-      const values = this.getNoteComparableValues(file, prop);
-      if (op === 'isempty' || op === 'empty') return values.length === 0;
-      if (op === 'isnotempty' || op === 'exists') return values.length > 0;
-      const tokens = this.extractFilterTokens(wordOperatorMatch[3] || '').map((token) => (this.resolveBaseContextToken(token) || token).toLowerCase());
-      if (op === 'contains' || op === 'has') return tokens.some((token) => values.some((value) => value.includes(token) || value === this.normalizeTaskTag(token)));
-      return tokens.some((token) => values.includes(token));
-    }
-    const comparisonMatch = expr.match(/^([\w.\s-]+)\s*(==|=|!=|!==|is|equals?)\s*["']?([^"']+)["']?$/i);
-    if (comparisonMatch?.[1]) {
-      const prop = comparisonMatch[1].trim();
-      if (prop.toLowerCase().startsWith('task.')) return false;
-      const matched = this.getNoteComparableValues(file, prop).includes(comparisonMatch[3].trim().toLowerCase());
-      const op = String(comparisonMatch[2] || '').toLowerCase();
-      return op.startsWith('!') ? !matched : matched;
-    }
-    return null;
-  }
-
-  private getNoteComparableValues(file: TFile, propRaw: string): string[] {
-    const raw = String(propRaw || '').trim();
-    const normalized = this.normalizeInlinePropertyKey(raw.replace(/^note\./i, ''));
-    if (['path', 'file', 'filepath'].includes(normalized) || raw.toLowerCase() === 'file.path') {
-      return [file.path, file.basename, file.name, file.path.replace(/\.md$/i, '')].map((value) => value.toLowerCase());
-    }
-    if (['extension', 'ext', 'fileextension', 'fileext'].includes(normalized) || raw.toLowerCase() === 'file.extension' || raw.toLowerCase() === 'file.ext') {
-      return [file.extension.toLowerCase()];
-    }
-    if (['tag', 'tags', 'filetags'].includes(normalized) || raw.toLowerCase() === 'file.tags') {
-      const cache = this.app.metadataCache.getFileCache(file);
-      const fm = cache?.frontmatter as Record<string, unknown> | undefined;
-      const rawTags = [
-        ...this.asArray(fm?.tags),
-        ...(cache?.tags ?? []).map((tag) => tag.tag),
-      ];
-      const tags = new Set<string>();
-      for (const rawTag of rawTags) {
-        const normalizedTag = this.normalizeTaskTag(String(rawTag || ''));
-        if (normalizedTag) {
-          tags.add(normalizedTag);
-          tags.add(normalizedTag.replace(/^#/, ''));
-        }
-      }
-      return Array.from(tags);
-    }
-    const value = this.getFallbackNoteValue(file, raw);
-    const values = Array.isArray(value) ? value : value == null || value === '' ? [] : [value];
-    return values.map((item) => String(item ?? '').trim().toLowerCase()).filter(Boolean);
   }
 
   private groupEntriesByProperty(entries: BasesEntry[], propId: string | null): BasesEntryGroup[] {
@@ -2926,6 +2599,12 @@ export class TpsListView extends BasesView {
   }
 
   private extractGroupValues(raw: unknown): string[] {
+    if (
+      raw instanceof Date
+      || raw instanceof Set
+      || Array.isArray(raw)
+      || (raw && typeof raw === 'object' && '__tpsFormulaType' in raw)
+    ) return getTpsFormulaGroupValues(raw);
     return extractKanbanGroupValues(raw);
   }
 
@@ -3413,6 +3092,10 @@ export class TpsListView extends BasesView {
   private shouldScanVaultForTaskFilters(taskFilter = this.getTaskRootFilterFromBaseFilters()): boolean {
     if (taskFilter.mode === 'tasks' || taskFilter.mode === 'bullets') return true;
     if (this.isEmbeddedScheduledDailyTaskBoard()) return true;
+    // A formula can select a synthesized checkbox, bullet, or heading even when
+    // Bases returned no native note rows. Detect only real formula references;
+    // quoted/regex/object-literal text is deliberately ignored by the provider.
+    if (hasTpsFormulaReference(this.getBaseFilterRoots())) return true;
     if (!taskFilter.hasTaskDirective) return false;
     return this.getBaseFilterRoots().some((root) => this.hasGlobalTaskMatchFilter(root));
   }
@@ -3422,15 +3105,13 @@ export class TpsListView extends BasesView {
     if (Array.isArray(node)) return node.some((child) => this.hasGlobalTaskMatchFilter(child));
     if (typeof node === 'string') {
       const expr = node.trim().replace(/^!+\s*/u, '');
-      if (parseBareSemanticKindExpression(expr)) return false;
       return /^(?:task\.)?(?:tags?|status|open|isopen|done|isdone|completed|complete)\b/i.test(expr)
-        || /^(?:(?:tps|kanban)\.)?(?:itemtype|itemkind|kind)\s*(?:==|=|is|equals?)\s*["']?(?:task|tasks)["']?$/i.test(expr)
+        || /^(?:(?:tps|kanban)\.)?(?:itemtype|itemkind|kind)\s*(?:==|=|is|equals?)\s*/i.test(expr)
         || this.isSharedTaskValueFilterExpression(expr);
     }
     if (typeof node !== 'object') return false;
     const record = node as Record<string, unknown>;
     const propRaw = this.readFilterObjectProperty(record).toLowerCase();
-    if (isBareSemanticKindFilter(propRaw, this.readFilterObjectValues(record))) return false;
     const normalizedProp = this.normalizeInlinePropertyKey(propRaw.replace(/^(?:task|tps|kanban)\./i, ''));
     if (propRaw.startsWith('task.') && !['path', 'file', 'filepath', 'fileextension', 'fileext'].includes(normalizedProp)) return true;
     if (['itemtype', 'itemkind', 'kind', 'tags', 'tag', 'status', 'open', 'isopen', 'done', 'isdone', 'completed', 'complete'].includes(normalizedProp)) return true;
@@ -3443,7 +3124,6 @@ export class TpsListView extends BasesView {
     if (!prop) return false;
     const lower = prop.toLowerCase();
     if (lower.startsWith('note.') || lower.startsWith('file.')) return false;
-    if (parseBareSemanticKindExpression(expr)) return false;
     const normalized = this.normalizeInlinePropertyKey(lower.replace(/^(?:task|tps|kanban)\./i, ''));
     return !['path', 'file', 'filepath', 'fileextension', 'fileext', 'extension', 'ext'].includes(normalized);
   }
@@ -3502,6 +3182,9 @@ export class TpsListView extends BasesView {
   private taskMatchesSearchQuery(file: TFile, task: OpenTaskSubitem, query: string): boolean {
     const normalizedQuery = String(query || '').trim().toLowerCase();
     if (!normalizedQuery) return true;
+    const formulaValues = Object.values(this.getTaskFormulaSession(file, task).getAll())
+      .filter((result) => result.status === 'value')
+      .map((result) => formatTpsFormulaValue(result.value));
     const haystack = [
       file.basename,
       file.name,
@@ -3510,6 +3193,7 @@ export class TpsListView extends BasesView {
       task.displayText,
       task.checkboxState,
       ...(task.inlineFields ?? []).flatMap((field) => [field.key, field.value]),
+      ...formulaValues,
     ]
       .map((value) => String(value ?? '').toLowerCase())
       .join('\n');
@@ -3688,7 +3372,7 @@ export class TpsListView extends BasesView {
   private taskMatchesStructuredBaseFilters(task: OpenTaskSubitem, file: TFile | null = null): boolean | null {
     let hasStructuredTaskFilter = false;
     for (const root of this.getBaseFilterRoots()) {
-      const result = this.evaluateTaskFilterNode(root, task, file);
+      const result = this.evaluateTaskFilterRootFailClosed(root, task, file);
       if (result == null) continue;
       hasStructuredTaskFilter = true;
       if (!result) return false;
@@ -3696,20 +3380,30 @@ export class TpsListView extends BasesView {
     return hasStructuredTaskFilter ? true : null;
   }
 
+  private evaluateTaskFilterRootFailClosed(
+    node: unknown,
+    task: OpenTaskSubitem,
+    file: TFile | null = null,
+  ): boolean | null {
+    const failureSequence = this.formulaFilterFailureSequence ?? 0;
+    const result = this.evaluateTaskFilterNode(node, task, file);
+    return (this.formulaFilterFailureSequence ?? 0) === failureSequence ? result : false;
+  }
+
   private evaluateTaskFilterNode(node: unknown, task: OpenTaskSubitem, file: TFile | null = null): boolean | null {
     if (!node) return null;
     if (typeof node === 'string') return this.evaluateTaskFilterString(node, task, file);
-    if (Array.isArray(node)) return this.combineTaskFilterResults(node.map((child) => this.evaluateTaskFilterNode(child, task, file)), 'and');
+    if (Array.isArray(node)) return evaluateOrderedFilterChildren(node, 'and', (child) => this.evaluateTaskFilterNode(child, task, file));
     if (typeof node !== 'object') return null;
 
     const record = node as Record<string, unknown>;
     if (Object.prototype.hasOwnProperty.call(record, 'and') || Object.prototype.hasOwnProperty.call(record, 'all')) {
       const children = Object.prototype.hasOwnProperty.call(record, 'and') ? record.and : record.all;
-      return this.combineTaskFilterResults(this.asArray(children).map((child) => this.evaluateTaskFilterNode(child, task, file)), 'and');
+      return evaluateOrderedFilterChildren(this.asArray(children), 'and', (child) => this.evaluateTaskFilterNode(child, task, file));
     }
     if (Object.prototype.hasOwnProperty.call(record, 'or') || Object.prototype.hasOwnProperty.call(record, 'any')) {
       const children = Object.prototype.hasOwnProperty.call(record, 'or') ? record.or : record.any;
-      return this.combineTaskFilterResults(this.asArray(children).map((child) => this.evaluateTaskFilterNode(child, task, file)), 'or');
+      return evaluateOrderedFilterChildren(this.asArray(children), 'or', (child) => this.evaluateTaskFilterNode(child, task, file));
     }
     if (Object.prototype.hasOwnProperty.call(record, 'not')) {
       const result = this.evaluateTaskFilterNode(record.not, task, file);
@@ -3719,13 +3413,8 @@ export class TpsListView extends BasesView {
     return this.evaluateTaskFilterObject(record, task, file);
   }
 
-  private combineTaskFilterResults(results: Array<boolean | null>, mode: 'and' | 'or'): boolean | null {
-    return combineFilterTreeResults(results, mode);
-  }
-
   private evaluateTaskFilterString(rawExpr: string, task: OpenTaskSubitem, file: TFile | null = null): boolean | null {
     const raw = String(rawExpr || '').trim();
-    if (parseBareSemanticKindExpression(raw)) return false;
     const isNegated = raw.startsWith('!');
     const expr = (isNegated ? raw.slice(1) : raw).trim();
     const result = this.evaluatePositiveTaskFilterString(expr, task, file);
@@ -3733,14 +3422,29 @@ export class TpsListView extends BasesView {
   }
 
   private evaluatePositiveTaskFilterString(expr: string, task: OpenTaskSubitem, file: TFile | null = null): boolean | null {
-    if (parseBareSemanticKindExpression(expr)) return false;
     if (/^note\.kind\b/i.test(expr)) return false;
-    const kindMatch = expr.match(/^(?:(?:tps|kanban)\.)?(?:itemtype|itemkind|kind)\s*(?:==|=|is|equals?)\s*["']?([a-z0-9-]+)["']?$/i);
-    if (kindMatch?.[1]) {
-      const value = kindMatch[1].toLowerCase();
-      if (matchesTpsListStructuralKind(value, task.itemKind || 'task', task.headingLevel)) return true;
-      if (value.startsWith('note')) return null;
-      return value === 'all' || value === 'mixed';
+    if (hasTpsFormulaReference(expr)) {
+      if (!(file instanceof TFile)) {
+        this.markFormulaFilterFailure();
+        return null;
+      }
+      const result = this.getTaskFormulaSession(file, task).evaluateExpression(expr, '$filter');
+      if (result.status === 'error' || result.status === 'unsupported') {
+        this.reportFormulaFailure(result, file, task);
+        return null;
+      }
+      return isTpsFormulaTruthy(result.value);
+    }
+    const kindMatch = expr.match(/^(?:(?:tps|kanban)\.)?(itemtype|itemkind|kind)\s*(==|=|!=|!==|is|equals?)\s*["']?([^"']+?)["']?$/i);
+    if (kindMatch?.[1] && kindMatch[3]) {
+      const property = kindMatch[1].toLowerCase();
+      const value = kindMatch[3].trim().toLowerCase();
+      const matched = property === 'kind'
+        ? this.taskMatchesAdditiveKind(task, value)
+        : matchesTpsListStructuralKind(value, task.itemKind || 'task', task.headingLevel)
+          || value === 'all'
+          || value === 'mixed';
+      return kindMatch[2].startsWith('!') ? !matched : matched;
     }
 
     const headingWorkflowMatch = expr.match(
@@ -3773,7 +3477,7 @@ export class TpsListView extends BasesView {
     if (tagsResult != null) return tagsResult;
     const fileResult = this.evaluateTaskFileFilterExpression(expr, file);
     if (fileResult != null) return fileResult;
-    return this.evaluateGenericTaskValueFilterExpression(expr, task);
+    return this.evaluateGenericTaskValueFilterExpression(expr, task, file);
   }
 
   private evaluateTaskValueFilterExpression(expr: string, propName: 'status' | 'tags', rawValues: string[], requireTaskPrefix = false): boolean | null {
@@ -3809,11 +3513,11 @@ export class TpsListView extends BasesView {
     return null;
   }
 
-  private evaluateGenericTaskValueFilterExpression(expr: string, task: OpenTaskSubitem): boolean | null {
+  private evaluateGenericTaskValueFilterExpression(expr: string, task: OpenTaskSubitem, file: TFile | null = null): boolean | null {
     const callMatch = expr.match(/^([\w.\s-]+)\.(contains|containsAny|equals)\((.*)\)$/i);
     if (callMatch?.[1]) {
-      const values = this.getGenericTaskComparableValues(task, callMatch[1].trim());
-      if (values == null) return false;
+      const values = this.getGenericTaskComparableValues(task, callMatch[1].trim(), file);
+      if (values == null) return /^formula\./iu.test(callMatch[1].trim()) ? null : false;
       const tokens = this.extractFilterTokens(callMatch[3] || '').map((value) => value.toLowerCase());
       if (callMatch[2].toLowerCase().includes('contains')) {
         return tokens.some((token) => this.taskValuesContain(callMatch[1].trim(), values, token));
@@ -3823,16 +3527,16 @@ export class TpsListView extends BasesView {
 
     const emptyMatch = expr.match(/^([\w.\s-]+)\.(isEmpty|empty|exists|isNotEmpty)\(\)$/i);
     if (emptyMatch?.[1]) {
-      const values = this.getGenericTaskComparableValues(task, emptyMatch[1].trim());
-      if (values == null) return false;
+      const values = this.getGenericTaskComparableValues(task, emptyMatch[1].trim(), file);
+      if (values == null) return /^formula\./iu.test(emptyMatch[1].trim()) ? null : false;
       const op = emptyMatch[2].toLowerCase();
       return op.includes('empty') && !op.includes('not') ? values.length === 0 : values.length > 0;
     }
 
     const wordOperatorMatch = expr.match(/^([\w.\s-]+)\s+(contains|has|is not empty|is empty|isNotEmpty|exists|empty|is|equals?)\s*(.*)$/i);
     if (wordOperatorMatch?.[1]) {
-      const values = this.getGenericTaskComparableValues(task, wordOperatorMatch[1].trim());
-      if (values == null) return false;
+      const values = this.getGenericTaskComparableValues(task, wordOperatorMatch[1].trim(), file);
+      if (values == null) return /^formula\./iu.test(wordOperatorMatch[1].trim()) ? null : false;
       const op = wordOperatorMatch[2].trim().toLowerCase().replace(/\s+/g, '');
       if (op === 'isempty' || op === 'empty') return values.length === 0;
       if (op === 'isnotempty' || op === 'exists') return values.length > 0;
@@ -3841,23 +3545,43 @@ export class TpsListView extends BasesView {
       return tokens.some((token) => this.taskValuesMatch(wordOperatorMatch[1].trim(), values, token));
     }
 
-    const comparisonMatch = expr.match(/^([\w.\s-]+)\s*(==|=|!=|!==|is|equals?)\s*["']?([^"']+)["']?$/i);
+    const comparisonMatch = expr.match(/^([\w.\s-]+)\s*(==|=|!=|!==|>=|<=|>|<|is|equals?)\s*["']?([^"']+)["']?$/i);
     if (comparisonMatch?.[1]) {
-      const values = this.getGenericTaskComparableValues(task, comparisonMatch[1].trim());
-      if (values == null) return false;
+      const values = this.getGenericTaskComparableValues(task, comparisonMatch[1].trim(), file);
+      if (values == null) return /^formula\./iu.test(comparisonMatch[1].trim()) ? null : false;
       const token = this.resolveBaseContextToken(comparisonMatch[3]) || comparisonMatch[3];
-      const matched = this.taskValuesMatch(comparisonMatch[1].trim(), values, token);
       const op = String(comparisonMatch[2] || '').toLowerCase();
+      if (['>', '>=', '<', '<='].includes(op)) {
+        return values.some((value) => {
+          const comparison = this.compareTaskFilterValues(value, token);
+          return op === '>' ? comparison > 0 : op === '>=' ? comparison >= 0 : op === '<' ? comparison < 0 : comparison <= 0;
+        });
+      }
+      const matched = this.taskValuesMatch(comparisonMatch[1].trim(), values, token);
       return op.startsWith('!') ? !matched : matched;
     }
 
     return null;
   }
 
-  private getGenericTaskComparableValues(task: OpenTaskSubitem, propRaw: string): string[] | null {
+  private getGenericTaskComparableValues(task: OpenTaskSubitem, propRaw: string, file: TFile | null = null): string[] | null {
     const raw = String(propRaw || '').trim();
     const lower = raw.toLowerCase();
     if (!raw || lower.startsWith('note.') || lower.startsWith('file.')) return null;
+    if (lower.startsWith('formula.')) {
+      if (!(file instanceof TFile)) {
+        this.markFormulaFilterFailure();
+        return null;
+      }
+      const result = this.getTaskFormulaSession(file, task).get(raw);
+      if (result.status === 'error' || result.status === 'unsupported') {
+        this.reportFormulaFailure(result, file, task);
+        return null;
+      }
+      return getTpsFormulaComparableValues(result.value)
+        .map((value) => formatTpsFormulaValue(value).trim().toLowerCase())
+        .filter(Boolean);
+    }
     const prop = raw.replace(/^(?:task|tps|kanban)\./i, '');
     const normalized = this.normalizeInlinePropertyKey(prop);
     if (['itemtype', 'itemkind', 'kind', 'open', 'isopen', 'done', 'isdone', 'completed', 'complete'].includes(normalized)) return null;
@@ -3879,6 +3603,15 @@ export class TpsListView extends BasesView {
       return this.getTaskInlineValues(task, 'tags').map((tag) => tag.toLowerCase());
     }
     return this.getTaskInlineValues(task, normalized).map((value) => value.toLowerCase());
+  }
+
+  private compareTaskFilterValues(left: unknown, right: unknown): number {
+    const leftNumber = Number(left);
+    const rightNumber = Number(right);
+    if (String(left ?? '').trim() && String(right ?? '').trim() && Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+      return leftNumber === rightNumber ? 0 : leftNumber < rightNumber ? -1 : 1;
+    }
+    return String(left ?? '').trim().toLowerCase().localeCompare(String(right ?? '').trim().toLowerCase());
   }
 
   private evaluateTaskFileFilterExpression(expr: string, file: TFile | null): boolean | null {
@@ -4047,9 +3780,85 @@ export class TpsListView extends BasesView {
     return op === '!=' || op === '!==' || op === 'isnot' || op === 'not' || op === 'isnotempty';
   }
 
+  private evaluateFormulaFilterObject(
+    node: Record<string, unknown>,
+    session: TpsFormulaRowSession,
+    reportFailure: (result: TpsFormulaResult) => void,
+  ): boolean | null {
+    const property = this.readFilterObjectProperty(node);
+    const formulaResult = session.get(property);
+    if (formulaResult.status === 'error' || formulaResult.status === 'unsupported') {
+      reportFailure(formulaResult);
+      return null;
+    }
+    const rawExpected = node.values ?? node.value ?? node.expected ?? node.right ?? node.rhs ?? node.target;
+    const expected = this.asArray(rawExpected).map((value) => (
+      typeof value === 'string'
+        ? this.resolveBaseContextToken(value) || value.replace(/^(?:["'])(.*)(?:["'])$/u, '$1')
+        : value
+    ));
+    const values = getTpsFormulaComparableValues(formulaResult.value);
+    const operator = this.readFilterObjectOperator(node);
+    const normalizedOperator = operator.replace(/[\s_-]+/gu, '');
+    const positiveEquality = new Set(['', '=', '==', '===', 'is', 'equal', 'equals']);
+    const negativeEquality = new Set(['!=', '!==', 'isnot', 'not', 'notequal', 'notequals', 'doesnotequal']);
+    const positiveContains = new Set(['contains', 'containsany', 'has']);
+    const negativeContains = new Set(['!contains', 'notcontains', 'doesnotcontain']);
+    const positiveExists = new Set(['exists', 'isnotempty']);
+    const negativeExists = new Set(['!exists', 'notexists', 'doesnotexist']);
+    let matched: boolean | null;
+    if (this.isImplicitEmptyValueFilter(operator, expected.map(String)) || this.isEmptyFilterOperator(operator)) {
+      matched = values.length === 0;
+    } else if (this.isImplicitNotEmptyValueFilter(operator, expected.map(String)) || positiveExists.has(normalizedOperator)) {
+      matched = values.length > 0;
+    } else if (negativeExists.has(normalizedOperator)) {
+      matched = values.length === 0;
+    } else if (positiveContains.has(normalizedOperator) || negativeContains.has(normalizedOperator)) {
+      matched = expected.some((target) => values.some((current) => (
+        Array.isArray(formulaResult.value)
+          ? compareTpsFormulaValues(current, target) === 0
+          : formatTpsFormulaValue(current).toLocaleLowerCase().includes(formatTpsFormulaValue(target).toLocaleLowerCase())
+      )));
+      if (negativeContains.has(normalizedOperator)) matched = !matched;
+    } else if (['>', '>=', '<', '<='].includes(operator.trim())) {
+      matched = expected.some((target) => values.some((current) => {
+        const comparison = compareTpsFormulaValues(current, target);
+        return operator.trim() === '>'
+          ? comparison > 0
+          : operator.trim() === '>='
+            ? comparison >= 0
+            : operator.trim() === '<'
+              ? comparison < 0
+              : comparison <= 0;
+      }));
+    } else if (positiveEquality.has(normalizedOperator) || negativeEquality.has(normalizedOperator)) {
+      matched = expected.some((target) => values.some((current) => compareTpsFormulaValues(current, target) === 0));
+      if (negativeEquality.has(normalizedOperator)) matched = !matched;
+    } else {
+      reportFailure({
+        status: 'unsupported',
+        value: null,
+        formula: property.replace(/^formula\./iu, ''),
+        code: 'unsupported-formula-filter-operator',
+        message: `Unsupported formula filter operator: ${operator || '(empty)'}`,
+      });
+      return null;
+    }
+    return matched;
+  }
+
   private evaluateTaskFilterObject(node: Record<string, unknown>, task: OpenTaskSubitem, file: TFile | null = null): boolean | null {
     const propRaw = this.readFilterObjectProperty(node);
     if (!propRaw) return null;
+    if (/^formula\./iu.test(propRaw)) {
+      if (!(file instanceof TFile)) {
+        this.markFormulaFilterFailure();
+        return null;
+      }
+      return this.evaluateFormulaFilterObject(node, this.getTaskFormulaSession(file, task), (failure) => {
+        this.reportFormulaFailure(failure, file, task);
+      });
+    }
     const normalizedProp = this.normalizeInlinePropertyKey(propRaw.replace(/^task\./i, '').replace(/^tps\./i, ''));
     const operator = this.readFilterObjectOperator(node);
     const values = this.readFilterObjectValues(node).map((value) => this.resolveBaseContextToken(value) || value);
@@ -4057,13 +3866,14 @@ export class TpsListView extends BasesView {
     let result: boolean | null = null;
 
     if (propRaw.toLowerCase() === 'note.kind') return false;
-    if (isBareSemanticKindFilter(propRaw, values)) return false;
     if (['itemtype', 'itemkind', 'kind'].includes(normalizedProp)) {
       result = values.some((value) => {
         const normalized = value.toLowerCase();
-        if (matchesTpsListStructuralKind(normalized, task.itemKind || 'task', task.headingLevel)) return true;
-        if (normalized.startsWith('note')) return false;
-        return normalized === 'all' || normalized === 'mixed';
+        return normalizedProp === 'kind'
+          ? this.taskMatchesAdditiveKind(task, normalized)
+          : matchesTpsListStructuralKind(normalized, task.itemKind || 'task', task.headingLevel)
+            || normalized === 'all'
+            || normalized === 'mixed';
       });
     } else if (['open', 'isopen', 'done', 'isdone', 'completed', 'complete'].includes(normalizedProp)) {
       if (task.itemKind === 'heading') return false;
@@ -4145,7 +3955,7 @@ export class TpsListView extends BasesView {
         result = values.some((value) => this.taskValuesMatch(propRaw, currentValues, value));
       }
     } else {
-      const currentValues = this.getGenericTaskComparableValues(task, propRaw);
+      const currentValues = this.getGenericTaskComparableValues(task, propRaw, file);
       if (currentValues == null) {
         result = null;
       } else if (this.isImplicitEmptyValueFilter(operator, values)) {
@@ -4158,6 +3968,17 @@ export class TpsListView extends BasesView {
         result = currentValues.length > 0;
       } else if (this.isContainsFilterOperator(operator)) {
         result = values.some((value) => this.taskValuesContain(propRaw, currentValues, value));
+      } else if (['>', '>=', '<', '<='].includes(operator.trim())) {
+        result = values.some((value) => currentValues.some((current) => {
+          const comparison = this.compareTaskFilterValues(current, value);
+          return operator.trim() === '>'
+            ? comparison > 0
+            : operator.trim() === '>='
+              ? comparison >= 0
+              : operator.trim() === '<'
+                ? comparison < 0
+                : comparison <= 0;
+        }));
       } else {
         result = values.some((value) => this.taskValuesMatch(propRaw, currentValues, value));
       }
@@ -4208,6 +4029,18 @@ export class TpsListView extends BasesView {
     if (isSourceNoteGroupProperty(propId)) {
       const sourceNoteValue = getSourceNoteGroupValue(file, propId);
       return [getTpsBaseGroupLaneId(sourceNoteValue)];
+    }
+    if (/^formula\./iu.test(String(propId || '').trim())) {
+      if (!(file instanceof TFile)) return ['ungrouped'];
+      const result = this.getTaskFormulaSession(file, task).get(String(propId));
+      if (result.status === 'error' || result.status === 'unsupported') {
+        this.reportFormulaFailure(result, file, task);
+        return ['ungrouped'];
+      }
+      const values = this.extractGroupValues(result.value);
+      return values.length
+        ? Array.from(new Set(values.map((value) => `key:${value}`)))
+        : ['ungrouped'];
     }
     const normalized = this.normalizeInlinePropertyKey(this.getTaskInlinePropertyName(propName));
     if (this.isStatusPropertyName(propName)) {
@@ -4269,6 +4102,210 @@ export class TpsListView extends BasesView {
       }
     }
     return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
+  }
+
+  private getTaskExplicitKindValues(task: OpenTaskSubitem): string[] {
+    return Array.from(new Set(
+      this.getTaskInlineValues(task, 'kind')
+        .flatMap((value) => {
+          const parsed = parseStringListInput(value);
+          return parsed.length ? parsed : [value];
+        })
+        .map((value) => String(value || '').trim())
+        .filter(Boolean),
+    ));
+  }
+
+  private normalizeAdditiveKindIdentity(value: unknown): string {
+    const normalized = String(value ?? '').trim().toLowerCase();
+    if (normalized === 'tasks') return 'task';
+    if (normalized === 'bullets') return 'bullet';
+    if (normalized === 'notes') return 'note';
+    return normalized;
+  }
+
+  private taskMatchesAdditiveKind(task: OpenTaskSubitem, rawValue: unknown): boolean {
+    const value = String(rawValue ?? '').trim().toLowerCase();
+    if (!value) return false;
+    if (value === 'all' || value === 'mixed') return true;
+    if (matchesTpsListStructuralKind(value, task.itemKind || 'task', task.headingLevel)) return true;
+    return this.getTaskExplicitKindValues(task)
+      .some((candidate) => candidate.toLowerCase() === value);
+  }
+
+  private getTaskFormulaSession(file: TFile, task: OpenTaskSubitem): TpsFormulaRowSession {
+    const cached = this.taskFormulaSessions.get(task);
+    if (cached) return cached;
+    const session = tpsBaseFormulaService.createSession(
+      this.getActiveFormulaSet(),
+      this.createTaskFormulaContext(file, task),
+    );
+    this.taskFormulaSessions.set(task, session);
+    return session;
+  }
+
+  private createTaskFormulaContext(file: TFile, task: OpenTaskSubitem): TpsFormulaRecordContext {
+    const cache = this.app.metadataCache.getFileCache(file) as any;
+    const note = (cache?.frontmatter || {}) as Record<string, unknown>;
+    const fileContext = this.createFormulaFileContext(file);
+    const inline: Record<string, unknown> = {};
+    const inlineGroups = new Map<string, { aliases: Set<string>; values: string[] }>();
+    for (const field of task.inlineFields ?? []) {
+      const key = String(field.key || '').trim();
+      if (!key) continue;
+      const normalized = this.normalizeInlinePropertyKey(key);
+      if (!normalized) continue;
+      const group = inlineGroups.get(normalized) ?? { aliases: new Set<string>(), values: [] };
+      group.aliases.add(key);
+      // Blank is a real inline value. Formulas can distinguish it from a
+      // missing field with isEmpty()/isNull() instead of TPS dropping it.
+      group.values.push(String(field.value ?? '').trim());
+      inlineGroups.set(normalized, group);
+    }
+    for (const [normalized, group] of inlineGroups) {
+      const aggregate: unknown = group.values.length > 1 ? [...group.values] : group.values[0] ?? '';
+      inline[normalized] = aggregate;
+      for (const alias of group.aliases) inline[alias] = aggregate;
+    }
+    const itemKind = task.itemKind === 'heading'
+      ? `h${task.headingLevel || 1}`
+      : task.itemKind === 'bullet'
+        ? 'bullet'
+        : 'task';
+    const title = this.getTaskVisibleTitle(task);
+    const tags = Array.from(new Set([
+      ...readTaskLineTags(task.text),
+      ...this.getTaskInlineValues(task, 'tags'),
+    ].map((tag) => tag.startsWith('#') ? tag : `#${tag}`)));
+    const status = task.itemKind === 'task'
+      ? this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo'
+      : '';
+    const done = task.itemKind === 'task' && this.getDoneStatuses().has(status);
+    const explicitKinds = this.getTaskExplicitKindValues(task);
+    const kinds = Array.from(new Set(
+      [itemKind, ...explicitKinds]
+        .map((value) => this.normalizeAdditiveKindIdentity(value))
+        .filter(Boolean),
+    ));
+    const row: Record<string, unknown> = {
+      ...inline,
+      kind: itemKind,
+      itemKind,
+      itemType: itemKind,
+      explicitKind: explicitKinds.length > 1 ? explicitKinds : explicitKinds[0] ?? null,
+      kinds,
+      title,
+      text: title,
+      line: task.line,
+      lineNumber: task.line,
+      path: file.path,
+      tags,
+      ...(task.itemKind === 'task' ? {
+        checkboxState: task.checkboxState || '[ ]',
+        checkboxStatus: status,
+        open: !done,
+        isOpen: !done,
+        done,
+        completed: done,
+      } : {}),
+    };
+    const lineContext = {
+      ...row,
+      number: task.line,
+      raw: task.rawLine ?? task.text,
+      file: fileContext,
+    };
+    return {
+      row,
+      note,
+      file: fileContext,
+      thisValue: this.createFormulaThisValue(),
+      line: lineContext,
+      task: task.itemKind === 'task' ? {
+        ...row,
+        status,
+        checkboxState: task.checkboxState || '[ ]',
+        checkboxStatus: status,
+        open: !done,
+        isOpen: !done,
+        done,
+        completed: done,
+        tags,
+        file: fileContext,
+      } : null,
+      heading: task.itemKind === 'heading' ? {
+        ...row,
+        level: task.headingLevel || 1,
+        file: fileContext,
+      } : null,
+      now: this.formulaNow,
+    };
+  }
+
+  private createFormulaFileContext(file: TFile): TpsFormulaRecordContext['file'] {
+    const cacheKey = `${file.path}:${Number(file.stat?.mtime || 0)}`;
+    const contexts = this.formulaFileContexts ??= new Map<string, NonNullable<TpsFormulaRecordContext['file']>>();
+    const cachedContext = contexts.get(cacheKey);
+    if (cachedContext) return cachedContext;
+    const cache = this.app.metadataCache.getFileCache(file) as any;
+    const properties = (cache?.frontmatter || {}) as Record<string, unknown>;
+    const tags = parseTaskTagValues([
+      this.asArray(properties.tags),
+      this.asArray(cache?.tags).map((tag: any) => tag?.tag ?? tag),
+    ]);
+    const context: NonNullable<TpsFormulaRecordContext['file']> = {
+      path: file.path,
+      name: file.name,
+      basename: file.basename,
+      extension: file.extension,
+      folder: file.parent?.path || '',
+      size: Number(file.stat?.size || 0),
+      ctime: Number(file.stat?.ctime || 0),
+      mtime: Number(file.stat?.mtime || 0),
+      tags,
+      links: this.asArray(cache?.links).map((link: any) => link?.link ?? link),
+      properties,
+    };
+    contexts.set(cacheKey, context);
+    return context;
+  }
+
+  private createFormulaThisValue(): Record<string, unknown> | null {
+    if (this.formulaThisValue !== undefined) return this.formulaThisValue;
+    const contextFile = this.getBaseContextFile() ?? this.getBaseFile();
+    if (!(contextFile instanceof TFile)) {
+      this.formulaThisValue = null;
+      return null;
+    }
+    const frontmatter = (this.app.metadataCache.getFileCache(contextFile)?.frontmatter || {}) as Record<string, unknown>;
+    const scheduled = this.getBaseContextFrontmatterValue('scheduled');
+    this.formulaThisValue = {
+      ...frontmatter,
+      ...(scheduled ? { scheduled, date: scheduled } : {}),
+      file: this.createFormulaFileContext(contextFile),
+    };
+    return this.formulaThisValue;
+  }
+
+  private reportFormulaFailure(result: TpsFormulaResult, file: TFile, task?: OpenTaskSubitem): void {
+    this.markFormulaFilterFailure();
+    const key = `${this.getActiveFormulaSet().revision}:${result.formula}:${result.code || result.status}`;
+    this.formulaDiagnostics ??= new Set<string>();
+    if (this.formulaDiagnostics.has(key)) return;
+    this.formulaDiagnostics.add(key);
+    flowWarn('TpsListView', 'formula:evaluation-failed', {
+      base: this.getBaseSourcePath(),
+      viewName: this.getConfiguredBaseViewName(),
+      formula: result.formula,
+      code: result.code || result.status,
+      message: result.message || '',
+      samplePath: file.path,
+      sampleLine: task?.line ?? null,
+    });
+  }
+
+  private markFormulaFilterFailure(): void {
+    this.formulaFilterFailureSequence = (this.formulaFilterFailureSequence ?? 0) + 1;
   }
 
   private normalizeTaskTag(value: string): string {
@@ -5218,6 +5255,23 @@ export class TpsListView extends BasesView {
     return composeEffectiveFilterRoots(runtimeRoots, []);
   }
 
+  private getActiveFormulaSet(): TpsCompiledFormulaSet {
+    if (this.stampedFormulaSet) return this.stampedFormulaSet;
+    const baseFile = this.getBaseFile();
+    if (
+      baseFile
+      && this.baseFileFilterCache?.path === baseFile.path
+      && this.baseFileFilterCache.mtime === Number(baseFile.stat?.mtime || 0)
+    ) return this.baseFileFilterCache.formulaSet;
+    const contextFile = this.getBaseContextFile();
+    if (
+      contextFile
+      && this.embeddedBaseFilterCache?.path === contextFile.path
+      && this.embeddedBaseFilterCache.mtime === Number(contextFile.stat?.mtime || 0)
+    ) return this.embeddedBaseFilterCache.formulaSet;
+    return tpsBaseFormulaService.compile({}, 'tps-list:unresolved');
+  }
+
   private getRuntimeBaseFilterRoots(): unknown[] {
     return this.extractFilterRootCandidates([
       this.config?.get?.('filters'),
@@ -5263,11 +5317,20 @@ export class TpsListView extends BasesView {
   private getStampedBaseFilterRoots(): unknown[] | null {
     const host = this.containerEl?.closest('[data-tps-base-definition]') as HTMLElement | null;
     const serialized = host?.dataset.tpsBaseDefinition;
-    if (!serialized) return null;
+    if (!serialized) {
+      this.stampedFormulaSet = null;
+      return null;
+    }
     try {
       const parsed = JSON.parse(serialized) as Record<string, unknown>;
+      const source = this.getBaseSourcePath() || this.getBaseContextFile()?.path || 'embedded';
+      this.stampedFormulaSet = tpsBaseFormulaService.compile(
+        extractTpsBaseFormulaDefinitions(parsed),
+        `tps-list:stamped:${source}`,
+      );
       return this.extractBaseFileFilterRoots(parsed, this.getConfiguredBaseViewName()).filters;
     } catch (error) {
+      this.stampedFormulaSet = tpsBaseFormulaService.compile({}, 'tps-list:stamped-invalid');
       flowError('BaseFilters', 'stamped-definition-invalid', error, { viewName: this.getConfiguredBaseViewName() });
       return null;
     }
@@ -5312,7 +5375,10 @@ export class TpsListView extends BasesView {
         const content = await this.app.vault.cachedRead(file);
         const exactRoots: unknown[] = [];
         const fallbackRoots: unknown[] = [];
+        let exactFormulas: Record<string, string> = {};
+        let fallbackFormulas: Record<string, string> = {};
         const viewNames: string[] = [];
+        let exactBlockCount = 0;
         let fallbackBlockCount = 0;
         const blockPattern = /```base\s*\n([\s\S]*?)```/gi;
         let match: RegExpExecArray | null = null;
@@ -5321,7 +5387,14 @@ export class TpsListView extends BasesView {
             const parsed = parseYaml(match[1] || '') as Record<string, unknown> | null | undefined;
             const blockMatch = this.getEmbeddedKanbanBlockMatch(parsed, viewName);
             if (!blockMatch) continue;
-            if (blockMatch === 'fallback') fallbackBlockCount += 1;
+            const formulas = extractTpsBaseFormulaDefinitions(parsed);
+            if (blockMatch === 'fallback') {
+              fallbackBlockCount += 1;
+              if (fallbackBlockCount === 1) fallbackFormulas = formulas;
+            } else {
+              exactBlockCount += 1;
+              if (exactBlockCount === 1) exactFormulas = formulas;
+            }
             const extracted = this.extractBaseFileFilterRoots(parsed, viewName);
             viewNames.push(...extracted.viewNames);
             if (extracted.filters?.length) {
@@ -5332,9 +5405,11 @@ export class TpsListView extends BasesView {
             flowError('EmbeddedBaseFilters', 'parse-block-failed', error, { path: file.path, viewName });
           }
         }
-        const ambiguousFallback = exactRoots.length === 0 && fallbackBlockCount > 1;
-        const roots = exactRoots.length ? exactRoots : ambiguousFallback ? [] : fallbackRoots;
-        const currentViewName = viewName || (ambiguousFallback ? '' : viewNames[0] || '');
+        const ambiguousExact = exactBlockCount > 1;
+        const ambiguousFallback = exactBlockCount === 0 && fallbackBlockCount > 1;
+        const roots = exactBlockCount === 1 ? exactRoots : ambiguousExact || ambiguousFallback ? [] : fallbackRoots;
+        const formulas = exactBlockCount === 1 ? exactFormulas : ambiguousExact || ambiguousFallback ? {} : fallbackFormulas;
+        const currentViewName = viewName || (ambiguousExact || ambiguousFallback ? '' : viewNames[0] || '');
         if (this.embeddedBaseFiltersLoadingKey !== loadingKey) return;
         const previous = this.embeddedBaseFilterCache;
         this.embeddedBaseFilterCache = {
@@ -5343,11 +5418,14 @@ export class TpsListView extends BasesView {
           viewName: currentViewName,
           viewNames: Array.from(new Set(viewNames)),
           filters: roots.length ? roots : null,
+          formulas,
+          formulaSet: tpsBaseFormulaService.compile(formulas, `${file.path}:${mtime}:embedded:${currentViewName}`),
         };
-        if (ambiguousFallback) {
+        if (ambiguousExact || ambiguousFallback) {
           flowWarn('EmbeddedBaseFilters', 'ambiguous-fallback-skipped', {
             path: file.path,
             viewName,
+            exactBlocks: exactBlockCount,
             fallbackBlocks: fallbackBlockCount,
           });
         }
@@ -5356,6 +5434,7 @@ export class TpsListView extends BasesView {
             path: file.path,
             viewName: currentViewName,
             filterRoots: roots.length,
+            formulas: Object.keys(formulas).length,
           });
           this.refreshDebounced();
         }
@@ -5363,7 +5442,15 @@ export class TpsListView extends BasesView {
       } catch (error) {
         flowError('EmbeddedBaseFilters', 'read-failed', error, { path: file.path, viewName });
         if (this.embeddedBaseFiltersLoadingKey === loadingKey) {
-          this.embeddedBaseFilterCache = { path: file.path, mtime, viewName, viewNames: [], filters: null };
+          this.embeddedBaseFilterCache = {
+            path: file.path,
+            mtime,
+            viewName,
+            viewNames: [],
+            filters: null,
+            formulas: {},
+            formulaSet: tpsBaseFormulaService.compile({}, `${file.path}:${mtime}:embedded-read-error`),
+          };
         }
         return false;
       }
@@ -5534,6 +5621,8 @@ export class TpsListView extends BasesView {
       if (!propertyRaw) continue;
       const property = propertyRaw.toLowerCase();
       if (
+        property.startsWith('formula.') ||
+        property.startsWith('formula[') ||
         property.includes('file.') ||
         property.includes('path') ||
         property.includes('folder') ||
@@ -5752,9 +5841,18 @@ export class TpsListView extends BasesView {
       excludeTags: new Set<string>(),
     };
     for (const root of roots) {
+      if (hasTpsFormulaReference(root)) {
+        filter.hasTaskDirective = true;
+        filter.includeBullets = true;
+        filter.includeHeadings = true;
+      }
       if (this.hasTaskDirectiveInFilterNode(root)) filter.hasTaskDirective = true;
       if (filterTreeIncludesStructuralKind(root, 'bullet')) filter.includeBullets = true;
       if (filterTreeIncludesStructuralKind(root, 'heading')) filter.includeHeadings = true;
+      if (this.filterTreeIncludesAdditiveKind(root)) {
+        filter.includeBullets = true;
+        filter.includeHeadings = true;
+      }
       this.collectTaskRootFilterNode(root, filter);
     }
     // A task-aware Base query owns completion visibility. Feed every task status
@@ -5769,12 +5867,24 @@ export class TpsListView extends BasesView {
     return filter;
   }
 
+  private filterTreeIncludesAdditiveKind(node: unknown): boolean {
+    if (!node) return false;
+    if (Array.isArray(node)) return node.some((child) => this.filterTreeIncludesAdditiveKind(child));
+    if (typeof node === 'string') {
+      return /^(?:!+\s*)?(?:(?:tps|kanban)\.)?kind\s*(?:==|=|!=|!==|is|equals?)\s*/iu.test(node.trim());
+    }
+    if (typeof node !== 'object') return false;
+    const record = node as Record<string, unknown>;
+    const property = String(record.property ?? record.field ?? record.key ?? '').trim().toLowerCase();
+    if (/^(?:(?:tps|kanban)\.)?kind$/u.test(property)) return true;
+    return Object.values(record).some((value) => this.filterTreeIncludesAdditiveKind(value));
+  }
+
   private hasTaskDirectiveInFilterNode(node: unknown): boolean {
     if (!node) return false;
     if (Array.isArray(node)) return node.some((child) => this.hasTaskDirectiveInFilterNode(child));
     if (typeof node === 'string') {
       const expr = node.trim().replace(/^!+\s*/u, '');
-      if (parseBareSemanticKindExpression(expr)) return false;
       return /^(?:(?:tps|kanban)\.)?(?:itemtype|itemkind|kind)\b/i.test(expr)
         || /^(?:task\.)?(?:status|tags?|open|isopen|done|isdone|completed|complete)\b/i.test(expr)
         || /^task\.(?:path|file|file\.path|file\.extension|file\.ext)\b/i.test(expr)
@@ -5785,7 +5895,6 @@ export class TpsListView extends BasesView {
     const propRaw = String(record.property ?? record.field ?? '').trim();
     const normalizedProp = this.normalizeInlinePropertyKey(propRaw.replace(/^(?:task|tps|kanban)\./i, ''));
     const propLower = propRaw.toLowerCase();
-    if (isBareSemanticKindFilter(propRaw, this.readFilterObjectValues(record))) return false;
     if (propLower.startsWith('task.')
       || ['itemtype', 'itemkind', 'kind', 'tag', 'tags', 'status', 'checkboxstatus', 'open', 'isopen', 'done', 'isdone', 'completed', 'complete'].includes(normalizedProp)
       || (propRaw && !propLower.startsWith('note.') && !propLower.startsWith('file.') && !['path', 'file', 'filepath', 'fileextension', 'fileext'].includes(normalizedProp))) return true;
@@ -5825,15 +5934,19 @@ export class TpsListView extends BasesView {
     const lower = expr.toLowerCase();
 
     if (parseBareSemanticKindExpression(expr)) {
-      filter.mode = 'notes';
+      filter.hasTaskDirective = true;
+      filter.mode = 'mixed';
       return;
     }
 
-    const kindMatch = lower.match(/^(?:(?:tps|kanban)\.)?(?:itemtype|itemkind|kind)\s*(?:==|=)\s*["']?(task|tasks|bullet|bullets|note|notes|all|mixed)["']?$/i);
-    if (kindMatch?.[1]) {
-      const value = kindMatch[1].toLowerCase();
+    const kindMatch = lower.match(/^(?:(?:tps|kanban)\.)?(itemtype|itemkind|kind)\s*(?:==|=)\s*["']?([^"']+?)["']?$/i);
+    if (kindMatch?.[1] && kindMatch[2]) {
+      const property = kindMatch[1].toLowerCase();
+      const value = kindMatch[2].trim().toLowerCase();
       filter.hasTaskDirective = true;
-      filter.mode = value.startsWith('task') ? 'tasks' : value.startsWith('bullet') ? 'bullets' : value.startsWith('note') ? 'notes' : 'mixed';
+      filter.mode = property === 'kind'
+        ? 'mixed'
+        : value.startsWith('task') ? 'tasks' : value.startsWith('bullet') ? 'bullets' : value.startsWith('note') ? 'notes' : 'mixed';
     }
 
     if (/^(?:task\.)?(?:open|isopen)\s*(?:==|=)\s*(true|1)$/i.test(expr)) {
@@ -5924,7 +6037,8 @@ export class TpsListView extends BasesView {
     const isNegated = parentNegated || operator.startsWith('!') || operator.includes('not') || operator === '!=' || operator === '!==';
 
     if (isBareSemanticKindFilter(propRaw, values)) {
-      filter.mode = 'notes';
+      filter.hasTaskDirective = true;
+      filter.mode = 'mixed';
       return;
     }
 
@@ -5933,7 +6047,9 @@ export class TpsListView extends BasesView {
         const value = String(raw || '').trim().toLowerCase();
         if (!value) continue;
         filter.hasTaskDirective = true;
-        filter.mode = value.startsWith('task') ? 'tasks' : value.startsWith('bullet') ? 'bullets' : value.startsWith('note') ? 'notes' : 'mixed';
+        filter.mode = normalizedProp === 'kind'
+          ? 'mixed'
+          : value.startsWith('task') ? 'tasks' : value.startsWith('bullet') ? 'bullets' : value.startsWith('note') ? 'notes' : 'mixed';
       }
       return;
     }
@@ -6299,6 +6415,30 @@ export class TpsListView extends BasesView {
   }
 
   private getTaskPropertyValue(file: TFile, task: OpenTaskSubitem, propId: string, hidden: Set<string>): TpsTaskPropertyDisplay | null {
+    if (/^formula\./iu.test(String(propId || '').trim())) {
+      const result = this.getTaskFormulaSession(file, task).get(propId);
+      if (result.status === 'error' || result.status === 'unsupported') {
+        this.reportFormulaFailure(result, file, task);
+        return {
+          text: '⚠ Formula',
+          title: result.message || result.code || 'Formula evaluation failed',
+          kind: 'formula-error',
+          editable: false,
+        };
+      }
+      const presentation = getReadOnlyBooleanFormulaPresentation(result.value);
+      if (presentation) {
+        return {
+          text: presentation.text,
+          title: `${propId}: ${presentation.text}`,
+          kind: 'checkbox',
+          editable: false,
+          rawValue: result.value,
+        };
+      }
+      const text = formatTpsFormulaValue(result.value);
+      return text ? { text, title: text, kind: 'formula', editable: false } : null;
+    }
     const normalized = this.normalizeTaskPropertyId(propId);
     if (!normalized || hidden.has(normalized)) return null;
     const workflowStatusReference = this.isStatusPropertyName(propId);
@@ -6336,7 +6476,7 @@ export class TpsListView extends BasesView {
     }
 
     if (normalized === 'line') {
-      return { text: String(task.line + 1), title: `${file.path}:${task.line + 1}`, kind: 'line', editable: false };
+      return { text: String(task.line), title: `${file.path}:${task.line}`, kind: 'line', editable: false };
     }
 
     if (normalized === 'tag' || normalized === 'tags') {
@@ -6363,6 +6503,18 @@ export class TpsListView extends BasesView {
       if (!value) return null;
       const configuredProperty = configuredForProperty
         || this.getConfiguredCustomProperty(field.key);
+      if (isBooleanPropertyType(configuredProperty?.type)) {
+        const booleanValue: unknown = value === 'true' ? true : value === 'false' ? false : value;
+        const presentation = getBooleanPropertyPresentation(booleanValue);
+        return {
+          text: presentation.text,
+          title: `${configuredProperty?.label || field.key}: ${presentation.text}`,
+          kind: 'checkbox',
+          editable: true,
+          propName: configuredProperty?.key || field.key,
+          rawValue: booleanValue,
+        };
+      }
       const entityReference = isEntityReferenceProperty(configuredProperty);
       const text = entityReference
         ? this.formatEntityPropertyValue(value, configuredProperty!)
@@ -6493,22 +6645,6 @@ export class TpsListView extends BasesView {
     }
 
     const taskLine = this.buildRootTaskLine(title, propName, targetSelection.value, effectiveTaskFilter, itemKind, defaults);
-    const creationFilterMatch = this.lineMatchesCreationFilters(taskLine, targetFile, effectiveFilterRoots);
-    if (creationFilterMatch === false) {
-      flowWarn('CreateRootTask', 'blocked', {
-        reason: 'prospective-line-does-not-match-filters',
-        path: targetFile.path,
-        itemKind,
-      });
-      new Notice('TPS List did not create the item because the resulting line would not match this view.');
-      return;
-    }
-    if (creationFilterMatch == null) {
-      flowWarn('CreateRootTask', 'filter-validation-partial', {
-        path: targetFile.path,
-        itemKind,
-      });
-    }
     flow('CreateRootTask', 'write', {
       path: targetFile.path,
       lane: displayLane.label,
@@ -6520,7 +6656,47 @@ export class TpsListView extends BasesView {
       inlineKeys: Array.from(defaults.inlineFields?.keys?.() || []),
       openAfterCreate: this.plugin.settings.openTaskDestinationAfterCreate !== false,
     });
-    await this.app.vault.process(targetFile, (content) => this.insertLineAfterFrontmatter(content, taskLine));
+    this.formulaNow = new Date();
+    this.taskFormulaSessions = new WeakMap<OpenTaskSubitem, TpsFormulaRowSession>();
+    let blockedReason: 'mismatch' | 'formula-unresolved' | null = null;
+    await this.app.vault.process(targetFile, (content) => {
+      const nextLineNumber = this.getAppendedLineNumber(content);
+      const creationFilterMatch = this.lineMatchesCreationFilters(
+        taskLine,
+        targetFile,
+        effectiveFilterRoots,
+        nextLineNumber,
+      );
+      if (creationFilterMatch === false) {
+        blockedReason = 'mismatch';
+        return content;
+      }
+      if (creationFilterMatch == null && hasTpsFormulaReference(effectiveFilterRoots)) {
+        blockedReason = 'formula-unresolved';
+        return content;
+      }
+      if (creationFilterMatch == null) {
+        flowWarn('CreateRootTask', 'filter-validation-partial', {
+          path: targetFile.path,
+          itemKind,
+          nextLineNumber,
+        });
+      }
+      return this.insertLineAfterFrontmatter(content, taskLine);
+    });
+    if (blockedReason) {
+      flowWarn('CreateRootTask', 'blocked', {
+        reason: blockedReason === 'mismatch'
+          ? 'prospective-line-does-not-match-filters'
+          : 'formula-filter-unresolved',
+        path: targetFile.path,
+        itemKind,
+      });
+      new Notice(blockedReason === 'mismatch'
+        ? 'TPS List did not create the item because the resulting line would not match this view.'
+        : 'TPS List did not create the item because its formula filter could not be evaluated reliably.');
+      return;
+    }
 
     this.clearTaskCachesForPath(targetFile.path);
     emitFilesUpdated(this.app, [targetFile.path], 'tps-list');
@@ -6551,7 +6727,7 @@ export class TpsListView extends BasesView {
     });
   }
 
-  private lineMatchesCreationFilters(line: string, file: TFile, roots: unknown[]): boolean | null {
+  private lineMatchesCreationFilters(line: string, file: TFile, roots: unknown[], oneBasedLineNumber: number): boolean | null {
     const parsed = parseTpsListHeadingLine(line) ?? this.parseLineItem(line, true);
     if (!parsed) return false;
     const checkboxState = parsed.itemKind === 'heading' ? undefined : parsed.checkboxState;
@@ -6561,17 +6737,20 @@ export class TpsListView extends BasesView {
       itemKind: parsed.itemKind,
       ...(parsed.itemKind === 'heading' ? { headingLevel: parsed.headingLevel } : {}),
       internalId: `${file.path}:creation-preview`,
-      line: 1,
+      line: oneBasedLineNumber,
       indent: 0,
       checkboxState,
       text,
       displayText: this.cleanTaskDisplayText(this.stripTaskInlineFields(text)),
       inlineFields,
     };
-    return combineFilterTreeResults(
-      roots.map((root) => this.evaluateTaskFilterNode(root, task, file)),
+    const failureSequence = this.formulaFilterFailureSequence ?? 0;
+    const result = evaluateOrderedFilterChildren(
+      roots,
       'and',
+      (root) => this.evaluateTaskFilterNode(root, task, file),
     );
+    return (this.formulaFilterFailureSequence ?? 0) === failureSequence ? result : null;
   }
 
   private getRootTaskCreationDefaults(
@@ -6770,6 +6949,7 @@ export class TpsListView extends BasesView {
 
   private inferTaskCreationDefaultsFromString(rawExpr: string): TaskCreationDefaults | null {
     const raw = String(rawExpr || '').trim();
+    if (hasTpsFormulaReference(raw)) return null;
     if (parseBareSemanticKindExpression(raw)) {
       return { mode: 'notes', inlineFields: new Map(), tags: new Set(), excludedStatuses: new Set(), excludedTags: new Set() };
     }
@@ -6867,6 +7047,7 @@ export class TpsListView extends BasesView {
   private inferTaskCreationDefaultsFromObject(node: Record<string, unknown>): TaskCreationDefaults | null {
     const propRaw = String(node.property ?? node.field ?? '').trim();
     if (!propRaw) return null;
+    if (/^formula(?:\.|\[)/iu.test(propRaw)) return null;
     const normalizedProp = this.normalizeInlinePropertyKey(propRaw.replace(/^task\./i, '').replace(/^tps\./i, ''));
     const operator = String(node.operator ?? node.op ?? '').trim().toLowerCase();
     const values = this.asArray(node.values ?? node.value).map((value) => String(value || '').trim()).filter(Boolean);
@@ -6945,6 +7126,11 @@ export class TpsListView extends BasesView {
     if (!normalizedLine) return content;
     const normalizedContent = String(content || '').replace(/\s+$/g, '');
     return normalizedContent ? `${normalizedContent}\n${normalizedLine}\n` : `${normalizedLine}\n`;
+  }
+
+  private getAppendedLineNumber(content: string): number {
+    const normalizedContent = String(content || '').replace(/\s+$/gu, '');
+    return normalizedContent ? normalizedContent.split('\n').length + 1 : 1;
   }
 
   private async resolveRootTaskTargetFile(defaults = this.getRootTaskCreationDefaults(this.getTaskRootFilterFromBaseFilters())): Promise<TFile | null> {
@@ -7030,6 +7216,12 @@ export class TpsListView extends BasesView {
   private render(preserveScroll = true): void {
     this.renderGeneration += 1;
     if (!this.shouldRenderView()) return;
+    this.taskFormulaSessions = new WeakMap<OpenTaskSubitem, TpsFormulaRowSession>();
+    this.formulaFileContexts?.clear();
+    this.formulaThisValue = undefined;
+    this.formulaDiagnostics.clear();
+    this.formulaNow = new Date();
+    this.getBaseFilterRoots();
     const scrollState = preserveScroll ? this.captureRenderScrollState() : null;
     this.applyLayoutSettings();
     this.ensureContainer();
@@ -7179,7 +7371,10 @@ export class TpsListView extends BasesView {
       if (groupLabel) {
         group.createDiv({ cls: 'tps-list-native-group-label', text: groupLabel });
       }
-      const rows = group.createEl('ul', { cls: 'tps-list-native-rows' });
+      const rows = group.createEl('ul', {
+        cls: 'tps-list-native-rows',
+        attr: { role: 'list' },
+      });
       const rowItems = this.getSortedListRows(noteItems, taskItems);
       for (const { row: rowItem, depth } of rowItems) {
         if (rowItem.kind === 'note') {
@@ -7254,12 +7449,26 @@ export class TpsListView extends BasesView {
   }
 
   private getListSortValue(row: TpsListRowItem, propId: string): string {
-    if (row.kind === 'note') return this.sortValue(row.item.entry, propId);
+    if (row.kind === 'note') {
+      if (/^formula\./iu.test(String(propId || '').trim())) {
+        const raw = this.getEntryValue(row.item.entry, propId);
+        return getTpsFormulaSortKey(raw);
+      }
+      return this.sortValue(row.item.entry, propId);
+    }
     return this.getTaskSortValue(row.item, propId);
   }
 
   private getTaskSortValue(item: TaskRenderItem, propId: string): string {
     const raw = String(propId || '').trim();
+    if (/^formula\./iu.test(raw)) {
+      const result = this.getTaskFormulaSession(item.file, item.task).get(raw);
+      if (result.status === 'error' || result.status === 'unsupported') {
+        this.reportFormulaFailure(result, item.file, item.task);
+        return '';
+      }
+      return getTpsFormulaSortKey(result.value);
+    }
     const lower = raw.toLowerCase();
     const normalized = this.normalizeTaskPropertyId(raw);
     if (lower === 'file.path' || lower === 'path' || lower === 'task.path' || normalized === 'filepath') return item.file.path.toLowerCase();
@@ -7319,7 +7528,14 @@ export class TpsListView extends BasesView {
     if (this.selectedRowIds.has(selectionId)) row.addClass('tps-list-native-row--selected');
     if (this.activeNotePath && entry.file.path === this.activeNotePath) row.addClass('tps-list-native-row--open-note');
 
-    const link = row.createEl('a', {
+    const marker = row.createSpan({
+      cls: 'tps-list-native-leading tps-list-native-file-marker',
+      attr: { 'aria-hidden': 'true' },
+    });
+    setIconWithFallback(marker, 'file-text');
+    const body = row.createDiv({ cls: 'tps-list-native-row-body' });
+
+    const link = body.createEl('a', {
       text: entry.file.basename,
       cls: 'tps-list-native-title internal-link',
       attr: {
@@ -7339,7 +7555,7 @@ export class TpsListView extends BasesView {
       void this.openOrFocusFile(entry.file);
     });
     row.addEventListener('contextmenu', (event: MouseEvent) => this.openListNoteContextMenu(event, entry, row));
-    this.renderListNoteProperties(row, entry, selectedProps);
+    this.renderListNoteProperties(body, entry, selectedProps);
   }
 
   private openListNoteContextMenu(event: MouseEvent, entry: BasesEntry, row: HTMLElement): void {
@@ -7368,6 +7584,39 @@ export class TpsListView extends BasesView {
       const configuredProperty = this.getConfiguredCustomProperty(propId);
       const entityReference = isEntityReferenceProperty(configuredProperty);
       const editable = this.isWritableNotePropertyId(propId);
+      const formulaBoolean = /^formula\./iu.test(String(propId || '').trim())
+        ? getReadOnlyBooleanFormulaPresentation(rawValue)
+        : null;
+      if (formulaBoolean) {
+        this.renderListReadOnlyBooleanProperty(parent, propId, rawValue);
+        continue;
+      }
+      if (editable && isBooleanPropertyType(configuredProperty?.type)) {
+        this.createListBooleanPropertyControl(
+          parent,
+          configuredProperty?.label || propName,
+          rawValue,
+          async (next) => {
+            try {
+              await this.processFrontmatter(entry.file, (fm) => {
+                const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, propName) || propName;
+                fm[actualKey] = next;
+              });
+              emitFilesUpdated(this.app, [entry.file.path], 'tps-list');
+              this.render(false);
+              return true;
+            } catch (error) {
+              flowError('ListProperty', 'boolean-note-update:failed', error, {
+                path: entry.file.path,
+                property: propName,
+              });
+              new Notice(`Could not update ${configuredProperty?.label || propName}.`);
+              return false;
+            }
+          },
+        );
+        continue;
+      }
       const typedEmptyTarget = Boolean(configuredProperty) || editable;
       const value = entityReference
         ? this.formatEntityPropertyValue(rawValue, configuredProperty!)
@@ -7395,6 +7644,87 @@ export class TpsListView extends BasesView {
         this.startListNotePropertyEdit(span, entry.file, propName, rawValue);
       });
     }
+  }
+
+  private createListBooleanPropertyControl(
+    parent: HTMLElement,
+    propertyLabel: string,
+    rawValue: unknown,
+    commit: (next: boolean) => Promise<boolean>,
+  ): HTMLElement {
+    const control = parent.createEl('label', {
+      cls: 'tps-list-native-property tps-list-native-property--checkbox tps-list-native-property--editable',
+    });
+    const checkbox = control.createEl('input', {
+      cls: 'tps-list-native-property-checkbox',
+      attr: { type: 'checkbox' },
+    });
+    const stateText = control.createSpan({ cls: 'tps-list-native-property-checkbox-label' });
+    let currentValue = rawValue;
+    const renderState = (value: unknown) => {
+      const presentation = getBooleanPropertyPresentation(value);
+      checkbox.checked = presentation.checked;
+      checkbox.indeterminate = presentation.indeterminate;
+      checkbox.setAttribute('aria-label', `${propertyLabel}: ${presentation.text}`);
+      if (presentation.state === 'invalid') checkbox.setAttribute('aria-invalid', 'true');
+      else checkbox.removeAttribute('aria-invalid');
+      stateText.setText(`${propertyLabel}: ${presentation.text}`);
+      control.dataset.tpsListBooleanState = presentation.state;
+    };
+    renderState(currentValue);
+    const stop = (event: Event) => event.stopPropagation();
+    control.addEventListener('pointerdown', stop);
+    control.addEventListener('click', stop);
+    control.addEventListener('keydown', stop);
+    checkbox.addEventListener('change', (event) => {
+      event.stopPropagation();
+      if (checkbox.disabled) return;
+      const previous = currentValue;
+      const next = getNextBooleanPropertyValue(previous);
+      currentValue = next;
+      renderState(next);
+      checkbox.disabled = true;
+      void commit(next).then((changed) => {
+        if (!changed) {
+          currentValue = previous;
+          renderState(previous);
+        }
+      }).finally(() => {
+        checkbox.disabled = false;
+      });
+    });
+    return control;
+  }
+
+  private renderListReadOnlyBooleanProperty(
+    parent: HTMLElement,
+    propertyLabel: string,
+    rawValue: unknown,
+  ): HTMLElement {
+    const presentation = getBooleanPropertyPresentation(rawValue);
+    const control = parent.createEl('span', {
+      cls: 'tps-list-native-property tps-list-native-property--checkbox tps-list-native-property--readonly',
+      attr: {
+        title: `${propertyLabel}: ${presentation.text}`,
+        'aria-label': `${propertyLabel}: ${presentation.text}`,
+      },
+    });
+    const checkbox = control.createEl('input', {
+      cls: 'tps-list-native-property-checkbox',
+      attr: {
+        type: 'checkbox',
+        disabled: 'true',
+        'aria-readonly': 'true',
+      },
+    });
+    checkbox.checked = presentation.checked;
+    checkbox.indeterminate = presentation.indeterminate;
+    control.createSpan({
+      cls: 'tps-list-native-property-checkbox-label',
+      text: presentation.text,
+    });
+    control.dataset.tpsListBooleanState = presentation.state;
+    return control;
   }
 
   private isWritableNotePropertyId(propId: string): boolean {
@@ -7430,11 +7760,12 @@ export class TpsListView extends BasesView {
     if (this.selectedRowIds.has(selectionId)) row.addClass('tps-list-native-row--selected');
 
     row.createSpan({
-      cls: 'tps-list-native-heading-marker',
+      cls: 'tps-list-native-leading tps-list-native-heading-marker',
       text: headingKind.toUpperCase(),
       attr: { 'aria-hidden': 'true' },
     });
-    const title = row.createEl('button', {
+    const body = row.createDiv({ cls: 'tps-list-native-row-body' });
+    const title = body.createEl('button', {
       cls: 'tps-list-native-title tps-list-native-title-button tps-list-native-heading-title',
       text: headingTitle,
       attr: { type: 'button', 'aria-label': `Open ${headingKind} heading in ${file.basename}` },
@@ -7457,6 +7788,7 @@ export class TpsListView extends BasesView {
     const hidden = new Set(['tpsinlineprops', 'externalid', 'externaleventid', 'tpscalendaruid', 'tpscalendarsourceurl']);
     for (const propId of selectedProps) {
       let property = this.getTaskPropertyValue(file, task, propId, hidden);
+      if (!property && /^formula\./iu.test(String(propId || '').trim())) continue;
       if (!property) {
         const configuredProperty = this.getConfiguredCustomProperty(propId);
         if (isEntityReferenceProperty(configuredProperty)) {
@@ -7511,7 +7843,12 @@ export class TpsListView extends BasesView {
         }
       }
       if (!property) continue;
-      const span = row.createSpan({
+      if (property.kind === 'checkbox') {
+        if (property.editable && property.propName) this.renderListTaskBooleanProperty(body, file, task, property);
+        else this.renderListReadOnlyBooleanProperty(body, property.title || propId, property.rawValue);
+        continue;
+      }
+      const span = body.createSpan({
         cls: `tps-list-native-property${property.kind ? ` tps-list-native-property--${property.kind}` : ''}${property.editable ? ' tps-list-native-property--editable' : ''}`,
         text: property.text,
         attr: {
@@ -7572,13 +7909,13 @@ export class TpsListView extends BasesView {
 
     if (isBullet) {
       const marker = row.createSpan({
-        cls: 'tps-list-native-checkbox tps-list-native-bullet-marker',
+        cls: 'tps-list-native-leading tps-list-native-bullet-marker',
         attr: { 'aria-hidden': 'true' },
       });
       setIconWithFallback(marker, 'list');
     } else {
       const checkbox = row.createEl('input', {
-        cls: 'tps-list-native-checkbox',
+        cls: 'tps-list-native-leading tps-list-native-checkbox',
         attr: {
           type: 'checkbox',
           role: 'checkbox',
@@ -7601,7 +7938,8 @@ export class TpsListView extends BasesView {
       });
     }
 
-    const title = row.createEl('button', {
+    const body = row.createDiv({ cls: 'tps-list-native-row-body' });
+    const title = body.createEl('button', {
       cls: 'tps-list-native-title tps-list-native-title-button',
       text: taskTitle,
       attr: { type: 'button', 'aria-label': isBullet ? `Open line in ${file.basename}` : `Open task in ${file.basename}` },
@@ -7638,6 +7976,7 @@ export class TpsListView extends BasesView {
     const hidden = new Set(['tpsinlineprops', 'externalid', 'externaleventid', 'tpscalendaruid', 'tpscalendarsourceurl']);
     for (const propId of selectedProps) {
       let property = this.getTaskPropertyValue(file, task, propId, hidden);
+      if (!property && /^formula\./iu.test(String(propId || '').trim())) continue;
       if (!property) {
         const configuredProperty = this.getConfiguredCustomProperty(propId);
         if (isEntityReferenceProperty(configuredProperty)) {
@@ -7693,7 +8032,7 @@ export class TpsListView extends BasesView {
       }
       if (!property) continue;
       if (property.kind === 'source') {
-        const link = row.createEl('a', {
+        const link = body.createEl('a', {
           cls: 'tps-list-native-property tps-list-native-property--source internal-link',
           text: property.text,
           attr: {
@@ -7719,7 +8058,12 @@ export class TpsListView extends BasesView {
         });
         continue;
       }
-      const span = row.createSpan({
+      if (property.kind === 'checkbox') {
+        if (property.editable && property.propName) this.renderListTaskBooleanProperty(body, file, task, property);
+        else this.renderListReadOnlyBooleanProperty(body, property.title || propId, property.rawValue);
+        continue;
+      }
+      const span = body.createSpan({
         cls: `tps-list-native-property${property.kind ? ` tps-list-native-property--${property.kind}` : ''}${property.editable ? ' tps-list-native-property--editable' : ''}`,
         text: property.text,
         attr: {
@@ -7746,6 +8090,39 @@ export class TpsListView extends BasesView {
     row.addEventListener('pointerdown', (event: PointerEvent) => {
       this.beginTaskPointerDrag(event, file, task, propName, displayLane, row);
     });
+  }
+
+  private renderListTaskBooleanProperty(
+    row: HTMLElement,
+    file: TFile,
+    task: OpenTaskSubitem,
+    property: TpsTaskPropertyDisplay,
+  ): void {
+    const propertyKey = String(property.propName || '').trim();
+    if (!propertyKey) return;
+    const configuredProperty = this.getConfiguredCustomProperty(propertyKey);
+    const rawValue = property.rawValue === '' && property.text.startsWith('+')
+      ? undefined
+      : property.rawValue;
+    this.createListBooleanPropertyControl(
+      row,
+      configuredProperty?.label || propertyKey,
+      rawValue,
+      async (next) => {
+        const expectedLine = await this.resolveRenderedTaskLine(file, task, 'boolean-property');
+        if (!expectedLine) return false;
+        const changed = await this.mutateRenderedTaskLine(
+          file,
+          task.line,
+          expectedLine,
+          propertyKey,
+          'boolean-property-update',
+          (line) => setLogInlineFieldValue(line, propertyKey, next ? 'true' : 'false'),
+        );
+        if (changed) this.render(false);
+        return changed;
+      },
+    );
   }
 
   private startListTaskPropertyEdit(
@@ -7802,7 +8179,7 @@ export class TpsListView extends BasesView {
       task,
       configuredProperty,
       propName,
-      property.rawValue ?? property.text,
+      String(property.rawValue ?? property.text),
     );
   }
 

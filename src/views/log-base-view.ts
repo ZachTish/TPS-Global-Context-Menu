@@ -96,8 +96,39 @@ import { splitLineItemContent } from '../utils/line-item-deletion';
 import { addLineEntityPropertyMenus } from '../menu/line-entity-property-menu';
 import type { TaskLineContext } from '../services/task-line-context-menu-service';
 import { applyLogBasePropertyValueChoice } from './log-base-property-choice';
+import {
+  extractTpsBaseFormulaDefinitions,
+  formatTpsFormulaValue,
+  getTpsFormulaSortKey,
+  hasTpsFormulaReference,
+  tpsBaseFormulaService,
+  type TpsCompiledFormulaSet,
+  type TpsFormulaRecordContext,
+  type TpsFormulaResult,
+  type TpsFormulaRowSession,
+} from '../services/tps-base-formula-service';
+import { getOwningWorkspaceFile } from './base-view-owner';
+import {
+  getBooleanPropertyPresentation,
+  getNextBooleanPropertyValue,
+  getReadOnlyBooleanFormulaPresentation,
+  isBooleanPropertyType,
+  normalizeInlineBooleanPropertyValue,
+} from '../utils/boolean-property';
+import { parseLineEntityMetadata } from '../services/line-entity-source-provider';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
+const TPS_TABLE_TITLE_ALIASES = new Set([
+  'line',
+  'title',
+  'text',
+  'linetext',
+  'linetitle',
+  'tasktext',
+  'tasktitle',
+  'headingtext',
+  'headingtitle',
+]);
 
 interface LogLineEntry {
   id: string;
@@ -108,6 +139,7 @@ interface LogLineEntry {
   title: string;
   fields: Record<string, string>;
   queryFields?: Record<string, string>;
+  formulaSession?: TpsFormulaRowSession;
 }
 
 function getLogEntrySelectionId(
@@ -119,6 +151,13 @@ function getLogEntrySelectionId(
   const stable = getLogEntryStableIdentity({ fields });
   if (stable) return `${filePath}:stable:${stable.key}:${hashSelectionIdentity(stable.value)}`;
   return `${filePath}:line:${lineNumber}:${hashSelectionIdentity(line)}`;
+}
+
+function getTpsTableLineDisplayTitle(line: string): string {
+  return parseLineEntityMetadata(line)?.displayTitle
+    || (parseTaskLine(line) ? getTaskDisplayTitle(line) : '')
+    || getTpsListHeadingDisplayTitle(line)
+    || visibleLineText(line);
 }
 
 interface HealthFoodLogApiLike {
@@ -211,15 +250,9 @@ export class TpsTableView extends BasesView {
   private selectionAnchorId: string | null = null;
   private renderedEntryOrder: string[] = [];
   private columnWidths: Record<string, number> = {};
-  private panSession: {
-    pointerId: number;
-    scroller: HTMLElement;
-    startX: number;
-    startY: number;
-    startScrollLeft: number;
-    active: boolean;
-  } | null = null;
-
+  private compiledFormulaSet: TpsCompiledFormulaSet = tpsBaseFormulaService.compile({}, 'tps-table:unresolved');
+  private formulaDiagnostics = new Set<string>();
+  private formulaNow: Date | undefined;
   constructor(controller: QueryController, containerEl: HTMLElement, private plugin: TPSGlobalContextMenuPlugin) {
     super(controller);
     this.containerEl = containerEl;
@@ -237,7 +270,7 @@ export class TpsTableView extends BasesView {
 
   onload(): void {
     this.registerEvent(this.plugin.app.vault.on('modify', (file) => {
-      if (file instanceof TFile && file.extension === 'md') this.queueRender();
+      if (file instanceof TFile && (file.extension === 'md' || file.extension === 'base')) this.queueRender();
     }));
     this.registerEvent(this.plugin.app.vault.on('create', (file) => {
       if (file instanceof TFile && file.extension === 'md') this.queueRender();
@@ -245,11 +278,6 @@ export class TpsTableView extends BasesView {
     this.registerEvent(this.plugin.app.vault.on('delete', (file) => {
       if (file instanceof TFile && file.extension === 'md') this.queueRender();
     }));
-    this.registerDomEvent(window, 'wheel', (evt) => this.handleWindowWheel(evt), { capture: true, passive: false });
-    this.registerDomEvent(window, 'pointerdown', (evt) => this.handleWindowPointerDown(evt), { capture: true });
-    this.registerDomEvent(window, 'pointermove', (evt) => this.handleWindowPointerMove(evt), { capture: true, passive: false });
-    this.registerDomEvent(window, 'pointerup', (evt) => this.finishWindowPan(evt), { capture: true });
-    this.registerDomEvent(window, 'pointercancel', (evt) => this.finishWindowPan(evt), { capture: true });
     void this.render();
   }
 
@@ -262,6 +290,9 @@ export class TpsTableView extends BasesView {
     this.selectedEntryIds.clear();
     this.selectionAnchorId = null;
     this.renderedEntryOrder = [];
+    const previousScroller = this.containerEl.querySelector<HTMLElement>('.tps-log-base-table-scroll');
+    const previousScrollLeft = previousScroller?.scrollLeft ?? 0;
+    const previousScrollTop = previousScroller?.scrollTop ?? 0;
     this.containerEl.empty();
     this.containerEl.removeClass('tps-log-base');
     if ((this.containerEl as any).__tpsTableView === this) delete (this.containerEl as any).__tpsTableView;
@@ -372,7 +403,14 @@ export class TpsTableView extends BasesView {
     });
     const fields = readInlineFields(line);
     const rowKind = defaults.kind === 'heading' ? `h${headingLevel}` : defaults.kind;
-    let queryFields: Record<string, string> = { ...fields, kind: rowKind };
+    const explicitKind = String(fields.kind || '').trim();
+    let queryFields: Record<string, string> = {
+      ...fields,
+      kind: rowKind,
+      itemkind: rowKind,
+      itemtype: rowKind,
+      ...(explicitKind ? { explicitkind: explicitKind, entitykind: explicitKind } : {}),
+    };
     const prospectiveTags = readTaskLineTags(line);
     if (prospectiveTags.length > 0 && queryFields.tags == null) {
       queryFields.tags = prospectiveTags.map((tag) => `#${tag}`).join(', ');
@@ -409,26 +447,6 @@ export class TpsTableView extends BasesView {
         queryFields['task.status'] = taskQueryFields.status;
       }
     }
-    const prospectiveMatch = evaluateLogBaseFilterRoots(
-      filterRoots,
-      this.createFilterContext(queryFields, targetFile, line, rowKind),
-    );
-    if (prospectiveMatch === false) {
-      logger.flowWarn('TpsTableView', 'create-line:blocked', {
-        reason: 'prospective-line-does-not-match-filters',
-        kind: defaults.kind,
-        targetPath,
-      });
-      new Notice('TPS Table did not create the item because the resulting line would not match this view.');
-      return true;
-    }
-    if (prospectiveMatch == null) {
-      logger.flowWarn('TpsTableView', 'create-line:filter-validation-partial', {
-        kind: defaults.kind,
-        targetPath,
-        unsupportedFilters: defaults.diagnostics.unsupportedFilters,
-      });
-    }
     logger.flow('TpsTableView', 'create-line:start', {
       kind: defaults.kind,
       targetPath,
@@ -438,7 +456,58 @@ export class TpsTableView extends BasesView {
       headingLevel: defaults.kind === 'heading' ? headingLevel : null,
       selectedBranches: defaults.diagnostics.selectedBranches,
     });
-    await this.plugin.app.vault.process(targetFile, (content) => appendTpsTableMarkdownLine(content, line));
+    this.formulaNow = new Date();
+    let blockedReason: 'mismatch' | 'formula-unresolved' | null = null;
+    await this.plugin.app.vault.process(targetFile, (content) => {
+      const nextLineNumber = content.length === 0
+        ? 1
+        : content.split('\n').length + (content.endsWith('\n') ? 0 : 1);
+      const filterContext = this.createFilterContext(
+        queryFields,
+        targetFile,
+        line,
+        rowKind,
+        nextLineNumber,
+      );
+      const prospectiveMatch = evaluateLogBaseFilterRoots(
+        filterRoots,
+        filterContext,
+      );
+      if (filterContext.formulaFailed) {
+        blockedReason = 'formula-unresolved';
+        return content;
+      }
+      if (prospectiveMatch === false) {
+        blockedReason = 'mismatch';
+        return content;
+      }
+      if (prospectiveMatch == null && hasTpsFormulaReference(filterRoots)) {
+        blockedReason = 'formula-unresolved';
+        return content;
+      }
+      if (prospectiveMatch == null) {
+        logger.flowWarn('TpsTableView', 'create-line:filter-validation-partial', {
+          kind: defaults.kind,
+          targetPath,
+          nextLineNumber,
+          unsupportedFilters: defaults.diagnostics.unsupportedFilters,
+        });
+      }
+      return appendTpsTableMarkdownLine(content, line);
+    });
+    if (blockedReason) {
+      logger.flowWarn('TpsTableView', 'create-line:blocked', {
+        reason: blockedReason === 'mismatch'
+          ? 'prospective-line-does-not-match-filters'
+          : 'formula-filter-unresolved',
+        kind: defaults.kind,
+        targetPath,
+      });
+      new Notice(blockedReason === 'mismatch'
+        ? 'TPS Table did not create the item because the resulting line would not match this view.'
+        : 'TPS Table did not create the item because its formula filter could not be evaluated reliably.');
+      return true;
+    }
     logger.flow('TpsTableView', 'create-line:done', { kind: defaults.kind, targetPath });
     this.queueRender();
     return true;
@@ -452,17 +521,11 @@ export class TpsTableView extends BasesView {
   }
 
   private getLineCreateContextPath(): string | null {
-    const controller = (this as any)?.controller;
-    const queryController = (this as any)?.queryController;
-    const contextHost = this.containerEl.closest<HTMLElement>('[data-tps-context-path]');
+    const contextHost = this.containerEl?.closest<HTMLElement>('[data-tps-context-path]');
     const candidates = [
-      this.containerEl.dataset.tpsContextPath,
+      this.containerEl?.dataset?.tpsContextPath,
       contextHost?.dataset.tpsContextPath,
-      controller?.context?.file?.path,
-      controller?.sourceFile?.path,
-      queryController?.context?.file?.path,
-      queryController?.currentFile?.path,
-      this.plugin.app.workspace.getActiveFile?.()?.path,
+      getOwningWorkspaceFile(this.plugin.app, this.containerEl, 'md')?.path,
     ];
     for (const candidate of candidates) {
       const path = String(candidate || '').trim();
@@ -482,6 +545,8 @@ export class TpsTableView extends BasesView {
   private async render(): Promise<void> {
     const generation = ++this.renderGeneration;
     const start = performance.now();
+    this.formulaDiagnostics.clear();
+    this.formulaNow = new Date();
     const entries = await this.loadEntries();
     if (generation !== this.renderGeneration) {
       logger.flow('TpsTableView', 'render:stale', { generation });
@@ -491,7 +556,7 @@ export class TpsTableView extends BasesView {
     const columns = this.getColumns(entries);
     const groupBy = resolveTpsBaseGroupDescriptor(this.getConfigValue('groupBy'));
     const entryGroups = groupBy
-      ? groupTpsBaseRows(entries, (entry) => this.getEntryValue(entry, groupBy.property), groupBy.direction)
+      ? groupTpsBaseRows(entries, (entry) => this.getEntryRawValue(entry, groupBy.property), groupBy.direction)
       : [{ key: null, rows: entries }];
     const renderedEntries = entryGroups.flatMap((group) => group.rows);
     const totalsPosition = normalizeTotalsRowPosition(this.getConfigValue('totalsRow'));
@@ -500,6 +565,9 @@ export class TpsTableView extends BasesView {
     const visibleEntryIds = new Set(this.renderedEntryOrder);
     this.selectedEntryIds = new Set([...this.selectedEntryIds].filter((id) => visibleEntryIds.has(id)));
     if (this.selectionAnchorId && !visibleEntryIds.has(this.selectionAnchorId)) this.selectionAnchorId = null;
+    const previousScroller = this.containerEl.querySelector<HTMLElement>('.tps-log-base-table-scroll');
+    const previousScrollLeft = previousScroller?.scrollLeft ?? 0;
+    const previousScrollTop = previousScroller?.scrollTop ?? 0;
     this.containerEl.empty();
 
     this.syncNativeResultsCountSoon();
@@ -512,7 +580,7 @@ export class TpsTableView extends BasesView {
 
     this.columnWidths = this.loadColumnWidths(columns);
     const tableScroller = this.containerEl.createDiv({ cls: 'tps-log-base-table-scroll' });
-    this.registerHorizontalScroll(tableScroller);
+    this.configureTableScroller(tableScroller);
     const table = tableScroller.createEl('table', { cls: 'bases-table tps-log-base-table' });
     this.applyTableWidth(table, columns);
     const colgroup = table.createEl('colgroup');
@@ -548,6 +616,8 @@ export class TpsTableView extends BasesView {
       for (const entry of group.rows) this.renderEntry(tbody, entry, columns);
     }
     if (totalsPosition === 'bottom') totaledColumns = this.renderTotalsRow(tbody, entries, columns, totalsPosition);
+    tableScroller.scrollLeft = Math.min(previousScrollLeft, Math.max(0, tableScroller.scrollWidth - tableScroller.clientWidth));
+    tableScroller.scrollTop = Math.min(previousScrollTop, Math.max(0, tableScroller.scrollHeight - tableScroller.clientHeight));
 
     logger.flow('TpsTableView', 'render:done', {
       entries: entries.length,
@@ -579,10 +649,17 @@ export class TpsTableView extends BasesView {
         const heading = parseTpsListHeadingLine(line);
         const markdownKind = getTpsTableMarkdownLineKind(line);
         const rowKind = heading ? `h${heading.headingLevel}` : markdownKind;
+        const explicitKind = String(fields.kind || '').trim();
         if (rowKind && !fields.kind) fields.kind = rowKind;
         let queryFields = { ...fields };
         if (rowKind) {
           queryFields.kind = rowKind;
+          queryFields.itemkind = rowKind;
+          queryFields.itemtype = rowKind;
+          if (explicitKind) {
+            queryFields.explicitkind = explicitKind;
+            queryFields.entitykind = explicitKind;
+          }
         } else if (/^(?:tasks?|bullets?|headings?|headers?|h[1-6])$/iu.test(String(queryFields.kind || '').trim())) {
           // `kind` is the structural Base discriminator for synthesized rows.
           // A plain line cannot opt into task/bullet behavior with editable
@@ -629,10 +706,8 @@ export class TpsTableView extends BasesView {
           }
         }
         if (!this.lineMatches(queryFields) && !(markdownKind && hasTpsTableLineKindFilter(filterRoots))) return;
-        const filterResult = evaluateLogBaseFilterRoots(
-          filterRoots,
-          this.createFilterContext(queryFields, file, line, rowKind),
-        );
+        const filterContext = this.createFilterContext(queryFields, file, line, rowKind, index + 1);
+        const filterResult = evaluateLogBaseFilterRoots(filterRoots, filterContext);
         if (filterResult === false) return;
         if (filterResult == null && filterRoots.length) unknownFilterRows += 1;
         if (!this.lineMatchesHomeDateContext(fields, file)) return;
@@ -642,9 +717,10 @@ export class TpsTableView extends BasesView {
           file,
           lineNumber: index,
           line,
-          title: heading ? getTpsListHeadingDisplayTitle(line) : visibleLineText(line),
+          title: getTpsTableLineDisplayTitle(line),
           fields,
           queryFields,
+          formulaSession: filterContext.formulaSession,
         });
       });
     }
@@ -686,11 +762,16 @@ export class TpsTableView extends BasesView {
     if (stampedRoots) return composeEffectiveFilterRoots(runtimeRoots, stampedRoots);
     const baseFile = this.getBaseFile();
     if (!baseFile) {
+      this.compiledFormulaSet = tpsBaseFormulaService.compile({}, 'tps-table:unresolved');
       if (failOnReadError) throw new Error('Could not resolve the Base definition for line creation');
       return composeEffectiveFilterRoots(runtimeRoots, []);
     }
     try {
       const parsed = parseYaml(await this.plugin.app.vault.cachedRead(baseFile)) as Record<string, unknown> | null | undefined;
+      this.compiledFormulaSet = tpsBaseFormulaService.compile(
+        extractTpsBaseFormulaDefinitions(parsed),
+        `${baseFile.path}:${Number(baseFile.stat?.mtime || 0)}`,
+      );
       const persisted = extractPersistedFilterRoots(parsed, this.getViewName(), new Set([TPS_TABLE_VIEW_TYPE]));
       const roots = composeEffectiveFilterRoots(runtimeRoots, persisted.filters || []);
       logger.flow('TpsTableView', 'filters:resolved', {
@@ -701,6 +782,7 @@ export class TpsTableView extends BasesView {
       });
       return roots;
     } catch (error) {
+      this.compiledFormulaSet = tpsBaseFormulaService.compile({}, `tps-table:read-error:${baseFile.path}`);
       logger.flowWarn('TpsTableView', 'filters:read-failed', { path: baseFile.path, error: logger.errorSummary(error) });
       if (failOnReadError) throw error;
       return composeEffectiveFilterRoots(runtimeRoots, []);
@@ -713,8 +795,16 @@ export class TpsTableView extends BasesView {
     if (!serialized) return null;
     try {
       const parsed = JSON.parse(serialized) as Record<string, unknown>;
+      const source = this.containerEl.closest<HTMLElement>('[data-tps-base-path]')?.dataset.tpsBasePath
+        || this.getBaseFile()?.path
+        || 'embedded';
+      this.compiledFormulaSet = tpsBaseFormulaService.compile(
+        extractTpsBaseFormulaDefinitions(parsed),
+        `tps-table:stamped:${source}`,
+      );
       return extractPersistedFilterRoots(parsed, this.getViewName(), new Set([TPS_TABLE_VIEW_TYPE])).filters;
     } catch (error) {
+      this.compiledFormulaSet = tpsBaseFormulaService.compile({}, 'tps-table:stamped-invalid');
       logger.flowWarn('TpsTableView', 'filters:stamped-definition-invalid', { error: logger.errorSummary(error) });
       if (failOnReadError) throw error;
       return null;
@@ -722,20 +812,12 @@ export class TpsTableView extends BasesView {
   }
 
   private getBaseFile(): TFile | null {
-    const host = this.containerEl.closest<HTMLElement>('[data-tps-base-path], [data-path$=".base"], [data-src$=".base"], .internal-embed[src$=".base"], .markdown-embed[src$=".base"]');
-    const controller = (this as any)?.controller;
-    const queryController = (this as any)?.queryController;
+    const host = this.containerEl?.closest<HTMLElement>('[data-tps-base-path], [data-path$=".base"], [data-src$=".base"], .internal-embed[src$=".base"], .markdown-embed[src$=".base"]');
     const candidates = [
       host?.dataset.tpsBasePath,
       host?.dataset.path,
       host?.dataset.src,
       host?.getAttribute('src'),
-      controller?.file?.path,
-      controller?.baseFile?.path,
-      controller?.source?.path,
-      queryController?.query?.file?.path,
-      queryController?.currentFile?.path,
-      this.plugin.app.workspace.getActiveFile?.()?.path,
     ];
     for (const candidate of candidates) {
       const path = normalizePath(String(candidate || '').trim()).replace(/^\/+/, '');
@@ -743,7 +825,7 @@ export class TpsTableView extends BasesView {
       const file = this.plugin.app.vault.getFileByPath(path);
       if (file instanceof TFile) return file;
     }
-    return null;
+    return getOwningWorkspaceFile(this.plugin.app, this.containerEl, 'base');
   }
 
   private createFilterContext(
@@ -751,7 +833,28 @@ export class TpsTableView extends BasesView {
     file: TFile,
     line = '',
     rowKind: string | null = null,
+    oneBasedLineNumber = 1,
   ): LogBaseFilterContext {
+    // Query fields contain virtual workflow aliases used by Base filters. Build
+    // formulas from the authored line again so a virtual task status cannot
+    // overwrite an inline relational `[status:: ...]` value.
+    const parsedLine = line ? parseLineEntityMetadata(line) : null;
+    const inlineGroups = new Map<string, { aliases: Set<string>; values: string[] }>();
+    for (const field of parsedLine?.fields ?? []) {
+      const key = String(field.key || '').trim();
+      const normalized = normalizeInlineKey(key);
+      if (!key || !normalized) continue;
+      const group = inlineGroups.get(normalized) ?? { aliases: new Set<string>(), values: [] };
+      group.aliases.add(key);
+      group.values.push(String(field.value ?? '').trim());
+      inlineGroups.set(normalized, group);
+    }
+    const formulaFields: Record<string, unknown> = { ...fields };
+    for (const [normalized, group] of inlineGroups) {
+      const aggregate: unknown = group.values.length > 1 ? [...group.values] : group.values[0] ?? '';
+      formulaFields[normalized] = aggregate;
+      for (const alias of group.aliases) formulaFields[alias] = aggregate;
+    }
     const cache = this.plugin.app.metadataCache.getFileCache(file);
     const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
     const frontmatterTags = Array.isArray(frontmatter.tags) ? frontmatter.tags : frontmatter.tags ? [frontmatter.tags] : [];
@@ -759,11 +862,132 @@ export class TpsTableView extends BasesView {
       ...(cache?.tags || []).map((tag) => tag.tag),
       ...frontmatterTags.map((tag) => String(tag || '')),
     ]);
+    const taskTags = rowKind ? parsedLine?.tags ?? readTaskLineTags(line) : [];
+    const fileContext = {
+      path: file.path,
+      name: file.name,
+      basename: file.basename,
+      extension: file.extension,
+      folder: file.parent?.path || '',
+      size: Number(file.stat?.size || 0),
+      ctime: Number(file.stat?.ctime || 0),
+      mtime: Number(file.stat?.mtime || 0),
+      tags,
+      links: (cache?.links || []).map((link) => link.link),
+      properties: frontmatter,
+    };
+    const contextPath = this.getLineCreateContextPath();
+    const contextFile = contextPath ? this.plugin.app.vault.getFileByPath(contextPath) : this.getBaseFile();
+    const contextCache = contextFile instanceof TFile
+      ? this.plugin.app.metadataCache.getFileCache(contextFile)
+      : null;
+    const contextFrontmatter = (contextCache?.frontmatter || {}) as Record<string, unknown>;
+    const contextDate = this.getHomeContextDate();
+    const thisValue: Record<string, unknown> = {
+      ...contextFrontmatter,
+      ...(contextDate ? { scheduled: contextDate, date: contextDate } : {}),
+      ...(contextFile instanceof TFile ? {
+        file: {
+          path: contextFile.path,
+          name: contextFile.name,
+          basename: contextFile.basename,
+          extension: contextFile.extension,
+          folder: contextFile.parent?.path || '',
+          size: Number(contextFile.stat?.size || 0),
+          ctime: Number(contextFile.stat?.ctime || 0),
+          mtime: Number(contextFile.stat?.mtime || 0),
+          tags: parseTaskTagValues([
+            ...(contextCache?.tags || []).map((tag) => tag.tag),
+            ...([contextFrontmatter.tags].flat().filter(Boolean)),
+          ]),
+          links: (contextCache?.links || []).map((link) => link.link),
+          properties: contextFrontmatter,
+        },
+      } : {}),
+    };
+    const title = getTpsTableLineDisplayTitle(line);
+    const authoredExplicitKinds = (parsedLine?.fields ?? [])
+      .filter((field) => normalizeInlineKey(field.key) === 'kind')
+      .flatMap((field) => parseStringListInput(field.value));
+    const explicitKinds = Array.from(new Set(
+      authoredExplicitKinds.length > 0
+        ? authoredExplicitKinds
+        : parseStringListInput(fields.explicitkind ?? fields.entitykind),
+    ));
+    const normalizeKind = (value: unknown): string => {
+      const normalized = String(value ?? '').trim().toLowerCase();
+      if (normalized === 'tasks') return 'task';
+      if (normalized === 'bullets') return 'bullet';
+      if (normalized === 'notes') return 'note';
+      return normalized;
+    };
+    const kinds = Array.from(new Set(
+      [...(rowKind ? [rowKind] : []), ...explicitKinds]
+        .map(normalizeKind)
+        .filter(Boolean),
+    ));
+    const workflowStatus = String(fields['task.status'] ?? fields.checkboxstatus ?? '').trim();
+    const checkboxState = String(fields.checkboxstate ?? '').trim();
+    const row: Record<string, unknown> = {
+      ...formulaFields,
+      ...(rowKind ? { kind: rowKind } : {}),
+      ...(rowKind ? { itemKind: rowKind, itemType: rowKind } : {}),
+      explicitKind: explicitKinds.length > 1 ? explicitKinds : explicitKinds[0] ?? null,
+      kinds,
+      title,
+      text: title,
+      line: oneBasedLineNumber,
+      lineNumber: oneBasedLineNumber,
+      path: file.path,
+      tags: taskTags.length ? taskTags.map((tag) => `#${tag}`) : fields.tags,
+    };
+    if (rowKind === 'task') {
+      if (inlineGroups.has('status')) {
+        row.status = formulaFields.status;
+      } else {
+        delete row.status;
+      }
+      row.checkboxState = checkboxState;
+      row.checkboxStatus = workflowStatus;
+    }
+    const lineContext: Record<string, unknown> = {
+      ...row,
+      number: oneBasedLineNumber,
+      raw: line,
+      file: fileContext,
+    };
+    const taskContext = rowKind === 'task' ? {
+      ...row,
+      status: workflowStatus,
+      checkboxState,
+      checkboxStatus: workflowStatus,
+      open: fields.open === 'true',
+      done: fields.done === 'true' || fields.completed === 'true',
+      tags: taskTags.map((tag) => `#${tag}`),
+      file: fileContext,
+    } : null;
+    const headingLevel = String(rowKind || '').match(/^h([1-6])$/u)?.[1];
+    const formulaContext: TpsFormulaRecordContext = {
+      row,
+      note: frontmatter,
+      file: fileContext,
+      thisValue,
+      task: taskContext,
+      line: lineContext,
+      heading: headingLevel ? {
+        ...row,
+        level: Number(headingLevel),
+        text: title,
+        title,
+        file: fileContext,
+      } : null,
+      now: this.formulaNow,
+    };
     return {
       fields,
-      contextDate: this.getHomeContextDate(),
+      contextDate,
       rowKind,
-      taskTags: rowKind ? readTaskLineTags(line) : undefined,
+      taskTags: taskTags.length ? taskTags : undefined,
       file: {
         path: file.path,
         name: file.name,
@@ -772,6 +996,13 @@ export class TpsTableView extends BasesView {
         folder: file.parent?.path || '',
         tags,
         frontmatter,
+      },
+      formulaSession: tpsBaseFormulaService.createSession(
+        this.compiledFormulaSet ?? tpsBaseFormulaService.compile({}, 'tps-table:test-harness'),
+        formulaContext,
+      ),
+      onFormulaFailure: (result) => {
+        this.reportFormulaFailureAt(file, oneBasedLineNumber, result);
       },
     };
   }
@@ -819,7 +1050,7 @@ export class TpsTableView extends BasesView {
   }
 
   private getHomeContextDate(): string | null {
-    const host = this.containerEl.closest<HTMLElement>('[data-tps-context-source="home"][data-tps-context-date], [data-tps-context-source="home"][data-tps-context-scheduled]');
+    const host = this.containerEl?.closest<HTMLElement>('[data-tps-context-source="home"][data-tps-context-date], [data-tps-context-source="home"][data-tps-context-scheduled]');
     if (!host) return null;
     return this.normalizeDateKey(host.dataset.tpsContextDate || host.dataset.tpsContextScheduled || '');
   }
@@ -917,8 +1148,7 @@ export class TpsTableView extends BasesView {
   }
 
   private columnWidthStorageKey(): string {
-    const controller = (this as any).controller;
-    const basePath = String(controller?.file?.path || controller?.path || '').trim();
+    const basePath = this.getBaseFile()?.path || '';
     const viewName = this.getViewName();
     return `tps-gcm:tps-table:column-widths:${basePath || 'unknown'}:${viewName}`;
   }
@@ -964,130 +1194,10 @@ export class TpsTableView extends BasesView {
     });
   }
 
-  private registerHorizontalScroll(scroller: HTMLElement): void {
+  private configureTableScroller(scroller: HTMLElement): void {
     scroller.tabIndex = 0;
     scroller.setAttribute('role', 'region');
     scroller.setAttribute('aria-label', `${this.getViewName()} table`);
-    scroller.addEventListener('wheel', (evt) => {
-      this.routeHorizontalWheel(evt, scroller);
-    }, { passive: false });
-    scroller.addEventListener('keydown', (evt) => {
-      if (evt.key !== 'ArrowLeft' && evt.key !== 'ArrowRight') return;
-      const maxScrollLeft = scroller.scrollWidth - scroller.clientWidth;
-      if (maxScrollLeft <= 0) return;
-      const before = scroller.scrollLeft;
-      const next = Math.max(0, Math.min(maxScrollLeft, before + (evt.key === 'ArrowRight' ? 80 : -80)));
-      if (next === before) return;
-      evt.preventDefault();
-      evt.stopPropagation();
-      scroller.scrollLeft = next;
-    });
-  }
-
-  private handleWindowWheel(evt: WheelEvent): void {
-    const target = evt.target instanceof HTMLElement ? evt.target : null;
-    if (!target || !this.containerEl.contains(target)) return;
-    const scroller = target.closest<HTMLElement>('.tps-log-base-table-scroll')
-      ?? this.containerEl.querySelector<HTMLElement>('.tps-log-base-table-scroll');
-    if (!scroller) return;
-    this.routeHorizontalWheel(evt, scroller);
-  }
-
-  private routeHorizontalWheel(evt: WheelEvent, scroller: HTMLElement): void {
-    const maxScrollLeft = this.getTableMaxScrollLeft(scroller);
-    if (maxScrollLeft <= 0) return;
-    const rawDelta = Math.abs(evt.deltaX) >= Math.abs(evt.deltaY) ? evt.deltaX : evt.shiftKey ? evt.deltaY : 0;
-    if (!rawDelta) return;
-    const before = this.getTableScrollLeft(scroller);
-    const next = Math.max(0, Math.min(maxScrollLeft, before + rawDelta));
-    if (next === before) return;
-    evt.preventDefault();
-    evt.stopPropagation();
-    evt.stopImmediatePropagation?.();
-    this.setTableScrollLeft(scroller, next);
-    logger.flow('TpsTableView', 'table-scroll:horizontal', {
-      left: Math.round(next),
-      max: Math.round(maxScrollLeft),
-      embedded: Boolean(scroller.closest('.canvas-node-content, .markdown-embed, .internal-embed')),
-    });
-  }
-
-  private handleWindowPointerDown(evt: PointerEvent): void {
-    if (evt.button !== 0) return;
-    const target = evt.target instanceof HTMLElement ? evt.target : null;
-    if (!target || !this.containerEl.contains(target) || target.closest('.tps-log-base-column-resize')) return;
-    const scroller = target.closest<HTMLElement>('.tps-log-base-table-scroll');
-    if (!scroller || scroller.scrollWidth <= scroller.clientWidth) return;
-    this.panSession = {
-      pointerId: evt.pointerId,
-      scroller,
-      startX: evt.clientX,
-      startY: evt.clientY,
-      startScrollLeft: this.getTableScrollLeft(scroller),
-      active: false,
-    };
-  }
-
-  private handleWindowPointerMove(evt: PointerEvent): void {
-    const session = this.panSession;
-    if (!session || session.pointerId !== evt.pointerId) return;
-    const dx = evt.clientX - session.startX;
-    const dy = evt.clientY - session.startY;
-    if (!session.active) {
-      if (Math.abs(dx) < 6 || Math.abs(dx) < Math.abs(dy)) return;
-      session.active = true;
-      this.containerEl.addClass('tps-log-base--panning');
-    }
-    evt.preventDefault();
-    evt.stopPropagation();
-    evt.stopImmediatePropagation?.();
-    this.setTableScrollLeft(session.scroller, session.startScrollLeft - dx);
-  }
-
-  private finishWindowPan(evt: PointerEvent): void {
-    const session = this.panSession;
-    if (!session || session.pointerId !== evt.pointerId) return;
-    const wasActive = session.active;
-    const scroller = session.scroller;
-    this.panSession = null;
-    this.containerEl.removeClass('tps-log-base--panning');
-    if (wasActive) {
-      evt.preventDefault();
-      evt.stopPropagation();
-      evt.stopImmediatePropagation?.();
-      logger.flow('TpsTableView', 'table-scroll:pan', {
-        left: Math.round(this.getTableScrollLeft(scroller)),
-        max: Math.round(this.getTableMaxScrollLeft(scroller)),
-        embedded: Boolean(scroller.closest('.canvas-node-content, .markdown-embed, .internal-embed')),
-      });
-    }
-  }
-
-  private getTableScrollLeft(scroller: HTMLElement): number {
-    const value = Number(scroller.dataset.tpsTableScrollLeft);
-    return Number.isFinite(value) ? value : scroller.scrollLeft;
-  }
-
-  private setTableScrollLeft(scroller: HTMLElement, rawLeft: number): number {
-    const table = scroller.querySelector<HTMLElement>('.tps-log-base-table');
-    const maxScrollLeft = this.getTableMaxScrollLeft(scroller);
-    const next = Math.max(0, Math.min(maxScrollLeft, rawLeft));
-    scroller.dataset.tpsTableScrollLeft = String(next);
-    scroller.scrollLeft = 0;
-    if (table) {
-      table.style.setProperty('transform', next ? `translateX(${-next}px)` : 'none');
-      table.style.setProperty('will-change', next ? 'transform' : 'auto');
-    }
-    return next;
-  }
-
-  private getTableMaxScrollLeft(scroller: HTMLElement): number {
-    const table = scroller.querySelector<HTMLElement>('.tps-log-base-table');
-    const tableRect = table?.getBoundingClientRect();
-    const scrollerRect = scroller.getBoundingClientRect();
-    const tableWidth = Math.max(scroller.scrollWidth, table?.offsetWidth ?? 0, tableRect?.width ?? 0);
-    const viewportWidth = Math.max(1, Math.min(scroller.clientWidth || scrollerRect.width, this.containerEl.clientWidth || scrollerRect.width, scrollerRect.width));
-    return Math.max(0, tableWidth - viewportWidth);
   }
 
   private applyColumnWidth(key: string, width: number): void {
@@ -1131,8 +1241,12 @@ export class TpsTableView extends BasesView {
     if (!descriptors.length) return entries;
     return [...entries].sort((a, b) => {
       for (const descriptor of descriptors) {
-        const av = this.getEntryValue(a, descriptor.key).toLowerCase();
-        const bv = this.getEntryValue(b, descriptor.key).toLowerCase();
+        const av = /^formula\./iu.test(descriptor.key)
+          ? getTpsFormulaSortKey(this.getEntryRawValue(a, descriptor.key))
+          : this.getEntryValue(a, descriptor.key).toLowerCase();
+        const bv = /^formula\./iu.test(descriptor.key)
+          ? getTpsFormulaSortKey(this.getEntryRawValue(b, descriptor.key))
+          : this.getEntryValue(b, descriptor.key).toLowerCase();
         if (av < bv) return descriptor.direction === 'desc' ? 1 : -1;
         if (av > bv) return descriptor.direction === 'desc' ? -1 : 1;
       }
@@ -1180,7 +1294,18 @@ export class TpsTableView extends BasesView {
       cell.dataset.key = column.key;
       cell.dataset.label = column.label;
       cell.dataset.tpsTableCellIntent = 'navigation';
-      if (this.isFileLinkColumn(column.key)) {
+      if (/^formula\./iu.test(String(column.key || '').trim())) {
+        cell.dataset.tpsTableCellIntent = 'formula';
+        const formulaResult = this.getEntryFormulaResult(entry, column.key);
+        if (formulaResult.status === 'error' || formulaResult.status === 'unsupported') {
+          this.reportFormulaFailure(entry, formulaResult);
+          cell.setText('⚠ Formula');
+        } else if (getReadOnlyBooleanFormulaPresentation(formulaResult.value)) {
+          this.renderTableBooleanCell(cell, column.label, formulaResult.value);
+        } else {
+          cell.setText(formatTpsFormulaValue(formulaResult.value));
+        }
+      } else if (this.isFileLinkColumn(column.key)) {
         const link = cell.createEl('a', {
           cls: 'internal-link tps-log-base-file-link',
           text: entry.file.basename,
@@ -1248,6 +1373,34 @@ export class TpsTableView extends BasesView {
     property: CustomProperty,
   ): void {
     const entityOptions = propertyUsesEntityOptions(property);
+    if (!entityOptions && isBooleanPropertyType(property.type)) {
+      const current = normalizeInlineBooleanPropertyValue(
+        entry.fields[normalizeInlineKey(property.key)]
+          ?? entry.queryFields?.[normalizeInlineKey(property.key)],
+      );
+      this.renderTableBooleanCell(
+        cell,
+        property.label || column.label,
+        current,
+        async (next) => {
+          try {
+            return await this.updateEntryLine(
+              entry,
+              (line) => setLogInlineFieldValue(line, property.key, String(next)),
+            );
+          } catch (error) {
+            logger.flowError('TpsTableView', 'boolean-property-cell:update-failed', error, {
+              path: entry.file.path,
+              lineNumber: entry.lineNumber + 1,
+              property: property.key,
+            });
+            new Notice(`Could not update ${property.label || property.key}.`);
+            return false;
+          }
+        },
+      );
+      return;
+    }
     if (!entityOptions && this.isTagColumn(column, property)) {
       const currentTags = readLogLinePropertyTags(
         entry.line,
@@ -1294,6 +1447,59 @@ export class TpsTableView extends BasesView {
       display || `+ ${property.label || column.label}`,
       () => this.openConfiguredPropertyCellEditor(entry, column, property, cell),
     );
+  }
+
+  private renderTableBooleanCell(
+    cell: HTMLElement,
+    propertyLabel: string,
+    rawValue: unknown,
+    commit?: (next: boolean) => Promise<boolean>,
+  ): void {
+    cell.empty();
+    cell.dataset.tpsTableCellIntent = commit ? 'boolean-property' : 'formula';
+    const control = cell.createEl(commit ? 'label' : 'span', {
+      cls: `tps-log-base-boolean-control${commit ? ' tps-log-base-boolean-control--editable' : ' tps-log-base-boolean-control--readonly'}`,
+    });
+    const checkbox = control.createEl('input', {
+      cls: 'tps-log-base-boolean-checkbox',
+      attr: {
+        type: 'checkbox',
+        ...(commit ? {} : { disabled: 'true', 'aria-readonly': 'true' }),
+      },
+    });
+    let currentValue = rawValue;
+    const renderState = (value: unknown) => {
+      const presentation = getBooleanPropertyPresentation(value);
+      checkbox.checked = presentation.checked;
+      checkbox.indeterminate = presentation.indeterminate;
+      checkbox.setAttribute('aria-label', `${propertyLabel}: ${presentation.text}`);
+      control.setAttribute('title', `${propertyLabel}: ${presentation.text}`);
+      control.dataset.tpsBooleanState = presentation.state;
+      if (presentation.state === 'invalid') checkbox.setAttribute('aria-invalid', 'true');
+      else checkbox.removeAttribute('aria-invalid');
+    };
+    renderState(currentValue);
+    const stop = (event: Event) => event.stopPropagation();
+    control.addEventListener('pointerdown', stop);
+    control.addEventListener('click', stop);
+    if (!commit) return;
+    checkbox.addEventListener('change', (event) => {
+      event.stopPropagation();
+      if (checkbox.disabled) return;
+      const previous = currentValue;
+      const next = getNextBooleanPropertyValue(previous);
+      currentValue = next;
+      renderState(next);
+      checkbox.disabled = true;
+      void commit(next).then((changed) => {
+        if (!changed) {
+          currentValue = previous;
+          renderState(previous);
+        }
+      }).finally(() => {
+        checkbox.disabled = false;
+      });
+    });
   }
 
   private renderGenericInlinePropertyCell(
@@ -2130,7 +2336,7 @@ export class TpsTableView extends BasesView {
         file,
         lineNumber,
         line,
-        title: getTpsListHeadingDisplayTitle(line) || visibleLineText(line),
+        title: getTpsTableLineDisplayTitle(line),
         fields,
       }, row, columns);
     }).catch((error) => {
@@ -2141,14 +2347,75 @@ export class TpsTableView extends BasesView {
   }
 
   private getEntryValue(entry: LogLineEntry, key: string): string {
+    if (/^formula\./iu.test(String(key || '').trim())) {
+      const result = this.getEntryFormulaResult(entry, key);
+      if (result.status === 'error' || result.status === 'unsupported') {
+        this.reportFormulaFailure(entry, result);
+        return '⚠ Formula';
+      }
+      return formatTpsFormulaValue(result.value);
+    }
     const sourceNoteValue = getSourceNoteGroupValue(entry.file, key);
     if (sourceNoteValue !== undefined) return sourceNoteValue ?? '';
     const normalized = normalizeInlineKey(key);
-    if (normalized === 'line' || normalized === 'title') return entry.title;
+    if (TPS_TABLE_TITLE_ALIASES.has(normalized)) return entry.title;
     if (this.isFileLinkColumn(key)) return entry.file.basename;
     if (normalized === 'source' || normalized === 'path') return `${entry.file.path}:${entry.lineNumber + 1}`;
     if (normalized === 'linenumber') return String(entry.lineNumber + 1);
     return this.displayInlineValue(entry.fields[normalized] ?? entry.queryFields?.[normalized] ?? '', entry.file.path);
+  }
+
+  private getEntryRawValue(entry: LogLineEntry, key: string): unknown {
+    if (/^formula\./iu.test(String(key || '').trim())) {
+      const result = this.getEntryFormulaResult(entry, key);
+      if (result.status === 'error' || result.status === 'unsupported') {
+        this.reportFormulaFailure(entry, result);
+        return null;
+      }
+      return result.value;
+    }
+    return this.getEntryValue(entry, key);
+  }
+
+  private getEntryFormulaResult(entry: LogLineEntry, key: string): TpsFormulaResult {
+    if (!entry.formulaSession) {
+      const heading = parseTpsListHeadingLine(entry.line);
+      const rowKind = heading ? `h${heading.headingLevel}` : getTpsTableMarkdownLineKind(entry.line);
+      entry.formulaSession = this.createFilterContext(
+        entry.queryFields ?? entry.fields,
+        entry.file,
+        entry.line,
+        rowKind,
+        entry.lineNumber + 1,
+      ).formulaSession;
+    }
+    return entry.formulaSession?.get(key) ?? {
+      status: 'error',
+      value: null,
+      formula: String(key || '').replace(/^formula\./iu, ''),
+      code: 'formula-session-unavailable',
+      message: 'TPS formula context is unavailable for this row',
+    };
+  }
+
+  private reportFormulaFailure(entry: LogLineEntry, result: TpsFormulaResult): void {
+    this.reportFormulaFailureAt(entry.file, entry.lineNumber + 1, result);
+  }
+
+  private reportFormulaFailureAt(file: TFile, oneBasedLineNumber: number, result: TpsFormulaResult): void {
+    const key = `${this.compiledFormulaSet.revision}:${result.formula}:${result.code || result.status}`;
+    this.formulaDiagnostics ??= new Set<string>();
+    if (this.formulaDiagnostics.has(key)) return;
+    this.formulaDiagnostics.add(key);
+    logger.flowWarn('TpsTableView', 'formula:evaluation-failed', {
+      base: this.getBaseFile()?.path || null,
+      viewName: this.getViewName(),
+      formula: result.formula,
+      code: result.code || result.status,
+      message: result.message || '',
+      samplePath: file.path,
+      sampleLine: oneBasedLineNumber,
+    });
   }
 
   private isFileLinkColumn(key: string): boolean {
@@ -2300,12 +2567,17 @@ export class TpsTableView extends BasesView {
       file: entry.file,
       rawLine: entry.line,
       mutateLine: (updater) => this.updateEntryLine(entry, updater),
-      excludePropertyKeys: ['tag', 'tags'],
+      excludePropertyKeys: [
+        'tag',
+        'tags',
+        ...Object.keys(this.compiledFormulaSet.definitions).map((name) => `formula.${name}`),
+      ],
     });
 
     const editableColumns = columns
       .map((column) => ({ ...column, normalized: normalizeInlineKey(column.key) }))
       .filter((column) => column.normalized
+        && !/^formula\./iu.test(String(column.key || '').trim())
         && column.normalized !== 'line'
         && column.normalized !== 'title'
         && column.normalized !== 'source'
@@ -2453,7 +2725,7 @@ export class TpsTableView extends BasesView {
     });
   }
 
-  private async updateEntryLine(entry: LogLineEntry, updater: (line: string) => string | null): Promise<void> {
+  private async updateEntryLine(entry: LogLineEntry, updater: (line: string) => string | null): Promise<boolean> {
     let mutation: ReturnType<typeof mutateLogLineContent> = {
       content: '',
       outcome: 'unchanged',
@@ -2470,7 +2742,7 @@ export class TpsTableView extends BasesView {
         identity: getLogEntryStableIdentity(entry),
       });
       new Notice('That log row changed before it could be updated. Refresh and try again.');
-      return;
+      return false;
     }
     logger.flow('TpsTableView', 'record-mutation:done', {
       path: entry.file.path,
@@ -2479,6 +2751,7 @@ export class TpsTableView extends BasesView {
       identity: getLogEntryStableIdentity(entry),
     });
     this.queueRender();
+    return true;
   }
 
   private getHealthFoodLogApi(): HealthFoodLogApiLike | null {

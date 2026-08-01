@@ -433,6 +433,25 @@ test('fully supported ordered branches outrank earlier branches that cannot supp
   assert.deepEqual(plan.diagnostics.unsupportedFilters, []);
 });
 
+test('formula filters remain computed and never become writable creation defaults', async () => {
+  const { resolveTpsBaseLineCreationPlan } = await loadModule();
+  const stringFilter = resolveTpsBaseLineCreationPlan([
+    'kind == "task"',
+    'formula.ready == true',
+  ]);
+  assert.equal(stringFilter.kind, 'task');
+  assert.deepEqual(stringFilter.fields, {});
+  assert.ok(stringFilter.diagnostics.unsupportedFilters.some((entry) => entry.includes('formula.ready')));
+
+  const objectFilter = resolveTpsBaseLineCreationPlan([
+    { property: 'formula.bucket', operator: 'equals', value: 'High' },
+    { property: 'priority', operator: 'equals', value: 'high' },
+    'kind == "task"',
+  ]);
+  assert.deepEqual(objectFilter.fields, { priority: 'high' });
+  assert.equal(Object.hasOwn(objectFilter.fields, 'formula.bucket'), false);
+});
+
 test('search stays bounded and reports the guard instead of exploding', async () => {
   const { resolveTpsBaseLineCreationPlan } = await loadModule();
   const plan = resolveTpsBaseLineCreationPlan([

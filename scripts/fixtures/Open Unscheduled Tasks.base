@@ -1,0 +1,17 @@
+filters:
+  and:
+    - kind == "task"
+    - scheduled.isEmpty()
+    - start.isEmpty()
+    - due.isEmpty()
+    - '!file.path.startsWith("Archive/")'
+    - '!file.path.startsWith("_archive/")'
+    - '!task.path.contains("Archive/")'
+    - '!task.path.contains("_archive/")'
+views:
+  - type: tps-list
+    order:
+      - title
+      - file.name
+      - priority
+      - scheduled

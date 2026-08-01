@@ -1,3 +1,5 @@
+import { getTpsFormulaGroupValues } from '../services/tps-base-formula-service';
+
 export type TpsBaseGroupDirection = 'asc' | 'desc';
 
 export type TpsBaseGroupDescriptor = {
@@ -96,15 +98,17 @@ export function groupTpsBaseRows<T>(
   const ungrouped: T[] = [];
 
   for (const row of rows) {
-    const value = cleanGroupValue(getValue(row));
-    if (!value) {
+    const values = cleanGroupValues(getValue(row));
+    if (!values.length) {
       ungrouped.push(row);
       continue;
     }
-    const normalized = value.toLocaleLowerCase();
-    const group = keyed.get(normalized) ?? { key: value, rows: [] };
-    group.rows.push(row);
-    keyed.set(normalized, group);
+    for (const value of values) {
+      const normalized = value.toLocaleLowerCase();
+      const group = keyed.get(normalized) ?? { key: value, rows: [] };
+      group.rows.push(row);
+      keyed.set(normalized, group);
+    }
   }
 
   const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
@@ -117,8 +121,11 @@ export function groupTpsBaseRows<T>(
 }
 
 function cleanGroupValue(value: unknown): string | null {
-  if (value == null) return null;
-  const text = String(value).trim();
+  const text = getTpsFormulaGroupValues(value)[0] ?? '';
   if (!text || text.toLowerCase() === 'null' || text.toLowerCase() === 'undefined') return null;
   return text;
+}
+
+function cleanGroupValues(value: unknown): string[] {
+  return getTpsFormulaGroupValues(value);
 }

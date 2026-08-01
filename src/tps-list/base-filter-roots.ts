@@ -79,6 +79,36 @@ export function combineFilterTreeResults(results: Array<boolean | null>, mode: '
   return results.some((result) => result == null) ? null : false;
 }
 
+/**
+ * Evaluate persisted filter children in stored order with normal boolean
+ * short-circuiting. `null` remains an unknown/unapplied result, but a child
+ * that cannot affect the outcome is never evaluated. Callers may therefore
+ * fail closed on an evaluated formula error without letting an unreachable
+ * formula branch invalidate a decisive earlier result.
+ */
+export function evaluateOrderedFilterChildren<T>(
+  children: readonly T[],
+  mode: 'and' | 'or',
+  evaluate: (child: T) => boolean | null,
+): boolean | null {
+  if (!children.length) return null;
+  let sawNull = false;
+  let sawBoolean = false;
+  for (const child of children) {
+    const result = evaluate(child);
+    if (result == null) {
+      sawNull = true;
+      continue;
+    }
+    sawBoolean = true;
+    if (mode === 'and' && result === false) return false;
+    if (mode === 'or' && result === true) return true;
+  }
+  if (sawNull) return null;
+  if (!sawBoolean) return null;
+  return mode === 'and';
+}
+
 export function extractFilterRootCandidates(candidates: unknown[]): unknown[] {
   const roots: unknown[] = [];
   for (const candidate of candidates) collectFilterRootCandidates(candidate, roots);

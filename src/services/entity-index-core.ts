@@ -35,6 +35,13 @@ export interface EntityIndexSource {
   basename?: string;
   frontmatter?: Readonly<Record<string, unknown>> | null;
   /**
+   * Provider-derived dimension values that are not persisted properties.
+   * Values are unioned with configured property-backed values by dimension
+   * name. This lets structural providers contribute identity without
+   * pretending that a synthetic value was written into Markdown.
+   */
+  dimensions?: Readonly<Record<string, unknown>> | null;
+  /**
    * Physical Markdown source. It equals `path` for note-backed entities and
    * lets several line-backed records coexist inside the same note.
    */
@@ -112,6 +119,10 @@ export interface EntityIndexQuery {
    * Optional case-insensitive substring match against name, basename, and path.
    */
   search?: string;
+  /** Restrict results to note- or block-backed entities. */
+  entityTypes?: EntityIndexEntityType | readonly EntityIndexEntityType[];
+  /** Restrict block results to one or more structural Markdown line kinds. */
+  lineKinds?: EntityIndexLineKind | readonly EntityIndexLineKind[];
   limit?: number;
 }
 
@@ -136,6 +147,8 @@ interface NormalizedQuery {
   readonly anyOf: readonly NormalizedFilterClause[];
   readonly noneOf: readonly NormalizedFilterClause[];
   readonly search: string;
+  readonly entityTypes: readonly EntityIndexEntityType[];
+  readonly lineKinds: readonly EntityIndexLineKind[];
   readonly limit: number | null;
 }
 
@@ -379,6 +392,9 @@ export class EntityIndexCore {
   private readonly queryCache = new Map<string, readonly EntityIndexRecord[]>();
   private readonly dimensionValueCache = new Map<string, readonly string[]>();
   private readonly listeners = new Set<EntityIndexChangeListener>();
+  private mutationBatchDepth = 0;
+  private mutationBatchChanged = false;
+  private mutationBatchNotify = false;
   private revision = 0;
 
   configureDimensions(
@@ -431,6 +447,32 @@ export class EntityIndexCore {
   onChanged(listener: EntityIndexChangeListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Coalesces a synchronous set of provider mutations into one revision and
+   * one listener notification. Mutations remain immediately visible inside
+   * the callback; only publication is deferred until the complete snapshot.
+   */
+  batchMutations<T>(mutate: () => T, notify = true): T {
+    const outermost = this.mutationBatchDepth === 0;
+    if (outermost) {
+      this.mutationBatchChanged = false;
+      this.mutationBatchNotify = notify;
+    }
+    this.mutationBatchDepth += 1;
+    try {
+      return mutate();
+    } finally {
+      this.mutationBatchDepth -= 1;
+      if (outermost) {
+        const changed = this.mutationBatchChanged;
+        const shouldNotify = this.mutationBatchNotify;
+        this.mutationBatchChanged = false;
+        this.mutationBatchNotify = false;
+        if (changed) this.publishRevision(shouldNotify);
+      }
+    }
   }
 
   invalidate(notify = true): void {
@@ -746,6 +788,18 @@ export class EntityIndexCore {
 
     let records = [...this.recordsById.values()].filter((record) => {
       if (
+        normalizedQuery.entityTypes.length > 0
+        && !normalizedQuery.entityTypes.includes(record.entityType)
+      ) {
+        return false;
+      }
+      if (
+        normalizedQuery.lineKinds.length > 0
+        && (!record.lineKind || !normalizedQuery.lineKinds.includes(record.lineKind))
+      ) {
+        return false;
+      }
+      if (
         normalizedQuery.allOf.length > 0
         && !normalizedQuery.allOf.every((clause) => recordMatchesClause(record, clause))
       ) {
@@ -834,6 +888,10 @@ export class EntityIndexCore {
     for (const [key, value] of Object.entries(frontmatter)) {
       frontmatterByKey.set(normalizeLookupValue(key), value);
     }
+    const providedDimensionsByName = new Map<string, unknown>();
+    for (const [name, value] of Object.entries(source.dimensions ?? {})) {
+      providedDimensionsByName.set(normalizeLookupValue(name), value);
+    }
 
     const dimensions = Object.create(null) as Record<string, readonly string[]>;
     for (const definition of this.definitions) {
@@ -841,6 +899,10 @@ export class EntityIndexCore {
       for (const propertyKey of definition.normalizedPropertyKeys) {
         flattenDimensionValue(frontmatterByKey.get(propertyKey), values);
       }
+      flattenDimensionValue(
+        providedDimensionsByName.get(definition.normalizedName),
+        values,
+      );
       const uniqueValues = uniqueDisplayValues(values);
       if (uniqueValues.length > 0) dimensions[definition.name] = uniqueValues;
     }
@@ -966,11 +1028,23 @@ export class EntityIndexCore {
       ...normalizeFilter(query.dimensions, dimensionNames),
       ...normalizeFilter(query.allOf, dimensionNames),
     ].sort((left, right) => compareText(left.dimensionName, right.dimensionName));
+    const entityTypes = [...new Set(
+      (Array.isArray(query.entityTypes) ? query.entityTypes : [query.entityTypes])
+        .filter((value): value is EntityIndexEntityType => value === 'note' || value === 'block'),
+    )].sort(compareText);
+    const lineKinds = [...new Set(
+      (Array.isArray(query.lineKinds) ? query.lineKinds : [query.lineKinds])
+        .filter((value): value is EntityIndexLineKind => (
+          value === 'task' || value === 'bullet' || value === 'heading'
+        )),
+    )].sort(compareText);
     return Object.freeze({
       allOf: Object.freeze(allOf),
       anyOf: normalizeFilter(query.anyOf, dimensionNames),
       noneOf: normalizeFilter(query.noneOf, dimensionNames),
       search: normalizeLookupValue(query.search),
+      entityTypes: Object.freeze(entityTypes),
+      lineKinds: Object.freeze(lineKinds),
       limit,
     });
   }
@@ -981,6 +1055,14 @@ export class EntityIndexCore {
   }
 
   private bumpRevision(notify: boolean): void {
+    if (this.mutationBatchDepth > 0) {
+      this.mutationBatchChanged = true;
+      return;
+    }
+    this.publishRevision(notify);
+  }
+
+  private publishRevision(notify: boolean): void {
     this.revision += 1;
     if (!notify) return;
     for (const listener of this.listeners) {

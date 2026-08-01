@@ -41,6 +41,11 @@ import {
   addPropertyValueChoiceMenuItems,
   showPropertyValueChoiceMenuAtElement,
 } from './property-value-choice-menu';
+import {
+  getBooleanPropertyPresentation,
+  getNextBooleanPropertyValue,
+  isBooleanPropertyType,
+} from '../utils/boolean-property';
 
 interface SubitemNode {
   file: TFile;
@@ -922,14 +927,14 @@ export class PanelBuilder {
   }
 
   private getDefaultPropertyValue(prop: any): unknown {
-    if (prop?.type === 'checkbox' || prop?.type === 'boolean') return false;
+    if (isBooleanPropertyType(prop?.type)) return false;
     if (prop?.type === 'number') return '';
     if (prop?.type === 'list') return [];
     return '';
   }
 
   private makeStackedPropertyValueEditable(target: HTMLElement, entries: any[], prop: any): void {
-    if (!this.isStackedPropertyEditable(prop)) return;
+    if (!this.isStackedPropertyEditable(prop) || isBooleanPropertyType(prop?.type)) return;
     target.classList.add('tps-gcm-top-property-value--clickable');
     target.tabIndex = 0;
     target.setAttribute('role', 'button');
@@ -1019,7 +1024,7 @@ export class PanelBuilder {
       this.openStackedSelectorMenu(anchor, entries, prop);
       return;
     }
-    if (prop.type === 'checkbox' || prop.type === 'boolean') {
+    if (isBooleanPropertyType(prop.type)) {
       void this.toggleStackedBooleanProperty(entries, prop);
       return;
     }
@@ -1206,11 +1211,99 @@ export class PanelBuilder {
   private async toggleStackedBooleanProperty(entries: any[], prop: any): Promise<void> {
     const key = String(prop?.key || '').trim();
     if (!key) return;
-    const next = this.getFrontmatterValueCaseInsensitive(entries[0]?.frontmatter || {}, key) !== true;
+    const next = getNextBooleanPropertyValue(
+      this.getFrontmatterValueCaseInsensitive(entries[0]?.frontmatter || {}, key),
+    );
     const files = this.filesFromEntries(entries);
     this.setEntryFrontmatterValue(entries, key, next);
     await this.plugin.bulkEditService.updateFrontmatter(files, { [key]: next });
     await this.afterStackedPropertyEdit(files, [key]);
+  }
+
+  private createBooleanPropertyControl(
+    entries: any[],
+    prop: any,
+    rawValue: unknown,
+    context: 'stacked' | 'chip',
+  ): HTMLElement {
+    const key = String(prop?.key || '').trim();
+    const propertyLabel = String(prop?.label || key || 'Property');
+    const control = document.createElement('label');
+    control.className = context === 'chip'
+      ? 'tps-gcm-chip tps-gcm-chip--generic-property tps-gcm-boolean-property-control tps-gcm-boolean-property-control--chip'
+      : 'tps-gcm-boolean-property-control tps-gcm-boolean-property-control--stacked';
+
+    if (context === 'chip') {
+      const icon = document.createElement('span');
+      icon.className = 'tps-gcm-chip-icon';
+      setIcon(icon, this.getStackedPropertyIcon(prop));
+      control.appendChild(icon);
+    }
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'tps-gcm-boolean-property-checkbox';
+    control.appendChild(checkbox);
+
+    const stateText = document.createElement('span');
+    stateText.className = context === 'chip' ? 'tps-gcm-chip-label' : 'tps-gcm-top-property-text';
+    control.appendChild(stateText);
+
+    const render = (value: unknown): void => {
+      const presentation = getBooleanPropertyPresentation(value);
+      checkbox.checked = presentation.checked;
+      checkbox.indeterminate = presentation.indeterminate;
+      checkbox.setAttribute('aria-label', `${propertyLabel}: ${presentation.text}`);
+      if (presentation.state === 'invalid') checkbox.setAttribute('aria-invalid', 'true');
+      else checkbox.removeAttribute('aria-invalid');
+      control.dataset.tpsGcmBooleanState = presentation.state;
+      stateText.textContent = context === 'chip'
+        ? `${propertyLabel}: ${presentation.text}`
+        : presentation.text;
+    };
+    render(rawValue);
+
+    // Keep the native control isolated from surrounding row/chip navigation.
+    const stopPropagation = (event: Event): void => event.stopPropagation();
+    control.addEventListener('pointerdown', stopPropagation);
+    control.addEventListener('mousedown', stopPropagation);
+    control.addEventListener('touchstart', stopPropagation, { passive: true });
+    control.addEventListener('click', stopPropagation);
+    control.addEventListener('keydown', stopPropagation);
+    control.addEventListener('keyup', stopPropagation);
+
+    checkbox.addEventListener('change', (event) => {
+      event.stopPropagation();
+      if (checkbox.disabled || !key) return;
+
+      const previous = this.getFrontmatterValueCaseInsensitive(entries[0]?.frontmatter || {}, key);
+      const next = getNextBooleanPropertyValue(previous);
+      render(next);
+      checkbox.disabled = true;
+
+      const files = this.filesFromEntries(entries);
+      void (async () => {
+        let persisted = false;
+        try {
+          await this.plugin.bulkEditService.updateFrontmatter(files, { [key]: next });
+          persisted = true;
+          this.setEntryFrontmatterValue(entries, key, next);
+          await this.afterStackedPropertyEdit(files, [key]);
+        } catch (error) {
+          if (!persisted) {
+            render(previous);
+          }
+          logger.warn('Failed to update boolean property', { key, persisted, error });
+          new Notice(persisted
+            ? `${propertyLabel} was updated, but follow-up processing failed.`
+            : `Could not update ${propertyLabel}.`);
+        } finally {
+          checkbox.disabled = false;
+        }
+      })();
+    });
+
+    return control;
   }
 
   private filesFromEntries(entries: any[]): TFile[] {
@@ -1316,6 +1409,12 @@ export class PanelBuilder {
 
     if (propId === 'type' || prop.type === 'folder') {
       target.appendChild(this.createFolderChip(entries));
+      return;
+    }
+
+    if (isBooleanPropertyType(prop.type)) {
+      const raw = propKey ? this.getFrontmatterValueCaseInsensitive(frontmatter, propKey) : undefined;
+      target.appendChild(this.createBooleanPropertyControl(entries, prop, raw, 'stacked'));
       return;
     }
 
@@ -1531,7 +1630,7 @@ export class PanelBuilder {
     if (propId === 'tags' || propKey === 'tags' || propKey === 'tag') return 'tags';
     if (prop?.type === 'list' && (isLinkListProperty(prop) || isEntityReferenceProperty(prop))) return 'link';
     if (prop?.type === 'folder') return 'folder';
-    if (prop?.type === 'checkbox' || prop?.type === 'boolean') return 'square-check';
+    if (isBooleanPropertyType(prop?.type)) return 'square-check';
     if (prop?.type === 'recurrence') return 'repeat';
     return 'list';
   }
@@ -1541,6 +1640,9 @@ export class PanelBuilder {
     if (!key) return null;
 
     const raw = this.getFrontmatterValueCaseInsensitive(frontmatter, key);
+    if (isBooleanPropertyType(prop?.type) && !isEntityReferenceProperty(prop)) {
+      return this.createBooleanPropertyControl(entries, prop, raw, 'chip');
+    }
     const text = isEntityReferenceProperty(prop)
       ? (prop.type === 'list'
         ? isLinkListProperty(prop) ? parseLinkListInput(raw) : parseMixedListInput(raw)

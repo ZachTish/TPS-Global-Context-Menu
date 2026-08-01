@@ -1740,13 +1740,21 @@ export class TpsHomeView extends ItemView {
   private async stampHomeBaseDefinition(panel: HTMLElement, host: HTMLElement, baseFile: TFile): Promise<void> {
     try {
       const parsed = parseYaml(await this.app.vault.cachedRead(baseFile)) as Record<string, unknown> | null | undefined;
-      const serialized = JSON.stringify({ filters: parsed?.filters, views: parsed?.views });
+      const serialized = JSON.stringify({
+        filters: parsed?.filters,
+        formulas: parsed?.formulas,
+        properties: parsed?.properties,
+        views: parsed?.views,
+      });
       panel.dataset.tpsBaseDefinition = serialized;
       host.dataset.tpsBaseDefinition = serialized;
       logger.flow('HomeView', 'base-definition:stamped', {
         path: baseFile.path,
         views: Array.isArray(parsed?.views) ? parsed.views.length : 0,
         hasBaseFilters: parsed?.filters != null,
+        formulas: parsed?.formulas && typeof parsed.formulas === 'object'
+          ? Object.keys(parsed.formulas as Record<string, unknown>).length
+          : 0,
       });
     } catch (error) {
       logger.flowWarn('HomeView', 'base-definition:stamp-failed', { path: baseFile.path, error: logger.errorSummary(error) });

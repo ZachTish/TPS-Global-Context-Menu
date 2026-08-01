@@ -89,6 +89,10 @@ export function createSharedServices(plugin: TPSGlobalContextMenuPlugin) {
       'parent',
       'childOf',
     ].map((key) => String(key || '').trim()).filter(Boolean))),
+    getChildKeys: (): string[] => Array.from(new Set([
+      plugin.settings.childLinkFrontmatterKey,
+      'parentOf',
+    ].map((key) => String(key || '').trim()).filter(Boolean))),
     getParentsForChild: (childFile: TFile): ResolvedParentLink[] =>
       plugin.parentLinkResolutionService.getParentsForChild(childFile),
     getParentFile: (childFile: TFile): TFile | null =>
