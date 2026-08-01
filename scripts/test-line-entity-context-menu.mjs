@@ -599,7 +599,7 @@ test('whole-note selector and list menus enforce configured value sources', () =
   assert.match(listModal, /\$\{label\} \$\{choice\.label\}/);
   assert.match(listModal, /return;[\s\S]*?if \(isLinkListProperty\(property\)\)/);
 
-  const selectorStart = menuBuilderSource.indexOf('  addSelectorToMenu(menu: Menu');
+  const selectorStart = menuBuilderSource.indexOf('  addSelectorToMenu(menu: GcmMenuSink');
   const selectorEnd = menuBuilderSource.indexOf('\n  addEntityReferenceToMenu(', selectorStart);
   const selector = menuBuilderSource.slice(selectorStart, selectorEnd);
   assert.match(selector, /addPropertyValueChoiceMenuItems/);
@@ -607,7 +607,7 @@ test('whole-note selector and list menus enforce configured value sources', () =
   assert.match(selector, /onChooseEntity: \(choice\) => this\.setContextPropertyValue/);
   assert.doesNotMatch(selector, /TextInputModal|Set custom value|getEffectivePropertyOptions/);
 
-  const listStart = menuBuilderSource.indexOf('  addListToMenu(menu: Menu');
+  const listStart = menuBuilderSource.indexOf('  addListToMenu(menu: GcmMenuSink');
   const listEnd = menuBuilderSource.indexOf('\n  addDatetimeToMenu(', listStart);
   const list = menuBuilderSource.slice(listStart, listEnd);
   assert.match(list, /this\.populateListSubmenu\(subMenu, entries, prop, items\)/);

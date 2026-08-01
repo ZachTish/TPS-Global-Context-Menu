@@ -1,4 +1,4 @@
-import { App, Menu, TFile, Notice, normalizePath } from 'obsidian';
+import { App, Menu, MenuItem, TFile, Notice, normalizePath } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
 import { TextInputModal } from '../modals/text-input-modal';
 import { FileSuggestModal } from '../modals/FileSuggestModal';
@@ -29,6 +29,12 @@ export interface NativeMenuLabelOptions {
   includeTitle?: boolean;
   includeTags?: boolean;
   excludeCustomPropertyKeys?: readonly string[];
+}
+
+/** Minimal synchronous menu surface shared with guarded third-party hosts. */
+export interface GcmMenuSink {
+  addItem(callback: (item: MenuItem) => void): unknown;
+  addSeparator(): unknown;
 }
 
 export class MenuBuilder {
@@ -434,30 +440,56 @@ export class MenuBuilder {
     if ((menu as any)._tpsHandled) return;
     (menu as any)._tpsHandled = true;
 
-    // Capture initial item count to allow reordering later
-    const initialItemCount = (menu as any).items ? (menu as any).items.length : 0;
-
     // Delegate resolution to service
     const resolvedFiles = this.plugin.contextTargetService.resolveTargets(files);
+    this.addResolvedFilesToMenu(menu, resolvedFiles, options, true);
+  }
+
+  /**
+   * Adds canonical GCM note actions for only the supplied, currently-live files.
+   * This deliberately bypasses ContextTargetService so an integration-owned row
+   * cannot inherit an unrelated active editor or explorer selection.
+   */
+  addToExactFileMenu(menu: GcmMenuSink, files: readonly TFile[], options: NativeMenuLabelOptions = {}): void {
+    const exactFiles = new Map<string, TFile>();
+    for (const candidate of files) {
+      if (!(candidate instanceof TFile)) continue;
+      const path = normalizePath(String(candidate.path || '').trim());
+      if (!path || exactFiles.has(path)) continue;
+      const current = this.app.vault.getFileByPath(path);
+      // A deleted/recreated file can reuse the same path with a different
+      // TFile identity. Treat that foreign row snapshot as stale rather than
+      // silently retargeting its actions to the replacement note.
+      if (!(current instanceof TFile) || current !== candidate) continue;
+      exactFiles.set(path, candidate);
+    }
+    this.addResolvedFilesToMenu(menu, [...exactFiles.values()], options, false);
+  }
+
+  private addResolvedFilesToMenu(
+    targetMenu: GcmMenuSink,
+    resolvedFiles: readonly TFile[],
+    options: NativeMenuLabelOptions,
+    markTpsItems: boolean,
+  ): void {
+    const menu: GcmMenuSink = markTpsItems
+      ? {
+          addItem: (callback) => targetMenu.addItem((item) => {
+            callback(item);
+            (item as any)._isTpsItem = true;
+          }),
+          addSeparator: () => targetMenu.addSeparator(),
+        }
+      : targetMenu;
 
     // Create entries for ALL resolved files
-    const entries = this.delegates.createFileEntries(resolvedFiles);
+    const entries = this.delegates.createFileEntries([...resolvedFiles]);
     if (!entries.length) return;
 
     // Filter for markdown-specific features
     const markdownEntries = entries.filter(e => e.file.extension?.toLowerCase() === 'md');
     const markdownFiles = this.getPropertyFiles(markdownEntries).filter((candidate) => candidate.extension?.toLowerCase() === 'md');
     const propertyEntries = entries.filter((entry) => this.isPropertyFile(entry.file));
-
-    // Wrap addItem to tag all items added by this plugin
-    const originalAddItem = menu.addItem;
-
-    menu.addItem = (callback: (item: any) => any) => {
-      return originalAddItem.call(menu, (item: any) => {
-        callback(item);
-        (item as any)._isTpsItem = true;
-      });
-    };
 
     const file = entries[0].file;
 
@@ -804,11 +836,9 @@ export class MenuBuilder {
       });
     }
 
-    // Restore original methods
-    menu.addItem = originalAddItem;
   }
 
-  addSelectorToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
+  addSelectorToMenu(menu: GcmMenuSink, entries: any[], prop: any, sectionId: string) {
     menu.addItem((item) => {
       const allValues = entries.map((e: any) => this.getValueCaseInsensitive(e.frontmatter, prop.key) || '');
       const uniqueValues = new Set(allValues);
@@ -851,7 +881,7 @@ export class MenuBuilder {
     });
   }
 
-  addEntityReferenceToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
+  addEntityReferenceToMenu(menu: GcmMenuSink, entries: any[], prop: any, sectionId: string) {
     menu.addItem((item) => {
       const isList = prop.type === 'list';
       const allValues = entries.map((entry: any) => this.getValueCaseInsensitive(entry.frontmatter, prop.key) || '');
@@ -912,7 +942,7 @@ export class MenuBuilder {
     });
   }
 
-  addListToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
+  addListToMenu(menu: GcmMenuSink, entries: any[], prop: any, sectionId: string) {
     menu.addItem((item) => {
       const listValues = this.getValueCaseInsensitive(entries[0].frontmatter, prop.key) || [];
       const items = isTextListProperty(prop)
@@ -975,7 +1005,7 @@ export class MenuBuilder {
     });
   }
 
-  addDatetimeToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
+  addDatetimeToMenu(menu: GcmMenuSink, entries: any[], prop: any, sectionId: string) {
     const val = this.getValueCaseInsensitive(entries[0].frontmatter, prop.key);
     const isUndefined = !this.plugin.fieldInitializationService.isFieldDefinedForEntries(entries, prop.key);
     const title = isUndefined ? `${prop.label} (create field)` : (val ? `${prop.label}: ${val}` : `Set ${prop.label}...`);
@@ -1000,7 +1030,7 @@ export class MenuBuilder {
     });
   }
 
-  addRecurrenceToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
+  addRecurrenceToMenu(menu: GcmMenuSink, entries: any[], prop: any, sectionId: string) {
     menu.addItem((item) => {
       item.setTitle(`${prop.label} (read-only)`)
         .setIcon(prop.icon || 'repeat')
@@ -1009,7 +1039,7 @@ export class MenuBuilder {
     });
   }
 
-  addFolderToMenu(menu: Menu, entries: any[], prop: any, sectionId: string) {
+  addFolderToMenu(menu: GcmMenuSink, entries: any[], prop: any, sectionId: string) {
     const files = entries.map((e: any) => e.file);
     const inArchive = this.isFileInArchive(files);
 

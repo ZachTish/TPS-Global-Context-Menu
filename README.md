@@ -1,5 +1,20 @@
 # TPS Global Context Menu
 
+## 1.16.0
+
+- Note-backed rows in TPS Notebook Navigator's **Notes** and dynamic **Kinds** collections now receive GCM's canonical
+  whole-note actions through Navigator's public row-menu API. Right-click, mobile long-press, and **More actions** target
+  the exact current Markdown note represented by that row; checkbox, task, bullet, heading, placeholder, and third-party
+  rows remain on their own action paths.
+- The bridge is runtime-only and lifecycle-safe. It follows TPS Navigator load, hot reload, API replacement, settings
+  refresh, and unload without polling or persisted coupling, never registers against upstream Notebook Navigator, and
+  preserves a working registration when a replacement API is malformed or throws. An opaque host identity—not wall-clock
+  ordering—ensures only the active Navigator instance can tear down its registration.
+- Menu construction is transactional, stale or delete/recreated files fail closed, and **Inline menu only** continues to
+  suppress context-menu actions. The existing GCM menu builder remains the single source of note actions.
+- This is a backward-compatible minor release with no settings or note-data migration. Minimum supported Obsidian remains
+  1.10.0.
+
 ## 1.15.0
 
 - The public Task API adds `tasks.setCompletion(ref, completed)`, a canonical binary completion mutation for cross-plugin task controls. It resolves the configured complete/todo checkbox mappings, preserves the existing exact-line atomic write guard, and returns the current task after synchronous follow-up only when that row remains uniquely identifiable; removed or ambiguous rows return `task: null` instead of a guessed line.
@@ -594,6 +609,13 @@ TPS Table and TPS List use the same source-aware picker for empty and populated 
 - Configured checkbox/boolean properties render as native controls on both note and synthesized-line rows. Native Obsidian `BooleanValue` wrappers are read through the public Value contract; frontmatter stores real booleans, while line metadata stores lowercase inline `true`/`false`. The visible states are **Yes**, **No**, **Not set**, and **Invalid**, and a failed or stale write restores the prior control state.
 - Notes, tasks, bullets, and headings share one two-column row contract: a decorative file/list/heading marker or the real task checkbox occupies the same leading slot, and title plus properties wrap in the body column. The collection retains list semantics, decorative markers are hidden from assistive technology, only task rows expose a leading workflow checkbox, and nested task depth uses logical inline padding rather than a file-row indentation workaround.
 
+## TPS Notebook Navigator Note Row Menus
+
+- GCM registers its canonical note actions with TPS Notebook Navigator through Navigator's public lifecycle-safe `menus.registerRowMenu(...)` API. Registration is load-order independent, replaced when Navigator reloads, refreshed when GCM's menu visibility setting changes, and disposed on either plugin's unload; GCM does not inspect Navigator through Obsidian's private plugin registry.
+- The integration is deliberately limited to note-backed records owned by Navigator's built-in Types provider. It applies to records shown under **Notes** and every dynamic **Kind** collection, including note-backed status Kinds. Task, checkbox, bullet, heading, and third-party provider rows remain owned by their existing row menus, so task actions are never duplicated.
+- Every action receives only the row's exact, current Markdown `TFile`. GCM does not consult the active editor, File Explorer selection, or another ambient selection for this route. Missing files, mismatched paths, stale delete/recreate snapshots, malformed lifecycle payloads, and older out-of-order host events fail closed.
+- Menu construction is synchronous and buffered: the foreign menu receives the complete canonical action set only after GCM finishes building it successfully. **Inline menu only** keeps the integration hidden just as it does for GCM's native note menus. This bridge adds no persisted setting or note-data migration.
+
 ### Synthetic Base formula contract
 
 `plugin.api.formulas` is version 1. It compiles one authoritative `formulas:` map, creates isolated memoized row sessions, evaluates declared formulas or filter expressions, and exposes shared format/comparison/sort/group/truthiness adapters. TPS consumers must require the exact API version when formulas are configured; ordinary Bases without formulas continue without that dependency. GCM emits `tps:gcm-api-changed` with the exact source identity, API object, availability, and formula, line-metadata, Entity Index, configuration, task-line, and checkbox capability versions on installation and removal. Consumers register before sending `tps:gcm-api-request`, replace their cached object on every compatible available payload, and clear it on unload; polling and private plugin-registry discovery are not part of this contract.
@@ -773,6 +795,7 @@ Version `0.1.9` isolated native Base create actions to their owning Base compone
 
 ## Validation Notes
 
+- 2026-08-01 (1.16.0): Added lifecycle-safe GCM note actions to built-in TPS Notebook Navigator Notes and dynamic Kind rows. Fifteen focused bridge and exact-line assertions passed across exact targets, task/line exclusions, cross-realm file snapshots, stale delete/recreate refusal, transactional construction, settings refresh, host replacement, failed-registration preservation, and unload. The complete declared suite and TypeScript passed, followed by the required separate final build and byte-matching test-vault deployment. Obsidian 1.12.7 was reloaded; a Note row showed the canonical whole-note menu while a Checkbox retained the task menu without duplication. Runtime `data.json` retained its original inode, size, timestamp, and SHA-256 hash. Production was untouched.
 - 2026-07-20 (1.3.2): Routed `@@` Scheduled and configured datetime suggestions through the existing guarded date picker while preserving ordinary inline text insertion. The focused task-line suite passed 43/43 and the complete isolated release-snapshot suite passed 267/267, followed by a separate exact-snapshot production build. Obsidian 1.12.7 was reloaded in the test vault; Scheduled opened immediately, saved `scheduled`, `timeEstimate`, and `allDay`, Escape left no empty property, and Priority still stored through the text route. Final source/runtime artifacts matched byte-for-byte, and no production promotion occurred.
 - 2026-07-20 (1.3.1): Added exact Notebook Navigator selection/drag intent tracking for Daily Notes and restricted the final-checkbox status chooser to notes with a populated frontmatter `status`. Focused Notebook Navigator and task/status routing suites passed 5/5 each; the complete declared suite passed 267/267, followed by the required separate production-mode build. Obsidian 1.12.7 was reloaded with `Reload app without saving`; an ordinary Navigator Daily Note open retained the date-backed Home route, the real GCM checkbox menu prompted for `status: todo`, and the same action on a statusless note neither prompted nor created `status`. Modified-pointer and drag behavior is executable-regression tested because the macOS automation surface cannot synthesize modifier-held pointer clicks. Final source/runtime artifacts matched byte-for-byte, the disposable notes were moved directly to `_archive`, and no production promotion occurred.
 - 2026-07-15 (0.1.13): Added a Base-only Home component context menu. Base-backed cards now resolve their rendered Base path, expose `Open Base`, and open it in a separate tab without re-enabling the dangerous file-level Archive/Delete menu or intercepting row/item context menus. Calendar stamps its actual resolved fallback Base path. Focused Home coverage passed 26/26, the complete `npm test` suite passed, and the suite's production build confirmed the deployed runtime was current. Obsidian 1.12.7 accepted `Reload app without saving`; right-clicking the live Daily Note Feed card displayed only `Open Base`, selecting it opened `Daily Note Feed.base` in a separate tab, and the Home tab remained intact.

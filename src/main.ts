@@ -105,6 +105,7 @@ import {
 import { normalizePropertyOptionSources } from './utils/property-option-source';
 import { normalizeAcceptedKindSetting } from './utils/property-option-setting';
 import { ArchiveFileService } from './services/archive-file-service';
+import { TpsNotebookNavigatorMenuBridge } from './services/tps-notebook-navigator-menu-bridge';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -328,6 +329,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   baseLineEditProtocolService: BaseLineEditProtocolService;
   homeComponentActionService: HomeComponentActionService;
   archiveFileService: ArchiveFileService;
+  tpsNotebookNavigatorMenuBridge: TpsNotebookNavigatorMenuBridge;
   sharedServices: GcmSharedServices;
   styleEl: HTMLStyleElement | null = null;
   ignoreNextContext = false;
@@ -602,6 +604,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.app.workspace.updateOptions();
 
     this.menuController = new MenuController(this);
+    this.tpsNotebookNavigatorMenuBridge = new TpsNotebookNavigatorMenuBridge(this);
     this.persistentMenuManager = new PersistentMenuManager(this);
     this.viewModeManager = new ViewModeManager(this);
     this.addChild(this.viewModeManager);
@@ -649,6 +652,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     // Expose inter-plugin API
     setupPluginApi(this);
+    this.tpsNotebookNavigatorMenuBridge.start();
     this.registerEvent(this.app.workspace.on(TPS_EVENTS.GCM_API_REQUEST as any, () => {
       this.emitGcmApiChanged(true);
     }));
@@ -1870,6 +1874,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.basesPreviewPropertiesObserver?.disconnect();
     this.basesPreviewPropertiesObserver = null;
     this.closeBaseLinkHoverEditor(getPluginById(this.app, 'obsidian-hover-editor') as any);
+    this.tpsNotebookNavigatorMenuBridge?.stop();
     this.workspaceRibbonService?.teardown();
     delete (this as any).api;
     this.emitGcmApiChanged(false);
@@ -2612,6 +2617,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       this.stopArchiveTagAutomation();
     }
     await this.persistSettingsSnapshot();
+    this.tpsNotebookNavigatorMenuBridge?.refresh();
     this.overlayRenderingService?.invalidate({
       reason: 'settings-save',
       surfaces: ['menus', 'linked-subitems', 'daily-nav'],

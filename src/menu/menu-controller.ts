@@ -15,7 +15,7 @@ import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestMod
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { BadgeRenderer, hashStringToHue } from './badge-renderer';
 import { PanelBuilder } from './panel-builder';
-import { MenuBuilder, type NativeMenuLabelOptions } from './menu-builder';
+import { MenuBuilder, type GcmMenuSink, type NativeMenuLabelOptions } from './menu-builder';
 
 export function addSafeClickListener(element: HTMLElement, handler: (e: MouseEvent) => void) {
   element.addEventListener('click', (e) => {
@@ -132,6 +132,12 @@ export class MenuController {
   addToNativeMenu(menu: Menu, files: TFile[], options: NativeMenuLabelOptions = {}) {
     if (this.plugin.settings.inlineMenuOnly) return;
     this.menuBuilder.addToNativeMenu(menu, files, options);
+  }
+
+  /** Adds GCM actions for exactly these live files without consulting ambient UI selection. */
+  addToExactFileMenu(menu: GcmMenuSink, files: readonly TFile[], options: NativeMenuLabelOptions = {}) {
+    if (this.plugin.settings.inlineMenuOnly) return;
+    this.menuBuilder.addToExactFileMenu(menu, files, options);
   }
 
   buildSpecialPanel(files: TFile[], options: BuildPanelOptions = {}): HTMLElement {
