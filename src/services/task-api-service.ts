@@ -26,6 +26,7 @@ import {
 import { getLinkedSubitemCompleteMarkers, mapStatusToSubitemCheckboxState } from '../utils/linked-subitem-mapping';
 import * as logger from '../logger';
 import { findRelationalStatusProperty } from '../utils/property-option-source';
+import { classifyMappedTaskCheckboxState } from '../utils/task-checkbox-classification';
 
 const INLINE_FIELD_GLOBAL_RE = /(?:^|\s)([\[(])\s*([A-Za-z0-9_-]+)\s*::\s*([^\]\)]*)[\])]/g;
 
@@ -102,6 +103,17 @@ export interface GcmTaskMutationResult {
   task: GcmTaskRecord | null;
   before?: GcmTaskRecord | null;
   error?: string;
+}
+
+interface TaskUpdateExecutionOptions {
+  checklistFollowup?: boolean;
+  completionTarget?: boolean;
+}
+
+interface PostFollowupTaskIdentity {
+  rawLine: string;
+  title: string;
+  marker: string | null;
 }
 
 export class TaskApiService {
@@ -212,70 +224,23 @@ export class TaskApiService {
   }
 
   async update(ref: GcmTaskRef, input: GcmTaskUpdateInput): Promise<GcmTaskMutationResult> {
-    const resolved = await this.resolveTask(ref);
-    if (!resolved) {
-      logger.flowWarn('TaskApi', 'update:target-unresolved', this.summarizeRef(ref));
-      return { ok: false, changed: false, task: null, error: 'Task line could not be resolved.' };
-    }
-    const before = resolved.record;
-    let changed = false;
-    let writeResolved = false;
-    let resolvedLineNumber = before.lineNumber;
-    let nextRawLine = before.rawLine;
-    const context = {
-      path: resolved.file.path,
-      lineNumber: before.lineNumber,
-      titleChanged: input.title !== undefined,
-      checkboxChanged: input.checkbox !== undefined,
-      statusChanged: input.status !== undefined,
-      fieldKeys: Object.keys(input.fields || {}).sort(),
-      addTags: input.addTags?.length || 0,
-      removeTags: input.removeTags?.length || 0,
-      replaceTags: input.replaceTags?.length || 0,
-    };
-    logger.flow('TaskApi', 'update:start', context);
-
-    try {
-      await this.plugin.app.vault.process(resolved.file, (content) => {
-        const parts = splitContent(content);
-        const index = findCurrentTaskLineIndex(parts.lines, before.lineNumber, before.rawLine, before.title);
-        if (index < 0) return content;
-        writeResolved = true;
-        resolvedLineNumber = index;
-        const current = parts.lines[index] || '';
-        const next = this.applyTaskInputToLine(current, input, { update: true });
-        if (next === current) return content;
-        parts.lines[index] = next;
-        nextRawLine = next;
-        changed = true;
-        return joinContent(parts.lines, parts.newline, parts.endsWithNewline);
-      });
-
-      if (!writeResolved) {
-        logger.flowWarn('TaskApi', 'update:stale-target', context);
-        return {
-          ok: false,
-          changed: false,
-          task: null,
-          before,
-          error: 'Task line changed before it could be updated.',
-        };
-      }
-
-      const task = changed
-        ? await this.get({ path: resolved.file.path, lineNumber: resolvedLineNumber, rawLine: nextRawLine, title: getTaskDisplayTitle(nextRawLine) })
-        : before;
-      if (changed) this.notifyChanged([resolved.file.path], 'task-api-update');
-      logger.flow('TaskApi', 'update:done', { ...context, changed, resolved: !!task });
-      return { ok: true, changed, task, before };
-    } catch (error) {
-      logger.flowError('TaskApi', 'update:failed', error, context);
-      return { ok: false, changed: false, task: null, before, error: getErrorMessage(error) };
-    }
+    return this.updateTask(ref, input);
   }
 
   setCheckbox(ref: GcmTaskRef, checkbox: string): Promise<GcmTaskMutationResult> {
     return this.update(ref, { checkbox });
+  }
+
+  /**
+   * Applies GCM's configured complete/todo mapping and runs the same note-level
+   * recurrence, final-status, and checklist-property follow-up as GCM's UI.
+   */
+  setCompletion(ref: GcmTaskRef, completed: boolean): Promise<GcmTaskMutationResult> {
+    const checkbox = this.statusToCheckboxMarker(completed ? 'complete' : 'todo');
+    return this.updateTask(ref, { checkbox }, {
+      checklistFollowup: true,
+      completionTarget: completed,
+    });
   }
 
   setStatus(ref: GcmTaskRef, status: string): Promise<GcmTaskMutationResult> {
@@ -299,6 +264,134 @@ export class TaskApiService {
       return Promise.resolve({ ok: false, changed: false, task: null, error: 'At least one field is required.' });
     }
     return this.update(ref, { fields });
+  }
+
+  private async updateTask(
+    ref: GcmTaskRef,
+    input: GcmTaskUpdateInput,
+    options: TaskUpdateExecutionOptions = {},
+  ): Promise<GcmTaskMutationResult> {
+    const resolved = await this.resolveTask(ref);
+    if (!resolved) {
+      logger.flowWarn('TaskApi', 'update:target-unresolved', this.summarizeRef(ref));
+      return { ok: false, changed: false, task: null, error: 'Task line could not be resolved.' };
+    }
+    const before = resolved.record;
+    let changed = false;
+    let writeResolved = false;
+    let resolvedLineNumber = before.lineNumber;
+    let nextRawLine = before.rawLine;
+    let previousMarker: string | null = null;
+    let nextMarker: string | null = null;
+    let updatedLines: string[] | null = null;
+    let resolvedCurrentTask: GcmTaskRecord = before;
+    const context = {
+      path: resolved.file.path,
+      lineNumber: before.lineNumber,
+      titleChanged: input.title !== undefined,
+      checkboxChanged: input.checkbox !== undefined,
+      statusChanged: input.status !== undefined,
+      fieldKeys: Object.keys(input.fields || {}).sort(),
+      addTags: input.addTags?.length || 0,
+      removeTags: input.removeTags?.length || 0,
+      replaceTags: input.replaceTags?.length || 0,
+    };
+    logger.flow('TaskApi', 'update:start', context);
+
+    try {
+      await this.plugin.app.vault.process(resolved.file, (content) => {
+        const parts = splitContent(content);
+        const index = findCurrentTaskLineIndex(parts.lines, before.lineNumber, before.rawLine, before.title);
+        if (index < 0) return content;
+        writeResolved = true;
+        resolvedLineNumber = index;
+        const current = parts.lines[index] || '';
+        nextRawLine = current;
+        const currentRecord = this.recordFromLine(resolved.file.path, index, current, parts.lines);
+        if (currentRecord) resolvedCurrentTask = currentRecord;
+        const currentParsed = options.checklistFollowup || options.completionTarget !== undefined
+          ? parseTaskLine(current)
+          : null;
+        if (options.completionTarget !== undefined && currentParsed) {
+          const currentState = classifyMappedTaskCheckboxState(
+            this.plugin.settings.linkedSubitemCheckboxMappings || [],
+            currentParsed.token,
+          );
+          const alreadyAtTarget = options.completionTarget
+            ? currentState.isComplete
+            : currentState.isOpen || currentState.isMigrated;
+          if (alreadyAtTarget) return content;
+        }
+        const next = this.applyTaskInputToLine(current, input, { update: true });
+        if (next === current) return content;
+        parts.lines[index] = next;
+        nextRawLine = next;
+        if (options.checklistFollowup) {
+          previousMarker = currentParsed?.marker ?? null;
+          nextMarker = parseTaskLine(next)?.marker ?? null;
+          updatedLines = [...parts.lines];
+        }
+        changed = true;
+        return joinContent(parts.lines, parts.newline, parts.endsWithNewline);
+      });
+
+      if (!writeResolved) {
+        logger.flowWarn('TaskApi', 'update:stale-target', context);
+        return {
+          ok: false,
+          changed: false,
+          task: null,
+          before,
+          error: 'Task line changed before it could be updated.',
+        };
+      }
+
+      let task = changed
+        ? await this.get({ path: resolved.file.path, lineNumber: resolvedLineNumber, rawLine: nextRawLine, title: getTaskDisplayTitle(nextRawLine) })
+        : resolvedCurrentTask;
+      let followupError: unknown = null;
+      if (changed && options.checklistFollowup && updatedLines) {
+        try {
+          await this.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation(
+            resolved.file,
+            previousMarker,
+            nextMarker,
+            updatedLines,
+          );
+        } catch (error) {
+          followupError = error;
+          logger.flowError('TaskApi', 'update:checkbox-followup-failed', error, {
+            path: resolved.file.path,
+            lineNumber: resolvedLineNumber,
+          });
+        }
+        task = await this.readTaskAfterFollowup(resolved.file, {
+          rawLine: nextRawLine,
+          title: getTaskDisplayTitle(nextRawLine),
+          marker: nextMarker,
+        });
+      }
+      if (changed) this.notifyChanged([resolved.file.path], 'task-api-update');
+      if (followupError) {
+        logger.flowWarn('TaskApi', 'update:checkbox-followup-incomplete', {
+          ...context,
+          changed,
+          resolved: !!task,
+        });
+        return {
+          ok: false,
+          changed: true,
+          task,
+          before,
+          error: `Task checkbox changed, but its completion follow-up failed: ${getErrorMessage(followupError)}`,
+        };
+      }
+      logger.flow('TaskApi', 'update:done', { ...context, changed, resolved: !!task });
+      return { ok: true, changed, task, before };
+    } catch (error) {
+      logger.flowError('TaskApi', 'update:failed', error, context);
+      return { ok: false, changed: false, task: null, before, error: getErrorMessage(error) };
+    }
   }
 
   findByField(key: string, value: string | string[] | null, filter: GcmTaskListFilter = {}): Promise<GcmTaskRecord[]> {
@@ -458,7 +551,13 @@ export class TaskApiService {
     const marker = parsed.marker || ' ';
     const checkbox = parsed.token;
     const inlineStatus = fields.status || '';
-    const status = this.plugin.sharedServices?.status?.checkboxStateToStatus(marker) || checkboxMarkerToStatus(marker);
+    const classification = classifyMappedTaskCheckboxState(
+      this.plugin.settings.linkedSubitemCheckboxMappings || [],
+      checkbox,
+    );
+    const status = classification.status
+      || this.plugin.sharedServices?.status?.checkboxStateToStatus(marker)
+      || checkboxMarkerToStatus(marker);
     const blockLineCount = Array.isArray(allLines)
       ? Math.max(1, extractTaskBlock(allLines, lineNumber).lines.length)
       : 1;
@@ -474,7 +573,7 @@ export class TaskApiService {
       marker,
       status,
       inlineStatus,
-      isComplete: this.getCompleteMarkers().has(marker),
+      isComplete: classification.isComplete,
       tags: readInlineTags(rawLine),
       fields,
       blockLineCount,
@@ -510,6 +609,46 @@ export class TaskApiService {
     if (lineIndex < 0) return null;
     const record = this.recordFromLine(file.path, lineIndex, lines[lineIndex] || '', lines);
     return record ? { file, record } : null;
+  }
+
+  private async readTaskAfterFollowup(
+    file: TFile,
+    identity: PostFollowupTaskIdentity,
+  ): Promise<GcmTaskRecord | null> {
+    try {
+      const content = await this.plugin.app.vault.read(file);
+      const parts = splitContent(content);
+      const records = parts.lines.reduce<GcmTaskRecord[]>((result, line, lineNumber) => {
+        const record = this.recordFromLine(file.path, lineNumber, line || '', parts.lines);
+        if (record) result.push(record);
+        return result;
+      }, []);
+
+      const exactMatches = records.filter((record) => record.rawLine === identity.rawLine);
+      if (exactMatches.length > 0) return exactMatches.length === 1 ? exactMatches[0] : null;
+
+      for (const key of ['tpsId', 'subitemId', 'recurrenceTaskId']) {
+        const value = readInlineFieldValue(identity.rawLine, key);
+        if (!value) continue;
+        const identityMatches = records.filter(
+          (record) => readInlineFieldValue(record.rawLine, key) === value,
+        );
+        if (identityMatches.length > 0) return identityMatches.length === 1 ? identityMatches[0] : null;
+      }
+
+      const normalizedTitle = normalizeTaskIdentityTitle(identity.title);
+      if (!normalizedTitle || identity.marker == null) return null;
+      const titleAndMarkerMatches = records.filter(
+        (record) => normalizeTaskIdentityTitle(record.title) === normalizedTitle
+          && record.marker === identity.marker,
+      );
+      return titleAndMarkerMatches.length === 1 ? titleAndMarkerMatches[0] : null;
+    } catch (error) {
+      logger.flowError('TaskApi', 'update:post-followup-read-failed', error, {
+        path: file.path,
+      });
+      return null;
+    }
   }
 
   private applyTaskInputToLine(
@@ -749,6 +888,10 @@ function readInlineFields(line: string): Record<string, string> {
 
 function normalizeTagForCompare(tag: string): string {
   return String(tag || '').trim().replace(/^#/, '').toLowerCase();
+}
+
+function normalizeTaskIdentityTitle(value: string): string {
+  return String(value || '').replace(/\s+/gu, ' ').trim().toLowerCase();
 }
 
 function checkboxMarkerToStatus(marker: string): string {

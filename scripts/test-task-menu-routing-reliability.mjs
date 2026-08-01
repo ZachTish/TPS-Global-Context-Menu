@@ -70,6 +70,39 @@ test('last-checklist-item status prompt reads only the configured workflow statu
   assert.doesNotMatch(promptFlow, /frontmatter\?\.status|frontmatter\.status/u);
 });
 
+test('checklist follow-up uses mapped open/terminal states and preserves canonical ordering', () => {
+  assert.match(checkboxSource, /classifyMappedTaskCheckboxState/);
+  assert.match(checkboxSource, /hasOpenMappedTaskLines/);
+
+  const followupFlow = sourceBetween(
+    checkboxSource,
+    'async handleExternalChecklistStateMutation(',
+    'private async maybePromptToCompleteNote(',
+  );
+  const recurrenceIndex = followupFlow.indexOf('handleTaskCompletion');
+  const promptIndex = followupFlow.indexOf('maybePromptToCompleteNote');
+  const propertyIndex = followupFlow.indexOf('scheduleChecklistPropertyUpdate');
+  assert.ok(recurrenceIndex >= 0, 'recurrence must run for the completed task first');
+  assert.ok(promptIndex > recurrenceIndex, 'the final-note prompt must run after recurrence');
+  assert.ok(propertyIndex > promptIndex, 'checklist-property sync must be scheduled after the prompt');
+
+  const promptFlow = sourceBetween(
+    checkboxSource,
+    'private async maybePromptToCompleteNote(',
+    'private hasOpenChecklistItems(',
+  );
+  assert.match(promptFlow, /if \(!previous\.isOpen \|\| !next\.isComplete\) return/);
+  assert.match(
+    checkboxSource,
+    /private hasOpenChecklistItems\(lines: string\[\]\): boolean \{\s*return hasOpenMappedTaskLines\(lines, this\.getCheckboxMappings\(\)\);/u,
+  );
+  assert.match(
+    checkboxSource,
+    /const hasOpenChecklistItem = this\.hasOpenChecklistItems\(content\.split\(\/\\r\?\\n\/u\)\);/u,
+    'the persisted checklist property must use the same configured mapping classifier',
+  );
+});
+
 test('TPS Table keeps Health precedence and lets task rows reach the shared task menu', () => {
   const routing = sourceBetween(
     mainSource,

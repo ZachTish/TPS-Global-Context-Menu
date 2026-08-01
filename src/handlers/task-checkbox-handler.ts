@@ -16,6 +16,10 @@ import {
     getLinkedSubitemCompleteMarkers,
     normalizeLinkedSubitemMappings,
 } from '../utils/linked-subitem-mapping';
+import {
+    classifyMappedTaskCheckboxState,
+    hasOpenMappedTaskLines,
+} from '../utils/task-checkbox-classification';
 
 type TaskCheckboxContext = {
     file: TFile;
@@ -354,25 +358,51 @@ export class TaskCheckboxHandler {
         nextState: string | null,
         updatedLines: string[],
     ): Promise<void> {
-        await this.plugin.taskRecurrenceService?.handleTaskCompletion({
-            file,
-            previousState,
-            nextState,
-            updatedLines,
-        });
-        await this.maybePromptToCompleteNote(file, previousState, nextState, updatedLines);
-        this.scheduleChecklistPropertyUpdate(file);
+        const failures: Array<{ stage: string; error: unknown }> = [];
+        try {
+            await this.plugin.taskRecurrenceService?.handleTaskCompletion({
+                file,
+                previousState,
+                nextState,
+                updatedLines,
+            });
+        } catch (error) {
+            failures.push({ stage: 'recurrence', error });
+        }
+
+        try {
+            await this.maybePromptToCompleteNote(file, previousState, nextState);
+        } catch (error) {
+            failures.push({ stage: 'final-note-status', error });
+        }
+
+        try {
+            this.scheduleChecklistPropertyUpdate(file);
+        } catch (error) {
+            failures.push({ stage: 'checklist-property', error });
+        }
+
+        if (failures.length > 0) {
+            const firstFailure = failures[0];
+            logger.flowError('TaskCheckboxFollowup', 'run:failed', firstFailure.error, {
+                path: file.path,
+                failedStages: failures.map((failure) => failure.stage),
+            });
+            throw firstFailure.error;
+        }
     }
 
     private async maybePromptToCompleteNote(
         file: TFile,
         previousState: string | null,
         nextState: string | null,
-        updatedLines: string[],
     ): Promise<void> {
-        if (previousState !== ' ') return;
-        if (nextState === ' ') return;
-        if (this.hasOpenChecklistItems(updatedLines)) return;
+        const mappings = this.getCheckboxMappings();
+        const previous = classifyMappedTaskCheckboxState(mappings, previousState);
+        const next = classifyMappedTaskCheckboxState(mappings, nextState);
+        if (!previous.isOpen || !next.isComplete) return;
+        const currentContent = await this.app.vault.read(file);
+        if (this.hasOpenChecklistItems(currentContent.split(/\r?\n/u))) return;
         const cache = this.app.metadataCache.getFileCache(file);
         const statusService = this.plugin.sharedServices.status;
         const workflowStatusKey = statusService.getStatusPropertyKey();
@@ -382,15 +412,11 @@ export class TaskCheckboxHandler {
         if (statusChoices.length === 0) return;
         const chosenStatus = await this.promptForFinalChecklistStatus(statusChoices);
         if (!chosenStatus) return;
-        try {
-            await this.plugin.bulkEditService.setStatus([file], chosenStatus);
-        } catch (error) {
-            logger.warn('[TPS GCM] Failed auto-completing note after last checkbox completion', { file: file.path, error });
-        }
+        await this.plugin.bulkEditService.setStatus([file], chosenStatus);
     }
 
     private hasOpenChecklistItems(lines: string[]): boolean {
-        return lines.some((line) => /^\s*(?:[-*+]|\d+\.)\s*\[ \]/.test(line));
+        return hasOpenMappedTaskLines(lines, this.getCheckboxMappings());
     }
 
     private getChecklistFinalPromptStatuses(): string[] {
@@ -467,13 +493,7 @@ export class TaskCheckboxHandler {
             return;
         }
 
-        let hasOpenChecklistItem = false;
-        for (const line of content.split('\n')) {
-            if (/^\s*(?:[-*+]|\d+\.)\s*\[ \]/.test(line)) {
-                hasOpenChecklistItem = true;
-                break;
-            }
-        }
+        const hasOpenChecklistItem = this.hasOpenChecklistItems(content.split(/\r?\n/u));
 
         const cache = this.plugin.app.metadataCache.getFileCache(file);
         if (cache?.frontmatter?.[propKey] === hasOpenChecklistItem) return;

@@ -40,6 +40,18 @@ async function loadTaskApiModule() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
+async function loadTaskCheckboxClassificationModule() {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/utils/task-checkbox-classification.ts', import.meta.url))],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
 class ForeignFile {
   constructor(path, extension = 'md') {
     this.path = path;
@@ -78,6 +90,11 @@ function createTaskApiFixture(TaskApiService) {
   const reads = [];
   const processes = [];
   const opened = [];
+  const checklistMutations = [];
+  const mutationTimeline = [];
+  const filesUpdated = [];
+  const calendarUpdated = [];
+  const overlayInvalidations = [];
   let dailyNoteFallbackCalls = 0;
   const vault = {
     getFileByPath(path) {
@@ -87,6 +104,10 @@ function createTaskApiFixture(TaskApiService) {
       return [canonicalTaskFile, canonicalUpperFile];
     },
     async cachedRead(file) {
+      reads.push(file);
+      return contents.get(file.path) ?? '';
+    },
+    async read(file) {
       reads.push(file);
       return contents.get(file.path) ?? '';
     },
@@ -120,11 +141,33 @@ function createTaskApiFixture(TaskApiService) {
       fileTimestampFormat: 'YYYY-MM-DD HH:mm:ss',
     },
     sharedServices: { status },
-    eventService: {
-      emitFilesUpdated() {},
-      emitCalendarRefresh() {},
+    taskCheckboxHandler: {
+      async handleExternalChecklistStateMutation(file, previousState, nextState, updatedLines) {
+        mutationTimeline.push('checklist-followup');
+        checklistMutations.push({
+          file,
+          previousState,
+          nextState,
+          updatedLines: [...updatedLines],
+        });
+      },
     },
-    overlayRenderingService: null,
+    eventService: {
+      emitFilesUpdated(paths) {
+        mutationTimeline.push('files-updated');
+        filesUpdated.push([...paths]);
+      },
+      emitCalendarRefresh(paths) {
+        mutationTimeline.push('calendar-refresh');
+        calendarUpdated.push([...paths]);
+      },
+    },
+    overlayRenderingService: {
+      invalidate(options) {
+        mutationTimeline.push('overlay-invalidated');
+        overlayInvalidations.push({ ...options });
+      },
+    },
     manifest: { id: 'tps-global-context-menu' },
     fileNamingService: { getDailyNoteDateFormat: () => 'YYYY-MM-DD' },
     noteOperationService: {
@@ -149,6 +192,12 @@ function createTaskApiFixture(TaskApiService) {
     reads,
     processes,
     opened,
+    plugin,
+    checklistMutations,
+    mutationTimeline,
+    filesUpdated,
+    calendarUpdated,
+    overlayInvalidations,
     getDailyNoteFallbackCalls: () => dailyNoteFallbackCalls,
   };
 }
@@ -165,6 +214,7 @@ test('GCM exposes a strategic task API for external agents', () => {
   assert.match(taskApiSource, /async create\(input: GcmTaskCreateInput\)/);
   assert.match(taskApiSource, /async update\(ref: GcmTaskRef, input: GcmTaskUpdateInput\)/);
   assert.match(taskApiSource, /setCheckbox\(ref: GcmTaskRef, checkbox: string\)/);
+  assert.match(taskApiSource, /setCompletion\(ref: GcmTaskRef, completed: boolean\)/);
   assert.match(taskApiSource, /setStatus\(ref: GcmTaskRef, status: string\)/);
   assert.match(taskApiSource, /setScheduled\(ref: GcmTaskRef, scheduled: string \| null\)/);
   assert.match(taskApiSource, /setField\(ref: GcmTaskRef, key: string, value: string \| number \| boolean \| null\)/);
@@ -273,6 +323,312 @@ test('compiled task API fails explicit invalid targets closed and writes valid f
   assert.match(move.error, /Target markdown file/);
 });
 
+test('setCompletion uses configured mappings and runs the canonical checklist follow-up before invalidation', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  fixture.plugin.settings.linkedSubitemCheckboxMappings = [
+    { checkboxState: '[*]', statuses: ['complete'], toggleTargetStatus: 'todo' },
+    { checkboxState: '[?]', statuses: ['todo'], toggleTargetStatus: 'complete' },
+  ];
+
+  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const completed = await fixture.service.setCompletion(openTask, true);
+
+  assert.equal(completed.ok, true);
+  assert.equal(completed.changed, true);
+  assert.equal(completed.task?.marker, '*');
+  assert.equal(completed.task?.status, 'complete');
+  assert.equal(completed.task?.isComplete, true);
+  assert.match(completed.task?.rawLine || '', /\[completedDate:: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]/);
+  assert.equal(fixture.checklistMutations.length, 1);
+  assert.equal(fixture.checklistMutations[0].file, fixture.canonicalTaskFile);
+  assert.equal(fixture.checklistMutations[0].previousState, ' ');
+  assert.equal(fixture.checklistMutations[0].nextState, '*');
+  assert.match(fixture.checklistMutations[0].updatedLines[4], /^- \[\*\] Open task/);
+  assert.deepEqual(fixture.mutationTimeline, [
+    'checklist-followup',
+    'files-updated',
+    'calendar-refresh',
+    'overlay-invalidated',
+  ]);
+  assert.deepEqual(fixture.filesUpdated, [[fixture.taskPath]]);
+  assert.deepEqual(fixture.calendarUpdated, [[fixture.taskPath]]);
+  assert.equal(fixture.overlayInvalidations.length, 1);
+
+  fixture.mutationTimeline.length = 0;
+  const unchanged = await fixture.service.setCompletion(completed.task, true);
+  assert.equal(unchanged.ok, true);
+  assert.equal(unchanged.changed, false);
+  assert.equal(unchanged.task?.isComplete, true);
+  assert.equal(fixture.checklistMutations.length, 1);
+  assert.deepEqual(fixture.mutationTimeline, []);
+
+  fixture.mutationTimeline.length = 0;
+  const reopened = await fixture.service.setCompletion(completed.task, false);
+  assert.equal(reopened.ok, true);
+  assert.equal(reopened.changed, true);
+  assert.equal(reopened.task?.marker, '?');
+  assert.equal(reopened.task?.status, 'todo');
+  assert.equal(reopened.task?.isComplete, false);
+  assert.doesNotMatch(reopened.task?.rawLine || '', /\[completedDate::/);
+  assert.equal(fixture.checklistMutations.length, 2);
+  assert.equal(fixture.checklistMutations[1].previousState, '*');
+  assert.equal(fixture.checklistMutations[1].nextState, '?');
+  assert.deepEqual(fixture.mutationTimeline, [
+    'checklist-followup',
+    'files-updated',
+    'calendar-refresh',
+    'overlay-invalidated',
+  ]);
+});
+
+test('setCompletion preserves matching custom states and only canonicalizes explicit opposite targets', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  fixture.plugin.settings.linkedSubitemCheckboxMappings = [
+    { checkboxState: '[*]', statuses: ['complete'], toggleTargetStatus: 'todo' },
+    { checkboxState: '[?]', statuses: ['todo'], toggleTargetStatus: 'complete' },
+    { checkboxState: '[/]', statuses: ['working'], toggleTargetStatus: 'complete' },
+    { checkboxState: '[-]', statuses: ['wont-do'], toggleTargetStatus: 'todo' },
+    { checkboxState: '[>]', statuses: ['migrated'], toggleTargetStatus: 'todo' },
+  ];
+  fixture.contents.set(
+    fixture.taskPath,
+    `${fixture.contents.get(fixture.taskPath).trimEnd()}\n- [-] Wont-do task\n- [>] Migrated task\n`,
+  );
+
+  const tasks = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const byTitle = new Map(tasks.map((task) => [task.title, task]));
+  const working = byTitle.get('Working task');
+  const wontDo = byTitle.get('Wont-do task');
+  const migrated = byTitle.get('Migrated task');
+  assert.ok(working && wontDo && migrated);
+
+  const stillWorking = await fixture.service.setCompletion(working, false);
+  const stillWontDo = await fixture.service.setCompletion(wontDo, true);
+  const stillMigrated = await fixture.service.setCompletion(migrated, false);
+  assert.deepEqual(
+    [stillWorking, stillWontDo, stillMigrated].map((result) => ({
+      ok: result.ok,
+      changed: result.changed,
+      marker: result.task?.marker,
+    })),
+    [
+      { ok: true, changed: false, marker: '/' },
+      { ok: true, changed: false, marker: '-' },
+      { ok: true, changed: false, marker: '>' },
+    ],
+  );
+  assert.equal(fixture.checklistMutations.length, 0);
+  assert.deepEqual(fixture.mutationTimeline, []);
+
+  const completedWorking = await fixture.service.setCompletion(working, true);
+  const reopenedWontDo = await fixture.service.setCompletion(wontDo, false);
+  const completedMigrated = await fixture.service.setCompletion(migrated, true);
+  assert.deepEqual(
+    [completedWorking, reopenedWontDo, completedMigrated].map((result) => ({
+      ok: result.ok,
+      changed: result.changed,
+      marker: result.task?.marker,
+      status: result.task?.status,
+    })),
+    [
+      { ok: true, changed: true, marker: '*', status: 'complete' },
+      { ok: true, changed: true, marker: '?', status: 'todo' },
+      { ok: true, changed: true, marker: '*', status: 'complete' },
+    ],
+  );
+  assert.deepEqual(
+    fixture.checklistMutations.map(({ previousState, nextState }) => [previousState, nextState]),
+    [['/', '*'], ['-', '?'], ['>', '*']],
+  );
+});
+
+test('configured task-state classification keeps custom open states open and migrated records inactive', async () => {
+  const {
+    classifyMappedTaskCheckboxState,
+    hasOpenMappedTaskLines,
+  } = await loadTaskCheckboxClassificationModule();
+  const mappings = [
+    { checkboxState: '[*]', statuses: ['complete'], toggleTargetStatus: 'todo' },
+    { checkboxState: '[?]', statuses: ['todo'], toggleTargetStatus: 'complete' },
+    { checkboxState: '[/]', statuses: ['working'], toggleTargetStatus: 'complete' },
+    { checkboxState: '[-]', statuses: ['wont-do'], toggleTargetStatus: 'todo' },
+    { checkboxState: '[>]', statuses: ['migrated'], toggleTargetStatus: 'todo' },
+  ];
+
+  assert.deepEqual(classifyMappedTaskCheckboxState(mappings, '[?]'), {
+    marker: '?',
+    status: 'todo',
+    isComplete: false,
+    isMigrated: false,
+    isOpen: true,
+  });
+  assert.equal(classifyMappedTaskCheckboxState(mappings, '*').isComplete, true);
+  assert.equal(classifyMappedTaskCheckboxState(mappings, '/').isOpen, true);
+  assert.equal(classifyMappedTaskCheckboxState(mappings, '-').isComplete, true);
+  assert.deepEqual(classifyMappedTaskCheckboxState(mappings, '>'), {
+    marker: '>',
+    status: 'migrated',
+    isComplete: false,
+    isMigrated: true,
+    isOpen: false,
+  });
+
+  assert.equal(hasOpenMappedTaskLines(['- [?] Custom todo'], mappings), true);
+  assert.equal(hasOpenMappedTaskLines(['- [/] Working'], mappings), true);
+  assert.equal(hasOpenMappedTaskLines(['- [*] Complete', '- [-] Wont do', '- [>] Migrated'], mappings), false);
+  assert.equal(
+    hasOpenMappedTaskLines(['- [*] Complete', '- [>] Migrated', '- [?] Reopened'], mappings),
+    true,
+    'the checklist property must remain true after reopening into a custom todo marker',
+  );
+});
+
+test('setCompletion returns the exact post-follow-up task and fails an ambiguous recurrence reopen closed', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  fixture.plugin.settings.linkedSubitemCheckboxMappings = [
+    { checkboxState: '[*]', statuses: ['complete'], toggleTargetStatus: 'todo' },
+    { checkboxState: '[?]', statuses: ['todo'], toggleTargetStatus: 'complete' },
+  ];
+  fixture.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation = async (
+    file,
+    previousState,
+    nextState,
+    updatedLines,
+  ) => {
+    fixture.mutationTimeline.push('checklist-followup');
+    fixture.checklistMutations.push({ file, previousState, nextState, updatedLines: [...updatedLines] });
+    if (nextState !== '*') return;
+    const lines = fixture.contents.get(fixture.taskPath).split('\n');
+    lines[4] = `${lines[4]} [recurrenceTaskId:: qa-series]`;
+    lines.splice(5, 0, '- [?] Open task [recurrenceTaskId:: qa-series]');
+    fixture.contents.set(fixture.taskPath, lines.join('\n'));
+  };
+
+  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const completed = await fixture.service.setCompletion(openTask, true);
+
+  assert.equal(completed.ok, true);
+  assert.match(completed.task?.rawLine || '', /\[recurrenceTaskId:: qa-series\]/u);
+  assert.equal(completed.task?.lineNumber, 4);
+  assert.equal(completed.task?.status, 'complete');
+
+  const reopened = await fixture.service.setCompletion(completed.task, false);
+  assert.equal(reopened.ok, true);
+  assert.equal(reopened.changed, true);
+  assert.equal(
+    reopened.task,
+    null,
+    'reopening creates two identical recurrence rows, so the API must not trust the old absolute line',
+  );
+  const reopenedLines = fixture.contents.get(fixture.taskPath).split('\n').filter(
+    (line) => /^- \[\?\] Open task \[recurrenceTaskId:: qa-series\]$/u.test(line),
+  );
+  assert.equal(reopenedLines.length, 2);
+});
+
+test('setCompletion reports a committed write when follow-up fails and refreshes across frontmatter shifts', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  fixture.plugin.settings.linkedSubitemCheckboxMappings = [
+    { checkboxState: '[*]', statuses: ['complete'], toggleTargetStatus: 'todo' },
+    { checkboxState: '[?]', statuses: ['todo'], toggleTargetStatus: 'complete' },
+  ];
+  fixture.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation = async () => {
+    fixture.mutationTimeline.push('checklist-followup');
+    const lines = fixture.contents.get(fixture.taskPath).split('\n');
+    lines.splice(2, 0, 'followupAttempted: true');
+    fixture.contents.set(fixture.taskPath, lines.join('\n'));
+    throw new Error('synthetic follow-up failure');
+  };
+
+  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const completed = await fixture.service.setCompletion(openTask, true);
+
+  assert.equal(completed.ok, false);
+  assert.equal(completed.changed, true);
+  assert.match(completed.error || '', /synthetic follow-up failure/u);
+  assert.equal(completed.task?.marker, '*');
+  assert.equal(completed.task?.lineNumber, 5, 'frontmatter growth must not leave the result on the old absolute line');
+  assert.match(fixture.contents.get(fixture.taskPath).split('\n')[5], /^- \[\*\] Open task/u);
+  assert.deepEqual(fixture.mutationTimeline, [
+    'checklist-followup',
+    'files-updated',
+    'calendar-refresh',
+    'overlay-invalidated',
+  ]);
+  assert.deepEqual(fixture.filesUpdated, [[fixture.taskPath]]);
+  assert.deepEqual(fixture.calendarUpdated, [[fixture.taskPath]]);
+  assert.equal(fixture.overlayInvalidations.length, 1);
+});
+
+test('setCompletion fails the refreshed task identity closed when follow-up creates an exact duplicate', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  fixture.plugin.settings.linkedSubitemCheckboxMappings = [
+    { checkboxState: '[*]', statuses: ['complete'], toggleTargetStatus: 'todo' },
+    { checkboxState: '[?]', statuses: ['todo'], toggleTargetStatus: 'complete' },
+  ];
+  fixture.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation = async () => {
+    fixture.mutationTimeline.push('checklist-followup');
+    const lines = fixture.contents.get(fixture.taskPath).split('\n');
+    lines.splice(5, 0, lines[4]);
+    fixture.contents.set(fixture.taskPath, lines.join('\n'));
+  };
+
+  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const completed = await fixture.service.setCompletion(openTask, true);
+
+  assert.equal(completed.ok, true);
+  assert.equal(completed.changed, true);
+  assert.equal(completed.task, null, 'duplicate post-follow-up identities must not select by stale line number');
+  assert.deepEqual(fixture.mutationTimeline, [
+    'checklist-followup',
+    'files-updated',
+    'calendar-refresh',
+    'overlay-invalidated',
+  ]);
+});
+
+test('setCompletion never returns a stale task when follow-up removes the exact task line', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  fixture.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation = async () => {
+    fixture.mutationTimeline.push('checklist-followup');
+    const lines = fixture.contents.get(fixture.taskPath).split('\n');
+    lines[4] = '- Follow-up replaced the task with a bullet';
+    fixture.contents.set(fixture.taskPath, lines.join('\n'));
+  };
+
+  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const completed = await fixture.service.setCompletion(openTask, true);
+
+  assert.equal(completed.ok, true);
+  assert.equal(completed.changed, true);
+  assert.equal(completed.task, null);
+  assert.deepEqual(fixture.mutationTimeline, [
+    'checklist-followup',
+    'files-updated',
+    'calendar-refresh',
+    'overlay-invalidated',
+  ]);
+});
+
+test('raw setCheckbox remains backward-compatible and does not opt into completion follow-ups', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+
+  const result = await fixture.service.setCheckbox(openTask, 'x');
+
+  assert.equal(result.ok, true);
+  assert.equal(result.task?.isComplete, true);
+  assert.equal(fixture.checklistMutations.length, 0);
+  assert.deepEqual(fixture.mutationTimeline, ['files-updated', 'calendar-refresh', 'overlay-invalidated']);
+});
+
 test('task API mutations preserve safe task-specific behavior', () => {
   assert.match(taskApiSource, /this\.plugin\.app\.vault\.process\(targetFile/);
   assert.match(taskApiSource, /this\.plugin\.app\.vault\.process\(resolved\.file/);
@@ -284,6 +640,7 @@ test('task API mutations preserve safe task-specific behavior', () => {
   assert.match(taskApiSource, /setInlineFieldValueOnTaskLine\(next, 'status', null\)/);
   assert.match(taskApiSource, /statusToCheckboxMarker\(status: string\)/);
   assert.match(taskApiSource, /linkedSubitemCheckboxMappings/);
+  assert.match(taskApiSource, /handleExternalChecklistStateMutation\(/);
   assert.match(taskApiSource, /emitFilesUpdated/);
   assert.match(taskApiSource, /emitCalendarRefresh/);
   assert.match(taskApiSource, /refreshLivePreviewEditors: true/);
