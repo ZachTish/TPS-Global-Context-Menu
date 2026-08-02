@@ -57,6 +57,10 @@ import {
 } from '../../views/log-line-utils';
 import { resolveExactLineRevisionIndex, splitLineItemContent } from '../../utils/line-item-deletion';
 import {
+  scanMarkdownDocumentLines,
+  type MarkdownDocumentLine,
+} from '../../utils/markdown-document-lines';
+import {
   addInlineTagToTaskLine,
   parseTaskTagValues,
   readInlineFieldRanges,
@@ -2156,48 +2160,33 @@ export class TpsListView extends BasesView {
       .then((content) => {
         const taskFilter = this.getTaskRootFilterFromBaseFilters();
         if (generation !== this.renderGeneration && !this.isVisibleFile(file.path) && !this.isTaskSourceFile(file, taskFilter)) return;
-        const contentApi = this.getGcmServices()?.cardContent || this.getGcmApi()?.cardContent;
         const limit = this.getOpenTaskPreviewLimit();
-        const fallback = this.parseOpenTasks(content, file.path, limit);
-        const parsed = typeof contentApi?.extractOpenTasksFromMarkdown === 'function'
-          ? contentApi.extractOpenTasksFromMarkdown(file.path, content, { openTaskLimit: limit })
-          : fallback;
-        const allTasks = this.parseOpenTasks(content, file.path, Number.MAX_SAFE_INTEGER, true).openTasks;
-        const gcmTasksByLine = new Map<number, OpenTaskSubitem>(
-          (Array.isArray(parsed?.openTasks) ? parsed.openTasks : [])
-            .filter((task: OpenTaskSubitem) => Number.isFinite(Number(task.line)))
-            .map((task: OpenTaskSubitem) => [Number(task.line), task])
-        );
-        const openTasks = fallback.openTasks.map((task: OpenTaskSubitem) => {
-          const enriched = gcmTasksByLine.get(task.line);
-          const merged = {
-            ...task,
-            checkboxState: task.checkboxState || enriched?.checkboxState || '[ ]',
-            inlineFields: task.inlineFields?.length ? task.inlineFields : enriched?.inlineFields,
-          };
-          return {
-            ...merged,
-            displayText: this.getTaskVisibleTitle(merged),
-          };
-        });
-        const openByLine = new Map<number, OpenTaskSubitem>(openTasks.map((task: OpenTaskSubitem) => [task.line, task]));
+        const documentLines = scanMarkdownDocumentLines(content);
+        const allTasks = this.parseOpenTasks(
+          content,
+          file.path,
+          Number.MAX_SAFE_INTEGER,
+          true,
+          false,
+          false,
+          documentLines,
+        ).openTasks;
+        const doneStatuses = this.getDoneStatuses();
         const enrichedAllTasks = allTasks.map((task: OpenTaskSubitem) => {
-          const openTask = openByLine.get(task.line);
-          const merged = {
-            ...task,
-            ...(openTask ?? {}),
-            checkboxState: task.checkboxState || openTask?.checkboxState || '[ ]',
-            inlineFields: task.inlineFields?.length ? task.inlineFields : openTask?.inlineFields,
-          };
-          return {
-            ...merged,
-            displayText: this.getTaskVisibleTitle(merged),
-          };
+          const normalized = { ...task, checkboxState: task.checkboxState || '[ ]' };
+          return { ...normalized, displayText: this.getTaskVisibleTitle(normalized) };
         });
-        const overflowCount = Number(parsed?.overflowCount ?? fallback.overflowCount);
+        const openCandidates = enrichedAllTasks.filter((task) => !doneStatuses.has(
+          this.getStatusForCheckboxState(task.checkboxState || '[ ]'),
+        ));
+        const normalizedLimit = Number.isFinite(Number(limit))
+          ? Math.max(0, Math.floor(Number(limit)))
+          : openCandidates.length;
+        const openTasks = openCandidates.slice(0, normalizedLimit);
+        const overflowCount = Math.max(0, openCandidates.length - openTasks.length);
         this.openTasksByPath.set(file.path, openTasks);
         this.allTasksByPath.set(file.path, enrichedAllTasks);
-        this.openTaskOverflowByPath.set(file.path, Number.isFinite(overflowCount) ? Math.max(0, overflowCount) : fallback.overflowCount);
+        this.openTaskOverflowByPath.set(file.path, overflowCount);
       })
       .catch(() => {
         this.openTasksByPath.set(file.path, []);
@@ -2219,13 +2208,19 @@ export class TpsListView extends BasesView {
     includeDone = false,
     includeBullets = false,
     includeHeadings = false,
+    documentLines: readonly MarkdownDocumentLine[] = scanMarkdownDocumentLines(content),
   ): { openTasks: OpenTaskSubitem[]; overflowCount: number } {
     const tasks: OpenTaskSubitem[] = [];
-    const lines = content.split(/\r?\n/);
     const doneStatuses = this.getDoneStatuses();
     const hierarchyStack: Array<{ line: number; indent: number }> = [];
-    lines.forEach((line, index) => {
-      const lineNumber = index + 1;
+    documentLines.forEach((documentLine) => {
+      if (!documentLine.isContent) {
+        if (documentLine.text.trim() && getMarkdownIndentColumns(documentLine.text) === 0) {
+          hierarchyStack.length = 0;
+        }
+        return;
+      }
+      const { text: line, lineNumber } = documentLine;
       const structuralItem = this.parseLineItem(line, true);
       const indent = getMarkdownIndentColumns(line);
       let parentLine: number | undefined;

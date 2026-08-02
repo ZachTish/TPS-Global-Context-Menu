@@ -783,6 +783,109 @@ test('TPS List skips ambiguous filters from multiple unidentified embedded Base 
   assert.equal(reads, 1);
 });
 
+test('TPS List excludes frontmatter and fenced-code examples from synthesized rows', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  view.getDoneStatuses = () => new Set(['complete', 'wont-do']);
+  view.getStatusForCheckboxState = () => 'todo';
+  const content = [
+    '---',
+    'quarantine:',
+    '  - [ ] Frontmatter task',
+    '---',
+    '# Visible heading',
+    '- [ ] Visible task',
+    '- Visible bullet',
+    '```md',
+    '# Hidden backtick heading',
+    '- [ ] Hidden backtick task',
+    '- Hidden backtick bullet',
+    '```',
+    '~~~text',
+    '# Hidden tilde heading',
+    '- [ ] Hidden tilde task',
+    '- Hidden tilde bullet',
+    '~~~',
+  ].join('\n');
+
+  const rows = view.parseOpenTasks(
+    content,
+    'Inbox/Quarantined.md',
+    Number.MAX_SAFE_INTEGER,
+    true,
+    true,
+    true,
+  ).openTasks;
+
+  assert.deepEqual(
+    rows.map((row) => ({ kind: row.itemKind, title: row.displayText, line: row.line })),
+    [
+      { kind: 'heading', title: 'Visible heading', line: 5 },
+      { kind: 'task', title: 'Visible task', line: 6 },
+      { kind: 'bullet', title: 'Visible bullet', line: 7 },
+    ],
+  );
+});
+
+test('TPS List does not carry hierarchy across a top-level protected block', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  view.getDoneStatuses = () => new Set(['complete', 'wont-do']);
+  view.getStatusForCheckboxState = () => 'todo';
+
+  const topLevelRows = view.parseOpenTasks(
+    [
+      '- [ ] Parent before code',
+      '```md',
+      '- [ ] Hidden code task',
+      '```',
+      '  - [ ] Separate top-level task',
+    ].join('\n'),
+    'Inbox/Hierarchy.md',
+    Number.MAX_SAFE_INTEGER,
+    true,
+  ).openTasks;
+  assert.deepEqual(
+    topLevelRows.map(({ line, parentLine, displayText }) => ({ line, parentLine, displayText })),
+    [
+      { line: 1, parentLine: undefined, displayText: 'Parent before code' },
+      { line: 5, parentLine: undefined, displayText: 'Separate top-level task' },
+    ],
+  );
+
+  const nestedRows = view.parseOpenTasks(
+    [
+      '- [ ] Parent around code',
+      '  ```md',
+      '  - [ ] Hidden nested code task',
+      '  ```',
+      '  - [ ] Child after nested code',
+    ].join('\n'),
+    'Inbox/Nested-Hierarchy.md',
+    Number.MAX_SAFE_INTEGER,
+    true,
+  ).openTasks;
+  assert.deepEqual(
+    nestedRows.map(({ line, parentLine, displayText }) => ({ line, parentLine, displayText })),
+    [
+      { line: 1, parentLine: undefined, displayText: 'Parent around code' },
+      { line: 5, parentLine: 1, displayText: 'Child after nested code' },
+    ],
+  );
+});
+
+test('TPS List classifies each loaded note once and derives previews from the canonical task set', () => {
+  const loader = sourceBlock(
+    viewSource,
+    'private loadOpenTasksForFile(file: TFile)',
+    'private parseOpenTasks(',
+  );
+  assert.equal((loader.match(/scanMarkdownDocumentLines\(content\)/gu) || []).length, 1);
+  assert.equal((loader.match(/this\.parseOpenTasks\(/gu) || []).length, 1);
+  assert.doesNotMatch(loader, /extractOpenTasksFromMarkdown|contentApi|fallback/u);
+  assert.match(loader, /openCandidates\.length - openTasks\.length/u);
+});
+
 test('TPS List parses, displays, and safely renames Markdown headings', async () => {
   const { getTpsListHeadingDisplayTitle, parseTpsListHeadingLine, setTpsListHeadingText } = await loadHeadingLineUtils();
   assert.deepEqual(parseTpsListHeadingLine('## what im doing today'), {
@@ -1735,6 +1838,7 @@ test('GCM exposes the canonical nesting-aware line metadata parser as a versione
   assert.match(pluginApiSource, /parseStringList:\s*\(value:\s*unknown\)\s*=>\s*parseStringListInput\(value\)/u);
   assert.match(pluginApiSource, /parseTags:\s*\(value:\s*unknown\)\s*=>\s*parseTaskTagValues\(value\)/u);
   assert.match(pluginApiSource, /getDisplayTitle:\s*\(line:\s*string\)\s*=>\s*getSharedLineDisplayTitle\(line\)/u);
+  assert.match(pluginApiSource, /scanDocument:\s*\(content:\s*string\)\s*=>\s*Object\.freeze\([\s\S]*?getMarkdownContentLines\(content\)/u);
   assert.match(pluginApiSource, /parseLine:\s*\(line:\s*string\)\s*=>\s*\{\s*const parsed = parseLineEntityMetadata\(line\);[\s\S]*?fields:\s*parsed\?\.fields\s*\?\?\s*\[\],[\s\S]*?tags:\s*parsed\?\.tags\s*\?\?\s*\[\],[\s\S]*?displayTitle:\s*parsed\?\.displayTitle\s*\?\?\s*''/u);
   assert.doesNotMatch(pluginApiSource, /parseLine:[\s\S]{0,500}readTaskInlineFields|parseLine:[\s\S]{0,500}readTaskLineTags/u);
 });

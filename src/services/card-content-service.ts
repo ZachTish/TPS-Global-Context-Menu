@@ -1,3 +1,5 @@
+import { scanMarkdownDocumentLines } from '../utils/markdown-document-lines';
+
 export interface CardTaskPreview {
   internalId: string;
   line: number;
@@ -18,16 +20,17 @@ export class CardContentService {
   extractOpenTasksFromMarkdown(filePath: string, content: string, options: CardContentOptions = {}): CardContent {
     const limit = this.normalizeLimit(options.openTaskLimit);
     const allTasks: CardTaskPreview[] = [];
-    const lines = String(content || '').split(/\r?\n/);
+    const lines = scanMarkdownDocumentLines(content);
 
-    lines.forEach((line, index) => {
+    lines.forEach((documentLine) => {
+      if (!documentLine.isContent) return;
+      const { text: line, lineNumber } = documentLine;
       const match = line.match(/^\s*(?:[-*+]|\d+[.)])\s+\[([^\]]*)\]\s+(.+)$/);
       if (!match) return;
       const status = match[1] ?? '';
       if (status.trim()) return;
       const text = this.cleanTaskText(match[2] ?? '');
       if (!text) return;
-      const lineNumber = index + 1;
       allTasks.push({
         internalId: `${filePath}:${lineNumber}`,
         line: lineNumber,

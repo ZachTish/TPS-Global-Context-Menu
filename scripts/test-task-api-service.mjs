@@ -202,6 +202,21 @@ function createTaskApiFixture(TaskApiService) {
   };
 }
 
+function moveTaskIntoFenceBeforeNextSourceProcess(fixture, task) {
+  const vault = fixture.plugin.app.vault;
+  const process = vault.process.bind(vault);
+  const protectedContent = ['```md', task.rawLine, '```'].join('\n');
+  let armed = true;
+  vault.process = async (file, updater) => {
+    if (armed && file.path === task.path) {
+      armed = false;
+      fixture.contents.set(task.path, protectedContent);
+    }
+    return process(file, updater);
+  };
+  return protectedContent;
+}
+
 test('GCM exposes a strategic task API for external agents', () => {
   assert.match(mainSource, /import \{ TaskApiService \} from '\.\/services\/task-api-service';/);
   assert.match(mainSource, /taskApiService: TaskApiService;/);
@@ -301,6 +316,109 @@ test('compiled task API accepts foreign file-like values and keeps empty prefixe
 
   assert.equal(await fixture.service.focus(exact), true);
   assert.equal(fixture.opened.at(-1), fixture.canonicalTaskFile, 'focus must open the canonical vault object');
+});
+
+test('compiled task API excludes frontmatter, fenced, and indented code tasks', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  fixture.contents.set(fixture.taskPath, [
+    '---',
+    'quarantine:',
+    '  - [ ] Hidden frontmatter task',
+    '---',
+    '```md',
+    '- [ ] Hidden fenced task',
+    '```',
+    '',
+    '    - [ ] Hidden indented task',
+    '',
+    '- [ ] Visible task',
+  ].join('\n'));
+
+  const tasks = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  assert.deepEqual(tasks.map(({ title, line }) => ({ title, line })), [
+    { title: 'Visible task', line: 11 },
+  ]);
+  assert.equal(await fixture.service.get({
+    path: fixture.taskPath,
+    line: 6,
+    rawLine: '- [ ] Hidden fenced task',
+  }), null);
+});
+
+test('task API mutations revalidate Markdown protection inside each write callback', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+
+  const updateFixture = createTaskApiFixture(TaskApiService);
+  const [updateTask] = await updateFixture.service.list({ paths: [updateFixture.taskPath], includeCompleted: true });
+  const protectedUpdate = moveTaskIntoFenceBeforeNextSourceProcess(updateFixture, updateTask);
+  const updated = await updateFixture.service.update(updateTask, { title: 'Must not edit code' });
+  assert.equal(updated.ok, false);
+  assert.equal(updated.changed, false);
+  assert.equal(updateFixture.contents.get(updateFixture.taskPath), protectedUpdate);
+
+  const deleteFixture = createTaskApiFixture(TaskApiService);
+  const [deleteTask] = await deleteFixture.service.list({ paths: [deleteFixture.taskPath], includeCompleted: true });
+  const protectedDelete = moveTaskIntoFenceBeforeNextSourceProcess(deleteFixture, deleteTask);
+  const deleted = await deleteFixture.service.delete(deleteTask);
+  assert.equal(deleted.ok, false);
+  assert.equal(deleted.changed, false);
+  assert.equal(deleteFixture.contents.get(deleteFixture.taskPath), protectedDelete);
+
+  const sameFileFixture = createTaskApiFixture(TaskApiService);
+  const [sameFileTask] = await sameFileFixture.service.list({ paths: [sameFileFixture.taskPath], includeCompleted: true });
+  const protectedSameFileMove = moveTaskIntoFenceBeforeNextSourceProcess(sameFileFixture, sameFileTask);
+  const sameFileMove = await sameFileFixture.service.move(sameFileTask, {
+    targetPath: sameFileFixture.taskPath,
+    placement: 'line',
+    lineNumber: 0,
+  });
+  assert.equal(sameFileMove.ok, false);
+  assert.equal(sameFileMove.changed, false);
+  assert.equal(sameFileFixture.contents.get(sameFileFixture.taskPath), protectedSameFileMove);
+
+  const crossFileFixture = createTaskApiFixture(TaskApiService);
+  const [crossFileTask] = await crossFileFixture.service.list({ paths: [crossFileFixture.taskPath], includeCompleted: true });
+  const originalTarget = crossFileFixture.contents.get(crossFileFixture.canonicalUpperFile.path);
+  const protectedCrossFileMove = moveTaskIntoFenceBeforeNextSourceProcess(crossFileFixture, crossFileTask);
+  const crossFileMove = await crossFileFixture.service.move(crossFileTask, {
+    targetFile: { path: crossFileFixture.canonicalUpperFile.path },
+  });
+  assert.equal(crossFileMove.ok, false);
+  assert.equal(crossFileMove.changed, false);
+  assert.equal(crossFileFixture.contents.get(crossFileFixture.taskPath), protectedCrossFileMove);
+  assert.equal(
+    crossFileFixture.contents.get(crossFileFixture.canonicalUpperFile.path),
+    originalTarget,
+    'a stale cross-file move must roll back its target insertion',
+  );
+});
+
+test('task API writes preserve actionable CR-only task coordinates', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  fixture.contents.set(fixture.taskPath, [
+    '---',
+    'title: Classic Mac',
+    '---',
+    '- [ ] CR task',
+    '',
+  ].join('\r'));
+
+  const [task] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  assert.deepEqual({ title: task.title, line: task.line, lineNumber: task.lineNumber }, {
+    title: 'CR task',
+    line: 4,
+    lineNumber: 3,
+  });
+
+  const result = await fixture.service.update(task, { title: 'CR task updated' });
+  const updatedContent = fixture.contents.get(fixture.taskPath);
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.match(updatedContent, /- \[ \] CR task updated/u);
+  assert.equal(updatedContent.includes('\n'), false);
+  assert.equal(updatedContent.split('\r').length, 5);
 });
 
 test('compiled task API fails explicit invalid targets closed and writes valid foreign targets exactly', async () => {
@@ -634,7 +752,8 @@ test('task API mutations preserve safe task-specific behavior', () => {
   assert.match(taskApiSource, /this\.plugin\.app\.vault\.process\(resolved\.file/);
   assert.match(taskApiSource, /insertLineAfterFrontmatter\(content, line\)/);
   assert.match(taskApiSource, /insertTaskBlockAfterFrontmatter\(content, block\.lines\)/);
-  assert.match(taskApiSource, /removeTaskBlockFromContent\(content, sourceIndex, resolved\.record\.rawLine, resolved\.record\.title\)/);
+  assert.match(taskApiSource, /private resolveMutableTaskLine\(/);
+  assert.match(taskApiSource, /removeTaskBlockFromContent\(\s*content,\s*currentResolution\.index,\s*resolved\.record\.rawLine,\s*resolved\.record\.title/u);
   assert.ok(taskApiSource.includes('setTaskCheckboxToken(next, `[${marker}]`)'));
   assert.ok(taskApiSource.includes('updateTaskCompletedDateForCheckboxState(next, `[${marker}]`'));
   assert.match(taskApiSource, /setInlineFieldValueOnTaskLine\(next, 'status', null\)/);

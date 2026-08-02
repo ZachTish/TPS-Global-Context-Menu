@@ -116,6 +116,7 @@ import {
   normalizeInlineBooleanPropertyValue,
 } from '../utils/boolean-property';
 import { parseLineEntityMetadata } from '../services/line-entity-source-provider';
+import { scanMarkdownDocumentLines } from '../utils/markdown-document-lines';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
 const TPS_TABLE_TITLE_ALIASES = new Set([
@@ -644,7 +645,9 @@ export class TpsTableView extends BasesView {
         logger.flowWarn('TpsTableView', 'source-read:failed', { path: file.path, error: logger.errorSummary(error) });
         continue;
       }
-      splitLineItemContent(content).lines.forEach((line, index) => {
+      scanMarkdownDocumentLines(content).forEach((documentLine) => {
+        if (!documentLine.isContent) return;
+        const { text: line, index } = documentLine;
         const fields = readInlineFields(line);
         const heading = parseTpsListHeadingLine(line);
         const markdownKind = getTpsTableMarkdownLineKind(line);

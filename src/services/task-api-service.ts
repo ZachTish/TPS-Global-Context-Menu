@@ -27,6 +27,7 @@ import { getLinkedSubitemCompleteMarkers, mapStatusToSubitemCheckboxState } from
 import * as logger from '../logger';
 import { findRelationalStatusProperty } from '../utils/property-option-source';
 import { classifyMappedTaskCheckboxState } from '../utils/task-checkbox-classification';
+import { scanMarkdownDocumentLines } from '../utils/markdown-document-lines';
 
 const INLINE_FIELD_GLOBAL_RE = /(?:^|\s)([\[(])\s*([A-Za-z0-9_-]+)\s*::\s*([^\]\)]*)[\])]/g;
 
@@ -134,9 +135,11 @@ export class TaskApiService {
 
     for (const file of files) {
       const content = await this.plugin.app.vault.cachedRead(file);
-      const lines = content.split(/\r?\n/);
-      for (let index = 0; index < lines.length; index += 1) {
-        const record = this.recordFromLine(file.path, index, lines[index] || '', lines);
+      const documentLines = scanMarkdownDocumentLines(content);
+      const lines = documentLines.map((line) => line.text);
+      for (const line of documentLines) {
+        if (!line.isContent) continue;
+        const record = this.recordFromLine(file.path, line.index, line.text, lines);
         if (!record) continue;
         if (!this.matchesFilter(record, filter)) continue;
         results.push(record);
@@ -300,9 +303,14 @@ export class TaskApiService {
 
     try {
       await this.plugin.app.vault.process(resolved.file, (content) => {
-        const parts = splitContent(content);
-        const index = findCurrentTaskLineIndex(parts.lines, before.lineNumber, before.rawLine, before.title);
-        if (index < 0) return content;
+        const currentResolution = this.resolveMutableTaskLine(
+          content,
+          before.lineNumber,
+          before.rawLine,
+          before.title,
+        );
+        if (!currentResolution) return content;
+        const { parts, index } = currentResolution;
         writeResolved = true;
         resolvedLineNumber = index;
         const current = parts.lines[index] || '';
@@ -438,12 +446,17 @@ export class TaskApiService {
 
     try {
       const sourceContent = await this.plugin.app.vault.cachedRead(resolved.file);
-      const sourceParts = splitContent(sourceContent);
-      const sourceIndex = findCurrentTaskLineIndex(sourceParts.lines, resolved.record.lineNumber, resolved.record.rawLine, resolved.record.title);
-      if (sourceIndex < 0) {
+      const sourceResolution = this.resolveMutableTaskLine(
+        sourceContent,
+        resolved.record.lineNumber,
+        resolved.record.rawLine,
+        resolved.record.title,
+      );
+      if (!sourceResolution) {
         logger.flowWarn('TaskApi', 'move:source-line-missing', context);
         return { ok: false, changed: false, task: null, before: resolved.record, error: 'Source task moved before it could be edited.' };
       }
+      const { parts: sourceParts, index: sourceIndex } = sourceResolution;
       const block = extractTaskBlock(sourceParts.lines, sourceIndex);
       if (!block.lines.length) {
         logger.flowWarn('TaskApi', 'move:empty-block', context);
@@ -451,11 +464,18 @@ export class TaskApiService {
       }
 
       let insertedLineNumber = -1;
+      let sourceMutationResolved = false;
       if (resolved.file.path === targetFile.path) {
         await this.plugin.app.vault.process(resolved.file, (content) => {
-          const parts = splitContent(content);
-          const currentIndex = findCurrentTaskLineIndex(parts.lines, sourceIndex, resolved.record.rawLine, resolved.record.title);
-          if (currentIndex < 0) return content;
+          const currentResolution = this.resolveMutableTaskLine(
+            content,
+            sourceIndex,
+            resolved.record.rawLine,
+            resolved.record.title,
+          );
+          if (!currentResolution) return content;
+          const { parts, index: currentIndex } = currentResolution;
+          sourceMutationResolved = true;
           const currentBlock = extractTaskBlock(parts.lines, currentIndex);
           const requested = this.resolveTargetLineIndex(parts.lines.length, target);
           if (requested >= currentIndex && requested <= currentBlock.endExclusive) return content;
@@ -480,8 +500,59 @@ export class TaskApiService {
           return joinContent(nextLines, parts.newline, true);
         });
         await this.plugin.app.vault.process(resolved.file, (content) => {
-          return removeTaskBlockFromContent(content, sourceIndex, resolved.record.rawLine, resolved.record.title).content;
+          const currentResolution = this.resolveMutableTaskLine(
+            content,
+            sourceIndex,
+            resolved.record.rawLine,
+            resolved.record.title,
+          );
+          if (!currentResolution) return content;
+          const removed = removeTaskBlockFromContent(
+            content,
+            currentResolution.index,
+            resolved.record.rawLine,
+            resolved.record.title,
+          );
+          sourceMutationResolved = removed.changed;
+          return removed.content;
         });
+      }
+
+      if (!sourceMutationResolved) {
+        let rolledBackTarget = resolved.file.path === targetFile.path;
+        if (!rolledBackTarget && insertedLineNumber >= 0) {
+          await this.plugin.app.vault.process(targetFile, (content) => {
+            const insertedResolution = this.resolveMutableTaskLine(
+              content,
+              insertedLineNumber,
+              block.lines[0] || resolved.record.rawLine,
+              resolved.record.title,
+            );
+            if (!insertedResolution) return content;
+            const removed = removeTaskBlockFromContent(
+              content,
+              insertedResolution.index,
+              block.lines[0] || resolved.record.rawLine,
+              resolved.record.title,
+            );
+            rolledBackTarget = removed.changed;
+            return removed.content;
+          });
+        }
+        logger.flowWarn('TaskApi', 'move:source-became-protected', {
+          ...context,
+          rolledBackTarget,
+        });
+        if (!rolledBackTarget) this.notifyChanged([targetFile.path], 'task-api-move-partial');
+        return {
+          ok: false,
+          changed: !rolledBackTarget,
+          task: null,
+          before: resolved.record,
+          error: rolledBackTarget
+            ? 'Source task moved into protected Markdown before it could be moved.'
+            : 'Source task moved into protected Markdown and the target insertion could not be rolled back.',
+        };
       }
 
       const task = await this.get({
@@ -514,7 +585,19 @@ export class TaskApiService {
     logger.flow('TaskApi', 'delete:start', context);
     try {
       await this.plugin.app.vault.process(resolved.file, (content) => {
-        const result = removeTaskBlockFromContent(content, resolved.record.lineNumber, resolved.record.rawLine, resolved.record.title);
+        const currentResolution = this.resolveMutableTaskLine(
+          content,
+          resolved.record.lineNumber,
+          resolved.record.rawLine,
+          resolved.record.title,
+        );
+        if (!currentResolution) return content;
+        const result = removeTaskBlockFromContent(
+          content,
+          currentResolution.index,
+          resolved.record.rawLine,
+          resolved.record.title,
+        );
         changed = result.changed;
         return result.content;
       });
@@ -580,6 +663,20 @@ export class TaskApiService {
     };
   }
 
+  private resolveMutableTaskLine(
+    content: string,
+    preferredIndex: number,
+    rawLine: string,
+    title: string,
+  ): { parts: ReturnType<typeof splitContent>; index: number } | null {
+    const parts = splitContent(content);
+    const index = findCurrentTaskLineIndex(parts.lines, preferredIndex, rawLine, title);
+    if (index < 0) return null;
+    const documentLine = scanMarkdownDocumentLines(content)[index];
+    if (!documentLine?.isContent || documentLine.text !== (parts.lines[index] || '')) return null;
+    return { parts, index };
+  }
+
   private summarizeRef(ref: GcmTaskRef): Record<string, unknown> {
     return {
       path: ref.path || '',
@@ -594,7 +691,8 @@ export class TaskApiService {
     const file = this.resolveMarkdownFile(ref.path);
     if (!file) return null;
     const content = await this.plugin.app.vault.cachedRead(file);
-    const lines = content.split(/\r?\n/);
+    const documentLines = scanMarkdownDocumentLines(content);
+    const lines = documentLines.map((line) => line.text);
     const preferred = typeof ref.lineNumber === 'number'
       ? Math.floor(ref.lineNumber)
       : typeof ref.line === 'number'
@@ -606,7 +704,7 @@ export class TaskApiService {
       String(ref.rawLine || ''),
       String(ref.title || (preferred >= 0 ? getTaskDisplayTitle(lines[preferred] || '') : '')),
     );
-    if (lineIndex < 0) return null;
+    if (lineIndex < 0 || !documentLines[lineIndex]?.isContent) return null;
     const record = this.recordFromLine(file.path, lineIndex, lines[lineIndex] || '', lines);
     return record ? { file, record } : null;
   }
@@ -618,8 +716,10 @@ export class TaskApiService {
     try {
       const content = await this.plugin.app.vault.read(file);
       const parts = splitContent(content);
-      const records = parts.lines.reduce<GcmTaskRecord[]>((result, line, lineNumber) => {
-        const record = this.recordFromLine(file.path, lineNumber, line || '', parts.lines);
+      const documentLines = scanMarkdownDocumentLines(content);
+      const records = documentLines.reduce<GcmTaskRecord[]>((result, line) => {
+        if (!line.isContent) return result;
+        const record = this.recordFromLine(file.path, line.index, line.text, parts.lines);
         if (record) result.push(record);
         return result;
       }, []);

@@ -14,10 +14,13 @@ import {
   type TaskInlineField,
 } from '../utils/task-line-metadata';
 import { parseStringListInput } from '../utils/list-utils';
+import {
+  scanMarkdownDocumentLines,
+  type MarkdownDocumentLine,
+} from '../utils/markdown-document-lines';
 
 const MARKDOWN_LINE_PREFIX_RE = /^([ \t]*)(?:[-+*]|\d+[.)])[ \t]+/u;
 const MARKDOWN_HEADING_RE = /^[ \t]{0,3}(#{1,6})[ \t]+(.+)$/u;
-const FENCE_RE = /^[ \t]{0,3}(`{3,}|~{3,})/u;
 
 export interface LineEntityDescriptor {
   readonly id: string;
@@ -126,32 +129,12 @@ export class LineEntitySourceProvider {
 
     const sources: EntityIndexSource[] = [];
     const descriptorIds = new Set<string>();
-    const lines = splitContentLines(String(content || ''));
+    const lines = scanMarkdownDocumentLines(content);
     const nativeBlockIdIndexes = collectNativeBlockIdIndexes(lines);
-    let inFrontmatter = lines[0]?.text.trim() === '---';
-    let fence: { character: string; length: number } | null = null;
 
     for (let index = 0; index < lines.length; index += 1) {
       const rawLine = lines[index].text;
-      const trimmed = rawLine.trim();
-      if (inFrontmatter) {
-        if (index > 0 && (trimmed === '---' || trimmed === '...')) {
-          inFrontmatter = false;
-        }
-        continue;
-      }
-
-      const fenceMatch = rawLine.match(FENCE_RE);
-      if (fenceMatch) {
-        const marker = fenceMatch[1];
-        if (!fence) {
-          fence = { character: marker[0], length: marker.length };
-        } else if (isValidFenceClose(rawLine, marker, fence)) {
-          fence = null;
-        }
-        continue;
-      }
-      if (fence) continue;
+      if (!lines[index].isContent) continue;
 
       const lineKind = getLineEntityKind(rawLine);
       if (!lineKind) continue;
@@ -405,8 +388,8 @@ function provisionalLineEntityId(path: string, lineNumber: number, rawLine: stri
 function resolveLineEntityTarget(
   content: string,
   descriptor: LineEntityDescriptor,
-): { lines: readonly ContentLine[]; index: number } {
-  const lines = splitContentLines(content);
+): { lines: readonly MarkdownDocumentLine[]; index: number } {
+  const lines = scanMarkdownDocumentLines(content);
   if (descriptor.blockId) {
     const blockMatches = collectNativeBlockIdIndexes(lines)
       .get(normalizeLookupValue(descriptor.blockId)) || [];
@@ -423,6 +406,7 @@ function resolveLineEntityTarget(
   const preferred = lines[preferredIndex];
   if (
     preferred
+    && preferred.isContent
     && preferred.text === descriptor.rawLine
     && getLineEntityKind(preferred.text) === descriptor.lineKind
   ) {
@@ -433,6 +417,7 @@ function resolveLineEntityTarget(
   for (const identity of descriptor.legacyIdentities) {
     const matches: number[] = [];
     for (let index = 0; index < lines.length; index += 1) {
+      if (!lines[index].isContent) continue;
       if (getLineEntityKind(lines[index].text) !== descriptor.lineKind) continue;
       const hasIdentity = normalizeLookupValue(
         readLineEntityInlineFieldValue(lines[index].text, identity.key),
@@ -460,7 +445,8 @@ function resolveLineEntityTarget(
   const exactMatches: number[] = [];
   for (let index = 0; index < lines.length; index += 1) {
     if (
-      lines[index].text === descriptor.rawLine
+      lines[index].isContent
+      && lines[index].text === descriptor.rawLine
       && getLineEntityKind(lines[index].text) === descriptor.lineKind
     ) {
       exactMatches.push(index);
@@ -479,57 +465,13 @@ function resolveLineEntityTarget(
   );
 }
 
-interface ContentLine {
-  readonly text: string;
-  readonly start: number;
-  readonly end: number;
-}
-
-function splitContentLines(content: string): ContentLine[] {
-  const source = String(content || '');
-  const lines: ContentLine[] = [];
-  const newline = /\r\n|\n|\r/gu;
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-  while ((match = newline.exec(source)) !== null) {
-    lines.push({
-      text: source.slice(cursor, match.index),
-      start: cursor,
-      end: match.index,
-    });
-    cursor = match.index + match[0].length;
-  }
-  lines.push({
-    text: source.slice(cursor),
-    start: cursor,
-    end: source.length,
-  });
-  return lines;
-}
-
 function collectNativeBlockIdIndexes(
-  lines: readonly ContentLine[],
+  lines: readonly MarkdownDocumentLine[],
 ): Map<string, number[]> {
   const indexesById = new Map<string, number[]>();
-  let inFrontmatter = lines[0]?.text.trim() === '---';
-  let fence: { character: string; length: number } | null = null;
   for (let index = 0; index < lines.length; index += 1) {
     const rawLine = lines[index].text;
-    const trimmed = rawLine.trim();
-    if (inFrontmatter) {
-      if (index > 0 && (trimmed === '---' || trimmed === '...')) {
-        inFrontmatter = false;
-      }
-      continue;
-    }
-    const fenceMatch = rawLine.match(FENCE_RE);
-    if (fenceMatch) {
-      const marker = fenceMatch[1];
-      if (!fence) fence = { character: marker[0], length: marker.length };
-      else if (isValidFenceClose(rawLine, marker, fence)) fence = null;
-      continue;
-    }
-    if (fence) continue;
+    if (!lines[index].isContent) continue;
     const blockId = normalizeLookupValue(readLineBlockId(rawLine));
     if (!blockId) continue;
     const indexes = indexesById.get(blockId) || [];
@@ -537,17 +479,6 @@ function collectNativeBlockIdIndexes(
     indexesById.set(blockId, indexes);
   }
   return indexesById;
-}
-
-function isValidFenceClose(
-  rawLine: string,
-  marker: string,
-  fence: { character: string; length: number },
-): boolean {
-  if (marker[0] !== fence.character || marker.length < fence.length) return false;
-  const markerStart = rawLine.indexOf(marker);
-  return markerStart >= 0
-    && /^[ \t]*$/u.test(rawLine.slice(markerStart + marker.length));
 }
 
 function findCaseInsensitiveKey(record: Record<string, unknown>, key: string): string {

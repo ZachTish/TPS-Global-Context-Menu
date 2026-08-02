@@ -21,6 +21,7 @@ import {
     parseLineEntityMetadata,
     readLineEntityInlineFieldValue,
 } from './services/line-entity-source-provider';
+import { getMarkdownContentLines } from './utils/markdown-document-lines';
 
 type ChecklistTaskState = string;
 
@@ -578,6 +579,15 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
                     displayTitle: parsed?.displayTitle ?? '',
                 };
             },
+            scanDocument: (content: string) => Object.freeze(
+                getMarkdownContentLines(content).map((line) => Object.freeze({
+                    index: line.index,
+                    lineNumber: line.lineNumber,
+                    text: line.text,
+                    start: line.start,
+                    end: line.end,
+                })),
+            ),
         },
         events: eventsApi,
         registry: {

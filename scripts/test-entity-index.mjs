@@ -814,6 +814,75 @@ test('invalid fence-like lines cannot expose code examples as entities', async (
   assert.deepEqual(sources.map(({ name }) => name), ['Visible']);
 });
 
+test('line provider uses CommonMark block context without dropping legitimate nested tasks', async () => {
+  const { LineEntitySourceProvider } = await lineProviderPromise;
+  const provider = new LineEntitySourceProvider();
+  const sources = provider.scanFile(
+    'Entities/Structural-Boundaries.md',
+    [
+      '    - [ ] Hidden indented code [kind:: Project]',
+      '',
+      '- [ ] Visible root [kind:: Task]',
+      '- Parent [kind:: Area]',
+      '',
+      '        - [ ] Hidden list-contained code [kind:: Project]',
+      '',
+      '    - [ ] Visible nested task [kind:: Task]',
+      '    ```md',
+      '    - [ ] Hidden list fence [kind:: Project]',
+      '    ```',
+      '    - [ ] Visible after fence [kind:: Task]',
+      '>     - [ ] Hidden blockquote code [kind:: Project]',
+      '<!--',
+      '- [ ] Hidden comment [kind:: Project]',
+      '-->',
+      '<pre>',
+      '- [ ] Hidden HTML code [kind:: Project]',
+      '</pre>',
+      '- [ ] Visible inline `code` [kind:: Task]',
+    ].join('\n'),
+    [{ name: 'kind', propertyKeys: ['kind'] }],
+  );
+
+  assert.deepEqual(sources.map(({ name, lineNumber }) => ({ name, lineNumber })), [
+    { name: 'Visible root', lineNumber: 3 },
+    { name: 'Parent', lineNumber: 4 },
+    { name: 'Visible nested task', lineNumber: 8 },
+    { name: 'Visible after fence', lineNumber: 12 },
+    { name: 'Visible inline code', lineNumber: 20 },
+  ]);
+});
+
+test('line materialization refuses a formerly valid entity after it moves into code', async () => {
+  const {
+    LineEntityResolutionError,
+    LineEntitySourceProvider,
+  } = await lineProviderPromise;
+  const provider = new LineEntitySourceProvider(() => 'must-not-materialize');
+  const original = '- Target [kind:: Project]';
+  const [source] = provider.scanFile(
+    'Entities/Quarantine-Move.md',
+    original,
+    [{ name: 'kind', propertyKeys: ['kind'] }],
+  );
+  let content = ['```md', original, '```'].join('\n');
+
+  await assert.rejects(
+    provider.materialize(
+      { path: 'Entities/Quarantine-Move.md' },
+      { id: source.id },
+      {
+        process: async (_file, transform) => {
+          content = transform(content);
+          return content;
+        },
+      },
+    ),
+    (error) => error instanceof LineEntityResolutionError && error.code === 'stale-source',
+  );
+  assert.equal(content.includes('^must-not-materialize'), false);
+});
+
 test('line provider lazily materializes native block links while preserving LF and CRLF bytes', async () => {
   const { LineEntitySourceProvider } = await lineProviderPromise;
   for (const newline of ['\n', '\r\n']) {

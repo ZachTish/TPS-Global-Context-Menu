@@ -174,6 +174,77 @@ test('TPS Table exposes clean heading titles, levels, and raw tags as synthesize
   assert.equal(view.getEntryValue(entries[0], 'tags'), '#qa-heading');
 });
 
+test('TPS Table excludes frontmatter and fenced-code examples from synthesized rows', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const view = Object.create(TpsTableView.prototype);
+  const file = {
+    path: 'Inbox/Quarantined.md',
+    name: 'Quarantined.md',
+    basename: 'Quarantined',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+  };
+  const content = [
+    '---',
+    'quarantine:',
+    '  - [ ] Frontmatter task',
+    '---',
+    '# Visible heading',
+    '- [ ] Visible task',
+    '- Visible bullet',
+    'Visible record [kind:: Project]',
+    '```md',
+    '# Hidden backtick heading',
+    '- [ ] Hidden backtick task',
+    '- Hidden backtick bullet',
+    'Hidden backtick record [kind:: Project]',
+    '```',
+    '~~~text',
+    '# Hidden tilde heading',
+    '- [ ] Hidden tilde task',
+    '- Hidden tilde bullet',
+    '~~~',
+  ].join('\n');
+  view.plugin = {
+    settings: { linkedSubitemCheckboxMappings: [] },
+    sharedServices: {
+      status: {
+        normalize: (value) => String(value || '').toLowerCase(),
+        checkboxStateToStatus: () => 'todo',
+        isDoneStatus: () => false,
+      },
+    },
+    app: {
+      vault: {
+        getMarkdownFiles: () => [file],
+        cachedRead: async () => content,
+      },
+      metadataCache: {
+        getFileCache: () => ({ frontmatter: {} }),
+        getFirstLinkpathDest: () => null,
+      },
+    },
+  };
+  view.getEffectiveBaseFilterRoots = async () => [{
+    or: ['kind == "task"', 'kind == "bullet"', 'kind == "heading"', 'kind == "project"'],
+  }];
+  view.getHomeContextDate = () => null;
+  view.lineMatches = () => true;
+  view.lineMatchesHomeDateContext = () => true;
+  view.sortEntries = (entries) => entries;
+
+  const entries = await view.loadEntries();
+  assert.deepEqual(
+    entries.map((entry) => ({ title: entry.title, line: entry.lineNumber + 1 })),
+    [
+      { title: 'Visible heading', line: 5 },
+      { title: 'Visible task', line: 6 },
+      { title: 'Visible bullet', line: 7 },
+      { title: 'Visible record', line: 8 },
+    ],
+  );
+});
+
 test('TPS Table canonical task.path filters address the containing note', async () => {
   const { evaluateLogBaseFilterRoots } = await loadModule();
   const taskContext = { ...context, rowKind: 'task', fields: { kind: 'task' } };

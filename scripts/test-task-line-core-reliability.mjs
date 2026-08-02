@@ -239,6 +239,28 @@ test('task relocation uses exact and stable identities and refuses ambiguous fal
   );
 });
 
+test('task block mutations preserve the first physical newline form, including CR-only files', async () => {
+  const {
+    removeTaskBlockFromContent,
+    splitContent,
+  } = await taskBlockPromise;
+
+  for (const newline of ['\n', '\r\n', '\r']) {
+    const source = ['Before', '- [ ] Remove me', 'After', ''].join(newline);
+    const parts = splitContent(source);
+    assert.equal(parts.newline, newline);
+    assert.equal(parts.endsWithNewline, true);
+    assert.deepEqual(parts.lines, ['Before', '- [ ] Remove me', 'After']);
+
+    const removed = removeTaskBlockFromContent(source, 1, '- [ ] Remove me', 'Remove me');
+    assert.equal(removed.changed, true);
+    assert.equal(removed.content, ['Before', 'After', ''].join(newline));
+  }
+
+  assert.equal(splitContent('one\ntwo\r\nthree').newline, '\n');
+  assert.equal(splitContent('one\r\ntwo\nthree').newline, '\r\n');
+});
+
 test('daily-note migrated source blocks shed clone identities while destination blocks stay authoritative', async () => {
   const { readInlineFieldValue } = await metadataPromise;
   const { buildDailyNoteScratchpadMovedTaskBlock, insertTaskBlockAfterFrontmatter } = await taskBlockPromise;

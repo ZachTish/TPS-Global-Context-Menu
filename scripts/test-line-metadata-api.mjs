@@ -57,3 +57,58 @@ test('checkbox tasks, bullets, and headings share the same visible-title contrac
   assert.equal(parseLineEntityMetadata('## Heading [reference](Target.md) #tag [kind:: project]')?.displayTitle, 'Heading reference');
   assert.equal(parseLineEntityMetadata('plain paragraph'), null);
 });
+
+test('document line scanning is immutable, offset-exact, and excludes CommonMark block examples', async () => {
+  const { getMarkdownContentLines } = await loadModule('../src/utils/markdown-document-lines.ts');
+  const content = [
+    '---',
+    'fake: - [ ] Frontmatter task',
+    '---',
+    '- [ ] Visible root',
+    '  - [ ] Visible child',
+    '-     [ ] Hidden list code',
+    '>     - [ ] Hidden blockquote code',
+    '```md',
+    '- [ ] Hidden fenced task',
+    '```',
+    '<!--',
+    '- [ ] Hidden comment task',
+    '-->',
+    '- [ ] Visible tail',
+  ].join('\n');
+
+  const lines = getMarkdownContentLines(content);
+  assert.equal(Object.isFrozen(lines), true);
+  assert.equal(lines.every(Object.isFrozen), true);
+  assert.deepEqual(
+    lines.filter((line) => line.text.trim()).map(({ lineNumber, text }) => ({ lineNumber, text })),
+    [
+      { lineNumber: 4, text: '- [ ] Visible root' },
+      { lineNumber: 5, text: '  - [ ] Visible child' },
+      { lineNumber: 14, text: '- [ ] Visible tail' },
+    ],
+  );
+  for (const line of lines) {
+    assert.equal(content.slice(line.start, line.end), line.text);
+    assert.equal(line.lineNumber, line.index + 1);
+  }
+  assert.throws(() => lines.push({}), TypeError);
+  assert.throws(() => { lines[0].text = 'changed'; }, TypeError);
+});
+
+test('document line scanning preserves CR-only physical coordinates while parsing block context', async () => {
+  const { getMarkdownContentLines } = await loadModule('../src/utils/markdown-document-lines.ts');
+  const content = ['```md', '- [ ] Hidden', '```', '- [ ] Visible'].join('\r');
+  const lines = getMarkdownContentLines(content);
+  assert.deepEqual(lines.filter((line) => line.text).map(({ lineNumber, text, start, end }) => ({
+    lineNumber,
+    text,
+    start,
+    end,
+  })), [{
+    lineNumber: 4,
+    text: '- [ ] Visible',
+    start: 23,
+    end: 36,
+  }]);
+});
