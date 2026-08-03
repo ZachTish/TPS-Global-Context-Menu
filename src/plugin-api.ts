@@ -1,12 +1,13 @@
-import { Notice, normalizePath, TFile, type WorkspaceLeaf } from 'obsidian';
+import { Notice, normalizePath, parseYaml, TFile, type WorkspaceLeaf } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
 import type { VaultQueryService } from './services/vault-query-service';
 import type { BodySubitemLink, ResolvedParentLink } from './services/subitem-types';
 import { createSubitemForParentWithTitle, getDefaultSubitemFolderPath } from './services/subitem-creation-service';
-import { mergeNormalizedTags, parseTagInput } from './utils/tag-utils';
+import { parseTagInput } from './utils/tag-utils';
+import * as logger from './logger';
 import { executeCommandById, getInternalPlugin, getPluginById, hasCommand } from './core';
 import {
-    mapStatusToSubitemCheckboxState,
+    createLinkedSubitemCheckboxContract,
     mapSubitemCheckboxStateToStatus,
     normalizeLinkedSubitemMappings,
 } from './utils/linked-subitem-mapping';
@@ -47,6 +48,16 @@ type PromotedChecklistBlock = {
     body: string;
 };
 
+type ChecklistPromotionSourcePlan = {
+    lineNumber: number;
+    rawLine: string;
+    text: string;
+    block: PromotedChecklistBlock;
+    blockRevision: string;
+    sourceStatus: string;
+    targetStatus: string;
+};
+
 function parseChecklistLine(line: string): { prefix: string; state: ChecklistTaskState; text: string } | null {
     const match = line.match(/^(\s*(?:[-*+]|\d+\.)\s*)\[([^\]\r\n]?)\]\s*(.*)$/);
     if (!match) return null;
@@ -61,12 +72,36 @@ function resolvePromotionStatusFromSource(
     plugin: TPSGlobalContextMenuPlugin,
     state: ChecklistTaskState,
     behavior: 'remove' | 'complete-and-link' | 'link-only',
-): string | null {
-    if (behavior === 'complete-and-link') return 'complete';
-    const normalizedState = `[${String(state || ' ').trim()}]`;
-    const mapped = mapSubitemCheckboxStateToStatus(plugin.settings.linkedSubitemCheckboxMappings || [], normalizedState);
-    if (mapped) return mapped;
-    return plugin.sharedServices.status.checkboxStateToStatus(normalizedState) || null;
+): { sourceStatus: string; targetStatus: string } | null {
+    const normalizeStatus = (value: unknown): string => plugin.sharedServices.status.normalize(value);
+    const mappings = normalizeLinkedSubitemMappings(
+        plugin.settings.linkedSubitemCheckboxMappings || [],
+        {
+            enforceStrictDefaults: false,
+            normalizeStatus,
+        },
+    );
+    const normalizedState = `[${state || ' '}]`;
+    const mapped = mapSubitemCheckboxStateToStatus(
+        mappings,
+        normalizedState,
+        { normalizedMappings: true },
+    );
+    const sourceStatus = mapped ? normalizeStatus(mapped) : '';
+    if (!sourceStatus) return null;
+    if (behavior !== 'complete-and-link') {
+        return { sourceStatus, targetStatus: sourceStatus };
+    }
+
+    for (const mapping of mappings) {
+        for (const status of mapping.statuses) {
+            const normalizedStatus = normalizeStatus(status);
+            if (normalizedStatus && plugin.sharedServices.status.isDoneStatus(normalizedStatus)) {
+                return { sourceStatus, targetStatus: normalizedStatus };
+            }
+        }
+    }
+    return null;
 }
 
 function normalizeChecklistText(text: string): string {
@@ -76,22 +111,50 @@ function normalizeChecklistText(text: string): string {
         .toLowerCase();
 }
 
-function resolveChecklistLineIndex(lines: string[], item: Required<ChecklistPromotionInput>): number {
-    const direct = lines[item.lineNumber];
-    if (typeof direct === 'string' && direct === item.rawLine) {
-        return item.lineNumber;
+function resolveExactChecklistLineIndex(lines: string[], input: ChecklistPromotionInput): number {
+    const rawLine = input.rawLine !== undefined
+        ? String(input.rawLine)
+        : lines[input.lineNumber];
+    if (typeof rawLine !== 'string') return -1;
+
+    const exactMatches: number[] = [];
+    for (let index = 0; index < lines.length; index += 1) {
+        if (lines[index] === rawLine) exactMatches.push(index);
     }
+    if (exactMatches.length !== 1) return -1;
 
-    const normalizedTarget = normalizeChecklistText(item.text);
-    if (!normalizedTarget) return -1;
+    const lineNumber = exactMatches[0];
+    const parsed = parseChecklistLine(lines[lineNumber]);
+    if (!parsed) return -1;
+    if (
+        input.text !== undefined
+        && normalizeChecklistText(input.text) !== normalizeChecklistText(parsed.text)
+    ) return -1;
+    return lineNumber;
+}
 
-    for (let i = 0; i < lines.length; i += 1) {
-        const parsed = parseChecklistLine(lines[i]);
-        if (!parsed) continue;
-        if (normalizeChecklistText(parsed.text) === normalizedTarget) return i;
-    }
-
-    return -1;
+function resolveChecklistPromotionSourcePlan(
+    plugin: TPSGlobalContextMenuPlugin,
+    lines: string[],
+    input: ChecklistPromotionInput,
+    behavior: 'remove' | 'complete-and-link' | 'link-only',
+): ChecklistPromotionSourcePlan | null {
+    const lineNumber = resolveExactChecklistLineIndex(lines, input);
+    if (lineNumber < 0) return null;
+    const rawLine = lines[lineNumber] || '';
+    const parsed = parseChecklistLine(rawLine);
+    if (!parsed) return null;
+    const statuses = resolvePromotionStatusFromSource(plugin, parsed.state, behavior);
+    if (!statuses) return null;
+    const block = getPromotedChecklistBlock(lines, lineNumber);
+    return {
+        lineNumber,
+        rawLine,
+        text: String(parsed.text || '').trim(),
+        block,
+        blockRevision: lines.slice(block.startLine, block.endLineExclusive).join('\n'),
+        ...statuses,
+    };
 }
 
 function indentWidth(indent: string): number {
@@ -174,14 +237,6 @@ function getPromotedChecklistBlock(lines: string[], lineNumber: number): Promote
         endLineExclusive: end,
         body: trimPromotedBody(body),
     };
-}
-
-async function appendPromotedBodyToChild(plugin: TPSGlobalContextMenuPlugin, childFile: TFile, body: string): Promise<void> {
-    const trimmedBody = trimPromotedBody(body);
-    if (!trimmedBody) return;
-    const current = await plugin.app.vault.read(childFile);
-    const separator = current.endsWith('\n') ? '' : '\n';
-    await plugin.app.vault.modify(childFile, `${current}${separator}${trimmedBody}\n`);
 }
 
 function getChecklistPromotionTitle(rawText: string): string {
@@ -335,18 +390,58 @@ function extractChecklistPromotionMetadata(
     };
 }
 
-async function applyChecklistPromotionMetadata(
+async function compensateOwnedPromotedChild(
     plugin: TPSGlobalContextMenuPlugin,
-    created: TFile,
-    promotion: ChecklistPromotionMetadata,
-): Promise<void> {
-    if (!promotion.scheduled && promotion.tags.length === 0) return;
-    await plugin.bulkEditService.runSerializedFrontmatterWrite(created, async () => {
-        await plugin.frontmatterMutationService.process(created, (frontmatter) => {
-            if (promotion.scheduled) frontmatter.scheduled = promotion.scheduled;
-            if (promotion.tags.length > 0) frontmatter.tags = mergeNormalizedTags(frontmatter.tags, promotion.tags);
-        });
-    });
+    child: TFile,
+): Promise<boolean> {
+    const liveTarget = plugin.app.vault.getAbstractFileByPath(child.path);
+    if (liveTarget !== child) {
+        logger.flowWarn('ChecklistPromotion', 'rollback:ownership-lost', { childPath: child.path });
+        return false;
+    }
+    try {
+        await plugin.app.vault.delete(child, true);
+        logger.flow('ChecklistPromotion', 'rollback:child-removed', { childPath: child.path });
+        return true;
+    } catch (error) {
+        logger.error('[TPS GCM] Failed compensating an uncommitted checklist promotion:', child.path, error);
+        return false;
+    }
+}
+
+async function didPromotionParentWriteCommit(
+    plugin: TPSGlobalContextMenuPlugin,
+    rootFile: TFile,
+    expectedContent: string | null,
+): Promise<boolean> {
+    if (expectedContent == null) return false;
+    try {
+        return await plugin.app.vault.read(rootFile) === expectedContent;
+    } catch {
+        return false;
+    }
+}
+
+async function readPromotedChildWorkflowStatus(
+    plugin: TPSGlobalContextMenuPlugin,
+    child: TFile,
+): Promise<string | null> {
+    try {
+        const content = await plugin.app.vault.read(child);
+        const match = String(content || '').match(/^\uFEFF?---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u);
+        if (!match) return null;
+        const frontmatter = parseYaml(match[1]) as Record<string, unknown> | null;
+        if (!frontmatter || typeof frontmatter !== 'object') return null;
+        const workflowKey = plugin.sharedServices.status.getStatusPropertyKey();
+        const actualKey = Object.keys(frontmatter).find(
+            (key) => key.trim().toLowerCase() === workflowKey.trim().toLowerCase(),
+        );
+        return actualKey
+            ? plugin.sharedServices.status.normalize(frontmatter[actualKey]) || null
+            : null;
+    } catch {
+        return null;
+    }
 }
 
 export async function promoteChecklistItemToChild(
@@ -356,79 +451,116 @@ export async function promoteChecklistItemToChild(
 ): Promise<TFile | null> {
     const content = await plugin.app.vault.cachedRead(rootFile);
     const lines = content.split('\n');
-    const rawLine = input.rawLine ?? lines[input.lineNumber] ?? '';
-    const parsed = parseChecklistLine(rawLine);
-    const text = String(input.text ?? parsed?.text ?? '').trim();
-    const item = {
-        lineNumber: input.lineNumber,
-        rawLine,
-        text,
-    };
+    const behavior = plugin.settings.checklistPromotionBehavior ?? 'remove';
+    const sourcePlan = resolveChecklistPromotionSourcePlan(plugin, lines, input, behavior);
+    if (!sourcePlan) {
+        new Notice('Checklist promotion stopped because the exact source line is stale, duplicated, or has no checkbox mapping.');
+        return null;
+    }
 
-    const promotion = extractChecklistPromotionMetadata(plugin, rootFile, text);
+    const promotion = extractChecklistPromotionMetadata(plugin, rootFile, sourcePlan.text);
     if (!promotion.title) {
         new Notice('Checklist item title is empty.');
         return null;
     }
 
-    const created = await createSubitemForParentWithTitle(
-        plugin,
-        rootFile,
-        promotion.title,
-        getDefaultSubitemFolderPath(plugin, rootFile),
-        {
-            seedParentTags: true,
-            seedVisualMetadata: false,
-            insertParentBodyLink: false,
-        },
-    );
-    if (!created) return null;
+    let created: TFile | null = null;
+    let expectedParentContent: string | null = null;
+    let parentChanged = false;
+    let mutationError: unknown = null;
+    try {
+        parentChanged = await plugin.subitemRelationshipSyncService.mutateMarkdownBody(rootFile, async (currentLines) => {
+            const currentPlan = resolveChecklistPromotionSourcePlan(
+                plugin,
+                currentLines,
+                {
+                    lineNumber: sourcePlan.lineNumber,
+                    rawLine: sourcePlan.rawLine,
+                    text: sourcePlan.text,
+                },
+                behavior,
+            );
+            if (
+                !currentPlan
+                || currentPlan.blockRevision !== sourcePlan.blockRevision
+                || currentPlan.sourceStatus !== sourcePlan.sourceStatus
+                || currentPlan.targetStatus !== sourcePlan.targetStatus
+            ) return false;
 
-    await applyChecklistPromotionMetadata(plugin, created, promotion);
+            const nextChild = await createSubitemForParentWithTitle(
+                plugin,
+                rootFile,
+                promotion.title,
+                getDefaultSubitemFolderPath(plugin, rootFile),
+                {
+                    seedParentTags: true,
+                    seedVisualMetadata: false,
+                    insertParentBodyLink: false,
+                    requireNewFile: true,
+                    initialWorkflowStatus: currentPlan.targetStatus,
+                    initialScheduled: promotion.scheduled,
+                    initialTags: promotion.tags,
+                    initialBody: currentPlan.block.body,
+                    suppressCreatedNotice: true,
+                },
+            );
+            if (!nextChild) return false;
+            created = nextChild;
 
-    const promotedLineIndex = resolveChecklistLineIndex(lines, {
-        lineNumber: item.lineNumber,
-        rawLine: item.rawLine,
-        text: item.text,
-    });
-    const promotedBlock = promotedLineIndex >= 0
-        ? getPromotedChecklistBlock(lines, promotedLineIndex)
-        : { startLine: item.lineNumber, endLineExclusive: item.lineNumber + 1, body: '' };
-    await appendPromotedBodyToChild(plugin, created, promotedBlock.body);
-
-    const behavior = plugin.settings.checklistPromotionBehavior ?? 'remove';
-    const linkPath = normalizePath(created.path.replace(/\.md$/i, ''));
-    const wikilink = `[[${linkPath}|${text || created.basename}]]`;
-
-    await plugin.subitemRelationshipSyncService.mutateMarkdownBody(rootFile, async (currentLines) => {
-        const currentLineIndex = resolveChecklistLineIndex(currentLines, item);
-        if (currentLineIndex < 0 || currentLineIndex >= currentLines.length) return false;
-        const currentParsed = parseChecklistLine(currentLines[currentLineIndex]);
-        if (!currentParsed) return false;
-
-        const derivedStatus = resolvePromotionStatusFromSource(plugin, currentParsed.state, behavior);
-        if (derivedStatus) {
-            await plugin.sharedServices.status.setFileStatus(created, derivedStatus);
-        }
-
-        const currentBlock = getPromotedChecklistBlock(currentLines, currentLineIndex);
-
-        if (behavior === 'link-only' || behavior === 'complete-and-link') {
-            const nextLine = `${currentParsed.prefix}${wikilink}`;
-            const hasNestedLines = currentBlock.endLineExclusive > currentLineIndex + 1;
-            if ((currentLines[currentLineIndex] || '') === nextLine && !hasNestedLines) return false;
-            currentLines[currentLineIndex] = nextLine;
-            if (hasNestedLines) {
-                currentLines.splice(currentLineIndex + 1, currentBlock.endLineExclusive - currentLineIndex - 1);
+            const linkPath = normalizePath(nextChild.path.replace(/\.md$/i, ''));
+            const wikilink = `[[${linkPath}|${currentPlan.text || nextChild.basename}]]`;
+            const currentParsed = parseChecklistLine(currentPlan.rawLine);
+            if (!currentParsed) return false;
+            const liveStatuses = resolvePromotionStatusFromSource(plugin, currentParsed.state, behavior);
+            if (
+                !liveStatuses
+                || liveStatuses.sourceStatus !== currentPlan.sourceStatus
+                || liveStatuses.targetStatus !== currentPlan.targetStatus
+            ) return false;
+            if (await readPromotedChildWorkflowStatus(plugin, nextChild) !== currentPlan.targetStatus) {
+                await plugin.sharedServices.status.setFileStatus(nextChild, currentPlan.targetStatus);
+                if (await readPromotedChildWorkflowStatus(plugin, nextChild) !== currentPlan.targetStatus) {
+                    return false;
+                }
             }
+            const currentLineIndex = currentPlan.lineNumber;
+            const currentBlock = currentPlan.block;
+
+            if (behavior === 'link-only' || behavior === 'complete-and-link') {
+                currentLines[currentLineIndex] = `${currentParsed.prefix}${wikilink}`;
+                if (currentBlock.endLineExclusive > currentLineIndex + 1) {
+                    currentLines.splice(currentLineIndex + 1, currentBlock.endLineExclusive - currentLineIndex - 1);
+                }
+            } else {
+                currentLines.splice(currentBlock.startLine, currentBlock.endLineExclusive - currentBlock.startLine);
+            }
+            expectedParentContent = currentLines.join('\n');
             return true;
-        }
+        });
+    } catch (error) {
+        mutationError = error;
+    }
 
-        currentLines.splice(currentBlock.startLine, currentBlock.endLineExclusive - currentBlock.startLine);
-        return true;
+    if (!created) {
+        if (mutationError) logger.error('[TPS GCM] Checklist promotion failed before child creation:', mutationError);
+        return null;
+    }
+    if (parentChanged || await didPromotionParentWriteCommit(plugin, rootFile, expectedParentContent)) {
+        new Notice(`Created subitem: ${created.basename}`);
+        return created;
+    }
+
+    const compensated = await compensateOwnedPromotedChild(plugin, created);
+    logger.flowWarn('ChecklistPromotion', 'promotion:parent-uncommitted', {
+        parentPath: rootFile.path,
+        childPath: created.path,
+        compensated,
+        threw: mutationError != null,
     });
-
-    return created;
+    new Notice(compensated
+        ? 'Checklist promotion stopped before the parent changed; the temporary child was removed.'
+        : 'Checklist promotion could not be completed or safely rolled back.');
+    return null;
 }
 
 /**
@@ -437,6 +569,11 @@ export async function promoteChecklistItemToChild(
  */
 export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
     const services = plugin.sharedServices;
+    const normalizeTaskCheckboxStatus = (value: unknown): string => services.status.normalize(value);
+    const taskCheckboxesApi = createLinkedSubitemCheckboxContract(
+        () => plugin.settings.linkedSubitemCheckboxMappings || [],
+        normalizeTaskCheckboxStatus,
+    );
     const eventsApi = {
         emitFilesUpdated: (paths: unknown, options?: { sourcePluginId?: string }) => {
             return plugin.eventService.emitFilesUpdated(paths, options);
@@ -738,32 +875,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
                 context: Parameters<typeof plugin.dailyInboxLineService.createNoteForLine>[0],
             ) => plugin.dailyInboxLineService.createNoteForLine(context),
         },
-        taskCheckboxes: {
-            version: 1,
-            getMappings: () => normalizeLinkedSubitemMappings(
-                plugin.settings.linkedSubitemCheckboxMappings || [],
-                { enforceStrictDefaults: true },
-            ).map((mapping) => ({
-                ...mapping,
-                statuses: [...mapping.statuses],
-            })),
-            stateForStatus: (status: unknown): string => {
-                const configured = mapStatusToSubitemCheckboxState(
-                    plugin.settings.linkedSubitemCheckboxMappings || [],
-                    plugin.sharedServices.status.normalize(status),
-                );
-                if (configured) return configured;
-                const marker = plugin.sharedServices.status.statusToCheckboxState(status);
-                return `[${String(marker ?? '').trim() || ' '}]`;
-            },
-            statusForState: (state: unknown): string => {
-                const configured = mapSubitemCheckboxStateToStatus(
-                    plugin.settings.linkedSubitemCheckboxMappings || [],
-                    String(state ?? ''),
-                );
-                return configured || plugin.sharedServices.status.checkboxStateToStatus(state);
-            },
-        },
+        taskCheckboxes: taskCheckboxesApi,
         tasks: plugin.taskApiService,
         ui: {
             shouldForceBaseLinkPreview: () => plugin.settings.enableBasesForcedLinkPreview === true,
@@ -816,9 +928,10 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
                 : undefined;
             const current = services.status.normalize(raw);
             const options = services.status.getStatusOptions();
+            if (!options.length) return false;
             const normalizedOptions = options.map((option) => services.status.normalize(option));
             const index = normalizedOptions.indexOf(current);
-            const next = options[index >= 0 ? (index + 1) % options.length : 0] || 'todo';
+            const next = options[index >= 0 ? (index + 1) % options.length : 0];
             const changed = await services.status.setFileStatus(file, next);
             await plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
                 reason: 'gcm-status-cycle',

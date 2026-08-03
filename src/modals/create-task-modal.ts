@@ -10,11 +10,20 @@ export interface CreateTaskModalResult {
   title: string;
   targetFile: TFile | null;
   checkboxMarker: string;
+  checkboxStatus: string;
+  checkboxStatuses: string[];
   priority: string;
   scheduledValue: string;
   allDay: boolean;
   timeEstimate: number;
   taskLine: string;
+}
+
+export interface CreateTaskCheckboxOption {
+  checkboxMarker: string;
+  label: string;
+  status: string;
+  statuses: readonly string[];
 }
 
 export class CreateTaskModal extends Modal {
@@ -38,6 +47,8 @@ export class CreateTaskModal extends Modal {
       defaultTargetFile: TFile | null;
       defaultTargetLabel: string;
       defaultTimeEstimate: number;
+      checkboxOptions: readonly CreateTaskCheckboxOption[];
+      defaultCheckboxMarker: string;
       onSubmit: (result: CreateTaskModalResult) => void | Promise<void>;
     },
   ) {
@@ -91,13 +102,10 @@ export class CreateTaskModal extends Modal {
       .setName('Checkbox')
       .addDropdown((dropdown) => {
         this.checkboxInput = dropdown.selectEl;
-        dropdown
-          .addOption(' ', 'Todo')
-          .addOption('\\', 'Working')
-          .addOption('x', 'Complete')
-          .addOption('?', 'Holding')
-          .addOption('-', 'Won’t do')
-          .setValue(' ');
+        for (const option of this.options.checkboxOptions) {
+          dropdown.addOption(option.checkboxMarker, option.label);
+        }
+        dropdown.setValue(this.options.defaultCheckboxMarker);
         dropdown.onChange(() => this.updateTaskLinePreview());
       });
 
@@ -201,7 +209,7 @@ export class CreateTaskModal extends Modal {
   private buildTaskLine(): string {
     return buildCreatedTaskLine({
       title: this.parsed.title || this.titleInput?.getValue?.() || '',
-      checkboxMarker: this.checkboxInput?.value || ' ',
+      checkboxMarker: this.checkboxInput?.value ?? '',
       priority: this.priorityInput?.value || '',
       scheduledValue: this.scheduledInput?.getValue?.() || '',
       allDay: this.allDayToggle?.getValue?.() || false,
@@ -216,16 +224,22 @@ export class CreateTaskModal extends Modal {
 
   private async submit(): Promise<void> {
     const taskLine = this.buildTaskLine();
-    this.close();
-    await this.options.onSubmit({
+    const checkboxMarker = this.checkboxInput?.value ?? '';
+    const checkboxOption = this.options.checkboxOptions
+      .find((option) => option.checkboxMarker === checkboxMarker);
+    const result: CreateTaskModalResult = {
       title: this.parsed.title || this.titleInput?.getValue?.() || 'Untitled task',
       targetFile: this.targetFile,
-      checkboxMarker: this.checkboxInput?.value || ' ',
+      checkboxMarker,
+      checkboxStatus: checkboxOption?.status ?? '',
+      checkboxStatuses: [...(checkboxOption?.statuses ?? [])],
       priority: this.priorityInput?.value || '',
       scheduledValue: this.scheduledInput?.getValue?.() || '',
       allDay: this.allDayToggle?.getValue?.() || false,
       timeEstimate: Number(this.timeEstimateInput?.getValue?.() || 0),
       taskLine,
-    });
+    };
+    this.close();
+    await this.options.onSubmit(result);
   }
 }

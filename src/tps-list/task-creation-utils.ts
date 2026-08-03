@@ -1,4 +1,5 @@
 import { normalizePath } from 'obsidian';
+import { normalizeLinkedSubitemCheckboxState } from '../utils/linked-subitem-mapping';
 
 export type KanbanTaskCreationDefaultsLike = {
   status?: string | null;
@@ -61,7 +62,7 @@ export function resolveKanbanRootTaskTargetPath(defaultsTargetPath?: string | nu
   return normalizeKanbanTaskTargetPath(defaultsTargetPath) || normalizeKanbanTaskTargetPath(configuredTargetPath) || null;
 }
 
-export function buildKanbanRootTaskLine(options: BuildKanbanRootTaskLineOptions): string {
+export function buildKanbanRootTaskLine(options: BuildKanbanRootTaskLineOptions): string | null {
   const writablePropName = options.propName ? getTaskInlinePropertyName(options.propName) : '';
   const normalizedProp = writablePropName ? normalizeInlinePropertyKey(writablePropName) : '';
   const isStatusProperty = options.isStatusPropertyName ?? isDefaultStatusPropertyName;
@@ -69,17 +70,21 @@ export function buildKanbanRootTaskLine(options: BuildKanbanRootTaskLineOptions)
   const title = String(options.title || '').trim()
     || (itemKind === 'bullet' ? 'Untitled bullet' : itemKind === 'heading' ? 'Untitled heading' : 'Untitled task');
   const headingLevel = Math.max(1, Math.min(6, Number(options.headingLevel) || 1));
-  const parts = [itemKind === 'bullet'
-    ? `- ${title}`
-    : itemKind === 'heading'
-      ? `${'#'.repeat(headingLevel)} ${title}`
-      : `- [${getCheckboxMarker(getLaneOrDefaultCheckboxState({
+  const taskCheckboxState = itemKind === 'task'
+    ? getLaneOrDefaultCheckboxState({
         propName: options.propName,
         laneValue: options.laneValue,
         defaults: options.defaults,
         getCheckboxStateForStatus: options.getCheckboxStateForStatus,
         isStatusPropertyName: isStatusProperty,
-      }))}] ${title}`];
+      })
+    : null;
+  if (itemKind === 'task' && !taskCheckboxState) return null;
+  const parts = [itemKind === 'bullet'
+    ? `- ${title}`
+    : itemKind === 'heading'
+      ? `${'#'.repeat(headingLevel)} ${title}`
+      : `- [${getCheckboxMarker(taskCheckboxState!)}] ${title}`];
   const tags = new Set<string>();
 
   for (const tag of options.defaults.tags) {
@@ -116,16 +121,15 @@ export function buildKanbanRootTaskLine(options: BuildKanbanRootTaskLineOptions)
   return parts.join(' ').replace(/\s+/g, ' ').trim();
 }
 
-export function getKanbanRootTaskCheckboxMarker(options: Omit<BuildKanbanRootTaskLineOptions, 'title'>): string {
-  return getCheckboxMarker(
-    getLaneOrDefaultCheckboxState({
-      propName: options.propName,
-      laneValue: options.laneValue,
-      defaults: options.defaults,
-      getCheckboxStateForStatus: options.getCheckboxStateForStatus,
-      isStatusPropertyName: options.isStatusPropertyName ?? isDefaultStatusPropertyName,
-    }),
-  );
+export function getKanbanRootTaskCheckboxMarker(options: Omit<BuildKanbanRootTaskLineOptions, 'title'>): string | null {
+  const checkboxState = getLaneOrDefaultCheckboxState({
+    propName: options.propName,
+    laneValue: options.laneValue,
+    defaults: options.defaults,
+    getCheckboxStateForStatus: options.getCheckboxStateForStatus,
+    isStatusPropertyName: options.isStatusPropertyName ?? isDefaultStatusPropertyName,
+  });
+  return checkboxState ? getCheckboxMarker(checkboxState) : null;
 }
 
 export function resolveKanbanLaneAddPresentation(mode: KanbanLaneAddMode, laneLabel: string): KanbanLaneAddPresentation {
@@ -146,23 +150,20 @@ function getLaneOrDefaultCheckboxState(options: {
   defaults: KanbanTaskCreationDefaultsLike;
   getCheckboxStateForStatus: (status: string | null) => string | null;
   isStatusPropertyName: (propName: string | null | undefined) => boolean;
-}): string {
-  const laneCheckbox = options.propName && options.isStatusPropertyName(options.propName)
-    ? options.getCheckboxStateForStatus(options.laneValue)
-    : null;
-  const filterStatus = !laneCheckbox ? options.defaults.status ?? null : null;
-  return laneCheckbox || options.getCheckboxStateForStatus(filterStatus) || '[ ]';
+}): string | null {
+  const laneStatus = options.propName
+    && options.isStatusPropertyName(options.propName)
+    && String(options.laneValue || '').trim()
+      ? options.laneValue
+      : null;
+  const desiredStatus = laneStatus || options.defaults.status || null;
+  if (!desiredStatus) return null;
+  return options.getCheckboxStateForStatus(desiredStatus);
 }
 
 function getCheckboxMarker(rawState: string): string {
-  const state = normalizeCheckboxState(rawState);
-  return state.slice(1, -1);
-}
-
-function normalizeCheckboxState(rawState: string): string {
-  const raw = String(rawState ?? '').trim();
-  if (raw.startsWith('[') && raw.endsWith(']')) return raw;
-  return `[${raw}]`;
+  const state = normalizeLinkedSubitemCheckboxState(rawState);
+  return state ? state.slice(1, -1) : '';
 }
 
 function normalizeInlinePropertyKey(key: string): string {

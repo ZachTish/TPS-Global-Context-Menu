@@ -1,5 +1,6 @@
 import { DEFAULT_NOTEBOOK_NAVIGATOR_RULE_SETTINGS, TPSGlobalContextMenuSettings } from './types';
-import { MIGRATED_TASK_MAPPING, MIGRATED_TASK_STATUS } from './constants/task-migration';
+import { MIGRATED_TASK_STATUS } from './constants/task-migration';
+import { DEFAULT_LINKED_SUBITEM_MAPPINGS } from './utils/linked-subitem-mapping';
 
 export const HOME_DAILY_NOTE_FEED_BASE_PATH = 'Daily Note Feed.base';
 export const HOME_DAILY_NOTE_FEED_BASE_CONTENT = `model:
@@ -138,15 +139,10 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   reconcileTaskStatusToCheckbox: true,
   enableLinkedSubitemCheckboxes: true,
   linkedSubitemCheckboxStyle: 'soft-link',
-  linkedSubitemCheckboxMappings: [
-    { checkboxState: '[ ]', statuses: ['todo'], toggleTargetStatus: 'complete', icon: 'square', label: 'Todo' },
-    { checkboxState: '[x]', statuses: ['complete'], toggleTargetStatus: 'todo', icon: 'check', label: 'Complete' },
-    { checkboxState: '[/]', statuses: ['working'], toggleTargetStatus: 'complete', icon: 'slash', label: 'Working' },
-    { checkboxState: '[\\]', statuses: ['working'], toggleTargetStatus: 'complete', icon: 'slash', label: 'Working' },
-    { checkboxState: '[?]', statuses: ['holding'], toggleTargetStatus: 'todo', icon: 'help-circle', label: 'Holding' },
-    { checkboxState: '[-]', statuses: ['wont-do'], toggleTargetStatus: 'todo', icon: 'minus', label: 'Won’t Do' },
-    MIGRATED_TASK_MAPPING,
-  ],
+  linkedSubitemCheckboxMappings: DEFAULT_LINKED_SUBITEM_MAPPINGS.map((mapping) => ({
+    ...mapping,
+    statuses: [...mapping.statuses],
+  })),
   linkedSubitemDefaultOpenState: '[ ]',
   linkedSubitemUncheckedStatuses: ['todo'],
   linkedSubitemCheckedStatuses: ['complete'],

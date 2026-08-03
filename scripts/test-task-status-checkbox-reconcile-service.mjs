@@ -59,6 +59,12 @@ test('task status reconciliation maps inline status fields into task checkbox ma
     '- [x] Done thing [completedDate:: 2026-06-01 09:00:00]',
   );
   assert.equal(
+    reconcileTaskStatusLine('- [X] Uppercase done [status:: complete]', 'status', mappings, {
+      completedAt: new Date(2026, 5, 3, 14, 5, 6),
+    }).line,
+    '- [x] Uppercase done [completedDate:: 2026-06-03 14:05:06]',
+  );
+  assert.equal(
     reconcileTaskStatusLine('- [ ] Canceled thing [status:: wont-do]', 'status', mappings, {
       completedAt: new Date(2026, 5, 3, 14, 5, 6),
     }).line,
@@ -95,13 +101,41 @@ test('task status reconciliation leaves unrelated and unmapped lines alone', asy
   );
 });
 
+test('task status reconciliation preserves an alternate marker and honors canonical status aliases', async () => {
+  const { reconcileTaskStatusLine } = await importUtility();
+  const alternateMappings = [
+    { checkboxState: '[\\]', statuses: ['working'] },
+    { checkboxState: '[/]', statuses: ['working'] },
+    { checkboxState: '[d]', statuses: ['done'] },
+  ];
+  const normalizeStatus = (value) => ({ done: 'complete', completed: 'complete' }[String(value).trim().toLowerCase()] || String(value).trim().toLowerCase());
+
+  assert.equal(
+    reconcileTaskStatusLine('- [/] Keep this working marker [status:: working]', 'status', alternateMappings, {
+      normalizeStatus,
+    }).line,
+    '- [/] Keep this working marker',
+  );
+  assert.equal(
+    reconcileTaskStatusLine('- [ ] Alias completion [status:: completed]', 'status', alternateMappings, {
+      normalizeStatus,
+      completeMarkers: ['d'],
+      completedAt: new Date(2026, 5, 3, 14, 5, 6),
+    }).line,
+    '- [d] Alias completion [completedDate:: 2026-06-03 14:05:06]',
+  );
+});
+
 test('task status reconciliation is registered as an enabled GCM automation', () => {
   assert.match(serviceSource, /export class TaskStatusCheckboxReconcileService extends Component/);
   assert.match(serviceSource, /vault\.process\(file, \(data\) =>/);
   assert.match(serviceSource, /workspace\.on\('editor-change'/);
   assert.match(serviceSource, /workspace\.on\('active-leaf-change'/);
   assert.match(serviceSource, /isEditorQuiet\(\)/);
-  assert.match(serviceSource, /reconcileTaskStatusLine\(line, statusKey, mappings, \{ completedAt, completeMarkers \}\)/);
+  assert.match(serviceSource, /scanMarkdownDocumentLines\(data\)/);
+  assert.match(serviceSource, /documentLines\[index\]\?\.isContent !== true/);
+  assert.match(serviceSource, /reconcileTaskStatusLine\(line, statusKey, mappings, \{[\s\S]{0,180}normalizeStatus/);
+  assert.match(serviceSource, /data\.includes\('\\r'\) \? '\\r' : '\\n'/);
   assert.match(serviceSource, /getCompleteMarkers\(mappings\)/);
   assert.match(mainSource, /new TaskStatusCheckboxReconcileService\(this\)/);
   assert.match(mainSource, /this\.addChild\(this\.taskStatusCheckboxReconcileService\)/);

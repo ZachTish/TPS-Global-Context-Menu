@@ -389,7 +389,7 @@ export class RecurrenceService {
         if (this.plugin.bulkEditService.isRecurrenceTemplateFrontmatter(fm)) return;
 
         // 4. Ignore completed/wont-do items (next instance will be created by completion handler)
-        const completionStatuses = this.plugin.settings.recurrenceCompletionStatuses?.length
+        const completionStatuses = Array.isArray(this.plugin.settings.recurrenceCompletionStatuses)
             ? this.plugin.settings.recurrenceCompletionStatuses
             : ['complete', 'wont-do'];
         const completionSet = new Set(

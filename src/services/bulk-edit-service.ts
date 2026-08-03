@@ -994,7 +994,11 @@ export class BulkEditService {
         return count;
     }
 
-    async updateFrontmatter(files: TFile[], updates: Record<string, any>): Promise<number> {
+    async updateFrontmatter(
+        files: TFile[],
+        updates: Record<string, any>,
+        options: { writeGuard?: (file: TFile) => boolean } = {},
+    ): Promise<number> {
         const workflowStatusKey = this.getWorkflowStatusKey();
         const workflowStatusUpdate = Object.entries(updates || {}).find(
             ([key]) => key.trim().toLowerCase() === workflowStatusKey.toLowerCase(),
@@ -1074,7 +1078,7 @@ export class BulkEditService {
             }
         }
 
-        const recurrenceStatuses = this.plugin.settings.recurrenceCompletionStatuses?.length
+        const recurrenceStatuses = Array.isArray(this.plugin.settings.recurrenceCompletionStatuses)
             ? this.plugin.settings.recurrenceCompletionStatuses
             : ['complete', 'wont-do'];
         const recurrenceCompletionSet = new Set(
@@ -1110,7 +1114,8 @@ export class BulkEditService {
             }
         }
 
-        const count = await this.applyToFiles(files, (fm) => {
+        const count = await this.applyToFiles(files, (fm, file) => {
+            if (options.writeGuard?.(file) === false) return;
             for (const [key, value] of Object.entries(updates)) {
                 if (value === null || value === undefined) {
                     this.deleteFrontmatterValueCaseInsensitive(fm, key);
@@ -1167,7 +1172,11 @@ export class BulkEditService {
         return count;
     }
 
-    async setStatus(files: TFile[], status: string): Promise<number> {
+    async setStatus(
+        files: TFile[],
+        status: string,
+        options: { writeGuard?: (file: TFile) => boolean } = {},
+    ): Promise<number> {
         // Parent link prompt (single file to avoid spam)
         if (
             this.plugin.settings.checkParentLinkStatuses &&
@@ -1195,7 +1204,11 @@ export class BulkEditService {
             }
         }
 
-        return this.updateFrontmatter(files, { [this.getWorkflowStatusKey()]: status });
+        return this.updateFrontmatter(
+            files,
+            { [this.getWorkflowStatusKey()]: status },
+            options,
+        );
     }
 
     async setPriority(files: TFile[], priority: string): Promise<number> {
@@ -1496,7 +1509,7 @@ export class BulkEditService {
         });
 
         if (normalizedRule && this.plugin.settings.enableRecurrence) {
-            const recurrenceStatuses = this.plugin.settings.recurrenceCompletionStatuses?.length
+            const recurrenceStatuses = Array.isArray(this.plugin.settings.recurrenceCompletionStatuses)
                 ? this.plugin.settings.recurrenceCompletionStatuses
                 : ['complete', 'wont-do'];
 
@@ -2160,7 +2173,7 @@ export class BulkEditService {
 
         // Completion statuses — instances in these states are skipped
         const completionSet = new Set(
-            (this.plugin.settings.recurrenceCompletionStatuses?.length
+            (Array.isArray(this.plugin.settings.recurrenceCompletionStatuses)
                 ? this.plugin.settings.recurrenceCompletionStatuses
                 : ['complete', 'wont-do']
             ).map((s: string) => s.trim().toLowerCase())
@@ -2207,7 +2220,7 @@ export class BulkEditService {
             const files = this.plugin.app.vault.getMarkdownFiles();
             let createdCount = 0;
 
-            const recurrenceStatuses = (this.plugin.settings.recurrenceCompletionStatuses?.length
+            const recurrenceStatuses = (Array.isArray(this.plugin.settings.recurrenceCompletionStatuses)
                 ? this.plugin.settings.recurrenceCompletionStatuses
                 : ['complete', 'wont-do']
             ).map((s: string) => s.trim().toLowerCase());

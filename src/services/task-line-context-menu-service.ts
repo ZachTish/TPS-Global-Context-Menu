@@ -30,7 +30,6 @@ import {
   readTaskLineTags,
   removeInlineTagFromTaskLine,
   setInlineFieldValueOnTaskLine,
-  setTaskCheckboxToken,
   setTaskEditableBody,
   setTaskTitle,
   stripTaskInlinePropsMetadata,
@@ -38,12 +37,25 @@ import {
   updateTaskLineTimestamps,
 } from '../utils/task-line-metadata';
 import {
+  clearTaskCheckboxOwnedWorkflowFields,
+  getTaskCheckboxWorkflowMutationSignature,
+  isTaskCheckboxWorkflowTokenCurrent,
+  setTaskCheckboxWorkflowState,
+  type TaskCheckboxWorkflowFieldOwnership,
+} from '../utils/task-checkbox-workflow-mutation';
+import {
   getInheritedDailyNoteTaskScheduledValue,
   getIsoDateFromScheduledValue,
   parseDailyNoteFileDate,
   resolveTaskScheduledValue,
 } from '../utils/daily-note-task-schedule';
-import { getLinkedSubitemCompleteMarkers, mapSubitemCheckboxStateToStatus, normalizeLinkedSubitemMappings } from '../utils/linked-subitem-mapping';
+import {
+  getLinkedSubitemCompleteMarkers,
+  getLinkedSubitemMappingForState,
+  mapStatusToSubitemCheckboxState,
+  mapSubitemCheckboxStateToStatus,
+  normalizeLinkedSubitemMappings,
+} from '../utils/linked-subitem-mapping';
 import * as logger from '../logger';
 import { KeyboardAwareOverlay } from '../utils/mobile-overlay';
 import { getOrderedSelectionRange } from '../utils/ordered-selection';
@@ -107,6 +119,11 @@ export type TaskLineContext = {
 };
 
 type TaskLineHighlightKind = 'active' | 'selected';
+
+type TaskLineUpdateOptions = {
+  checkboxMutation?: boolean;
+  expectedMappingSignature?: string;
+};
 
 type TaskEditorPropertyDraft = {
   descriptor: TaskEditorPropertyDescriptor;
@@ -387,14 +404,34 @@ export class TaskLineContextMenuService {
       try {
         const mappings = this.getCheckboxMappings();
         const marker = parseTaskLine(context.rawLine)?.marker || ' ';
-        const completeMarkers = new Set(this.getCompleteMarkers());
-        const currentIsComplete = completeMarkers.has(marker);
-        const nextMapping = currentIsComplete
-          ? mappings.find((mapping) => mapping.checkboxState === '[ ]')
-          : mappings.find((mapping) => completeMarkers.has(parseTaskLine(`- ${mapping.checkboxState} item`)?.marker || ''));
-        const nextToken = nextMapping?.checkboxState || (currentIsComplete ? '[ ]' : '[x]');
-        const updated = await this.updateTaskLine(context, (line) => setTaskCheckboxToken(line, nextToken), {
+        const currentToken = `[${marker}]`;
+        const currentMapping = getLinkedSubitemMappingForState(mappings, currentToken, {
+          normalizedMappings: true,
+        });
+        const targetStatus = currentMapping?.toggleTargetStatus
+          ? this.plugin.sharedServices.status.normalize(currentMapping.toggleTargetStatus)
+          : '';
+        const nextToken = targetStatus
+          ? mapStatusToSubitemCheckboxState(mappings, targetStatus, {
+              normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+              normalizedMappings: true,
+            })
+          : null;
+        if (!nextToken) {
+          logger.flowWarn('TaskQuickEditor', 'status:toggle-blocked', {
+            path: context.file.path,
+            lineNumber: context.lineNumber,
+            checkboxState: currentToken,
+            targetStatus,
+            reason: currentMapping ? 'unmapped-toggle-target' : 'unmapped-checkbox-state',
+          });
+          new Notice('Could not toggle this task because its target status has no checkbox mapping.');
+          return;
+        }
+        const expectedMappingSignature = this.getCheckboxMutationSignature(mappings);
+        const updated = await this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, nextToken), {
           checkboxMutation: true,
+          expectedMappingSignature,
         });
         if (!updated) return;
         logger.flow('TaskQuickEditor', 'status:toggle', {
@@ -925,7 +962,9 @@ export class TaskLineContextMenuService {
   ): void {
     if (!anchor.isConnected) return;
     const menu = new Menu();
-    for (const mapping of this.getCheckboxMappings()) {
+    const mappings = this.getCheckboxMappings();
+    const expectedMappingSignature = this.getCheckboxMutationSignature(mappings);
+    for (const mapping of mappings) {
       const status = String(mapping.statuses?.[0] || '').trim();
       const label = String(mapping.label || status || mapping.checkboxState).trim();
       const selected = mapping.checkboxState === context.checkboxToken;
@@ -937,6 +976,7 @@ export class TaskLineContextMenuService {
           .onClick(() => {
             void this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, mapping.checkboxState), {
               checkboxMutation: true,
+              expectedMappingSignature,
             }).then((updated) => {
               if (!updated) return;
               logger.flow('TaskLineContextMenu', 'status-picker:change', {
@@ -960,15 +1000,11 @@ export class TaskLineContextMenuService {
   }
 
   private setTaskStatusCheckboxState(line: string, checkboxState: string): string {
-    let next = setTaskCheckboxToken(line, checkboxState);
-    const relationalStatusKey = String(
-      findRelationalStatusProperty(this.plugin.settings.properties)?.key || '',
-    ).trim().toLowerCase();
-    for (const key of new Set([this.getStatusKey(), 'status', 'checkboxStatus'])) {
-      if (String(key || '').trim().toLowerCase() === relationalStatusKey) continue;
-      next = setInlineFieldValueOnTaskLine(next, key, null);
-    }
-    return next;
+    return setTaskCheckboxWorkflowState(
+      line,
+      checkboxState,
+      this.getTaskWorkflowFieldOwnership(),
+    );
   }
 
   private showTaskEditorStatusMenu(
@@ -978,7 +1014,9 @@ export class TaskLineContextMenuService {
   ): void {
     if (!button.isConnected) return;
     const menu = new Menu();
-    for (const mapping of this.getCheckboxMappings()) {
+    const mappings = this.getCheckboxMappings();
+    const expectedMappingSignature = this.getCheckboxMutationSignature(mappings);
+    for (const mapping of mappings) {
       const status = String(mapping.statuses?.[0] || '').trim();
       const label = String(mapping.label || status || mapping.checkboxState).trim();
       const selected = mapping.checkboxState === context.checkboxToken;
@@ -988,8 +1026,9 @@ export class TaskLineContextMenuService {
           .setIcon(mapping.icon || 'square')
           .setChecked(selected)
           .onClick(() => {
-            void this.updateTaskLine(context, (line) => setTaskCheckboxToken(line, mapping.checkboxState), {
+            void this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, mapping.checkboxState), {
               checkboxMutation: true,
+              expectedMappingSignature,
             }).then((updated) => {
               if (!updated) return;
               logger.flow('TaskQuickEditor', 'status:change', {
@@ -1010,9 +1049,10 @@ export class TaskLineContextMenuService {
         .setIcon('list')
         .onClick(() => {
           void this.updateTaskLine(context, (line) => convertTaskLineToBullet(
-            setInlineFieldValueOnTaskLine(line, this.getStatusKey(), null),
+            clearTaskCheckboxOwnedWorkflowFields(line, this.getTaskWorkflowFieldOwnership()),
           ), {
             checkboxMutation: true,
+            expectedMappingSignature,
           }).then((updated) => {
             if (!updated) return;
             logger.flow('TaskQuickEditor', 'status:bullet', {
@@ -1582,13 +1622,16 @@ export class TaskLineContextMenuService {
       subMenu.addItem((sub: any) => {
         sub.setTitle('Set status').setIcon('circle-check');
         const statusMenu = sub.setSubmenu();
-        for (const mapping of this.getCheckboxMappings()) {
+        const mappings = this.getCheckboxMappings();
+        const expectedMappingSignature = this.getCheckboxMutationSignature(mappings);
+        for (const mapping of mappings) {
           const status = String(mapping.statuses?.[0] || '').trim();
           const label = String(mapping.label || status || mapping.checkboxState).trim();
           statusMenu.addItem((statusItem: any) => {
             statusItem.setTitle(label).setIcon(mapping.icon || 'square').onClick(() => {
-              void this.updateTaskLines(contexts, (line) => setTaskCheckboxToken(line, mapping.checkboxState), {
+              void this.updateTaskLines(contexts, (line) => this.setTaskStatusCheckboxState(line, mapping.checkboxState), {
                 checkboxMutation: true,
+                expectedMappingSignature,
               });
             });
           });
@@ -1761,6 +1804,8 @@ export class TaskLineContextMenuService {
         .setIcon('circle-check');
       const subMenu = (item as any).setSubmenu();
       const statusItems: Array<{ item: any; mapping: LinkedSubitemCheckboxMapping; label: string }> = [];
+      const mappings = this.getCheckboxMappings();
+      const expectedMappingSignature = this.getCheckboxMutationSignature(mappings);
       const setSelectedToken = (token: string) => {
         context.checkboxToken = token;
         const selectedStatus = this.getStatusForCheckboxToken(token);
@@ -1772,7 +1817,7 @@ export class TaskLineContextMenuService {
         }
       };
 
-      for (const mapping of this.getCheckboxMappings()) {
+      for (const mapping of mappings) {
         const status = String(mapping.statuses?.[0] || '').trim();
         const label = String(mapping.label || status || mapping.checkboxState).trim();
         subMenu.addItem((sub: any) => {
@@ -1785,8 +1830,9 @@ export class TaskLineContextMenuService {
           sub.onClick(() => {
             const previousToken = context.checkboxToken;
             setSelectedToken(mapping.checkboxState);
-            void this.updateTaskLine(context, (line) => setTaskCheckboxToken(line, mapping.checkboxState), {
+            void this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, mapping.checkboxState), {
               checkboxMutation: true,
+              expectedMappingSignature,
             }).then((updated) => {
               if (!updated) setSelectedToken(previousToken);
             });
@@ -1806,10 +1852,16 @@ export class TaskLineContextMenuService {
                 new Notice('Use a single checkbox marker, for example ?, *, /, -, x, or blank.');
                 return;
               }
+              const ownedMapping = getLinkedSubitemMappingForState(mappings, token, { normalizedMappings: true });
+              if (!ownedMapping) {
+                new Notice('Configure a checkbox mapping for that marker before applying it to a task.');
+                return;
+              }
               const previousToken = context.checkboxToken;
-              setSelectedToken(token);
-              const updated = await this.updateTaskLine(context, (line) => setTaskCheckboxToken(line, token), {
+              setSelectedToken(ownedMapping.checkboxState);
+              const updated = await this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, ownedMapping.checkboxState), {
                 checkboxMutation: true,
+                expectedMappingSignature,
               });
               if (!updated) setSelectedToken(previousToken);
             }).open();
@@ -2194,8 +2246,22 @@ export class TaskLineContextMenuService {
   }
 
   private async duplicateTaskBelowForTimer(context: TaskLineContext): Promise<TaskLineContext | null> {
-    const duplicateLine = this.buildTimerDuplicateTaskLine(context);
+    const mappings = this.getCheckboxMappings();
+    const expectedMappingSignature = this.getCheckboxMutationSignature(mappings);
+    const checkboxState = this.resolveTaskCreationCheckboxState('todo', mappings);
+    if (!checkboxState) {
+      logger.flowWarn('TaskLineContextMenu', 'timer-duplicate:blocked', {
+        path: context.file.path,
+        renderedLineNumber: context.lineIndex + 1,
+        status: 'todo',
+        reason: 'unmapped-status',
+      });
+      new Notice('Could not create a timer task because todo has no checkbox mapping.');
+      return null;
+    }
+    const duplicateLine = this.buildTimerDuplicateTaskLine(context, checkboxState);
     let insertedIndex = -1;
+    let mappingGuardBlocked = false;
     try {
       await this.plugin.app.vault.process(context.file, (content) => {
         const newline = content.includes('\r\n') ? '\r\n' : '\n';
@@ -2203,7 +2269,18 @@ export class TaskLineContextMenuService {
         const lines = content.split(/\r?\n/);
         if (endsWithNewline) lines.pop();
         const lineIndex = this.resolveLineIndex(lines, context);
-        if (lineIndex < 0 || !parseTaskLine(lines[lineIndex] || '')) return content;
+        const sourceParsed = lineIndex >= 0 ? parseTaskLine(lines[lineIndex] || '') : null;
+        const duplicateParsed = parseTaskLine(duplicateLine);
+        if (!sourceParsed || !duplicateParsed) return content;
+        const liveMappings = this.getCheckboxMappings();
+        if (
+          this.getCheckboxMutationSignature(liveMappings) !== expectedMappingSignature
+          || !getLinkedSubitemMappingForState(liveMappings, sourceParsed.token, { normalizedMappings: true })
+          || !getLinkedSubitemMappingForState(liveMappings, duplicateParsed.token, { normalizedMappings: true })
+        ) {
+          mappingGuardBlocked = true;
+          return content;
+        }
         insertedIndex = lineIndex + 1;
         lines.splice(insertedIndex, 0, duplicateLine);
         return `${lines.join(newline)}${endsWithNewline ? newline : ''}`;
@@ -2214,6 +2291,15 @@ export class TaskLineContextMenuService {
         renderedLineNumber: context.lineIndex + 1,
       });
       new Notice('Could not create a new task for the timer.');
+      return null;
+    }
+
+    if (mappingGuardBlocked) {
+      logger.flowWarn('TaskLineContextMenu', 'timer-duplicate:mapping-changed', {
+        path: context.file.path,
+        renderedLineNumber: context.lineIndex + 1,
+      });
+      new Notice('Task status mappings changed before the timer task could be created. Refresh and try again.');
       return null;
     }
 
@@ -2245,8 +2331,8 @@ export class TaskLineContextMenuService {
     };
   }
 
-  private buildTimerDuplicateTaskLine(context: TaskLineContext): string {
-    let next = setTaskCheckboxToken(context.rawLine, '[ ]');
+  private buildTimerDuplicateTaskLine(context: TaskLineContext, checkboxState: string): string {
+    let next = this.setTaskStatusCheckboxState(context.rawLine, checkboxState);
     next = setTaskTitle(next, this.getContextTaskTitle(context) || 'New task');
     for (const key of [
       'scheduled',
@@ -2302,13 +2388,17 @@ export class TaskLineContextMenuService {
   private async updateTaskLine(
     context: TaskLineContext,
     updater: (line: string) => string,
-    options: { checkboxMutation?: boolean } = {},
+    options: TaskLineUpdateOptions = {},
   ): Promise<boolean> {
     let resolved = false;
     let changed = false;
     let previousMarker: string | null = null;
     let nextMarker: string | null = null;
     let updatedLines: string[] | null = null;
+    let mappingGuardBlocked = false;
+    const expectedMappingSignature = options.checkboxMutation === true
+      ? options.expectedMappingSignature || this.getCheckboxMutationSignature()
+      : '';
 
     try {
       await this.plugin.app.vault.process(context.file, (content) => {
@@ -2321,13 +2411,36 @@ export class TaskLineContextMenuService {
         const currentLine = lines[lineIndex] || '';
         const currentParsed = parseTaskLine(currentLine);
         if (!currentParsed) return content;
+        if (
+          options.checkboxMutation === true
+          && !isTaskCheckboxWorkflowTokenCurrent(currentParsed.token, context.checkboxToken)
+        ) return content;
+        let liveMappings: LinkedSubitemCheckboxMapping[] | null = null;
+        if (options.checkboxMutation === true) {
+          liveMappings = this.getCheckboxMappings();
+          if (
+            this.getCheckboxMutationSignature(liveMappings) !== expectedMappingSignature
+            || !getLinkedSubitemMappingForState(liveMappings, currentParsed.token, { normalizedMappings: true })
+          ) {
+            mappingGuardBlocked = true;
+            return content;
+          }
+        }
         resolved = true;
         let nextLine = updater(currentLine);
         if (nextLine === currentLine) return content;
         let nextParsed = parseTaskLine(nextLine);
         if (options.checkboxMutation === true) {
+          if (
+            nextParsed
+            && !getLinkedSubitemMappingForState(liveMappings || [], nextParsed.token, { normalizedMappings: true })
+          ) {
+            mappingGuardBlocked = true;
+            resolved = false;
+            return content;
+          }
           nextLine = updateTaskCompletedDateForCheckboxState(nextLine, nextParsed?.marker ?? currentParsed.marker, {
-            completeMarkers: this.getCompleteMarkers(),
+            completeMarkers: this.getCompleteMarkers(liveMappings || undefined),
           });
           nextParsed = parseTaskLine(nextLine);
         }
@@ -2356,6 +2469,15 @@ export class TaskLineContextMenuService {
         checkboxMutation: options.checkboxMutation === true,
       });
       new Notice('Could not update the task.');
+      return false;
+    }
+
+    if (mappingGuardBlocked) {
+      logger.flowWarn('TaskLineContextMenu', 'write:mapping-changed', {
+        path: context.file.path,
+        renderedLineNumber: context.lineIndex + 1,
+      });
+      new Notice('Task status mappings changed before the task could be updated. Refresh and try again.');
       return false;
     }
 
@@ -2405,7 +2527,7 @@ export class TaskLineContextMenuService {
   private async updateTaskLines(
     contexts: TaskLineContext[],
     updater: (line: string, context: TaskLineContext) => string,
-    options: { checkboxMutation?: boolean } = {},
+    options: TaskLineUpdateOptions = {},
   ): Promise<number> {
     const uniqueContexts = this.getUniqueContexts(contexts);
     const updatedPaths = new Set<string>();
@@ -2896,18 +3018,52 @@ export class TaskLineContextMenuService {
     return String(configured || 'status').trim() || 'status';
   }
 
+  private getTaskWorkflowFieldOwnership(): TaskCheckboxWorkflowFieldOwnership {
+    return {
+      workflowStatusKey: this.getStatusKey(),
+      relationalStatusKey: this.plugin.sharedServices?.status?.getRelationalStatusPropertyKey?.()
+        || findRelationalStatusProperty(this.plugin.settings.properties)?.key,
+    };
+  }
+
   private getCheckboxMappings(): LinkedSubitemCheckboxMapping[] {
     return normalizeLinkedSubitemMappings(this.plugin.settings.linkedSubitemCheckboxMappings || [], {
       enforceStrictDefaults: false,
     });
   }
 
-  private getStatusForCheckboxToken(token: string): string {
-    return mapSubitemCheckboxStateToStatus(this.getCheckboxMappings(), token) || '';
+  private resolveTaskCreationCheckboxState(
+    rawStatus: unknown,
+    mappings = this.getCheckboxMappings(),
+  ): string | null {
+    const status = this.plugin.sharedServices.status.normalize(rawStatus);
+    if (!status) return null;
+    return mapStatusToSubitemCheckboxState(mappings, status, {
+      normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+      normalizedMappings: true,
+    });
   }
 
-  private getCompleteMarkers(): string[] {
-    return getLinkedSubitemCompleteMarkers(this.getCheckboxMappings());
+  private getStatusForCheckboxToken(token: string): string {
+    const mapped = mapSubitemCheckboxStateToStatus(this.getCheckboxMappings(), token);
+    return mapped ? this.plugin.sharedServices.status.normalize(mapped) : '';
+  }
+
+  private getCompleteMarkers(mappings = this.getCheckboxMappings()): string[] {
+    return getLinkedSubitemCompleteMarkers(mappings, {
+      completionStatuses: this.plugin.sharedServices.status.getDoneStatuses(),
+      normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+    });
+  }
+
+  private getCheckboxMutationSignature(
+    mappings = this.getCheckboxMappings(),
+  ): string {
+    return getTaskCheckboxWorkflowMutationSignature(
+      mappings,
+      this.getTaskWorkflowFieldOwnership(),
+      this.getCompleteMarkers(mappings),
+    );
   }
 
   private normalizeCheckboxToken(value: string): string {

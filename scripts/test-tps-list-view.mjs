@@ -59,6 +59,18 @@ async function loadTaskCreationUtils() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
+async function loadTaskDropUtils() {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/tps-list/task-drop-utils.ts', import.meta.url))],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
 async function loadBaseEmbedContext() {
   const result = await build({
     entryPoints: [fileURLToPath(new URL('../src/views/base-embed-context.ts', import.meta.url))],
@@ -231,6 +243,7 @@ async function loadTpsListViewHarness() {
                 FileView: Dummy,
                 FuzzySuggestModal: Dummy,
                 Modal: Dummy,
+                Notice: Dummy,
                 TFile: Dummy,
                 normalizePath: (value) => String(value),
                 parseYaml: (value) => JSON.parse(value),
@@ -503,6 +516,8 @@ test('TPS List lets effective Base filters own task completion visibility across
     { itemKind: 'task', line: 3, text: 'Holding', checkboxState: '[?]', inlineFields: [] },
     { itemKind: 'task', line: 4, text: 'Complete', checkboxState: '[x]', inlineFields: [] },
     { itemKind: 'task', line: 5, text: 'Wont do', checkboxState: '[-]', inlineFields: [] },
+    { itemKind: 'task', line: 6, text: 'Custom unmapped', checkboxState: '[!]', inlineFields: [] },
+    { itemKind: 'task', line: 7, text: 'Missing marker', checkboxState: undefined, inlineFields: [] },
   ];
   const statuses = new Map([
     ['[ ]', 'todo'],
@@ -514,8 +529,8 @@ test('TPS List lets effective Base filters own task completion visibility across
   let roots = [];
   view.getBaseFilterRoots = () => roots;
   view.shouldShowCompletedTasks = () => false;
-  view.getDoneStatuses = () => new Set(['complete', 'wont-do']);
-  view.getStatusForCheckboxState = (checkboxState) => statuses.get(checkboxState) || 'todo';
+  view.getAuthoritativeDoneStatuses = () => new Set(['complete', 'wont-do']);
+  view.getStatusForCheckboxState = (checkboxState) => statuses.get(checkboxState) || '';
   view.isEmbeddedScheduledDailyTaskBoard = () => false;
   view.resolveBaseContextToken = (value) => String(value || '').replace(/^(["'])(.*)\1$/u, '$2');
 
@@ -525,9 +540,9 @@ test('TPS List lets effective Base filters own task completion visibility across
     return tasks.filter((task) => view.taskMatchesRootFilter(task, taskFilter, null)).map((task) => task.text);
   };
 
-  assert.deepEqual(select('All tasks'), ['Todo', 'Working', 'Holding', 'Complete', 'Wont do']);
+  assert.deepEqual(select('All tasks'), ['Todo', 'Working', 'Holding', 'Complete', 'Wont do', 'Custom unmapped', 'Missing marker']);
   assert.deepEqual(select('Working'), ['Working']);
-  assert.deepEqual(select('All tasks again'), ['Todo', 'Working', 'Holding', 'Complete', 'Wont do']);
+  assert.deepEqual(select('All tasks again'), ['Todo', 'Working', 'Holding', 'Complete', 'Wont do', 'Custom unmapped', 'Missing marker']);
   assert.deepEqual(select('Open'), ['Todo', 'Working', 'Holding']);
   assert.deepEqual(select('Closed'), ['Complete', 'Wont do']);
   assert.deepEqual(select('Complete'), ['Complete', 'Wont do']);
@@ -554,6 +569,119 @@ test('TPS List lets effective Base filters own task completion visibility across
   assert.deepEqual(
     tasks.filter((task) => view.taskMatchesRootFilter(task, runtimeDoneFilter, null)).map((task) => task.text),
     ['Complete', 'Wont do'],
+  );
+});
+
+test('TPS List task drops reject unmapped statuses before confirmation and write one captured plan atomically', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const file = { path: 'Inbox/Tasks.md' };
+  let content = '- [ ] Task';
+  let processCalls = 0;
+  let confirmationCalls = 0;
+
+  view.app = {
+    vault: {
+      async process(receivedFile, updater) {
+        assert.equal(receivedFile, file);
+        processCalls += 1;
+        content = updater(content);
+      },
+    },
+    workspace: { trigger() {} },
+  };
+  view.parseLineItem = () => ({ itemKind: 'task' });
+  view.clearTaskCachesForPath = () => {};
+  view.confirmTaskDrop = async () => {
+    confirmationCalls += 1;
+    return true;
+  };
+  view.buildTaskDropPlan = async () => ({
+    changes: ['Task: Inbox/Tasks.md:1'],
+    filterTags: [],
+    filterStatus: null,
+    mappingError: 'No valid mapping.',
+    currentLine: '- [ ] Task',
+    nextLine: '- [ ] Task',
+    itemKind: 'task',
+  });
+
+  assert.equal(await view.confirmAndApplyInlineTaskDrop(file, 1, 'status', 'working'), false);
+  assert.equal(confirmationCalls, 0);
+  assert.equal(processCalls, 0);
+  assert.equal(content, '- [ ] Task');
+
+  view.buildTaskDropPlan = async () => ({
+    changes: ['Task: Inbox/Tasks.md:1', 'Set checkbox state to [/].'],
+    filterTags: [],
+    filterStatus: null,
+    mappingError: null,
+    currentLine: '- [ ] Task',
+    nextLine: '- [/] Task',
+    itemKind: 'task',
+  });
+
+  assert.equal(await view.confirmAndApplyInlineTaskDrop(file, 1, 'status', 'working'), true);
+  assert.equal(confirmationCalls, 1);
+  assert.equal(processCalls, 1);
+  assert.equal(content, '- [/] Task');
+
+  content = '- [?] Concurrent edit';
+  assert.equal(await view.confirmAndApplyInlineTaskDrop(file, 1, 'status', 'working'), false);
+  assert.equal(confirmationCalls, 2);
+  assert.equal(processCalls, 2);
+  assert.equal(content, '- [?] Concurrent edit');
+});
+
+test('TPS List status drops remove only checkbox-owned inline status fields', async () => {
+  const {
+    buildKanbanTaskDropLine,
+    parseKanbanLineItem,
+    removeKanbanInlineTaskProperties,
+  } = await loadTaskDropUtils();
+  const isStatusPropertyName = (name) => String(name || '').toLowerCase() === 'status';
+  assert.equal(
+    buildKanbanTaskDropLine({
+      line: '- [ ] Task [status:: todo] [checkboxStatus:: todo] [relationStatus:: [[Statuses/Todo]]]',
+      propName: 'status',
+      value: 'working',
+      statusCheckboxState: '[/]',
+      statusFieldKeysToRemove: ['status', 'checkboxStatus'],
+      isStatusPropertyName,
+    }),
+    '- [/] Task [relationStatus:: [[Statuses/Todo]]]',
+  );
+  assert.equal(
+    buildKanbanTaskDropLine({
+      line: '- [ ] Task [status:: [[Statuses/Todo]]] [checkboxStatus:: todo]',
+      propName: 'status',
+      value: 'working',
+      statusCheckboxState: '[/]',
+      statusFieldKeysToRemove: ['checkboxStatus'],
+      isStatusPropertyName,
+    }),
+    '- [/] Task [status:: [[Statuses/Todo]]]',
+  );
+  assert.equal(
+    removeKanbanInlineTaskProperties(
+      '- [ ] Task `[task.status:: todo]` [task.status:: [[Statuses/Todo]]] [Relation Status:: [[Statuses/Todo]]]',
+      ['task.status', 'checkboxStatus'],
+    ),
+    '- [ ] Task `[task.status:: todo]` [Relation Status:: [[Statuses/Todo]]]',
+    'closed code spans and relational fields survive while one nested workflow field is removed intact',
+  );
+  assert.equal(parseKanbanLineItem('- [xx] Malformed checkbox-shaped line', true), null);
+  assert.equal(
+    buildKanbanTaskDropLine({
+      line: '- [xx] Malformed checkbox-shaped line',
+      propName: 'status',
+      value: 'working',
+      statusCheckboxState: '[/]',
+      statusFieldKeysToRemove: ['status'],
+      isStatusPropertyName,
+    }),
+    '- [xx] Malformed checkbox-shaped line',
+    'unsupported checkbox-shaped lines fail closed instead of becoming tasks or bullets',
   );
 });
 
@@ -614,7 +742,7 @@ test('TPS List task tag filters use exact task-tag membership across aliases and
   };
   view.getBaseFilterRoots = () => roots;
   view.shouldShowCompletedTasks = () => false;
-  view.getDoneStatuses = () => new Set(['complete', 'wont-do']);
+  view.getAuthoritativeDoneStatuses = () => new Set(['complete', 'wont-do']);
   view.getStatusForCheckboxState = () => 'todo';
   view.isEmbeddedScheduledDailyTaskBoard = () => false;
   view.resolveBaseContextToken = (value) => String(value || '').replace(/^(["'])(.*)\1$/u, '$2');
@@ -711,6 +839,154 @@ test('TPS List normalizes configured checkbox status aliases before completion c
   assert.equal(view.getDoneStatuses().has(view.getStatusForCheckboxState('[d]')), true);
 });
 
+test('TPS List keeps unmapped task identity but never invents workflow state or mutates a stale revision', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const file = { path: 'Inbox/Mapping QA.md' };
+  const mappings = [
+    { checkboxState: '[ ]', statuses: ['todo'], toggleTargetStatus: 'complete' },
+    { checkboxState: '[x]', statuses: ['complete'], toggleTargetStatus: 'todo' },
+    { checkboxState: '[?]', statuses: ['working'], toggleTargetStatus: 'complete' },
+  ];
+  let services = {
+    status: {
+      normalize: (value) => String(value || '').trim().toLowerCase(),
+      getDoneStatuses: () => ['complete'],
+      getStatusPropertyKey: () => 'taskStatus',
+      getRelationalStatusPropertyKey: () => 'status',
+    },
+  };
+  view.getGcmSettings = () => ({ linkedSubitemCheckboxMappings: mappings, properties: [] });
+  view.getGcmServices = () => services;
+  view.getRelationshipSettingsSources = () => [{ recurrenceCompletionStatuses: ['complete', 'wont-do'] }];
+  view.getTaskVisibleTitle = (task) => task.text;
+  view.getTaskInlineValues = (task, key) => (task.inlineFields || [])
+    .filter((field) => field.key === key)
+    .map((field) => field.value);
+  view.getTaskExplicitKindValues = () => [];
+  view.createFormulaFileContext = () => ({ path: file.path });
+  view.createFormulaThisValue = () => null;
+  view.getGroupByPropId = (value) => value;
+  view.isEmbeddedScheduledDailyTaskBoard = () => false;
+  view.resolveBaseContextToken = (value) => String(value || '').replace(/^(?:"([^"]*)"|'([^']*)')$/u, '$1$2');
+  view.app = {
+    metadataCache: { getFileCache: () => ({ frontmatter: {} }) },
+    workspace: { trigger() {} },
+    vault: {},
+  };
+  view.plugin = { settings: {} };
+
+  const todo = { itemKind: 'task', line: 1, checkboxState: '[ ]', text: 'Todo', rawLine: '- [ ] Todo', inlineFields: [] };
+  const unmapped = { itemKind: 'task', line: 2, checkboxState: '[!]', text: 'Custom', rawLine: '- [!] Custom', inlineFields: [{ key: 'status', value: 'relational' }] };
+  const missing = { itemKind: 'task', line: 3, checkboxState: undefined, text: 'Missing', rawLine: '- Missing', inlineFields: [] };
+  const bullet = { itemKind: 'bullet', line: 4, checkboxState: '[ ]', text: 'Bullet', rawLine: '- Bullet', inlineFields: [] };
+
+  assert.deepEqual(view.resolveMappedTaskCheckbox(todo), { checkboxState: '[ ]', status: 'todo' });
+  assert.equal(view.resolveMappedTaskCheckbox(unmapped), null);
+  assert.equal(view.resolveMappedTaskCheckbox(missing), null);
+  assert.equal(view.resolveMappedTaskCheckbox(bullet), null, 'bullets remain explicitly state-less');
+  assert.deepEqual(view.getTaskLaneIds(unmapped, 'status', file), ['ungrouped']);
+
+  const invalidContext = view.createTaskFormulaContext(file, unmapped);
+  assert.equal(invalidContext.row.status, 'relational', 'the relational row status remains independent');
+  assert.equal(invalidContext.row.checkboxState, undefined);
+  assert.equal(invalidContext.row.checkboxStatus, undefined);
+  assert.equal(invalidContext.row.open, undefined);
+  assert.equal(invalidContext.task.status, undefined, 'task.status never inherits relational status');
+  assert.equal(invalidContext.task.checkboxState, undefined);
+  const bulletContext = view.createTaskFormulaContext(file, bullet);
+  assert.equal(bulletContext.row.checkboxState, undefined);
+  assert.equal(bulletContext.task, null);
+
+  const checkbox = { checked: true };
+  let toggleWrites = 0;
+  view.updateTaskCheckboxState = async () => { toggleWrites += 1; };
+  view.requestTaskCheckboxToggle(file, unmapped, checkbox);
+  assert.equal(toggleWrites, 0);
+  assert.equal(checkbox.checked, false);
+
+  view.isWritableTaskGroupingProperty = () => true;
+  view.getDisplayLaneWritableValues = () => [];
+  const cardEl = { setPointerCapture() {} };
+  view.beginTaskPointerDrag(
+    { button: 0, pointerId: 9, clientX: 1, clientY: 2 },
+    file,
+    unmapped,
+    'project',
+    { id: 'lane', label: 'Lane', groups: [], laneIds: ['lane'] },
+    cardEl,
+  );
+  assert.equal(view.activeTaskPointerDrag.checkboxState, undefined);
+  assert.equal(view.buildPointerTaskDropPayload(view.activeTaskPointerDrag).checkboxState, undefined);
+
+  services = {
+    status: {
+      normalize: (value) => String(value || '').trim().toLowerCase(),
+      getStatusPropertyKey: () => 'taskStatus',
+      getRelationalStatusPropertyKey: () => 'status',
+    },
+  };
+  assert.deepEqual([...view.getDoneStatuses()], [], 'legacy recurrence settings never become a hidden done-status fallback');
+  assert.equal(view.classifyDoneStatus('todo'), null, 'a missing done-status service remains unknown instead of inventing an open state');
+  assert.equal(view.getDefaultMappedTaskStatus('open'), null, 'creation fails closed without an authoritative done-status snapshot');
+  assert.deepEqual(
+    view.getWorkflowStatusFieldKeysToClear(),
+    ['taskStatus', 'task.status', 'checkboxStatus'],
+    'the exact configured relational status key is excluded from checkbox-owned cleanup',
+  );
+
+  services.status.getDoneStatuses = () => ['complete'];
+  let content = '- [ ] Different task';
+  let processCalls = 0;
+  view.clearTaskCachesForPath = () => {};
+  view.app.vault.process = async (_file, updater) => {
+    processCalls += 1;
+    content = updater(content);
+  };
+  await TpsListView.prototype.updateTaskCheckboxState.call(view, file, 1, '[x]', '[ ]', '- [ ] Original task');
+  assert.equal(content, '- [ ] Different task', 'same-marker replacement at the old line is never toggled');
+
+  content = '- [ ] Original task';
+  view.app.vault.process = async (_file, updater) => {
+    processCalls += 1;
+    mappings[0].toggleTargetStatus = 'working';
+    content = updater(content);
+  };
+  await TpsListView.prototype.updateTaskCheckboxState.call(view, file, 1, '[x]', '[ ]', '- [ ] Original task');
+  assert.equal(content, '- [ ] Original task', 'a changed toggle mapping blocks the captured mutation');
+
+  mappings[0].toggleTargetStatus = 'complete';
+  content = 'Inserted line\n- [ ] Original task';
+  view.app.vault.process = async (_file, updater) => {
+    processCalls += 1;
+    content = updater(content);
+  };
+  await TpsListView.prototype.updateTaskCheckboxState.call(view, file, 1, '[x]', '[ ]', '- [ ] Original task');
+  assert.equal(content, 'Inserted line\n- [x] Original task', 'one uniquely moved exact revision is safely relocated');
+  assert.equal(processCalls, 3);
+
+  mappings.splice(0, mappings.length,
+    { checkboxState: '[q]', statuses: ['queued'], toggleTargetStatus: 'shipped' },
+    { checkboxState: '[s]', statuses: ['shipped'], toggleTargetStatus: 'queued' },
+  );
+  services.status.getDoneStatuses = () => ['shipped'];
+  assert.equal(view.getDefaultMappedTaskStatus('open'), 'queued');
+  assert.equal(view.getDefaultMappedTaskStatus('done'), 'shipped');
+  assert.equal(
+    view.buildRootTaskLine(
+      'Custom workflow',
+      null,
+      null,
+      { mode: 'tasks' },
+      'task',
+      { status: 'queued', inlineFields: new Map(), tags: new Set(), excludedTags: new Set() },
+    ),
+    '- [q] Custom workflow',
+  );
+  services.status.getDoneStatuses = () => ['queued', 'shipped'];
+  assert.equal(view.getDefaultMappedTaskStatus('open'), null, 'creation blocks when no authoritative mapped open status exists');
+});
+
 test('TPS List ignores a stale filter load that finishes after a newer view', async () => {
   const { TpsListView } = await loadTpsListViewHarness();
   const view = Object.create(TpsListView.prototype);
@@ -786,7 +1062,7 @@ test('TPS List skips ambiguous filters from multiple unidentified embedded Base 
 test('TPS List excludes frontmatter and fenced-code examples from synthesized rows', async () => {
   const { TpsListView } = await loadTpsListViewHarness();
   const view = Object.create(TpsListView.prototype);
-  view.getDoneStatuses = () => new Set(['complete', 'wont-do']);
+  view.getAuthoritativeDoneStatuses = () => new Set(['complete', 'wont-do']);
   view.getStatusForCheckboxState = () => 'todo';
   const content = [
     '---',
@@ -830,7 +1106,7 @@ test('TPS List excludes frontmatter and fenced-code examples from synthesized ro
 test('TPS List does not carry hierarchy across a top-level protected block', async () => {
   const { TpsListView } = await loadTpsListViewHarness();
   const view = Object.create(TpsListView.prototype);
-  view.getDoneStatuses = () => new Set(['complete', 'wont-do']);
+  view.getAuthoritativeDoneStatuses = () => new Set(['complete', 'wont-do']);
   view.getStatusForCheckboxState = () => 'todo';
 
   const topLevelRows = view.parseOpenTasks(
@@ -1646,7 +1922,7 @@ test('TPS List formulas power synthesized task display, filtering, grouping, sor
   };
   view.getActiveFormulaSet = () => compiled;
   view.getStatusForCheckboxState = () => 'todo';
-  view.getDoneStatuses = () => new Set(['complete']);
+  view.getAuthoritativeDoneStatuses = () => new Set(['complete']);
   view.getBaseContextFile = () => null;
   view.getBaseFile = () => null;
   view.getBaseSourcePath = () => 'Formula Tasks.base';
@@ -1796,7 +2072,7 @@ test('a formula-only Base filter discovers checkbox, bullet, and heading rows ev
   view.app = { vault: { getMarkdownFiles: () => [file] } };
   view.getBaseFilterRoots = () => ['formula.include'];
   view.shouldShowCompletedTasks = () => false;
-  view.getDoneStatuses = () => new Set(['complete']);
+  view.getAuthoritativeDoneStatuses = () => new Set(['complete']);
   view.isEmbeddedScheduledDailyTaskBoard = () => false;
   view.isBaseFileFilterReady = () => true;
   view.getActiveBasesSearchQuery = () => '';

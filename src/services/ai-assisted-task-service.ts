@@ -3,6 +3,13 @@ import type TPSGlobalContextMenuPlugin from '../main';
 import { AiAssistedTaskModal } from '../modals/ai-assisted-task-modal';
 import { buildCreatedTaskLine } from '../utils/create-task-parser';
 import { findAfterFrontmatterIndex, updateTaskLineTimestamps } from '../utils/task-line-metadata';
+import {
+  isLinkedSubitemSemanticCheckboxPlanCurrent,
+  normalizeLinkedSubitemCheckboxState,
+  normalizeLinkedSubitemMappings,
+  resolveLinkedSubitemSemanticCheckboxPlanForStatus,
+  type LinkedSubitemSemanticCheckboxPlan,
+} from '../utils/linked-subitem-mapping';
 import * as logger from '../logger';
 
 export interface AiTaskCreationContext {
@@ -53,6 +60,8 @@ export interface AiTaskCreationProposal {
   title: string;
   targetFilePath: string;
   checkboxMarker: string;
+  semanticStatus: 'todo' | 'complete';
+  semanticMappingStatuses: string[];
   priority: string;
   scheduledValue: string;
   allDay: boolean;
@@ -81,6 +90,13 @@ export class AiAssistedTaskService {
     }
 
     const baseContext = await this.buildContext(cleanInput, followUpMessages, previousProposal);
+    const semanticStatus: 'todo' | 'complete' = this.inputImpliesCompletion(baseContext) ? 'complete' : 'todo';
+    const semanticPlan = this.resolveSemanticCheckboxPlan(semanticStatus);
+    if (!semanticPlan) {
+      throw new Error('The requested task state does not have a valid checkbox mapping.');
+    }
+    const semanticCheckboxMarker = semanticPlan.checkboxState.slice(1, -1);
+
     let lastError: Error | null = null;
     let rejectedProposal: AiTaskCreationProposal | null = previousProposal;
 
@@ -95,7 +111,15 @@ export class AiAssistedTaskService {
             `The previous proposal was rejected by validation: ${lastError?.message || 'unknown error'}. Return a corrected proposal for the original request only.`,
           ],
         };
-      const proposal = await api.proposeTaskCreation(cleanInput, context) as AiTaskCreationProposal;
+      const proposed = await api.proposeTaskCreation(cleanInput, context) as AiTaskCreationProposal;
+      const proposal = proposed && typeof proposed === 'object'
+        ? {
+          ...proposed,
+          checkboxMarker: semanticCheckboxMarker,
+          semanticStatus,
+          semanticMappingStatuses: [...semanticPlan.statuses],
+        }
+        : proposed;
       try {
         this.validateProposal(proposal, context);
         return proposal;
@@ -109,9 +133,17 @@ export class AiAssistedTaskService {
   }
 
   buildTaskLine(proposal: AiTaskCreationProposal): string {
+    const creationPlan = this.resolveAcceptedSemanticCheckboxPlan(
+      proposal.checkboxMarker,
+      proposal.semanticStatus,
+    );
+    if (!creationPlan || !this.proposalMappingMatchesPlan(proposal, creationPlan)) {
+      throw new Error('AI task checkbox marker is not a configured Todo or Complete mapping.');
+    }
+    const checkboxMarker = creationPlan.checkboxState.slice(1, -1);
     return buildCreatedTaskLine({
       title: proposal.title,
-      checkboxMarker: proposal.checkboxMarker,
+      checkboxMarker,
       priority: proposal.priority,
       scheduledValue: proposal.scheduledValue,
       allDay: proposal.allDay,
@@ -120,13 +152,34 @@ export class AiAssistedTaskService {
   }
 
   async accept(proposal: AiTaskCreationProposal): Promise<TFile | null> {
+    const creationPlan = this.resolveAcceptedSemanticCheckboxPlan(
+      proposal.checkboxMarker,
+      proposal.semanticStatus,
+    );
+    if (!creationPlan || !this.proposalMappingMatchesPlan(proposal, creationPlan)) {
+      logger.warn('[TPS GCM] AI task creation blocked because its semantic checkbox mapping is unavailable', {
+        checkboxMarker: String(proposal.checkboxMarker ?? ''),
+        semanticStatus: String(proposal.semanticStatus ?? ''),
+      });
+      new Notice('The AI task checkbox is no longer configured.');
+      return null;
+    }
+    const checkboxMarker = creationPlan.checkboxState.slice(1, -1);
     const targetFile = this.resolveMarkdownFile(proposal.targetFilePath);
     if (!targetFile) {
       new Notice('AI task target no longer exists.');
       return null;
     }
 
-    const taskLine = updateTaskLineTimestamps(this.buildTaskLine(proposal), {
+    const createdTaskLine = buildCreatedTaskLine({
+      title: proposal.title,
+      checkboxMarker,
+      priority: proposal.priority,
+      scheduledValue: proposal.scheduledValue,
+      allDay: proposal.allDay,
+      timeEstimate: proposal.timeEstimate,
+    });
+    const taskLine = updateTaskLineTimestamps(createdTaskLine, {
       enabled: this.plugin.settings.autoSyncFileTimestamps === true,
       createdKey: this.plugin.settings.dateCreatedFrontmatterKey,
       modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
@@ -135,7 +188,30 @@ export class AiAssistedTaskService {
       markModified: true,
     });
     try {
-      await this.plugin.app.vault.process(targetFile, (content) => this.insertTaskLine(content, taskLine, proposal));
+      let mappingChanged = false;
+      await this.plugin.app.vault.process(targetFile, (content) => {
+        if (!isLinkedSubitemSemanticCheckboxPlanCurrent(
+          this.getConfiguredMappings(),
+          creationPlan,
+          {
+            normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+            normalizedMappings: true,
+          },
+        )) {
+          mappingChanged = true;
+          return content;
+        }
+        return this.insertTaskLine(content, taskLine, proposal);
+      });
+      if (mappingChanged) {
+        logger.warn('[TPS GCM] AI task creation blocked because its semantic checkbox mapping changed before write', {
+          checkboxMarker,
+          semanticStatus: creationPlan.status,
+          targetPath: targetFile.path,
+        });
+        new Notice('The AI task checkbox mapping changed. Regenerate the proposal and try again.');
+        return null;
+      }
       new Notice(`Created AI-assisted task in ${targetFile.basename}`);
       await this.plugin.openFileInLeaf(targetFile, false, () => this.plugin.app.workspace.getLeaf(false), { revealLeaf: true });
       return targetFile;
@@ -294,8 +370,18 @@ export class AiAssistedTaskService {
         throw new Error(`Task model kept routing words in the task title: ${proposal.title}`);
       }
     }
-    if (!this.inputImpliesCompletion(context) && String(proposal.checkboxMarker || '') !== ' ') {
-      throw new Error(`Task model returned checkbox marker ${JSON.stringify(proposal.checkboxMarker)} but the request did not say the task is completed.`);
+    const expectedSemanticStatus = this.inputImpliesCompletion(context) ? 'complete' : 'todo';
+    const expectedCheckboxMarker = this.resolveSemanticCheckboxMarker(expectedSemanticStatus);
+    if (
+      proposal.semanticStatus !== expectedSemanticStatus
+      || !expectedCheckboxMarker
+      || proposal.checkboxMarker !== expectedCheckboxMarker
+      || !this.proposalMappingMatchesPlan(
+        proposal,
+        this.resolveSemanticCheckboxPlan(expectedSemanticStatus),
+      )
+    ) {
+      throw new Error('Task proposal does not match the configured semantic checkbox mapping.');
     }
     if (!this.inputImpliesPriority(context) && String(proposal.priority || '').trim()) {
       throw new Error(`Task model invented priority ${JSON.stringify(proposal.priority)}.`);
@@ -314,6 +400,54 @@ export class AiAssistedTaskService {
     if (!this.resolveMarkdownFile(targetPath)) {
       throw new Error(`Task model selected a missing markdown target: ${targetPath}`);
     }
+  }
+
+  private resolveSemanticCheckboxMarker(status: 'todo' | 'complete'): string | null {
+    const plan = this.resolveSemanticCheckboxPlan(status);
+    return plan ? plan.checkboxState.slice(1, -1) : null;
+  }
+
+  private resolveSemanticCheckboxPlan(status: 'todo' | 'complete'): LinkedSubitemSemanticCheckboxPlan | null {
+    return resolveLinkedSubitemSemanticCheckboxPlanForStatus(
+      this.getConfiguredMappings(),
+      status,
+      {
+        normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+        normalizedMappings: true,
+      },
+    );
+  }
+
+  private resolveAcceptedSemanticCheckboxPlan(
+    marker: unknown,
+    status: unknown,
+  ): LinkedSubitemSemanticCheckboxPlan | null {
+    if (status !== 'todo' && status !== 'complete') return null;
+    const plan = this.resolveSemanticCheckboxPlan(status);
+    return plan && normalizeLinkedSubitemCheckboxState(marker) === plan.checkboxState
+      ? plan
+      : null;
+  }
+
+  private proposalMappingMatchesPlan(
+    proposal: Pick<AiTaskCreationProposal, 'semanticMappingStatuses'>,
+    plan: LinkedSubitemSemanticCheckboxPlan | null,
+  ): boolean {
+    if (!plan || !Array.isArray(proposal.semanticMappingStatuses)) return false;
+    const statuses = proposal.semanticMappingStatuses
+      .map((status) => this.plugin.sharedServices.status.normalize(status));
+    return statuses.length === plan.statuses.length
+      && statuses.every((status, index) => status === plan.statuses[index]);
+  }
+
+  private getConfiguredMappings() {
+    return normalizeLinkedSubitemMappings(
+      this.plugin.settings.linkedSubitemCheckboxMappings,
+      {
+        enforceStrictDefaults: false,
+        normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+      },
+    );
   }
 
   private inputImpliesCompletion(context: AiTaskCreationContext): boolean {

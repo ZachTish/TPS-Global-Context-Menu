@@ -1,4 +1,5 @@
 import * as chrono from 'chrono-node';
+import { normalizeLinkedSubitemCheckboxState } from './linked-subitem-mapping';
 
 export interface ParsedCreateTaskInput {
   rawInput: string;
@@ -45,13 +46,16 @@ export function parseCreateTaskInput(input: string, referenceDate = new Date()):
 
 export function buildCreatedTaskLine(options: {
   title: string;
-  checkboxMarker?: string;
+  checkboxMarker: string;
   scheduledValue?: string;
   allDay?: boolean;
   timeEstimate?: number;
   priority?: string;
 }): string {
-  const marker = normalizeCheckboxMarker(options.checkboxMarker);
+  const marker = normalizeCreateTaskCheckboxMarker(options.checkboxMarker);
+  if (marker == null) {
+    throw new Error('Task checkbox marker must be one configured character.');
+  }
   const title = normalizeTaskTitle(options.title);
   const parts = [`- [${marker}] ${title || 'Untitled task'}`];
   const priority = String(options.priority || '').trim();
@@ -78,13 +82,9 @@ function normalizeTaskTitle(input: string): string {
     .trim();
 }
 
-function normalizeCheckboxMarker(value: string | undefined): string {
-  const marker = String(value ?? ' ').trim();
-  if (!marker) return ' ';
-  if (marker.length === 1) return marker;
-  const tokenMatch = marker.match(/^\[([^\]\r\n]?)\]$/);
-  if (tokenMatch) return tokenMatch[1] || ' ';
-  return marker.slice(0, 1);
+export function normalizeCreateTaskCheckboxMarker(value: unknown): string | null {
+  const state = normalizeLinkedSubitemCheckboxState(value);
+  return state ? state.slice(1, -1) : null;
 }
 
 function pad(value: number): string {

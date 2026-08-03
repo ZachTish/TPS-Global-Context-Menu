@@ -82,6 +82,8 @@ function createFixture(TaskCheckboxHandler, overrides = {}) {
         getStatusPropertyKey: () => 'status',
         getStatuses: (frontmatter, key) => [String(frontmatter?.[key] || '')].filter(Boolean),
         isDoneStatus: (status) => ['complete', 'wont-do'].includes(String(status || '').toLowerCase()),
+        getDoneStatuses: () => ['complete', 'wont-do'],
+        normalize: (status) => String(status || '').trim().toLowerCase(),
       },
     },
     taskRecurrenceService: {
@@ -116,6 +118,60 @@ function createFixture(TaskCheckboxHandler, overrides = {}) {
     handler,
     timeline,
     setContent: (content) => { currentContent = content; },
+  };
+}
+
+function createNativeCheckboxMutationFixture(
+  TaskCheckboxHandler,
+  { changeMappingsBeforeUpdater = false, liveLineBeforeUpdater = null } = {},
+) {
+  const file = { path: 'Inbox/Native.md', extension: 'md' };
+  let content = '- [ ] Native task [taskStatus:: todo] [status:: [[Statuses/Blocked]]] [task.status:: todo] [task.checkboxStatus:: todo] [checkboxStatus:: todo] [priority:: high] `[task.status:: example]`';
+  const plugin = {
+    app: {},
+    settings: {
+      linkedSubitemCheckboxMappings: [
+        { checkboxState: '[ ]', statuses: ['todo'], toggleTargetStatus: 'complete' },
+        { checkboxState: '[x]', statuses: ['complete'], toggleTargetStatus: 'todo' },
+      ],
+      autoSyncFileTimestamps: false,
+      dateModifiedFrontmatterKey: 'modifiedDate',
+      fileTimestampFormat: 'YYYY-MM-DD HH:mm:ss',
+    },
+    sharedServices: {
+      status: {
+        getStatusPropertyKey: () => 'taskStatus',
+        getRelationalStatusPropertyKey: () => 'status',
+        getDoneStatuses: () => ['complete'],
+        normalize: (value) => String(value ?? '').trim().toLowerCase(),
+      },
+    },
+    subitemRelationshipSyncService: {
+      async mutateMarkdownBody(target, updater) {
+        assert.equal(target, file);
+        if (liveLineBeforeUpdater != null) content = String(liveLineBeforeUpdater);
+        if (changeMappingsBeforeUpdater) {
+          plugin.settings.linkedSubitemCheckboxMappings = [
+            { checkboxState: '[ ]', statuses: ['todo'], toggleTargetStatus: 'complete' },
+          ];
+        }
+        const lines = content.split('\n');
+        if (await updater(lines)) content = lines.join('\n');
+      },
+    },
+  };
+  const handler = new TaskCheckboxHandler(plugin);
+  handler.handleExternalChecklistStateMutation = async () => {};
+  const context = {
+    file,
+    lineNumber: 0,
+    rawLine: content,
+    currentToken: '[ ]',
+  };
+  return {
+    handler,
+    context,
+    getContent: () => content,
   };
 }
 
@@ -215,4 +271,43 @@ test('a checklist-property scheduling failure is surfaced after recurrence and l
   );
 
   assert.deepEqual(fixture.timeline, ['recurrence', 'read', 'property']);
+});
+
+test('native checkbox menu clears checkbox-owned workflow fields without touching relational status', async () => {
+  const { TaskCheckboxHandler } = await handlerModule;
+  const fixture = createNativeCheckboxMutationFixture(TaskCheckboxHandler);
+
+  await fixture.handler.setTaskCheckboxState(fixture.context, '[x]');
+
+  const rawLine = fixture.getContent();
+  const semanticLine = rawLine.replace(/`[^`]*`/gu, '');
+  assert.match(rawLine, /^- \[x\] Native task/u);
+  assert.match(rawLine, /\[status:: \[\[Statuses\/Blocked\]\]\]/u);
+  assert.match(rawLine, /\[priority:: high\]/u);
+  assert.match(rawLine, /`\[task\.status:: example\]`/u);
+  assert.doesNotMatch(semanticLine, /\[(?:taskStatus|task\.status|task\.checkboxStatus|checkboxStatus)::/iu);
+});
+
+test('native checkbox menu refuses a mapping change inside the body mutation callback', async () => {
+  const { TaskCheckboxHandler } = await handlerModule;
+  const fixture = createNativeCheckboxMutationFixture(TaskCheckboxHandler, {
+    changeMappingsBeforeUpdater: true,
+  });
+  const before = fixture.getContent();
+
+  await fixture.handler.setTaskCheckboxState(fixture.context, '[x]');
+
+  assert.equal(fixture.getContent(), before);
+});
+
+test('native checkbox menu refuses a relocated same-title task whose workflow token changed', async () => {
+  const { TaskCheckboxHandler } = await handlerModule;
+  const liveLine = '- [x] Native task [priority:: high]';
+  const fixture = createNativeCheckboxMutationFixture(TaskCheckboxHandler, {
+    liveLineBeforeUpdater: liveLine,
+  });
+
+  await fixture.handler.setTaskCheckboxState(fixture.context, '[/]');
+
+  assert.equal(fixture.getContent(), liveLine);
 });

@@ -42,8 +42,12 @@ export type TpsBaseLineCreationOptions = {
   today?: string;
   maxStates?: number;
   maxNodeVisits?: number;
-  defaultOpenStatus?: string;
-  defaultDoneStatus?: string;
+  /**
+   * Workflow statuses in authoritative checkbox-mapping order. Completion
+   * boolean filters may select only from this list; they never synthesize a
+   * status name that is absent from the active mappings.
+   */
+  orderedMappedStatuses?: readonly string[];
   isDoneStatus?: (status: string) => boolean | null;
   /**
    * Distinguish virtual checkbox workflow status (for example task.status or
@@ -99,7 +103,8 @@ type ResolvedLiteral = {
 };
 
 type SolverContext = {
-  options: Required<Pick<TpsBaseLineCreationOptions, 'maxStates' | 'maxNodeVisits' | 'defaultOpenStatus' | 'defaultDoneStatus'>> & TpsBaseLineCreationOptions;
+  options: Required<Pick<TpsBaseLineCreationOptions, 'maxStates' | 'maxNodeVisits'>> & TpsBaseLineCreationOptions;
+  orderedMappedStatuses: string[];
   nodeVisits: number;
   maxConcurrentStates: number;
   searchLimited: boolean;
@@ -116,8 +121,6 @@ type ParsedCondition = {
 
 const EQUALITY_OPERATORS = new Set(['=', '==', 'is', 'equal', 'equals']);
 const NEGATED_EQUALITY_OPERATORS = new Set(['!=', '!==', 'isnot', 'notequal', 'notequals', 'doesnotequal']);
-const DONE_STATUS_NAMES = new Set(['complete', 'completed', 'done', 'wont-do', 'wontdo', 'cancelled', 'canceled']);
-const OPEN_STATUS_NAMES = new Set(['todo', 'open', 'working', 'holding', 'in-progress', 'inprogress', 'backlog']);
 const KIND_PROPERTIES = new Set(['kind', 'itemkind', 'itemtype']);
 const STATUS_PROPERTIES = new Set(['status', 'checkboxstatus']);
 const OPEN_PROPERTIES = new Set(['open', 'isopen']);
@@ -139,9 +142,8 @@ export function resolveTpsBaseLineCreationPlan(
       ...options,
       maxStates: clampLimit(options.maxStates, 64),
       maxNodeVisits: clampLimit(options.maxNodeVisits, 256),
-      defaultOpenStatus: normalizeValue(options.defaultOpenStatus || 'todo') || 'todo',
-      defaultDoneStatus: normalizeValue(options.defaultDoneStatus || 'complete') || 'complete',
     },
+    orderedMappedStatuses: normalizeOrderedStatuses(options.orderedMappedStatuses),
     nodeVisits: 0,
     maxConcurrentStates: 1,
     searchLimited: false,
@@ -546,7 +548,8 @@ function applyDoneConstraint(
   if (state.done != null && state.done !== done) return conflict(context, `task-completion-conflict:${state.done}:${done}`);
   if (state.status) {
     const classified = classifyDoneStatus(state.status, context.options);
-    if (classified != null && classified !== done) return conflict(context, `status-completion-conflict:${state.status}`);
+    if (classified == null) return conflict(context, `status-completion-unclassified:${state.status}`);
+    if (classified !== done) return conflict(context, `status-completion-conflict:${state.status}`);
   }
   state.done = done;
   state.statusSource ??= source;
@@ -570,8 +573,9 @@ function applyStatus(
   if (state.forbiddenStatuses.has(status)) return conflict(context, `status-conflict:${status}`);
   if (state.status && state.status !== status) return conflict(context, `status-conflict:${state.status}:${status}`);
   const classified = classifyDoneStatus(status, context.options);
-  if (state.done != null && classified != null && state.done !== classified) {
-    return conflict(context, `status-completion-conflict:${status}`);
+  if (state.done != null) {
+    if (classified == null) return conflict(context, `status-completion-unclassified:${status}`);
+    if (state.done !== classified) return conflict(context, `status-completion-conflict:${status}`);
   }
   state.status = status;
   state.statusDisplay = String(rawValue || '').trim() || status;
@@ -734,8 +738,15 @@ function finalizeState(state: SolverState, context: SolverContext): SolverState 
   }
 
   if (result.done != null && result.status == null) {
-    result.status = chooseStatusForDone(result.done, result.forbiddenStatuses, context.options);
-    if (!result.status) return conflict(context, `status-conflict:${result.done ? 'done' : 'open'}`);
+    result.status = chooseStatusForDone(
+      result.done,
+      result.forbiddenStatuses,
+      context.orderedMappedStatuses,
+      context.options,
+    );
+    if (!result.status) {
+      return conflict(context, `checkbox-status-mapping-unavailable:${result.done ? 'done' : 'open'}`);
+    }
   }
   if (result.status && result.forbiddenStatuses.has(result.status)) return conflict(context, `status-conflict:${result.status}`);
 
@@ -941,23 +952,39 @@ function normalizeResolvedLiteral(value: unknown): string {
 }
 
 function classifyDoneStatus(status: string, options: TpsBaseLineCreationOptions): boolean | null {
-  const custom = options.isDoneStatus?.(status);
-  if (custom != null) return custom;
-  const normalized = normalizeValue(status);
-  if (DONE_STATUS_NAMES.has(normalized)) return true;
-  if (OPEN_STATUS_NAMES.has(normalized)) return false;
-  return null;
+  if (typeof options.isDoneStatus !== 'function') return null;
+  try {
+    const classified = options.isDoneStatus(status);
+    return typeof classified === 'boolean' ? classified : null;
+  } catch {
+    return null;
+  }
 }
 
 function chooseStatusForDone(
   done: boolean,
   forbidden: Set<string>,
-  options: SolverContext['options'],
+  orderedMappedStatuses: string[],
+  options: TpsBaseLineCreationOptions,
 ): string | null {
-  const preferred = done
-    ? [options.defaultDoneStatus, 'complete', 'wont-do']
-    : [options.defaultOpenStatus, 'todo', 'working', 'holding'];
-  return preferred.map(normalizeValue).find((status) => status && !forbidden.has(status)) ?? null;
+  for (const status of orderedMappedStatuses) {
+    if (forbidden.has(status)) continue;
+    if (classifyDoneStatus(status, options) === done) return status;
+  }
+  return null;
+}
+
+function normalizeOrderedStatuses(statuses: readonly string[] | undefined): string[] {
+  if (!Array.isArray(statuses)) return [];
+  const normalized: string[] = [];
+  const seen = new Set<string>();
+  for (const rawStatus of statuses) {
+    const status = normalizeValue(rawStatus);
+    if (!status || seen.has(status)) continue;
+    seen.add(status);
+    normalized.push(status);
+  }
+  return normalized;
 }
 
 function normalizeComparableTargetPath(value: unknown): string | null {

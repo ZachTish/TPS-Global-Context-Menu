@@ -23,7 +23,8 @@ function sourceBetween(source, start, end) {
 test('checkbox menus use normalized configured mappings and retain shared task actions', () => {
   assert.doesNotMatch(checkboxSource, /TASK_STATE_OPTIONS/);
   assert.match(checkboxSource, /normalizeLinkedSubitemMappings/);
-  assert.match(checkboxSource, /for \(const mapping of this\.getCheckboxMappings\(\)\)/);
+  assert.match(checkboxSource, /const mappings = this\.getCheckboxMappings\(\)/);
+  assert.match(checkboxSource, /for \(const mapping of mappings\)/);
   assert.match(checkboxSource, /enforceStrictDefaults:\s*false/);
   assert.match(checkboxSource, /setTitle\('Custom checkbox value\.\.\.'\)/);
   assert.match(
@@ -94,7 +95,7 @@ test('checklist follow-up uses mapped open/terminal states and preserves canonic
   assert.match(promptFlow, /if \(!previous\.isOpen \|\| !next\.isComplete\) return/);
   assert.match(
     checkboxSource,
-    /private hasOpenChecklistItems\(lines: string\[\]\): boolean \{\s*return hasOpenMappedTaskLines\(lines, this\.getCheckboxMappings\(\)\);/u,
+    /private hasOpenChecklistItems\(lines: string\[\]\): boolean \{\s*return hasOpenMappedTaskLines\(lines, this\.getCheckboxMappings\(\), this\.getClassificationOptions\(\)\);/u,
   );
   assert.match(
     checkboxSource,

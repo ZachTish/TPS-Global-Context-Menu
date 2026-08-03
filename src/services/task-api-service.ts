@@ -10,11 +10,18 @@ import {
   readInlineTags,
   removeInlineTagFromTaskLine,
   setInlineFieldValueOnTaskLine,
-  setTaskCheckboxToken,
   setTaskTitle,
   updateTaskCompletedDateForCheckboxState,
   updateTaskLineTimestamps,
 } from '../utils/task-line-metadata';
+import {
+  clearTaskCheckboxOwnedWorkflowFields,
+  getTaskCheckboxWorkflowMutationSignature,
+  isTaskCheckboxOwnedWorkflowFieldKey,
+  isTaskCheckboxWorkflowTokenCurrent,
+  setTaskCheckboxWorkflowState,
+  type TaskCheckboxWorkflowFieldOwnership,
+} from '../utils/task-checkbox-workflow-mutation';
 import {
   extractTaskBlock,
   findCurrentTaskLineIndex,
@@ -23,7 +30,13 @@ import {
   removeTaskBlockFromContent,
   splitContent,
 } from '../utils/task-block-move';
-import { getLinkedSubitemCompleteMarkers, mapStatusToSubitemCheckboxState } from '../utils/linked-subitem-mapping';
+import {
+  getLinkedSubitemCompleteMarkers,
+  getLinkedSubitemMappingForState,
+  mapStatusToSubitemCheckboxState,
+  normalizeLinkedSubitemCheckboxState,
+  normalizeLinkedSubitemMappings,
+} from '../utils/linked-subitem-mapping';
 import * as logger from '../logger';
 import { findRelationalStatusProperty } from '../utils/property-option-source';
 import { classifyMappedTaskCheckboxState } from '../utils/task-checkbox-classification';
@@ -117,6 +130,21 @@ interface PostFollowupTaskIdentity {
   marker: string | null;
 }
 
+interface TaskInputMappingPlan {
+  checkboxMarker: string | null;
+  statusMarker: string | null;
+  rawLineMarker: string | null;
+  fieldStatusMarkers: ReadonlyMap<string, string>;
+  impliedCreateMarker: string | null;
+  completeMarkers: readonly string[];
+  mappingSignature: string;
+  mutatesCheckboxWorkflow: boolean;
+}
+
+type TaskInputMappingPreflight =
+  | { ok: true; plan: TaskInputMappingPlan }
+  | { ok: false; error: string };
+
 export class TaskApiService {
   readonly version = 1;
 
@@ -161,6 +189,18 @@ export class TaskApiService {
       logger.flowWarn('TaskApi', 'create:invalid-input', { hasTitle: !!title, hasRawLine: !!String(input.rawLine || '').trim() });
       return { ok: false, changed: false, task: null, error: 'Task title is required.' };
     }
+    const mappingPreflight = this.preflightTaskInputMappings(input, { create: true });
+    if ('error' in mappingPreflight) {
+      logger.flowWarn('TaskApi', 'create:unsupported-checkbox-mapping', { error: mappingPreflight.error });
+      return { ok: false, changed: false, task: null, error: mappingPreflight.error };
+    }
+    const initialMarker = mappingPreflight.plan.checkboxMarker
+      || mappingPreflight.plan.statusMarker
+      || Array.from(mappingPreflight.plan.fieldStatusMarkers.values()).at(-1)
+      || mappingPreflight.plan.impliedCreateMarker;
+    if (!String(input.rawLine || '').trim() && !initialMarker) {
+      return { ok: false, changed: false, task: null, error: 'A mapped checkbox state is required to create a task.' };
+    }
 
     const hasExplicitTarget = input.targetFile != null || !!String(input.targetPath || '').trim();
     const targetFile = this.resolveMarkdownFile(input.targetFile)
@@ -172,6 +212,14 @@ export class TaskApiService {
         hasTargetFile: input.targetFile != null,
       });
       return { ok: false, changed: false, task: null, error: 'Target markdown file could not be resolved.' };
+    }
+    if (!this.mappingPlanIsCurrent(mappingPreflight.plan)) {
+      return {
+        ok: false,
+        changed: false,
+        task: null,
+        error: 'Task status mappings changed before the task could be created.',
+      };
     }
     const context = {
       targetPath: targetFile.path,
@@ -185,14 +233,28 @@ export class TaskApiService {
     logger.flow('TaskApi', 'create:start', context);
 
     const line = this.applyTaskInputToLine(
-      String(input.rawLine || `- [${this.normalizeMarker(input.checkbox ?? input.status ?? ' ')}] ${title}`).trim(),
+      String(input.rawLine || `- [${initialMarker}] ${title}`).trim(),
       input,
       { create: true },
+      mappingPreflight.plan,
     );
     let insertedLineNumber = -1;
+    let writeAccepted = false;
+    let mappingGuardBlocked = false;
 
     try {
       await this.plugin.app.vault.process(targetFile, (content) => {
+        const liveMappings = this.getConfiguredTaskMappings();
+        const parsedLine = parseTaskLine(line);
+        if (
+          !this.mappingPlanIsCurrent(mappingPreflight.plan, liveMappings)
+          || !parsedLine
+          || !getLinkedSubitemMappingForState(liveMappings, parsedLine.token, { normalizedMappings: true })
+        ) {
+          mappingGuardBlocked = true;
+          return content;
+        }
+        writeAccepted = true;
         if (input.placement === 'end') {
           const newline = content.includes('\r\n') ? '\r\n' : '\n';
           const separator = content.endsWith('\n') || content.length === 0 ? '' : newline;
@@ -204,6 +266,20 @@ export class TaskApiService {
         insertedLineNumber = this.findInsertedLineIndex(next, line);
         return next;
       });
+
+      if (!writeAccepted) {
+        if (mappingGuardBlocked) {
+          logger.flowWarn('TaskApi', 'create:mapping-changed', context);
+        }
+        return {
+          ok: false,
+          changed: false,
+          task: null,
+          error: mappingGuardBlocked
+            ? 'Task status mappings changed before the task could be created.'
+            : 'Task could not be inserted.',
+        };
+      }
 
       const task = await this.get({
         path: targetFile.path,
@@ -239,8 +315,7 @@ export class TaskApiService {
    * recurrence, final-status, and checklist-property follow-up as GCM's UI.
    */
   setCompletion(ref: GcmTaskRef, completed: boolean): Promise<GcmTaskMutationResult> {
-    const checkbox = this.statusToCheckboxMarker(completed ? 'complete' : 'todo');
-    return this.updateTask(ref, { checkbox }, {
+    return this.updateTask(ref, { status: completed ? 'complete' : 'todo' }, {
       checklistFollowup: true,
       completionTarget: completed,
     });
@@ -274,10 +349,23 @@ export class TaskApiService {
     input: GcmTaskUpdateInput,
     options: TaskUpdateExecutionOptions = {},
   ): Promise<GcmTaskMutationResult> {
+    const mappingPreflight = this.preflightTaskInputMappings(input);
+    if ('error' in mappingPreflight) {
+      logger.flowWarn('TaskApi', 'update:unsupported-checkbox-mapping', { error: mappingPreflight.error });
+      return { ok: false, changed: false, task: null, error: mappingPreflight.error };
+    }
     const resolved = await this.resolveTask(ref);
     if (!resolved) {
       logger.flowWarn('TaskApi', 'update:target-unresolved', this.summarizeRef(ref));
       return { ok: false, changed: false, task: null, error: 'Task line could not be resolved.' };
+    }
+    if (mappingPreflight.plan.mutatesCheckboxWorkflow && !this.mappingPlanIsCurrent(mappingPreflight.plan)) {
+      return {
+        ok: false,
+        changed: false,
+        task: null,
+        error: 'Task status mappings changed before the task could be updated.',
+      };
     }
     const before = resolved.record;
     let changed = false;
@@ -288,6 +376,7 @@ export class TaskApiService {
     let nextMarker: string | null = null;
     let updatedLines: string[] | null = null;
     let resolvedCurrentTask: GcmTaskRecord = before;
+    let mappingGuardBlocked = false;
     const context = {
       path: resolved.file.path,
       lineNumber: before.lineNumber,
@@ -303,6 +392,16 @@ export class TaskApiService {
 
     try {
       await this.plugin.app.vault.process(resolved.file, (content) => {
+        const liveMappings = mappingPreflight.plan.mutatesCheckboxWorkflow
+          ? this.getConfiguredTaskMappings()
+          : null;
+        if (
+          liveMappings
+          && !this.mappingPlanIsCurrent(mappingPreflight.plan, liveMappings)
+        ) {
+          mappingGuardBlocked = true;
+          return content;
+        }
         const currentResolution = this.resolveMutableTaskLine(
           content,
           before.lineNumber,
@@ -311,26 +410,54 @@ export class TaskApiService {
         );
         if (!currentResolution) return content;
         const { parts, index } = currentResolution;
-        writeResolved = true;
         resolvedLineNumber = index;
         const current = parts.lines[index] || '';
         nextRawLine = current;
         const currentRecord = this.recordFromLine(resolved.file.path, index, current, parts.lines);
         if (currentRecord) resolvedCurrentTask = currentRecord;
-        const currentParsed = options.checklistFollowup || options.completionTarget !== undefined
+        const currentParsed = options.checklistFollowup
+          || options.completionTarget !== undefined
+          || mappingPreflight.plan.mutatesCheckboxWorkflow
           ? parseTaskLine(current)
           : null;
+        if (
+          liveMappings
+          && !isTaskCheckboxWorkflowTokenCurrent(currentParsed?.token, before.checkbox)
+        ) return content;
+        if (
+          liveMappings
+          && (
+            !currentParsed
+            || !getLinkedSubitemMappingForState(liveMappings, currentParsed.token, { normalizedMappings: true })
+          )
+        ) {
+          mappingGuardBlocked = true;
+          return content;
+        }
+        writeResolved = true;
         if (options.completionTarget !== undefined && currentParsed) {
           const currentState = classifyMappedTaskCheckboxState(
             this.plugin.settings.linkedSubitemCheckboxMappings || [],
             currentParsed.token,
+            this.getTaskClassificationOptions(),
           );
           const alreadyAtTarget = options.completionTarget
             ? currentState.isComplete
             : currentState.isOpen || currentState.isMigrated;
           if (alreadyAtTarget) return content;
         }
-        const next = this.applyTaskInputToLine(current, input, { update: true });
+        const next = this.applyTaskInputToLine(current, input, { update: true }, mappingPreflight.plan);
+        const nextParsed = liveMappings ? parseTaskLine(next) : null;
+        if (
+          liveMappings
+          && (
+            !nextParsed
+            || !getLinkedSubitemMappingForState(liveMappings, nextParsed.token, { normalizedMappings: true })
+          )
+        ) {
+          mappingGuardBlocked = true;
+          return content;
+        }
         if (next === current) return content;
         parts.lines[index] = next;
         nextRawLine = next;
@@ -342,6 +469,17 @@ export class TaskApiService {
         changed = true;
         return joinContent(parts.lines, parts.newline, parts.endsWithNewline);
       });
+
+      if (mappingGuardBlocked) {
+        logger.flowWarn('TaskApi', 'update:mapping-changed', context);
+        return {
+          ok: false,
+          changed: false,
+          task: null,
+          before,
+          error: 'Task status mappings changed before the task could be updated.',
+        };
+      }
 
       if (!writeResolved) {
         logger.flowWarn('TaskApi', 'update:stale-target', context);
@@ -637,10 +775,9 @@ export class TaskApiService {
     const classification = classifyMappedTaskCheckboxState(
       this.plugin.settings.linkedSubitemCheckboxMappings || [],
       checkbox,
+      this.getTaskClassificationOptions(),
     );
-    const status = classification.status
-      || this.plugin.sharedServices?.status?.checkboxStateToStatus(marker)
-      || checkboxMarkerToStatus(marker);
+    const status = classification.status || '';
     const blockLineCount = Array.isArray(allLines)
       ? Math.max(1, extractTaskBlock(allLines, lineNumber).lines.length)
       : 1;
@@ -755,44 +892,43 @@ export class TaskApiService {
     line: string,
     input: GcmTaskUpdateInput | GcmTaskCreateInput,
     options: { create?: boolean; update?: boolean } = {},
+    mappingPlan: TaskInputMappingPlan,
   ): string {
     let next = line;
+    const workflowFieldOwnership = this.getTaskWorkflowFieldOwnership();
+    if (options.create === true && mappingPlan.rawLineMarker) {
+      next = setTaskCheckboxWorkflowState(
+        next,
+        `[${mappingPlan.rawLineMarker}]`,
+        workflowFieldOwnership,
+      );
+    }
     const title = 'title' in input ? input.title : undefined;
     if (typeof title === 'string' && title.trim()) next = setTaskTitle(next, title);
 
-    const requestedCheckbox = 'checkbox' in input ? input.checkbox : undefined;
-    const requestedStatus = 'status' in input ? input.status : undefined;
-    const marker = requestedCheckbox != null
-      ? this.normalizeMarker(requestedCheckbox)
-      : requestedStatus != null
-        ? this.statusToCheckboxMarker(requestedStatus)
-        : '';
+    const marker = mappingPlan.checkboxMarker || mappingPlan.statusMarker || '';
     if (marker) {
-      next = setTaskCheckboxToken(next, `[${marker}]`);
+      next = setTaskCheckboxWorkflowState(next, `[${marker}]`, workflowFieldOwnership);
       next = updateTaskCompletedDateForCheckboxState(next, `[${marker}]`, {
-        completeMarkers: Array.from(this.getCompleteMarkers()),
+        completeMarkers: [...mappingPlan.completeMarkers],
       });
-      if (!findRelationalStatusProperty(this.plugin.settings.properties)) {
-        next = setInlineFieldValueOnTaskLine(next, 'status', null);
-      }
     }
 
     if (input.fields && typeof input.fields === 'object') {
       for (const [key, value] of Object.entries(input.fields)) {
         if (!key.trim()) continue;
-        if (
-          key.trim().toLowerCase() === 'status'
-          && !findRelationalStatusProperty(this.plugin.settings.properties)
-        ) {
-          const status = value == null ? null : String(value);
+        if (isTaskCheckboxOwnedWorkflowFieldKey(key, workflowFieldOwnership)) {
+          const status = value == null ? null : String(value).trim();
           if (status) {
-            const statusMarker = this.statusToCheckboxMarker(status);
-            next = setTaskCheckboxToken(next, `[${statusMarker}]`);
+            const statusMarker = mappingPlan.fieldStatusMarkers.get(key);
+            if (!statusMarker) return line;
+            next = setTaskCheckboxWorkflowState(next, `[${statusMarker}]`, workflowFieldOwnership);
             next = updateTaskCompletedDateForCheckboxState(next, `[${statusMarker}]`, {
-              completeMarkers: Array.from(this.getCompleteMarkers()),
+              completeMarkers: [...mappingPlan.completeMarkers],
             });
+          } else {
+            next = clearTaskCheckboxOwnedWorkflowFields(next, workflowFieldOwnership);
           }
-          next = setInlineFieldValueOnTaskLine(next, key, null);
           continue;
         }
         const cleanValue = value == null ? null : String(value).trim();
@@ -873,27 +1009,181 @@ export class TaskApiService {
     return true;
   }
 
-  private statusToCheckboxMarker(status: string): string {
-    const mappings = Array.isArray(this.plugin.settings.linkedSubitemCheckboxMappings)
-      ? this.plugin.settings.linkedSubitemCheckboxMappings
-      : [];
-    const mapped = mapStatusToSubitemCheckboxState(mappings, this.plugin.sharedServices.status.normalize(status));
-    if (mapped) {
-      return this.normalizeMarker(mapped);
-    }
-    return this.plugin.sharedServices.status.statusToCheckboxState(status);
-  }
-
   private normalizeMarker(value: unknown): string {
-    const raw = String(value ?? '').trim();
-    const tokenMatch = raw.match(/^\[([^\]\r\n]?)\]$/);
-    if (tokenMatch) return tokenMatch[1] || ' ';
-    if (raw.length <= 1) return raw || ' ';
-    return this.statusToCheckboxMarker(raw);
+    const token = normalizeLinkedSubitemCheckboxState(value);
+    return token ? token.slice(1, -1) || ' ' : '';
   }
 
-  private getCompleteMarkers(): Set<string> {
-    return new Set(['x', 'X', ...getLinkedSubitemCompleteMarkers(this.plugin.settings.linkedSubitemCheckboxMappings || [])]);
+  private preflightTaskInputMappings(
+    input: GcmTaskUpdateInput | GcmTaskCreateInput,
+    options: { create?: boolean } = {},
+  ): TaskInputMappingPreflight {
+    const mappings = this.getConfiguredTaskMappings();
+    const resolveOwnedMarker = (value: unknown, label: string): { marker: string } | { error: string } => {
+      const checkboxState = normalizeLinkedSubitemCheckboxState(value);
+      if (!checkboxState) {
+        return { error: `${label} must be [ ] or exactly one marker character.` };
+      }
+      if (!getLinkedSubitemMappingForState(mappings, checkboxState, { normalizedMappings: true })) {
+        return { error: `No checkbox mapping is configured for state "${checkboxState}".` };
+      }
+      return { marker: checkboxState.slice(1, -1) || ' ' };
+    };
+    const resolveStatusMarker = (value: unknown, label = 'status'): { marker: string } | { error: string } => {
+      const status = String(value ?? '').trim();
+      if (!status) return { error: `${label} must not be blank.` };
+      const checkboxState = mapStatusToSubitemCheckboxState(mappings, status, {
+        normalizeStatus: (entry) => this.plugin.sharedServices.status.normalize(entry),
+        normalizedMappings: true,
+      });
+      if (!checkboxState) {
+        return { error: `No checkbox mapping is configured for status "${status}".` };
+      }
+      return { marker: checkboxState.slice(1, -1) || ' ' };
+    };
+
+    let checkboxMarker: string | null = null;
+    if ('checkbox' in input && input.checkbox != null) {
+      const resolved = resolveOwnedMarker(input.checkbox, 'Checkbox state');
+      if ('error' in resolved) return { ok: false, error: resolved.error };
+      checkboxMarker = resolved.marker;
+    }
+
+    let statusMarker: string | null = null;
+    if ('status' in input && input.status != null) {
+      const resolved = resolveStatusMarker(input.status);
+      if ('error' in resolved) return { ok: false, error: resolved.error };
+      statusMarker = resolved.marker;
+    }
+
+    let rawLineMarker: string | null = null;
+    const rawLine = 'rawLine' in input ? String(input.rawLine || '').trim() : '';
+    if (rawLine) {
+      const parsed = parseTaskLine(rawLine);
+      if (!parsed) {
+        return { ok: false, error: 'Raw task line must contain one checkbox marker, such as "- [ ] Task".' };
+      }
+      const resolved = resolveOwnedMarker(parsed.token, 'Raw task checkbox state');
+      if ('error' in resolved) return { ok: false, error: resolved.error };
+      rawLineMarker = resolved.marker;
+    }
+
+    const fieldStatusMarkers = new Map<string, string>();
+    const workflowFieldOwnership = this.getTaskWorkflowFieldOwnership();
+    const hasWorkflowFieldMutation = Boolean(
+      input.fields
+      && typeof input.fields === 'object'
+      && Object.keys(input.fields).some((key) => (
+        isTaskCheckboxOwnedWorkflowFieldKey(key, workflowFieldOwnership)
+      )),
+    );
+    if (input.fields && typeof input.fields === 'object') {
+      for (const [key, value] of Object.entries(input.fields)) {
+        if (
+          !isTaskCheckboxOwnedWorkflowFieldKey(key, workflowFieldOwnership)
+          || value == null
+          || !String(value).trim()
+        ) continue;
+        const resolved = resolveStatusMarker(value, `Task field "${key}"`);
+        if ('error' in resolved) return { ok: false, error: resolved.error };
+        fieldStatusMarkers.set(key, resolved.marker);
+      }
+    }
+
+    let impliedCreateMarker: string | null = null;
+    if (
+      options.create === true
+      && !rawLine
+      && checkboxMarker == null
+      && statusMarker == null
+      && fieldStatusMarkers.size === 0
+    ) {
+      const resolved = resolveStatusMarker('todo', 'Default task status');
+      if ('error' in resolved) return { ok: false, error: resolved.error };
+      impliedCreateMarker = resolved.marker;
+    }
+
+    return {
+      ok: true,
+      plan: {
+        checkboxMarker,
+        statusMarker,
+        rawLineMarker,
+        fieldStatusMarkers,
+        impliedCreateMarker,
+        completeMarkers: Array.from(this.getCompleteMarkers(mappings)),
+        mappingSignature: this.getCheckboxMutationSignature(mappings, workflowFieldOwnership),
+        mutatesCheckboxWorkflow: options.create === true
+          || checkboxMarker != null
+          || statusMarker != null
+          || hasWorkflowFieldMutation,
+      },
+    };
+  }
+
+  private getConfiguredTaskMappings() {
+    return normalizeLinkedSubitemMappings(
+      this.plugin.settings.linkedSubitemCheckboxMappings,
+      {
+        enforceStrictDefaults: false,
+        normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+      },
+    );
+  }
+
+  private getTaskWorkflowFieldOwnership(): TaskCheckboxWorkflowFieldOwnership {
+    const relationalProperty = findRelationalStatusProperty(this.plugin.settings.properties);
+    const configuredWorkflowProperty = (this.plugin.settings.properties || []).find((property) => {
+      if (property === relationalProperty) return false;
+      const id = String(property?.id || '').trim().toLowerCase();
+      const key = String(property?.key || '').trim().toLowerCase();
+      return id === 'status' || key === 'status';
+    });
+    const statusService = this.plugin.sharedServices?.status;
+    return {
+      workflowStatusKey: statusService?.getStatusPropertyKey?.()
+        || configuredWorkflowProperty?.key
+        || (relationalProperty ? 'taskStatus' : 'status'),
+      relationalStatusKey: statusService?.getRelationalStatusPropertyKey?.()
+        || relationalProperty?.key,
+    };
+  }
+
+  private getCheckboxMutationSignature(
+    mappings = this.getConfiguredTaskMappings(),
+    ownership = this.getTaskWorkflowFieldOwnership(),
+  ): string {
+    return getTaskCheckboxWorkflowMutationSignature(
+      mappings,
+      ownership,
+      Array.from(this.getCompleteMarkers(mappings)),
+    );
+  }
+
+  private mappingPlanIsCurrent(
+    plan: TaskInputMappingPlan,
+    mappings = this.getConfiguredTaskMappings(),
+  ): boolean {
+    return plan.mappingSignature === this.getCheckboxMutationSignature(mappings);
+  }
+
+  private getCompleteMarkers(mappings = this.getConfiguredTaskMappings()): Set<string> {
+    const statusService = this.plugin.sharedServices.status;
+    return new Set(getLinkedSubitemCompleteMarkers(
+      mappings,
+      {
+        completionStatuses: statusService.getDoneStatuses(),
+        normalizeStatus: (value) => statusService.normalize(value),
+      },
+    ));
+  }
+
+  private getTaskClassificationOptions() {
+    const statusService = this.plugin.sharedServices.status;
+    return {
+      completionStatuses: statusService.getDoneStatuses(),
+      normalizeStatus: (value: unknown) => statusService.normalize(value),
+    };
   }
 
   private resolveTargetLineIndex(lineCount: number, target: { line?: number; lineNumber?: number }): number {
@@ -992,16 +1282,6 @@ function normalizeTagForCompare(tag: string): string {
 
 function normalizeTaskIdentityTitle(value: string): string {
   return String(value || '').replace(/\s+/gu, ' ').trim().toLowerCase();
-}
-
-function checkboxMarkerToStatus(marker: string): string {
-  const normalized = String(marker || '').trim().toLowerCase();
-  if (!normalized) return 'todo';
-  if (normalized === 'x') return 'complete';
-  if (normalized === '/' || normalized === '\\') return 'working';
-  if (normalized === '?') return 'holding';
-  if (normalized === '-') return 'wont-do';
-  return normalized;
 }
 
 function getErrorMessage(error: unknown): string {

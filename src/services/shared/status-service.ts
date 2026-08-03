@@ -7,6 +7,11 @@ import {
   findRelationalStatusProperty,
   propertyUsesEntityOptions,
 } from '../../utils/property-option-source';
+import {
+  mapStatusToSubitemCheckboxState,
+  mapSubitemCheckboxStateToStatus,
+  normalizeLinkedSubitemCheckboxState,
+} from '../../utils/linked-subitem-mapping';
 
 export type StatusSet = {
   canonical: string[];
@@ -72,6 +77,10 @@ export class SharedStatusService {
     return String(configured?.key || 'status').trim() || 'status';
   }
 
+  getRelationalStatusPropertyKey(): string {
+    return String(findRelationalStatusProperty(this.plugin.settings.properties)?.key || '').trim();
+  }
+
   getStatusOptions(): string[] {
     const key = this.getStatusPropertyKey().toLowerCase();
     const configured = (this.plugin.settings.properties || []).find((property) => {
@@ -87,18 +96,16 @@ export class SharedStatusService {
   }
 
   getDoneStatuses(): string[] {
-    const configured = Array.isArray(this.plugin.settings.recurrenceCompletionStatuses)
+    const raw = Array.isArray(this.plugin.settings.recurrenceCompletionStatuses)
       ? this.plugin.settings.recurrenceCompletionStatuses
-      : [];
-    const raw = configured.length ? configured : ['complete', 'wont-do'];
+      : ['complete', 'wont-do'];
     return Array.from(new Set(raw.map((status) => this.normalize(status)).filter(Boolean)));
   }
 
   getActiveStatuses(): string[] {
-    const configured = Array.isArray(this.plugin.settings.activeStatusValues)
+    const raw = Array.isArray(this.plugin.settings.activeStatusValues)
       ? this.plugin.settings.activeStatusValues
-      : [];
-    const raw = configured.length ? configured : ['todo', 'working', 'holding'];
+      : ['todo', 'working', 'holding'];
     return Array.from(new Set(raw.map((status) => this.normalize(status)).filter(Boolean)));
   }
 
@@ -137,26 +144,22 @@ export class SharedStatusService {
   }
 
   checkboxStateToStatus(rawState: unknown): string {
-    let state = String(rawState ?? '').trim();
-    if (state.startsWith('[') && state.endsWith(']')) {
-      state = state.slice(1, -1);
-    }
-    const marker = state.trim().toLowerCase();
-    if (marker === '' || marker === ' ') return 'todo';
-    if (marker === 'x') return 'complete';
-    if (marker === '/' || marker === '\\') return 'working';
-    if (marker === '?') return 'holding';
-    if (marker === '-' || marker === '~') return 'wont-do';
-    return this.normalize(marker);
+    const configured = mapSubitemCheckboxStateToStatus(
+      this.plugin.settings.linkedSubitemCheckboxMappings || [],
+      rawState,
+    );
+    return configured ? this.normalize(configured) : '';
   }
 
   statusToCheckboxState(rawStatus: unknown): string {
-    const normalized = this.normalize(rawStatus);
-    if (normalized === 'complete') return 'x';
-    if (normalized === 'working') return '/';
-    if (normalized === 'holding') return '?';
-    if (normalized === 'wont-do') return '-';
-    return ' ';
+    const configured = mapStatusToSubitemCheckboxState(
+      this.plugin.settings.linkedSubitemCheckboxMappings || [],
+      rawStatus,
+      { normalizeStatus: (value) => this.normalize(value) },
+    );
+    if (!configured) return '';
+    const token = normalizeLinkedSubitemCheckboxState(configured);
+    return token ? token.slice(1, -1) || ' ' : '';
   }
 
   async setFileStatus(file: TFile, status: string | null): Promise<boolean> {

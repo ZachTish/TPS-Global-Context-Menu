@@ -41,7 +41,14 @@ test('first matching any branch controls task versus bullet creation', async () 
   assert.equal(defaults.kind, 'task');
   assert.equal(defaults.targetPath, 'Inbox.md');
   assert.equal(defaults.targetPathSpecified, true);
-  assert.equal(buildTpsTableMarkdownLine(defaults.kind, 'Follow up', {}), '- [ ] Follow up');
+  assert.equal(
+    buildTpsTableMarkdownLine(defaults.kind, 'Follow up', {}, { checkboxState: '[ ]' }),
+    '- [ ] Follow up',
+  );
+  assert.throws(
+    () => buildTpsTableMarkdownLine(defaults.kind, 'Unmapped task', {}),
+    /mapped checkbox state is required/u,
+  );
 });
 
 test('higher-priority filters win while lower-priority roots fill missing defaults', async () => {
@@ -149,7 +156,8 @@ test('table view owns filter-derived line creation and uses an atomic vault muta
   assert.match(source, /Could not read the Base filters, so TPS Table did not create anything\./);
   assert.match(source, /if \(failOnReadError\) throw error/);
   assert.ok(
-    source.indexOf('new TpsTableLineCreateModal') < source.indexOf('this.plugin.resolveTpsBaseWriteFile'),
+    source.indexOf('await this.promptForLineTitle') < source.indexOf('this.plugin.resolveTpsBaseWriteFile'),
     'cancelling the title prompt must happen before a Daily Note fallback can create a note',
   );
+  assert.match(source, /private async promptForLineTitle\([\s\S]{0,260}new TpsTableLineCreateModal/u);
 });

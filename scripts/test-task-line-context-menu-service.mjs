@@ -36,6 +36,21 @@ const dailyInboxLineSource = readFileSync(new URL('../src/services/daily-inbox-l
 const notebookRuleSettingsSource = readFileSync(new URL('../src/services/notebook-navigator-rule-settings.ts', import.meta.url), 'utf8');
 const taskLineResolutionSource = readFileSync(new URL('../src/utils/task-line-resolution.ts', import.meta.url), 'utf8');
 
+test('task checkbox UI mutations share ownership cleanup and atomic mapping guards', () => {
+  assert.doesNotMatch(serviceSource, /setTaskCheckboxToken\(/u);
+  assert.ok(
+    (serviceSource.match(/this\.setTaskStatusCheckboxState\(/gu) || []).length >= 7,
+    'quick toggle, Base picker, quick status, multi-select, context menu, custom marker, and timer duplication must share cleanup',
+  );
+  assert.match(serviceSource, /getTaskCheckboxWorkflowMutationSignature\(/u);
+  assert.match(serviceSource, /expectedMappingSignature/u);
+  assert.match(serviceSource, /getLinkedSubitemMappingForState\(liveMappings, currentParsed\.token/u);
+  assert.match(serviceSource, /getLinkedSubitemMappingForState\(liveMappings \|\| \[\], nextParsed\.token/u);
+  assert.match(taskCheckboxHandlerSource, /setTaskCheckboxWorkflowState\(line, token/u);
+  assert.match(taskCheckboxHandlerSource, /getCheckboxMutationSignature\(liveMappings\) !== expectedMappingSignature/u);
+  assert.match(taskCheckboxHandlerSource, /getLinkedSubitemMappingForState\(liveMappings, token/u);
+});
+
 test('task resolution inherits exact source metadata from rendered surface hosts', () => {
   assert.match(serviceSource, /closest<HTMLElement>\('\[data-task-path\], \[data-tps-kanban-path\], \[data-source-path\], \[data-file-path\], \[data-path\]'\)/);
   assert.match(serviceSource, /metadataHost\?\.dataset\.sourcePath/);
@@ -120,6 +135,18 @@ async function importTaskHighlightMetadataUtility() {
 async function importTaskLineResolutionUtility() {
   const build = await esbuild.build({
     entryPoints: [fileURLToPath(new URL('../src/utils/task-line-resolution.ts', import.meta.url))],
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    write: false,
+  });
+  const bundled = build.outputFiles[0].text;
+  return import(`data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`);
+}
+
+async function importTaskCheckboxWorkflowUtility() {
+  const build = await esbuild.build({
+    entryPoints: [fileURLToPath(new URL('../src/utils/task-checkbox-workflow-mutation.ts', import.meta.url))],
     bundle: true,
     format: 'esm',
     platform: 'node',
@@ -271,6 +298,13 @@ test('task line metadata helpers edit task text without destroying inline task p
       completedAt: new Date(2026, 5, 3, 14, 5, 6),
     }),
     '- [x] completed task [completedDate:: 2026-06-03 14:05:06]',
+  );
+  assert.equal(
+    updateTaskCompletedDateForCheckboxState('- [X] uppercase completed task', '[X]', {
+      completeMarkers: ['x'],
+      completedAt: new Date(2026, 5, 3, 14, 5, 6),
+    }),
+    '- [X] uppercase completed task [completedDate:: 2026-06-03 14:05:06]',
   );
   assert.equal(
     updateTaskCompletedDateForCheckboxState('- [x] completed task [completedDate:: 2026-06-01 09:00:00]', '[x]', {
@@ -710,6 +744,26 @@ test('TPS Table property cells resolve through the row task identity and exact o
   assert.doesNotMatch(serviceSource, /add\(pluginLine, false\)/);
 });
 
+test('task-menu checkbox mutations reject a relocated same-title task whose workflow token changed', async () => {
+  const [{ findCurrentTaskLineIndex }, { isTaskCheckboxWorkflowTokenCurrent }] = await Promise.all([
+    importTaskBlockMoveUtility(),
+    importTaskCheckboxWorkflowUtility(),
+  ]);
+  const capturedLine = '- [ ] Same title';
+  const liveLine = '- [x] Same title';
+  const resolved = findCurrentTaskLineIndex([liveLine], 0, capturedLine, 'Same title');
+  let writes = 0;
+  if (resolved >= 0 && isTaskCheckboxWorkflowTokenCurrent('[x]', '[ ]')) writes += 1;
+
+  assert.equal(resolved, 0, 'the legacy unique-title resolver still relocates the task');
+  assert.equal(writes, 0, 'the token compare-and-swap must block the stale checkbox write');
+  assert.equal(isTaskCheckboxWorkflowTokenCurrent('[X]', '[x]'), true, 'canonical checked spellings are one workflow token');
+  assert.match(
+    serviceSource,
+    /options\.checkboxMutation === true[\s\S]{0,120}!isTaskCheckboxWorkflowTokenCurrent\(currentParsed\.token, context\.checkboxToken\)[\s\S]{0,40}return content/u,
+  );
+});
+
 test('mobile task and note editors share the keyboard-aware overlay contract', async () => {
   const { computeOverlayPlacement } = await importMobileOverlayUtility();
   const placement = computeOverlayPlacement(
@@ -999,7 +1053,7 @@ test('GCM intercepts Kanban and Calendar task rows before the note file menu', (
   assert.match(serviceSource, /tps-calendar-task-entry/);
   assert.match(serviceSource, /evt\.stopImmediatePropagation\(\)/);
   assert.match(serviceSource, /showMenu\(context, taskEl, evt\.pageX, evt\.pageY\)/);
-  assert.match(serviceSource, /setTaskCheckboxToken\(line, mapping\.checkboxState\)/);
+  assert.match(serviceSource, /this\.setTaskStatusCheckboxState\(line, mapping\.checkboxState\)/);
   assert.match(serviceSource, /updateTaskCompletedDateForCheckboxState\(nextLine, nextParsed\?\.marker/);
   assert.match(serviceSource, /setInlineFieldValueOnTaskLine\(line, property\.key/);
   assert.match(serviceSource, /type: 'task'/);
@@ -1407,7 +1461,9 @@ test('create task command appends to today daily note and does not create task s
   assert.match(mainSource, /new CreateTaskService\(this\)/);
   assert.match(createTaskServiceSource, /noteOperationService\.ensureDailyNote\([\s\S]{0,100}format\('YYYY-MM-DD'\)[\s\S]{0,40}00:00:00/);
   assert.match(createTaskServiceSource, /updateTaskLineTimestamps\(taskLine/);
-  assert.match(createTaskServiceSource, /vault\.process\(targetFile, \(content\) => insertLineAfterFrontmatter\(content, stampedTaskLine\)\)/);
+  assert.match(createTaskServiceSource, /vault\.process\(targetFile, \(content\) => \{/);
+  assert.match(createTaskServiceSource, /isLinkedSubitemSemanticCheckboxPlanCurrent\(/);
+  assert.match(createTaskServiceSource, /return insertLineAfterFrontmatter\(content, stampedTaskLine\)/);
   assert.match(createTaskServiceSource, /openCreateTaskModalWithCanonicalTarget/);
   assert.match(createTaskModalSource, /Natural language schedule text is parsed into the Scheduled field/);
   assert.match(createTaskModalSource, /parseCreateTaskInput\(this\.titleInput\?\.getValue\?\.\(\) \|\| ''\)/);
@@ -1499,7 +1555,9 @@ test('AI assisted task creator uses AI Assistant proposal API and review-gated w
   assert.match(aiAssistedTaskServiceSource, /addToListItem/);
   assert.match(aiAssistedTaskServiceSource, /Task model kept routing words in the task title/);
   assert.match(aiAssistedTaskServiceSource, /targetFilePath must exactly match one of the noteCandidates paths|selected an invalid markdown target/);
-  assert.match(aiAssistedTaskServiceSource, /vault\.process\(targetFile, \(content\) => this\.insertTaskLine\(content, taskLine, proposal\)\)/);
+  assert.match(aiAssistedTaskServiceSource, /vault\.process\(targetFile, \(content\) => \{/);
+  assert.match(aiAssistedTaskServiceSource, /isLinkedSubitemSemanticCheckboxPlanCurrent\(/);
+  assert.match(aiAssistedTaskServiceSource, /return this\.insertTaskLine\(content, taskLine, proposal\)/);
   assert.match(aiAssistedTaskServiceSource, /buildCreatedTaskLine/);
   assert.match(aiAssistedTaskServiceSource, /findAfterFrontmatterIndex/);
   assert.match(aiAssistedTaskModalSource, /Add follow-up message/);
@@ -1529,12 +1587,12 @@ test('task recurrence utilities support fixed schedules and after-completion sch
     }),
     '2026-06-02 09:00:00',
   );
-  const completed = '- [x] water plants [recurrence:: GCM-AFTER-COMPLETION:P1D] [completedDate:: 2026-06-01 12:00:00] [tpsId:: old-line] [subitemId:: child-note] [icon:: lucide:leaf] #home';
-  const template = buildTaskRecurrenceTemplateLine(completed);
-  assert.equal(template, '- [ ] water plants [recurrence:: GCM-AFTER-COMPLETION:P1D] #home');
+  const completed = '- [x] water plants [workflow:: complete] [recurrence:: GCM-AFTER-COMPLETION:P1D] [completedDate:: 2026-06-01 12:00:00] [tpsId:: old-line] [subitemId:: child-note] [icon:: lucide:leaf] #home';
+  const template = buildTaskRecurrenceTemplateLine(completed, '[o]', 'workflow');
+  assert.equal(template, '- [o] water plants [recurrence:: GCM-AFTER-COMPLETION:P1D] #home');
   assert.equal(
-    buildNextTaskRecurrenceLine(template, '2026-06-02 12:00:00'),
-    '- [ ] water plants [recurrence:: GCM-AFTER-COMPLETION:P1D] #home [scheduled:: 2026-06-02 12:00:00]',
+    buildNextTaskRecurrenceLine(template, '2026-06-02 12:00:00', '[o]', 'workflow'),
+    '- [o] water plants [recurrence:: GCM-AFTER-COMPLETION:P1D] #home [scheduled:: 2026-06-02 12:00:00]',
   );
   assert.equal(findTaskBlockEndIndex(['- [x] parent', '  - child', '', '- [ ] next'], 0), 3);
 });
@@ -1551,7 +1609,7 @@ test('task recurrence is wired into checkbox mutation, context menus, and modal 
   assert.match(taskRecurrenceServiceSource, /handleTaskCompletion/);
   assert.match(taskRecurrenceServiceSource, /findTaskBlockEndIndex\(lines, lineIndex\)/);
   assert.match(taskRecurrenceServiceSource, /TASK_RECURRENCE_COMPLETED_DATE_KEY/);
-  assert.match(taskRecurrenceServiceSource, /buildNextTaskRecurrenceLine\(templateLine, nextScheduledValue\)[\s\S]{0,120}recurrenceTaskId/);
+  assert.match(taskRecurrenceServiceSource, /buildNextTaskRecurrenceLine\([\s\S]{0,180}creationMapping\.checkboxState[\s\S]{0,180}recurrenceTaskId/);
   assert.match(taskRecurrenceServiceSource, /ensureTaskRecurrenceIdOnLine\(value, recurrenceTaskId\)/);
   assert.match(recurrenceModalSource, /GCM-AFTER-COMPLETION:P1D/);
   assert.match(recurrenceModalSource, /Next Occurrences From Completion Time/);

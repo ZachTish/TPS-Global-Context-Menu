@@ -8588,18 +8588,9 @@ export const PLUGIN_STYLES = `
         min-width: 58px;
       }
 
-      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view li.task-list-item[data-task="x"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view li.task-list-item[data-task="X"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view li.task-list-item[data-task="-"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view li.task-list-item.is-checked,
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered li.task-list-item[data-task="x"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered li.task-list-item[data-task="X"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered li.task-list-item[data-task="-"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered li.task-list-item.is-checked,
-      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view li.task-list-item[data-task="x"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view li.task-list-item[data-task="X"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view li.task-list-item[data-task="-"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view li.task-list-item.is-checked {
+      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view li.task-list-item.tps-gcm-mapped-completed-task,
+      body.tps-gcm-hide-completed-checkboxes .markdown-rendered li.task-list-item.tps-gcm-mapped-completed-task,
+      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view li.task-list-item.tps-gcm-mapped-completed-task {
         display: none !important;
       }
 
@@ -8612,18 +8603,9 @@ export const PLUGIN_STYLES = `
         display: none !important;
       }
 
-      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view.tps-gcm-task-hiding-excluded li.task-list-item[data-task="x"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view.tps-gcm-task-hiding-excluded li.task-list-item[data-task="X"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view.tps-gcm-task-hiding-excluded li.task-list-item[data-task="-"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view.tps-gcm-task-hiding-excluded li.task-list-item.is-checked,
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered.tps-gcm-task-hiding-excluded li.task-list-item[data-task="x"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered.tps-gcm-task-hiding-excluded li.task-list-item[data-task="X"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered.tps-gcm-task-hiding-excluded li.task-list-item[data-task="-"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered.tps-gcm-task-hiding-excluded li.task-list-item.is-checked,
-      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view.tps-gcm-task-hiding-excluded li.task-list-item[data-task="x"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view.tps-gcm-task-hiding-excluded li.task-list-item[data-task="X"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view.tps-gcm-task-hiding-excluded li.task-list-item[data-task="-"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view.tps-gcm-task-hiding-excluded li.task-list-item.is-checked,
+      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view.tps-gcm-task-hiding-excluded li.task-list-item.tps-gcm-mapped-completed-task,
+      body.tps-gcm-hide-completed-checkboxes .markdown-rendered.tps-gcm-task-hiding-excluded li.task-list-item.tps-gcm-mapped-completed-task,
+      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view.tps-gcm-task-hiding-excluded li.task-list-item.tps-gcm-mapped-completed-task,
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-preview-view.tps-gcm-task-hiding-excluded li.task-list-item[data-task],
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-preview-view.tps-gcm-task-hiding-excluded li.task-list-item,
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-rendered.tps-gcm-task-hiding-excluded li.task-list-item[data-task],
@@ -8642,18 +8624,9 @@ export const PLUGIN_STYLES = `
         display: list-item !important;
       }
 
-      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view.tps-gcm-completed-checkboxes-revealed li.task-list-item[data-task="x"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view.tps-gcm-completed-checkboxes-revealed li.task-list-item[data-task="X"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view.tps-gcm-completed-checkboxes-revealed li.task-list-item[data-task="-"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view.tps-gcm-completed-checkboxes-revealed li.task-list-item.is-checked,
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered.tps-gcm-completed-checkboxes-revealed li.task-list-item[data-task="x"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered.tps-gcm-completed-checkboxes-revealed li.task-list-item[data-task="X"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered.tps-gcm-completed-checkboxes-revealed li.task-list-item[data-task="-"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered.tps-gcm-completed-checkboxes-revealed li.task-list-item.is-checked,
-      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view.tps-gcm-completed-checkboxes-revealed li.task-list-item[data-task="x"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view.tps-gcm-completed-checkboxes-revealed li.task-list-item[data-task="X"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view.tps-gcm-completed-checkboxes-revealed li.task-list-item[data-task="-"],
-      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view.tps-gcm-completed-checkboxes-revealed li.task-list-item.is-checked {
+      body.tps-gcm-hide-completed-checkboxes .markdown-preview-view.tps-gcm-completed-checkboxes-revealed li.task-list-item.tps-gcm-mapped-completed-task,
+      body.tps-gcm-hide-completed-checkboxes .markdown-rendered.tps-gcm-completed-checkboxes-revealed li.task-list-item.tps-gcm-mapped-completed-task,
+      body.tps-gcm-hide-completed-checkboxes .markdown-reading-view.tps-gcm-completed-checkboxes-revealed li.task-list-item.tps-gcm-mapped-completed-task {
         display: list-item !important;
       }
 

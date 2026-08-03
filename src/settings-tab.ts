@@ -1,4 +1,4 @@
-import { App, Notice, PluginSettingTab, Setting, TextComponent } from 'obsidian';
+import { App, ButtonComponent, Notice, PluginSettingTab, Setting, TextAreaComponent, TextComponent } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
 import type { AppearanceSettingKey, CustomProperty, LinkedSubitemCheckboxMapping, ViewModeConditionOperator, ViewModeConditionType, ViewModeRule, ViewModeRuleCondition } from './types';
 import { BucketSectionRenderer } from './notebook-navigator-settings/bucket-section';
@@ -20,7 +20,13 @@ import {
   normalizeAcceptedKindSetting,
 } from './utils/property-option-setting';
 import { normalizeAcceptsKind } from './utils/entity-property';
-import { mergeLinkedSubitemMappingPresentation } from './utils/linked-subitem-mapping';
+import {
+  DEFAULT_LINKED_SUBITEM_MAPPINGS,
+  mergeLinkedSubitemMappingPresentation,
+  normalizeLinkedSubitemCheckboxState,
+  normalizeLinkedSubitemMappings,
+  parseLinkedSubitemMappingsText,
+} from './utils/linked-subitem-mapping';
 import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { FileSuggestModal } from './modals/FileSuggestModal';
 import * as logger from './logger';
@@ -2972,35 +2978,145 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           })
       );
 
-    new Setting(container)
-      .setName('Fallback open marker')
-      .setDesc('Checkbox token used when no child status mapping matches.')
-      .addText((t) =>
-        t.setValue(this.plugin.settings.linkedSubitemDefaultOpenState || '[ ]')
-          .onChange(async (v) => {
-            this.plugin.settings.linkedSubitemDefaultOpenState = v.trim() || '[ ]';
-            await this.plugin.saveSettings();
+    let fallbackDraft = this.plugin.settings.linkedSubitemDefaultOpenState || '[ ]';
+    let mappingsDraft = this.serializeLinkedSubitemMappings(
+      normalizeLinkedSubitemMappings(this.plugin.settings.linkedSubitemCheckboxMappings || [], {
+        enforceStrictDefaults: true,
+      }),
+    );
+    let fallbackInput: TextComponent | null = null;
+    let mappingsInput: TextAreaComponent | null = null;
+    let applyButton: ButtonComponent | null = null;
+    let validationEl: HTMLElement | null = null;
+    const validationId = 'tps-gcm-checkbox-mapping-validation';
+    const normalizeWorkflowStatus = (value: unknown): string =>
+      this.plugin.sharedServices.status.normalize(value);
+
+    const validateDraft = () => {
+      const fallbackState = normalizeLinkedSubitemCheckboxState(fallbackDraft);
+      const result = parseLinkedSubitemMappingsText(mappingsDraft, {
+        normalizeStatus: normalizeWorkflowStatus,
+        completionStatuses: this.plugin.sharedServices.status.getDoneStatuses(),
+      });
+      const fallbackMapping = fallbackState
+        ? result.mappings.find((mapping) => mapping.checkboxState === fallbackState)
+        : null;
+      const completeStatuses = new Set(
+        this.plugin.sharedServices.status.getDoneStatuses().map(normalizeWorkflowStatus),
+      );
+      const fallbackIsOpen = !!fallbackMapping
+        && fallbackState !== '[>]'
+        && fallbackMapping.statuses.every((status) => !completeStatuses.has(normalizeWorkflowStatus(status)));
+      const errors = [
+        ...(fallbackState ? [] : ['Fallback open marker must be [ ] or one checkbox character.']),
+        ...(fallbackState && !fallbackMapping ? ['Fallback open marker must be defined by a mapping row.'] : []),
+        ...(fallbackMapping && !fallbackIsOpen ? ['Fallback open marker must map only to open statuses.'] : []),
+        ...result.errors.map((issue) => `Line ${issue.line}: ${issue.message}`),
+      ];
+      fallbackInput?.inputEl.setAttribute('aria-invalid', fallbackState ? 'false' : 'true');
+      mappingsInput?.inputEl.setAttribute('aria-invalid', result.errors.length === 0 ? 'false' : 'true');
+      applyButton?.setDisabled(errors.length > 0);
+      if (validationEl) {
+        validationEl.empty();
+        validationEl.toggleClass('is-error', errors.length > 0);
+        validationEl.toggleClass('is-warning', errors.length === 0 && result.warnings.length > 0);
+        if (errors.length > 0) {
+          validationEl.setText(errors.slice(0, 4).join(' '));
+        } else if (result.warnings.length > 0) {
+          validationEl.setText(result.warnings.join(' '));
+        } else {
+          validationEl.setText('Ready to apply. The first row containing a status is its primary marker.');
+        }
+      }
+      return { fallbackState, result, errors };
+    };
+
+    const applyMappings = async (): Promise<void> => {
+      const validation = validateDraft();
+      if (!validation.fallbackState || validation.errors.length > 0) {
+        (validation.fallbackState ? mappingsInput?.inputEl : fallbackInput?.inputEl)?.focus();
+        return;
+      }
+      const merged = mergeLinkedSubitemMappingPresentation(
+        validation.result.mappings,
+        this.plugin.settings.linkedSubitemCheckboxMappings || [],
+      );
+      this.plugin.settings.linkedSubitemDefaultOpenState = validation.fallbackState;
+      this.plugin.settings.linkedSubitemCheckboxMappings = normalizeLinkedSubitemMappings(merged, {
+        enforceStrictDefaults: true,
+      });
+      await this.plugin.saveSettings();
+      fallbackDraft = this.plugin.settings.linkedSubitemDefaultOpenState;
+      mappingsDraft = this.serializeLinkedSubitemMappings(this.plugin.settings.linkedSubitemCheckboxMappings);
+      fallbackInput?.setValue(fallbackDraft);
+      mappingsInput?.setValue(mappingsDraft);
+      validateDraft();
+      new Notice('Checkbox/status mappings applied.');
+    };
+
+    const actions = new Setting(container)
+      .setName('Checkbox/status mapping changes')
+      .setDesc('Draft changes stay local until Apply mappings. Loading defaults also stays a draft until applied.')
+      .addButton((button) => {
+        applyButton = button;
+        button
+          .setButtonText('Apply mappings')
+          .setCta()
+          .onClick(() => void applyMappings());
+      })
+      .addButton((button) =>
+        button
+          .setButtonText('Load defaults')
+          .onClick(() => {
+            fallbackDraft = '[ ]';
+            mappingsDraft = this.serializeLinkedSubitemMappings(DEFAULT_LINKED_SUBITEM_MAPPINGS);
+            fallbackInput?.setValue(fallbackDraft);
+            mappingsInput?.setValue(mappingsDraft);
+            validateDraft();
           })
       );
+    actions.settingEl.addClass('tps-gcm-settings-checkbox-mapping-actions');
 
     new Setting(container)
+      .setName('Fallback open marker')
+      .setDesc('Used only when a linked child note has no workflow status. A nonempty unmapped status remains unsupported. Enter [ ] or one marker character.')
+      .addText((text) => {
+        fallbackInput = text;
+        text
+          .setValue(fallbackDraft)
+          .onChange((value) => {
+            fallbackDraft = value;
+            validateDraft();
+          });
+        text.inputEl.setAttribute('aria-describedby', validationId);
+      });
+
+    const mappingEditor = new Setting(container)
       .setName('Child status to checkbox mappings')
-      .setDesc('One mapping per line: "[ ]: todo => complete". Left side is the visual checkbox, right side is the status written when toggled.')
-      .addTextArea((t) =>
-        t
-          .setPlaceholder('[ ]: todo => complete\n[x]: complete => todo\n[\\\\]: working => complete\n[?]: holding => todo\n[-]: wont-do => todo')
-          .setValue(this.serializeLinkedSubitemMappings(this.plugin.settings.linkedSubitemCheckboxMappings || []))
-          .onChange(async (v) => {
-            const parsed = this.parseLinkedSubitemMappings(v);
-            const fallback = this.parseLinkedSubitemMappings('[ ]: todo => complete\n[x]: complete => todo\n[\\\\]: working => complete\n[?]: holding => todo\n[-]: wont-do => todo');
-            const nextMappings = parsed.length > 0 ? parsed : fallback;
-            this.plugin.settings.linkedSubitemCheckboxMappings = mergeLinkedSubitemMappingPresentation(
-              nextMappings,
-              this.plugin.settings.linkedSubitemCheckboxMappings || [],
-            );
-            await this.plugin.saveSettings();
-          })
-      );
+      .setDesc('One row per marker: "[ ]: todo => complete". The first status is used when reading the marker; the first row containing a status is used when writing it.')
+      .addTextArea((text) => {
+        mappingsInput = text;
+        text
+          .setPlaceholder('[ ]: todo => complete\n[x]: complete => todo\n[/]: working => complete\n[\\]: working => complete\n[?]: holding => todo\n[-]: wont-do => todo\n[>]: migrated => todo')
+          .setValue(mappingsDraft)
+          .onChange((value) => {
+            mappingsDraft = value;
+            validateDraft();
+          });
+        text.inputEl.rows = 9;
+        text.inputEl.addClass('tps-gcm-settings-checkbox-mapping-textarea');
+        text.inputEl.setAttribute('aria-describedby', validationId);
+      });
+    mappingEditor.settingEl.addClass('tps-gcm-settings-checkbox-mapping-editor');
+    validationEl = mappingEditor.descEl.createDiv({
+      attr: {
+        id: validationId,
+        role: 'status',
+        'aria-live': 'polite',
+      },
+      cls: 'tps-gcm-settings-checkbox-mapping-validation',
+    });
+    validateDraft();
   }
 
   private serializeLinkedSubitemMappings(mappings: LinkedSubitemCheckboxMapping[]): string {
@@ -3011,31 +3127,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         return `${entry.checkboxState}: ${statuses}${toggle}`;
       })
       .join('\n');
-  }
-
-  private parseLinkedSubitemMappings(raw: string): LinkedSubitemCheckboxMapping[] {
-    return String(raw || '')
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean)
-      .map((line): LinkedSubitemCheckboxMapping | null => {
-        const [left, togglePart] = line.split(/\s*=>\s*/, 2);
-        const colonIndex = left.indexOf(':');
-        if (colonIndex < 0) return null;
-        const checkboxState = left.slice(0, colonIndex).trim();
-        const statuses = left
-          .slice(colonIndex + 1)
-          .split(',')
-          .map((value) => value.trim())
-          .filter(Boolean);
-        if (!checkboxState || statuses.length === 0) return null;
-        return {
-          checkboxState,
-          statuses,
-          toggleTargetStatus: togglePart?.trim() || undefined,
-        };
-      })
-      .filter((entry): entry is LinkedSubitemCheckboxMapping => entry !== null);
   }
 
   private serializePropertyScopeCondition(condition: NonNullable<CustomProperty['scopeProperties']>[number]): string {

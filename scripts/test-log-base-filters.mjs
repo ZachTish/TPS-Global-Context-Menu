@@ -68,6 +68,7 @@ async function loadViewModule() {
                 FileView: Dummy,
                 FuzzySuggestModal: Dummy,
                 Modal: Dummy,
+                Notice: Dummy,
                 TFile: Dummy,
                 normalizePath: (value) => String(value),
                 parseYaml: (value) => JSON.parse(value),
@@ -175,7 +176,10 @@ test('TPS Table exposes clean heading titles, levels, and raw tags as synthesize
 });
 
 test('TPS Table excludes frontmatter and fenced-code examples from synthesized rows', async () => {
-  const { TpsTableView } = await loadViewModule();
+  const [{ TpsTableView }, { tpsBaseFormulaService }] = await Promise.all([
+    loadViewModule(),
+    loadFormulaService(),
+  ]);
   const view = Object.create(TpsTableView.prototype);
   const file = {
     path: 'Inbox/Quarantined.md',
@@ -190,7 +194,7 @@ test('TPS Table excludes frontmatter and fenced-code examples from synthesized r
     '  - [ ] Frontmatter task',
     '---',
     '# Visible heading',
-    '- [ ] Visible task',
+    '- [ ] Visible task [open:: true] [done:: true] [checkboxStatus:: complete] [task.status:: complete]',
     '- Visible bullet',
     'Visible record [kind:: Project]',
     '```md',
@@ -232,6 +236,10 @@ test('TPS Table excludes frontmatter and fenced-code examples from synthesized r
   view.lineMatches = () => true;
   view.lineMatchesHomeDateContext = () => true;
   view.sortEntries = (entries) => entries;
+  view.compiledFormulaSet = tpsBaseFormulaService.compile({
+    structural_task: 'kind == "task" && checkboxState == "[ ]" && task.checkboxState == "[ ]"',
+    no_invented_workflow: 'task.status == null && task.open == null && task.done == null',
+  }, 'unmapped-structural-task');
 
   const entries = await view.loadEntries();
   assert.deepEqual(
@@ -243,6 +251,14 @@ test('TPS Table excludes frontmatter and fenced-code examples from synthesized r
       { title: 'Visible record', line: 8 },
     ],
   );
+  assert.equal(entries[1].queryFields.checkboxstate, '[ ]');
+  assert.equal(Object.hasOwn(entries[1].queryFields, 'status'), false);
+  assert.equal(Object.hasOwn(entries[1].queryFields, 'taskstatus'), false);
+  assert.equal(Object.hasOwn(entries[1].queryFields, 'checkboxstatus'), false);
+  assert.equal(Object.hasOwn(entries[1].queryFields, 'open'), false);
+  assert.equal(Object.hasOwn(entries[1].queryFields, 'done'), false);
+  assert.equal(view.getEntryValue(entries[1], 'formula.structural_task'), 'true');
+  assert.equal(view.getEntryValue(entries[1], 'formula.no_invented_workflow'), 'true');
 });
 
 test('TPS Table canonical task.path filters address the containing note', async () => {
@@ -279,14 +295,29 @@ test('TPS Table derives task status fields and follows the active view without s
     ['- [?] Holding', 'Holding'],
     ['- [x] Complete', 'Complete'],
     ['- [-] Wont do', 'Wont do'],
-  ].map(([line, title]) => ({
+  ];
+  const statusByState = new Map([
+    ['[ ]', 'todo'],
+    ['[\\]', 'working'],
+    ['[?]', 'holding'],
+    ['[x]', 'complete'],
+    ['[-]', 'wont-do'],
+  ]);
+  const synthesizedRows = rows.map(([line, title]) => ({
     title,
-    fields: { kind: 'task', ...getTpsTableTaskQueryFields(line) },
+    fields: {
+      kind: 'task',
+      ...getTpsTableTaskQueryFields(
+        line,
+        (state) => statusByState.get(state) || '',
+        (status) => status === 'complete' || status === 'wont-do',
+      ),
+    },
   }));
   const acceptedTypes = new Set(['tps-table']);
   const select = (viewName) => {
     const roots = extractPersistedFilterRoots(definition, viewName, acceptedTypes).filters ?? [];
-    return rows
+    return synthesizedRows
       .filter((row) => evaluateLogBaseFilterRoots(roots, { ...context, fields: row.fields }) === true)
       .map((row) => row.title);
   };
@@ -339,10 +370,18 @@ test('TPS Table derives task status fields and follows the active view without s
       complete: 'true',
     },
   );
+  assert.deepEqual(
+    getTpsTableTaskQueryFields('- [!] Unmapped', () => '', () => false),
+    { checkboxstate: '[!]' },
+  );
+  assert.deepEqual(
+    getTpsTableTaskQueryFields('- [q] Unknown authority', () => 'queued', () => null),
+    { status: 'queued', checkboxstatus: 'queued', checkboxstate: '[q]' },
+  );
   assert.equal(
     evaluateLogBaseFilterRoots(
       [{ property: 'task.status', operator: 'is', value: 'working' }],
-      { ...context, fields: rows[1].fields },
+      { ...context, fields: synthesizedRows[1].fields },
     ),
     true,
   );
@@ -355,7 +394,8 @@ test('TPS Table derives task status fields and follows the active view without s
   assert.match(logBaseViewSource, /entry\.fields\[normalized\] \?\? entry\.queryFields\?\.\[normalized\]/);
   assert.doesNotMatch(logBaseViewSource, /Object\.assign\(fields,\s*getTpsTableTaskQueryFields\(/);
   assert.match(logBaseViewSource, /linkedSubitemCheckboxMappings/);
-  assert.match(logBaseViewSource, /getKanbanStatusForCheckboxState\(checkboxState, checkboxMappings\)/);
+  assert.match(logBaseViewSource, /mapSubitemCheckboxStateToStatus\(checkboxMappings, checkboxState\)/);
+  assert.match(logBaseViewSource, /normalizeLinkedSubitemMappings\(this\.plugin\.settings\?\.linkedSubitemCheckboxMappings/);
   assert.match(logBaseViewSource, /statusService\?\.isDoneStatus/);
 });
 
@@ -457,6 +497,141 @@ test('TPS Table task tag filters use exact task-tag membership across aliases an
     [],
     'file.tags.contains must use exact tag membership rather than substrings',
   );
+});
+
+test('TPS Table runtime mappings stay exact and default creation follows the first authoritative open row', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const view = Object.create(TpsTableView.prototype);
+  view.plugin = {
+    settings: { linkedSubitemCheckboxMappings: [] },
+    sharedServices: {
+      status: {
+        normalize: (value) => String(value ?? '').trim().toLowerCase(),
+        isDoneStatus: (status) => status === 'shipped',
+      },
+    },
+  };
+
+  assert.deepEqual(view.getTaskCheckboxMappings(), []);
+  assert.equal(view.getDefaultMappedTaskStatus('open'), null);
+  view.plugin.settings.linkedSubitemCheckboxMappings = [
+    { checkboxState: '[q]', statuses: ['queued'] },
+    { checkboxState: '[s]', statuses: ['shipped'] },
+  ];
+  assert.deepEqual(view.getTaskCheckboxMappings().map((mapping) => mapping.checkboxState), ['[q]', '[s]']);
+  assert.equal(view.getDefaultMappedTaskStatus('open'), 'queued');
+  assert.equal(view.getDefaultMappedTaskStatus('done'), 'shipped');
+
+  delete view.plugin.sharedServices.status.isDoneStatus;
+  assert.equal(view.getDefaultMappedTaskStatus('open'), null);
+  assert.equal(view.getDefaultMappedTaskStatus('done'), null);
+});
+
+test('TPS Table task creation revalidates its exact mapping inside the atomic append callback', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const File = globalThis.__TpsTableFormulaTestFile;
+  const target = new File();
+  Object.assign(target, {
+    path: 'Inbox/Mapping Race.md',
+    name: 'Mapping Race.md',
+    basename: 'Mapping Race',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+  });
+  let content = '';
+  let processCalls = 0;
+  const view = Object.create(TpsTableView.prototype);
+  view.containerEl = { closest: () => null };
+  view.plugin = {
+    settings: {
+      properties: [],
+      linkedSubitemCheckboxMappings: [
+        { checkboxState: '[q]', statuses: ['queued'] },
+        { checkboxState: '[s]', statuses: ['shipped'] },
+      ],
+    },
+    sharedServices: {
+      status: {
+        normalize: (value) => String(value ?? '').trim().toLowerCase(),
+        isDoneStatus: (status) => status === 'shipped',
+      },
+    },
+    resolveTpsBaseWriteFile: async () => {
+      view.plugin.settings.linkedSubitemCheckboxMappings = [
+        { checkboxState: '[s]', statuses: ['shipped'] },
+      ];
+      return { file: target, reason: 'resolved', source: 'filter', path: target.path };
+    },
+    app: {
+      vault: {
+        process: async (file, updater) => {
+          assert.equal(file, target);
+          processCalls += 1;
+          content = updater(content);
+        },
+      },
+    },
+  };
+  view.getEffectiveBaseFilterRoots = async () => ['kind == "task"'];
+  view.getBaseFile = () => null;
+  view.getViewName = () => 'Mapping race';
+  view.getLineCreateContextPath = () => null;
+  view.promptForLineTitle = async () => 'Do not append stale marker';
+  view.queueRender = () => undefined;
+
+  assert.equal(await view.createLineForView(), true);
+  assert.equal(processCalls, 1);
+  assert.equal(content, '');
+});
+
+test('TPS Table task creation rejects a stale open/done classification inside the atomic append callback', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const File = globalThis.__TpsTableFormulaTestFile;
+  const target = new File();
+  Object.assign(target, {
+    path: 'Inbox/Done Race.md',
+    name: 'Done Race.md',
+    basename: 'Done Race',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+  });
+  let content = '';
+  let doneStatuses = new Set(['shipped']);
+  const view = Object.create(TpsTableView.prototype);
+  view.containerEl = { closest: () => null };
+  view.plugin = {
+    settings: {
+      properties: [],
+      linkedSubitemCheckboxMappings: [
+        { checkboxState: '[q]', statuses: ['queued'] },
+        { checkboxState: '[s]', statuses: ['shipped'] },
+      ],
+    },
+    sharedServices: {
+      status: {
+        normalize: (value) => String(value ?? '').trim().toLowerCase(),
+        isDoneStatus: (status) => doneStatuses.has(status),
+      },
+    },
+    resolveTpsBaseWriteFile: async () => {
+      doneStatuses = new Set(['queued', 'shipped']);
+      return { file: target, reason: 'resolved', source: 'filter', path: target.path };
+    },
+    app: {
+      vault: {
+        process: async (_file, updater) => { content = updater(content); },
+      },
+    },
+  };
+  view.getEffectiveBaseFilterRoots = async () => ['kind == "task"', 'open == true'];
+  view.getBaseFile = () => null;
+  view.getViewName = () => 'Done race';
+  view.getLineCreateContextPath = () => null;
+  view.promptForLineTitle = async () => 'Do not append stale open state';
+  view.queueRender = () => undefined;
+
+  assert.equal(await view.createLineForView(), true);
+  assert.equal(content, '');
 });
 
 test('TPS Table loadEntries keeps task query aliases out of inferred display columns', async () => {
@@ -660,7 +835,14 @@ test('TPS Table formulas drive synthesized-row filters, columns, sorting, groupi
   const view = Object.create(TpsTableView.prototype);
   view.containerEl = { closest: () => null };
   view.plugin = {
-    settings: { properties: [] },
+    settings: {
+      properties: [
+        { id: 'status', key: 'status', type: 'selector', acceptsKind: 'status', optionSources: ['entity'] },
+      ],
+      linkedSubitemCheckboxMappings: [
+        { checkboxState: '[ ]', statuses: ['todo'] },
+      ],
+    },
     app: {
       vault: {
         getMarkdownFiles: () => [file],

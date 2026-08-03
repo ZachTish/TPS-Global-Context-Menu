@@ -11,6 +11,11 @@ import {
 } from '../utils/task-line-metadata';
 import { findCurrentTaskLineIndex } from '../utils/task-block-move';
 import {
+  isLinkedSubitemSemanticCheckboxPlanCurrent,
+  resolveLinkedSubitemSemanticCheckboxPlanForStatus,
+  type LinkedSubitemSemanticCheckboxPlan,
+} from '../utils/linked-subitem-mapping';
+import {
   normalizeTimeTrackingRecord,
   normalizeTimeTrackingRecordList,
   resolveTimeTrackingStorageKind,
@@ -192,13 +197,31 @@ export class TimeTrackingService {
   ): Promise<TimeTrackingSession | null> {
     if (!this.ensureEnabled()) return null;
 
+    const creationPlan = this.resolveTaskCreationCheckboxPlan('todo');
+    if (!creationPlan) {
+      logger.warn('[TimeTracking] Task creation blocked because todo has no checkbox mapping.', {
+        target,
+        sourcePath: noteFile?.path || null,
+      });
+      new Notice('Could not create the timer task because todo has no checkbox mapping.');
+      return null;
+    }
+
     const now = new Date();
     const targetFile = target === 'source-note' && noteFile instanceof TFile
       ? noteFile
       : await this.ensureDailyNoteForDate(now);
     const tpsId = this.createId('task');
     const taskTitle = String(title || '').replace(/\s+/g, ' ').trim() || 'Untitled timer';
-    const lineNumber = await this.insertTimerTask(targetFile, tpsId, taskTitle);
+    const lineNumber = await this.insertTimerTask(targetFile, tpsId, taskTitle, creationPlan);
+    if (lineNumber == null) {
+      logger.warn('[TimeTracking] Task creation blocked because the todo checkbox mapping changed before write.', {
+        target,
+        sourcePath: noteFile?.path || null,
+      });
+      new Notice('Could not create the timer task because its todo checkbox mapping changed.');
+      return null;
+    }
     const rawLine = (await this.plugin.app.vault.cachedRead(targetFile).catch(() => ''))
       .split(/\r?\n/)[lineNumber] || '';
     return this.startTimer({
@@ -718,9 +741,14 @@ export class TimeTrackingService {
     });
   }
 
-  private async insertTimerTask(file: TFile, tpsId: string, title: string): Promise<number> {
+  private async insertTimerTask(
+    file: TFile,
+    tpsId: string,
+    title: string,
+    creationPlan: LinkedSubitemSemanticCheckboxPlan,
+  ): Promise<number | null> {
     const safeTitle = String(title || '').replace(/\s+/g, ' ').trim() || 'Untitled timer';
-    const taskLine = updateTaskLineTimestamps(`- [ ] ${safeTitle} [${TPS_ID_FIELD}:: ${tpsId}]`, {
+    const taskLine = updateTaskLineTimestamps(`- ${creationPlan.checkboxState} ${safeTitle} [${TPS_ID_FIELD}:: ${tpsId}]`, {
       enabled: this.plugin.settings.autoSyncFileTimestamps === true,
       createdKey: this.plugin.settings.dateCreatedFrontmatterKey,
       modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
@@ -729,12 +757,22 @@ export class TimeTrackingService {
       markModified: true,
     });
     let insertedLineNumber = -1;
+    let mappingChanged = false;
     await this.plugin.app.vault.process(file, (content) => {
+      if (!isLinkedSubitemSemanticCheckboxPlanCurrent(
+        this.plugin.settings.linkedSubitemCheckboxMappings || [],
+        creationPlan,
+        { normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value) },
+      )) {
+        mappingChanged = true;
+        return content;
+      }
       const nextContent = insertLineAfterFrontmatter(content, taskLine);
       const lines = nextContent.split(/\r?\n/);
       insertedLineNumber = lines.findIndex((line) => readInlineFieldValue(line, TPS_ID_FIELD) === tpsId);
       return nextContent;
     });
+    if (mappingChanged) return null;
     if (insertedLineNumber < 0) {
       const content = await this.plugin.app.vault.cachedRead(file);
       insertedLineNumber = content.split(/\r?\n/).findIndex((line) => readInlineFieldValue(line, TPS_ID_FIELD) === tpsId);
@@ -743,6 +781,14 @@ export class TimeTrackingService {
       throw new Error(`Failed to create blank timer task in ${file.path}`);
     }
     return insertedLineNumber;
+  }
+
+  private resolveTaskCreationCheckboxPlan(rawStatus: unknown): LinkedSubitemSemanticCheckboxPlan | null {
+    return resolveLinkedSubitemSemanticCheckboxPlanForStatus(
+      this.plugin.settings.linkedSubitemCheckboxMappings || [],
+      rawStatus,
+      { normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value) },
+    );
   }
 
   private getRunningProjectedEnd(start: Date): Date {

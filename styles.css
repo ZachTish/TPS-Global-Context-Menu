@@ -381,6 +381,38 @@
   width: 100%;
 }
 
+.tps-gcm-settings-checkbox-mapping-actions .setting-item-control {
+  flex-wrap: wrap;
+}
+
+.tps-gcm-settings-checkbox-mapping-editor {
+  align-items: flex-start;
+}
+
+.tps-gcm-settings-checkbox-mapping-editor .setting-item-control {
+  min-width: min(420px, 52%);
+}
+
+.tps-gcm-settings-checkbox-mapping-textarea {
+  width: 100%;
+  min-height: 12em;
+  resize: vertical;
+  font-family: var(--font-monospace);
+}
+
+.tps-gcm-settings-checkbox-mapping-validation {
+  margin-top: 6px;
+  color: var(--text-muted);
+}
+
+.tps-gcm-settings-checkbox-mapping-validation.is-warning {
+  color: var(--text-warning);
+}
+
+.tps-gcm-settings-checkbox-mapping-validation.is-error {
+  color: var(--text-error);
+}
+
 @media (max-width: 700px) {
   .tps-gcm-settings-hub {
     display: flex;
@@ -426,6 +458,15 @@
     width: 100%;
     flex-wrap: wrap;
     justify-content: flex-start;
+  }
+
+  .tps-gcm-settings-checkbox-mapping-editor .setting-item-control {
+    min-width: 0;
+  }
+
+  .tps-gcm-settings-checkbox-mapping-textarea {
+    width: 100%;
+    max-width: 100%;
   }
 
   .tps-gcm-viewmode-condition-row {

@@ -30,12 +30,12 @@ import { getOrderedSelectionRange, toggleOrderedSelection } from '../utils/order
 import { hashSelectionIdentity } from '../utils/selection-identity';
 import { requestLineItemDelete } from '../services/line-item-delete-service';
 import { normalizeTagValue } from '../utils/tag-utils';
+import type { KanbanCheckboxMappingLike } from '../tps-list/task-checkbox-utils';
 import {
-  getKanbanCheckboxStateForStatus,
-  getKanbanStatusForCheckboxState,
-  normalizeKanbanCheckboxState,
-  type KanbanCheckboxMappingLike,
-} from '../tps-list/task-checkbox-utils';
+  mapStatusToSubitemCheckboxState,
+  mapSubitemCheckboxStateToStatus,
+  normalizeLinkedSubitemMappings,
+} from '../utils/linked-subitem-mapping';
 import {
   getTpsListHeadingDisplayTitle,
   parseTpsListHeadingLine,
@@ -321,12 +321,11 @@ export class TpsTableView extends BasesView {
     }
     const statusService = this.plugin.sharedServices?.status;
     const relationalStatus = findRelationalStatusProperty(this.plugin.settings.properties);
+    const taskCheckboxMappings = this.getTaskCheckboxMappings();
     const defaults = resolveTpsBaseLineCreationPlan(filterRoots, {
       resolveValue: (value) => this.resolveLineCreateToken(value),
-      defaultOpenStatus: 'todo',
-      defaultDoneStatus: 'complete',
-      isDoneStatus: (status) => statusService?.isDoneStatus?.(status)
-        ?? (status === 'complete' || status === 'wont-do'),
+      orderedMappedStatuses: taskCheckboxMappings.flatMap((mapping) => mapping.statuses),
+      isDoneStatus: (status) => statusService?.isDoneStatus?.(status) ?? null,
       isWorkflowStatusProperty: (property) => {
         const normalized = String(property || '').trim().toLowerCase();
         return normalized === 'task.status'
@@ -348,13 +347,34 @@ export class TpsTableView extends BasesView {
     if (!defaults.kind) return false;
     const headingLevel = Math.max(1, Math.min(6, Number(defaults.headingLevel) || 1)) as 1 | 2 | 3 | 4 | 5 | 6;
 
-    const title = await new Promise<string | null>((resolve) => {
-      new TpsTableLineCreateModal(this.plugin.app, defaults.kind!, headingLevel, resolve).open();
-    });
+    const title = await this.promptForLineTitle(defaults.kind, headingLevel);
     if (!title) {
       logger.flow('TpsTableView', 'create-line:cancelled', { kind: defaults.kind });
       return true;
     }
+
+    const desiredTaskStatus = defaults.kind === 'task'
+      ? (defaults.status || this.getDefaultMappedTaskStatus('open'))
+      : null;
+    const checkboxState = desiredTaskStatus
+      ? mapStatusToSubitemCheckboxState(taskCheckboxMappings, desiredTaskStatus, {
+          normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+          normalizedMappings: true,
+        })
+      : null;
+    if (defaults.kind === 'task' && !checkboxState) {
+      logger.flowWarn('TpsTableView', 'create-line:blocked', {
+        reason: 'unmapped-status',
+        status: desiredTaskStatus,
+        base: this.getBaseFile()?.path || null,
+        viewName: this.getViewName(),
+      });
+      new Notice(`Could not create the task because status "${desiredTaskStatus || '(unavailable)'}" has no checkbox mapping.`);
+      return true;
+    }
+    const plannedDoneClassification = defaults.kind === 'task' && desiredTaskStatus
+      ? this.classifyTaskDoneStatus(desiredTaskStatus)
+      : null;
 
     const targetResolution = await this.plugin.resolveTpsBaseWriteFile({
       explicitTargetPath: defaults.targetPath,
@@ -383,20 +403,6 @@ export class TpsTableView extends BasesView {
       return true;
     }
     const targetPath = targetFile.path;
-
-    const checkboxState = defaults.kind === 'task' && defaults.status
-      ? getKanbanCheckboxStateForStatus(defaults.status, this.getTaskCheckboxMappings())
-      : defaults.kind === 'task' ? '[ ]' : null;
-    if (defaults.kind === 'task' && defaults.status && !checkboxState) {
-      logger.flowWarn('TpsTableView', 'create-line:blocked', {
-        reason: 'unmapped-status',
-        status: defaults.status,
-        base: this.getBaseFile()?.path || null,
-        viewName: this.getViewName(),
-      });
-      new Notice(`Could not create the task because status "${defaults.status}" has no checkbox mapping.`);
-      return true;
-    }
     const line = buildTpsTableMarkdownLine(defaults.kind, title, defaults.fields, {
       checkboxState,
       headingLevel,
@@ -422,16 +428,14 @@ export class TpsTableView extends BasesView {
       queryFields.headingpath = targetFile.path;
     }
     if (defaults.kind === 'task') {
+      queryFields = this.scrubTaskWorkflowOwnedFields(queryFields);
       const taskQueryFields = getTpsTableTaskQueryFields(
         line,
         (state) => {
-          const mapped = getKanbanStatusForCheckboxState(state, this.getTaskCheckboxMappings())
-            || statusService?.checkboxStateToStatus?.(state)
-            || '';
+          const mapped = mapSubitemCheckboxStateToStatus(this.getTaskCheckboxMappings(), state) || '';
           return statusService?.normalize?.(mapped) || mapped;
         },
-        (status) => statusService?.isDoneStatus?.(status)
-          ?? (status === 'complete' || status === 'wont-do'),
+        () => plannedDoneClassification,
       );
       queryFields = {
         ...queryFields,
@@ -445,7 +449,8 @@ export class TpsTableView extends BasesView {
             normalizeInlineKey(relationalStatus.key)
           ];
         }
-        queryFields['task.status'] = taskQueryFields.status;
+        if (taskQueryFields.status) queryFields['task.status'] = taskQueryFields.status;
+        else delete queryFields['task.status'];
       }
     }
     logger.flow('TpsTableView', 'create-line:start', {
@@ -458,8 +463,29 @@ export class TpsTableView extends BasesView {
       selectedBranches: defaults.diagnostics.selectedBranches,
     });
     this.formulaNow = new Date();
-    let blockedReason: 'mismatch' | 'formula-unresolved' | null = null;
+    let blockedReason: 'mismatch' | 'formula-unresolved' | 'mapping-changed' | null = null;
     await this.plugin.app.vault.process(targetFile, (content) => {
+      if (defaults.kind === 'task') {
+        const liveMappings = this.getTaskCheckboxMappings();
+        const liveState = desiredTaskStatus
+          ? mapStatusToSubitemCheckboxState(liveMappings, desiredTaskStatus, {
+              normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+              normalizedMappings: true,
+            })
+          : null;
+        const liveStatus = checkboxState
+          ? mapSubitemCheckboxStateToStatus(liveMappings, checkboxState, { normalizedMappings: true })
+          : null;
+        if (
+          !liveState
+          || liveState !== checkboxState
+          || this.plugin.sharedServices.status.normalize(liveStatus) !== this.plugin.sharedServices.status.normalize(desiredTaskStatus)
+          || this.classifyTaskDoneStatus(desiredTaskStatus) !== plannedDoneClassification
+        ) {
+          blockedReason = 'mapping-changed';
+          return content;
+        }
+      }
       const nextLineNumber = content.length === 0
         ? 1
         : content.split('\n').length + (content.endsWith('\n') ? 0 : 1);
@@ -500,18 +526,31 @@ export class TpsTableView extends BasesView {
       logger.flowWarn('TpsTableView', 'create-line:blocked', {
         reason: blockedReason === 'mismatch'
           ? 'prospective-line-does-not-match-filters'
-          : 'formula-filter-unresolved',
+          : blockedReason === 'mapping-changed'
+            ? 'checkbox-mapping-changed'
+            : 'formula-filter-unresolved',
         kind: defaults.kind,
         targetPath,
       });
       new Notice(blockedReason === 'mismatch'
         ? 'TPS Table did not create the item because the resulting line would not match this view.'
-        : 'TPS Table did not create the item because its formula filter could not be evaluated reliably.');
+        : blockedReason === 'mapping-changed'
+          ? 'TPS Table did not create the task because its checkbox mapping changed before the write.'
+          : 'TPS Table did not create the item because its formula filter could not be evaluated reliably.');
       return true;
     }
     logger.flow('TpsTableView', 'create-line:done', { kind: defaults.kind, targetPath });
     this.queueRender();
     return true;
+  }
+
+  private async promptForLineTitle(
+    kind: TpsTableLineKind,
+    headingLevel: 1 | 2 | 3 | 4 | 5 | 6,
+  ): Promise<string | null> {
+    return await new Promise<string | null>((resolve) => {
+      new TpsTableLineCreateModal(this.plugin.app, kind, headingLevel, resolve).open();
+    });
   }
 
   private resolveLineCreateToken(value: string): string {
@@ -681,16 +720,14 @@ export class TpsTableView extends BasesView {
         }
         if (markdownKind === 'task') {
           const statusService = this.plugin.sharedServices?.status;
+          queryFields = this.scrubTaskWorkflowOwnedFields(queryFields);
           const taskQueryFields = getTpsTableTaskQueryFields(
             line,
             (checkboxState) => {
-              const mappedStatus = getKanbanStatusForCheckboxState(checkboxState, checkboxMappings)
-                || statusService?.checkboxStateToStatus?.(checkboxState)
-                || '';
+              const mappedStatus = mapSubitemCheckboxStateToStatus(checkboxMappings, checkboxState) || '';
               return statusService?.normalize?.(mappedStatus) || mappedStatus;
             },
-            (status) => statusService?.isDoneStatus?.(status)
-              ?? (status === 'complete' || status === 'wont-do'),
+            (status) => this.classifyTaskDoneStatus(status),
           );
           const relationalStatus = findRelationalStatusProperty(this.plugin.settings.properties);
           queryFields = {
@@ -705,7 +742,8 @@ export class TpsTableView extends BasesView {
                 normalizeInlineKey(relationalStatus.key)
               ];
             }
-            queryFields['task.status'] = taskQueryFields.status;
+            if (taskQueryFields.status) queryFields['task.status'] = taskQueryFields.status;
+            else delete queryFields['task.status'];
           }
         }
         if (!this.lineMatches(queryFields) && !(markdownKind && hasTpsTableLineKindFilter(filterRoots))) return;
@@ -738,17 +776,57 @@ export class TpsTableView extends BasesView {
   }
 
   private getTaskCheckboxMappings(): KanbanCheckboxMappingLike[] {
-    const configured = this.plugin.settings?.linkedSubitemCheckboxMappings;
-    if (!Array.isArray(configured)) return [];
-    return configured
-      .map((entry) => ({
-        checkboxState: normalizeKanbanCheckboxState(String(entry?.checkboxState || '[ ]')),
-        statuses: Array.isArray(entry?.statuses)
-          ? entry.statuses.map((status) => String(status || '').trim().toLowerCase()).filter(Boolean)
-          : [],
-        toggleTargetStatus: String(entry?.toggleTargetStatus || '').trim() || undefined,
-      }))
-      .filter((entry) => entry.checkboxState && entry.statuses.length > 0);
+    return normalizeLinkedSubitemMappings(this.plugin.settings?.linkedSubitemCheckboxMappings, {
+      enforceStrictDefaults: false,
+      normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+    });
+  }
+
+  private classifyTaskDoneStatus(rawStatus: unknown): boolean | null {
+    const statusService = this.plugin.sharedServices?.status;
+    if (typeof statusService?.isDoneStatus !== 'function') return null;
+    const status = statusService.normalize(rawStatus);
+    return status ? statusService.isDoneStatus(status) : null;
+  }
+
+  private getDefaultMappedTaskStatus(kind: 'open' | 'done'): string | null {
+    for (const mapping of this.getTaskCheckboxMappings()) {
+      for (const rawStatus of mapping.statuses) {
+        const status = this.plugin.sharedServices.status.normalize(rawStatus);
+        const done = this.classifyTaskDoneStatus(status);
+        if (status && done != null && done === (kind === 'done')) return status;
+      }
+    }
+    return null;
+  }
+
+  private getTaskWorkflowOwnedFieldKeys(): Set<string> {
+    const relationalKey = normalizeInlineKey(
+      findRelationalStatusProperty(this.plugin.settings.properties)?.key || '',
+    );
+    const workflowKey = normalizeInlineKey(
+      this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status',
+    );
+    return new Set([
+      workflowKey,
+      'status',
+      'task.status',
+      'task.checkboxStatus',
+      'checkboxStatus',
+      'open',
+      'isOpen',
+      'done',
+      'isDone',
+      'completed',
+      'complete',
+    ].map((key) => normalizeInlineKey(key)).filter((key) => key && key !== relationalKey));
+  }
+
+  private scrubTaskWorkflowOwnedFields(fields: Record<string, string>): Record<string, string> {
+    const owned = this.getTaskWorkflowOwnedFieldKeys();
+    return Object.fromEntries(
+      Object.entries(fields).filter(([key]) => !owned.has(normalizeInlineKey(key))),
+    );
   }
 
   private async getEffectiveBaseFilterRoots(failOnReadError = false): Promise<unknown[]> {
@@ -858,6 +936,15 @@ export class TpsTableView extends BasesView {
       formulaFields[normalized] = aggregate;
       for (const alias of group.aliases) formulaFields[alias] = aggregate;
     }
+    if (rowKind === 'task') {
+      const owned = this.getTaskWorkflowOwnedFieldKeys();
+      for (const key of Object.keys(formulaFields)) {
+        if (owned.has(normalizeInlineKey(key))) delete formulaFields[key];
+      }
+      for (const [key, value] of Object.entries(fields)) {
+        if (owned.has(normalizeInlineKey(key))) formulaFields[key] = value;
+      }
+    }
     const cache = this.plugin.app.metadataCache.getFileCache(file);
     const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
     const frontmatterTags = Array.isArray(frontmatter.tags) ? frontmatter.tags : frontmatter.tags ? [frontmatter.tags] : [];
@@ -945,13 +1032,16 @@ export class TpsTableView extends BasesView {
       tags: taskTags.length ? taskTags.map((tag) => `#${tag}`) : fields.tags,
     };
     if (rowKind === 'task') {
-      if (inlineGroups.has('status')) {
+      const relationalStatusKey = normalizeInlineKey(
+        findRelationalStatusProperty(this.plugin.settings.properties)?.key || '',
+      );
+      if (relationalStatusKey === 'status' && inlineGroups.has('status')) {
         row.status = formulaFields.status;
       } else {
         delete row.status;
       }
       row.checkboxState = checkboxState;
-      row.checkboxStatus = workflowStatus;
+      if (workflowStatus) row.checkboxStatus = workflowStatus;
     }
     const lineContext: Record<string, unknown> = {
       ...row,
@@ -961,11 +1051,12 @@ export class TpsTableView extends BasesView {
     };
     const taskContext = rowKind === 'task' ? {
       ...row,
-      status: workflowStatus,
+      ...(workflowStatus ? { status: workflowStatus, checkboxStatus: workflowStatus } : {}),
       checkboxState,
-      checkboxStatus: workflowStatus,
-      open: fields.open === 'true',
-      done: fields.done === 'true' || fields.completed === 'true',
+      ...(fields.open != null ? { open: fields.open === 'true' } : {}),
+      ...(fields.done != null || fields.completed != null
+        ? { done: fields.done === 'true' || fields.completed === 'true' }
+        : {}),
       tags: taskTags.map((tag) => `#${tag}`),
       file: fileContext,
     } : null;

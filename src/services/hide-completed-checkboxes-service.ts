@@ -2,6 +2,11 @@ import type TPSGlobalContextMenuPlugin from '../main';
 import { TFile } from 'obsidian';
 import { RangeSetBuilder, type Extension } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate } from '@codemirror/view';
+import {
+  getLinkedSubitemCompleteMarkers,
+  normalizeLinkedSubitemCheckboxMarker,
+} from '../utils/linked-subitem-mapping';
+import { MIGRATED_TASK_CHECKBOX } from '../constants/task-migration';
 
 const BODY_CLASS = 'tps-gcm-hide-completed-checkboxes';
 const HIDDEN_LINE_CLASS = 'tps-gcm-hidden-completed-checkbox-line';
@@ -11,8 +16,8 @@ const EDITING_ROOT_CLASS = 'tps-gcm-completed-checkboxes-editing';
 const HAS_REVEAL_WIDGET_CLASS = 'tps-gcm-completed-checkboxes-has-reveal';
 const HIDE_ALL_TASK_LINES_BODY_CLASS = 'tps-gcm-hide-all-task-lines-reading-mode';
 const TASK_HIDING_EXCLUDED_ROOT_CLASS = 'tps-gcm-task-hiding-excluded';
-const HIDDEN_TASK_DATA_SELECTOR = '[data-task="x"], [data-task="X"], [data-task="-"], [data-task=">"]';
-const COMPLETED_TASK_RE = /^\s*(?:[-*+]|\d+[.)])\s+\[(?:x|X|-|>)\](?:\s|$)/;
+const MAPPED_COMPLETED_TASK_CLASS = 'tps-gcm-mapped-completed-task';
+const TASK_LINE_STATE_RE = /^\s*(?:[-*+]|\d+[.)])\s+\[([^\]\r\n])\](?:\s|$)/u;
 const EDITING_QUIET_WINDOW_MS = 1200;
 type HiddenCompletedLine = { from: number; text: string };
 type TaskVisibilityState = { showCompleted?: boolean; showTasks?: boolean };
@@ -116,6 +121,9 @@ export class HideCompletedCheckboxesService {
     });
     document.querySelectorAll<HTMLElement>(`.${TASK_HIDING_EXCLUDED_ROOT_CLASS}`).forEach((root) => {
       root.classList.remove(TASK_HIDING_EXCLUDED_ROOT_CLASS);
+    });
+    document.querySelectorAll<HTMLElement>(`.${MAPPED_COMPLETED_TASK_CLASS}`).forEach((task) => {
+      task.classList.remove(MAPPED_COMPLETED_TASK_CLASS);
     });
   }
 
@@ -228,6 +236,8 @@ export class HideCompletedCheckboxesService {
     observer.observe(root, {
       childList: true,
       subtree: true,
+      attributes: true,
+      attributeFilter: ['data-task'],
     });
     this.rootObservers.set(root, observer);
   }
@@ -309,7 +319,8 @@ export class HideCompletedCheckboxesService {
     }
     this.clearRootEditing(root);
     const lines = Array.from(root.querySelectorAll<HTMLElement>('.cm-line'));
-    const completedLines = lines.filter((line) => this.isCompletedTaskLine(line));
+    const completeMarkers = this.getCompleteTaskMarkers();
+    const completedLines = lines.filter((line) => this.isCompletedTaskLine(line, completeMarkers));
     const hasCompletedTasks = completedLines.length > 0;
     const revealed = this.getEffectiveRevealState(root, false);
     root.classList.toggle(REVEALED_ROOT_CLASS, revealed);
@@ -345,11 +356,10 @@ export class HideCompletedCheckboxesService {
     }
     root.classList.remove(TASK_HIDING_EXCLUDED_ROOT_CLASS);
     const revealAllTasks = this.plugin.settings.hideAllTaskLinesInReadingMode === true;
+    this.syncRenderedCompletedTasks(root);
     const hasRevealableTasks = revealAllTasks
       ? root.querySelector('li.task-list-item[data-task], li.task-list-item') !== null
-      : root.querySelector(
-      'li.task-list-item[data-task="x"], li.task-list-item[data-task="X"], li.task-list-item[data-task="-"], li.task-list-item[data-task=">"], li.task-list-item.is-checked',
-    ) !== null;
+      : root.querySelector(`li.task-list-item.${MAPPED_COMPLETED_TASK_CLASS}`) !== null;
     const revealed = this.getEffectiveRevealState(root, revealAllTasks);
     root.classList.toggle(REVEALED_ROOT_CLASS, revealed);
     this.syncRevealButton(root, hasRevealableTasks, revealed, revealAllTasks);
@@ -372,6 +382,9 @@ export class HideCompletedCheckboxesService {
     root.classList.remove(REVEALED_ROOT_CLASS);
     root.classList.remove(HAS_REVEAL_WIDGET_CLASS);
     root.classList.remove(TASK_HIDING_EXCLUDED_ROOT_CLASS);
+    root.querySelectorAll<HTMLElement>(`.${MAPPED_COMPLETED_TASK_CLASS}`).forEach((task) => {
+      task.classList.remove(MAPPED_COMPLETED_TASK_CLASS);
+    });
   }
 
   private clearTaskHidingRoot(root: HTMLElement): void {
@@ -545,13 +558,39 @@ export class HideCompletedCheckboxesService {
     root.classList.remove(EDITING_ROOT_CLASS);
   }
 
-  private isCompletedTaskLine(line: HTMLElement): boolean {
-    if (COMPLETED_TASK_RE.test(line.textContent ?? '')) return true;
-    if (line.matches(HIDDEN_TASK_DATA_SELECTOR)) return true;
-    const task = line.querySelector<HTMLElement>(HIDDEN_TASK_DATA_SELECTOR);
-    if (task) return true;
-    if (line.querySelector('[aria-checked="true"]')) return true;
-    return false;
+  private getCompleteTaskMarkers(): Set<string> {
+    const markers = new Set(getLinkedSubitemCompleteMarkers(
+      this.plugin.settings.linkedSubitemCheckboxMappings || [],
+      {
+        completionStatuses: this.plugin.sharedServices.status.getDoneStatuses(),
+        normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+      },
+    ));
+    const migratedMarker = MIGRATED_TASK_CHECKBOX.slice(1, -1);
+    if (migratedMarker) markers.add(migratedMarker);
+    return markers;
+  }
+
+  private isCompletedTaskSourceLine(source: unknown, completeMarkers: ReadonlySet<string>): boolean {
+    const marker = normalizeLinkedSubitemCheckboxMarker(
+      String(source ?? '').match(TASK_LINE_STATE_RE)?.[1],
+    );
+    return marker != null && completeMarkers.has(marker);
+  }
+
+  private isCompletedTaskLine(line: HTMLElement, completeMarkers: ReadonlySet<string>): boolean {
+    if (this.isCompletedTaskSourceLine(line.textContent, completeMarkers)) return true;
+    const task = line.matches('[data-task]') ? line : line.querySelector<HTMLElement>('[data-task]');
+    const marker = normalizeLinkedSubitemCheckboxMarker(task?.getAttribute('data-task'));
+    return marker != null && completeMarkers.has(marker);
+  }
+
+  private syncRenderedCompletedTasks(root: HTMLElement): void {
+    const completeMarkers = this.getCompleteTaskMarkers();
+    root.querySelectorAll<HTMLElement>('li.task-list-item').forEach((task) => {
+      const marker = normalizeLinkedSubitemCheckboxMarker(task.getAttribute('data-task'));
+      task.classList.toggle(MAPPED_COMPLETED_TASK_CLASS, marker != null && completeMarkers.has(marker));
+    });
   }
 
   private getMarkdownRootsForFile(filePath: string): HTMLElement[] {
@@ -734,9 +773,10 @@ export class HideCompletedCheckboxesService {
     const doc = view.state.doc;
     const hidden: HiddenCompletedLine[] = [];
     const seen = new Set<number>();
+    const completeMarkers = this.getCompleteTaskMarkers();
     for (let lineNumber = 1; lineNumber <= doc.lines; lineNumber += 1) {
       const line = doc.line(lineNumber);
-      if (!COMPLETED_TASK_RE.test(line.text)) continue;
+      if (!this.isCompletedTaskSourceLine(line.text, completeMarkers)) continue;
       this.collectCompletedTaskBlockLines(view, lineNumber, seen, hidden);
     }
     return hidden;

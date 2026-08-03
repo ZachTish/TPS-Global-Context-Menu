@@ -36,7 +36,7 @@ export function buildLinkedSubitemRow(
 
   const includeCheckbox = options?.includeCheckbox === true;
   let checkbox: HTMLElement | null = null;
-  if (includeCheckbox) {
+  if (includeCheckbox && model.checkboxState) {
     const button = document.createElement('button');
     button.type = 'button';
     button.tabIndex = -1;
@@ -119,7 +119,7 @@ export function getIconNameForState(state: string): string {
 
 export function getIconNameForModel(model: SubitemLineModel): string {
   if (model.kind !== 'checkbox' && model.visualState === 'open') return 'circle';
-  return getIconNameForState(model.checkboxState || '[ ]');
+  return model.checkboxIcon || getIconNameForState(model.checkboxState || '[ ]');
 }
 
 /**

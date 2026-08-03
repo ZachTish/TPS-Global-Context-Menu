@@ -3,6 +3,7 @@ import type TPSGlobalContextMenuPlugin from '../main';
 import { buildParentFrontmatterLinkValue } from '../handlers/parent-link-format';
 import { CreateSubitemModal } from '../modals/create-subitem-modal';
 import { mergeNormalizedTags, parseTagInput } from '../utils/tag-utils';
+import { currentCompletedDateStamp } from '../utils/completed-date-utils';
 import * as logger from '../logger';
 
 export interface CreateSubitemOptions {
@@ -13,6 +14,14 @@ export interface CreateSubitemOptions {
   saveFolderPath?: boolean;
   targetPath?: string;
   frontmatterTitle?: string;
+  /** Require this call to own a newly-created file instead of adopting a raced target. */
+  requireNewFile?: boolean;
+  /** Promotion-only seed values written atomically with the initial child file. */
+  initialWorkflowStatus?: string;
+  initialScheduled?: string | null;
+  initialTags?: string[];
+  initialBody?: string;
+  suppressCreatedNotice?: boolean;
 }
 
 export async function promptAndCreateSubitemForParent(
@@ -66,7 +75,7 @@ export async function createSubitemForParentWithTitle(
 
   const targetPath = requestedTargetPath || getUniqueMarkdownPath(plugin.app, folderPath, cleanedTitle);
   const existingTarget = plugin.app.vault.getAbstractFileByPath(targetPath);
-  if (existingTarget instanceof TFile) return existingTarget;
+  if (existingTarget instanceof TFile) return options?.requireNewFile === true ? null : existingTarget;
   if (existingTarget) {
     new Notice('A non-note item already uses the requested task note path.');
     return null;
@@ -105,7 +114,18 @@ export async function createSubitemForParentWithTitle(
     `${parentLinkKey}:`,
     `  - "${parentLinkValue}"`,
   ];
-  if (options?.inheritParentTemporalMetadata !== false && isDailyNoteParent && dailyNoteDateStr) {
+  const workflowStatusKey = plugin.sharedServices.status.getStatusPropertyKey();
+  const initialWorkflowStatus = plugin.sharedServices.status.normalize(options?.initialWorkflowStatus);
+  if (initialWorkflowStatus) {
+    frontmatterLines.push(`${workflowStatusKey}: ${serializeSimpleYamlProperty(workflowStatusKey, initialWorkflowStatus)}`);
+    if (plugin.sharedServices.status.isDoneStatus(initialWorkflowStatus)) {
+      frontmatterLines.push(`completedDate: ${currentCompletedDateStamp()}`);
+    }
+  }
+  const initialScheduled = String(options?.initialScheduled || '').trim();
+  if (initialScheduled) {
+    frontmatterLines.push(`scheduled: ${serializeSimpleYamlProperty('scheduled', initialScheduled)}`);
+  } else if (options?.inheritParentTemporalMetadata !== false && isDailyNoteParent && dailyNoteDateStr) {
     frontmatterLines.push(`scheduled: ${dailyNoteDateStr}`);
   }
   if (options?.saveFolderPath === true || (options?.saveFolderPath !== false && plugin.settings.autoSaveFolderPath)) {
@@ -126,6 +146,9 @@ export async function createSubitemForParentWithTitle(
 
   const parentCache = plugin.app.metadataCache.getFileCache(parentFile);
   const parentFrontmatter = (parentCache?.frontmatter || {}) as Record<string, any>;
+  const childWorkflowFrontmatter: Record<string, unknown> = initialWorkflowStatus
+    ? { [workflowStatusKey]: initialWorkflowStatus }
+    : {};
   
   const beforeInheritedKeys = new Set(
     frontmatterLines
@@ -139,13 +162,16 @@ export async function createSubitemForParentWithTitle(
   const parentTags = seedParentTags
     ? filterIgnoredSubitemTags(plugin, parseTagInput([parentFrontmatter.tags, parentFrontmatter.tag]))
     : [];
-  if (seedParentTags && parentTags.length > 0) {
-    const serializedTags = parentTags.map((tag) => `"${tag.replace(/"/g, '\\"')}"`).join(', ');
+  const initialTags = filterIgnoredSubitemTags(plugin, parseTagInput(options?.initialTags || []));
+  const seededTags = mergeNormalizedTags(parentTags, initialTags);
+  if (seededTags.length > 0) {
+    const serializedTags = seededTags.map((tag) => `"${tag.replace(/"/g, '\\"')}"`).join(', ');
     frontmatterLines.push(`tags: [${serializedTags}]`);
   }
 
   const finalFrontmatterLines = dedupeFrontmatterLines(frontmatterLines);
-  const initialContent = `${[...finalFrontmatterLines, '---', ''].join('\n')}\n`;
+  const initialBody = String(options?.initialBody || '').trim();
+  const initialContent = `${[...finalFrontmatterLines, '---', ''].join('\n')}\n${initialBody ? `${initialBody}\n` : ''}`;
 
   let created: TFile;
   try {
@@ -157,7 +183,7 @@ export async function createSubitemForParentWithTitle(
         parentPath: parentFile.path,
         targetPath,
       });
-      return racedTarget;
+      return options?.requireNewFile === true ? null : racedTarget;
     }
     logger.error('[TPS GCM] Failed creating subitem:', error);
     new Notice('Failed to create subitem.');
@@ -165,9 +191,15 @@ export async function createSubitemForParentWithTitle(
   }
 
   try {
-    const hasStatus = finalFrontmatterLines.some((l) => l.trim().toLowerCase().startsWith('status:'));
     if (options?.insertParentBodyLink !== false) {
-      await plugin.subitemRelationshipSyncService.insertBodyLink(parentFile, created, hasStatus ? '[ ]' : null);
+      const linkResult = await plugin.subitemRelationshipSyncService.insertBodyLinkForChildWorkflow(
+        parentFile,
+        created,
+        { frontmatter: childWorkflowFrontmatter },
+      );
+      if (linkResult.blockedReason) {
+        new Notice('Created subitem, but its workflow status has no current checkbox mapping, so no parent body link was added.');
+      }
     }
   } catch (error) {
     logger.error('[TPS GCM] Failed linking new subitem to parent:', error);
@@ -186,7 +218,9 @@ export async function createSubitemForParentWithTitle(
   // redundant immediate rewrite of a brand-new note while status sync
   // may also be settling metadata for the same file.
 
-  new Notice(`Created subitem: ${created.basename}`);
+  if (options?.suppressCreatedNotice !== true) {
+    new Notice(`Created subitem: ${created.basename}`);
+  }
   return created;
 }
 

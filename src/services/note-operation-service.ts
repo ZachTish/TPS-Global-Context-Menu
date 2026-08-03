@@ -89,20 +89,18 @@ export class NoteOperationService {
         let modified = false;
 
         for (const childFile of scheduledFiles) {
-            // Check if the file has a status field
-            const cache = this.app.metadataCache.getFileCache(childFile);
-            const workflowStatusKey = this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status';
-            const fmKeys = Object.keys(cache?.frontmatter || {});
-            const hasStatus = fmKeys.some(
-                (key) => key.trim().toLowerCase() === workflowStatusKey.trim().toLowerCase(),
-            );
-
-            const changed = await this.plugin.subitemRelationshipSyncService.insertBodyLink(
+            const result = await this.plugin.subitemRelationshipSyncService.insertBodyLinkForChildWorkflow(
                 dailyNote,
                 childFile,
-                hasStatus ? '[ ]' : null,
             );
-            if (changed) {
+            if (result.blockedReason) {
+                logger.warn('[TPS GCM] Skipped scheduled child body link because its workflow status is not safely mapped.', {
+                    dailyNotePath: dailyNote.path,
+                    childPath: childFile.path,
+                    blockedReason: result.blockedReason,
+                });
+            }
+            if (result.changed) {
                 modified = true;
             }
         }

@@ -13,7 +13,12 @@ import {
   TASK_RECURRENCE_COMPLETED_DATE_KEY,
   TASK_RECURRENCE_ID_KEY,
 } from '../utils/task-recurrence';
-import { getLinkedSubitemCompleteMarkers } from '../utils/linked-subitem-mapping';
+import {
+  getLinkedSubitemCompleteMarkers,
+  isLinkedSubitemSemanticCheckboxPlanCurrent,
+  resolveLinkedSubitemSemanticCheckboxPlanForStatus,
+  type LinkedSubitemSemanticCheckboxPlan,
+} from '../utils/linked-subitem-mapping';
 import {
   getTaskDisplayTitle,
   readInlineFieldValue,
@@ -39,6 +44,15 @@ type CompletionContext = {
   updatedLines: string[];
 };
 
+type RecurrenceTaskCreationMapping = LinkedSubitemSemanticCheckboxPlan & {
+  statusKey: string;
+};
+
+type ResolvedRecurrenceTemplate = {
+  line: string;
+  needsSave: boolean;
+};
+
 export class TaskRecurrenceService {
   private storeLoaded = false;
   private store: TaskRecurrenceTemplateStore = { version: 1, templates: {} };
@@ -50,10 +64,22 @@ export class TaskRecurrenceService {
     if (isCompletedTaskMarker(context.previousState, this.getCompleteMarkers())) return;
     if (!isCompletedTaskMarker(context.nextState, this.getCompleteMarkers())) return;
 
+    const creationMapping = this.resolveRecurrenceTaskCreationMapping();
+    if (!creationMapping) {
+      this.reportUnavailableCreationMapping('completion');
+      return;
+    }
+
     const completedAt = new Date();
     let created = false;
+    let mappingChanged = false;
+    let resolvedTemplate: { recurrenceTaskId: string; line: string } | null = null;
 
     await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(context.file, async (lines) => {
+      if (!this.recurrenceTaskCreationMappingIsCurrent(creationMapping)) {
+        mappingChanged = true;
+        return false;
+      }
       const lineIndex = this.resolveCompletedLineIndex(lines, context.updatedLines);
       if (lineIndex < 0) return false;
 
@@ -79,20 +105,53 @@ export class TaskRecurrenceService {
 
       const completedValue = formatTaskScheduledDate(completedAt);
       completedLine = setInlineFieldValueOnTaskLine(completedLine, TASK_RECURRENCE_COMPLETED_DATE_KEY, completedValue);
-      lines[lineIndex] = completedLine;
 
-      const templateLine = await this.getOrCreateTemplateLine(recurrenceTaskId, completedLine);
+      const template = await this.resolveTemplateLine(
+        recurrenceTaskId,
+        completedLine,
+        creationMapping,
+      );
+      if (!this.recurrenceTaskCreationMappingIsCurrent(creationMapping)) {
+        mappingChanged = true;
+        return false;
+      }
       const nextLine = ensureTaskRecurrenceIdOnLine(
-        buildNextTaskRecurrenceLine(templateLine, nextScheduledValue),
+        buildNextTaskRecurrenceLine(
+          template.line,
+          nextScheduledValue,
+          creationMapping.checkboxState,
+          creationMapping.statusKey,
+        ),
         recurrenceTaskId,
       );
+      lines[lineIndex] = completedLine;
       const insertIndex = findTaskBlockEndIndex(lines, lineIndex);
       lines.splice(insertIndex, 0, nextLine);
+      if (template.needsSave) {
+        resolvedTemplate = { recurrenceTaskId, line: template.line };
+      }
       created = true;
       return true;
     });
 
+    if (mappingChanged) {
+      this.reportChangedCreationMapping('completion');
+      return;
+    }
     if (created) {
+      if (resolvedTemplate) {
+        const saved = await this.setTemplateLine(
+          resolvedTemplate.recurrenceTaskId,
+          resolvedTemplate.line,
+          creationMapping,
+        );
+        if (!saved) {
+          logger.warn('[TaskRecurrence] Template metadata was not saved because the creation mapping changed after task creation.', {
+            source: 'completion',
+            recurrenceTaskId: resolvedTemplate.recurrenceTaskId,
+          });
+        }
+      }
       this.plugin.eventService.emitFilesUpdated([context.file.path]);
       this.plugin.overlayRenderingService?.invalidate({
         reason: 'task-recurrence-created',
@@ -107,9 +166,15 @@ export class TaskRecurrenceService {
   }
 
   async editTemplateForTaskLine(file: TFile, lineIndex: number, rawLine: string): Promise<void> {
+    const creationMapping = this.resolveRecurrenceTaskCreationMapping();
+    if (!creationMapping) {
+      this.reportUnavailableCreationMapping('edit-template');
+      return;
+    }
     let resolved: { recurrenceTaskId: string; lineForTemplate: string; lineIndex: number } | null = null;
     try {
       await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(file, async (lines) => {
+        if (!this.recurrenceTaskCreationMappingIsCurrent(creationMapping)) return false;
         const currentLineIndex = findCurrentTaskLineIndex(
           lines,
           lineIndex,
@@ -152,15 +217,33 @@ export class TaskRecurrenceService {
       preferredLineIndex: lineIndex,
       resolvedLineIndex,
     });
-    const current = await this.getOrCreateTemplateLine(recurrenceTaskId, lineForTemplate);
-    new TaskRecurrenceTemplateModal(this.plugin.app, 'Edit task recurrence template', current, async (value) => {
-      await this.setTemplateLine(recurrenceTaskId, buildTaskRecurrenceTemplateLine(ensureTaskRecurrenceIdOnLine(value, recurrenceTaskId)));
-      new Notice('Task recurrence template saved.');
+    const current = await this.resolveTemplateLine(recurrenceTaskId, lineForTemplate, creationMapping);
+    if (!this.recurrenceTaskCreationMappingIsCurrent(creationMapping)) {
+      this.reportChangedCreationMapping('edit-template-open');
+      return;
+    }
+    new TaskRecurrenceTemplateModal(this.plugin.app, 'Edit task recurrence template', current.line, async (value) => {
+      const saved = await this.setTemplateLine(recurrenceTaskId, buildTaskRecurrenceTemplateLine(
+        ensureTaskRecurrenceIdOnLine(value, recurrenceTaskId),
+        creationMapping.checkboxState,
+        creationMapping.statusKey,
+      ), creationMapping);
+      if (saved) new Notice('Task recurrence template saved.');
+      else this.reportChangedCreationMapping('edit-template-save');
     }).open();
   }
 
   async openTemplatesCommand(): Promise<void> {
+    const creationMapping = this.resolveRecurrenceTaskCreationMapping();
+    if (!creationMapping) {
+      this.reportUnavailableCreationMapping('open-templates');
+      return;
+    }
     await this.loadStore();
+    if (!this.recurrenceTaskCreationMappingIsCurrent(creationMapping)) {
+      this.reportChangedCreationMapping('open-templates');
+      return;
+    }
     const entries = Object.entries(this.store.templates);
     if (entries.length === 0) {
       new Notice('No task recurrence templates have been created yet.');
@@ -177,8 +260,13 @@ export class TaskRecurrenceService {
     }
     const [id, entry] = selected;
     new TaskRecurrenceTemplateModal(this.plugin.app, 'Edit task recurrence template', entry.line, async (value) => {
-      await this.setTemplateLine(id, buildTaskRecurrenceTemplateLine(ensureTaskRecurrenceIdOnLine(value, id)));
-      new Notice('Task recurrence template saved.');
+      const saved = await this.setTemplateLine(id, buildTaskRecurrenceTemplateLine(
+        ensureTaskRecurrenceIdOnLine(value, id),
+        creationMapping.checkboxState,
+        creationMapping.statusKey,
+      ), creationMapping);
+      if (saved) new Notice('Task recurrence template saved.');
+      else this.reportChangedCreationMapping('open-templates-save');
     }).open();
   }
 
@@ -192,28 +280,49 @@ export class TaskRecurrenceService {
     return -1;
   }
 
-  private async getOrCreateTemplateLine(recurrenceTaskId: string, rawLine: string): Promise<string> {
+  private async resolveTemplateLine(
+    recurrenceTaskId: string,
+    rawLine: string,
+    creationMapping: RecurrenceTaskCreationMapping,
+  ): Promise<ResolvedRecurrenceTemplate> {
     await this.loadStore();
     const existing = this.store.templates[recurrenceTaskId]?.line;
     if (existing) {
-      const withId = ensureTaskRecurrenceIdOnLine(existing, recurrenceTaskId);
-      if (withId !== existing) {
-        await this.setTemplateLine(recurrenceTaskId, withId);
-      }
-      return withId;
+      const normalized = buildTaskRecurrenceTemplateLine(
+        ensureTaskRecurrenceIdOnLine(existing, recurrenceTaskId),
+        creationMapping.checkboxState,
+        creationMapping.statusKey,
+      );
+      return { line: normalized, needsSave: normalized !== existing };
     }
-    const templateLine = buildTaskRecurrenceTemplateLine(rawLine);
-    await this.setTemplateLine(recurrenceTaskId, templateLine);
-    return templateLine;
+    const templateLine = buildTaskRecurrenceTemplateLine(
+      rawLine,
+      creationMapping.checkboxState,
+      creationMapping.statusKey,
+    );
+    return { line: templateLine, needsSave: true };
   }
 
-  private async setTemplateLine(recurrenceTaskId: string, line: string): Promise<void> {
+  private async setTemplateLine(
+    recurrenceTaskId: string,
+    line: string,
+    creationMapping: RecurrenceTaskCreationMapping,
+  ): Promise<boolean> {
     await this.loadStore();
-    this.store.templates[recurrenceTaskId] = {
-      line,
-      updatedAt: new Date().toISOString(),
+    if (!this.recurrenceTaskCreationMappingIsCurrent(creationMapping)) return false;
+    const nextStore: TaskRecurrenceTemplateStore = {
+      version: 1,
+      templates: {
+        ...this.store.templates,
+        [recurrenceTaskId]: {
+          line,
+          updatedAt: new Date().toISOString(),
+        },
+      },
     };
-    await this.saveStore();
+    const saved = await this.saveStore(nextStore);
+    if (saved) this.store = nextStore;
+    return saved;
   }
 
   private async loadStore(): Promise<void> {
@@ -232,12 +341,14 @@ export class TaskRecurrenceService {
     }
   }
 
-  private async saveStore(): Promise<void> {
+  private async saveStore(store: TaskRecurrenceTemplateStore): Promise<boolean> {
     try {
-      await this.plugin.app.vault.adapter.write(this.getStorePath(), JSON.stringify(this.store, null, 2));
+      await this.plugin.app.vault.adapter.write(this.getStorePath(), JSON.stringify(store, null, 2));
+      return true;
     } catch (error) {
       logger.warn('[TPS GCM] Failed saving task recurrence templates', error);
       new Notice('Failed to save task recurrence template metadata.');
+      return false;
     }
   }
 
@@ -255,7 +366,57 @@ export class TaskRecurrenceService {
   }
 
   private getCompleteMarkers(): string[] {
-    return getLinkedSubitemCompleteMarkers(this.plugin.settings.linkedSubitemCheckboxMappings || []);
+    return getLinkedSubitemCompleteMarkers(this.plugin.settings.linkedSubitemCheckboxMappings || [], {
+      completionStatuses: this.plugin.sharedServices.status.getDoneStatuses(),
+      normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+    });
+  }
+
+  private resolveRecurrenceTaskCreationMapping(): RecurrenceTaskCreationMapping | null {
+    const status = this.plugin.sharedServices.status.normalize(
+      this.plugin.settings.recurrenceDefaultStatus,
+    );
+    if (!status) return null;
+    const plan = resolveLinkedSubitemSemanticCheckboxPlanForStatus(
+      this.plugin.settings.linkedSubitemCheckboxMappings || [],
+      status,
+      { normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value) },
+    );
+    if (!plan) return null;
+    return {
+      ...plan,
+      statusKey: this.plugin.sharedServices.status.getStatusPropertyKey(),
+    };
+  }
+
+  private recurrenceTaskCreationMappingIsCurrent(mapping: RecurrenceTaskCreationMapping): boolean {
+    return mapping.status === this.plugin.sharedServices.status.normalize(
+      this.plugin.settings.recurrenceDefaultStatus,
+    )
+      && mapping.statusKey === this.plugin.sharedServices.status.getStatusPropertyKey()
+      && isLinkedSubitemSemanticCheckboxPlanCurrent(
+        this.plugin.settings.linkedSubitemCheckboxMappings || [],
+        mapping,
+        { normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value) },
+      );
+  }
+
+  private reportUnavailableCreationMapping(source: string): void {
+    const status = this.plugin.sharedServices.status.normalize(
+      this.plugin.settings.recurrenceDefaultStatus,
+    );
+    logger.warn('[TaskRecurrence] Creation blocked because the default status has no checkbox mapping.', {
+      source,
+      status: status || null,
+    });
+    new Notice('Could not create the recurring task because its default status has no checkbox mapping.');
+  }
+
+  private reportChangedCreationMapping(source: string): void {
+    logger.warn('[TaskRecurrence] Creation blocked because the default checkbox mapping changed before write.', {
+      source,
+    });
+    new Notice('The recurring task checkbox mapping changed. Review the task and try again.');
   }
 }
 

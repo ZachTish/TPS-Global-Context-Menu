@@ -42,19 +42,26 @@ export function getTpsTableMarkdownLineKind(line: string): TpsTableLineKind | nu
 
 export function getTpsTableTaskQueryFields(
   line: string,
-  resolveStatus: (checkboxState: string) => string = defaultStatusForCheckboxState,
-  isDoneStatus: (status: string) => boolean = defaultIsDoneStatus,
+  resolveStatus: (checkboxState: string) => string,
+  isDoneStatus: (status: string) => boolean | null,
 ): Record<string, string> {
   const markerMatch = String(line || '').match(/^\s*(?:[-+*]|\d+[.)])\s+\[([^\]])\]\s*/u);
   if (!markerMatch) return {};
   const checkboxState = `[${markerMatch[1]}]`;
-  const status = String(resolveStatus(checkboxState) || defaultStatusForCheckboxState(checkboxState))
+  const status = String(resolveStatus(checkboxState) || '')
     .trim()
     .toLowerCase();
+  if (!status) return { checkboxstate: checkboxState };
   const done = isDoneStatus(status);
-  return {
+  const workflowFields = {
     status,
     checkboxstatus: status,
+  };
+  if (done == null) {
+    return { ...workflowFields, checkboxstate: checkboxState };
+  }
+  return {
+    ...workflowFields,
     checkboxstate: checkboxState,
     open: String(!done),
     isopen: String(!done),
@@ -76,7 +83,12 @@ export function buildTpsTableMarkdownLine(
   } = {},
 ): string {
   const normalizedTitle = String(title || '').replace(/\s*\n\s*/gu, ' ').trim();
-  const checkboxState = normalizeCheckboxState(options.checkboxState || '[ ]');
+  const checkboxState = options.checkboxState == null
+    ? ''
+    : normalizeCheckboxState(options.checkboxState);
+  if (kind === 'task' && !checkboxState) {
+    throw new Error('A mapped checkbox state is required to create a TPS Table task row.');
+  }
   const headingLevel = Math.max(1, Math.min(6, Number(options.headingLevel) || 1));
   const prefix = kind === 'task' ? `- ${checkboxState} ` : kind === 'heading' ? `${'#'.repeat(headingLevel)} ` : '- ';
   const tags = Array.from(options.tags ?? [])
@@ -261,20 +273,6 @@ function normalizeWritableTag(value: unknown): string {
 
 function stripWrappingQuotes(value: string): string {
   return String(value || '').trim().replace(/^(?:"([\s\S]*)"|'([\s\S]*)')$/u, '$1$2').trim();
-}
-
-function defaultStatusForCheckboxState(rawState: string): string {
-  const marker = String(rawState || '').trim().replace(/^\[|\]$/gu, '').trim().toLowerCase();
-  if (!marker) return 'todo';
-  if (marker === 'x') return 'complete';
-  if (marker === '/' || marker === '\\') return 'working';
-  if (marker === '?') return 'holding';
-  if (marker === '-' || marker === '~') return 'wont-do';
-  return marker;
-}
-
-function defaultIsDoneStatus(status: string): boolean {
-  return status === 'complete' || status === 'wont-do';
 }
 
 function asArray(value: unknown): unknown[] {

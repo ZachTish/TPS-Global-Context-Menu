@@ -28,11 +28,19 @@ test('GCM API lifecycle publishes exact available and unavailable contract versi
 
 test('GCM public capability surface owns cross-plugin configuration and task interactions', () => {
   const api = readFileSync(new URL('../src/plugin-api.ts', import.meta.url), 'utf8');
+  const mappings = readFileSync(new URL('../src/utils/linked-subitem-mapping.ts', import.meta.url), 'utf8');
   const shared = readFileSync(new URL('../src/services/shared/index.ts', import.meta.url), 'utf8');
   assert.match(api, /configuration:\s*\{[\s\S]{0,1500}version:\s*1,[\s\S]{0,1500}isInlinePropertyAllowed:[\s\S]{0,1500}getParentLinkPolicy:/u);
   assert.match(api, /taskLines:\s*\{[\s\S]{0,1500}version:\s*1,[\s\S]{0,1500}handleContextMenu:[\s\S]{0,1500}openQuickEditorForElement:/u);
-  assert.match(api, /taskCheckboxes:\s*\{[\s\S]{0,1500}version:\s*1,[\s\S]{0,1500}getMappings:[\s\S]{0,1500}stateForStatus:[\s\S]{0,1500}statusForState:/u);
+  assert.match(api, /const taskCheckboxesApi = createLinkedSubitemCheckboxContract\(/u);
+  assert.match(api, /taskCheckboxes:\s*taskCheckboxesApi/u);
   assert.doesNotMatch(api, /taskCheckboxes:[\s\S]{0,2000}return plugin\.settings\.linkedSubitemCheckboxMappings/u);
+  assert.match(mappings, /contract:\s*'ordered-strict-v1'/u);
+  assert.match(mappings, /if \(!hasCachedSource \|\| source !== cachedSource\)/u);
+  assert.match(mappings, /Object\.freeze\(cachedMappings\.map/u);
+  assert.match(mappings, /stateForStatus:[\s\S]{0,400}normalizedMappings:\s*true/u);
+  assert.match(mappings, /statusForState:[\s\S]{0,400}normalizedMappings:\s*true/u);
+  assert.doesNotMatch(api, /taskCheckboxes:[\s\S]{0,2200}(?:statusToCheckboxState|checkboxStateToStatus)\(/u);
   assert.match(shared, /getChildKeys:\s*\(\):\s*string\[\][\s\S]{0,500}plugin\.settings\.childLinkFrontmatterKey[\s\S]{0,500}['"]parentOf['"]/u);
 });
 

@@ -1,6 +1,12 @@
 import type { LinkedSubitemCheckboxMapping } from '../types';
 import { updateTaskCompletedDateForCheckboxState } from './task-line-metadata';
-import { getLinkedSubitemCompleteMarkers, mapStatusToSubitemCheckboxState } from './linked-subitem-mapping';
+import {
+  getLinkedSubitemCompleteMarkers,
+  getLinkedSubitemMappingForState,
+  mapStatusToSubitemCheckboxState,
+  normalizeLinkedSubitemCheckboxState,
+  type LinkedSubitemStatusNormalizer,
+} from './linked-subitem-mapping';
 
 const TASK_LINE_RE = /^(\s*(?:[-*+]|\d+[.)])\s+)\[([^\]\r\n]?)\](\s*)(.*)$/;
 
@@ -21,7 +27,11 @@ export function reconcileTaskStatusLine(
   line: string,
   statusKey: string,
   mappings: LinkedSubitemCheckboxMapping[],
-  options: { completedAt?: Date; completeMarkers?: string[] } = {},
+  options: {
+    completedAt?: Date;
+    completeMarkers?: string[];
+    normalizeStatus?: LinkedSubitemStatusNormalizer;
+  } = {},
 ): TaskStatusCheckboxReconcileResult {
   const rawLine = String(line || '');
   const taskMatch = rawLine.match(TASK_LINE_RE);
@@ -32,7 +42,16 @@ export function reconcileTaskStatusLine(
   if (!field) return { changed: false, line: rawLine };
 
   const status = normalizeInlineStatusValue(field.value);
-  const checkboxState = mapStatusToCheckboxState(status, mappings);
+  const currentCheckboxState = normalizeLinkedSubitemCheckboxState(`[${taskMatch[2] || ' '}]`);
+  if (!currentCheckboxState) return { changed: false, line: rawLine };
+  const currentMapping = getLinkedSubitemMappingForState(mappings, currentCheckboxState);
+  const normalizedStatus = normalizeStatusForCompare(status, options.normalizeStatus);
+  const currentAlreadyRepresentsStatus = currentMapping?.statuses.some(
+    (mappedStatus) => normalizeStatusForCompare(mappedStatus, options.normalizeStatus) === normalizedStatus,
+  ) === true;
+  const checkboxState = currentAlreadyRepresentsStatus
+    ? currentCheckboxState
+    : mapStatusToCheckboxState(status, mappings, options.normalizeStatus);
   if (!checkboxState) return { changed: false, line: rawLine };
 
   const nextBody = removeInlineField(body, field);
@@ -50,8 +69,20 @@ export function reconcileTaskStatusLine(
   };
 }
 
-function mapStatusToCheckboxState(status: string, mappings: LinkedSubitemCheckboxMapping[]): string | null {
-  return mapStatusToSubitemCheckboxState(mappings, status);
+function mapStatusToCheckboxState(
+  status: string,
+  mappings: LinkedSubitemCheckboxMapping[],
+  normalizeStatus?: LinkedSubitemStatusNormalizer,
+): string | null {
+  return mapStatusToSubitemCheckboxState(mappings, status, { normalizeStatus });
+}
+
+function normalizeStatusForCompare(
+  status: unknown,
+  normalizer?: LinkedSubitemStatusNormalizer,
+): string {
+  const normalized = String(status ?? '').trim().toLowerCase();
+  return normalizer ? String(normalizer(normalized) || '').trim().toLowerCase() : normalized;
 }
 
 function findInlineField(line: string, key: string): InlineFieldMatch | null {

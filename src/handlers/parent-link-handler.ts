@@ -67,8 +67,9 @@ export class ParentLinkHandler {
 
   async findParentLinkIssues(target: TFile): Promise<ParentLinkIssue[]> {
     const key = this.normalizeParentKey();
-    const completionStatuses = this.getSettings().parentCompletionStatuses?.length
-      ? this.getSettings().parentCompletionStatuses
+    const configuredCompletionStatuses = this.getSettings().parentCompletionStatuses;
+    const completionStatuses = Array.isArray(configuredCompletionStatuses)
+      ? configuredCompletionStatuses
       : ['complete', 'wont-do'];
     const completionSet = new Set(completionStatuses.map((s: string) => this.normalizeStatusValue(s)));
 

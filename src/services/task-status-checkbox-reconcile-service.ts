@@ -3,6 +3,7 @@ import type TPSGlobalContextMenuPlugin from '../main';
 import { reconcileTaskStatusLine } from '../utils/task-status-checkbox-reconcile';
 import { getLinkedSubitemCompleteMarkers } from '../utils/linked-subitem-mapping';
 import type { LinkedSubitemCheckboxMapping } from '../types';
+import { scanMarkdownDocumentLines } from '../utils/markdown-document-lines';
 
 const RECONCILE_DELAY_MS = 1200;
 const EDITOR_QUIET_FALLBACK_MS = 1600;
@@ -66,19 +67,26 @@ export class TaskStatusCheckboxReconcileService extends Component {
     if (!statusKey || mappings.length === 0) return 0;
     const completedAt = new Date();
     const completeMarkers = this.getCompleteMarkers(mappings);
+    const normalizeStatus = (value: unknown): string => this.plugin.sharedServices.status.normalize(value);
 
     let changeCount = 0;
     this.filesBeingProcessed.add(file.path);
     try {
       await this.plugin.app.vault.process(file, (data) => {
-        const newline = data.includes('\r\n') ? '\r\n' : '\n';
-        const endsWithNewline = /\r?\n$/.test(data);
-        const lines = data.split(/\r?\n/);
+        const newline = data.includes('\r\n') ? '\r\n' : data.includes('\r') ? '\r' : '\n';
+        const endsWithNewline = /(?:\r\n|\n|\r)$/u.test(data);
+        const documentLines = scanMarkdownDocumentLines(data);
+        const lines = documentLines.map((line) => line.text);
         if (endsWithNewline) lines.pop();
 
         changeCount = 0;
-        const nextLines = lines.map((line) => {
-          const result = reconcileTaskStatusLine(line, statusKey, mappings, { completedAt, completeMarkers });
+        const nextLines = lines.map((line, index) => {
+          if (documentLines[index]?.isContent !== true) return line;
+          const result = reconcileTaskStatusLine(line, statusKey, mappings, {
+            completedAt,
+            completeMarkers,
+            normalizeStatus,
+          });
           if (result.changed) changeCount += 1;
           return result.line;
         });
@@ -158,6 +166,9 @@ export class TaskStatusCheckboxReconcileService extends Component {
   }
 
   private getCompleteMarkers(mappings: Array<{ checkboxState?: string; statuses?: string[] }>): string[] {
-    return getLinkedSubitemCompleteMarkers(mappings as LinkedSubitemCheckboxMapping[]);
+    return getLinkedSubitemCompleteMarkers(mappings as LinkedSubitemCheckboxMapping[], {
+      completionStatuses: this.plugin.sharedServices.status.getDoneStatuses(),
+      normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+    });
   }
 }

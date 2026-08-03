@@ -82,6 +82,7 @@ import {
   type TpsBaseLineCreationPlan,
 } from '../../views/base-line-creation-plan';
 import type { CustomProperty } from '../../types';
+import { normalizeLinkedSubitemMappings } from '../../utils/linked-subitem-mapping';
 import {
   isEntityReferenceProperty,
   mergeEntityReferenceList,
@@ -246,6 +247,7 @@ type TaskDropPlan = {
   changes: string[];
   filterTags: string[];
   filterStatus: string | null;
+  mappingError: string | null;
   currentLine: string;
   nextLine: string;
   itemKind: 'task' | 'bullet';
@@ -596,11 +598,11 @@ export class TpsListView extends BasesView {
       viewType: this.type,
       viewName: this.getConfiguredBaseViewName(),
     });
+    const creationCheckboxMappings = this.getGcmCheckboxMappings();
     const linePlan = resolveTpsBaseLineCreationPlan(creationFilterRoots, {
       resolveValue: (value) => this.resolveBaseContextToken(value) ?? '',
-      defaultOpenStatus: 'todo',
-      defaultDoneStatus: 'complete',
-      isDoneStatus: (status) => this.getDoneStatuses().has(this.normalizeTaskStatus(status)),
+      orderedMappedStatuses: creationCheckboxMappings.flatMap((mapping) => mapping.statuses),
+      isDoneStatus: (status) => this.classifyDoneStatus(status),
       isWorkflowStatusProperty: (property) => {
         const normalized = String(property || '').trim().toLowerCase();
         return normalized === 'task.status'
@@ -620,13 +622,18 @@ export class TpsListView extends BasesView {
     const lineKind = linePlan.kind;
     if (lineKind) {
       const lineDefaults = this.getTaskCreationDefaultsFromPlan(linePlan);
-      if (lineKind === 'task' && lineDefaults.status && !this.getCheckboxStateForStatus(lineDefaults.status)) {
+      const desiredTaskStatus = lineKind === 'task'
+        ? lineDefaults.status || this.getDefaultMappedTaskStatus('open')
+        : null;
+      if (lineKind === 'task' && (!desiredTaskStatus || !this.getCheckboxStateForStatus(desiredTaskStatus))) {
         flowWarn('CreateFile', 'blocked', {
           reason: 'unmapped-status',
-          status: lineDefaults.status,
+          status: desiredTaskStatus || '',
           viewName: this.getConfiguredBaseViewName(),
         });
-        new Notice(`Could not create the task because status "${lineDefaults.status}" has no checkbox mapping.`);
+        new Notice(desiredTaskStatus
+          ? `Could not create the task because status "${desiredTaskStatus}" has no checkbox mapping.`
+          : 'Could not create the task because GCM has no authoritative mapped open status.');
         return;
       }
       flow('CreateFile', 'route-root-line', {
@@ -1389,32 +1396,12 @@ export class TpsListView extends BasesView {
     return plugin?.settings || this.getGcmApi()?.settings || null;
   }
 
-  private getDefaultCheckboxMappings(): Array<{ checkboxState: string; statuses: string[]; toggleTargetStatus?: string; icon?: string; label?: string }> {
-    return [
-      { checkboxState: '[ ]', statuses: ['todo'], toggleTargetStatus: 'complete', icon: 'square', label: 'Todo' },
-      { checkboxState: '[x]', statuses: ['complete'], toggleTargetStatus: 'todo', icon: 'check', label: 'Complete' },
-      { checkboxState: '[\\]', statuses: ['working'], toggleTargetStatus: 'complete', icon: 'slash', label: 'Working' },
-      { checkboxState: '[?]', statuses: ['holding'], toggleTargetStatus: 'todo', icon: 'help-circle', label: 'Holding' },
-      { checkboxState: '[-]', statuses: ['wont-do'], toggleTargetStatus: 'todo', icon: 'minus', label: 'Wont do' },
-    ];
-  }
-
   private getGcmCheckboxMappings(): Array<{ checkboxState: string; statuses: string[]; toggleTargetStatus?: string; icon?: string; label?: string }> {
     const configured = this.getGcmSettings()?.linkedSubitemCheckboxMappings;
-    const source = Array.isArray(configured) && configured.length > 0
-      ? configured
-      : this.getDefaultCheckboxMappings();
-    return source
-      .map((entry: any) => ({
-        checkboxState: this.normalizeCheckboxState(String(entry?.checkboxState || '[ ]')),
-        statuses: Array.isArray(entry?.statuses)
-          ? entry.statuses.map((status: unknown) => String(status ?? '').trim().toLowerCase()).filter(Boolean)
-          : [],
-        toggleTargetStatus: String(entry?.toggleTargetStatus || '').trim() || undefined,
-        icon: String(entry?.icon || '').trim() || undefined,
-        label: String(entry?.label || '').trim() || undefined,
-      }))
-      .filter((entry) => entry.checkboxState && entry.statuses.length > 0);
+    return normalizeLinkedSubitemMappings(configured, {
+      enforceStrictDefaults: false,
+      normalizeStatus: (value) => this.normalizeTaskStatus(value),
+    });
   }
 
   private normalizeCheckboxState(rawState: string): string {
@@ -1423,6 +1410,22 @@ export class TpsListView extends BasesView {
 
   private getStatusForCheckboxState(rawState: string): string {
     return this.normalizeTaskStatus(getKanbanStatusForCheckboxState(rawState, this.getGcmCheckboxMappings()));
+  }
+
+  private resolveMappedTaskCheckbox(task: OpenTaskSubitem): { checkboxState: string; status: string } | null {
+    if (task.itemKind === 'bullet' || task.itemKind === 'heading') return null;
+    const checkboxState = this.normalizeCheckboxState(task.checkboxState || '');
+    if (!checkboxState) return null;
+    const status = this.getStatusForCheckboxState(checkboxState);
+    return status ? { checkboxState, status } : null;
+  }
+
+  private getMappedCheckboxStateForTask(task: OpenTaskSubitem): string {
+    return this.resolveMappedTaskCheckbox(task)?.checkboxState || '';
+  }
+
+  private getMappedStatusForTask(task: OpenTaskSubitem): string {
+    return this.resolveMappedTaskCheckbox(task)?.status || '';
   }
 
   private normalizeTaskStatus(rawStatus: unknown): string {
@@ -1436,11 +1439,36 @@ export class TpsListView extends BasesView {
   }
 
   private getCheckboxStateForStatus(rawStatus: string | null): string | null {
-    return getKanbanCheckboxStateForStatus(rawStatus, this.getGcmCheckboxMappings());
+    return getKanbanCheckboxStateForStatus(
+      this.normalizeTaskStatus(rawStatus),
+      this.getGcmCheckboxMappings(),
+    );
   }
 
-  private getToggleCheckboxStateForTask(task: OpenTaskSubitem): string {
-    return getKanbanToggleCheckboxState(task.checkboxState || '[ ]', this.getGcmCheckboxMappings(), this.getDoneStatuses());
+  private getToggleCheckboxStateForTask(task: OpenTaskSubitem): string | null {
+    const currentState = this.getMappedCheckboxStateForTask(task);
+    return currentState
+      ? getKanbanToggleCheckboxState(currentState, this.getGcmCheckboxMappings())
+      : null;
+  }
+
+  private requestTaskCheckboxToggle(file: TFile, task: OpenTaskSubitem, checkboxEl: HTMLInputElement): void {
+    const currentState = this.getMappedCheckboxStateForTask(task);
+    const currentStatus = currentState ? this.getStatusForCheckboxState(currentState) : '';
+    const nextState = this.getToggleCheckboxStateForTask(task);
+    const expectedRawLine = String(task.rawLine || '');
+    if (!currentState || !currentStatus || !nextState || !expectedRawLine) {
+      checkboxEl.checked = this.classifyDoneStatus(currentStatus) === true;
+      flowWarn('TaskCheckbox', 'toggle:blocked', {
+        path: file.path,
+        line: task.line,
+        checkboxState: currentState,
+        reason: expectedRawLine ? 'unmapped-toggle-target' : 'missing-source-revision',
+      });
+      new Notice('Could not toggle this task because GCM has no valid target mapping.');
+      return;
+    }
+    void this.updateTaskCheckboxState(file, task.line, nextState, currentState, expectedRawLine);
   }
 
   private getBaseSourcePath(): string | null {
@@ -2171,14 +2199,14 @@ export class TpsListView extends BasesView {
           false,
           documentLines,
         ).openTasks;
-        const doneStatuses = this.getDoneStatuses();
         const enrichedAllTasks = allTasks.map((task: OpenTaskSubitem) => {
-          const normalized = { ...task, checkboxState: task.checkboxState || '[ ]' };
+          const normalized = { ...task };
           return { ...normalized, displayText: this.getTaskVisibleTitle(normalized) };
         });
-        const openCandidates = enrichedAllTasks.filter((task) => !doneStatuses.has(
-          this.getStatusForCheckboxState(task.checkboxState || '[ ]'),
-        ));
+        const openCandidates = enrichedAllTasks.filter((task) => {
+          const status = this.getMappedStatusForTask(task);
+          return !!status && this.classifyDoneStatus(status) === false;
+        });
         const normalizedLimit = Number.isFinite(Number(limit))
           ? Math.max(0, Math.floor(Number(limit)))
           : openCandidates.length;
@@ -2211,7 +2239,6 @@ export class TpsListView extends BasesView {
     documentLines: readonly MarkdownDocumentLine[] = scanMarkdownDocumentLines(content),
   ): { openTasks: OpenTaskSubitem[]; overflowCount: number } {
     const tasks: OpenTaskSubitem[] = [];
-    const doneStatuses = this.getDoneStatuses();
     const hierarchyStack: Array<{ line: number; indent: number }> = [];
     documentLines.forEach((documentLine) => {
       if (!documentLine.isContent) {
@@ -2234,8 +2261,10 @@ export class TpsListView extends BasesView {
       const parsed = includeHeadings ? parseTpsListHeadingLine(line) ?? this.parseLineItem(line, includeBullets) : this.parseLineItem(line, includeBullets);
       if (!parsed) return;
       const checkboxState = parsed.itemKind === 'heading' ? undefined : parsed.checkboxState;
-      const mappedStatus = parsed.itemKind === 'task' ? this.getStatusForCheckboxState(checkboxState || '[ ]') : '';
-      if (parsed.itemKind === 'task' && !includeDone && doneStatuses.has(mappedStatus)) return;
+      const mappedStatus = parsed.itemKind === 'task'
+        ? this.getMappedStatusForTask({ itemKind: 'task', line: lineNumber, checkboxState, text: parsed.text })
+        : '';
+      if (parsed.itemKind === 'task' && !includeDone && this.classifyDoneStatus(mappedStatus) !== false) return;
       const inlineFields = this.extractTaskInlineFields(parsed.text);
       const text = this.cleanTaskText(parsed.text);
       if (!text) return;
@@ -2754,6 +2783,27 @@ export class TpsListView extends BasesView {
     return normalized === this.normalizeInlinePropertyKey(String(configuredKey || ''));
   }
 
+  private getWorkflowStatusPropertyKey(): string {
+    return String(this.getGcmServices()?.status?.getStatusPropertyKey?.() || '').trim();
+  }
+
+  private getRelationalStatusPropertyKey(): string {
+    return String(this.getGcmServices()?.status?.getRelationalStatusPropertyKey?.() || '').trim();
+  }
+
+  private getWorkflowStatusFieldKeysToClear(): string[] {
+    const workflowKey = this.getWorkflowStatusPropertyKey();
+    const relationalKey = this.normalizeInlinePropertyKey(this.getRelationalStatusPropertyKey());
+    return Array.from(new Set([
+      workflowKey,
+      'task.status',
+      'checkboxStatus',
+      ...(this.normalizeInlinePropertyKey(workflowKey) === 'status' ? ['status'] : []),
+    ].map((key) => String(key || '').trim()).filter((key) => (
+      !!key && this.normalizeInlinePropertyKey(key) !== relationalKey
+    ))));
+  }
+
   private isRelationalStatusPropertyReference(
     propName: string | null | undefined,
   ): boolean {
@@ -3261,10 +3311,16 @@ export class TpsListView extends BasesView {
       return true;
     }
 
-    const status = this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo';
-    if (!filter.includeDone && this.getDoneStatuses().has(status)) return false;
-    if (filter.excludeStatuses.has(status)) return false;
-    if (filter.statuses.size && !filter.statuses.has(status)) return false;
+    const status = this.getMappedStatusForTask(task);
+    if (!status) {
+      // A structurally valid task may still participate in kind/tag/formula
+      // queries, but it must never be guessed into a workflow-status branch.
+      if (structuredMatch !== true) return false;
+    } else {
+      if (!filter.includeDone && this.classifyDoneStatus(status) !== false) return false;
+      if (filter.excludeStatuses.has(status)) return false;
+      if (filter.statuses.size && !filter.statuses.has(status)) return false;
+    }
     const taskTags = new Set(this.getTaskInlineValues(task, 'tags').map((tag) => tag.toLowerCase()));
     for (const tag of filter.excludeTags) {
       if (taskTags.has(tag)) return false;
@@ -3401,6 +3457,10 @@ export class TpsListView extends BasesView {
       return evaluateOrderedFilterChildren(this.asArray(children), 'or', (child) => this.evaluateTaskFilterNode(child, task, file));
     }
     if (Object.prototype.hasOwnProperty.call(record, 'not')) {
+      if (
+        !this.getMappedStatusForTask(task)
+        && this.filterNodeUsesWorkflowStatus(record.not)
+      ) return false;
       const result = this.evaluateTaskFilterNode(record.not, task, file);
       return result == null ? null : !result;
     }
@@ -3412,6 +3472,14 @@ export class TpsListView extends BasesView {
     const raw = String(rawExpr || '').trim();
     const isNegated = raw.startsWith('!');
     const expr = (isNegated ? raw.slice(1) : raw).trim();
+    const workflowMatch = expr.match(
+      /^((?:task\.)?(?:status|checkboxstatus|open|isopen|done|isdone|completed|complete))\b/iu,
+    );
+    if (
+      workflowMatch
+      && !this.isRelationalStatusPropertyReference(workflowMatch[1])
+      && (task.itemKind === 'bullet' || task.itemKind === 'heading' || !this.getMappedStatusForTask(task))
+    ) return false;
     const result = this.evaluatePositiveTaskFilterString(expr, task, file);
     return result == null ? null : isNegated ? !result : result;
   }
@@ -3442,31 +3510,34 @@ export class TpsListView extends BasesView {
       return kindMatch[2].startsWith('!') ? !matched : matched;
     }
 
-    const headingWorkflowMatch = expr.match(
+    const workflowMatch = expr.match(
       /^((?:task\.)?(?:status|checkboxstatus|open|isopen|done|isdone|completed|complete))\b/iu,
     );
     if (
-      task.itemKind === 'heading'
-      && headingWorkflowMatch
-      && !this.isRelationalStatusPropertyReference(headingWorkflowMatch[1])
+      (task.itemKind === 'bullet' || task.itemKind === 'heading')
+      && workflowMatch
+      && !this.isRelationalStatusPropertyReference(workflowMatch[1])
     ) return false;
-    const status = this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo';
+    const status = this.getMappedStatusForTask(task);
+    const hasMappedStatus = !!status;
     const booleanMatch = expr.match(
       /^(?:task\.)?(open|isopen|done|isdone|completed|complete)\s*(==|=|!=|!==|is|equals?)\s*(true|false|1|0)$/i,
     );
     if (booleanMatch) {
       const isOpenProperty = ['open', 'isopen'].includes(booleanMatch[1].toLowerCase());
+      const isDone = this.classifyDoneStatus(status);
+      if (isDone == null) return false;
       const actual = isOpenProperty
-        ? !this.getDoneStatuses().has(status)
-        : this.getDoneStatuses().has(status);
+        ? hasMappedStatus && !isDone
+        : hasMappedStatus && isDone;
       const expected = ['true', '1'].includes(booleanMatch[3].toLowerCase());
       const matched = actual === expected;
       return booleanMatch[2].startsWith('!') ? !matched : matched;
     }
 
     if (!isRelationalStatusFilterExpression(expr, this.getGcmSettings()?.properties)) {
-      const statusResult = this.evaluateTaskValueFilterExpression(expr, 'status', [status], false);
-      if (statusResult != null) return statusResult;
+      const statusResult = this.evaluateTaskValueFilterExpression(expr, 'status', status ? [status] : [], false);
+      if (statusResult != null) return hasMappedStatus ? statusResult : false;
     }
     const tagsResult = this.evaluateTaskValueFilterExpression(expr, 'tags', this.getTaskInlineValues(task, 'tags'), false);
     if (tagsResult != null) return tagsResult;
@@ -3592,7 +3663,8 @@ export class TpsListView extends BasesView {
       && !this.isRelationalStatusPropertyReference(propRaw)
     ) {
       if (task.itemKind === 'heading') return [];
-      return [this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo'];
+      const status = this.getMappedStatusForTask(task);
+      return status ? [status] : null;
     }
     if (['tag', 'tags'].includes(normalized)) {
       return this.getTaskInlineValues(task, 'tags').map((tag) => tag.toLowerCase());
@@ -3871,9 +3943,12 @@ export class TpsListView extends BasesView {
             || normalized === 'mixed';
       });
     } else if (['open', 'isopen', 'done', 'isdone', 'completed', 'complete'].includes(normalizedProp)) {
-      if (task.itemKind === 'heading') return false;
-      const status = this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo';
-      const isOpen = !this.getDoneStatuses().has(status);
+      if (task.itemKind === 'bullet' || task.itemKind === 'heading') return false;
+      const status = this.getMappedStatusForTask(task);
+      if (!status) return false;
+      const isDone = this.classifyDoneStatus(status);
+      if (isDone == null) return false;
+      const isOpen = !isDone;
       const actual = ['open', 'isopen'].includes(normalizedProp) ? isOpen : !isOpen;
       const expected = values.find((value) => ['true', 'false', '1', '0'].includes(value.toLowerCase()));
       result = expected == null ? null : actual === ['true', '1'].includes(expected.toLowerCase());
@@ -3882,8 +3957,9 @@ export class TpsListView extends BasesView {
       && ['status', 'checkboxstatus'].includes(normalizedProp)
       && !this.isRelationalStatusPropertyReference(propRaw)
     ) {
-      if (task.itemKind === 'heading') return false;
-      const status = this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo';
+      if (task.itemKind === 'bullet' || task.itemKind === 'heading') return false;
+      const status = this.getMappedStatusForTask(task);
+      if (!status) return false;
       if (this.isImplicitEmptyValueFilter(operator, values)) {
         result = false;
       } else if (this.isImplicitNotEmptyValueFilter(operator, values)) {
@@ -4040,7 +4116,8 @@ export class TpsListView extends BasesView {
     const normalized = this.normalizeInlinePropertyKey(this.getTaskInlinePropertyName(propName));
     if (this.isStatusPropertyName(propName)) {
       if (task.itemKind !== 'task') return ['ungrouped'];
-      return [this.getLaneIdForStatus(this.getStatusForCheckboxState(task.checkboxState || '[ ]'))];
+      const status = this.getMappedStatusForTask(task);
+      return status ? [this.getLaneIdForStatus(status)] : ['ungrouped'];
     }
     const values = this.getTaskInlineValues(task, normalized)
       .map((value) => normalized === 'scheduled' ? this.normalizeScheduledLaneValue(value) : value);
@@ -4172,10 +4249,19 @@ export class TpsListView extends BasesView {
       ...readTaskLineTags(task.text),
       ...this.getTaskInlineValues(task, 'tags'),
     ].map((tag) => tag.startsWith('#') ? tag : `#${tag}`)));
-    const status = task.itemKind === 'task'
-      ? this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo'
-      : '';
-    const done = task.itemKind === 'task' && this.getDoneStatuses().has(status);
+    const isTask = itemKind === 'task';
+    const mappedCheckboxState = isTask ? this.getMappedCheckboxStateForTask(task) : '';
+    const status = mappedCheckboxState ? this.getStatusForCheckboxState(mappedCheckboxState) : '';
+    const hasMappedStatus = isTask && !!status;
+    const doneClassification = hasMappedStatus ? this.classifyDoneStatus(status) : null;
+    const hasCompletionClassification = doneClassification != null;
+    const done = doneClassification === true;
+    const rowInline = { ...inline };
+    for (const key of Object.keys(rowInline)) {
+      if (['checkboxstate', 'checkboxstatus', 'open', 'isopen', 'done', 'isdone', 'completed', 'complete'].includes(
+        this.normalizeInlinePropertyKey(key),
+      )) delete rowInline[key];
+    }
     const explicitKinds = this.getTaskExplicitKindValues(task);
     const kinds = Array.from(new Set(
       [itemKind, ...explicitKinds]
@@ -4183,7 +4269,7 @@ export class TpsListView extends BasesView {
         .filter(Boolean),
     ));
     const row: Record<string, unknown> = {
-      ...inline,
+      ...rowInline,
       kind: itemKind,
       itemKind,
       itemType: itemKind,
@@ -4195,15 +4281,19 @@ export class TpsListView extends BasesView {
       lineNumber: task.line,
       path: file.path,
       tags,
-      ...(task.itemKind === 'task' ? {
-        checkboxState: task.checkboxState || '[ ]',
+      ...(hasMappedStatus ? {
+        checkboxState: mappedCheckboxState,
         checkboxStatus: status,
-        open: !done,
-        isOpen: !done,
-        done,
-        completed: done,
+        ...(hasCompletionClassification ? {
+          open: !done,
+          isOpen: !done,
+          done,
+          completed: done,
+        } : {}),
       } : {}),
     };
+    const taskRow = { ...row };
+    delete taskRow.status;
     const lineContext = {
       ...row,
       number: task.line,
@@ -4216,15 +4306,19 @@ export class TpsListView extends BasesView {
       file: fileContext,
       thisValue: this.createFormulaThisValue(),
       line: lineContext,
-      task: task.itemKind === 'task' ? {
-        ...row,
-        status,
-        checkboxState: task.checkboxState || '[ ]',
-        checkboxStatus: status,
-        open: !done,
-        isOpen: !done,
-        done,
-        completed: done,
+      task: isTask ? {
+        ...taskRow,
+        ...(hasMappedStatus ? {
+          status,
+          checkboxState: mappedCheckboxState,
+          checkboxStatus: status,
+          ...(hasCompletionClassification ? {
+            open: !done,
+            isOpen: !done,
+            done,
+            completed: done,
+          } : {}),
+        } : {}),
         tags,
         file: fileContext,
       } : null,
@@ -4329,20 +4423,37 @@ export class TpsListView extends BasesView {
     return Array.from(keys);
   }
 
-  /** Returns the set of "done" status values from GCM settings (or defaults). */
-  private getDoneStatuses(): Set<string> {
-    const gcmDoneStatuses = this.getGcmServices()?.status?.getDoneStatuses?.();
-    if (Array.isArray(gcmDoneStatuses) && gcmDoneStatuses.length > 0) {
-      return new Set(gcmDoneStatuses.map((status: unknown) => this.normalizeTaskStatus(status)).filter(Boolean));
-    }
+  /** Returns null when GCM cannot provide an authoritative completion snapshot. */
+  private getAuthoritativeDoneStatuses(): Set<string> | null {
+    const statusService = this.getGcmServices()?.status;
+    if (typeof statusService?.getDoneStatuses !== 'function') return null;
+    const gcmDoneStatuses = statusService.getDoneStatuses();
+    if (!Array.isArray(gcmDoneStatuses)) return null;
+    return new Set(gcmDoneStatuses.map((status: unknown) => this.normalizeTaskStatus(status)).filter(Boolean));
+  }
 
-    const firstWithDoneStatuses = this.getRelationshipSettingsSources().find(
-      (settings) => Array.isArray(settings?.recurrenceCompletionStatuses) && settings.recurrenceCompletionStatuses.length > 0,
-    );
-    const raw: string[] = firstWithDoneStatuses?.recurrenceCompletionStatuses?.length
-      ? firstWithDoneStatuses.recurrenceCompletionStatuses
-      : ['complete', 'wont-do'];
-    return new Set(raw.map((status: string) => this.normalizeTaskStatus(status)).filter(Boolean));
+  /** Returns only the authoritative done statuses exposed by GCM. */
+  private getDoneStatuses(): Set<string> {
+    return this.getAuthoritativeDoneStatuses() ?? new Set();
+  }
+
+  private classifyDoneStatus(rawStatus: unknown): boolean | null {
+    const status = this.normalizeTaskStatus(rawStatus);
+    if (!status) return null;
+    const doneStatuses = this.getAuthoritativeDoneStatuses();
+    return doneStatuses ? doneStatuses.has(status) : null;
+  }
+
+  private getDefaultMappedTaskStatus(kind: 'open' | 'done'): string | null {
+    const doneStatuses = this.getAuthoritativeDoneStatuses();
+    if (!doneStatuses) return null;
+    for (const mapping of this.getGcmCheckboxMappings()) {
+      for (const rawStatus of mapping.statuses) {
+        const status = this.normalizeTaskStatus(rawStatus);
+        if (status && (kind === 'done') === doneStatuses.has(status)) return status;
+      }
+    }
+    return null;
   }
 
   private async applyInlineTaskProperty(
@@ -4353,9 +4464,22 @@ export class TpsListView extends BasesView {
     sourceLaneValues: string[] = [],
   ): Promise<void> {
     const plan = await this.buildTaskDropPlan(file, line, propName, value, sourceLaneValues);
+    if (plan.mappingError) {
+      flowWarn('TaskDrop', 'blocked', {
+        reason: 'unmapped-status',
+        error: plan.mappingError,
+        path: file.path,
+        line,
+        propName,
+        value,
+      });
+      new Notice(plan.mappingError);
+      return;
+    }
     await this.applyInlineTaskDropPlan(file, line, propName, value, sourceLaneValues, {
       filterTags: plan.filterTags,
       filterStatus: plan.filterStatus,
+      currentLine: plan.currentLine,
       nextLine: plan.nextLine,
     });
   }
@@ -4368,6 +4492,18 @@ export class TpsListView extends BasesView {
     sourceLaneValues: string[] = [],
   ): Promise<boolean> {
     const plan = await this.buildTaskDropPlan(file, line, propName, value, sourceLaneValues);
+    if (plan.mappingError) {
+      flowWarn('TaskDrop', 'blocked', {
+        reason: 'unmapped-status',
+        error: plan.mappingError,
+        path: file.path,
+        line,
+        propName,
+        value,
+      });
+      new Notice(plan.mappingError);
+      return false;
+    }
     if (!plan.changes.length) {
       flowWarn('TaskDrop', 'no-change', {
         reason: 'empty-plan',
@@ -4410,8 +4546,7 @@ export class TpsListView extends BasesView {
       });
       return false;
     }
-    await this.applyInlineTaskDropPlan(file, line, propName, value, sourceLaneValues, plan);
-    return true;
+    return this.applyInlineTaskDropPlan(file, line, propName, value, sourceLaneValues, plan);
   }
 
   private async buildTaskDropPlan(
@@ -4434,14 +4569,26 @@ export class TpsListView extends BasesView {
     const currentLine = content.split(/\r?\n/)[targetLine - 1] ?? '';
     const parsedLine = this.parseLineItem(currentLine, true);
     const itemKind = parsedLine?.itemKind ?? 'task';
+    const requestsStatusChange = this.isStatusPropertyName(propName) && itemKind !== 'bullet';
+    const statusValue = requestsStatusChange ? String(value ?? '').trim() : null;
+    const statusCheckboxState = requestsStatusChange
+      ? this.getCheckboxStateForStatus(statusValue)
+      : null;
+    const filterCheckboxState = filterStatus && itemKind !== 'bullet'
+      ? this.getCheckboxStateForStatus(filterStatus)
+      : null;
+    const mappingError = requestsStatusChange && !statusCheckboxState
+      ? `Could not move this task: no checkbox mapping exists for status "${statusValue || '(empty)'}".`
+      : filterStatus && itemKind !== 'bullet' && !filterCheckboxState
+        ? `Could not move this task: no checkbox mapping exists for Base status "${filterStatus}".`
+        : null;
     let nextLine = currentLine;
 
     if (this.isStatusPropertyName(propName)) {
       if (itemKind === 'bullet') {
         changes.push('Leave status unchanged because bullets do not have checkbox status.');
       } else {
-        const checkbox = this.getCheckboxStateForStatus(value);
-        changes.push(`Set checkbox state for status "${displayValue}"${checkbox ? ` to ${checkbox}` : ''}.`);
+        changes.push(`Set checkbox state for status "${displayValue}"${statusCheckboxState ? ` to ${statusCheckboxState}` : ''}.`);
       }
     } else if (normalizedProp === 'tags') {
       changes.push(`Move task tag lane to #${this.normalizeWritableTaskTag(String(value ?? '')) || displayValue}.`);
@@ -4459,23 +4606,25 @@ export class TpsListView extends BasesView {
       changes.push(`Add Base filter tag ${displayTag}.`);
     }
     if (filterStatus && itemKind !== 'bullet') {
-      const checkbox = this.getCheckboxStateForStatus(filterStatus);
-      changes.push(`Set checkbox state for Base status filter "${filterStatus}"${checkbox ? ` to ${checkbox}` : ''}.`);
+      changes.push(`Set checkbox state for Base status filter "${filterStatus}"${filterCheckboxState ? ` to ${filterCheckboxState}` : ''}.`);
     } else if (filterStatus && itemKind === 'bullet') {
       changes.push(`Base status filter "${filterStatus}" applies to tasks only; bullet status will remain empty.`);
     } else if (!this.isStatusPropertyName(propName) && filter.statuses.size > 1) {
       changes.push(`Base allows multiple statuses (${Array.from(filter.statuses).join(', ')}), so status will not be guessed.`);
     }
-    nextLine = buildKanbanTaskDropLine({
-      line: currentLine,
-      propName,
-      value,
-      sourceLaneValues,
-      filterTags,
-      filterStatus,
-      getCheckboxStateForStatus: (status) => this.getCheckboxStateForStatus(status),
-      isStatusPropertyName: (name) => this.isStatusPropertyName(name),
-    });
+    nextLine = mappingError
+      ? currentLine
+      : buildKanbanTaskDropLine({
+          line: currentLine,
+          propName,
+          value,
+          sourceLaneValues,
+          filterTags,
+          statusCheckboxState,
+          filterCheckboxState,
+          statusFieldKeysToRemove: this.getWorkflowStatusFieldKeysToClear(),
+          isStatusPropertyName: (name) => this.isStatusPropertyName(name),
+        });
 
     changes.unshift(`${itemKind === 'bullet' ? 'Bullet' : 'Task'}: ${file.path}:${targetLine}`);
     changes.push(`Current line: ${currentLine}`);
@@ -4484,6 +4633,7 @@ export class TpsListView extends BasesView {
       changes,
       filterTags,
       filterStatus: itemKind === 'bullet' ? null : filterStatus,
+      mappingError,
       currentLine,
       nextLine,
       itemKind,
@@ -4502,10 +4652,11 @@ export class TpsListView extends BasesView {
     propName: string,
     value: string | null,
     sourceLaneValues: string[] = [],
-    plan: Pick<TaskDropPlan, 'filterTags' | 'filterStatus' | 'nextLine'>,
-  ): Promise<void> {
+    plan: Pick<TaskDropPlan, 'filterTags' | 'filterStatus' | 'currentLine' | 'nextLine'>,
+  ): Promise<boolean> {
     const targetLine = Math.max(1, Math.floor(Number(line || 1)));
-    let changed = false;
+    const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
+    let resolvedLine = targetLine;
     flow('TaskDrop', 'apply:start', {
       path: file.path,
       line: targetLine,
@@ -4517,28 +4668,44 @@ export class TpsListView extends BasesView {
     });
 
     await this.app.vault.process(file, (content) => {
-      const lines = content.split(/\r?\n/);
-      const index = targetLine - 1;
-      if (index < 0 || index >= lines.length) return content;
-      const current = lines[index];
+      const parts = splitLineItemContent(content);
+      const index = resolveExactLineRevisionIndex(parts.lines, targetLine - 1, plan.currentLine);
+      if (index < 0) {
+        mutation.outcome = 'stale';
+        return content;
+      }
+      const current = parts.lines[index] || '';
       if (!this.parseLineItem(current, true)) return content;
       const next = plan.nextLine;
       if (next === current) return content;
-      lines[index] = next;
-      changed = true;
-      return lines.join('\n');
+      parts.lines[index] = next;
+      resolvedLine = index + 1;
+      mutation.outcome = 'changed';
+      return `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`;
     });
 
-    if (changed) {
+    if (mutation.outcome === 'stale') {
+      flowWarn('TaskDrop', 'apply:stale-target', {
+        path: file.path,
+        requestedLine: targetLine,
+        propName,
+        value,
+      });
+      new Notice('The source line changed while the task drop confirmation was open.');
+      return false;
+    }
+    if (mutation.outcome === 'changed') {
       this.clearTaskCachesForPath(file.path);
       emitFilesUpdated(this.app, [file.path], 'tps-list');
     }
-    flow('TaskDrop', changed ? 'apply:done' : 'apply:no-change', {
+    flow('TaskDrop', mutation.outcome === 'changed' ? 'apply:done' : 'apply:no-change', {
       path: file.path,
-      line: targetLine,
+      requestedLine: targetLine,
+      resolvedLine,
       propName,
       value,
     });
+    return mutation.outcome === 'changed';
   }
 
   private getDisplayLaneWritableValues(displayLane: DisplayLaneGroup | null | undefined): string[] {
@@ -4618,7 +4785,9 @@ export class TpsListView extends BasesView {
       path: file.path,
       line: task.line,
       rawLine: '',
-      checkboxState: task.itemKind === 'bullet' ? undefined : task.checkboxState || '[ ]',
+      checkboxState: task.itemKind === 'bullet'
+        ? undefined
+        : this.getMappedCheckboxStateForTask(task) || undefined,
       text: this.getTaskVisibleTitle(task),
       sourceLaneValues: this.getDisplayLaneWritableValues(displayLane),
       propName,
@@ -4711,7 +4880,7 @@ export class TpsListView extends BasesView {
       path: active.path,
       line: active.line,
       rawLine: active.rawLine || '',
-      checkboxState: active.itemKind === 'bullet' ? undefined : active.checkboxState || '[ ]',
+      checkboxState: active.itemKind === 'bullet' ? undefined : active.checkboxState,
       text: active.text || '',
       sourceLaneValues: active.sourceLaneValues,
     };
@@ -4746,11 +4915,27 @@ export class TpsListView extends BasesView {
     return this.buildDisplayLaneGroups(groups).find((lane) => lane.id === displayLaneId) ?? null;
   }
 
-  private async updateTaskCheckboxState(file: TFile, line: number, checkboxState: string): Promise<void> {
+  private async updateTaskCheckboxState(
+    file: TFile,
+    line: number,
+    checkboxState: string,
+    expectedCurrentState: string,
+    expectedRawLine: string,
+  ): Promise<void> {
     const targetLine = Math.max(1, Math.floor(Number(line || 1)));
     const nextState = this.normalizeCheckboxState(checkboxState);
+    const expectedState = this.normalizeCheckboxState(expectedCurrentState);
+    if (!nextState || !this.getStatusForCheckboxState(nextState) || !expectedState || !expectedRawLine) {
+      flowWarn('TaskCheckbox', 'update:blocked', {
+        path: file.path,
+        line: targetLine,
+        reason: 'unmapped-checkbox-state',
+      });
+      return;
+    }
     let changed = false;
     let blockedReason = '';
+    let resolvedLine = targetLine;
     flow('TaskCheckbox', 'update:start', {
       path: file.path,
       line: targetLine,
@@ -4758,15 +4943,30 @@ export class TpsListView extends BasesView {
     });
 
     await this.app.vault.process(file, (content) => {
-      const lines = content.split(/\r?\n/);
-      const index = targetLine - 1;
-      if (index < 0 || index >= lines.length) {
-        blockedReason = 'line-out-of-range';
+      const parts = splitLineItemContent(content);
+      const index = resolveExactLineRevisionIndex(parts.lines, targetLine - 1, expectedRawLine);
+      if (index < 0) {
+        blockedReason = 'stale-source-revision';
         return content;
       }
-      const current = lines[index];
-      if (!/^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]*\]\s+/.test(current)) {
+      const current = parts.lines[index];
+      const taskMatch = current.match(/^\s*(?:[-*+]|\d+[.)])\s+(\[[^\]\r\n]*\])\s+/u);
+      if (!taskMatch) {
         blockedReason = 'not-task-line';
+        return content;
+      }
+      const currentState = this.normalizeCheckboxState(taskMatch[1]);
+      if (!currentState || !this.getStatusForCheckboxState(currentState)) {
+        blockedReason = 'unmapped-current-state';
+        return content;
+      }
+      if (expectedState && currentState !== expectedState) {
+        blockedReason = 'stale-checkbox-state';
+        return content;
+      }
+      const currentToggleTarget = getKanbanToggleCheckboxState(currentState, this.getGcmCheckboxMappings());
+      if (!currentToggleTarget || currentToggleTarget !== nextState) {
+        blockedReason = 'stale-toggle-mapping';
         return content;
       }
       const next = replaceKanbanTaskLineCheckboxState(current, nextState);
@@ -4774,9 +4974,10 @@ export class TpsListView extends BasesView {
         blockedReason = 'unchanged';
         return content;
       }
-      lines[index] = next;
+      parts.lines[index] = next;
+      resolvedLine = index + 1;
       changed = true;
-      return lines.join('\n');
+      return `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`;
     });
 
     if (changed) {
@@ -4786,6 +4987,7 @@ export class TpsListView extends BasesView {
     flow('TaskCheckbox', changed ? 'update:done' : 'update:no-change', {
       path: file.path,
       line: targetLine,
+      resolvedLine,
       nextState,
       reason: changed ? undefined : blockedReason || 'unknown',
     });
@@ -5875,6 +6077,25 @@ export class TpsListView extends BasesView {
     return Object.values(record).some((value) => this.filterTreeIncludesAdditiveKind(value));
   }
 
+  private filterNodeUsesWorkflowStatus(node: unknown): boolean {
+    if (!node) return false;
+    if (Array.isArray(node)) return node.some((child) => this.filterNodeUsesWorkflowStatus(child));
+    if (typeof node === 'string') {
+      const expr = node.trim().replace(/^!+\s*/u, '');
+      const match = expr.match(/^((?:task\.)?(?:status|checkboxstatus|open|isopen|done|isdone|completed|complete))\b/iu);
+      return !!match && !this.isRelationalStatusPropertyReference(match[1]);
+    }
+    if (typeof node !== 'object') return false;
+    const record = node as Record<string, unknown>;
+    const propRaw = String(record.property ?? record.field ?? '').trim();
+    if (propRaw) {
+      const normalized = this.normalizeInlinePropertyKey(propRaw.replace(/^(?:task|tps|kanban)\./iu, ''));
+      if (['open', 'isopen', 'done', 'isdone', 'completed', 'complete', 'checkboxstatus'].includes(normalized)) return true;
+      if (normalized === 'status' && !this.isRelationalStatusPropertyReference(propRaw)) return true;
+    }
+    return Object.values(record).some((value) => this.filterNodeUsesWorkflowStatus(value));
+  }
+
   private hasTaskDirectiveInFilterNode(node: unknown): boolean {
     if (!node) return false;
     if (Array.isArray(node)) return node.some((child) => this.hasTaskDirectiveInFilterNode(child));
@@ -6052,6 +6273,11 @@ export class TpsListView extends BasesView {
     if (['open', 'isopen'].includes(normalizedProp)) {
       filter.hasTaskDirective = true;
       filter.includeDone = values.some((value) => String(value).toLowerCase() === 'true' || String(value) === '1') ? false : filter.includeDone;
+      return;
+    }
+
+    if (['done', 'isdone', 'completed', 'complete'].includes(normalizedProp)) {
+      filter.hasTaskDirective = true;
       return;
     }
 
@@ -6443,7 +6669,7 @@ export class TpsListView extends BasesView {
 
     if ((normalized === 'status' || normalized === 'checkboxstatus') && workflowStatusReference) {
       if (task.itemKind === 'heading') return null;
-      const status = task.itemKind === 'bullet' ? 'bullet' : this.getStatusForCheckboxState(task.checkboxState || '[ ]') || 'todo';
+      const status = task.itemKind === 'bullet' ? 'bullet' : this.getMappedStatusForTask(task);
       return status ? {
         text: status,
         kind: 'status',
@@ -6626,7 +6852,34 @@ export class TpsListView extends BasesView {
       return;
     }
 
-    const defaults = resolvedCreationDefaults ?? this.getRootTaskCreationDefaults(effectiveTaskFilter, effectiveFilterRoots);
+    const inferredDefaults = resolvedCreationDefaults ?? this.getRootTaskCreationDefaults(effectiveTaskFilter, effectiveFilterRoots);
+    const laneOwnsStatus = !!propName
+      && this.isStatusPropertyName(propName)
+      && !!String(targetSelection.value || '').trim();
+    const defaults = itemKind === 'task' && !laneOwnsStatus && !inferredDefaults.status
+      ? { ...inferredDefaults, status: this.getDefaultMappedTaskStatus('open') }
+      : inferredDefaults;
+    const taskLine = this.buildRootTaskLine(title, propName, targetSelection.value, effectiveTaskFilter, itemKind, defaults);
+    if (!taskLine) {
+      const desiredStatus = propName && this.isStatusPropertyName(propName) && String(targetSelection.value || '').trim()
+        ? String(targetSelection.value)
+        : defaults.status || '(unavailable)';
+      flowWarn('CreateRootTask', 'unmapped-status', {
+        lane: displayLane.label,
+        itemKind,
+        status: desiredStatus,
+      });
+      new Notice(`Could not create the task because status "${desiredStatus}" has no checkbox mapping.`);
+      return;
+    }
+    const desiredTaskStatus = itemKind === 'task'
+      ? this.normalizeTaskStatus(
+          laneOwnsStatus ? targetSelection.value : defaults.status,
+        )
+      : '';
+    const plannedCheckboxState = itemKind === 'task'
+      ? this.normalizeCheckboxState(this.parseLineItem(taskLine, true)?.checkboxState || '')
+      : '';
     const targetFile = await this.resolveRootTaskTargetFile(defaults);
     if (!targetFile) {
       flowWarn('CreateRootTask', 'missing-target', {
@@ -6639,7 +6892,6 @@ export class TpsListView extends BasesView {
       return;
     }
 
-    const taskLine = this.buildRootTaskLine(title, propName, targetSelection.value, effectiveTaskFilter, itemKind, defaults);
     flow('CreateRootTask', 'write', {
       path: targetFile.path,
       lane: displayLane.label,
@@ -6653,8 +6905,23 @@ export class TpsListView extends BasesView {
     });
     this.formulaNow = new Date();
     this.taskFormulaSessions = new WeakMap<OpenTaskSubitem, TpsFormulaRowSession>();
-    let blockedReason: 'mismatch' | 'formula-unresolved' | null = null;
+    let blockedReason: 'mismatch' | 'formula-unresolved' | 'mapping-changed' | null = null;
     await this.app.vault.process(targetFile, (content) => {
+      if (itemKind === 'task') {
+        const liveState = this.getCheckboxStateForStatus(desiredTaskStatus);
+        const liveStatus = plannedCheckboxState
+          ? this.getStatusForCheckboxState(plannedCheckboxState)
+          : '';
+        if (
+          !desiredTaskStatus
+          || !plannedCheckboxState
+          || liveState !== plannedCheckboxState
+          || liveStatus !== desiredTaskStatus
+        ) {
+          blockedReason = 'mapping-changed';
+          return content;
+        }
+      }
       const nextLineNumber = this.getAppendedLineNumber(content);
       const creationFilterMatch = this.lineMatchesCreationFilters(
         taskLine,
@@ -6683,13 +6950,17 @@ export class TpsListView extends BasesView {
       flowWarn('CreateRootTask', 'blocked', {
         reason: blockedReason === 'mismatch'
           ? 'prospective-line-does-not-match-filters'
-          : 'formula-filter-unresolved',
+          : blockedReason === 'mapping-changed'
+            ? 'checkbox-mapping-changed'
+            : 'formula-filter-unresolved',
         path: targetFile.path,
         itemKind,
       });
       new Notice(blockedReason === 'mismatch'
         ? 'TPS List did not create the item because the resulting line would not match this view.'
-        : 'TPS List did not create the item because its formula filter could not be evaluated reliably.');
+        : blockedReason === 'mapping-changed'
+          ? 'TPS List did not create the task because its checkbox mapping changed before the write.'
+          : 'TPS List did not create the item because its formula filter could not be evaluated reliably.');
       return;
     }
 
@@ -6709,7 +6980,7 @@ export class TpsListView extends BasesView {
     taskFilter: KanbanTaskRootFilter,
     itemKind: KanbanRootLineKind,
     defaults = this.getRootTaskCreationDefaults(taskFilter),
-  ): string {
+  ): string | null {
     return buildKanbanRootTaskLine({
       title,
       propName,
@@ -6781,7 +7052,7 @@ export class TpsListView extends BasesView {
       headingLevel: plan.kind === 'heading'
         ? Math.max(1, Math.min(6, Number(plan.headingLevel) || 1)) as 1 | 2 | 3 | 4 | 5 | 6
         : undefined,
-      includeDone: plan.status ? this.getDoneStatuses().has(this.normalizeTaskStatus(plan.status)) : undefined,
+      includeDone: plan.status ? this.classifyDoneStatus(plan.status) ?? undefined : undefined,
       status: plan.status ? this.normalizeTaskStatus(plan.status) : null,
       targetPath: plan.targetPath,
       targetPathSpecified: plan.targetPathSpecified,
@@ -6970,7 +7241,10 @@ export class TpsListView extends BasesView {
       return { includeDone: false, inlineFields: new Map(), tags: new Set(), excludedStatuses: new Set(), excludedTags: new Set() };
     }
     if (/^(?:task\.)?(?:done|isdone|completed|complete)\s*(?:==|=)\s*(true|1)$/i.test(expr)) {
-      return { includeDone: true, status: 'complete', inlineFields: new Map(), tags: new Set(), excludedStatuses: new Set(), excludedTags: new Set() };
+      const doneStatus = this.getDefaultMappedTaskStatus('done');
+      return doneStatus
+        ? { includeDone: true, status: doneStatus, inlineFields: new Map(), tags: new Set(), excludedStatuses: new Set(), excludedTags: new Set() }
+        : null;
     }
     return (
       isRelationalStatusFilterExpression(expr, this.getGcmSettings()?.properties)
@@ -7473,7 +7747,7 @@ export class TpsListView extends BasesView {
     }
     if (normalized === 'status' && !this.isRelationalStatusPropertyReference(raw)) {
       if (item.task.itemKind === 'heading') return '';
-      return item.task.itemKind === 'bullet' ? 'bullet' : (this.getStatusForCheckboxState(item.task.checkboxState || '[ ]') || 'todo');
+      return item.task.itemKind === 'bullet' ? 'bullet' : this.getMappedStatusForTask(item.task);
     }
     if (normalized === 'kind' || normalized === 'itemkind' || normalized === 'itemtype') {
       return item.task.itemKind === 'heading' ? `h${item.task.headingLevel || 1}` : item.task.itemKind === 'bullet' ? 'bullet' : 'task';
@@ -7878,6 +8152,8 @@ export class TpsListView extends BasesView {
     const { file, task } = item;
     const taskTitle = this.getTaskVisibleTitle(task);
     const isBullet = task.itemKind === 'bullet';
+    const mappedCheckboxState = isBullet ? '' : this.getMappedCheckboxStateForTask(task);
+    const mappedStatus = mappedCheckboxState ? this.getStatusForCheckboxState(mappedCheckboxState) : '';
     const row = parent.createEl('li', {
       cls: 'tps-list-native-row tps-list-native-row--task',
       attr: { title: `${file.path}:${task.line}` },
@@ -7899,7 +8175,7 @@ export class TpsListView extends BasesView {
       row.dataset.tpsGcmContext = 'kanban-task';
       row.dataset.tpsKanbanPath = file.path;
       row.dataset.tpsKanbanLine = String(task.line);
-      row.dataset.tpsKanbanCheckboxState = task.checkboxState || '[ ]';
+      row.dataset.tpsKanbanCheckboxState = mappedCheckboxState;
     }
 
     if (isBullet) {
@@ -7915,11 +8191,13 @@ export class TpsListView extends BasesView {
           type: 'checkbox',
           role: 'checkbox',
           'aria-label': `Toggle task: ${taskTitle}`,
-          'data-checkbox-state': task.checkboxState || '[ ]',
-          'data-checkbox-marker': this.getCheckboxMarker(task.checkboxState || '[ ]'),
+          'data-checkbox-state': mappedCheckboxState,
+          'data-checkbox-marker': this.getCheckboxMarker(mappedCheckboxState),
         },
       });
-      checkbox.checked = this.getDoneStatuses().has(this.getStatusForCheckboxState(task.checkboxState || '[ ]'));
+      checkbox.checked = this.classifyDoneStatus(mappedStatus) === true;
+      checkbox.disabled = !mappedStatus;
+      if (!mappedStatus) checkbox.title = 'Checkbox status is unavailable because this marker is not mapped by GCM.';
       checkbox.addEventListener('pointerdown', (event: PointerEvent) => {
         event.stopPropagation();
       });
@@ -7929,7 +8207,7 @@ export class TpsListView extends BasesView {
       checkbox.addEventListener('change', (event: Event) => {
         event.preventDefault();
         event.stopPropagation();
-        void this.updateTaskCheckboxState(file, task.line, this.getToggleCheckboxStateForTask(task));
+        this.requestTaskCheckboxToggle(file, task, checkbox);
       });
     }
 

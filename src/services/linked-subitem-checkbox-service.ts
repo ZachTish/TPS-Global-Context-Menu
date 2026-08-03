@@ -1,4 +1,4 @@
-import { MarkdownView, Menu, Notice, TFile, setIcon } from 'obsidian';
+import { MarkdownView, Menu, Notice, TFile, parseYaml, setIcon } from 'obsidian';
 import { RangeSetBuilder, StateEffect } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate, WidgetType } from '@codemirror/view';
 import type TPSGlobalContextMenuPlugin from '../main';
@@ -9,12 +9,20 @@ import { resolveLinkTargetToFile } from './link-target-service';
 import { ViewModeService } from './view-mode-service';
 import type { BodySubitemLink } from './subitem-types';
 import { SubitemLineModelService, type SubitemLineModel, type PropertyPill } from './subitem-line-model';
-import { buildLinkedSubitemRow, getIconNameForState } from './linked-subitem-row-builder';
+import { buildLinkedSubitemRow, getIconNameForModel } from './linked-subitem-row-builder';
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { TextInputModal } from '../modals/text-input-modal';
-import { getCheckboxStateMarker, normalizeCheckboxStateToken } from '../utils/checkbox-state';
+import { getCheckboxStateMarker } from '../utils/checkbox-state';
+import {
+  mapSubitemCheckboxStateToStatus,
+  normalizeLinkedSubitemCheckboxState,
+} from '../utils/linked-subitem-mapping';
 import { isEntityReferenceProperty } from '../utils/entity-property';
 import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
+import {
+  resolveLinkedSubitemMutationLineIndex,
+  runGuardedLinkedSubitemMutation,
+} from './linked-subitem-checkbox-mutation';
 
 const VIRTUAL_CHECKBOX_CLASS = 'tps-gcm-linked-subitem-checkbox';
 const CM_WIDGET_CLASS = 'tps-gcm-linked-subitem-cm-widget';
@@ -73,7 +81,7 @@ class LinkedSubitemRowWidget extends WidgetType {
       checkbox.dataset.linkedSubitemState = this.model.checkboxState || '[ ]';
       checkbox.className = `${VIRTUAL_CHECKBOX_CLASS} state-${this.model.visualState}`;
       checkbox.innerHTML = '';
-      setIcon(checkbox, getIconNameForState(this.model.checkboxState || '[ ]'));
+      setIcon(checkbox, getIconNameForModel(this.model));
     }
     
     return true;
@@ -256,22 +264,14 @@ export class LinkedSubitemCheckboxService {
     const currentState = this.mapStatusToCheckboxState(currentStatus);
     const nextStatus = this.getToggleTargetForState(currentState, currentStatus);
     if (!nextStatus) return false;
-
-    const statusKey = this.getStatusKey();
-    await this.plugin.frontmatterMutationService.process(childFile, (fm) => {
-      fm[statusKey] = nextStatus;
-    });
-
-    await this.refreshReferencesForChild(childFile);
-    this.scheduleDecorateForActiveView();
-    this.refreshLivePreviewEditors();
-    new Notice(`Set "${childFile.basename}" to ${nextStatus}.`);
-    return true;
+    const nextState = this.mapStatusToCheckboxState(nextStatus);
+    if (!nextState) return false;
+    return await this.setLinkedSubitemCheckboxState(parentFile, childFile, nextState);
   }
 
   private async handleNativeCheckboxInSubitemLine(
     evt: MouseEvent,
-    checkboxEl: HTMLInputElement,
+    _checkboxEl: HTMLInputElement,
     taskHost: HTMLElement,
   ): Promise<boolean> {
     const view = this.resolveMarkdownViewForElement(taskHost);
@@ -291,20 +291,12 @@ export class LinkedSubitemCheckboxService {
     evt.stopImmediatePropagation();
 
     const currentStatus = this.getNormalizedStatus(childFile);
-    const currentState = this.mapStatusToCheckboxState(currentStatus);
+    const currentState = parsed.checkboxState || this.mapStatusToCheckboxState(currentStatus);
     const nextStatus = this.getToggleTargetForState(currentState, currentStatus);
     if (!nextStatus) return false;
-
-    const statusKey = this.getStatusKey();
-    await this.plugin.frontmatterMutationService.process(childFile, (fm) => {
-      fm[statusKey] = nextStatus;
-    });
-
-    await this.refreshReferencesForChild(childFile);
-    this.scheduleDecorate(view);
-    this.refreshLivePreviewEditors();
-    new Notice(`Set "${childFile.basename}" to ${nextStatus}.`);
-    return true;
+    const nextState = this.mapStatusToCheckboxState(nextStatus);
+    if (!nextState) return false;
+    return await this.setLinkedSubitemCheckboxState(parentFile, childFile, nextState, sourceLine);
   }
 
   private resolveMarkdownViewForElement(targetEl: HTMLElement): MarkdownView | null {
@@ -420,9 +412,19 @@ export class LinkedSubitemCheckboxService {
         const selected = Boolean(normalized && normalized === currentStatus);
         item.setTitle(selected ? `${status} — Selected` : status);
         item.setChecked(selected);
-        item.onClick(() => {
-          setSelectedStatus(status);
-          void this.setLinkedSubitemStatus(context.childFile, status);
+        item.onClick(async () => {
+          const checkboxState = this.mapStatusToCheckboxState(status);
+          if (!checkboxState) {
+            new Notice(`Configure a checkbox mapping for ${status} before applying it to a linked child.`);
+            return;
+          }
+          const changed = await this.setLinkedSubitemCheckboxState(
+            context.parentFile,
+            context.childFile,
+            checkboxState,
+            context.sourceLine,
+          );
+          if (changed) setSelectedStatus(status);
         });
       });
     }
@@ -560,12 +562,23 @@ export class LinkedSubitemCheckboxService {
   }
 
   async syncDerivedStatusForChildFromReferences(childFile: TFile, references: BodySubitemLink[]): Promise<boolean> {
-    const checkboxReference = references.find((reference) => reference.kind === 'checkbox' && !!reference.checkboxState);
-    const targetStatus = checkboxReference?.checkboxState ? this.getStatusForCheckboxState(checkboxReference.checkboxState) : '';
+    const checkboxReference = references.find((reference) => reference.kind === 'checkbox');
+    const targetStatus = checkboxReference
+      ? this.getStatusForCheckboxState(checkboxReference.checkboxState)
+      : '';
     const currentStatus = this.getNormalizedStatus(childFile);
     const statusKey = this.getStatusKey();
 
-    if (!targetStatus) {
+    if (checkboxReference && !targetStatus) {
+      logger.flowWarn('LinkedSubitemStatusSync', 'blocked', {
+        reason: 'unmapped-checkbox-reference',
+        childPath: childFile.path,
+        checkboxState: checkboxReference.checkboxState,
+      });
+      return false;
+    }
+
+    if (!checkboxReference) {
       if (!currentStatus) return false;
       await this.plugin.frontmatterMutationService.deleteKeys([childFile], [statusKey]);
       await this.refreshReferencesForChild(childFile);
@@ -1153,18 +1166,7 @@ export class LinkedSubitemCheckboxService {
   }
 
   private getStatusOptions(): string[] {
-    return this.plugin.sharedServices?.status?.getStatusOptions?.()
-      || ['todo', 'working', 'holding', 'wont-do', 'complete'];
-  }
-
-  private async setLinkedSubitemStatus(file: TFile, status: string): Promise<void> {
-    const normalizedStatus = String(status || '').trim();
-    if (!normalizedStatus) return;
-    await this.plugin.bulkEditService.setStatus([file], normalizedStatus);
-    await this.refreshReferencesForChild(file);
-    this.scheduleDecorateForActiveView();
-    this.refreshLivePreviewEditors();
-    new Notice(`Set "${file.basename}" to ${normalizedStatus}.`);
+    return this.plugin.sharedServices.status.getStatusOptions();
   }
 
   private openCustomCheckboxValueModal(context: {
@@ -1177,9 +1179,15 @@ export class LinkedSubitemCheckboxService {
       : null;
     const initialValue = getCheckboxStateMarker(currentToken || this.mapStatusToCheckboxState(this.getNormalizedStatus(context.childFile)));
     new TextInputModal(this.plugin.app, 'Checkbox value', initialValue, async (value) => {
-      const token = normalizeCheckboxStateToken(value);
+      const token = String(value ?? '') === ''
+        ? '[ ]'
+        : normalizeLinkedSubitemCheckboxState(value);
       if (!token) {
         new Notice('Use a single checkbox marker, for example ?, *, /, -, x, or blank.');
+        return;
+      }
+      if (!this.getStatusForCheckboxState(token)) {
+        new Notice(`Configure a status mapping for ${token} before applying it to a child note.`);
         return;
       }
       await this.setLinkedSubitemCheckboxState(context.parentFile, context.childFile, token, context.sourceLine);
@@ -1191,33 +1199,143 @@ export class LinkedSubitemCheckboxService {
     childFile: TFile,
     checkboxToken: string,
     sourceLine?: { file: TFile; lineNumber: number; rawLine: string },
-  ): Promise<void> {
-    let didWriteLine = false;
-    await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(parentFile, async (lines) => {
-      const lineIndex = this.resolveLinkedSubitemLineIndex(lines, parentFile, childFile, sourceLine);
-      if (lineIndex < 0) return false;
+  ): Promise<boolean> {
+    const normalizedToken = normalizeLinkedSubitemCheckboxState(checkboxToken);
+    if (!normalizedToken) return false;
+    const mappedStatus = this.getStatusForCheckboxState(normalizedToken);
+    if (!mappedStatus) {
+      logger.flowWarn('LinkedSubitemCheckbox', 'set:blocked', {
+        parentPath: parentFile.path,
+        childPath: childFile.path,
+        checkboxState: normalizedToken,
+        reason: 'unmapped-checkbox-state',
+      });
+      return false;
+    }
+    let previousStatus = '';
+    try {
+      previousStatus = await this.readAuthoritativeChildStatus(childFile);
+    } catch (error) {
+      logger.flowError('LinkedSubitemCheckbox', 'set:failed', error, {
+        parentPath: parentFile.path,
+        childPath: childFile.path,
+        checkboxState: normalizedToken,
+        mappedStatus,
+        reason: 'child-preflight-read-failed',
+      });
+      new Notice(`Could not verify "${childFile.basename}" before changing its checkbox.`);
+      return false;
+    }
+    const needsStatusWrite = previousStatus !== mappedStatus;
 
-      const currentLine = lines[lineIndex] || '';
-      const updatedLine = this.withCheckboxToken(currentLine, checkboxToken);
-      if (updatedLine === currentLine) return false;
+    let didResolveLine = false;
+    let lineNeededUpdate = false;
+    let lineIndex = -1;
+    let previousLine = '';
+    let updatedLine = '';
+    let mappingGuardBlocked = false;
+    const mutation = await runGuardedLinkedSubitemMutation({
+      needsChildWrite: needsStatusWrite,
+      writeParent: async () => {
+        const didWriteLine = await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(parentFile, async (lines) => {
+          if (this.getStatusForCheckboxState(normalizedToken) !== mappedStatus) {
+            mappingGuardBlocked = true;
+            return false;
+          }
+          lineIndex = this.resolveLinkedSubitemLineIndex(lines, parentFile, childFile, sourceLine);
+          if (lineIndex < 0) return false;
+          didResolveLine = true;
 
-      lines[lineIndex] = updatedLine;
-      didWriteLine = true;
-      return true;
+          previousLine = lines[lineIndex] || '';
+          updatedLine = this.withCheckboxToken(previousLine, normalizedToken);
+          lineNeededUpdate = updatedLine !== previousLine;
+          if (!lineNeededUpdate) return false;
+
+          lines[lineIndex] = updatedLine;
+          return true;
+        });
+        if (mappingGuardBlocked) return 'blocked';
+        if (!didResolveLine || (lineNeededUpdate && !didWriteLine)) return 'blocked';
+        return didWriteLine ? 'changed' : 'unchanged';
+      },
+      writeChild: async () => {
+        if (this.getStatusForCheckboxState(normalizedToken) !== mappedStatus) {
+          throw new Error('Linked-subitem checkbox mapping changed before the child status write.');
+        }
+        await this.plugin.bulkEditService.setStatus([childFile], mappedStatus, {
+          writeGuard: () => this.getStatusForCheckboxState(normalizedToken) === mappedStatus,
+        });
+      },
+      readAuthoritativeChild: async () => {
+        const actualStatus = await this.readAuthoritativeChildStatus(childFile);
+        if (actualStatus === mappedStatus) return 'target';
+        if (actualStatus === previousStatus) return 'previous';
+        return 'diverged';
+      },
+      restoreParent: async () => {
+        await this.restoreLinkedSubitemLine(parentFile, lineIndex, updatedLine, previousLine);
+      },
+      readAuthoritativeParent: async () => {
+        const raw = await this.plugin.subitemRelationshipSyncService.readMarkdownText(parentFile);
+        const currentLine = raw.split('\n')[lineIndex];
+        if (currentLine === previousLine) return 'previous';
+        if (currentLine === updatedLine) return 'updated';
+        return 'diverged';
+      },
     });
 
-    if (!didWriteLine) return;
-
-    const mappedStatus = this.getStatusForCheckboxState(checkboxToken);
-    if (mappedStatus) {
-      await this.plugin.bulkEditService.setStatus([childFile], mappedStatus);
+    if (!mutation.ok) {
+      const context = {
+        parentPath: parentFile.path,
+        childPath: childFile.path,
+        checkboxState: normalizedToken,
+        mappedStatus,
+        reason: mutation.reason,
+        parentRolledBack: mutation.parentRolledBack,
+      };
+      if (mutation.error !== undefined) {
+        logger.flowError('LinkedSubitemCheckbox', 'set:failed', mutation.error, context);
+      } else {
+        logger.flowWarn('LinkedSubitemCheckbox', 'set:blocked', context);
+      }
+      if (
+        mutation.reason === 'child-blocked'
+        || mutation.reason === 'child-failed'
+        || mutation.reason === 'child-diverged'
+      ) {
+        new Notice(mutation.parentChanged
+          ? `Could not update "${childFile.basename}"; restored the parent checkbox.`
+          : `Could not update "${childFile.basename}"; the parent checkbox was left unchanged.`);
+      } else if (mutation.reason === 'child-verification-failed') {
+        new Notice(`Could not verify "${childFile.basename}" after its update; the parent checkbox was not rolled back.`);
+      } else if (mutation.reason === 'parent-rollback-failed') {
+        new Notice(`Could not update "${childFile.basename}" and could not safely restore its parent checkbox.`);
+      }
+      return false;
     }
+
+    if (!mutation.changed) return false;
 
     await this.refreshReferencesForChild(childFile);
     this.scheduleRefreshForParentFile(parentFile);
     this.scheduleDecorateForActiveView();
     this.refreshLivePreviewEditors();
-    new Notice(`Set "${childFile.basename}" checkbox to ${checkboxToken}.`);
+    new Notice(`Set "${childFile.basename}" checkbox to ${normalizedToken}.`);
+    return true;
+  }
+
+  private async restoreLinkedSubitemLine(
+    parentFile: TFile,
+    lineIndex: number,
+    expectedLine: string,
+    previousLine: string,
+  ): Promise<void> {
+    if (lineIndex < 0 || !expectedLine) return;
+    await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(parentFile, async (lines) => {
+      if (lines[lineIndex] !== expectedLine) return false;
+      lines[lineIndex] = previousLine;
+      return true;
+    });
   }
 
   private resolveLinkedSubitemLineIndex(
@@ -1226,21 +1344,22 @@ export class LinkedSubitemCheckboxService {
     childFile: TFile,
     sourceLine?: { file: TFile; lineNumber: number; rawLine: string },
   ): number {
-    if (
-      sourceLine?.file.path === parentFile.path
-      && typeof lines[sourceLine.lineNumber] === 'string'
-      && lines[sourceLine.lineNumber] === sourceLine.rawLine
-    ) {
-      return sourceLine.lineNumber;
-    }
+    return resolveLinkedSubitemMutationLineIndex(
+      lines,
+      parentFile.path,
+      sourceLine ? {
+        parentPath: sourceLine.file.path,
+        lineNumber: sourceLine.lineNumber,
+        rawLine: sourceLine.rawLine,
+      } : undefined,
+      (line) => this.isLinkedSubitemLineForChild(line, parentFile, childFile),
+    );
+  }
 
-    for (let index = 0; index < lines.length; index += 1) {
-      const parsed = this.plugin.bodySubitemLinkService.parseLine(lines[index] || '');
-      if (!parsed) continue;
-      const linkedFile = this.resolveLinkedFile(parsed.linkTarget, parentFile.path);
-      if (linkedFile?.path === childFile.path) return index;
-    }
-    return -1;
+  private isLinkedSubitemLineForChild(line: string, parentFile: TFile, childFile: TFile): boolean {
+    const parsed = this.plugin.bodySubitemLinkService.parseLine(line);
+    if (!parsed) return false;
+    return this.resolveLinkedFile(parsed.linkTarget, parentFile.path)?.path === childFile.path;
   }
 
   private withCheckboxToken(line: string, checkboxToken: string): string {
@@ -1263,13 +1382,34 @@ export class LinkedSubitemCheckboxService {
     return this.subitemLineModelService.getNormalizedStatus(file);
   }
 
-  private mapStatusToCheckboxState(status: string): string {
+  private async readAuthoritativeChildStatus(file: TFile): Promise<string> {
+    const raw = await this.plugin.app.vault.read(file);
+    const normalized = String(raw || '')
+      .replace(/^\uFEFF/u, '')
+      .replace(/\r\n?/gu, '\n');
+    const match = /^---[ \t]*\n([\s\S]*?)\n(?:---|\.\.\.)[ \t]*(?:\n|$)/u.exec(normalized);
+    if (!match) return '';
+
+    const parsed = parseYaml(match[1] || '');
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return '';
+    const statusKey = this.getStatusKey();
+    const actualKey = Object.keys(parsed).find(
+      (key) => key.trim().toLowerCase() === statusKey.trim().toLowerCase(),
+    );
+    return this.plugin.sharedServices.status.normalize(actualKey ? parsed[actualKey] : '');
+  }
+
+  private mapStatusToCheckboxState(status: string): string | null {
     return this.subitemLineModelService.mapStatusToCheckboxState(status);
   }
 
-  private getStatusForCheckboxState(state: string): string {
-    const mapping = this.getMappings().find((entry) => entry.checkboxState === state);
-    return String(mapping?.statuses?.[0] || '').trim();
+  private getStatusForCheckboxState(state: unknown): string {
+    const mapped = mapSubitemCheckboxStateToStatus(
+      this.getMappings(),
+      state,
+      { normalizedMappings: true },
+    );
+    return this.plugin.sharedServices.status.normalize(mapped || '');
   }
 
   private createEditorExtension() {
@@ -1572,11 +1712,15 @@ export class LinkedSubitemCheckboxService {
     return rect.width > 0 && rect.height > 0;
   }
 
-  private getToggleTargetForState(state: string, currentStatus: string): string | null {
-    const normalizedStatus = String(currentStatus || '').trim().toLowerCase();
+  private getToggleTargetForState(state: string | null, currentStatus: string): string | null {
+    const normalizedStatus = this.plugin.sharedServices.status.normalize(currentStatus);
     const mapping = this.getMappings().find((entry) => entry.checkboxState === state)
-      || this.getMappings().find((entry) => entry.statuses.some((status) => String(status || '').trim().toLowerCase() === normalizedStatus));
-    return mapping?.toggleTargetStatus ? String(mapping.toggleTargetStatus).trim() : null;
+      || this.getMappings().find((entry) => entry.statuses.some(
+        (status) => this.plugin.sharedServices.status.normalize(status) === normalizedStatus,
+      ));
+    return mapping?.toggleTargetStatus
+      ? this.plugin.sharedServices.status.normalize(mapping.toggleTargetStatus)
+      : null;
   }
 
   private normalizeCheckboxLinkSpacing(line: string): string {

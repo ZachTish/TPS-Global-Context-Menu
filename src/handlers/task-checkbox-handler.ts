@@ -8,11 +8,17 @@ import { findCurrentTaskLineIndex } from '../utils/task-block-move';
 import {
     getTaskDisplayTitle,
     parseTaskLine,
-    setTaskCheckboxToken,
     updateTaskCompletedDateForCheckboxState,
     updateTaskLineTimestamps,
 } from '../utils/task-line-metadata';
 import {
+    getTaskCheckboxWorkflowMutationSignature,
+    isTaskCheckboxWorkflowTokenCurrent,
+    setTaskCheckboxWorkflowState,
+    type TaskCheckboxWorkflowFieldOwnership,
+} from '../utils/task-checkbox-workflow-mutation';
+import {
+    getLinkedSubitemMappingForState,
     getLinkedSubitemCompleteMarkers,
     normalizeLinkedSubitemMappings,
 } from '../utils/linked-subitem-mapping';
@@ -95,7 +101,9 @@ export class TaskCheckboxHandler {
 
     private showTaskStateMenu(context: TaskCheckboxContext, x: number, y: number): void {
         const menu = new Menu();
-        for (const mapping of this.getCheckboxMappings()) {
+        const mappings = this.getCheckboxMappings();
+        const expectedMappingSignature = this.getCheckboxMutationSignature(mappings);
+        for (const mapping of mappings) {
             const label = String(mapping.label || mapping.statuses[0] || mapping.checkboxState).trim();
             menu.addItem((item) => {
                 item
@@ -105,7 +113,7 @@ export class TaskCheckboxHandler {
                     item.setChecked(true);
                 }
                 item.onClick(() => {
-                    void this.setTaskCheckboxState(context, mapping.checkboxState);
+                    void this.setTaskCheckboxState(context, mapping.checkboxState, expectedMappingSignature);
                 });
             });
         }
@@ -123,7 +131,12 @@ export class TaskCheckboxHandler {
                         new Notice('Use a single checkbox marker, for example ?, *, /, -, x, or blank.');
                         return;
                     }
-                    void this.setTaskCheckboxState(context, token);
+                    const ownedMapping = getLinkedSubitemMappingForState(mappings, token, { normalizedMappings: true });
+                    if (!ownedMapping) {
+                        new Notice('Configure a checkbox mapping for that marker before applying it to a task.');
+                        return;
+                    }
+                    void this.setTaskCheckboxState(context, ownedMapping.checkboxState, expectedMappingSignature);
                 });
         });
         const taskLineContext = this.toTaskLineContext(context);
@@ -151,12 +164,17 @@ export class TaskCheckboxHandler {
         };
     }
 
-    private async setTaskCheckboxState(context: TaskCheckboxContext, token: string): Promise<void> {
-        const previousMarker = getCheckboxStateMarker(context.currentToken);
+    private async setTaskCheckboxState(
+        context: TaskCheckboxContext,
+        token: string,
+        expectedMappingSignature = this.getCheckboxMutationSignature(),
+    ): Promise<void> {
+        let previousMarker = getCheckboxStateMarker(context.currentToken);
         const nextMarker = getCheckboxStateMarker(token);
         let updatedLines: string[] | null = null;
         let didWrite = false;
         let unresolvedWrite = false;
+        let mappingGuardBlocked = false;
 
         await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(context.file, async (lines) => {
             const lineIndex = this.resolveCurrentTaskLineIndex(lines, context);
@@ -166,9 +184,24 @@ export class TaskCheckboxHandler {
             }
 
             const currentLine = lines[lineIndex] || '';
+            const currentParsed = parseTaskLine(currentLine);
+            if (!currentParsed || !isTaskCheckboxWorkflowTokenCurrent(currentParsed.token, context.currentToken)) {
+                unresolvedWrite = true;
+                return false;
+            }
+            const liveMappings = this.getCheckboxMappings();
+            if (
+                this.getCheckboxMutationSignature(liveMappings) !== expectedMappingSignature
+                || !getLinkedSubitemMappingForState(liveMappings, currentParsed.token, { normalizedMappings: true })
+                || !getLinkedSubitemMappingForState(liveMappings, token, { normalizedMappings: true })
+            ) {
+                mappingGuardBlocked = true;
+                return false;
+            }
+            previousMarker = currentParsed.marker;
             let updatedLine = this.withTaskCheckboxToken(currentLine, token);
             updatedLine = updateTaskCompletedDateForCheckboxState(updatedLine, nextMarker, {
-                completeMarkers: this.getCompleteMarkers(),
+                completeMarkers: this.getCompleteMarkers(liveMappings),
             });
             updatedLine = updateTaskLineTimestamps(updatedLine, {
                 enabled: this.plugin.settings.autoSyncFileTimestamps === true,
@@ -184,6 +217,15 @@ export class TaskCheckboxHandler {
             return true;
         });
 
+        if (mappingGuardBlocked) {
+            logger.flowWarn('TaskCheckboxMenu', 'write:mapping-changed', {
+                path: context.file.path,
+                renderedLineNumber: context.lineNumber + 1,
+                nextCheckboxState: token,
+            });
+            new Notice('Task status mappings changed before the checkbox could be updated. Refresh and try again.');
+            return;
+        }
         if (unresolvedWrite) {
             logger.flowWarn('TaskCheckboxMenu', 'write:unresolved-task', {
                 path: context.file.path,
@@ -227,7 +269,15 @@ export class TaskCheckboxHandler {
     }
 
     private withTaskCheckboxToken(line: string, token: string): string {
-        return setTaskCheckboxToken(line, token);
+        return setTaskCheckboxWorkflowState(line, token, this.getTaskWorkflowFieldOwnership());
+    }
+
+    private getTaskWorkflowFieldOwnership(): TaskCheckboxWorkflowFieldOwnership {
+        const statusService = this.plugin.sharedServices?.status;
+        return {
+            workflowStatusKey: statusService?.getStatusPropertyKey?.() || 'status',
+            relationalStatusKey: statusService?.getRelationalStatusPropertyKey?.(),
+        };
     }
 
     private getCheckboxMappings() {
@@ -236,8 +286,16 @@ export class TaskCheckboxHandler {
         });
     }
 
-    private getCompleteMarkers(): string[] {
-        return getLinkedSubitemCompleteMarkers(this.getCheckboxMappings());
+    private getCompleteMarkers(mappings = this.getCheckboxMappings()): string[] {
+        return getLinkedSubitemCompleteMarkers(mappings, this.getClassificationOptions());
+    }
+
+    private getCheckboxMutationSignature(mappings = this.getCheckboxMappings()): string {
+        return getTaskCheckboxWorkflowMutationSignature(
+            mappings,
+            this.getTaskWorkflowFieldOwnership(),
+            this.getCompleteMarkers(mappings),
+        );
     }
 
     private resolveTaskCheckboxContext(targetEl: HTMLElement | null): TaskCheckboxContext | null {
@@ -398,8 +456,8 @@ export class TaskCheckboxHandler {
         nextState: string | null,
     ): Promise<void> {
         const mappings = this.getCheckboxMappings();
-        const previous = classifyMappedTaskCheckboxState(mappings, previousState);
-        const next = classifyMappedTaskCheckboxState(mappings, nextState);
+        const previous = classifyMappedTaskCheckboxState(mappings, previousState, this.getClassificationOptions());
+        const next = classifyMappedTaskCheckboxState(mappings, nextState, this.getClassificationOptions());
         if (!previous.isOpen || !next.isComplete) return;
         const currentContent = await this.app.vault.read(file);
         if (this.hasOpenChecklistItems(currentContent.split(/\r?\n/u))) return;
@@ -416,7 +474,15 @@ export class TaskCheckboxHandler {
     }
 
     private hasOpenChecklistItems(lines: string[]): boolean {
-        return hasOpenMappedTaskLines(lines, this.getCheckboxMappings());
+        return hasOpenMappedTaskLines(lines, this.getCheckboxMappings(), this.getClassificationOptions());
+    }
+
+    private getClassificationOptions() {
+        const statusService = this.plugin.sharedServices.status;
+        return {
+            completionStatuses: statusService.getDoneStatuses(),
+            normalizeStatus: (value: unknown) => statusService.normalize(value),
+        };
     }
 
     private getChecklistFinalPromptStatuses(): string[] {

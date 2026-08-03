@@ -1,3 +1,5 @@
+import { normalizeLinkedSubitemCheckboxMarker } from './linked-subitem-mapping';
+
 const TASK_LINE_RE = /^(\s*(?:[-*+]|\d+[.)])\s+)\[([^\]\r\n]?)\](\s*)(.*)$/;
 const TAG_GLOBAL_RE = /(?:^|\s)(#[\p{L}\p{N}_/-]+)/gu;
 const TPS_INLINE_METADATA_RE = /\s*(?:\[(?:tpsInlineProps|tps-inline-props)\s*::\s*[^\]]+\]|%%\s*tps-inline-props\s*:[\s\S]*?%%|<!--\s*tps-inline-props\s*:[\s\S]*?-->|<span\b[^>]*data-tps-inline-props\s*=\s*(?:"[^"]*"|'[^']*')[^>]*>\s*<\/span>|\[\^\s*tps-inline:[^\]]+\](?::\s*\S+)?)\s*/gi;
@@ -824,13 +826,11 @@ function normalizeCheckboxToken(token: string): string {
 }
 
 function normalizeCheckboxMarker(value: string): string {
-  const raw = String(value || '').trim();
-  const tokenMatch = raw.match(/^\[([^\]\r\n]?)\]$/);
-  return tokenMatch ? tokenMatch[1] || ' ' : raw.slice(0, 1);
+  return normalizeLinkedSubitemCheckboxMarker(value) ?? '';
 }
 
 function normalizeCompleteMarkers(markers: string[] | undefined): Set<string> {
-  const values = Array.isArray(markers) && markers.length > 0 ? markers : ['x', 'X'];
+  const values = Array.isArray(markers) ? markers : ['x', 'X'];
   return new Set(values.map((marker) => normalizeCheckboxMarker(marker)).filter(Boolean));
 }
 

@@ -46,7 +46,7 @@ test('linked subitem mapping presentation fields survive textarea-style parse re
   const parsed = [
     { checkboxState: '[ ]', statuses: ['todo'], toggleTargetStatus: 'complete' },
     { checkboxState: '[x]', statuses: ['complete'], toggleTargetStatus: 'todo' },
-    { checkboxState: '[custom]', statuses: ['waiting'], toggleTargetStatus: 'todo' },
+    { checkboxState: '*', statuses: ['waiting'], toggleTargetStatus: 'todo' },
   ];
   const existing = [
     { checkboxState: '[ ]', statuses: ['todo'], toggleTargetStatus: 'complete', icon: 'square', label: 'Todo' },
@@ -56,8 +56,174 @@ test('linked subitem mapping presentation fields survive textarea-style parse re
   assert.deepEqual(mergeLinkedSubitemMappingPresentation(parsed, existing), [
     { checkboxState: '[ ]', statuses: ['todo'], toggleTargetStatus: 'complete', icon: 'square', label: 'Todo' },
     { checkboxState: '[x]', statuses: ['complete'], toggleTargetStatus: 'todo', icon: 'check', label: 'Complete' },
-    { checkboxState: '[custom]', statuses: ['waiting'], toggleTargetStatus: 'todo', icon: undefined, label: undefined },
+    { checkboxState: '[*]', statuses: ['waiting'], toggleTargetStatus: 'todo', icon: undefined, label: undefined },
   ]);
+});
+
+test('checkbox mapping normalization preserves primary row order and rejects unsupported tokens deterministically', async () => {
+  const {
+    getLinkedSubitemCompleteMarkers,
+    mapStatusToSubitemCheckboxState,
+    mapSubitemCheckboxStateToStatus,
+    normalizeLinkedSubitemCheckboxMarker,
+    normalizeLinkedSubitemCheckboxState,
+    normalizeLinkedSubitemMappings,
+  } = await importModule('../src/utils/linked-subitem-mapping.ts');
+  const source = [
+    { checkboxState: '[ ]', statuses: ['todo'] },
+    { checkboxState: '[x]', statuses: ['complete'] },
+    { checkboxState: '[\\]', statuses: ['working'] },
+    { checkboxState: '[?]', statuses: ['holding'] },
+    { checkboxState: '[-]', statuses: ['wont-do'] },
+    { checkboxState: '[>]', statuses: ['migrated'] },
+    { checkboxState: '[/]', statuses: ['working'] },
+    { checkboxState: '[custom]', statuses: ['invalid'] },
+    { checkboxState: '[?]', statuses: ['duplicate-must-not-win'] },
+  ];
+
+  const normalized = normalizeLinkedSubitemMappings(source, { enforceStrictDefaults: true });
+  assert.deepEqual(normalized.map((entry) => entry.checkboxState), ['[ ]', '[x]', '[\\]', '[?]', '[-]', '[>]', '[/]']);
+  assert.equal(mapStatusToSubitemCheckboxState(normalized, 'working'), '[\\]');
+  assert.equal(mapSubitemCheckboxStateToStatus(normalized, '[?]'), 'holding');
+  assert.equal(mapSubitemCheckboxStateToStatus(normalized, '[X]'), 'complete');
+  assert.equal(mapSubitemCheckboxStateToStatus(normalized, '[custom]'), null);
+  assert.equal(normalizeLinkedSubitemCheckboxState(' '), '[ ]');
+  assert.equal(normalizeLinkedSubitemCheckboxState('[X]'), '[x]');
+  assert.equal(normalizeLinkedSubitemCheckboxMarker('[X]'), 'x');
+  assert.equal(normalizeLinkedSubitemCheckboxMarker('X'), 'x');
+  assert.equal(normalizeLinkedSubitemCheckboxMarker('[custom]'), null);
+  assert.equal(normalizeLinkedSubitemCheckboxState('🟢'), null);
+  assert.equal(normalizeLinkedSubitemCheckboxState('[🟢]'), null);
+  assert.deepEqual(
+    getLinkedSubitemCompleteMarkers([{ checkboxState: '[*]', statuses: ['complete'] }]),
+    ['*'],
+    'completion markers must come from the supplied mapping instead of an implicit x marker',
+  );
+  assert.deepEqual(
+    getLinkedSubitemCompleteMarkers(
+      [{ checkboxState: '[*]', statuses: ['complete'] }],
+      { completionStatuses: [] },
+    ),
+    [],
+    'an explicit empty completion set must not silently recreate complete/wont-do authority',
+  );
+});
+
+test('task completion metadata distinguishes absent defaults from explicit empty authority', async () => {
+  const { updateTaskCompletedDateForCheckboxState } = await importModule('../src/utils/task-line-metadata.ts');
+  const completed = '- [x] Done [completedDate:: 2026-08-01 10:00:00]';
+  assert.equal(
+    updateTaskCompletedDateForCheckboxState(completed, '[x]', { completeMarkers: [] }),
+    '- [x] Done',
+  );
+  assert.match(
+    updateTaskCompletedDateForCheckboxState('- [x] Done', '[x]', {
+      completedAt: new Date(2026, 7, 2, 9, 30, 0),
+    }),
+    /\[completedDate:: 2026-08-02 09:30:00\]/u,
+  );
+});
+
+test('checkbox mapping text validation keeps alternate markers but rejects ambiguous or unusable rows', async () => {
+  const { parseLinkedSubitemMappingsText } = await importModule('../src/utils/linked-subitem-mapping.ts');
+  const valid = [
+    '[ ]: todo => complete',
+    '[x]: complete => todo',
+    '[/]: working => complete',
+    '[\\]: working => complete',
+    '[?]: holding => todo',
+    '[-]: wont-do => todo',
+    '[>]: migrated => todo',
+  ].join('\n');
+  const parsed = parseLinkedSubitemMappingsText(valid);
+  assert.deepEqual(parsed.errors, []);
+  assert.equal(parsed.mappings.length, 7);
+  assert.match(parsed.warnings[0], /primary marker for "working"/u);
+
+  for (const [draft, expected] of [
+    [valid.replace('[?]: holding', '[custom]: holding'), /exactly one character/u],
+    [`${valid}\n[?]: blocked => todo`, /already defined/u],
+    [valid.replace('[/]: working => complete', ''), /Required system mapping \[\/\] is missing/u],
+    [valid.replace('[?]: holding => todo', '[?]: holding => reviewing'), /not mapped by any row/u],
+    [valid.replace('[?]: holding => todo', '[?]: holding, complete => todo'), /cannot mix completed and open/u],
+    [valid.replace('[?]: holding => todo', '[?]: reviewing => todo'), /Required system status "holding" is not mapped/u],
+    [valid.replace('[>]: migrated => todo', '[>]: migrated, working => todo'), /reserved for the migrated system status/u],
+    [valid.replace('[ ]: todo => complete', '[ ]: complete => todo'), /reserved open checkbox/u],
+    [valid.replace('[x]: complete => todo', '[x]: todo => complete'), /reserved checked checkbox/u],
+    [valid.replace('[/]: working => complete', '[🟢]: working => complete'), /exactly one character/u],
+  ]) {
+    const result = parseLinkedSubitemMappingsText(draft);
+    assert.ok(result.errors.some((issue) => expected.test(issue.message)), draft);
+  }
+});
+
+test('public checkbox mapping contract is ordered, strict, frozen, cached, and invalidated by settings replacement', async () => {
+  const { createLinkedSubitemCheckboxContract } = await importModule('../src/utils/linked-subitem-mapping.ts');
+  let source = [
+    { checkboxState: '[o]', statuses: ['todo'], toggleTargetStatus: 'complete' },
+    { checkboxState: '[*]', statuses: ['complete'], toggleTargetStatus: 'todo' },
+  ];
+  const normalizeStatus = (value) => String(value ?? '').trim().toLowerCase();
+  const contract = createLinkedSubitemCheckboxContract(() => source, normalizeStatus);
+
+  assert.equal(contract.version, 1);
+  assert.equal(contract.contract, 'ordered-strict-v1');
+  const first = contract.getMappings();
+  assert.equal(contract.getMappings(), first, 'an unchanged settings source must reuse one public snapshot');
+  assert.equal(Object.isFrozen(first), true);
+  assert.equal(Object.isFrozen(first[0]), true);
+  assert.equal(Object.isFrozen(first[0].statuses), true);
+  assert.equal(first.length, 2, 'the public runtime contract never supplements settings with hidden default rows');
+  assert.equal(first[0].checkboxState, '[o]');
+  assert.equal(contract.stateForStatus('TODO'), '[o]');
+  assert.equal(contract.statusForState('[*]'), 'complete');
+  assert.equal(contract.stateForStatus('unmapped'), '');
+  assert.equal(contract.statusForState('[!]'), '');
+  assert.throws(() => first[0].statuses.push('mutated'), TypeError);
+
+  source = [
+    { checkboxState: '[n]', statuses: ['todo'], toggleTargetStatus: 'complete' },
+    { checkboxState: '[x]', statuses: ['complete'], toggleTargetStatus: 'todo' },
+  ];
+  const second = contract.getMappings();
+  assert.notEqual(second, first);
+  assert.equal(contract.stateForStatus('todo'), '[n]');
+  assert.equal(first[0].checkboxState, '[o]', 'previous snapshots must remain immutable after invalidation');
+
+  source = [
+    { checkboxState: '[!]', statuses: ['review'], toggleTargetStatus: 'complete' },
+    { checkboxState: '[broken]', statuses: ['todo'], toggleTargetStatus: 'complete' },
+  ];
+  const partial = contract.getMappings();
+  assert.deepEqual(partial.map((mapping) => mapping.checkboxState), ['[!]']);
+  assert.equal(contract.stateForStatus('todo'), '', 'a missing default row remains unavailable instead of being synthesized');
+  assert.equal(contract.statusForState('[ ]'), '', 'blank never becomes todo unless that exact row exists in settings');
+});
+
+test('checkbox mapping settings keep drafts local and expose one explicit accessible apply path', () => {
+  const start = settingsTabSource.indexOf('private renderLinkedSubitemCheckboxSettings');
+  const end = settingsTabSource.indexOf('private serializeLinkedSubitemMappings', start);
+  const source = settingsTabSource.slice(start, end);
+  const draftSource = source.slice(source.indexOf('let fallbackDraft'));
+  assert.match(source, /Apply mappings/u);
+  assert.match(source, /Load defaults/u);
+  assert.match(source, /aria-live['"]?:\s*['"]polite/u);
+  assert.match(source, /Fallback open marker must be defined by a mapping row/u);
+  assert.match(source, /Fallback open marker must map only to open statuses/u);
+  assert.match(source, /Used only when a linked child note has no workflow status\. A nonempty unmapped status remains unsupported\./u);
+  assert.match(source, /onChange\(\(value\) => \{[\s\S]*?mappingsDraft = value;[\s\S]*?validateDraft\(\);[\s\S]*?\}\)/u);
+  assert.doesNotMatch(draftSource, /onChange\(async/u);
+  assert.equal((draftSource.match(/await this\.plugin\.saveSettings\(\)/gu) || []).length, 1);
+});
+
+test('checkbox mapping load migration uses legacy statuses and persists one canonical snapshot', () => {
+  assert.match(mainSource, /statuses: legacyUnchecked\.length > 0 \? legacyUnchecked : \['todo'\]/u);
+  assert.match(mainSource, /statuses: legacyChecked\.length > 0 \? legacyChecked : \['complete'\]/u);
+  assert.match(mainSource, /statuses: legacyCanceled\.length > 0 \? legacyCanceled : \['wont-do'\]/u);
+  assert.match(mainSource, /normalizeLinkedSubitemMappings\(mappingSource, \{[\s\S]{0,100}enforceStrictDefaults: true/u);
+  assert.match(mainSource, /const needsCheckboxMappingMigration = Boolean\(loaded\)/u);
+  assert.match(mainSource, /needsActivityBasePathMigration \|\|[\s\S]{0,120}needsCheckboxMappingMigration \|\|/u);
+  assert.doesNotMatch(mainSource, /getStrictLinkedSubitemMappings|normalizeStrictLinkedSubitemMappings/u);
 });
 
 test('settings persistence merges only locally changed keys into the newest disk payload', async () => {
@@ -479,7 +645,7 @@ test('retired bundled properties migrate once without rewriting saved Home actio
   assert.match(mainSource, /const normalizedProperties = this\.normalizeCustomProperties\(this\.settings\.properties\);/);
   assert.match(mainSource, /this\.settings\.properties = this\.removeRetiredBundledCustomProperties\(normalizedProperties\);/);
   assert.match(mainSource, /!id\.startsWith\('tps-health-'\) && !LEGACY_HEALTH_CUSTOM_PROPERTY_IDS\.has\(id\)/);
-  assert.match(mainSource, /const needsSettingsMigration =[\s\S]{0,180}removedRetiredPropertyCount > 0;/);
+  assert.match(mainSource, /const needsSettingsMigration =[\s\S]{0,320}removedRetiredPropertyCount > 0;/);
   assert.match(mainSource, /needsSettingsMigration[\s\S]{0,180}preNormalizationSettings[\s\S]{0,180}if \(needsSettingsMigration\) await this\.persistSettingsSnapshot\(\);/);
   assert.match(mainSource, /migration:removed-retired-bundled-properties'[\s\S]{0,120}count: removedRetiredPropertyCount/);
   assert.match(mainSource, /this\.settings\.homeComponentActions = normalizeHomeComponentActions\(this\.settings\.homeComponentActions\);/);

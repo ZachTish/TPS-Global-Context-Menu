@@ -17,7 +17,14 @@ import {
   parseStringListInput,
 } from '../utils/list-utils';
 import { isEntityReferenceProperty } from '../utils/entity-property';
-import { mapStatusToSubitemCheckboxState, normalizeLinkedSubitemMappings } from '../utils/linked-subitem-mapping';
+import {
+  getLinkedSubitemCompleteMarkers,
+  getLinkedSubitemMappingForState,
+  mapStatusToSubitemCheckboxState,
+  normalizeLinkedSubitemCheckboxMarker,
+  normalizeLinkedSubitemCheckboxState,
+  normalizeLinkedSubitemMappings,
+} from '../utils/linked-subitem-mapping';
 import * as logger from '../logger';
 
 export type SubitemLineKind = 'bare' | 'bullet' | 'checkbox';
@@ -41,6 +48,8 @@ export interface SubitemLineModel {
   kind: SubitemLineKind;
   /** The checkbox state string (e.g., "[ ]", "[x]") if kind is checkbox */
   checkboxState: string | null;
+  /** Configured icon for the resolved checkbox mapping, when present. */
+  checkboxIcon?: string;
   /** The raw wikilink markup */
   wikilink: string;
   /** The resolved link target path */
@@ -78,6 +87,7 @@ export class SubitemLineModelService {
     const status = this.getNormalizedStatus(childFile);
     const checkboxState = parsed.checkboxState || this.mapStatusToCheckboxState(status);
     const visualState = this.getVisualState(checkboxState);
+    const checkboxIcon = getLinkedSubitemMappingForState(this.getMappings(), checkboxState)?.icon;
     const pills = this.getPropertyPills(childFile, parsed.kind);
 
     return {
@@ -85,6 +95,7 @@ export class SubitemLineModelService {
       parentFile,
       kind: parsed.kind,
       checkboxState,
+      checkboxIcon,
       wikilink: parsed.wikilink,
       linkTarget: parsed.linkTarget,
       displayLabel: this.getDisplayLabel(parsed.wikilink, childFile),
@@ -104,19 +115,41 @@ export class SubitemLineModelService {
   /**
    * Map a checkbox state string to a visual state.
    */
-  getVisualState(checkboxState: string): VisualState {
-    if (/[xX]/.test(checkboxState)) return 'complete';
-    if (checkboxState.includes('-')) return 'canceled';
+  getVisualState(checkboxState: string | null): VisualState {
+    const mapping = getLinkedSubitemMappingForState(this.getMappings(), checkboxState);
+    const normalizedStatuses = (mapping?.statuses || [])
+      .map((status) => this.plugin.sharedServices.status.normalize(status));
+    if (normalizedStatuses.includes('wont-do')) return 'canceled';
+    const completeMarkers = new Set(getLinkedSubitemCompleteMarkers(this.getMappings(), {
+      completionStatuses: this.plugin.sharedServices.status.getDoneStatuses(),
+      normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+    }));
+    const marker = normalizeLinkedSubitemCheckboxMarker(checkboxState);
+    if (marker != null && completeMarkers.has(marker)) return 'complete';
     return 'open';
   }
 
   /**
    * Map a status string to a checkbox state string.
    */
-  mapStatusToCheckboxState(status: string): string {
-    const mapped = mapStatusToSubitemCheckboxState(this.getMappings(), status);
+  mapStatusToCheckboxState(status: string): string | null {
+    const normalizedStatus = this.plugin.sharedServices.status.normalize(status);
+    const mapped = mapStatusToSubitemCheckboxState(this.getMappings(), status, {
+      normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+    });
     if (mapped) return mapped;
-    return this.plugin.settings.linkedSubitemDefaultOpenState || '[ ]';
+    if (normalizedStatus) return null;
+
+    const fallback = normalizeLinkedSubitemCheckboxState(this.plugin.settings.linkedSubitemDefaultOpenState);
+    const fallbackMapping = fallback ? getLinkedSubitemMappingForState(this.getMappings(), fallback) : null;
+    const doneStatuses = new Set(
+      this.plugin.sharedServices.status.getDoneStatuses()
+        .map((value) => this.plugin.sharedServices.status.normalize(value)),
+    );
+    return fallbackMapping?.statuses.some((value) =>
+      doneStatuses.has(this.plugin.sharedServices.status.normalize(value)))
+      ? null
+      : fallbackMapping?.checkboxState || null;
   }
 
   /**
@@ -126,7 +159,7 @@ export class SubitemLineModelService {
     const fm = (this.plugin.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, unknown>;
     const statusKey = this.getStatusKey();
     const actualKey = Object.keys(fm).find((key) => key.toLowerCase() === statusKey.toLowerCase());
-    return String(actualKey ? fm[actualKey] : '').trim().toLowerCase();
+    return this.plugin.sharedServices.status.normalize(actualKey ? fm[actualKey] : '');
   }
 
   /**

@@ -49,6 +49,16 @@ const sharedStatusPromise = importBundled(
   '../src/services/shared/status-service.ts',
   [obsidianStubPlugin],
 );
+const linkedSubitemMutationPromise = importBundled(
+  '../src/services/linked-subitem-checkbox-mutation.ts',
+);
+const linkedSubitemMappingPromise = importBundled(
+  '../src/utils/linked-subitem-mapping.ts',
+);
+const subitemLineModelPromise = importBundled(
+  '../src/services/subitem-line-model.ts',
+  [obsidianStubPlugin],
+);
 
 const isCheckboxWorkflowStatus = (property) => {
   const normalized = String(property || '').trim().toLowerCase().replace(/\s+/gu, '');
@@ -93,6 +103,7 @@ test('shared status service reads taskStatus instead of a relational status iden
   });
 
   assert.equal(service.getStatusPropertyKey(), 'taskStatus');
+  assert.equal(service.getRelationalStatusPropertyKey(), 'status');
   assert.deepEqual(service.getStatuses({
     status: '[[Entities/Statuses/Blocked]]',
     taskStatus: 'working',
@@ -102,6 +113,432 @@ test('shared status service reads taskStatus instead of a relational status iden
   }), []);
   assert.equal(service.isDoneStatus('complete'), true);
   assert.equal(service.isDoneStatus('working'), false);
+});
+
+test('shared status service resolves only authoritative checkbox mappings and aliases', async () => {
+  const { SharedStatusService } = await sharedStatusPromise;
+  const service = new SharedStatusService({
+    settings: {
+      properties: [],
+      recurrenceCompletionStatuses: ['complete', 'wont-do'],
+      activeStatusValues: ['todo', 'working', 'holding'],
+      linkedSubitemCheckboxMappings: [
+        { checkboxState: '[d]', statuses: ['done'] },
+        { checkboxState: '[!]', statuses: ['blocked'] },
+      ],
+    },
+  });
+
+  assert.equal(service.checkboxStateToStatus('[d]'), 'complete');
+  assert.equal(service.checkboxStateToStatus('!'), 'holding');
+  assert.equal(service.statusToCheckboxState('completed'), 'd');
+  assert.equal(service.statusToCheckboxState('blocked'), '!');
+  assert.equal(service.checkboxStateToStatus('[?]'), '');
+  assert.equal(service.statusToCheckboxState('working'), '');
+});
+
+test('linked child rows derive status, completion, and icon presentation from the configured mapping', () => {
+  const modelSource = readFileSync(new URL('../src/services/subitem-line-model.ts', import.meta.url), 'utf8');
+  const rowSource = readFileSync(new URL('../src/services/linked-subitem-row-builder.ts', import.meta.url), 'utf8');
+  const checkboxSource = readFileSync(new URL('../src/services/linked-subitem-checkbox-service.ts', import.meta.url), 'utf8');
+  const bulkEditSource = readFileSync(new URL('../src/services/bulk-edit-service.ts', import.meta.url), 'utf8');
+
+  assert.match(modelSource, /getLinkedSubitemMappingForState\(this\.getMappings\(\), checkboxState\)\?\.icon/u);
+  assert.match(modelSource, /getLinkedSubitemCompleteMarkers\(this\.getMappings\(\), \{[\s\S]{0,260}getDoneStatuses/u);
+  assert.match(modelSource, /sharedServices\.status\.normalize\(actualKey \? fm\[actualKey\] : ''\)/u);
+  assert.match(rowSource, /return model\.checkboxIcon \|\| getIconNameForState/u);
+  assert.doesNotMatch(checkboxSource, /setLinkedSubitemStatus/u);
+  assert.match(checkboxSource, /handleCustomCheckboxClick[\s\S]{0,1200}setLinkedSubitemCheckboxState\(parentFile, childFile, nextState\)/u);
+  assert.match(checkboxSource, /setLinkedSubitemCheckboxState\(parentFile, childFile, nextState, sourceLine\)/u);
+  assert.match(checkboxSource, /item\.onClick\(async \(\) => \{[\s\S]{0,650}setLinkedSubitemCheckboxState\(/u);
+  assert.match(checkboxSource, /runGuardedLinkedSubitemMutation\(\{/u);
+  assert.match(checkboxSource, /previousStatus = await this\.readAuthoritativeChildStatus\(childFile\)/u);
+  assert.match(checkboxSource, /readAuthoritativeChild: async \(\) => \{[\s\S]{0,220}readAuthoritativeChildStatus\(childFile\)/u);
+  assert.match(checkboxSource, /readAuthoritativeParent: async \(\) => \{[\s\S]{0,220}readMarkdownText\(parentFile\)/u);
+  assert.match(checkboxSource, /private async readAuthoritativeChildStatus\([\s\S]{0,220}vault\.read\(file\)/u);
+  assert.match(
+    checkboxSource,
+    /mutateMarkdownBody\(parentFile,[\s\S]{0,260}getStatusForCheckboxState\(normalizedToken\) !== mappedStatus[\s\S]{0,120}mappingGuardBlocked = true/u,
+  );
+  assert.match(
+    checkboxSource,
+    /writeChild: async \(\) => \{[\s\S]{0,420}setStatus\(\[childFile\], mappedStatus, \{[\s\S]{0,180}writeGuard:/u,
+  );
+  assert.match(bulkEditSource, /applyToFiles\(files, \(fm, file\) => \{\s*if \(options\.writeGuard\?\.\(file\) === false\) return;/u);
+  assert.doesNotMatch(checkboxSource, /setStatus\(\[childFile\], mappedStatus\)\) > 0/u);
+  assert.doesNotMatch(checkboxSource, /fm\[statusKey\] = nextStatus/u);
+});
+
+test('linked-subitem mutation blocks stale or failed parents before touching the child', async () => {
+  const { runGuardedLinkedSubitemMutation } = await linkedSubitemMutationPromise;
+
+  for (const parentFailure of ['blocked', 'throw']) {
+    const state = { parent: '[ ]', child: 'todo' };
+    let childWrites = 0;
+    let rollbacks = 0;
+    const result = await runGuardedLinkedSubitemMutation({
+      needsChildWrite: true,
+      writeParent: async () => {
+        if (parentFailure === 'throw') throw new Error('synthetic parent write failure');
+        return 'blocked';
+      },
+      writeChild: async () => {
+        childWrites += 1;
+        state.child = 'complete';
+      },
+      readAuthoritativeChild: async () => state.child === 'complete' ? 'target' : 'previous',
+      restoreParent: async () => {
+        rollbacks += 1;
+      },
+      readAuthoritativeParent: async () => state.parent === '[ ]' ? 'previous' : 'updated',
+    });
+
+    assert.equal(result.ok, false, parentFailure);
+    assert.equal(result.reason, parentFailure === 'throw' ? 'parent-failed' : 'parent-blocked');
+    assert.deepEqual(state, { parent: '[ ]', child: 'todo' }, parentFailure);
+    assert.equal(childWrites, 0, `${parentFailure}: child mutation must not run`);
+    assert.equal(rollbacks, 0, `${parentFailure}: no parent write means no rollback`);
+  }
+});
+
+test('linked-subitem mutation performs zero writes when the checkbox mapping changes before the parent boundary', async () => {
+  const { runGuardedLinkedSubitemMutation } = await linkedSubitemMutationPromise;
+  const capturedStatus = 'complete';
+  let liveStatus = capturedStatus;
+  let parentWrites = 0;
+  let childWrites = 0;
+
+  liveStatus = 'archived';
+  const result = await runGuardedLinkedSubitemMutation({
+    needsChildWrite: true,
+    writeParent: async () => {
+      if (liveStatus !== capturedStatus) return 'blocked';
+      parentWrites += 1;
+      return 'changed';
+    },
+    writeChild: async () => {
+      childWrites += 1;
+    },
+    readAuthoritativeChild: async () => 'previous',
+    restoreParent: async () => {},
+    readAuthoritativeParent: async () => 'previous',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'parent-blocked');
+  assert.equal(parentWrites, 0);
+  assert.equal(childWrites, 0);
+});
+
+test('linked-subitem mutation rolls back the parent when the mapping changes at the child write boundary', async () => {
+  const { runGuardedLinkedSubitemMutation } = await linkedSubitemMutationPromise;
+  const state = { parent: '[ ]', child: 'todo' };
+  const capturedStatus = 'complete';
+  let liveStatus = capturedStatus;
+  let childWrites = 0;
+
+  const result = await runGuardedLinkedSubitemMutation({
+    needsChildWrite: true,
+    writeParent: async () => {
+      state.parent = '[x]';
+      liveStatus = 'archived';
+      return 'changed';
+    },
+    writeChild: async () => {
+      if (liveStatus !== capturedStatus) return;
+      childWrites += 1;
+      state.child = capturedStatus;
+    },
+    readAuthoritativeChild: async () => state.child === capturedStatus ? 'target' : 'previous',
+    restoreParent: async () => {
+      state.parent = '[ ]';
+    },
+    readAuthoritativeParent: async () => state.parent === '[ ]' ? 'previous' : 'updated',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'child-blocked');
+  assert.equal(result.parentRolledBack, true);
+  assert.equal(childWrites, 0);
+  assert.deepEqual(state, { parent: '[ ]', child: 'todo' });
+});
+
+test('linked-subitem mutation restores the parent when the child status write is blocked', async () => {
+  const { runGuardedLinkedSubitemMutation } = await linkedSubitemMutationPromise;
+  const state = { parent: '[ ]', child: 'todo' };
+  const timeline = [];
+
+  const result = await runGuardedLinkedSubitemMutation({
+    needsChildWrite: true,
+    writeParent: async () => {
+      timeline.push('parent-write');
+      state.parent = '[x]';
+      return 'changed';
+    },
+    writeChild: async () => {
+      timeline.push('child-blocked');
+    },
+    readAuthoritativeChild: async () => state.child === 'todo' ? 'previous' : 'target',
+    restoreParent: async () => {
+      timeline.push('parent-rollback');
+      state.parent = '[ ]';
+    },
+    readAuthoritativeParent: async () => state.parent === '[ ]' ? 'previous' : 'updated',
+  });
+
+  assert.deepEqual(result, {
+    ok: false,
+    changed: false,
+    parentChanged: true,
+    childChanged: false,
+    parentRolledBack: true,
+    reason: 'child-blocked',
+  });
+  assert.deepEqual(timeline, ['parent-write', 'child-blocked', 'parent-rollback']);
+  assert.deepEqual(state, { parent: '[ ]', child: 'todo' });
+
+  let unnecessaryRollback = 0;
+  const alreadyAlignedParent = await runGuardedLinkedSubitemMutation({
+    needsChildWrite: true,
+    writeParent: async () => 'unchanged',
+    writeChild: async () => {},
+    readAuthoritativeChild: async () => 'previous',
+    restoreParent: async () => {
+      unnecessaryRollback += 1;
+    },
+    readAuthoritativeParent: async () => 'updated',
+  });
+  assert.equal(alreadyAlignedParent.reason, 'child-blocked');
+  assert.equal(alreadyAlignedParent.parentChanged, false);
+  assert.equal(alreadyAlignedParent.parentRolledBack, true);
+  assert.equal(unnecessaryRollback, 0);
+
+  state.parent = '[ ]';
+  const thrownChild = await runGuardedLinkedSubitemMutation({
+    needsChildWrite: true,
+    writeParent: async () => {
+      state.parent = '[x]';
+      return 'changed';
+    },
+    writeChild: async () => {
+      throw new Error('synthetic child failure');
+    },
+    readAuthoritativeChild: async () => 'previous',
+    restoreParent: async () => {
+      state.parent = '[ ]';
+    },
+    readAuthoritativeParent: async () => state.parent === '[ ]' ? 'previous' : 'updated',
+  });
+  assert.equal(thrownChild.reason, 'child-failed');
+  assert.match(String(thrownChild.error), /synthetic child failure/u);
+  assert.deepEqual(state, { parent: '[ ]', child: 'todo' });
+});
+
+test('linked-subitem mutation commits the parent marker and child status in guarded order', async () => {
+  const { runGuardedLinkedSubitemMutation } = await linkedSubitemMutationPromise;
+  const state = { parent: '[ ]', child: 'todo' };
+  const timeline = [];
+
+  const result = await runGuardedLinkedSubitemMutation({
+    needsChildWrite: true,
+    writeParent: async () => {
+      timeline.push('parent-write');
+      state.parent = '[x]';
+      return 'changed';
+    },
+    writeChild: async () => {
+      timeline.push('child-write');
+      state.child = 'complete';
+    },
+    readAuthoritativeChild: async () => state.child === 'complete' ? 'target' : 'previous',
+    restoreParent: async () => {
+      timeline.push('unexpected-rollback');
+    },
+    readAuthoritativeParent: async () => state.parent === '[ ]' ? 'previous' : 'updated',
+  });
+
+  assert.deepEqual(result, {
+    ok: true,
+    changed: true,
+    parentChanged: true,
+    childChanged: true,
+    parentRolledBack: false,
+    reason: 'done',
+  });
+  assert.deepEqual(timeline, ['parent-write', 'child-write']);
+  assert.deepEqual(state, { parent: '[x]', child: 'complete' });
+});
+
+test('linked-subitem mutation trusts the authoritative child reread over ambiguous write outcomes', async () => {
+  const { runGuardedLinkedSubitemMutation } = await linkedSubitemMutationPromise;
+
+  for (const writeOutcome of ['zero-or-idempotent', 'post-write-error']) {
+    const state = { parent: '[ ]', child: 'todo' };
+    let rollbacks = 0;
+    const result = await runGuardedLinkedSubitemMutation({
+      needsChildWrite: true,
+      writeParent: async () => {
+        state.parent = '[x]';
+        return 'changed';
+      },
+      writeChild: async () => {
+        state.child = 'complete';
+        if (writeOutcome === 'post-write-error') {
+          throw new Error('synthetic error after the child write committed');
+        }
+      },
+      readAuthoritativeChild: async () => state.child === 'complete' ? 'target' : 'previous',
+      restoreParent: async () => {
+        rollbacks += 1;
+        state.parent = '[ ]';
+      },
+      readAuthoritativeParent: async () => state.parent === '[ ]' ? 'previous' : 'updated',
+    });
+
+    assert.deepEqual(result, {
+      ok: true,
+      changed: true,
+      parentChanged: true,
+      childChanged: true,
+      parentRolledBack: false,
+      reason: 'done',
+    }, writeOutcome);
+    assert.deepEqual(state, { parent: '[x]', child: 'complete' }, writeOutcome);
+    assert.equal(rollbacks, 0, `${writeOutcome}: a verified target child must never roll back its parent`);
+  }
+});
+
+test('linked-subitem mutation does not guess at compensation when the child cannot be reread', async () => {
+  const { runGuardedLinkedSubitemMutation } = await linkedSubitemMutationPromise;
+  const state = { parent: '[ ]', child: 'todo' };
+  let rollbacks = 0;
+
+  const result = await runGuardedLinkedSubitemMutation({
+    needsChildWrite: true,
+    writeParent: async () => {
+      state.parent = '[x]';
+      return 'changed';
+    },
+    writeChild: async () => {
+      state.child = 'complete';
+      throw new Error('synthetic post-write failure');
+    },
+    readAuthoritativeChild: async () => {
+      throw new Error('synthetic authoritative read failure');
+    },
+    restoreParent: async () => {
+      rollbacks += 1;
+      state.parent = '[ ]';
+    },
+    readAuthoritativeParent: async () => state.parent === '[ ]' ? 'previous' : 'updated',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'child-verification-failed');
+  assert.equal(result.parentRolledBack, false);
+  assert.equal(rollbacks, 0, 'an unverified child must not trigger a potentially incorrect parent rollback');
+  assert.deepEqual(state, { parent: '[x]', child: 'complete' });
+});
+
+test('linked-subitem mutation verifies parent compensation after a rollback error', async () => {
+  const { runGuardedLinkedSubitemMutation } = await linkedSubitemMutationPromise;
+  const state = { parent: '[ ]', child: 'todo' };
+
+  const result = await runGuardedLinkedSubitemMutation({
+    needsChildWrite: true,
+    writeParent: async () => {
+      state.parent = '[x]';
+      return 'changed';
+    },
+    writeChild: async () => {},
+    readAuthoritativeChild: async () => 'previous',
+    restoreParent: async () => {
+      state.parent = '[ ]';
+      throw new Error('synthetic error after rollback committed');
+    },
+    readAuthoritativeParent: async () => state.parent === '[ ]' ? 'previous' : 'updated',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.reason, 'child-blocked');
+  assert.equal(result.parentRolledBack, true);
+  assert.deepEqual(state, { parent: '[ ]', child: 'todo' });
+});
+
+test('linked-subitem source resolution rejects stale, missing, and ambiguous parent rows', async () => {
+  const { resolveLinkedSubitemMutationLineIndex } = await linkedSubitemMutationPromise;
+  const lines = [
+    '- [ ] [[Children/First]]',
+    '- [ ] [[Children/Other]]',
+  ];
+  const isFirst = (line) => line.includes('[[Children/First]]');
+
+  assert.equal(resolveLinkedSubitemMutationLineIndex(lines, 'Parent.md', {
+    parentPath: 'Parent.md',
+    lineNumber: 0,
+    rawLine: lines[0],
+  }, isFirst), 0);
+  assert.equal(resolveLinkedSubitemMutationLineIndex(lines, 'Parent.md', {
+    parentPath: 'Parent.md',
+    lineNumber: 0,
+    rawLine: '- [x] [[Children/First]]',
+  }, isFirst), -1, 'a stale captured row must not fall back to a broad scan');
+  assert.equal(resolveLinkedSubitemMutationLineIndex(lines, 'Parent.md', {
+    parentPath: 'Parent.md',
+    lineNumber: 9,
+    rawLine: '- [ ] [[Children/First]]',
+  }, isFirst), -1);
+  assert.equal(resolveLinkedSubitemMutationLineIndex(lines, 'Other Parent.md', {
+    parentPath: 'Parent.md',
+    lineNumber: 0,
+    rawLine: lines[0],
+  }, isFirst), -1);
+  assert.equal(resolveLinkedSubitemMutationLineIndex(lines, 'Parent.md', undefined, isFirst), 0);
+  assert.equal(resolveLinkedSubitemMutationLineIndex([...lines, lines[0]], 'Parent.md', undefined, isFirst), -1);
+
+  const checkboxSource = readFileSync(new URL('../src/services/linked-subitem-checkbox-service.ts', import.meta.url), 'utf8');
+  const resolver = methodSource(
+    checkboxSource,
+    'private resolveLinkedSubitemLineIndex(',
+    'private isLinkedSubitemLineForChild(',
+  );
+
+  assert.match(resolver, /return resolveLinkedSubitemMutationLineIndex\(/u);
+});
+
+test('linked child visual completion canonicalizes an authored uppercase X marker', async () => {
+  const { SubitemLineModelService } = await subitemLineModelPromise;
+  const normalize = (value) => String(value ?? '').trim().toLowerCase();
+  const service = new SubitemLineModelService({
+    settings: {
+      linkedSubitemCheckboxMappings: [
+        { checkboxState: '[ ]', statuses: ['todo'] },
+        { checkboxState: '[X]', statuses: ['complete'] },
+        { checkboxState: '[-]', statuses: ['wont-do'] },
+      ],
+    },
+    sharedServices: {
+      status: {
+        normalize,
+        getDoneStatuses: () => ['complete', 'wont-do'],
+      },
+    },
+  });
+
+  assert.equal(service.getVisualState('[X]'), 'complete');
+  assert.equal(service.getVisualState('X'), 'complete');
+  assert.equal(service.getVisualState('[ ]'), 'open');
+});
+
+test('the reserved blank checkbox remains intrinsically open even in malformed persisted mappings', async () => {
+  const { getLinkedSubitemCompleteMarkers } = await linkedSubitemMappingPromise;
+  assert.deepEqual(
+    getLinkedSubitemCompleteMarkers([
+      { checkboxState: '[ ]', statuses: ['complete'] },
+      { checkboxState: '[x]', statuses: ['complete'] },
+    ], { completionStatuses: ['complete'] }),
+    ['x'],
+  );
 });
 
 function methodSource(source, startMarker, endMarker) {
@@ -342,6 +779,10 @@ test('checkbox mutation integration preserves a configured relational status fie
     new URL('../src/services/shared/status-service.ts', import.meta.url),
     'utf8',
   );
+  const workflowMutationSource = readFileSync(
+    new URL('../src/utils/task-checkbox-workflow-mutation.ts', import.meta.url),
+    'utf8',
+  );
   const tableSource = readFileSync(
     new URL('../src/views/log-base-view.ts', import.meta.url),
     'utf8',
@@ -352,9 +793,10 @@ test('checkbox mutation integration preserves a configured relational status fie
     'private setTaskStatusCheckboxState(',
     'private showTaskEditorStatusMenu(',
   );
-  assert.match(checkboxMutation, /findRelationalStatusProperty\(this\.plugin\.settings\.properties\)/u);
-  assert.match(checkboxMutation, /=== relationalStatusKey\) continue;/u);
-  assert.match(checkboxMutation, /setInlineFieldValueOnTaskLine\(next,\s*key,\s*null\)/u);
+  assert.match(checkboxMutation, /setTaskCheckboxWorkflowState\(/u);
+  assert.match(checkboxMutation, /this\.getTaskWorkflowFieldOwnership\(\)/u);
+  assert.match(workflowMutationSource, /normalized === relationalStatusKey/u);
+  assert.match(workflowMutationSource, /setInlineFieldValueOnTaskLine\(next, key, null\)/u);
 
   const apiMutation = methodSource(
     taskApiSource,
@@ -363,11 +805,11 @@ test('checkbox mutation integration preserves a configured relational status fie
   );
   assert.match(
     apiMutation,
-    /if \(!findRelationalStatusProperty\(this\.plugin\.settings\.properties\)\) \{[\s\S]*?setInlineFieldValueOnTaskLine\(next,\s*'status',\s*null\)/u,
+    /const workflowFieldOwnership = this\.getTaskWorkflowFieldOwnership\(\)[\s\S]*?setTaskCheckboxWorkflowState\(next/u,
   );
   assert.match(
     apiMutation,
-    /key\.trim\(\)\.toLowerCase\(\) === 'status'[\s\S]*?&& !findRelationalStatusProperty\(this\.plugin\.settings\.properties\)/u,
+    /isTaskCheckboxOwnedWorkflowFieldKey\(key, workflowFieldOwnership\)/u,
   );
 
   assert.match(
@@ -481,7 +923,7 @@ test('note workflow and recurrence services never treat relational status as che
   );
   assert.match(
     bulkEditSource,
-    /return this\.updateFrontmatter\(files, \{ \[this\.getWorkflowStatusKey\(\)\]: status \}\);/u,
+    /return this\.updateFrontmatter\([\s\S]{0,180}\{ \[this\.getWorkflowStatusKey\(\)\]: status \},[\s\S]{0,80}options/u,
   );
   assert.match(
     bulkEditSource,
@@ -499,7 +941,8 @@ test('note workflow and recurrence services never treat relational status as che
   );
   assert.match(
     noteOperationSource,
-    /sharedServices\?\.status\?\.getStatusPropertyKey\?\.\(\) \|\| ['"]status['"]/u,
+    /subitemRelationshipSyncService\.insertBodyLinkForChildWorkflow\(\s*dailyNote,\s*childFile,/u,
+    'scheduled-note population must delegate workflow-key and checkbox mapping resolution to the shared relationship service',
   );
   assert.match(
     subitemLineSource,

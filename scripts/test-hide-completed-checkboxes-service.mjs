@@ -17,6 +17,10 @@ const observeRootSource = source.slice(
   source.indexOf('private observeRoot'),
   source.indexOf('private scheduleRefresh'),
 );
+const observeLiveRootSource = source.slice(
+  source.indexOf('private observeRoot'),
+  source.indexOf('private observeRenderedRoot'),
+);
 const syncRevealButtonSource = source.slice(
   source.indexOf('private syncRevealButton'),
   source.indexOf('private revealTemporarily'),
@@ -95,24 +99,34 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(source, /root\.classList\.add\(HAS_REVEAL_WIDGET_CLASS\)/);
   assert.match(source, /root\.classList\.remove\(HAS_REVEAL_WIDGET_CLASS\)/);
   assert.match(source, /root\.contains\(active\)/);
-  assert.match(source, /HIDDEN_TASK_DATA_SELECTOR = '\[data-task="x"\], \[data-task="X"\], \[data-task="-"\], \[data-task=">"\]'/);
-  assert.match(source, /COMPLETED_TASK_RE = \/[^\n]*x\|X\|-\|>/);
-  assert.match(source, /line\.querySelector\('\[aria-checked="true"\]'\)/);
+  assert.match(source, /MAPPED_COMPLETED_TASK_CLASS = 'tps-gcm-mapped-completed-task'/);
+  assert.match(source, /getLinkedSubitemCompleteMarkers/);
+  assert.match(source, /completionStatuses: this\.plugin\.sharedServices\.status\.getDoneStatuses\(\)/);
+  assert.match(source, /const migratedMarker = MIGRATED_TASK_CHECKBOX\.slice\(1, -1\)/);
+  assert.match(source, /if \(migratedMarker\) markers\.add\(migratedMarker\)/);
+  assert.match(source, /private isCompletedTaskSourceLine\(source: unknown, completeMarkers: ReadonlySet<string>\): boolean/);
+  assert.match(source, /normalizeLinkedSubitemCheckboxMarker/);
+  assert.match(source, /normalizeLinkedSubitemCheckboxMarker\([\s\S]{0,160}TASK_LINE_STATE_RE/u);
+  assert.match(source, /normalizeLinkedSubitemCheckboxMarker\(task\?\.getAttribute\('data-task'\)\)/u);
+  assert.match(source, /normalizeLinkedSubitemCheckboxMarker\(task\.getAttribute\('data-task'\)\)/u);
+  assert.match(source, /private syncRenderedCompletedTasks\(root: HTMLElement\): void/);
+  assert.doesNotMatch(source, /HIDDEN_TASK_DATA_SELECTOR|COMPLETED_TASK_RE|aria-checked="true"/);
   assert.match(source, /private isLivePreviewRoot\(root: HTMLElement\): boolean/);
   assert.match(source, /root\.classList\.contains\('is-source-mode'\)/);
   assert.match(source, /EDITING_QUIET_WINDOW_MS - \(Date\.now\(\) - this\.lastEditorInputAt\)/);
   assert.match(source, /Date\.now\(\) - this\.lastEditorInputAt < EDITING_QUIET_WINDOW_MS/);
-  assert.doesNotMatch(source, /attributes: true/);
+  assert.doesNotMatch(observeLiveRootSource, /attributes: true/);
+  assert.match(source, /attributeFilter: \['data-task'\]/);
   assert.doesNotMatch(source, /completedLines\.includes\(line\)/);
   assert.doesNotMatch(refreshRootSource, /classList\.toggle\(HIDDEN_LINE_CLASS/);
   assert.doesNotMatch(styles, /\.cm-line:has/);
   assert.doesNotMatch(styles, /\.cm-line\[data-task=/);
   assert.match(styles, /\.markdown-source-view\.mod-cm6:not\(\.is-source-mode\) \.cm-line\.tps-gcm-hidden-completed-checkbox-line/);
   assert.match(styles, /not\(\.is-source-mode\)\.tps-gcm-completed-checkboxes-revealed \.cm-line\.tps-gcm-hidden-completed-checkbox-line/);
-  assert.match(styles, /\.markdown-preview-view\.tps-gcm-completed-checkboxes-revealed li\.task-list-item\.is-checked/);
+  assert.match(styles, /\.markdown-preview-view\.tps-gcm-completed-checkboxes-revealed li\.task-list-item\.tps-gcm-mapped-completed-task/);
   assert.match(styles, /hide-all-task-lines-reading-mode \.markdown-reading-view li\.task-list-item \{/);
   assert.match(styles, /hide-all-task-lines-reading-mode \.markdown-reading-view\.tps-gcm-completed-checkboxes-revealed li\.task-list-item \{/);
-  assert.match(styles, /\.markdown-rendered\.tps-gcm-completed-checkboxes-revealed li\.task-list-item\[data-task="x"\]/);
+  assert.match(styles, /\.markdown-rendered\.tps-gcm-completed-checkboxes-revealed li\.task-list-item\.tps-gcm-mapped-completed-task/);
   assert.doesNotMatch(styles, /li\.task-list-item\[data-task=">"\]/);
   assert.match(styles, /\.markdown-preview-view \.tps-gcm-completed-checkbox-reveal/);
   assert.match(styles, /\.markdown-reading-view \.tps-gcm-completed-checkbox-reveal/);
@@ -204,6 +218,6 @@ test('task hiding exclusions bypass completed and all-task hiding by file patter
   assert.match(source, /if \(this\.isRootTaskHidingExcluded\(root\)\) \{\s*this\.clearTaskHidingRoot\(root\);\s*continue;/);
   assert.match(source, /if \(this\.isRootTaskHidingExcluded\(root\)\) \{\s*this\.clearTaskHidingRoot\(root\);\s*return;/);
   assert.match(styles, /tps-gcm-task-hiding-excluded/);
-  assert.match(styles, /hide-completed-checkboxes \.markdown-reading-view\.tps-gcm-task-hiding-excluded li\.task-list-item\.is-checked/);
+  assert.match(styles, /hide-completed-checkboxes \.markdown-reading-view\.tps-gcm-task-hiding-excluded li\.task-list-item\.tps-gcm-mapped-completed-task/);
   assert.match(styles, /hide-all-task-lines-reading-mode \.markdown-reading-view\.tps-gcm-task-hiding-excluded li\.task-list-item \{/);
 });

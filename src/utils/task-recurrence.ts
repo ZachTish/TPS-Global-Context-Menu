@@ -5,6 +5,10 @@ import {
   setTaskCheckboxToken,
   stripTaskInlinePropsMetadata,
 } from './task-line-metadata';
+import {
+  normalizeLinkedSubitemCheckboxMarker,
+  normalizeLinkedSubitemCheckboxState,
+} from './linked-subitem-mapping';
 
 export const TASK_RECURRENCE_AFTER_COMPLETION_PREFIX = 'GCM-AFTER-COMPLETION:';
 export const TASK_RECURRENCE_ID_KEY = 'recurrenceTaskId';
@@ -74,14 +78,27 @@ export function calculateNextTaskScheduledValue(rawRule: string, options: {
   }
 }
 
-export function buildTaskRecurrenceTemplateLine(rawLine: string): string {
-  let line = setTaskCheckboxToken(rawLine, '[ ]');
+export function buildTaskRecurrenceTemplateLine(
+  rawLine: string,
+  checkboxState: string,
+  statusKey = 'status',
+): string {
+  const normalizedCheckboxState = requireTaskRecurrenceCheckboxState(checkboxState);
+  let line = setTaskCheckboxToken(rawLine, normalizedCheckboxState);
+  line = setInlineFieldValueOnTaskLine(line, statusKey, null);
   line = stripTaskRecurrenceInstanceFields(line);
   return line;
 }
 
-export function buildNextTaskRecurrenceLine(templateLine: string, scheduledValue: string): string {
-  let line = setTaskCheckboxToken(templateLine, '[ ]');
+export function buildNextTaskRecurrenceLine(
+  templateLine: string,
+  scheduledValue: string,
+  checkboxState: string,
+  statusKey = 'status',
+): string {
+  const normalizedCheckboxState = requireTaskRecurrenceCheckboxState(checkboxState);
+  let line = setTaskCheckboxToken(templateLine, normalizedCheckboxState);
+  line = setInlineFieldValueOnTaskLine(line, statusKey, null);
   line = stripTaskRecurrenceInstanceFields(line);
   line = setInlineFieldValueOnTaskLine(line, 'scheduled', scheduledValue);
   return line;
@@ -109,9 +126,11 @@ export function findTaskBlockEndIndex(lines: string[], lineIndex: number): numbe
 }
 
 export function isCompletedTaskMarker(marker: string | null | undefined, completeMarkers: string[] = ['x', 'X']): boolean {
-  const normalized = String(marker ?? '').trim();
-  if (!normalized) return false;
-  return completeMarkers.some((markerValue) => String(markerValue || '').trim() === normalized);
+  const normalized = normalizeLinkedSubitemCheckboxMarker(marker);
+  if (normalized == null || normalized.trim().length === 0) return false;
+  return completeMarkers.some((markerValue) => (
+    normalizeLinkedSubitemCheckboxMarker(markerValue) === normalized
+  ));
 }
 
 export function extractTaskRecurrenceRule(rawLine: string): string {
@@ -155,4 +174,12 @@ function parseIsoDurationToMs(rawDuration: string): number {
 
 function getLineIndent(line: string): number {
   return String(line || '').match(/^\s*/)?.[0]?.length || 0;
+}
+
+function requireTaskRecurrenceCheckboxState(rawState: unknown): string {
+  const checkboxState = normalizeLinkedSubitemCheckboxState(rawState);
+  if (!checkboxState) {
+    throw new Error('Task recurrence requires a valid mapped checkbox state.');
+  }
+  return checkboxState;
 }

@@ -4,6 +4,7 @@ import { parseTaskLine } from './task-line-metadata';
 import {
   getLinkedSubitemCompleteMarkers,
   normalizeLinkedSubitemMappings,
+  type LinkedSubitemCompletionOptions,
 } from './linked-subitem-mapping';
 
 export interface MappedTaskCheckboxClassification {
@@ -29,19 +30,21 @@ interface TaskCheckboxClassificationContext {
 export function classifyMappedTaskCheckboxState(
   mappings: LinkedSubitemCheckboxMapping[],
   state: string | null | undefined,
+  options: LinkedSubitemCompletionOptions = {},
 ): MappedTaskCheckboxClassification {
-  return classifyWithContext(createClassificationContext(mappings), state);
+  return classifyWithContext(createClassificationContext(mappings, options), state, options);
 }
 
 export function hasOpenMappedTaskLines(
   lines: string[],
   mappings: LinkedSubitemCheckboxMapping[],
+  options: LinkedSubitemCompletionOptions = {},
 ): boolean {
-  const context = createClassificationContext(mappings);
+  const context = createClassificationContext(mappings, options);
   return lines.some((line) => {
     const parsed = parseTaskLine(line);
     return parsed
-      ? classifyWithContext(context, parsed.marker).isOpen
+      ? classifyWithContext(context, parsed.marker, options).isOpen
       : false;
   });
 }
@@ -49,6 +52,7 @@ export function hasOpenMappedTaskLines(
 function classifyWithContext(
   context: TaskCheckboxClassificationContext,
   state: string | null | undefined,
+  options: LinkedSubitemCompletionOptions,
 ): MappedTaskCheckboxClassification {
   const marker = readCheckboxMarker(state);
   if (marker == null) {
@@ -63,7 +67,7 @@ function classifyWithContext(
 
   const token = `[${marker}]`;
   const status = context.statusByToken.get(token) || null;
-  const normalizedStatus = normalizeStatus(status);
+  const normalizedStatus = normalizeStatus(status, options.normalizeStatus);
   const isMigrated = token === MIGRATED_TASK_CHECKBOX || normalizedStatus === MIGRATED_TASK_STATUS;
   const isComplete = !isMigrated && context.completeMarkers.has(marker);
 
@@ -72,22 +76,26 @@ function classifyWithContext(
     status,
     isComplete,
     isMigrated,
-    isOpen: !isMigrated && !isComplete,
+    isOpen: Boolean(status) && !isMigrated && !isComplete,
   };
 }
 
 function createClassificationContext(
   mappings: LinkedSubitemCheckboxMapping[],
+  options: LinkedSubitemCompletionOptions,
 ): TaskCheckboxClassificationContext {
   const normalizedMappings = normalizeLinkedSubitemMappings(mappings, { enforceStrictDefaults: false });
   const statusByToken = new Map<string, string>();
   for (const mapping of normalizedMappings) {
     if (!statusByToken.has(mapping.checkboxState)) {
-      statusByToken.set(mapping.checkboxState, mapping.statuses[0] || '');
+      statusByToken.set(
+        mapping.checkboxState,
+        normalizeStatus(mapping.statuses[0] || '', options.normalizeStatus),
+      );
     }
   }
   return {
-    completeMarkers: new Set(getLinkedSubitemCompleteMarkers(normalizedMappings)),
+    completeMarkers: new Set(getLinkedSubitemCompleteMarkers(normalizedMappings, options)),
     statusByToken,
   };
 }
@@ -97,16 +105,25 @@ function readCheckboxMarker(state: string | null | undefined): string | null {
   const source = String(state);
   const trimmed = source.trim();
   const tokenMatch = trimmed.match(/^\[([^\]\r\n]?)\]$/u);
-  if (tokenMatch) return tokenMatch[1] || ' ';
+  if (tokenMatch) {
+    const marker = tokenMatch[1] || ' ';
+    if (marker.length !== 1) return null;
+    return marker === 'X' ? 'x' : marker;
+  }
   if (source === ' ' || trimmed === '') return ' ';
-  if (trimmed.length === 1 && trimmed !== '[' && trimmed !== ']') return trimmed;
+  if (trimmed.length === 1 && trimmed !== '[' && trimmed !== ']') return trimmed === 'X' ? 'x' : trimmed;
   return null;
 }
 
-function normalizeStatus(value: unknown): string {
-  return String(value ?? '')
+function normalizeStatus(
+  value: unknown,
+  statusNormalizer?: (value: unknown) => string,
+): string {
+  const normalized = String(value ?? '')
     .replace(/^\[\[|\]\]$/gu, '')
     .replace(/^["']|["']$/gu, '')
     .trim()
     .toLowerCase();
+  if (!normalized || !statusNormalizer) return normalized;
+  return String(statusNormalizer(normalized) || '').trim().toLowerCase();
 }

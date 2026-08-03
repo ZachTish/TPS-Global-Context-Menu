@@ -87,9 +87,12 @@ import { TPS_EVENTS } from './tps-contracts';
 import { createSharedServices, type GcmSharedServices } from './services/shared';
 import { ViewModeService } from './services/view-mode-service';
 import { resolveCustomProperties } from './resolve-profiles';
-import { MIGRATED_TASK_MAPPING } from './constants/task-migration';
 import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { installVisibleViewportContract } from './utils/mobile-overlay';
+import {
+  normalizeLinkedSubitemCheckboxState,
+  normalizeLinkedSubitemMappings,
+} from './utils/linked-subitem-mapping';
 import {
   reconcilePersistedSettingsInPlace,
   SettingsPersistenceCoordinator,
@@ -371,51 +374,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private fileExclusionService: AutoFrontmatterExclusionService;
 
   private settingsPersistence: SettingsPersistenceCoordinator | null = null;
-
-  private getStrictLinkedSubitemMappings() {
-    return [
-      { checkboxState: '[ ]', statuses: ['todo'], toggleTargetStatus: 'complete', icon: 'square', label: 'Todo' },
-      { checkboxState: '[x]', statuses: ['complete'], toggleTargetStatus: 'todo', icon: 'check', label: 'Complete' },
-      { checkboxState: '[\\]', statuses: ['working'], toggleTargetStatus: 'complete', icon: 'slash', label: 'Working' },
-      { checkboxState: '[?]', statuses: ['holding'], toggleTargetStatus: 'todo', icon: 'help-circle', label: 'Holding' },
-      { checkboxState: '[-]', statuses: ['wont-do'], toggleTargetStatus: 'todo', icon: 'minus', label: 'Won’t Do' },
-      MIGRATED_TASK_MAPPING,
-    ];
-  }
-
-  private normalizeStrictLinkedSubitemMappings(
-    current: Array<{ checkboxState?: string; statuses?: string[]; toggleTargetStatus?: string; icon?: string; label?: string }> | undefined,
-  ) {
-    const byState = new Map(
-      (current || [])
-        .map((entry) => ({
-          checkboxState: String(entry?.checkboxState || '').trim(),
-          statuses: Array.isArray(entry?.statuses)
-            ? entry.statuses.map((value) => String(value || '').trim()).filter(Boolean)
-            : [],
-          toggleTargetStatus: String(entry?.toggleTargetStatus || '').trim() || undefined,
-          icon: String(entry?.icon || '').trim() || undefined,
-          label: String(entry?.label || '').trim() || undefined,
-        }))
-        .filter((entry) => entry.checkboxState)
-        .map((entry) => [entry.checkboxState, entry] as const),
-    );
-    const strictStates = new Set(this.getStrictLinkedSubitemMappings().map((entry) => entry.checkboxState));
-    const custom = Array.from(byState.values()).filter((entry) => !strictStates.has(entry.checkboxState) && entry.statuses.length > 0);
-    return [
-      ...this.getStrictLinkedSubitemMappings().map((entry) => {
-        const existing = byState.get(entry.checkboxState);
-        return {
-          ...entry,
-          statuses: existing?.statuses?.length ? existing.statuses : entry.statuses,
-          toggleTargetStatus: existing?.toggleTargetStatus || entry.toggleTargetStatus,
-          icon: existing?.icon || entry.icon,
-          label: existing?.label || entry.label,
-        };
-      }),
-      ...custom,
-    ];
-  }
 
   private isCanvasOrBasesInteractionTarget(target: EventTarget | null): target is HTMLElement {
     if (!(target instanceof HTMLElement)) return false;
@@ -2059,48 +2017,61 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     const legacyCanceled = Array.isArray(loaded?.linkedSubitemCanceledStatuses)
       ? loaded?.linkedSubitemCanceledStatuses.map((value) => String(value || '').trim()).filter(Boolean)
       : [];
-    const migratedMappings = Array.isArray(this.settings.linkedSubitemCheckboxMappings)
-      ? this.settings.linkedSubitemCheckboxMappings
+    const hasPersistedMappings = Object.prototype.hasOwnProperty.call(
+      loadedSettingsRecord,
+      'linkedSubitemCheckboxMappings',
+    );
+    const persistedMappings = Array.isArray(loaded?.linkedSubitemCheckboxMappings)
+      ? loaded.linkedSubitemCheckboxMappings
       : [];
-    if (migratedMappings.length === 0) {
-      this.settings.linkedSubitemCheckboxMappings = this.normalizeStrictLinkedSubitemMappings([
+    const hasLegacyMappingSettings = [
+      'linkedSubitemUncheckedStatuses',
+      'linkedSubitemCheckedStatuses',
+      'linkedSubitemCanceledStatuses',
+      'linkedSubitemToggleCheckedStatus',
+      'linkedSubitemToggleUncheckedStatus',
+    ].some((key) => Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key));
+    const mappingSource = persistedMappings.length > 0
+      ? persistedMappings
+      : hasLegacyMappingSettings
+        ? [
         {
           checkboxState: '[ ]',
+          statuses: legacyUnchecked.length > 0 ? legacyUnchecked : ['todo'],
           toggleTargetStatus: String(loaded?.linkedSubitemToggleCheckedStatus || 'complete').trim() || 'complete',
           icon: 'square',
           label: 'Todo',
         },
         {
           checkboxState: '[x]',
+          statuses: legacyChecked.length > 0 ? legacyChecked : ['complete'],
           toggleTargetStatus: String(loaded?.linkedSubitemToggleUncheckedStatus || 'todo').trim() || 'todo',
           icon: 'check',
           label: 'Complete',
         },
         {
           checkboxState: '[-]',
+          statuses: legacyCanceled.length > 0 ? legacyCanceled : ['wont-do'],
           toggleTargetStatus: String(loaded?.linkedSubitemToggleUncheckedStatus || 'todo').trim() || 'todo',
           icon: 'minus',
           label: 'Won’t Do',
         },
-      ]);
-    }
-    this.settings.linkedSubitemDefaultOpenState = String(this.settings.linkedSubitemDefaultOpenState || '[ ]').trim() || '[ ]';
-    this.settings.linkedSubitemCheckboxMappings = this.normalizeStrictLinkedSubitemMappings(
-      this.settings.linkedSubitemCheckboxMappings
-        .map((entry) => ({
-        checkboxState: String(entry?.checkboxState || '').trim(),
-        statuses: Array.isArray(entry?.statuses)
-          ? entry.statuses.map((value) => String(value || '').trim()).filter(Boolean)
-          : [],
-        toggleTargetStatus: String(entry?.toggleTargetStatus || '').trim() || undefined,
-        icon: String(entry?.icon || '').trim() || undefined,
-        label: String(entry?.label || '').trim() || undefined,
-      }))
-      .filter((entry) => entry.checkboxState && entry.statuses.length > 0),
+      ]
+        : DEFAULT_SETTINGS.linkedSubitemCheckboxMappings;
+    this.settings.linkedSubitemCheckboxMappings = normalizeLinkedSubitemMappings(mappingSource, {
+      enforceStrictDefaults: true,
+    });
+    this.settings.linkedSubitemDefaultOpenState = normalizeLinkedSubitemCheckboxState(
+      this.settings.linkedSubitemDefaultOpenState,
+    ) || '[ ]';
+    const needsCheckboxMappingMigration = Boolean(loaded) && (
+      hasLegacyMappingSettings
+      || (hasPersistedMappings && JSON.stringify(persistedMappings) !== JSON.stringify(this.settings.linkedSubitemCheckboxMappings))
+      || (
+        Object.prototype.hasOwnProperty.call(loadedSettingsRecord, 'linkedSubitemDefaultOpenState')
+        && loaded?.linkedSubitemDefaultOpenState !== this.settings.linkedSubitemDefaultOpenState
+      )
     );
-    if (this.settings.linkedSubitemCheckboxMappings.length === 0) {
-      this.settings.linkedSubitemCheckboxMappings = this.getStrictLinkedSubitemMappings();
-    }
     logger.setLoggingEnabled(this.settings.enableLogging);
     const normalizedAuthoritativeHomeSettingKeys = AUTHORITATIVE_HOME_SETTING_KEYS.filter((key) =>
       !Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key)
@@ -2109,6 +2080,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     const needsSettingsMigration =
       hadRetiredHomeCaptureHeadingSettings ||
       needsActivityBasePathMigration ||
+      needsCheckboxMappingMigration ||
       normalizedAuthoritativeHomeSettingKeys.length > 0 ||
       removedRetiredPropertyCount > 0;
     this.settingsPersistence = null;
@@ -2123,6 +2095,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }
     if (needsActivityBasePathMigration) {
       logger.flow('Settings', 'migration:activity-base-path');
+    }
+    if (needsCheckboxMappingMigration) {
+      logger.flow('Settings', 'migration:checkbox-status-mappings', {
+        count: this.settings.linkedSubitemCheckboxMappings.length,
+      });
     }
     if (normalizedAuthoritativeHomeSettingKeys.length > 0) {
       logger.flow('Settings', 'migration:authoritative-home-settings', {
@@ -2601,6 +2578,13 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     this.settings.parentLinkFormat = normalizeParentLinkFormat(this.settings.parentLinkFormat);
+    this.settings.linkedSubitemCheckboxMappings = normalizeLinkedSubitemMappings(
+      this.settings.linkedSubitemCheckboxMappings,
+      { enforceStrictDefaults: true },
+    );
+    this.settings.linkedSubitemDefaultOpenState = normalizeLinkedSubitemCheckboxState(
+      this.settings.linkedSubitemDefaultOpenState,
+    ) || '[ ]';
     this.stripLegacySettingsFields(this.settings as unknown as Record<string, unknown>);
     this.configureEntityIndexDimensions();
     logger.setLoggingEnabled(this.settings.enableLogging);

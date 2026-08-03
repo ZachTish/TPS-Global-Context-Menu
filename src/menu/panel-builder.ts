@@ -1893,13 +1893,7 @@ export class PanelBuilder {
     if (!value) return '';
     const shared = this.plugin.sharedServices?.status;
     if (/^\[[^\]]*]$/.test(value) || /^[xX/?\\\-\s]$/.test(value)) {
-      if (shared?.checkboxStateToStatus) return shared.checkboxStateToStatus(value);
-      const marker = getCheckboxStateMarker(normalizeCheckboxStateToken(value));
-      if (marker === 'x') return 'complete';
-      if (marker === '/' || marker === '\\') return 'working';
-      if (marker === '?') return 'holding';
-      if (marker === '-') return 'wont-do';
-      return 'todo';
+      return shared?.checkboxStateToStatus?.(value) || '';
     }
     return shared?.normalize?.(value) || value.toLowerCase();
   }

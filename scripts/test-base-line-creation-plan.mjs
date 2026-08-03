@@ -65,7 +65,10 @@ test('whole-Base kind and active-view fields resolve additively', async () => {
         'task.path == "Inbox/Tasks.md"',
       ],
     },
-  ]);
+  ], {
+    orderedMappedStatuses: ['todo', 'complete'],
+    isDoneStatus: (status) => status === 'complete',
+  });
 
   assert.equal(plan.blockedReason, null);
   assert.equal(plan.kind, 'task');
@@ -73,6 +76,83 @@ test('whole-Base kind and active-view fields resolve additively', async () => {
   assert.equal(plan.targetPath, 'Inbox/Tasks.md');
   assert.deepEqual(plan.fields, { priority: 'low' });
   assert.deepEqual(plan.diagnostics.selectedBranches, ['root[0].and[0].or[0]']);
+});
+
+test('completion booleans select only authoritatively classified statuses in mapping order', async () => {
+  const { resolveTpsBaseLineCreationPlan } = await loadModule();
+  const options = {
+    orderedMappedStatuses: ['shipped', 'queued', 'canceled'],
+    isDoneStatus: (status) => status === 'shipped' || status === 'canceled',
+  };
+
+  const open = resolveTpsBaseLineCreationPlan([
+    'kind == "task"',
+    'open == true',
+  ], options);
+  assert.equal(open.blockedReason, null);
+  assert.equal(open.status, 'queued');
+
+  const done = resolveTpsBaseLineCreationPlan([
+    'kind == "task"',
+    'done == true',
+  ], options);
+  assert.equal(done.blockedReason, null);
+  assert.equal(done.status, 'shipped');
+
+  const nextDone = resolveTpsBaseLineCreationPlan([
+    'kind == "task"',
+    'done == true',
+    'status != "shipped"',
+  ], options);
+  assert.equal(nextDone.blockedReason, null);
+  assert.equal(nextDone.status, 'canceled');
+});
+
+test('an explicit workflow status outranks boolean defaults but must be authoritatively classified', async () => {
+  const { resolveTpsBaseLineCreationPlan } = await loadModule();
+  const explicit = resolveTpsBaseLineCreationPlan([
+    'kind == "task"',
+    'status == "canceled"',
+    'done == true',
+  ], {
+    orderedMappedStatuses: ['shipped', 'queued', 'canceled'],
+    isDoneStatus: (status) => status === 'shipped' || status === 'canceled',
+  });
+  assert.equal(explicit.blockedReason, null);
+  assert.equal(explicit.status, 'canceled');
+
+  const unclassified = resolveTpsBaseLineCreationPlan([
+    'kind == "task"',
+    'status == "archived"',
+    'done == true',
+  ], {
+    orderedMappedStatuses: ['shipped', 'queued', 'canceled'],
+    isDoneStatus: (status) => status === 'archived' ? null : status !== 'queued',
+  });
+  assert.equal(unclassified.kind, null);
+  assert.equal(unclassified.blockedReason, 'status-completion-unclassified:archived');
+});
+
+test('completion defaults block after resolving filters when no mapped status matches', async () => {
+  const { resolveTpsBaseLineCreationPlan } = await loadModule();
+  const resolvedValues = [];
+  const plan = resolveTpsBaseLineCreationPlan([
+    'task.path == this.target',
+    'kind == "task"',
+    'done == true',
+  ], {
+    resolveValue: (value) => {
+      resolvedValues.push(value);
+      return value === 'this.target' ? 'Inbox/Mapped Tasks.md' : value;
+    },
+    orderedMappedStatuses: ['queued'],
+    isDoneStatus: () => false,
+  });
+
+  assert.deepEqual(resolvedValues, ['this.target', 'task', 'true']);
+  assert.equal(plan.kind, null);
+  assert.equal(plan.targetPath, null);
+  assert.equal(plan.blockedReason, 'checkbox-status-mapping-unavailable:done');
 });
 
 test('entity links, tags, and scheduled defaults compose additively like a task Base view', async () => {
@@ -111,7 +191,9 @@ test('entity links, tags, and scheduled defaults compose additively like a task 
   });
 
   const defaults = {
-    status: plan.status,
+    // The owning view resolves its authoritative mapped open status before
+    // calling the line builder; the utility no longer invents todo/[ ].
+    status: plan.status || 'queued',
     targetPath: plan.targetPath,
     inlineFields: new Map(Object.entries(plan.fields).map(([key, value]) => [key, { key, value }])),
     tags: new Set(plan.tags),
@@ -125,7 +207,7 @@ test('entity links, tags, and scheduled defaults compose additively like a task 
       laneValue: null,
       itemKind: 'task',
       defaults,
-      getCheckboxStateForStatus: () => '[ ]',
+      getCheckboxStateForStatus: (status) => status === 'queued' ? '[ ]' : null,
     }),
     expectedLine,
   );

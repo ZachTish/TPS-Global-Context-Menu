@@ -123,7 +123,6 @@ test('all migrated GCM owners route through the explicit mutation service', () =
     'src/services/archive-file-service.ts',
     'src/services/bulk-edit-service.ts',
     'src/services/file-naming-service.ts',
-    'src/services/linked-subitem-checkbox-service.ts',
     'src/services/note-operation-service.ts',
     'src/services/parent-link-resolution-service.ts',
     'src/services/subitem-creation-service.ts',
@@ -131,6 +130,10 @@ test('all migrated GCM owners route through the explicit mutation service', () =
   for (const path of directOwners) {
     assert.match(read(path), /frontmatterMutationService\.process\(/u, `${path} must use the owned service`);
   }
+
+  const linkedSubitems = read('src/services/linked-subitem-checkbox-service.ts');
+  assert.match(linkedSubitems, /bulkEditService\.setStatus\(/u, 'linked subitems must use the canonical bulk status pipeline');
+  assert.doesNotMatch(linkedSubitems, /frontmatterMutationService\.process\(/u, 'linked subitems must not bypass bulk status follow-up');
 
   const tpsList = read('src/tps-list/views/TpsListView.ts');
   assert.match(tpsList, /const service = this\.getGcmPlugin\(\)\?\.frontmatterMutationService;/u);

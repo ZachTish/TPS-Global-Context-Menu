@@ -3,8 +3,29 @@ import type TPSGlobalContextMenuPlugin from '../main';
 import type { BodySubitemLink, ReconcileResult } from './subitem-types';
 import { resolveLinkTargetToFile } from './link-target-service';
 import { getCompatibleMarkdownViewFromLeaf, pickBestMarkdownLeaf } from './leaf-resolver';
-import { mapStatusToSubitemCheckboxState } from '../utils/linked-subitem-mapping';
+import {
+  getLinkedSubitemMappingForState,
+  normalizeLinkedSubitemCheckboxState,
+  normalizeLinkedSubitemMappings,
+  resolveLinkedSubitemSemanticCheckboxPlanForState,
+  resolveLinkedSubitemSemanticCheckboxPlanForStatus,
+  type LinkedSubitemSemanticCheckboxPlan,
+} from '../utils/linked-subitem-mapping';
 import * as logger from '../logger';
+
+export type ChildWorkflowCheckboxResolution = {
+  outcome: 'mapped' | 'statusless' | 'unmapped';
+  statusKey: string;
+  statuses: string[];
+  checkboxState: string | null;
+  mappingPlans: LinkedSubitemSemanticCheckboxPlan[];
+};
+
+export type ChildWorkflowBodyLinkResult = {
+  changed: boolean;
+  blockedReason: 'unmapped-status' | 'workflow-changed' | null;
+  resolution: ChildWorkflowCheckboxResolution;
+};
 
 export class SubitemRelationshipSyncService {
   private bodyWriteChains = new Map<string, Promise<void>>();
@@ -49,8 +70,7 @@ export class SubitemRelationshipSyncService {
         if (!nextChild) break;
         const placeholderState =
           this.getBrokenSubitemPlaceholderCheckboxState(lines[index] || '') ??
-          this.resolveCheckboxStateForChild(nextChild) ??
-          '[ ]';
+          this.resolveCheckboxStateForChild(nextChild);
         lines[index] = this.buildBodyLinkLine(parentFile, nextChild, placeholderState);
         repairedCount += 1;
         changed = true;
@@ -183,6 +203,143 @@ export class SubitemRelationshipSyncService {
     return changed;
   }
 
+  /**
+   * Resolve a child note's workflow status through the strict, ordered
+   * checkbox mapping contract. A nonempty unsupported status is distinct from
+   * a genuinely statusless note and never receives an invented open marker.
+   */
+  public resolveChildWorkflowCheckbox(
+    frontmatter: Record<string, unknown> | null | undefined,
+    options: { statuslessMode?: 'bullet' | 'configured-open' } = {},
+  ): ChildWorkflowCheckboxResolution {
+    const statusService = this.plugin.sharedServices.status;
+    const statusKey = String(statusService.getStatusPropertyKey() || '').trim() || 'status';
+    const statuses = statusService.getStatuses(frontmatter, statusKey);
+    const mappings = normalizeLinkedSubitemMappings(
+      this.plugin.settings.linkedSubitemCheckboxMappings || [],
+      {
+        enforceStrictDefaults: false,
+        normalizeStatus: (value) => statusService.normalize(value),
+      },
+    );
+    if (statuses.length === 0) {
+      if (options.statuslessMode !== 'configured-open') {
+        return { outcome: 'statusless', statusKey, statuses: [], checkboxState: null, mappingPlans: [] };
+      }
+      const configuredState = normalizeLinkedSubitemCheckboxState(
+        this.plugin.settings.linkedSubitemDefaultOpenState,
+      );
+      const configuredMapping = configuredState
+        ? getLinkedSubitemMappingForState(mappings, configuredState, { normalizedMappings: true })
+        : null;
+      const configuredStatuses = configuredMapping?.statuses
+        .map((status) => statusService.normalize(status))
+        .filter(Boolean) || [];
+      if (
+        !configuredState
+        || !configuredMapping
+        || configuredStatuses.length === 0
+        || configuredStatuses.some((status) => statusService.isDoneStatus(status))
+      ) {
+        return { outcome: 'unmapped', statusKey, statuses: [], checkboxState: null, mappingPlans: [] };
+      }
+      const openPlan = resolveLinkedSubitemSemanticCheckboxPlanForState(
+        mappings,
+        configuredState,
+        configuredStatuses[0],
+        {
+          normalizeStatus: (value) => statusService.normalize(value),
+          normalizedMappings: true,
+        },
+      );
+      return openPlan
+        ? {
+          outcome: 'statusless',
+          statusKey,
+          statuses: [],
+          checkboxState: openPlan.checkboxState,
+          mappingPlans: [openPlan],
+        }
+        : { outcome: 'unmapped', statusKey, statuses: [], checkboxState: null, mappingPlans: [] };
+    }
+
+    const mappingPlans = statuses.map((status) => resolveLinkedSubitemSemanticCheckboxPlanForStatus(
+      mappings,
+      status,
+      {
+        normalizeStatus: (value) => statusService.normalize(value),
+        normalizedMappings: true,
+      },
+    ));
+    if (mappingPlans.some((plan) => plan == null)) {
+      return { outcome: 'unmapped', statusKey, statuses, checkboxState: null, mappingPlans: [] };
+    }
+    const exactPlans = mappingPlans as LinkedSubitemSemanticCheckboxPlan[];
+    const checkboxState = exactPlans[0]?.checkboxState || null;
+    if (!checkboxState || exactPlans.some((plan) => plan.checkboxState !== checkboxState)) {
+      return { outcome: 'unmapped', statusKey, statuses, checkboxState: null, mappingPlans: [] };
+    }
+    return { outcome: 'mapped', statusKey, statuses, checkboxState, mappingPlans: exactPlans };
+  }
+
+  public resolveChildWorkflowCheckboxForFile(
+    childFile: TFile,
+    options: { statuslessMode?: 'bullet' | 'configured-open' } = {},
+  ): ChildWorkflowCheckboxResolution {
+    const frontmatter = (this.plugin.app.metadataCache.getFileCache(childFile)?.frontmatter || {}) as Record<string, unknown>;
+    return this.resolveChildWorkflowCheckbox(frontmatter, options);
+  }
+
+  /**
+   * Insert a derived child link with semantic compare-and-swap revalidation at
+   * the parent body mutation boundary.
+   */
+  public async insertBodyLinkForChildWorkflow(
+    parentFile: TFile,
+    childFile: TFile,
+    options: {
+      frontmatter?: Record<string, unknown>;
+      statuslessMode?: 'bullet' | 'configured-open';
+    } = {},
+  ): Promise<ChildWorkflowBodyLinkResult> {
+    const resolveCurrent = () => options.frontmatter
+      ? this.resolveChildWorkflowCheckbox(options.frontmatter, { statuslessMode: options.statuslessMode })
+      : this.resolveChildWorkflowCheckboxForFile(childFile, { statuslessMode: options.statuslessMode });
+    const planned = resolveCurrent();
+    if (planned.outcome === 'unmapped') {
+      logger.flowWarn('SubitemRelationship', 'body-link:unmapped-child-status', {
+        parentPath: parentFile.path,
+        childPath: childFile.path,
+        statusKey: planned.statusKey,
+        statuses: planned.statuses,
+      });
+      return { changed: false, blockedReason: 'unmapped-status', resolution: planned };
+    }
+
+    let guardBlocked = false;
+    const changed = await this.mutateMarkdownBody(parentFile, async (lines, raw) => {
+      const live = resolveCurrent();
+      if (!sameChildWorkflowCheckboxResolution(planned, live)) {
+        guardBlocked = true;
+        return false;
+      }
+      return this.insertBodyLinkIntoLines(parentFile, childFile, live.checkboxState, lines, raw);
+    });
+    if (guardBlocked) {
+      logger.flowWarn('SubitemRelationship', 'body-link:child-workflow-changed', {
+        parentPath: parentFile.path,
+        childPath: childFile.path,
+        statusKey: planned.statusKey,
+        statuses: planned.statuses,
+      });
+    }
+    return {
+      changed,
+      blockedReason: guardBlocked ? 'workflow-changed' : null,
+      resolution: planned,
+    };
+  }
+
   async unlinkChildFromParent(childFile: TFile, parentFile: TFile): Promise<{ childChanged: boolean; parentChanged: boolean }> {
     const childChanged = await this.plugin.parentLinkResolutionService.removeParentFromChild(childFile, parentFile);
     let parentChanged = false;
@@ -193,20 +350,29 @@ export class SubitemRelationshipSyncService {
   }
 
   public async insertBodyLink(parentFile: TFile, childFile: TFile, checkboxState?: string | null): Promise<boolean> {
-    return await this.mutateMarkdownBody(parentFile, async (lines, raw) => {
-      const existing = this.plugin.bodySubitemLinkService.scanText(parentFile, raw);
-      if (existing.some((entry) => entry.childPath === childFile.path)) return false;
+    return await this.mutateMarkdownBody(parentFile, async (lines, raw) => (
+      this.insertBodyLinkIntoLines(parentFile, childFile, checkboxState, lines, raw)
+    ));
+  }
 
-      const line = this.buildBodyLinkLine(parentFile, childFile, checkboxState);
+  private insertBodyLinkIntoLines(
+    parentFile: TFile,
+    childFile: TFile,
+    checkboxState: string | null | undefined,
+    lines: string[],
+    raw: string,
+  ): boolean {
+    const existing = this.plugin.bodySubitemLinkService.scanText(parentFile, raw);
+    if (existing.some((entry) => entry.childPath === childFile.path)) return false;
 
-      const repaired = this.replaceBrokenPlaceholderWithLine(raw, line);
-      const normalized = repaired !== raw ? repaired : this.insertLineAfterSubitemBlock(raw, line, existing);
-      if (normalized === raw) return false;
+    const line = this.buildBodyLinkLine(parentFile, childFile, checkboxState);
+    const repaired = this.replaceBrokenPlaceholderWithLine(raw, line);
+    const normalized = repaired !== raw ? repaired : this.insertLineAfterSubitemBlock(raw, line, existing);
+    if (normalized === raw) return false;
 
-      const nextLines = normalized.split('\n');
-      lines.splice(0, lines.length, ...nextLines);
-      return true;
-    });
+    const nextLines = normalized.split('\n');
+    lines.splice(0, lines.length, ...nextLines);
+    return true;
   }
 
   /**
@@ -307,18 +473,8 @@ export class SubitemRelationshipSyncService {
   }
 
   private resolveCheckboxStateForChild(childFile: TFile): string | null {
-    const statusKey = String(
-      this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status',
-    ).trim() || 'status';
-    const frontmatter = (this.plugin.app.metadataCache.getFileCache(childFile)?.frontmatter || {}) as Record<string, unknown>;
-    const actualKey = Object.keys(frontmatter).find((candidate) => candidate.toLowerCase() === statusKey.toLowerCase());
-    const statusValue = String(actualKey ? frontmatter[actualKey] : '').trim();
-    const mapped = mapStatusToSubitemCheckboxState(
-      this.plugin.settings.linkedSubitemCheckboxMappings || [],
-      statusValue,
-    );
-    if (mapped) return mapped;
-    return statusValue ? (this.plugin.settings.linkedSubitemDefaultOpenState || '[ ]') : null;
+    const resolution = this.resolveChildWorkflowCheckboxForFile(childFile);
+    return resolution.outcome === 'mapped' ? resolution.checkboxState : null;
   }
 
   private async removeBodyLink(parentFile: TFile, childFile: TFile): Promise<boolean> {
@@ -567,6 +723,31 @@ export class SubitemRelationshipSyncService {
 
     await this.plugin.app.vault.modify(file, next);
   }
+}
+
+function sameChildWorkflowCheckboxResolution(
+  planned: ChildWorkflowCheckboxResolution,
+  current: ChildWorkflowCheckboxResolution,
+): boolean {
+  if (
+    planned.outcome !== current.outcome
+    || planned.statusKey !== current.statusKey
+    || planned.checkboxState !== current.checkboxState
+    || planned.statuses.length !== current.statuses.length
+    || planned.statuses.some((status, index) => status !== current.statuses[index])
+    || planned.mappingPlans.length !== current.mappingPlans.length
+  ) return false;
+  return planned.mappingPlans.every((plan, index) => {
+    const live = current.mappingPlans[index];
+    return Boolean(
+      live
+      && plan.resolution === live.resolution
+      && plan.checkboxState === live.checkboxState
+      && plan.status === live.status
+      && plan.statuses.length === live.statuses.length
+      && plan.statuses.every((status, statusIndex) => status === live.statuses[statusIndex]),
+    );
+  });
 }
 
 function compactStack(stack: string | undefined): string[] | undefined {

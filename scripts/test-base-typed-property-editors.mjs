@@ -9,6 +9,7 @@ const read = (relativePath) => readFileSync(new URL(`../${relativePath}`, import
 const logBase = read('src/views/log-base-view.ts');
 const main = read('src/main.ts');
 const taskLineContext = read('src/services/task-line-context-menu-service.ts');
+const taskWorkflowMutation = read('src/utils/task-checkbox-workflow-mutation.ts');
 const tpsList = read('src/tps-list/views/TpsListView.ts');
 const tagModal = read('src/modals/TagSuggestModal.ts');
 const propertyChoice = read('src/views/log-base-property-choice.ts');
@@ -193,9 +194,12 @@ test('TPS Table property cells own their click intent and configured selectors o
   assert.match(main, /'\[data-tps-table-cell-intent="property"\]'/);
   assert.match(taskLineContext, /openTaskStatusPicker\(/);
   assert.match(taskLineContext, /this\.setTaskStatusCheckboxState\(line, mapping\.checkboxState\)/);
-  assert.match(taskLineContext, /new Set\(\[this\.getStatusKey\(\), 'status', 'checkboxStatus'\]\)/);
-  assert.match(taskLineContext, /findRelationalStatusProperty\(this\.plugin\.settings\.properties\)/);
-  assert.match(taskLineContext, /if \(String\(key \|\| ''\)\.trim\(\)\.toLowerCase\(\) === relationalStatusKey\) continue/);
+  assert.match(taskLineContext, /setTaskCheckboxWorkflowState\(/);
+  assert.match(taskWorkflowMutation, /'taskStatus'/);
+  assert.match(taskWorkflowMutation, /'task\.status'/);
+  assert.match(taskWorkflowMutation, /'task\.checkboxStatus'/);
+  assert.match(taskWorkflowMutation, /'checkboxStatus'/);
+  assert.match(taskWorkflowMutation, /normalized === relationalStatusKey/);
   assert.match(taskLineContext, /status-picker:change/);
   assert.match(taskLineContext, /checkboxMutation:\s*true/);
   assert.match(taskLineContext, /handleExternalChecklistStateMutation\(/);
@@ -431,23 +435,25 @@ test('TPS Table selector mutations preserve line identity and sibling fields', a
   assert.match(line, /\^selector-row$/u);
 });
 
-test('task Status selection clears stale inline status carriers before completion follow-ups', async () => {
+test('task Status selection clears every checkbox-owned carrier while preserving relational status', async () => {
+  const mutation = await importBundled('../src/utils/task-checkbox-workflow-mutation.ts');
   const metadata = await importBundled('../src/utils/task-line-metadata.ts');
-  let line = '- [ ] Finish selector QA [status:: holding] [checkboxStatus:: holding] [priority:: high] ^selector-status';
+  const source = '- [ ] Finish selector QA [workflowStatus:: holding] [taskStatus:: legacy] [status:: [[Statuses/Holding]]] [task.status:: holding] [task.checkboxStatus:: holding] [checkboxStatus:: holding] [priority:: high] `[task.status:: sample]` ^selector-status';
 
-  line = metadata.setTaskCheckboxToken(line, '[x]');
-  for (const key of ['workflowStatus', 'status', 'checkboxStatus']) {
-    line = metadata.setInlineFieldValueOnTaskLine(line, key, null);
-  }
-  line = metadata.updateTaskCompletedDateForCheckboxState(line, '[x]', {
-    completedAt: new Date(2026, 6, 27, 12, 34, 56),
+  const line = mutation.setTaskCheckboxWorkflowState(source, '[x]', {
+    workflowStatusKey: 'workflowStatus',
+    relationalStatusKey: 'status',
   });
 
   assert.match(line, /^- \[x\] Finish selector QA/u);
-  assert.equal(metadata.readInlineFieldValue(line, 'status'), '');
+  assert.equal(metadata.readInlineFieldValue(line, 'workflowStatus'), '');
+  assert.equal(metadata.readInlineFieldValue(line, 'taskStatus'), '', 'a renamed workflow key must not leave its legacy carrier behind');
+  assert.equal(metadata.readInlineFieldValue(line, 'status'), '[[Statuses/Holding]]');
+  assert.equal(metadata.readInlineFieldValue(line, 'task.status'), '');
+  assert.equal(metadata.readInlineFieldValue(line, 'task.checkboxStatus'), '');
   assert.equal(metadata.readInlineFieldValue(line, 'checkboxStatus'), '');
   assert.equal(metadata.readInlineFieldValue(line, 'priority'), 'high');
-  assert.equal(metadata.readInlineFieldValue(line, 'completedDate'), '2026-07-27 12:34:56');
+  assert.match(line, /`\[task\.status:: sample\]`/u);
   assert.match(line, /\^selector-status$/u);
 });
 

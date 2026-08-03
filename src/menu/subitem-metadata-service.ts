@@ -192,7 +192,7 @@ export class SubitemMetadataService {
 
     return this.plugin.taskIdentityService.identify(file, identityFrontmatter, {
       statusProperty,
-      completionStatuses: this.plugin.settings.parentCompletionStatuses?.length
+      completionStatuses: Array.isArray(this.plugin.settings.parentCompletionStatuses)
         ? this.plugin.settings.parentCompletionStatuses
         : undefined,
     });
