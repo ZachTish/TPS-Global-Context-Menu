@@ -101,11 +101,26 @@ class FakeWorkspace {
 
 function createMenusApi() {
   const registrations = [];
+  const fileRegistrations = [];
   let disposeCount = 0;
+  let fileDisposeCount = 0;
   return {
     registrations,
+    fileRegistrations,
     get disposeCount() {
       return disposeCount;
+    },
+    get fileDisposeCount() {
+      return fileDisposeCount;
+    },
+    registerFileMenu(callback) {
+      const registration = { callback, active: true };
+      fileRegistrations.push(registration);
+      return () => {
+        if (!registration.active) return;
+        registration.active = false;
+        fileDisposeCount += 1;
+      };
     },
     registerRowMenu(callback, options) {
       const registration = { callback, options, active: true };
@@ -161,8 +176,8 @@ function createHarness(TFile) {
     manifest: { id: "tps-global-context-menu" },
     settings: { inlineMenuOnly: false },
     menuController: {
-      addToExactFileMenu(menu, files) {
-        exactCalls.push({ menu, files });
+      addToExactFileMenu(menu, files, options) {
+        exactCalls.push({ menu, files, options });
         menu.addItem((item) => item.setTitle("GCM note action"));
         menu.addSeparator();
         menu.addItem((item) => item.setTitle("Archive"));
@@ -182,6 +197,16 @@ function applyRegistration(registration, target) {
     addSeparator: () => operations.push({ kind: "separator" }),
   };
   registration.callback(context);
+  return operations;
+}
+
+function applyFileRegistration(registration, file, selection = { mode: "single", files: [file] }) {
+  const operations = [];
+  registration.callback({
+    file,
+    selection,
+    addItem: (callback) => operations.push({ kind: "item", callback }),
+  });
   return operations;
 }
 
@@ -268,6 +293,7 @@ test("lifecycle registration is idempotent and stale payloads cannot remove a ne
 
   workspace.requests[0].respond(apiPayload(first, 100));
   assert.equal(first.registrations.length, 1);
+  assert.equal(first.fileRegistrations.length, 1);
   workspace.trigger(
     "tps:notebook-navigator-api-changed",
     apiPayload(first, 100),
@@ -283,7 +309,9 @@ test("lifecycle registration is idempotent and stale payloads cannot remove a ne
     apiPayload(second, 50, true, "host-b"),
   );
   assert.equal(first.disposeCount, 1);
+  assert.equal(first.fileDisposeCount, 1);
   assert.equal(second.registrations.length, 1);
+  assert.equal(second.fileRegistrations.length, 1);
 
   workspace.trigger(
     "tps:notebook-navigator-api-changed",
@@ -294,6 +322,7 @@ test("lifecycle registration is idempotent and stale payloads cannot remove a ne
     0,
     "a retiring host cannot tear down the replacement even with a later wall clock",
   );
+  assert.equal(second.fileDisposeCount, 0);
   workspace.trigger(
     "tps:notebook-navigator-api-changed",
     apiPayload(null, 50, false, "host-b"),
@@ -303,10 +332,50 @@ test("lifecycle registration is idempotent and stale payloads cannot remove a ne
     1,
     "the current host unloads even when availability used the same timestamp",
   );
+  assert.equal(second.fileDisposeCount, 1);
 
   bridge.stop();
   bridge.stop();
   assert.equal(workspace.offCount, 1);
+});
+
+test("legacy row-only APIs remain supported and can gain file menus in place", async () => {
+  const { TFile, TpsNotebookNavigatorMenuBridge } = await loadBridgeModule();
+  const { host, workspace, file, exactCalls } = createHarness(TFile);
+  const menus = createMenusApi();
+  delete menus.registerFileMenu;
+  const bridge = new TpsNotebookNavigatorMenuBridge(host);
+
+  bridge.start();
+  workspace.requests[0].respond(apiPayload(menus, 10));
+  assert.equal(menus.registrations.length, 1);
+  assert.equal(menus.fileRegistrations.length, 0);
+  applyRegistration(menus.registrations[0], noteTarget(file));
+  assert.equal(exactCalls.length, 1, "the legacy note-row bridge remains active");
+
+  let upgradedFileDisposeCount = 0;
+  menus.registerFileMenu = (callback) => {
+    const registration = { callback, active: true };
+    menus.fileRegistrations.push(registration);
+    return () => {
+      if (!registration.active) return;
+      registration.active = false;
+      upgradedFileDisposeCount += 1;
+    };
+  };
+  workspace.trigger(
+    "tps:notebook-navigator-api-changed",
+    apiPayload(menus, 20),
+  );
+  assert.equal(menus.registrations.length, 2);
+  assert.equal(menus.disposeCount, 1, "the prior row registration is replaced once");
+  assert.equal(menus.fileRegistrations.length, 1);
+  applyFileRegistration(menus.fileRegistrations[0], file);
+  assert.equal(exactCalls.length, 2);
+
+  bridge.stop();
+  assert.equal(menus.disposeCount, 2);
+  assert.equal(upgradedFileDisposeCount, 1);
 });
 
 test("a failed replacement preserves the existing working registration", async () => {
@@ -323,12 +392,24 @@ test("a failed replacement preserves the existing working registration", async (
       return null;
     },
   };
+  let partialFileDisposeCount = 0;
+  const partial = {
+    registerFileMenu() {
+      return () => {
+        partialFileDisposeCount += 1;
+      };
+    },
+    registerRowMenu() {
+      throw new Error("row registration failed after file registration");
+    },
+  };
   const second = createMenusApi();
   const bridge = new TpsNotebookNavigatorMenuBridge(host);
 
   bridge.start();
   workspace.requests[0].respond(apiPayload(first, 100));
   assert.equal(first.registrations.length, 1);
+  assert.equal(first.fileRegistrations.length, 1);
 
   workspace.trigger(
     "tps:notebook-navigator-api-changed",
@@ -339,6 +420,15 @@ test("a failed replacement preserves the existing working registration", async (
     0,
     "throwing replacement must leave the old registration active",
   );
+  assert.equal(first.fileDisposeCount, 0);
+
+  workspace.trigger(
+    "tps:notebook-navigator-api-changed",
+    apiPayload(partial, 250, true, "host-partial"),
+  );
+  assert.equal(partialFileDisposeCount, 1);
+  assert.equal(first.disposeCount, 0);
+  assert.equal(first.fileDisposeCount, 0);
 
   workspace.trigger(
     "tps:notebook-navigator-api-changed",
@@ -349,6 +439,7 @@ test("a failed replacement preserves the existing working registration", async (
     0,
     "invalid replacement disposer must leave the old registration active",
   );
+  assert.equal(first.fileDisposeCount, 0);
 
   workspace.trigger(
     "tps:notebook-navigator-api-changed",
@@ -359,6 +450,7 @@ test("a failed replacement preserves the existing working registration", async (
     0,
     "an unavailable event for a rejected replacement must not remove the active host",
   );
+  assert.equal(first.fileDisposeCount, 0);
 
   workspace.trigger(
     "tps:notebook-navigator-api-changed",
@@ -369,10 +461,13 @@ test("a failed replacement preserves the existing working registration", async (
     1,
     "old registration is released only after replacement succeeds",
   );
+  assert.equal(first.fileDisposeCount, 1);
   assert.equal(second.registrations.length, 1);
+  assert.equal(second.fileRegistrations.length, 1);
 
   bridge.stop();
   assert.equal(second.disposeCount, 1);
+  assert.equal(second.fileDisposeCount, 1);
 });
 
 test("exact row actions use the canonical current file and never retarget a stale snapshot", async () => {
@@ -430,6 +525,114 @@ test("exact row actions use the canonical current file and never retarget a stal
   bridge.stop();
 });
 
+test("ordinary Navigator file menus use the canonical exact GCM builder without native duplicates", async () => {
+  const { TFile, TpsNotebookNavigatorMenuBridge } = await loadBridgeModule();
+  const { host, workspace, exactCalls, file } = createHarness(TFile);
+  const menus = createMenusApi();
+  const bridge = new TpsNotebookNavigatorMenuBridge(host);
+  bridge.start();
+  workspace.requests[0].respond(apiPayload(menus, 10));
+
+  assert.equal(menus.fileRegistrations.length, 1);
+  const operations = applyFileRegistration(menus.fileRegistrations[0], file);
+  assert.deepEqual(operations.map((entry) => entry.kind), ["item", "item"]);
+  assert.deepEqual(exactCalls[0].files, [file]);
+  assert.deepEqual(exactCalls[0].options, {
+    includeTitle: false,
+    includeDelete: false,
+    excludeStandardTagProperties: true,
+    includeSingleTargetActions: true,
+  });
+  bridge.stop();
+});
+
+test("PDF, Canvas, and mixed file selections reach GCM while unsafe single-target actions stay suppressed", async () => {
+  const { TFile, TpsNotebookNavigatorMenuBridge } = await loadBridgeModule();
+  const { host, workspace, liveFiles, exactCalls } = createHarness(TFile);
+  const pdf = new TFile("Reference/Guide.pdf", 300);
+  const canvas = new TFile("Maps/System.canvas", 400);
+  liveFiles.set(pdf.path, pdf);
+  liveFiles.set(canvas.path, canvas);
+  const menus = createMenusApi();
+  const bridge = new TpsNotebookNavigatorMenuBridge(host);
+  bridge.start();
+  workspace.requests[0].respond(apiPayload(menus, 10));
+  const registration = menus.fileRegistrations[0];
+
+  applyFileRegistration(registration, pdf);
+  assert.deepEqual(exactCalls.at(-1).files, [pdf]);
+  assert.equal(exactCalls.at(-1).options.includeSingleTargetActions, true);
+  assert.equal(exactCalls.at(-1).options.excludeStandardTagProperties, false);
+
+  applyFileRegistration(registration, canvas);
+  assert.deepEqual(exactCalls.at(-1).files, [canvas]);
+
+  applyFileRegistration(registration, pdf, {
+    mode: "multiple",
+    files: [canvas, pdf],
+  });
+  assert.deepEqual(exactCalls.at(-1).files, [canvas, pdf]);
+  assert.equal(
+    exactCalls.at(-1).options.includeSingleTargetActions,
+    false,
+    "multi-selection cannot expose actions that mutate only the first file",
+  );
+  bridge.stop();
+});
+
+test("file-menu selection is ordered, all-or-nothing, and anchored to the clicked file", async () => {
+  const { TFile, TpsNotebookNavigatorMenuBridge } = await loadBridgeModule();
+  const { host, workspace, liveFiles, exactCalls, file } = createHarness(TFile);
+  const second = new TFile("Projects/Second.md", 200);
+  liveFiles.set(second.path, second);
+  const menus = createMenusApi();
+  const bridge = new TpsNotebookNavigatorMenuBridge(host);
+  bridge.start();
+  workspace.requests[0].respond(apiPayload(menus, 10));
+  const registration = menus.fileRegistrations[0];
+
+  applyFileRegistration(registration, second, {
+    mode: "multiple",
+    files: [second, file],
+  });
+  assert.deepEqual(exactCalls.at(-1).files, [second, file]);
+  const validCallCount = exactCalls.length;
+
+  assert.deepEqual(
+    applyFileRegistration(registration, second, {
+      mode: "multiple",
+      files: [second, second],
+    }),
+    [],
+  );
+  assert.deepEqual(
+    applyFileRegistration(registration, second, {
+      mode: "multiple",
+      files: [file, new TFile("Projects/Third.md", 300)],
+    }),
+    [],
+  );
+  assert.deepEqual(
+    applyFileRegistration(registration, second, {
+      mode: "single",
+      files: [file],
+    }),
+    [],
+  );
+  assert.equal(exactCalls.length, validCallCount);
+
+  const staleSecond = new TFile(second.path, 201);
+  assert.deepEqual(
+    applyFileRegistration(registration, staleSecond, {
+      mode: "multiple",
+      files: [staleSecond, file],
+    }),
+    [],
+  );
+  assert.equal(exactCalls.length, validCallCount);
+  bridge.stop();
+});
+
 test("menu construction is transactional and settings refresh replaces registration once", async () => {
   const { TFile, TpsNotebookNavigatorMenuBridge } = await loadBridgeModule();
   const { host, workspace, file } = createHarness(TFile);
@@ -447,17 +650,22 @@ test("menu construction is transactional and settings refresh replaces registrat
     applyRegistration(menus.registrations[0], noteTarget(file)),
     [],
   );
+  assert.deepEqual(applyFileRegistration(menus.fileRegistrations[0], file), []);
 
   host.settings.inlineMenuOnly = true;
   bridge.refresh();
   assert.equal(menus.disposeCount, 1);
+  assert.equal(menus.fileDisposeCount, 1);
   assert.equal(menus.registrations.length, 2);
+  assert.equal(menus.fileRegistrations.length, 2);
   assert.equal(
     menus.registrations[1].options.supports(noteTarget(file)),
     false,
   );
+  assert.deepEqual(applyFileRegistration(menus.fileRegistrations[1], file), []);
   bridge.stop();
   assert.equal(menus.disposeCount, 2);
+  assert.equal(menus.fileDisposeCount, 2);
 });
 
 test("source contract keeps the foreign bridge exact, task-exclusive, and lifecycle-owned", () => {
@@ -479,6 +687,14 @@ test("source contract keeps the foreign bridge exact, task-exclusive, and lifecy
     bridgeSource,
     /target\.kind === TPS_NOTEBOOK_NAVIGATOR_NOTE_ENTITY_KIND/,
   );
+  assert.match(bridgeSource, /registerFileMenu/);
+  assert.match(bridgeSource, /includeTitle: false/);
+  assert.match(bridgeSource, /includeDelete: false/);
+  assert.match(bridgeSource, /excludeStandardTagProperties: files\.every/);
+  assert.match(bridgeSource, /includeSingleTargetActions: files\.length === 1/);
+  assert.match(builderSource, /includeSingleTargetActions && file\.extension === 'pdf'/);
+  assert.match(builderSource, /if \(includeSingleTargetActions\) \{[\s\S]{0,240}parentCount/);
+  assert.match(builderSource, /includeSingleTargetActions && this\.plugin\.settings\.enableTimeTracking/);
   assert.match(bridgeSource, /target\.sourceLineNumber === undefined/);
   assert.match(
     bridgeSource,

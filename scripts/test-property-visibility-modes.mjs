@@ -10,14 +10,16 @@ const panelBuilder = readFileSync(new URL('../src/menu/panel-builder.ts', import
 const persistentMenu = readFileSync(new URL('../src/menu/persistent-menu-manager.ts', import.meta.url), 'utf8');
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 const inlineDecoration = readFileSync(new URL('../src/services/inline-property-decoration-service.ts', import.meta.url), 'utf8');
+const visibility = readFileSync(new URL('../src/services/custom-property-visibility.ts', import.meta.url), 'utf8');
 
 test('custom property visibility distinguishes key presence from value presence', () => {
   assert.match(types, /showWhen\?: 'always' \| 'populated' \| 'exists' \| 'empty' \| 'blank' \| 'missing' \| 'never'/);
   assert.match(types, /inlineShowWhen\?: 'always' \| 'populated' \| 'exists' \| 'empty' \| 'blank' \| 'missing' \| 'never'/);
   assert.match(types, /contextMenuShowWhen\?: 'always' \| 'populated' \| 'exists' \| 'empty' \| 'blank' \| 'missing' \| 'never'/);
   assert.match(resolveProfiles, /surface: CustomPropertySurface = 'any'/);
-  assert.match(resolveProfiles, /surface === 'inline'[\s\S]{0,120}property\.inlineShowWhen \|\| property\.showWhen \|\| 'always'/);
-  assert.match(resolveProfiles, /surface === 'context'[\s\S]{0,120}property\.contextMenuShowWhen \|\| property\.showWhen \|\| 'always'/);
+  assert.match(resolveProfiles, /getCustomPropertySurfaceVisibilityMode\(property, surface\)/);
+  assert.match(visibility, /surface === "inline"[\s\S]{0,180}property\.inlineShowWhen \|\| property\.showWhen \|\| "always"/);
+  assert.match(visibility, /surface === "context"[\s\S]{0,180}property\.contextMenuShowWhen \|\| property\.showWhen \|\| "always"/);
   assert.match(resolveProfiles, /mode === 'never'[\s\S]{0,80}return false/);
   assert.match(resolveProfiles, /mode === 'populated'[\s\S]{0,220}hasPopulatedValue\(context\.frontmatter, key\)/);
   assert.match(resolveProfiles, /mode === 'exists'[\s\S]{0,220}hasFrontmatterKey\(context\.frontmatter, key\)/);
@@ -56,6 +58,21 @@ test('inline and context menu visibility are resolved independently', () => {
   assert.match(persistentMenu, /resolveCustomProperties\([\s\S]{0,80}this\.plugin\.settings\.properties \|\| \[\][\s\S]{0,120}entries[\s\S]{0,120}new ViewModeService\(\)[\s\S]{0,80}'inline'/);
   assert.match(persistentMenu, /resolveCustomProperties\([\s\S]{0,80}this\.plugin\.settings\.properties \|\| \[\][\s\S]{0,120}entries[\s\S]{0,120}new ViewModeService\(\)[\s\S]{0,80}'inline'/);
   assert.match(readFileSync(new URL('../src/menu/menu-builder.ts', import.meta.url), 'utf8'), /resolveCustomProperties\(this\.plugin\.settings\.properties \|\| \[\], propertyEntries, new ViewModeService\(\), 'context'\)/);
+});
+
+test('property-row visibility actions target the inline override and refresh mounted panels immediately', () => {
+  for (const source of [panelBuilder, persistentMenu]) {
+    assert.match(source, /getCustomPropertySurfaceVisibilityMode\([^,]+, 'inline'\)/);
+    assert.match(source, /createCustomPropertySurfaceVisibilityPatch\('inline', mode\)/);
+    assert.match(source, /Use property visibility/);
+    assert.match(source, /inlineShowWhen: undefined/);
+    assert.match(source, /visibilityPatch\('always'\)/);
+    assert.match(source, /applyCustomPropertyVisibilityUpdate\(\{/);
+  }
+  assert.match(visibility, /options\.commit\(properties\);[\s\S]{0,120}options\.refresh\(\);[\s\S]{0,220}await options\.persist\(\)/);
+  assert.match(persistentMenu, /refreshMountedCustomPropertyPresentationViews\([\s\S]{0,220}ensureTopParentNav\(view, options\)/);
+  assert.match(persistentMenu, /refreshBaseLinkPreviewProperties\(\)/);
+  assert.match(persistentMenu, /refreshCustomPropertyPreviewSurfaces\(\)/);
 });
 
 test('GCM keeps Health properties out of its core catalog and retires only managed definitions', () => {

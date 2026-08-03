@@ -1,5 +1,5 @@
 import { App, Menu, MenuItem, TFile, Notice, normalizePath } from 'obsidian';
-import TPSGlobalContextMenuPlugin from '../main';
+import type TPSGlobalContextMenuPlugin from '../main';
 import { TextInputModal } from '../modals/text-input-modal';
 import { FileSuggestModal } from '../modals/FileSuggestModal';
 import { MultiFileSelectModal } from '../modals/MultiFileSelectModal';
@@ -22,12 +22,16 @@ import { isEntityReferenceProperty } from '../utils/entity-property';
 import { addPropertyValueChoiceMenuItems } from './property-value-choice-menu';
 import { propertyUsesEntityOptions } from '../utils/property-option-source';
 import { isPathInArchiveFolder } from '../services/archive-file-service';
+import { createCustomPropertyMenuExclusionPredicate } from '../services/custom-property-menu-filter';
 
 export interface NativeMenuLabelOptions {
   archiveLabel?: string;
   deleteLabel?: string;
   includeTitle?: boolean;
   includeTags?: boolean;
+  includeDelete?: boolean;
+  excludeStandardTagProperties?: boolean;
+  includeSingleTargetActions?: boolean;
   excludeCustomPropertyKeys?: readonly string[];
 }
 
@@ -490,8 +494,11 @@ export class MenuBuilder {
     const markdownEntries = entries.filter(e => e.file.extension?.toLowerCase() === 'md');
     const markdownFiles = this.getPropertyFiles(markdownEntries).filter((candidate) => candidate.extension?.toLowerCase() === 'md');
     const propertyEntries = entries.filter((entry) => this.isPropertyFile(entry.file));
+    const allEntriesSupportProperties = propertyEntries.length === entries.length;
+    const allEntriesAreMarkdown = markdownEntries.length === entries.length;
 
     const file = entries[0].file;
+    const includeSingleTargetActions = options.includeSingleTargetActions !== false;
 
     if (options.includeTitle !== false) {
       menu.addItem((item) => {
@@ -519,7 +526,7 @@ export class MenuBuilder {
     }
 
     // Handwriting / PDF Integration
-    if (file.extension === 'pdf') {
+    if (includeSingleTargetActions && file.extension === 'pdf') {
       menu.addItem((item) => {
         item.setTitle('Write on PDF')
           .setIcon('pencil')
@@ -536,28 +543,17 @@ export class MenuBuilder {
     }
 
     // Dynamic Properties
-    if (propertyEntries.length > 0 && this.plugin.settings.showCustomPropertiesInContextMenu !== false) {
+    if (allEntriesSupportProperties && this.plugin.settings.showCustomPropertiesInContextMenu !== false) {
       const properties = resolveCustomProperties(this.plugin.settings.properties || [], propertyEntries, new ViewModeService(), 'context');
-      const excludedPropertyKeys = new Set(
-        (options.excludeCustomPropertyKeys || [])
-          .map((key) => String(key || '').trim().toLowerCase())
-          .filter(Boolean),
-      );
+      const isExcludedCustomProperty = createCustomPropertyMenuExclusionPredicate({
+        excludeCustomPropertyKeys: options.excludeCustomPropertyKeys,
+        excludeStandardTagProperties: options.excludeStandardTagProperties === true || options.includeTags === true,
+      });
 
       properties.forEach(prop => {
         if (prop.showInContextMenu === false) return;
         if (String(prop.key || '').trim().toLowerCase() === 'title' || String(prop.id || '').trim().toLowerCase() === 'title') return;
-        if (
-          excludedPropertyKeys.has(String(prop.key || '').trim().toLowerCase())
-          || excludedPropertyKeys.has(String(prop.id || '').trim().toLowerCase())
-        ) return;
-        if (
-          options.includeTags === true
-          && (
-            String(prop.key || '').trim().toLowerCase() === 'tags'
-            || prop.listItemType === 'tag'
-          )
-        ) return;
+        if (isExcludedCustomProperty(prop)) return;
 
         if (isEntityReferenceProperty(prop)) {
           this.addEntityReferenceToMenu(menu, propertyEntries, prop, 'tps-props');
@@ -655,7 +651,7 @@ export class MenuBuilder {
     // Base note rows always expose Tags even when the broader custom-property
     // context-menu surface is disabled. Skip the configured Tags row above so
     // this opt-in path remains singular and predictable.
-    if (propertyEntries.length > 0 && options.includeTags === true) {
+    if (allEntriesSupportProperties && options.includeTags === true) {
       this.addListToMenu(menu, propertyEntries, {
         id: 'tags',
         label: 'Tags',
@@ -667,41 +663,43 @@ export class MenuBuilder {
     }
 
     // Relationship and tracking operations are note actions, not custom properties.
-    if (markdownEntries.length > 0 && file.extension?.toLowerCase() === 'md') {
-      const parentCount = this.resolveParentFilesFor(file).length;
-      const childCount = this.resolveChildFilesFor(file).length;
+    if (allEntriesAreMarkdown) {
+      if (includeSingleTargetActions) {
+        const parentCount = this.resolveParentFilesFor(file).length;
+        const childCount = this.resolveChildFilesFor(file).length;
 
-      menu.addItem((item) => {
-        item.setTitle(parentCount > 0 ? `Link to Parent (${parentCount})` : 'Link to Parent')
-          .setIcon('link')
-          .setSection('tps-props');
+        menu.addItem((item) => {
+          item.setTitle(parentCount > 0 ? `Link to Parent (${parentCount})` : 'Link to Parent')
+            .setIcon('link')
+            .setSection('tps-props');
 
-        const subMenu = (item as any).setSubmenu();
-        this.populateParentRelationSubmenu(subMenu, file);
-      });
+          const subMenu = (item as any).setSubmenu();
+          this.populateParentRelationSubmenu(subMenu, file);
+        });
 
-      menu.addItem((item) => {
-        item.setTitle(childCount > 0 ? `Link Children (${childCount})` : 'Link Children')
-          .setIcon('network')
-          .setSection('tps-props');
+        menu.addItem((item) => {
+          item.setTitle(childCount > 0 ? `Link Children (${childCount})` : 'Link Children')
+            .setIcon('network')
+            .setSection('tps-props');
 
-        const subMenu = (item as any).setSubmenu();
-        this.populateChildRelationSubmenu(subMenu, file);
-      });
+          const subMenu = (item as any).setSubmenu();
+          this.populateChildRelationSubmenu(subMenu, file);
+        });
 
-      menu.addItem((item) => {
-        item.setTitle('Embed Attachments')
-          .setIcon('paperclip')
-          .setSection('tps-props')
-          .onClick(() => {
-            new MultiFileSelectModal(this.app, async (attachmentFiles: TFile[]) => {
-              if (attachmentFiles.length > 0) {
-                const added = await this.plugin.bulkEditService.linkAttachments(file, attachmentFiles);
-                new Notice(`Embedded ${added} attachment(s) in this note.`);
-              }
-            }).open();
-          });
-      });
+        menu.addItem((item) => {
+          item.setTitle('Embed Attachments')
+            .setIcon('paperclip')
+            .setSection('tps-props')
+            .onClick(() => {
+              new MultiFileSelectModal(this.app, async (attachmentFiles: TFile[]) => {
+                if (attachmentFiles.length > 0) {
+                  const added = await this.plugin.bulkEditService.linkAttachments(file, attachmentFiles);
+                  new Notice(`Embedded ${added} attachment(s) in this note.`);
+                }
+              }).open();
+            });
+        });
+      }
 
       menu.addItem((item) => {
         const label = markdownEntries.length > 1
@@ -727,7 +725,7 @@ export class MenuBuilder {
           });
       });
 
-      if (this.plugin.settings.enableTimeTracking !== false) {
+      if (includeSingleTargetActions && this.plugin.settings.enableTimeTracking !== false) {
         const activeTimerCount = this.plugin.timeTrackingService.getActiveTimerCountForFileSync(file);
         menu.addItem((item) => {
           item.setTitle('Time Tracking')
@@ -806,34 +804,35 @@ export class MenuBuilder {
         }
       });
 
-      // Delete
-      menu.addItem((item) => {
-        const fileCount = entries.length;
-        const deleteLabel = options.deleteLabel || (fileCount > 1 ? `Delete (${fileCount} items)` : 'Delete');
-        item.setTitle(deleteLabel)
-          .setIcon('trash')
-          .setSection('tps-delete')
-          .setWarning(true)
-          .onClick(async () => {
-            if (fileCount === 1 && this.app.fileManager.promptForDeletion) {
-              this.app.fileManager.promptForDeletion(entries[0].file);
-            } else {
-              const confirmMsg = fileCount === 1
-                ? `Are you sure you want to delete "${entries[0].file.name}"?`
-                : `Are you sure you want to delete ${fileCount} items?`;
-              if (confirm(confirmMsg)) {
-                const filesToDelete = entries
-                  .map((entry: any) => entry.file)
-                  .filter((candidate: unknown): candidate is TFile => candidate instanceof TFile);
-                await this.plugin.runQueuedDelete(filesToDelete, async () => {
-                  for (const entry of entries) {
-                    await this.app.vault.trash(entry.file, true);
-                  }
-                });
+      if (options.includeDelete !== false) {
+        menu.addItem((item) => {
+          const fileCount = entries.length;
+          const deleteLabel = options.deleteLabel || (fileCount > 1 ? `Delete (${fileCount} items)` : 'Delete');
+          item.setTitle(deleteLabel)
+            .setIcon('trash')
+            .setSection('tps-delete')
+            .setWarning(true)
+            .onClick(async () => {
+              if (fileCount === 1 && this.app.fileManager.promptForDeletion) {
+                this.app.fileManager.promptForDeletion(entries[0].file);
+              } else {
+                const confirmMsg = fileCount === 1
+                  ? `Are you sure you want to delete "${entries[0].file.name}"?`
+                  : `Are you sure you want to delete ${fileCount} items?`;
+                if (confirm(confirmMsg)) {
+                  const filesToDelete = entries
+                    .map((entry: any) => entry.file)
+                    .filter((candidate: unknown): candidate is TFile => candidate instanceof TFile);
+                  await this.plugin.runQueuedDelete(filesToDelete, async () => {
+                    for (const entry of entries) {
+                      await this.app.vault.trash(entry.file, true);
+                    }
+                  });
+                }
               }
-            }
-          });
-      });
+            });
+        });
+      }
     }
 
   }

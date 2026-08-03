@@ -1259,7 +1259,7 @@ test('TPS List and TPS Table row menus expose built-in tag actions', async () =>
   assert.match(viewSource, /removeInlineTagFromTaskLine\(line, tag\)/);
   assert.match(viewSource, /resolveExactLineRevisionIndex\(parts\.lines, lineIndex, rawLine\)/);
   assert.match(viewSource, /menuController\?\.addToNativeMenu\?\.\(menu, targets, \{ includeTags: true \}\)/);
-  assert.match(menuBuilderSource, /propertyEntries\.length > 0 && options\.includeTags === true/);
+  assert.match(menuBuilderSource, /allEntriesSupportProperties && options\.includeTags === true/);
   assert.match(menuBuilderSource, /label: 'Tags',[\s\S]{0,100}key: 'tags',[\s\S]{0,100}listItemType: 'tag'/);
   assert.match(logBaseSource, /this\.addEntryTagsMenu\(menu, entry\)/);
   assert.match(logBaseSource, /setTitle\(current\.length > 0 \? `Tags \(\$\{current\.length\}\)` : 'Tags'\)/);

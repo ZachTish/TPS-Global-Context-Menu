@@ -9,6 +9,11 @@ import { addSafeClickListener } from './menu-controller';
 import { normalizeTagValue, parseTagInput } from '../utils/tag-utils';
 import * as logger from '../logger';
 import { resolveCustomProperties } from '../resolve-profiles';
+import {
+  applyCustomPropertyVisibilityUpdate,
+  createCustomPropertySurfaceVisibilityPatch,
+  getCustomPropertySurfaceVisibilityMode,
+} from '../services/custom-property-visibility';
 import { ViewModeService } from '../services/view-mode-service';
 import { parseLinksFromFrontmatterValue, resolveLinkTargetToFile } from '../services/link-target-service';
 import { applyNotebookNavigatorRulesToFile, promptAndCreateSubitemForParent } from '../services/subitem-creation-service';
@@ -726,6 +731,9 @@ export class PanelBuilder {
     const menu = new Menu();
     const label = String(prop?.label || prop?.key || 'Property');
     const index = this.findPropertyIndex(prop);
+    const visibilityMode = getCustomPropertySurfaceVisibilityMode(prop, 'inline');
+    const visibilityPatch = (mode: NonNullable<CustomProperty['showWhen']>) =>
+      createCustomPropertySurfaceVisibilityPatch('inline', mode);
 
     menu.addItem((item) => {
       item
@@ -752,58 +760,70 @@ export class PanelBuilder {
     menu.addSeparator();
     menu.addItem((item) => {
       item
+        .setTitle('Use property visibility')
+        .setIcon('undo-2')
+        .setChecked(!prop?.inlineShowWhen)
+        .onClick(() => void this.updateConfiguredPropertyVisibility(
+          prop,
+          { hidden: false, showInCollapsed: true, inlineShowWhen: undefined },
+          file,
+          `${label} uses property visibility inline`,
+        ));
+    });
+    menu.addItem((item) => {
+      item
         .setTitle('Add hide rule to property')
         .setIcon('eye-off')
-        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, { hidden: true }, file, `${label} hidden`));
+        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, visibilityPatch('never'), file, `${label} hidden inline`));
     });
     menu.addItem((item) => {
       item
         .setTitle('Only show when missing or empty')
         .setIcon('circle')
-        .setChecked(prop?.showWhen === 'empty')
-        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, { hidden: false, showWhen: 'empty' }, file, `${label} shown only when missing or empty`));
+        .setChecked(visibilityMode === 'empty')
+        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, visibilityPatch('empty'), file, `${label} shown inline only when missing or empty`));
     });
     menu.addItem((item) => {
       item
         .setTitle('Only show when key exists')
         .setIcon('key')
-        .setChecked(prop?.showWhen === 'exists')
-        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, { hidden: false, showWhen: 'exists' }, file, `${label} shown only when key exists`));
+        .setChecked(visibilityMode === 'exists')
+        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, visibilityPatch('exists'), file, `${label} shown inline only when key exists`));
     });
     menu.addItem((item) => {
       item
         .setTitle('Only show when key exists but is empty')
         .setIcon('circle')
-        .setChecked(prop?.showWhen === 'blank')
-        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, { hidden: false, showWhen: 'blank' }, file, `${label} shown only when key exists but is empty`));
+        .setChecked(visibilityMode === 'blank')
+        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, visibilityPatch('blank'), file, `${label} shown inline only when key exists but is empty`));
     });
     menu.addItem((item) => {
       item
         .setTitle('Only show when key is missing')
         .setIcon('circle-slash')
-        .setChecked(prop?.showWhen === 'missing')
-        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, { hidden: false, showWhen: 'missing' }, file, `${label} shown only when key is missing`));
+        .setChecked(visibilityMode === 'missing')
+        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, visibilityPatch('missing'), file, `${label} shown inline only when key is missing`));
     });
     menu.addItem((item) => {
       item
         .setTitle('Only show when populated')
         .setIcon('circle-dot')
-        .setChecked(prop?.showWhen === 'populated')
-        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, { hidden: false, showWhen: 'populated' }, file, `${label} shown only when populated`));
+        .setChecked(visibilityMode === 'populated')
+        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, visibilityPatch('populated'), file, `${label} shown inline only when populated`));
     });
     menu.addItem((item) => {
       item
         .setTitle('Always show even when empty')
         .setIcon('eye')
-        .setChecked(!prop?.hidden && (!prop?.showWhen || prop.showWhen === 'always'))
-        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, { hidden: false, showWhen: 'always' }, file, `${label} always shown`));
+        .setChecked(visibilityMode === 'always')
+        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, visibilityPatch('always'), file, `${label} always shown inline`));
     });
     menu.addItem((item) => {
       item
         .setTitle('Never show')
         .setIcon('eye-off')
-        .setChecked(prop?.hidden === true || prop?.showWhen === 'never')
-        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, { hidden: true, showWhen: 'never' }, file, `${label} hidden`));
+        .setChecked(visibilityMode === 'never')
+        .onClick(() => void this.updateConfiguredPropertyVisibility(prop, visibilityPatch('never'), file, `${label} hidden inline`));
     });
     menu.showAtMouseEvent(event);
   }
@@ -840,10 +860,24 @@ export class PanelBuilder {
     const properties = this.plugin.settings.properties || [];
     const index = this.findPropertyIndex(prop);
     if (index < 0) return;
-    properties[index] = { ...properties[index], ...patch };
-    this.plugin.settings.properties = properties;
-    await this.plugin.saveSettings();
-    this.plugin.persistentMenuManager?.refreshMenusForFile(file, true);
+    await applyCustomPropertyVisibilityUpdate({
+      properties,
+      index,
+      patch,
+      commit: (nextProperties) => {
+        this.plugin.settings.properties = nextProperties;
+      },
+      refresh: () => {
+        this.plugin.persistentMenuManager?.refreshCustomPropertyPresentations();
+      },
+      persist: () => this.plugin.saveSettings(),
+      onRefreshError: (error) => {
+        logger.warn('[TPS GCM] Immediate property visibility refresh failed', {
+          path: file.path,
+          error,
+        });
+      },
+    });
     new Notice(notice);
   }
 

@@ -109,6 +109,7 @@ import { normalizePropertyOptionSources } from './utils/property-option-source';
 import { normalizeAcceptedKindSetting } from './utils/property-option-setting';
 import { ArchiveFileService } from './services/archive-file-service';
 import { TpsNotebookNavigatorMenuBridge } from './services/tps-notebook-navigator-menu-bridge';
+import { shouldReuseCustomPropertyPreviewPanel } from './services/custom-property-visibility';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -1499,6 +1500,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => scheduleRefreshBurst(false));
   }
 
+  /** Rebuilds non-leaf stacked property panels after an interactive rule change. */
+  public refreshCustomPropertyPreviewSurfaces(): void {
+    this.refreshBasesPreviewProperties(true);
+  }
+
   private refreshBasesPreviewProperties(force = false): void {
     if (this.settings.showCustomPropertiesUnderTitle !== true) return;
     if (this.settings.showCustomPropertiesInInlineUi === false) return;
@@ -1526,7 +1532,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     for (const root of roots) {
       if (this.isCalendarBaseEmbedElement(root)) continue;
-      this.enhanceBasesPreviewProperties(root, force);
+      try {
+        this.enhanceBasesPreviewProperties(root, force);
+      } catch (error) {
+        logger.warn('[TPS GCM] Failed refreshing one Bases/hover preview property panel', { error });
+      }
     }
   }
 
@@ -1587,7 +1597,12 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       !!existing &&
       root.dataset.tpsGcmPreviewPropertiesPath === file.path &&
       existing.dataset.tpsGcmPreviewPropertiesSignature === signature;
-    if (existing && (existingIsCurrent || (!force && root.dataset.tpsGcmPreviewPropertiesPath === file.path))) {
+    if (shouldReuseCustomPropertyPreviewPanel({
+      hasExistingPanel: !!existing,
+      isCurrentSignature: existingIsCurrent,
+      isCurrentPath: root.dataset.tpsGcmPreviewPropertiesPath === file.path,
+      force,
+    })) {
       if (metadata && !metadata.contains(existing) && !metadata.closest('.markdown-source-view, .cm-editor')) {
         metadata.classList.add('tps-gcm-bases-preview-metadata-host');
         metadata.empty();

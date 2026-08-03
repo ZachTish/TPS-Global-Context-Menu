@@ -573,7 +573,8 @@ test('every synthesized non-task row routes configured relationships to its own 
   );
   assert.match(listSource, /excludeCustomPropertyKeys:\s*getConfiguredLineContextPropertyKeys\(plugin\)/);
   assert.match(menuBuilderSource, /excludeCustomPropertyKeys\?:\s*readonly string\[\]/);
-  assert.match(menuBuilderSource, /excludedPropertyKeys\.has\(String\(prop\.key/);
+  assert.match(menuBuilderSource, /createCustomPropertyMenuExclusionPredicate\(\{[\s\S]{0,160}excludeCustomPropertyKeys/);
+  assert.match(menuBuilderSource, /isExcludedCustomProperty\(prop\)/);
 
   assert.match(tableSource, /addLineEntityPropertyMenus\(\{[\s\S]*?this\.updateEntryLine\(entry, updater\)/);
   assert.match(

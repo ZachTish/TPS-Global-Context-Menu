@@ -1,5 +1,8 @@
 import { TFile, type App, type EventRef, type MenuItem } from "obsidian";
-import type { GcmMenuSink } from "../menu/menu-builder";
+import type {
+  GcmMenuSink,
+  NativeMenuLabelOptions,
+} from "../menu/menu-builder";
 import type { MenuController } from "../menu/menu-controller";
 import * as logger from "../logger";
 
@@ -35,11 +38,23 @@ interface NavigatorRowMenuContextLike {
   readonly target: NavigatorRowMenuTargetLike;
 }
 
+interface NavigatorFileMenuContextLike {
+  readonly addItem: (callback: (item: MenuItem) => void) => void;
+  readonly file: NavigatorFileLike;
+  readonly selection: {
+    readonly mode: "single" | "multiple";
+    readonly files: readonly NavigatorFileLike[];
+  };
+}
+
 interface NavigatorRowMenuRegistrationOptionsLike {
   readonly supports?: (target: NavigatorRowMenuTargetLike) => boolean;
 }
 
 interface NavigatorMenusApiLike {
+  registerFileMenu?(
+    callback: (context: NavigatorFileMenuContextLike) => void,
+  ): () => void;
   registerRowMenu(
     callback: (context: NavigatorRowMenuContextLike) => void,
     options?: NavigatorRowMenuRegistrationOptionsLike,
@@ -76,8 +91,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
 }
 
+function isNavigatorFileLike(value: unknown): value is NavigatorFileLike {
+  return isRecord(value) && typeof value.path === "string";
+}
+
 function isNavigatorMenusApi(value: unknown): value is NavigatorMenusApiLike {
-  return isRecord(value) && typeof value.registerRowMenu === "function";
+  return (
+    isRecord(value) &&
+    typeof value.registerRowMenu === "function" &&
+    (value.registerFileMenu === undefined ||
+      typeof value.registerFileMenu === "function")
+  );
 }
 
 function readNavigatorApiPayload(
@@ -144,6 +168,7 @@ export class TpsNotebookNavigatorMenuBridge {
   private readonly events: WorkspaceEventHost;
   private apiEventRef: EventRef | null = null;
   private menusApi: NavigatorMenusApiLike | null = null;
+  private unregisterFileMenu: (() => void) | null = null;
   private unregisterRowMenu: (() => void) | null = null;
   private currentHostInstanceId: string | null = null;
 
@@ -218,7 +243,9 @@ export class TpsNotebookNavigatorMenuBridge {
     if (
       payload.hostInstanceId === this.currentHostInstanceId &&
       payload.api.menus === this.menusApi &&
-      this.unregisterRowMenu
+      this.unregisterRowMenu &&
+      (typeof payload.api.menus.registerFileMenu !== "function" ||
+        this.unregisterFileMenu)
     ) {
       logger.flow("TpsNotebookNavigatorMenuBridge", "api-payload:stale", {
         hostInstanceId: payload.hostInstanceId,
@@ -234,11 +261,29 @@ export class TpsNotebookNavigatorMenuBridge {
     candidate: NavigatorMenusApiLike,
     force: boolean,
   ): boolean {
-    if (!force && this.menusApi === candidate && this.unregisterRowMenu)
+    if (
+      !force &&
+      this.menusApi === candidate &&
+      this.unregisterRowMenu &&
+      (typeof candidate.registerFileMenu !== "function" ||
+        this.unregisterFileMenu)
+    )
       return true;
+    const previousFileUnregister = this.unregisterFileMenu;
     const previousUnregister = this.unregisterRowMenu;
+    let candidateFileUnregister: (() => void) | null = null;
     let candidateUnregister: (() => void) | null = null;
     try {
+      if (typeof candidate.registerFileMenu === "function") {
+        candidateFileUnregister = candidate.registerFileMenu((context) =>
+          this.addFileActions(context),
+        );
+        if (typeof candidateFileUnregister !== "function") {
+          throw new Error(
+            "TPS Notebook Navigator registerFileMenu() did not return a disposer.",
+          );
+        }
+      }
       candidateUnregister = candidate.registerRowMenu(
         (context) => this.addNoteEntityActions(context),
         { supports: (target) => this.supportsTarget(target) },
@@ -249,6 +294,11 @@ export class TpsNotebookNavigatorMenuBridge {
         );
       }
     } catch (error) {
+      try {
+        candidateFileUnregister?.();
+      } catch {
+        // Best-effort cleanup of a partial foreign registration.
+      }
       try {
         candidateUnregister?.();
       } catch {
@@ -263,11 +313,14 @@ export class TpsNotebookNavigatorMenuBridge {
     // Install the replacement before releasing the prior registration. A
     // malformed or throwing foreign API must not take down a working bridge.
     this.menusApi = candidate;
+    this.unregisterFileMenu = candidateFileUnregister;
     this.unregisterRowMenu = candidateUnregister;
+    this.disposeRegistration(previousFileUnregister);
     this.disposeRegistration(previousUnregister);
     logger.flow("TpsNotebookNavigatorMenuBridge", "registration:ready", {
       providerId: TPS_NOTEBOOK_NAVIGATOR_ENTITY_PROVIDER_ID,
       kind: TPS_NOTEBOOK_NAVIGATOR_NOTE_ENTITY_KIND,
+      fileMenu: candidateFileUnregister !== null,
     });
     return true;
   }
@@ -280,7 +333,9 @@ export class TpsNotebookNavigatorMenuBridge {
       return false;
     const current = this.host.app.vault.getFileByPath(target.sourcePath);
     return (
-      current instanceof TFile && this.matchesCurrentFile(target.file, current)
+      current instanceof TFile &&
+      current.extension.toLowerCase() === "md" &&
+      this.matchesCurrentFileSnapshot(target.file, current)
     );
   }
 
@@ -291,10 +346,99 @@ export class TpsNotebookNavigatorMenuBridge {
     );
     if (
       !(current instanceof TFile) ||
-      !this.matchesCurrentFile(context.target.file, current)
+      current.extension.toLowerCase() !== "md" ||
+      !this.matchesCurrentFileSnapshot(context.target.file, current)
     )
       return;
 
+    const operations = this.buildExactFileActions([current]);
+    if (!operations) return;
+    for (const operation of operations) {
+      if (operation.kind === "item") {
+        context.addItem(operation.callback);
+      } else {
+        context.addSeparator();
+      }
+    }
+  }
+
+  private addFileActions(context: NavigatorFileMenuContextLike): void {
+    if (this.host.settings.inlineMenuOnly === true) return;
+    const files = this.resolveCurrentFileMenuSelection(context);
+    if (!files) return;
+    const operations = this.buildExactFileActions(files, {
+      includeTitle: false,
+      includeDelete: false,
+      excludeStandardTagProperties: files.every(
+        (file) => file.extension.toLowerCase() === "md",
+      ),
+      includeSingleTargetActions: files.length === 1,
+    });
+    if (!operations) return;
+
+    // Navigator brackets extension items with its own separator and its public
+    // file-menu facade intentionally exposes only addItem(). GCM sections stay
+    // attached to their items; internal separator requests are safely omitted.
+    for (const operation of operations) {
+      if (operation.kind === "item") context.addItem(operation.callback);
+    }
+  }
+
+  private resolveCurrentFileMenuSelection(
+    context: NavigatorFileMenuContextLike,
+  ): TFile[] | null {
+    if (!isRecord(context) || !isNavigatorFileLike(context.file)) return null;
+    const selection = context.selection;
+    if (
+      !isRecord(selection) ||
+      (selection.mode !== "single" && selection.mode !== "multiple") ||
+      !Array.isArray(selection.files)
+    ) {
+      return null;
+    }
+    if (
+      (selection.mode === "single" && selection.files.length !== 1) ||
+      (selection.mode === "multiple" && selection.files.length < 2)
+    ) {
+      return null;
+    }
+
+    const anchorPath = String(context.file.path || "");
+    const currentAnchor = this.host.app.vault.getFileByPath(anchorPath);
+    if (
+      !(currentAnchor instanceof TFile) ||
+      !this.matchesCurrentFileSnapshot(context.file, currentAnchor)
+    ) {
+      return null;
+    }
+    const seen = new Set<string>();
+    const currentFiles: TFile[] = [];
+    for (const snapshot of selection.files) {
+      if (!isNavigatorFileLike(snapshot)) return null;
+      const path = snapshot.path;
+      if (!path || seen.has(path)) return null;
+      const current = this.host.app.vault.getFileByPath(path);
+      if (
+        !(current instanceof TFile) ||
+        !this.matchesCurrentFileSnapshot(snapshot, current)
+      )
+        return null;
+      seen.add(path);
+      currentFiles.push(current);
+    }
+    if (!seen.has(anchorPath)) return null;
+    if (selection.mode === "single" && currentFiles[0]?.path !== anchorPath)
+      return null;
+    return currentFiles;
+  }
+
+  private buildExactFileActions(
+    files: readonly TFile[],
+    options: NativeMenuLabelOptions = {},
+  ): Array<
+    | { readonly kind: "item"; readonly callback: (item: MenuItem) => void }
+    | { readonly kind: "separator" }
+  > | null {
     // Build against a transaction-like sink first. Foreign menu hosts cannot
     // roll back already-added items, so flush only after the canonical GCM
     // builder completes successfully.
@@ -307,32 +451,22 @@ export class TpsNotebookNavigatorMenuBridge {
       addSeparator: () => operations.push({ kind: "separator" }),
     };
     try {
-      this.host.menuController.addToExactFileMenu(bufferedMenu, [current]);
+      this.host.menuController.addToExactFileMenu(bufferedMenu, files, options);
     } catch (error) {
       logger.flowWarn("TpsNotebookNavigatorMenuBridge", "menu-build:failed", {
-        path: context.target.sourcePath,
+        paths: files.map((file) => file.path),
         error,
       });
-      return;
+      return null;
     }
-    for (const operation of operations) {
-      if (operation.kind === "item") {
-        context.addItem(operation.callback);
-      } else {
-        context.addSeparator();
-      }
-    }
+    return operations;
   }
 
-  private matchesCurrentFile(
+  private matchesCurrentFileSnapshot(
     snapshot: NavigatorFileLike,
     current: TFile,
   ): boolean {
-    if (
-      current.extension.toLowerCase() !== "md" ||
-      snapshot.path !== current.path
-    )
-      return false;
+    if (snapshot.path !== current.path) return false;
     if (snapshot === current) return true;
 
     // A structurally valid TFile can cross a JavaScript realm. In that case,
@@ -350,9 +484,12 @@ export class TpsNotebookNavigatorMenuBridge {
   }
 
   private releaseRegistration(): void {
+    const unregisterFileMenu = this.unregisterFileMenu;
     const unregister = this.unregisterRowMenu;
+    this.unregisterFileMenu = null;
     this.unregisterRowMenu = null;
     this.menusApi = null;
+    this.disposeRegistration(unregisterFileMenu);
     this.disposeRegistration(unregister);
   }
 

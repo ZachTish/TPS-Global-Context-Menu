@@ -1,9 +1,13 @@
 import { CustomProperty } from './types';
 import { ViewModeService } from './services/view-mode-service';
 import { normalizeTagValue } from './utils/tag-utils';
+import {
+    getCustomPropertySurfaceVisibilityMode,
+    type CustomPropertySurface,
+    type CustomPropertyVisibilityMode,
+} from './services/custom-property-visibility';
 
-export type CustomPropertySurface = 'any' | 'inline' | 'context';
-type CustomPropertyVisibilityMode = NonNullable<CustomProperty['showWhen']>;
+export type { CustomPropertySurface } from './services/custom-property-visibility';
 
 export function resolveCustomProperties(
     properties: CustomProperty[],
@@ -56,14 +60,12 @@ export function resolveCustomProperties(
             });
         if (!scopeMatches) return false;
 
-        return matchesVisibilityMode(property, entryContexts, getSurfaceVisibilityMode(property, surface));
+        return matchesVisibilityMode(
+            property,
+            entryContexts,
+            getCustomPropertySurfaceVisibilityMode(property, surface),
+        );
     });
-}
-
-function getSurfaceVisibilityMode(property: CustomProperty, surface: CustomPropertySurface): CustomPropertyVisibilityMode {
-    if (surface === 'inline') return property.inlineShowWhen || property.showWhen || 'always';
-    if (surface === 'context') return property.contextMenuShowWhen || property.showWhen || 'always';
-    return property.showWhen || 'always';
 }
 
 function matchesVisibilityMode(
