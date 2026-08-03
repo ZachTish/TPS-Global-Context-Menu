@@ -42,6 +42,12 @@ export interface EntityIndexSource {
    */
   dimensions?: Readonly<Record<string, unknown>> | null;
   /**
+   * Raw semantic inline fields for a block-backed entity. Keys retain the
+   * first authored casing, while values retain authored order (including
+   * blanks and repeated fields). Note-backed sources never expose this data.
+   */
+  lineProperties?: Readonly<Record<string, unknown>> | null;
+  /**
    * Physical Markdown source. It equals `path` for note-backed entities and
    * lets several line-backed records coexist inside the same note.
    */
@@ -69,6 +75,8 @@ export interface EntityIndexRecord {
   readonly displayName: string;
   readonly basename: string;
   readonly dimensions: Readonly<Record<string, readonly string[]>>;
+  /** Raw semantic inline fields. Present only on block-backed records. */
+  readonly lineProperties?: Readonly<Record<string, readonly string[]>>;
   readonly sourcePath: string;
   readonly entityType: EntityIndexEntityType;
   readonly subpath: string;
@@ -291,12 +299,47 @@ function recordsEqual(left: EntityIndexRecord | undefined, right: EntityIndexRec
   const leftEntries = Object.entries(left.dimensions);
   const rightEntries = Object.entries(right.dimensions);
   if (leftEntries.length !== rightEntries.length) return false;
-  return leftEntries.every(([name, values], index) => {
+  const dimensionsEqual = leftEntries.every(([name, values], index) => {
     const [rightName, rightValues] = rightEntries[index] ?? [];
     return name === rightName
       && values.length === rightValues.length
       && values.every((value, valueIndex) => value === rightValues[valueIndex]);
   });
+  if (!dimensionsEqual) return false;
+
+  const leftLineProperties = Object.entries(left.lineProperties ?? {});
+  const rightLineProperties = Object.entries(right.lineProperties ?? {});
+  if (leftLineProperties.length !== rightLineProperties.length) return false;
+  return leftLineProperties.every(([name, values], index) => {
+    const [rightName, rightValues] = rightLineProperties[index] ?? [];
+    return name === rightName
+      && values.length === rightValues.length
+      && values.every((value, valueIndex) => value === rightValues[valueIndex]);
+  });
+}
+
+function normalizeLineProperties(
+  value: Readonly<Record<string, unknown>> | null | undefined,
+): Readonly<Record<string, readonly string[]>> | undefined {
+  const properties = Object.create(null) as Record<string, readonly string[]>;
+  const authoredKeyByIdentity = new Map<string, string>();
+
+  for (const [rawKey, rawValues] of Object.entries(value ?? {})) {
+    const key = String(rawKey || '').trim();
+    const identity = normalizeLookupValue(key);
+    if (!key || !identity) continue;
+    const authoredKey = authoredKeyByIdentity.get(identity) ?? key;
+    if (!authoredKeyByIdentity.has(identity)) authoredKeyByIdentity.set(identity, authoredKey);
+    const priorValues = properties[authoredKey] ?? [];
+    const nextValues = (Array.isArray(rawValues) ? rawValues : [rawValues])
+      .filter((item) => item !== null && item !== undefined)
+      .map((item) => String(item));
+    properties[authoredKey] = Object.freeze([...priorValues, ...nextValues]);
+  }
+
+  return Object.keys(properties).length > 0
+    ? Object.freeze(properties)
+    : undefined;
 }
 
 function normalizeFilter(
@@ -906,6 +949,9 @@ export class EntityIndexCore {
       const uniqueValues = uniqueDisplayValues(values);
       if (uniqueValues.length > 0) dimensions[definition.name] = uniqueValues;
     }
+    const lineProperties = entityType === 'block'
+      ? normalizeLineProperties(source.lineProperties)
+      : undefined;
 
     return Object.freeze({
       id,
@@ -914,6 +960,7 @@ export class EntityIndexCore {
       displayName: name,
       basename,
       dimensions: Object.freeze(dimensions),
+      ...(lineProperties ? { lineProperties } : {}),
       sourcePath,
       entityType,
       subpath,

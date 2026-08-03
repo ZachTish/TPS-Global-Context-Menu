@@ -665,6 +665,125 @@ test('Kind task is the union of checkbox lines and note properties without erasi
   );
 });
 
+test('block records expose every raw semantic line property apart from parsed dimensions', async () => {
+  const { EntityIndexCore } = await corePromise;
+  const { LineEntitySourceProvider } = await lineProviderPromise;
+  const definitions = [{ name: 'kind', propertyKeys: ['kind'] }];
+  const provider = new LineEntitySourceProvider();
+  const [lineSource] = provider.scanFile(
+    'Inbox/Raw properties.md',
+    '- [ ] Relational row [Kind:: [Project, Area]] [Scheduled:: ] [scheduled:: 2026-08-04 09:00] [Owner:: Alpha] [OWNER:: Beta] [Unconfigured:: keep] ^raw-properties',
+    definitions,
+  );
+
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(lineSource.lineProperties)),
+    {
+      Kind: ['[Project, Area]'],
+      Scheduled: ['', '2026-08-04 09:00'],
+      Owner: ['Alpha', 'Beta'],
+      Unconfigured: ['keep'],
+    },
+    'all canonical fields retain first-authored key casing, blanks, repetitions, and order',
+  );
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(lineSource.frontmatter)),
+    { Kind: ['Project', 'Area'] },
+    'only configured dimension fields are parsed into the dimension source payload',
+  );
+
+  const index = new EntityIndexCore();
+  index.configureDimensions(definitions);
+  index.rebuild([
+    {
+      path: 'Inbox/Raw properties.md',
+      frontmatter: { kind: 'Registry' },
+      lineProperties: { shouldNeverLeak: ['note-only-input'] },
+    },
+    lineSource,
+  ]);
+  const record = index.getById(lineSource.id);
+  assert.deepEqual(record.dimensions.kind, ['Project', 'Area', 'task']);
+  assert.deepEqual(record.lineProperties.Kind, ['[Project, Area]']);
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(record.lineProperties, 'task'),
+    false,
+    'the provider-derived structural Kind dimension is not fabricated as an inline property',
+  );
+  assert.equal('lineProperties' in index.getByPath('Inbox/Raw properties.md'), false);
+  assert.ok(Object.isFrozen(record.lineProperties));
+  assert.ok(Object.isFrozen(record.lineProperties.Scheduled));
+  assert.throws(() => {
+    record.lineProperties.Scheduled[0] = 'changed';
+  }, TypeError);
+});
+
+test('bullet and heading records expose arbitrary repeated line properties without configured dimensions', async () => {
+  const { LineEntitySourceProvider } = await lineProviderPromise;
+  const provider = new LineEntitySourceProvider();
+  const sources = provider.scanFile(
+    'Inbox/Mixed raw properties.md',
+    [
+      '# Milestone [Owner:: Lead] [owner:: Backup] [Unconfigured:: heading]',
+      '- Resource [Status:: active] [status:: ] [Unconfigured:: bullet]',
+    ].join('\n'),
+    [{ name: 'kind', propertyKeys: ['kind'] }],
+  );
+
+  assert.deepEqual(
+    sources.map(({ lineKind, lineProperties }) => ({
+      lineKind,
+      lineProperties: Object.fromEntries(Object.entries(lineProperties)),
+    })),
+    [
+      {
+        lineKind: 'heading',
+        lineProperties: {
+          Owner: ['Lead', 'Backup'],
+          Unconfigured: ['heading'],
+        },
+      },
+      {
+        lineKind: 'bullet',
+        lineProperties: {
+          Status: ['active', ''],
+          Unconfigured: ['bullet'],
+        },
+      },
+    ],
+  );
+});
+
+test('a raw line-property-only change advances the revision and invalidates cached results', async () => {
+  const { EntityIndexCore } = await corePromise;
+  const { LineEntitySourceProvider } = await lineProviderPromise;
+  const definitions = [{ name: 'kind', propertyKeys: ['kind'] }];
+  const provider = new LineEntitySourceProvider();
+  const index = new EntityIndexCore();
+  index.configureDimensions(definitions);
+
+  const [initialSource] = provider.scanFile(
+    'Inbox/Revision.md',
+    '- [ ] Same row [kind:: Task] [priority:: low] ^same-row',
+    definitions,
+  );
+  index.replaceSource('lines:inbox/revision.md', [initialSource]);
+  const initialRevision = index.getRevision();
+  const cached = index.query({ dimensions: { kind: 'task' } });
+
+  const [updatedSource] = provider.scanFile(
+    'Inbox/Revision.md',
+    '- [ ] Same row [kind:: Task] [priority:: high] ^same-row',
+    definitions,
+  );
+  index.replaceSource('lines:inbox/revision.md', [updatedSource]);
+
+  assert.equal(index.getRevision(), initialRevision + 1);
+  assert.notEqual(index.query({ dimensions: { kind: 'task' } }), cached);
+  assert.deepEqual(index.getById(updatedSource.id).dimensions.kind, ['Task']);
+  assert.deepEqual(index.getById(updatedSource.id).lineProperties.priority, ['high']);
+});
+
 test('line Kind list syntax has note-parity dimensions without splitting wikilink commas', async () => {
   const { EntityIndexCore } = await corePromise;
   const { LineEntitySourceProvider } = await lineProviderPromise;
@@ -741,6 +860,21 @@ test('line provider ignores inline-code and protected-metadata field lookalikes'
         kind: 'Context',
       },
     ],
+  );
+  assert.deepEqual(
+    sources.map(({ lineProperties }) => Object.fromEntries(Object.entries(lineProperties ?? {}))),
+    [
+      {},
+      {},
+      {},
+      {},
+      {},
+      { kind: ['Context'] },
+      { kind: ['Project'] },
+      { kind: ['Project'] },
+      { kind: ['Context'] },
+    ],
+    'inline-code and protected-carrier lookalikes never leak into the generic line-property payload',
   );
 });
 
@@ -1536,6 +1670,39 @@ test('async service readiness adds task, bullet, and heading entities without ch
     service.getByReferenceTarget('Entities/Registry#^context-home')?.name,
     'Home',
   );
+});
+
+test('service queryAsync refreshes unconfigured line properties and replaces its revision cache', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Line properties.md',
+    basename: 'Line properties',
+    frontmatter: { kind: 'Registry' },
+    content: '- [ ] Same task [kind:: Task] [owner:: Alpha] ^service-line-properties',
+  }]);
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  service.setup();
+
+  const query = { entityTypes: ['block'], lineKinds: ['task'] };
+  const initial = await service.queryAsync(query);
+  assert.equal(initial.length, 1);
+  assert.deepEqual(initial[0].lineProperties.owner, ['Alpha']);
+  assert.equal(Object.prototype.hasOwnProperty.call(initial[0].dimensions, 'owner'), false);
+  const initialRevision = service.getRevision();
+
+  const file = fixture.files[0];
+  fixture.contentByFile.set(
+    file,
+    '- [ ] Same task [kind:: Task] [owner:: Beta] ^service-line-properties',
+  );
+  fixture.emitVault('modify', file);
+
+  const refreshed = await service.queryAsync(query);
+  assert.equal(service.getRevision(), initialRevision + 1);
+  assert.notEqual(refreshed, initial, 'a line-property-only refresh replaces the revision-scoped query result');
+  assert.deepEqual(refreshed[0].lineProperties.owner, ['Beta']);
+  assert.deepEqual(refreshed[0].dimensions.kind, ['Task']);
 });
 
 test('ready line index follows file create, rename, and delete without ghost source records', async () => {

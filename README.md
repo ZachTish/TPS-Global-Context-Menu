@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.18.0
+
+- Entity Index v3 block records now expose an optional, immutable `lineProperties` map containing every canonical inline field authored on that exact task, bullet, or heading. Values preserve authored order, repeats, blanks, and first-authored key casing; note records never expose line properties.
+- Raw line properties are independent from registered dimensions. Structural and configured Kind identities remain in `dimensions`, while consumers such as TPS Notebook Navigator can group a line by an arbitrary inline property without treating synthetic identity values as authored Markdown.
+- A line-property-only edit advances the Entity Index revision and invalidates cached results. Existing Entity Index v3 consumers remain compatible because the new field is optional; no settings or note-data migration is required.
+- This is a backward-compatible public capability release. Minimum supported Obsidian remains 1.10.0. It is coordinated with TPS Notebook Navigator 5.4.0.
+- Validation passed all 49 focused Entity Index checks, the complete declared suite, TypeScript, and the mandatory separate production-mode build. The final artifact is deployed and reloaded only in the isolated test vault; runtime-owned `data.json` stays byte-identical and production is not accessed.
+
 ## 1.17.1
 
 - Checkbox state and workflow status now resolve through one ordered, alias-aware mapping implementation across supported task creation and mutation surfaces, linked subitems, recurrence, timers, reconciliation, completed-task hiding, TPS Table/List, the Task API, and the public `taskCheckboxes` capability. Custom one-character markers remain supported; the first row containing a status is its primary marker, and the first status in a row is that marker's canonical reverse mapping.
@@ -185,7 +193,7 @@
 
 BRAT 2.2.0 or newer can install and update the public repository `ZachTish/TPS-Global-Context-Menu` without a GitHub token. Add that repository path as a beta plugin and track `Latest` to receive the highest semantic-version release; use a frozen numeric version when a device should stay pinned.
 
-Release `1.17.0` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
+Release `1.18.0` is BRAT-ready after publication: its numeric tag, manifest, and attached `main.js`, `manifest.json`, and `styles.css` come from the exact artifact validated in the test vault. The additional `styles-ui.css` asset is retained for the contained TPS deployment workflow but is not required by BRAT.
 
 ## 1.11.1
 
@@ -565,7 +573,7 @@ const unregister = gcm.api.entityIndex.registerDimension({
 
 `entityIndex.version` is `3`. `query()` always returns its backward-compatible synchronous note-only view, even after content readiness; `queryAsync()` awaits a complete line index and returns notes plus lines or rejects with `entity-index-incomplete` and the failed source paths. `ensureReady()` prepares the same complete block-aware snapshot. Async consumers can scope results with `entityTypes` (`note` and/or `block`) and structural `lineKinds` (`task`, `bullet`, or `heading`) in addition to `dimensions`/`allOf`, `anyOf`, `noneOf`, `search`, and `limit`. Version-3 consumers must fail closed when readiness rejects; they must not treat a partial or empty snapshot as authoritative.
 
-`getById`, note-only `getByPath`, `getByLocator`, `getByReferenceTarget`, `getBySourcePath`, `materializeReference`, `getDimensionValues`, `getRevision`, `onChanged`, and `invalidate` are public. Records expose `entityType`, `sourcePath`, `lineKind`, `lineNumber`, `referenceState`, `subpath`, `blockId`, `locatorKey`, and `referenceTarget`. `materializeReference()` returns a note unchanged and atomically re-resolves a provisional line. `registerDimension` returns an unregister callback; external dimensions remain registered when GCM's custom-field configuration changes.
+`getById`, note-only `getByPath`, `getByLocator`, `getByReferenceTarget`, `getBySourcePath`, `materializeReference`, `getDimensionValues`, `getRevision`, `onChanged`, and `invalidate` are public. Records expose `entityType`, `sourcePath`, `lineKind`, `lineNumber`, `referenceState`, `subpath`, `blockId`, `locatorKey`, and `referenceTarget`. Block records may additionally expose immutable `lineProperties`, keyed by first-authored inline-field casing with ordered string arrays that preserve repeats and blanks; note records omit it. `materializeReference()` returns a note unchanged and atomically re-resolves a provisional line. `registerDimension` returns an unregister callback; external dimensions remain registered when GCM's custom-field configuration changes.
 
 Line entities are selectable only when they can produce a stable native block reference. A line that has no block ID remains provisional until selection, when GCM atomically re-resolves the exact source and appends one collision-checked ID. Ambiguous duplicate IDs, duplicate legacy identities, stale lines, entities that changed Kind while a picker was open, and formerly valid lines moved into protected Markdown fail closed. The picker rechecks existence and accepted Kind immediately before writing. Ordinary paragraphs, YAML frontmatter, fenced or indented code, HTML/comment blocks, Canvas records, and non-Markdown files are not indexed as lines. Field- or tag-shaped text inside closed inline code or protected TPS JSON is never treated as identity or editable metadata; unsafe paths that cannot be represented inside both a wikilink and GCM's hidden carrier are omitted from constrained pickers.
 

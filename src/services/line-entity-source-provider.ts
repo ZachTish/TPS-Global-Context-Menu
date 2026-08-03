@@ -142,6 +142,7 @@ export class LineEntitySourceProvider {
       if (!semantic) continue;
       const fields = semantic.fields
         .filter((field) => configuredKeys.has(normalizeLookupValue(field.key)));
+      const lineProperties = collectLineProperties(semantic.fields);
       // Structural identity is additive: every supported line can satisfy its
       // native kind while an explicit inline Kind (for example `project`)
       // remains a second identity. Notes with `kind: task` continue to enter
@@ -208,6 +209,7 @@ export class LineEntitySourceProvider {
         name: label,
         basename: label,
         frontmatter: inlineProperties,
+        ...(lineProperties ? { lineProperties } : {}),
         ...(structuralDimensions ? { dimensions: structuralDimensions } : {}),
         entityType: 'block',
         subpath: blockId ? `#^${blockId}` : '',
@@ -306,6 +308,27 @@ export class LineEntitySourceProvider {
     }
     return result;
   }
+}
+
+function collectLineProperties(
+  fields: readonly TaskInlineField[],
+): Readonly<Record<string, readonly string[]>> | undefined {
+  const properties = Object.create(null) as Record<string, readonly string[]>;
+  for (const field of fields) {
+    const key = String(field.key || '').trim();
+    if (!key) continue;
+    const existing = findCaseInsensitiveKey(properties, key);
+    const authoredKey = existing || key;
+    properties[authoredKey] = [
+      ...(properties[authoredKey] ?? []),
+      String(field.value ?? ''),
+    ];
+  }
+  if (Object.keys(properties).length === 0) return undefined;
+  for (const [key, values] of Object.entries(properties)) {
+    properties[key] = Object.freeze([...values]);
+  }
+  return Object.freeze(properties);
 }
 
 export function getLineEntityKind(line: string): EntityIndexLineKind | null {
