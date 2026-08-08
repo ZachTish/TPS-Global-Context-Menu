@@ -735,39 +735,29 @@ export class MenuBuilder {
           const subMenu = (item as any).setSubmenu();
           if (activeTimerCount > 0) {
             subMenu.addItem((sub: any) => {
+              sub.setTitle('Open work-session notes')
+                .setIcon('notebook-pen')
+                .onClick(async () => {
+                  const opened = await this.plugin.timeTrackingService.openActiveSessionNotesForFile(file);
+                  if (!opened) new Notice('Could not open work-session notes.');
+                });
+            });
+            subMenu.addItem((sub: any) => {
               sub.setTitle(activeTimerCount > 1 ? `End timer (${activeTimerCount})` : 'End timer')
                 .setIcon('square')
                 .onClick(async () => {
                   await this.plugin.timeTrackingService.stopActiveTimerForFile(file);
                 });
             });
+          } else {
+            subMenu.addItem((sub: any) => {
+              sub.setTitle('Start work session')
+                .setIcon('play')
+                .onClick(async () => {
+                  await this.plugin.timeTrackingService.startTimer({ file, type: 'note' });
+                });
+            });
           }
-          subMenu.addItem((sub: any) => {
-            sub.setTitle('Track with task')
-              .setIcon('list-checks');
-            const taskSubMenu = sub.setSubmenu();
-            taskSubMenu.addItem((target: any) => {
-              target.setTitle("Create task in today's daily note")
-                .setIcon('calendar')
-                .onClick(async () => {
-                  await this.plugin.timeTrackingService.promptStartTaskTimerForNote(file, 'daily-note', this.getFileDisplayTitle(file));
-                });
-            });
-            taskSubMenu.addItem((target: any) => {
-              target.setTitle('Create task in this note')
-                .setIcon('file-text')
-                .onClick(async () => {
-                  await this.plugin.timeTrackingService.promptStartTaskTimerForNote(file, 'source-note', this.getFileDisplayTitle(file));
-                });
-            });
-          });
-          subMenu.addItem((sub: any) => {
-            sub.setTitle('Track with note')
-              .setIcon('file-clock')
-              .onClick(async () => {
-                await this.plugin.timeTrackingService.startTimer({ file, type: 'note' });
-              });
-          });
           subMenu.addItem((sub: any) => {
             sub.setTitle('Add manual session')
               .setIcon('clock')

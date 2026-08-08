@@ -83,9 +83,11 @@ test('focused opener emits compact diagnostics only through the toggle', () => {
   assert.match(mainSource, /this\.logOpenerDecision\('open-missing-file'/);
 });
 
-test('time tracking status bar opens the hydrated active target directly', () => {
-  assert.match(timeTrackingStatusBarSource, /openHydratedSessionTarget\(state\.session\)/);
-  assert.match(timeTrackingStatusBarSource, /new Notice\('Could not open timer target\.'\)/);
+test('time tracking status opens notes first and retains an exact tracked-item route', () => {
+  assert.match(timeTrackingStatusBarSource, /openHydratedSessionNotes\(state\.session\)/);
+  assert.match(timeTrackingStatusBarSource, /new Notice\('Could not open work-session notes\.'\)/);
+  assert.match(timeTrackingStatusBarSource, /setTitle\('Open tracked item'\)/);
+  assert.match(timeTrackingStatusBarSource, /openSessionTarget\(state\.session\.id\)/);
   assert.match(timeTrackingServiceSource, /async openHydratedSessionTarget\(session: TimeTrackingSession\)/);
   assert.match(timeTrackingServiceSource, /this\.resolveFile\(session\.targetPath\) \?\? this\.resolveFile\(session\.sourcePath\)/);
   assert.match(timeTrackingServiceSource, /return this\.openSessionTarget\(session\.id\)/);

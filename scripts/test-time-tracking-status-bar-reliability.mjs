@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
 
-async function loadStatusBarService() {
+async function loadStatusBarService(isMobile = false) {
   const build = await esbuild.build({
     entryPoints: [
       fileURLToPath(new URL('../src/services/time-tracking-status-bar-service.ts', import.meta.url)),
@@ -39,6 +40,7 @@ async function loadStatusBarService() {
                 showAtMouseEvent() {}
               }
               export class Notice {}
+              export const Platform = { isMobile: ${isMobile ? 'true' : 'false'} };
               export function setIcon() {}
             `,
           }),
@@ -60,6 +62,7 @@ class FakeElement {
     this.textContent = '';
     this.parentElement = null;
     this.removed = false;
+    this.classList = { add: (...values) => values.forEach((value) => this.classes.add(value)) };
   }
 
   addClass(value) {
@@ -73,9 +76,14 @@ class FakeElement {
 
   remove() {
     this.removed = true;
+    if (this.parentElement) {
+      this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+      this.parentElement = null;
+    }
   }
 
   empty() {
+    this.children.forEach((child) => { child.parentElement = null; });
     this.children = [];
     this.textContent = '';
   }
@@ -93,6 +101,7 @@ class FakeElement {
   }
 
   appendChild(child) {
+    child.removeFromParent();
     child.parentElement = this;
     this.children.push(child);
     return child;
@@ -104,6 +113,47 @@ class FakeElement {
 
   closest() {
     return null;
+  }
+
+  removeFromParent() {
+    if (!this.parentElement) return;
+    this.parentElement.children = this.parentElement.children.filter((child) => child !== this);
+    this.parentElement = null;
+  }
+
+  prepend(child) {
+    child.removeFromParent();
+    child.parentElement = this;
+    this.children.unshift(child);
+  }
+
+  insertBefore(child, reference) {
+    child.removeFromParent();
+    const index = this.children.indexOf(reference);
+    child.parentElement = this;
+    if (index < 0) this.children.push(child);
+    else this.children.splice(index, 0, child);
+    return child;
+  }
+
+  matches(selector) {
+    if (!selector.startsWith('.')) return false;
+    return this.classes.has(selector.slice(1));
+  }
+
+  querySelector(selector) {
+    if (this.matches(selector)) return this;
+    for (const child of this.children) {
+      const match = child.querySelector(selector);
+      if (match) return match;
+    }
+    return null;
+  }
+
+  get nextElementSibling() {
+    if (!this.parentElement) return null;
+    const index = this.parentElement.children.indexOf(this);
+    return index >= 0 ? this.parentElement.children[index + 1] ?? null : null;
   }
 
   get visibleText() {
@@ -149,22 +199,36 @@ function pausedStatus(title = 'Paused timer') {
   };
 }
 
-function createHarness(statusResults) {
+function createHarness(statusResults, options = {}) {
   const intervalCallbacks = [];
   const statusItems = [];
+  const createdElements = [];
+  const workspaceHandlers = new Map();
+  let statusBarCalls = 0;
   let statusReadCount = 0;
+  const leafContainer = new FakeElement('leaf');
+  const viewContent = new FakeElement('view-content');
+  viewContent.addClass('view-content');
+  leafContainer.appendChild(viewContent);
   const plugin = {
     settings: { enableTimeTracking: true },
     addStatusBarItem() {
+      statusBarCalls += 1;
       const item = new FakeElement(`status-${statusItems.length + 1}`);
       statusItems.push(item);
       return item;
     },
     registerInterval() {},
+    registerEvent() {},
     app: {
       workspace: {
+        activeLeaf: { containerEl: leafContainer, view: { containerEl: viewContent } },
         onLayoutReady(callback) {
           plugin.layoutReadyCallback = callback;
+        },
+        on(name, callback) {
+          workspaceHandlers.set(name, callback);
+          return { name, callback };
         },
       },
     },
@@ -184,7 +248,15 @@ function createHarness(statusResults) {
       async openHydratedSessionTarget() {
         return true;
       },
+      async openHydratedSessionNotes() {
+        plugin.openedNotes = (plugin.openedNotes || 0) + 1;
+        return true;
+      },
       async openPausedTimerTarget() {
+        return true;
+      },
+      async openPausedTimerNotes() {
+        plugin.openedNotes = (plugin.openedNotes || 0) + 1;
         return true;
       },
       async openSessionTarget() {
@@ -205,7 +277,14 @@ function createHarness(statusResults) {
     },
   };
 
-  globalThis.document = { querySelector: () => null };
+  globalThis.document = {
+    createElement(tag) {
+      const element = new FakeElement(tag);
+      createdElements.push(element);
+      return element;
+    },
+    querySelector: () => null,
+  };
   globalThis.window = {
     setInterval(callback) {
       intervalCallbacks.push(callback);
@@ -217,6 +296,13 @@ function createHarness(statusResults) {
     plugin,
     intervalCallbacks,
     statusItems,
+    createdElements,
+    leafContainer,
+    viewContent,
+    workspaceHandlers,
+    get statusBarCalls() {
+      return statusBarCalls;
+    },
     get statusReadCount() {
       return statusReadCount;
     },
@@ -229,7 +315,9 @@ async function settle(turns = 6) {
   }
 }
 
-const { TimeTrackingStatusBarService } = await loadStatusBarService();
+const { TimeTrackingStatusBarService } = await loadStatusBarService(false);
+const { TimeTrackingStatusBarService: MobileTimeTrackingStatusBarService } = await loadStatusBarService(true);
+const pluginStylesSource = readFileSync(new URL('../src/plugin-styles.ts', import.meta.url), 'utf8');
 
 test('a burst of event-driven refreshes replays one authoritative status read', async () => {
   const firstRead = deferred();
@@ -344,4 +432,69 @@ test('successful timer actions do not request a third redundant status scan', as
   await settle();
 
   assert.equal(harness.statusReadCount, 2);
+});
+
+test('mobile mounts one in-flow timer dock without calling the unsupported status-bar API', async () => {
+  const harness = createHarness([activeStatus('Mobile timer')]);
+  const service = new MobileTimeTrackingStatusBarService(harness.plugin);
+
+  service.setup();
+  await settle();
+
+  assert.equal(harness.statusBarCalls, 0);
+  assert.equal(harness.createdElements.length, 1);
+  const dock = harness.createdElements[0];
+  assert.equal(dock.parentElement, harness.leafContainer);
+  assert.equal(dock.nextElementSibling, harness.viewContent);
+  assert.match(dock.visibleText, /Mobile timer/);
+  assert.equal(dock.classes.has('tps-gcm-time-tracker-mobile-dock'), true);
+
+  await dock.children[0].children[0].listeners.get('click')();
+  assert.equal(harness.plugin.openedNotes, 1, 'the mobile primary action opens the Daily Note workspace');
+});
+
+test('mobile reparents the same timer dock when the active leaf changes', async () => {
+  const harness = createHarness([activeStatus('Moving timer')]);
+  const service = new MobileTimeTrackingStatusBarService(harness.plugin);
+  service.setup();
+  await settle();
+  const dock = harness.createdElements[0];
+
+  const nextLeaf = new FakeElement('next-leaf');
+  const nextContent = new FakeElement('next-content');
+  nextContent.addClass('view-content');
+  nextLeaf.appendChild(nextContent);
+  harness.plugin.app.workspace.activeLeaf = {
+    containerEl: nextLeaf,
+    view: { containerEl: nextContent },
+  };
+  harness.workspaceHandlers.get('active-leaf-change')();
+
+  assert.equal(harness.createdElements.length, 1);
+  assert.equal(dock.parentElement, nextLeaf);
+  assert.equal(dock.nextElementSibling, nextContent);
+  assert.equal(harness.leafContainer.children.includes(dock), false);
+});
+
+test('mobile hides the dock when no active or paused timer exists', async () => {
+  const harness = createHarness([{ active: null, paused: null }]);
+  const service = new MobileTimeTrackingStatusBarService(harness.plugin);
+  service.setup();
+  await settle();
+
+  const dock = harness.createdElements[0];
+  assert.equal(dock.style.display, 'none');
+  assert.equal(dock.visibleText, '');
+});
+
+test('mobile timer CSS is namespaced, in-flow, and keeps usable touch targets', () => {
+  const start = pluginStylesSource.indexOf('body.is-mobile .tps-gcm-time-tracker-mobile-dock');
+  const end = pluginStylesSource.indexOf('/* Mobile gesture passthrough', start);
+  const css = pluginStylesSource.slice(start, end);
+
+  assert.ok(start >= 0 && end > start);
+  assert.match(css, /position: relative/);
+  assert.match(css, /min-height: 40px/);
+  assert.match(css, /safe-area-inset-left/);
+  assert.doesNotMatch(css, /position: fixed/);
 });

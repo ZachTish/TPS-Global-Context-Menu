@@ -179,6 +179,12 @@ function buildTitles(builder, targets, options) {
   return menu.items.map((item) => item.title);
 }
 
+function buildMenu(builder, targets, options) {
+  const menu = new FakeMenu();
+  builder.addToExactFileMenu(menu, targets, options);
+  return menu;
+}
+
 const bridgeOptions = (files) => ({
   includeTitle: false,
   includeDelete: false,
@@ -198,6 +204,18 @@ test("the real menu builder de-duplicates only standard Markdown tags", async ()
   assert.equal(titles.some((title) => title.startsWith("Priority")), true);
   assert.equal(titles.includes("Link to Parent"), true);
   assert.equal(titles.includes("Time Tracking"), true);
+});
+
+test("note time tracking exposes one inferred-target start action instead of task-vs-note modes", async () => {
+  const { MenuBuilder, TFile } = await loadMenuBuilderModule();
+  const { builder, addFile } = createBuilderHarness(MenuBuilder, TFile);
+  const note = addFile("Notes/Project.md", 11);
+  const menu = buildMenu(builder, [note], bridgeOptions([note]));
+  const timeTracking = menu.items.find((item) => item.title === "Time Tracking");
+  const titles = timeTracking.submenu.items.map((item) => item.title);
+
+  assert.deepEqual(titles, ["Start work session", "Add manual session"]);
+  assert.equal(titles.some((title) => /Track with task|Track with note/u.test(title)), false);
 });
 
 test("the real menu builder keeps non-Markdown single-file capabilities", async () => {

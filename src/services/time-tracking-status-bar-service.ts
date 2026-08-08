@@ -1,4 +1,4 @@
-import { Menu, Notice, setIcon } from 'obsidian';
+import { Menu, Notice, Platform, setIcon } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import type { TimeTrackingPausedSessionState } from '../types';
 import type { TimeTrackingSession } from './time-tracking-service';
@@ -14,13 +14,19 @@ export class TimeTrackingStatusBarService {
   private refreshPending = false;
   private lastRenderKey = '';
   private cachedState: StatusBarTimerState | null = null;
+  private readonly isMobile = Platform.isMobile;
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
   setup(): void {
     if (this.itemEl) return;
-    this.itemEl = this.plugin.addStatusBarItem();
-    this.itemEl.addClass('tps-gcm-time-tracker-status-item');
+    this.itemEl = this.isMobile
+      ? document.createElement('div')
+      : this.plugin.addStatusBarItem();
+    this.itemEl.classList.add('tps-gcm-time-tracker-status-item');
+    if (this.isMobile) {
+      this.itemEl.classList.add('tps-gcm-time-tracker-mobile-dock');
+    }
     this.itemEl.style.display = 'none';
 
     this.plugin.registerInterval(window.setInterval(() => {
@@ -34,6 +40,14 @@ export class TimeTrackingStatusBarService {
       this.reposition();
       void this.update(true, true);
     });
+    if (this.isMobile) {
+      this.plugin.registerEvent(this.plugin.app.workspace.on('active-leaf-change', () => {
+        this.reposition();
+      }));
+      this.plugin.registerEvent(this.plugin.app.workspace.on('layout-change', () => {
+        this.reposition();
+      }));
+    }
     this.refresh();
   }
 
@@ -128,18 +142,18 @@ export class TimeTrackingStatusBarService {
       cls: 'tps-gcm-time-tracker-main',
       attr: {
         type: 'button',
-        'aria-label': state.kind === 'active' ? 'Open active timer target' : 'Open paused timer target',
-        title: state.kind === 'active' ? 'Open active timer target' : 'Open paused timer target',
+        'aria-label': 'Open work-session notes',
+        title: 'Open work-session notes',
       },
     });
     mainButton.addEventListener('click', async () => {
       let opened = false;
       if (state.kind === 'active') {
-        opened = await this.plugin.timeTrackingService.openHydratedSessionTarget(state.session);
+        opened = await this.plugin.timeTrackingService.openHydratedSessionNotes(state.session);
       } else {
-        opened = await this.plugin.timeTrackingService.openPausedTimerTarget();
+        opened = await this.plugin.timeTrackingService.openPausedTimerNotes();
       }
-      if (!opened) new Notice('Could not open timer target.');
+      if (!opened) new Notice('Could not open work-session notes.');
     });
 
     const iconEl = mainButton.createSpan({ cls: 'tps-gcm-time-tracker-icon' });
@@ -199,7 +213,19 @@ export class TimeTrackingStatusBarService {
     const menu = new Menu();
     menu.addItem((item) => {
       item
-        .setTitle('Open target')
+        .setTitle('Open work-session notes')
+        .setIcon('notebook-pen')
+        .onClick(async () => {
+          if (state.kind === 'active') {
+            await this.plugin.timeTrackingService.openHydratedSessionNotes(state.session);
+          } else {
+            await this.plugin.timeTrackingService.openPausedTimerNotes();
+          }
+        });
+    });
+    menu.addItem((item) => {
+      item
+        .setTitle('Open tracked item')
         .setIcon('arrow-up-right')
         .onClick(async () => {
           if (state.kind === 'active') {
@@ -236,6 +262,10 @@ export class TimeTrackingStatusBarService {
 
   private reposition(): void {
     if (!this.itemEl) return;
+    if (this.isMobile) {
+      this.repositionMobile();
+      return;
+    }
     const statusBar = this.itemEl.closest('.status-bar') as HTMLElement | null
       ?? document.querySelector('.status-bar');
     if (!statusBar) return;
@@ -243,6 +273,31 @@ export class TimeTrackingStatusBarService {
     const wordCountItem = this.findWordCountItem(statusBar);
     if (wordCountItem && wordCountItem !== this.itemEl && wordCountItem.parentElement === statusBar) {
       statusBar.insertBefore(this.itemEl, wordCountItem);
+    }
+  }
+
+  private repositionMobile(): void {
+    if (!this.itemEl) return;
+    const activeLeaf = this.plugin.app.workspace.activeLeaf as any;
+    const leafContainer = activeLeaf?.containerEl as HTMLElement | undefined;
+    const viewContainer = activeLeaf?.view?.containerEl as HTMLElement | undefined;
+    const fallbackContainer = document.querySelector<HTMLElement>(
+      '.workspace-split.mod-root .workspace-leaf.mod-active .workspace-leaf-content',
+    );
+    const mountRoot = leafContainer ?? viewContainer ?? fallbackContainer;
+    if (!mountRoot) return;
+    const viewContent = mountRoot.matches?.('.view-content')
+      ? mountRoot
+      : mountRoot.querySelector<HTMLElement>('.view-content')
+        ?? (viewContainer?.matches?.('.view-content') ? viewContainer : null);
+    if (viewContent?.parentElement) {
+      if (this.itemEl.parentElement !== viewContent.parentElement || this.itemEl.nextElementSibling !== viewContent) {
+        viewContent.parentElement.insertBefore(this.itemEl, viewContent);
+      }
+      return;
+    }
+    if (this.itemEl.parentElement !== mountRoot) {
+      mountRoot.prepend(this.itemEl);
     }
   }
 

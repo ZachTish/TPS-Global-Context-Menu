@@ -53,6 +53,7 @@ export type ParentLinkFormat = 'wikilink' | 'markdown-title';
 export type ChecklistPromotionBehavior = 'remove' | 'complete-and-link' | 'link-only';
 export type LinkedSubitemCheckboxStyle = 'native' | 'soft-link' | 'accent';
 export type TimeTrackingStorageMode = 'daily-note' | 'source-note' | 'dedicated-note';
+export type TimeTrackingDailyNotePlacement = 'top' | 'bottom';
 export type TpsBaseWriteFallbackMode = 'filter-required' | 'today-daily-note' | 'specific-note';
 type ExtensibleLiteral<T extends string> = T | (string & Record<never, never>);
 
@@ -96,6 +97,9 @@ export interface TimeTrackingPausedSessionState {
   pausedAt: string;
   elapsedMs: number;
   lastSessionId?: string;
+  notesPath?: string;
+  notesHeading?: string;
+  notesBlockId?: string;
 }
 export interface LinkedSubitemCheckboxMapping {
   checkboxState: string;
@@ -479,6 +483,8 @@ export interface TPSGlobalContextMenuSettings {
   timeTrackingPropertyKey: string;
   timeTrackingStorageMode: TimeTrackingStorageMode;
   timeTrackingDedicatedNotePath: string;
+  timeTrackingDailyNoteHeading: string;
+  timeTrackingDailyNotePlacement: TimeTrackingDailyNotePlacement;
   timeTrackingSingleActiveSession: boolean;
   timeTrackingIgnoreArchivedFiles: boolean;
   timeTrackingPausedSession?: TimeTrackingPausedSessionState | null;

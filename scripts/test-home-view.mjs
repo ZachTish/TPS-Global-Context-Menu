@@ -320,6 +320,40 @@ test('TPS Home separates dashboard UI from daily-note capture storage', () => {
   assert.match(stylesSource, /flex-direction: column/);
 });
 
+test('desktop Home quick-capture edits preserve hidden TPS metadata without exposing stale payloads', async () => {
+  assert.match(
+    viewSource,
+    /const replacement = editTarget && originalEditLine != null\s*\?\s*preserveTpsInlinePropsMetadata\(originalEditLine, value\)/u,
+    'the desktop edit-save path must merge the edited value with metadata from the original line',
+  );
+
+  const {
+    preserveTpsInlinePropsMetadata,
+    stripTaskInlinePropsMetadata,
+  } = await loadPureModule('../src/utils/task-line-metadata.ts');
+  const original = [
+    '- [ ] Original title [priority:: low]',
+    '%% tps-inline-props:{"createdDate":"2026-07-28 08:15:00","externalId":"reminders:abc","remindersSyncedCompleted":false} %%',
+  ].join(' ');
+  const edited = [
+    '- [ ] Renamed title [priority:: high]',
+    '%% tps-inline-props:{"createdDate":"stale-visible-value","externalId":"stale-visible-id"} %%',
+  ].join(' ');
+
+  const saved = preserveTpsInlinePropsMetadata(original, edited);
+
+  assert.equal(
+    stripTaskInlinePropsMetadata(saved),
+    '- [ ] Renamed title [priority:: high]',
+    'only the edited user-visible line should remain visible',
+  );
+  assert.match(saved, /"createdDate":"2026-07-28 08:15:00"/u);
+  assert.match(saved, /"externalId":"reminders:abc"/u);
+  assert.match(saved, /"remindersSyncedCompleted":false/u);
+  assert.doesNotMatch(saved, /stale-visible/u);
+  assert.equal((saved.match(/tps-inline-props:/gu) || []).length, 1);
+});
+
 test('TPS Home selected-day daily-note opens use the shared focused-tab opener', () => {
   assert.match(captureServiceSource, /this\.plugin\.openFileInLeaf\(file, false/);
   assert.doesNotMatch(captureServiceSource, /getLeaf\(false\)\.openFile/);
@@ -462,7 +496,7 @@ test('TPS Home can move, remove, and add components', () => {
   assert.match(viewSource, /showAddComponentMenu/);
   assert.match(viewSource, /window\.setTimeout\(\(\) => \{\s*if \(!this\.editMode \|\| !anchor\.isConnected\) return;\s*menu\.showAtPosition/);
   assert.doesNotMatch(viewSource, /menu\.showAtMouseEvent\(event\)/);
-  assert.match(viewSource, /file\.extension === 'base'/);
+  assert.match(viewSource, /\.filter\(\(file\) => file\.extension === 'base'/);
   assert.match(viewSource, /onClick\(\(\) => void this\.addComponent\(\{ type: 'base', path: file\.path \}\)\)/);
   assert.match(viewSource, /onClick\(\(\) => void this\.addComponent\(\{ type: 'command', commandId: command\.id, title: command\.name \}\)\)/);
   assert.match(viewSource, /getHomeBaseComponentKey/);

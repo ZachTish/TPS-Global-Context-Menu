@@ -92,6 +92,8 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   timeTrackingPropertyKey: 'timeTracking',
   timeTrackingStorageMode: 'daily-note',
   timeTrackingDedicatedNotePath: 'Time Tracking.md',
+  timeTrackingDailyNoteHeading: 'Time Tracking',
+  timeTrackingDailyNotePlacement: 'top',
   timeTrackingSingleActiveSession: true,
   timeTrackingIgnoreArchivedFiles: true,
   timeTrackingPausedSession: null,

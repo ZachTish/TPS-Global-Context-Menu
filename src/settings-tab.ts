@@ -1701,7 +1701,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       timeTracking.dataset.tpsSettingsRoute = 'time-tracking';
       timeTracking.createEl('h4', { text: 'Time tracking' });
       timeTracking.createEl('p', {
-        text: 'Start and stop timers and choose where note-level session blocks are stored.',
+        text: 'Track the current task or note while keeping every work-session notebook under one Daily Note heading.',
         cls: 'setting-item-description',
       });
 
@@ -1735,7 +1735,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
       new Setting(timeTracking)
         .setName('Storage mode')
-        .setDesc('Choose where new note-level sessions are written.')
+        .setDesc('Choose where session records are stored. Working notes always stay in the session-start Daily Note.')
         .addDropdown((dropdown) =>
           dropdown
             .addOption('daily-note', 'Daily note')
@@ -1763,6 +1763,37 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
               })
           );
       }
+
+      new Setting(timeTracking)
+        .setName('Daily Note session heading')
+        .setDesc('Heading that contains the editable notes workspace for each work session.')
+        .addText((text) =>
+          text
+            .setPlaceholder('Time Tracking')
+            .setValue(this.plugin.settings.timeTrackingDailyNoteHeading || 'Time Tracking')
+            .onChange(async (value) => {
+              this.plugin.settings.timeTrackingDailyNoteHeading = value
+                .replace(/[\r\n]+/g, ' ')
+                .replace(/^\s*#{1,6}\s*/, '')
+                .trim()
+                || 'Time Tracking';
+              await this.plugin.saveSettings();
+            })
+        );
+
+      new Setting(timeTracking)
+        .setName('Daily Note session placement')
+        .setDesc('For a new section, choose immediately after properties or the note bottom. Existing sections stay in place; new sessions are added first or last within them.')
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('top', 'Top, after properties')
+            .addOption('bottom', 'Bottom of note')
+            .setValue(this.plugin.settings.timeTrackingDailyNotePlacement === 'bottom' ? 'bottom' : 'top')
+            .onChange(async (value: 'top' | 'bottom') => {
+              this.plugin.settings.timeTrackingDailyNotePlacement = value;
+              await this.plugin.saveSettings();
+            })
+        );
 
       new Setting(timeTracking)
         .setName('Single active timer')

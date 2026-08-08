@@ -97,7 +97,7 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.addCommand({
         id: 'time-tracking-start-active-target',
-        name: 'Time tracking: Start timer for current task line or note',
+        name: 'Time tracking: Start work session for current task or note',
         callback: async () => {
             const target = await plugin.timeTrackingService.resolveActiveTarget();
             await plugin.timeTrackingService.startTimer(target ?? undefined);
@@ -105,10 +105,14 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
     });
 
     plugin.addCommand({
-        id: 'time-tracking-start-new-daily-task',
-        name: "Time tracking: Track with task in today's daily note",
+        id: 'time-tracking-open-active-notes',
+        name: 'Time tracking: Open active work-session notes',
         callback: async () => {
-            await plugin.timeTrackingService.promptStartDailyTaskTimer();
+            const active = await plugin.timeTrackingService.getActiveTimer();
+            const opened = active
+                ? await plugin.timeTrackingService.openHydratedSessionNotes(active)
+                : await plugin.timeTrackingService.openPausedTimerNotes();
+            if (!opened) new Notice('TPS GCM: No active or paused work-session notes.');
         },
     });
 

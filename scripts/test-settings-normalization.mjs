@@ -672,6 +672,15 @@ test('optional inline and context surfaces default to the lean off state', () =>
   assert.match(mainSource, /this\.settings = Object\.assign\(\{\}, DEFAULT_SETTINGS, loaded \?\? \{\}\);/);
 });
 
+test('time tracking normalizes a clean Daily Note workspace default', () => {
+  assert.match(constantsSource, /timeTrackingDailyNoteHeading: 'Time Tracking'/);
+  assert.match(constantsSource, /timeTrackingDailyNotePlacement: 'top'/);
+  assert.match(
+    mainSource,
+    /timeTrackingDailyNoteHeading[\s\S]{0,320}replace\(\/\[\\r\\n\]\+\/g, ' '\)[\s\S]{0,220}timeTrackingDailyNotePlacement === 'bottom' \? 'bottom' : 'top'/,
+  );
+});
+
 test('icon and color rule filter matches exact case-insensitive working values deterministically', async () => {
   const { matchesRuleFilter, collectRuleFilterTerms } = await importModule('../src/notebook-navigator-settings/rule-filter.ts');
 

@@ -6765,6 +6765,60 @@ export const PLUGIN_STYLES = `
         color: var(--text-faint);
       }
 
+      body.is-mobile .tps-gcm-time-tracker-mobile-dock,
+      body.is-phone .tps-gcm-time-tracker-mobile-dock {
+        position: relative;
+        z-index: 5;
+        box-sizing: border-box;
+        flex: 0 0 auto;
+        width: 100%;
+        padding: 4px max(8px, env(safe-area-inset-right)) 4px max(8px, env(safe-area-inset-left));
+        border-bottom: 1px solid var(--background-modifier-border);
+        background: var(--background-primary);
+        color: var(--text-normal);
+      }
+
+      body.is-mobile .tps-gcm-time-tracker-mobile-dock .tps-gcm-time-tracker-status,
+      body.is-phone .tps-gcm-time-tracker-mobile-dock .tps-gcm-time-tracker-status {
+        display: flex;
+        width: 100%;
+        max-width: none;
+        gap: 4px;
+      }
+
+      body.is-mobile .tps-gcm-time-tracker-mobile-dock .tps-gcm-time-tracker-status button,
+      body.is-phone .tps-gcm-time-tracker-mobile-dock .tps-gcm-time-tracker-status button {
+        min-height: 40px;
+        height: 40px;
+        border-radius: 8px;
+      }
+
+      body.is-mobile .tps-gcm-time-tracker-mobile-dock .tps-gcm-time-tracker-main,
+      body.is-phone .tps-gcm-time-tracker-mobile-dock .tps-gcm-time-tracker-main {
+        flex: 1 1 auto;
+        justify-content: flex-start;
+        max-width: none;
+        padding: 0 10px;
+        background: var(--background-secondary);
+      }
+
+      body.is-mobile .tps-gcm-time-tracker-mobile-dock .tps-gcm-time-tracker-action,
+      body.is-phone .tps-gcm-time-tracker-mobile-dock .tps-gcm-time-tracker-action {
+        flex: 0 0 40px;
+        width: 40px;
+        padding: 0;
+        background: var(--background-secondary);
+      }
+
+      body.is-mobile .tps-gcm-time-tracker-mobile-dock .tps-gcm-time-tracker-icon,
+      body.is-mobile .tps-gcm-time-tracker-mobile-dock .tps-gcm-time-tracker-action svg,
+      body.is-phone .tps-gcm-time-tracker-mobile-dock .tps-gcm-time-tracker-icon,
+      body.is-phone .tps-gcm-time-tracker-mobile-dock .tps-gcm-time-tracker-action svg {
+        width: 18px;
+        height: 18px;
+        flex-basis: 18px;
+      }
+
       /* Mobile gesture passthrough: the bottom nav/action shells span the viewport
          for positioning, so only their visible controls should intercept touches. */
       body.is-mobile .tps-daily-note-nav--mobile-bottom,

@@ -477,6 +477,110 @@ test('timer task creation performs zero markdown writes when Todo mapping change
   assert.equal(sourceContent, '# Timers\n');
 });
 
+test('note- and task-linked sessions create Daily Note notes without scheduling the Daily Note', async () => {
+  const { Notice, TFile, TimeTrackingService } = await importMappedTaskCreationServices();
+  Notice.messages.length = 0;
+  const sourceFile = new TFile('Projects/Alpha.md');
+  const dailyFile = new TFile('Daily/2026-08-03.md');
+  const files = new Map([
+    [sourceFile.path, sourceFile],
+    [dailyFile.path, dailyFile],
+  ]);
+  const bodies = new Map([
+    [sourceFile.path, '---\ntitle: Alpha\ntpsId: project-alpha\n---\n\n# Alpha\n- [ ] Ship release [tpsId:: task-one]\n'],
+    [dailyFile.path, '---\ntitle: Today\nscheduled: 2026-08-03 00:00:00\n---\n\n# Existing\n'],
+  ]);
+  const frontmatter = new Map([
+    [sourceFile.path, { title: 'Alpha', tpsId: 'project-alpha' }],
+    [dailyFile.path, { title: 'Today', scheduled: '2026-08-03 00:00:00' }],
+  ]);
+  const plugin = {
+    settings: {
+      enableTimeTracking: true,
+      timeTrackingPropertyKey: 'timeTracking',
+      timeTrackingStorageMode: 'source-note',
+      timeTrackingDailyNoteHeading: 'Time Tracking',
+      timeTrackingDailyNotePlacement: 'top',
+      timeTrackingSingleActiveSession: false,
+      timeTrackingIgnoreArchivedFiles: false,
+      timeTrackingPausedSession: null,
+    },
+    app: {
+      vault: {
+        getAbstractFileByPath: (path) => files.get(path) ?? null,
+        getMarkdownFiles: () => [...files.values()],
+        async cachedRead(file) { return bodies.get(file.path) ?? ''; },
+        async process(file, mutate) {
+          bodies.set(file.path, mutate(bodies.get(file.path) ?? ''));
+        },
+      },
+      metadataCache: {
+        getFileCache: (file) => ({ frontmatter: frontmatter.get(file.path) }),
+      },
+      fileManager: {
+        generateMarkdownLink: (file) => `[[${file.path.replace(/\.md$/u, '')}]]`,
+      },
+      workspace: {
+        getActiveFile: () => sourceFile,
+      },
+    },
+    sharedServices: {
+      schedule: {
+        parseDate: (value) => new Date(String(value).replace(' ', 'T')),
+        formatDateTimeForFrontmatter: (date) => date.toISOString().slice(0, 19).replace('T', ' '),
+      },
+    },
+    frontmatterMutationService: {
+      async process(file, mutate) {
+        const value = frontmatter.get(file.path) ?? {};
+        mutate(value);
+        frontmatter.set(file.path, value);
+      },
+    },
+    noteOperationService: {
+      async ensureDailyNote() { return dailyFile; },
+    },
+    eventService: { emitFilesUpdated() {} },
+    timeTrackingStatusBarService: { refresh() {} },
+    async persistRuntimeSettingsState() {},
+    getArchiveFolderPath: () => '_archive',
+  };
+  const originalDailyScheduled = frontmatter.get(dailyFile.path).scheduled;
+  const service = new TimeTrackingService(plugin);
+  const session = await service.startTimer({ file: sourceFile, type: 'note' });
+
+  assert.ok(session);
+  assert.equal(session.targetPath, sourceFile.path);
+  assert.equal(session.notesPath, dailyFile.path);
+  assert.equal(frontmatter.get(dailyFile.path).scheduled, originalDailyScheduled);
+  assert.equal(frontmatter.get(dailyFile.path).timeEstimate, undefined);
+  assert.match(bodies.get(dailyFile.path), /^---\ntitle: Today\nscheduled: 2026-08-03 00:00:00\n---\n## Time Tracking\n\n### /u);
+  assert.match(bodies.get(dailyFile.path), /\^tps-time-tt[_-]/u);
+  const stored = frontmatter.get(sourceFile.path).timeTracking;
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].notesPath, dailyFile.path);
+  assert.equal(stored[0].notesHeading, 'Time Tracking');
+  assert.match(stored[0].notesBlockId, /^tps-time-tt[_-]/u);
+
+  const rawTask = '- [ ] Ship release [tpsId:: task-one]';
+  const taskLineNumber = bodies.get(sourceFile.path).split(/\r?\n/u).indexOf(rawTask);
+  const taskSession = await service.startTimer({
+    file: sourceFile,
+    type: 'task',
+    lineNumber: taskLineNumber,
+    rawLine: rawTask,
+    title: 'Ship release',
+  });
+  assert.ok(taskSession);
+  assert.equal(taskSession.targetType, 'task');
+  assert.equal(taskSession.notesPath, dailyFile.path);
+  assert.equal(frontmatter.get(dailyFile.path).scheduled, originalDailyScheduled);
+  assert.equal(frontmatter.get(dailyFile.path).timeEstimate, undefined);
+  assert.match(bodies.get(sourceFile.path), /Ship release[\s\S]*\[scheduled::/u);
+  assert.equal(frontmatter.get(sourceFile.path).timeTracking.length, 2);
+  assert.equal((bodies.get(dailyFile.path).match(/\^tps-time-tt[_-]/gu) || []).length, 2);
+});
+
 test('timer duplicate resolves todo before vault.process and clears stale status metadata', () => {
   const methodStart = taskLineContextMenuSource.indexOf('private async duplicateTaskBelowForTimer');
   const methodEnd = taskLineContextMenuSource.indexOf('private promptTaskTitle', methodStart);

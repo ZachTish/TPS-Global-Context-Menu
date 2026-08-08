@@ -1,5 +1,15 @@
 # TPS Global Context Menu
 
+## 1.20.0
+
+- Time tracking now has one inferred-target start workflow. Starting from a task line links the session to that task; starting from a note context links it to that note. The note menu and panel no longer ask users to choose between **Track with task** and **Track with note**, and the redundant blank-Daily-Note-task command is replaced by **Open active work-session notes**.
+- Every running or manual session also gets an editable workspace in the session-start Daily Note. GCM creates or reuses the configured `## Time Tracking` section and adds a stable `###` session heading linked back to the tracked object. The session record stores the Daily Note path, section heading, and block ID independently from the tracked target and independently from the selected frontmatter storage mode.
+- **Daily Note session placement** defaults to **Top, after properties**. It can instead create a missing section at the bottom. Existing sections are never relocated; top placement prepends new sessions inside the section, while bottom placement appends them. Insertion preserves CRLF, trailing newlines, frontmatter, fenced examples, duplicate headings, and unrelated note bytes.
+- Pausing and resuming keeps the same Daily Note workspace. Opening session notes re-resolves the stable block ID and switches a Daily Note Home leaf into editable Live Preview before focusing the notes line. Legacy sessions without workspace fields are repaired lazily when opened.
+- Mobile now has one persistent, in-flow timer dock beneath the active view header with elapsed time, target title, pause/resume, and stop controls. Its primary action opens the work-session notes; **Open tracked item** remains in the timer context menu. The same dock moves between active leaves, stays out of the keyboard/bottom-toolbar region, and does not use Obsidian's desktop-only status-bar API.
+- The Daily Note workspace is never the timer target. Task sessions continue to synchronize schedule/duration on the task line, note sessions continue to synchronize the tracked note, and creating session notes cannot add `scheduled` or `timeEstimate` to the Daily Note itself.
+- This is a backward-compatible minor release. Existing session records, storage modes, target metadata, and settings remain valid; the two new Daily Note workspace settings have non-destructive defaults. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.19.0
 
 - Ordinary TPS Notebook Navigator file rows now receive GCM's canonical whole-file actions through Navigator's public file-menu extension API. The same GCM definitions and mutation methods serve file rows reached through folders, tags, properties, search, Recent files, shortcuts, Notes, PDFs, Canvas, Bases, drawings, media, and other file-backed Type views; Navigator does not duplicate GCM settings or action code.
@@ -509,8 +519,8 @@ GCM keeps the command palette limited to complete, common actions:
 - `Transfer current line to note`
 - `Link current task line to note`
 - `Rename active note title`
-- `Time tracking: Start timer for current task line or note`
-- `Time tracking: Track with task in today's daily note`
+- `Time tracking: Start work session for current task or note`
+- `Time tracking: Open active work-session notes`
 - `Time tracking: Stop active timer`
 
 Rare repair, migration, sidebar-open, recurrence-template, inline-UI toggle, paused-timer, manual-timer-entry, and parent-unlink actions are intentionally not registered as commands. Those behaviors remain settings/API/service concerns when still supported.
@@ -562,21 +572,21 @@ Base row shape and explicit identity remain distinct, except for the intentional
 The note index builds lazily from Obsidian's metadata cache. Content-backed task, bullet, and heading entities are added by `ensureReady()`/`queryAsync()` and then updated incrementally. Queries are case-insensitive exact matches by dimension, deterministically sorted, immutable, and cached until the index revision changes. Renames replace old paths, deletes remove source records, GCM writes invalidate immediately, and later readiness calls retry transient file-read failures.
 
 ```js
-const gcm = app.plugins.getPlugin('tps-global-context-menu');
+const gcm = app.plugins.getPlugin("tps-global-context-menu");
 
 // Includes matching notes and addressable task/bullet/heading lines.
 const projects = await gcm.api.entityIndex.queryAsync({
-  dimensions: { kind: { anyOf: ['project'] } },
+  dimensions: { kind: { anyOf: ["project"] } },
 });
 
 // Version-1 compatibility: synchronous query() remains note-only.
 const projectNotes = gcm.api.entityIndex.query({
-  dimensions: { kind: { anyOf: ['project'] } },
+  dimensions: { kind: { anyOf: ["project"] } },
 });
 
 const unregister = gcm.api.entityIndex.registerDimension({
-  name: 'lifecycle',
-  propertyKeys: ['state'],
+  name: "lifecycle",
+  propertyKeys: ["state"],
 });
 ```
 
@@ -774,14 +784,15 @@ The supported deterministic subset covers arithmetic/comparison/boolean expressi
 
 ## Time Tracking And Note Opening
 
-- Time tracking has two explicit targets:
-  - Task timers track work blocks. Starting a timer from a task line writes `scheduled`, `timeEstimate`, and session identity to that task line.
-  - Note timers track broad note/project focus. Starting a note timer writes note-level `scheduled` / `timeEstimate` metadata and should be used intentionally.
-  - Process run notes such as workouts do not receive note-level `scheduled` from time tracking. They keep canonical timing in run/workout fields such as `startedAt`, `workoutDate`, `durationSeconds`, and `timeTracking`, which prevents scheduled-note filename sync from renaming run files away from their canonical paths.
-- Note-level time tracking exposes two choices:
-  - `Track with task`: create a task line for this work block, then track that task. The task can be created in today's daily note or in the note being tracked.
-  - `Track with note`: track the note itself and intentionally write note-level `scheduled` / `timeEstimate` metadata.
-- `Time tracking: Track with task in today's daily note` is the command-palette shortcut for the daily-note task path.
+- Time tracking has one start action and infers the tracked object from the surface:
+  - Starting from an exact task-line menu, or with the editor cursor on a task, links the session to that task and writes `scheduled` / `timeEstimate` to the task line.
+  - Starting from a note/file menu, or with no task under the editor cursor, links the session to that note and writes note-level `scheduled` / `timeEstimate` metadata intentionally.
+  - Process run notes such as workouts do not receive note-level `scheduled`. They keep canonical timing in run/workout fields such as `startedAt`, `workoutDate`, `durationSeconds`, and `timeTracking`, which prevents scheduled-note filename sync from renaming run files away from their canonical paths.
+- Every session has a separate notes workspace in the Daily Note for its start date. The configurable `## Time Tracking` section contains one stable `### time · tracked object` block per work session. The block links back to the task's containing note or the tracked note, and its native block ID lets GCM re-resolve the current notes line after edits above it.
+- `Daily Note session placement` defaults to `Top, after properties`; a `Bottom of note` option is also available. A missing section is created at that location. If the heading already exists, GCM preserves its location and adds new sessions first for Top or last for Bottom.
+- Session-record storage remains independently configurable as Daily Note, source note, or dedicated note. `notesPath`, `notesHeading`, and `notesBlockId` travel with the record and paused state, so pause/resume and cross-midnight work keep the same notes block. Older records acquire these optional fields only when their notes are opened.
+- The notes workspace never becomes the tracked object and never receives timer schedule/duration metadata. Creating a task- or note-linked work session therefore cannot schedule the Daily Note itself.
+- The desktop status item and mobile timer dock both show the active/paused session. Their primary action opens the editable Daily Note workspace; the context menu keeps **Open tracked item**, pause/resume, and stop.
 - `Ignore archived files` is enabled by default. When on, active timer scans skip sessions stored inside the configured archive folder and sessions whose source or resolved target file has moved into that archive folder.
 - Time tracking updates its own session state, target metadata, status bar, and affected file UI without opening, pinning, unpinning, or closing editor tabs.
 - TPS Home shows a compact timer icon in the header only while GCM time tracking has an active running session. If that active session targets a workout note, Home labels it as a workout for UI purposes, but an active TPS Health workout by itself does not light the timer button.

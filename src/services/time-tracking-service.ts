@@ -26,6 +26,11 @@ import {
 } from './time-tracking-format';
 import type { TimeTrackingPausedSessionState } from '../types';
 import * as logger from '../logger';
+import {
+  ensureTimeTrackingSessionSection,
+  removeEmptyTimeTrackingSessionAnchor,
+  resolveTimeTrackingSessionAnchor,
+} from './time-tracking-daily-note-section';
 
 export type {
   TimeTrackingSessionRecord,
@@ -85,6 +90,18 @@ interface StoredSession {
   storageLineNumber?: number;
 }
 
+interface TimeTrackingNotesReference {
+  notesPath: string;
+  notesHeading: string;
+  notesBlockId: string;
+}
+
+interface EnsuredTimeTrackingNotesReference extends TimeTrackingNotesReference {
+  file: TFile;
+  contentLine: number;
+  created: boolean;
+}
+
 const TPS_ID_FIELD = 'tpsId';
 const RUNNING_SCHEDULE_AHEAD_MINUTES = 5;
 const RUNNING_SCHEDULE_SYNC_INTERVAL_MS = 60_000;
@@ -120,7 +137,10 @@ export class TimeTrackingService {
       : 'daily-note';
   }
 
-  async startTimer(input?: TimeTrackingTargetInput): Promise<TimeTrackingSession | null> {
+  async startTimer(
+    input?: TimeTrackingTargetInput,
+    existingNotes?: Partial<TimeTrackingNotesReference>,
+  ): Promise<TimeTrackingSession | null> {
     if (!this.ensureEnabled()) return null;
 
     const target = await this.resolveAndEnsureTarget(input);
@@ -138,7 +158,7 @@ export class TimeTrackingService {
 
     const now = new Date();
     const timestamp = this.formatDateTime(now);
-    const record: TimeTrackingSessionRecord = {
+    let record: TimeTrackingSessionRecord = {
       id: this.createId('tt'),
       targetId: target.tpsId,
       targetType: target.type,
@@ -150,7 +170,28 @@ export class TimeTrackingService {
     };
 
     const storageFile = await this.resolveStorageFileForNewSession(target, now);
-    await this.writeNewSession(target, record, storageFile);
+    let notesReference: EnsuredTimeTrackingNotesReference | null = null;
+    try {
+      notesReference = await this.ensureSessionNotesWorkspace(record, target, now, existingNotes);
+      record = {
+        ...record,
+        notesPath: notesReference.notesPath,
+        notesHeading: notesReference.notesHeading,
+        notesBlockId: notesReference.notesBlockId,
+      };
+      await this.writeNewSession(target, record, storageFile);
+    } catch (error) {
+      if (notesReference?.created) {
+        await this.rollbackEmptySessionNotes(notesReference).catch(() => undefined);
+      }
+      logger.warn('[TimeTracking] Failed to create the work-session record and Daily Note workspace.', {
+        targetPath: target.file.path,
+        targetType: target.type,
+        error,
+      });
+      new Notice('Could not start the work session. No timer was started.');
+      return null;
+    }
     const resolvedTarget = await this.resolveTargetForRecord(record, { storageFile });
     await this.syncTargetScheduledMetadata(resolvedTarget ?? target, record, { mode: 'running' });
     await this.clearPausedTimer({ silent: true });
@@ -318,6 +359,9 @@ export class TimeTrackingService {
       pausedAt: this.formatDateTime(end),
       elapsedMs: Math.max(0, end.getTime() - (this.normalizeDateInput(active.record.start)?.getTime() ?? end.getTime())),
       lastSessionId: hydrated.id,
+      notesPath: hydrated.notesPath,
+      notesHeading: hydrated.notesHeading,
+      notesBlockId: hydrated.notesBlockId,
     };
     await this.persistTimeTrackingState();
     await this.refreshActiveTimerCache();
@@ -342,13 +386,20 @@ export class TimeTrackingService {
       return null;
     }
 
-    const started = await this.startTimer({
-      file: target.file,
-      lineNumber: target.lineNumber,
-      rawLine: target.rawLine,
-      type: paused.targetType,
-      title: target.title || paused.title,
-    });
+    const started = await this.startTimer(
+      {
+        file: target.file,
+        lineNumber: target.lineNumber,
+        rawLine: target.rawLine,
+        type: paused.targetType,
+        title: target.title || paused.title,
+      },
+      {
+        notesPath: paused.notesPath,
+        notesHeading: paused.notesHeading,
+        notesBlockId: paused.notesBlockId,
+      },
+    );
     if (started) {
       await this.clearPausedTimer({ silent: true });
     }
@@ -392,7 +443,7 @@ export class TimeTrackingService {
     }
 
     const now = this.formatDateTime(new Date());
-    const record = this.withUpdatedTimes({
+    let record = this.withUpdatedTimes({
       id: this.createId('tt'),
       targetId: target.tpsId,
       targetType: target.type,
@@ -414,7 +465,28 @@ export class TimeTrackingService {
       start: record.start,
       end: record.end,
     });
-    await this.writeNewSession(target, record, storageFile);
+    let notesReference: EnsuredTimeTrackingNotesReference | null = null;
+    try {
+      notesReference = await this.ensureSessionNotesWorkspace(record, target, start);
+      record = {
+        ...record,
+        notesPath: notesReference.notesPath,
+        notesHeading: notesReference.notesHeading,
+        notesBlockId: notesReference.notesBlockId,
+      };
+      await this.writeNewSession(target, record, storageFile);
+    } catch (error) {
+      if (notesReference?.created) {
+        await this.rollbackEmptySessionNotes(notesReference).catch(() => undefined);
+      }
+      logger.warn('[TimeTracking] Failed to create the manual session workspace.', {
+        targetPath: target.file.path,
+        targetType: target.type,
+        error,
+      });
+      new Notice('Could not add the time session.');
+      return null;
+    }
     const resolvedTarget = await this.resolveTargetForRecord(record, { storageFile });
     if (resolvedTarget?.file instanceof TFile) {
       await this.syncTargetScheduledMetadata(resolvedTarget, record, { mode: 'stopped', end });
@@ -500,6 +572,74 @@ export class TimeTrackingService {
     if (!resolved) return false;
 
     return this.openResolvedTarget(resolved);
+  }
+
+  async openSessionNotes(id: string): Promise<boolean> {
+    const stored = await this.findStoredSession(id);
+    if (!stored) return false;
+    const target = await this.resolveTargetForRecord(stored.record, stored);
+    if (!target) return false;
+    const start = this.normalizeDateInput(stored.record.start) ?? new Date();
+    const notes = await this.ensureSessionNotesWorkspace(stored.record, target, start, stored.record);
+    if (
+      stored.record.notesPath !== notes.notesPath
+      || stored.record.notesHeading !== notes.notesHeading
+      || stored.record.notesBlockId !== notes.notesBlockId
+    ) {
+      const updated = {
+        ...stored.record,
+        notesPath: notes.notesPath,
+        notesHeading: notes.notesHeading,
+        notesBlockId: notes.notesBlockId,
+      };
+      await this.replaceStoredSession(stored, updated);
+    }
+    return this.openSessionNotesReference(notes);
+  }
+
+  async openHydratedSessionNotes(session: TimeTrackingSession): Promise<boolean> {
+    return this.openSessionNotes(session.id);
+  }
+
+  async openPausedTimerNotes(): Promise<boolean> {
+    const paused = this.getPausedTimer();
+    if (!paused) return false;
+    const target = await this.resolveTargetForPausedState(paused);
+    if (!target) return false;
+    const start = this.normalizeDateInput(paused.pausedAt) ?? new Date();
+    const pseudoRecord: TimeTrackingSessionRecord = {
+      id: paused.lastSessionId || this.createId('paused'),
+      targetId: paused.targetId,
+      targetType: paused.targetType,
+      sourcePath: paused.sourcePath,
+      lineNumber: paused.lineNumber,
+      notesPath: paused.notesPath,
+      notesHeading: paused.notesHeading,
+      notesBlockId: paused.notesBlockId,
+      start: paused.pausedAt,
+      createdAt: paused.pausedAt,
+      updatedAt: paused.pausedAt,
+    };
+    const notes = await this.ensureSessionNotesWorkspace(pseudoRecord, target, start, paused);
+    if (
+      paused.notesPath !== notes.notesPath
+      || paused.notesHeading !== notes.notesHeading
+      || paused.notesBlockId !== notes.notesBlockId
+    ) {
+      this.plugin.settings.timeTrackingPausedSession = {
+        ...paused,
+        notesPath: notes.notesPath,
+        notesHeading: notes.notesHeading,
+        notesBlockId: notes.notesBlockId,
+      };
+      await this.persistTimeTrackingState();
+    }
+    return this.openSessionNotesReference(notes);
+  }
+
+  async openActiveSessionNotesForFile(file: TFile): Promise<boolean> {
+    const stored = await this.getActiveStoredSessionForFile(file);
+    return stored ? this.openSessionNotes(stored.record.id) : false;
   }
 
   async openHydratedSessionTarget(session: TimeTrackingSession): Promise<boolean> {
@@ -1052,6 +1192,102 @@ export class TimeTrackingService {
     return file;
   }
 
+  private async ensureSessionNotesWorkspace(
+    record: TimeTrackingSessionRecord,
+    target: ResolvedTimeTrackingTarget | TimeTrackingTargetReference,
+    start: Date,
+    existing?: Partial<TimeTrackingNotesReference>,
+  ): Promise<EnsuredTimeTrackingNotesReference> {
+    const configuredHeading = String(
+      existing?.notesHeading
+      || record.notesHeading
+      || this.plugin.settings.timeTrackingDailyNoteHeading
+      || 'Time Tracking',
+    )
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/^\s*#{1,6}\s*/, '')
+      .trim()
+      || 'Time Tracking';
+    const configuredPath = normalizePath(String(existing?.notesPath || record.notesPath || '').trim());
+    const existingFile = configuredPath ? this.resolveFile(configuredPath) : null;
+    const dailyNote = existingFile ?? await this.ensureDailyNoteForDate(start);
+    const blockId = String(existing?.notesBlockId || record.notesBlockId || `tps-time-${record.id}`)
+      .trim()
+      .replace(/^\^+/, '')
+      .replace(/[^A-Za-z0-9_-]+/g, '-');
+    const sessionHeading = this.buildSessionNotesHeading(start, target, dailyNote);
+    let result: ReturnType<typeof ensureTimeTrackingSessionSection> | null = null;
+    await this.plugin.app.vault.process(dailyNote, (content) => {
+      result = ensureTimeTrackingSessionSection(content, {
+        heading: configuredHeading,
+        placement: this.plugin.settings.timeTrackingDailyNotePlacement === 'bottom' ? 'bottom' : 'top',
+        sessionHeading,
+        blockId,
+      });
+      return result.content;
+    });
+
+    if (!result) {
+      const content = await this.plugin.app.vault.cachedRead(dailyNote);
+      const anchor = resolveTimeTrackingSessionAnchor(content, blockId);
+      if (!anchor) throw new Error(`Failed to create time tracking notes in ${dailyNote.path}`);
+      result = { content, ...anchor, created: false };
+    }
+
+    logger.log('[TimeTracking] Daily Note session workspace ready.', {
+      sessionId: record.id,
+      targetPath: target.file.path,
+      targetType: target.type,
+      notesPath: dailyNote.path,
+      notesHeading: configuredHeading,
+      notesBlockId: blockId,
+      placement: this.plugin.settings.timeTrackingDailyNotePlacement === 'bottom' ? 'bottom' : 'top',
+      created: result.created,
+    });
+    return {
+      file: dailyNote,
+      notesPath: dailyNote.path,
+      notesHeading: configuredHeading,
+      notesBlockId: blockId,
+      contentLine: result.contentLine,
+      created: result.created,
+    };
+  }
+
+  private buildSessionNotesHeading(
+    start: Date,
+    target: ResolvedTimeTrackingTarget | TimeTrackingTargetReference,
+    dailyNote: TFile,
+  ): string {
+    const time = start.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+    const title = String(target.title || target.file.basename)
+      .replace(/[\r\n]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      || 'Tracked work';
+    const linkAlias = target.type === 'task' ? this.getNoteTitle(target.file) : title;
+    const link = this.plugin.app.fileManager.generateMarkdownLink(target.file, dailyNote.path, undefined, linkAlias);
+    return target.type === 'task'
+      ? `${time} · ${title} · ${link}`
+      : `${time} · ${link}`;
+  }
+
+  private async rollbackEmptySessionNotes(reference: EnsuredTimeTrackingNotesReference): Promise<void> {
+    await this.plugin.app.vault.process(reference.file, (content) => (
+      removeEmptyTimeTrackingSessionAnchor(content, reference.notesBlockId)
+    ));
+  }
+
+  private async openSessionNotesReference(reference: EnsuredTimeTrackingNotesReference): Promise<boolean> {
+    const content = await this.plugin.app.vault.cachedRead(reference.file).catch(() => '');
+    const anchor = resolveTimeTrackingSessionAnchor(content, reference.notesBlockId);
+    const lineNumber = anchor?.contentLine ?? reference.contentLine;
+    return this.openResolvedTarget(
+      { file: reference.file, lineNumber },
+      { forceLivePreview: true },
+    );
+  }
+
   private async ensureMarkdownFile(path: string, title: string): Promise<TFile> {
     let normalized = normalizePath(String(path || '').trim() || 'Time Tracking.md');
     if (!normalized.toLowerCase().endsWith('.md')) normalized = `${normalized}.md`;
@@ -1214,6 +1450,9 @@ export class TimeTrackingService {
       pausedAt,
       elapsedMs: Number.isFinite(elapsedMs) && elapsedMs > 0 ? elapsedMs : 0,
       lastSessionId: String(raw.lastSessionId || '').trim() || undefined,
+      notesPath: String(raw.notesPath || '').trim() || undefined,
+      notesHeading: String(raw.notesHeading || '').trim() || undefined,
+      notesBlockId: String(raw.notesBlockId || '').trim().replace(/^\^+/, '') || undefined,
     };
   }
 
@@ -1330,19 +1569,46 @@ export class TimeTrackingService {
       targetType: paused.targetType,
       sourcePath: paused.sourcePath,
       lineNumber: paused.lineNumber,
+      notesPath: paused.notesPath,
+      notesHeading: paused.notesHeading,
+      notesBlockId: paused.notesBlockId,
       start: paused.pausedAt,
       createdAt: paused.pausedAt,
       updatedAt: paused.pausedAt,
     });
   }
 
-  private async openResolvedTarget(resolved: { file: TFile; lineNumber?: number }): Promise<boolean> {
-    const opened = await this.plugin.openFileInLeaf(
-      resolved.file,
-      false,
-      () => this.plugin.app.workspace.getLeaf(false),
-      { revealLeaf: true },
-    );
+  private async openResolvedTarget(
+    resolved: { file: TFile; lineNumber?: number },
+    options?: { forceLivePreview?: boolean },
+  ): Promise<boolean> {
+    let opened = false;
+    if (options?.forceLivePreview) {
+      const leaf = this.plugin.findOpenLeafForFile(resolved.file) ?? this.plugin.app.workspace.getLeaf(false);
+      if (!leaf) return false;
+      const currentState = leaf.getViewState?.();
+      this.plugin.dailyNoteHomeService.allowLivePreview(leaf, resolved.file.path);
+      await leaf.setViewState({
+        type: 'markdown',
+        active: true,
+        pinned: currentState?.pinned,
+        state: {
+          file: resolved.file.path,
+          mode: 'source',
+          source: false,
+        },
+      } as any);
+      this.plugin.app.workspace.setActiveLeaf(leaf, { focus: true } as any);
+      this.plugin.app.workspace.revealLeaf(leaf);
+      opened = true;
+    } else {
+      opened = await this.plugin.openFileInLeaf(
+        resolved.file,
+        false,
+        () => this.plugin.app.workspace.getLeaf(false),
+        { revealLeaf: true },
+      );
+    }
     if (!opened) return false;
 
     if (typeof resolved.lineNumber === 'number') {

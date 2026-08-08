@@ -2015,6 +2015,14 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }
     this.settings.timeTrackingDedicatedNotePath =
       String(this.settings.timeTrackingDedicatedNotePath || 'Time Tracking.md').trim() || 'Time Tracking.md';
+    this.settings.timeTrackingDailyNoteHeading =
+      String(this.settings.timeTrackingDailyNoteHeading || DEFAULT_SETTINGS.timeTrackingDailyNoteHeading)
+        .replace(/[\r\n]+/g, ' ')
+        .replace(/^\s*#{1,6}\s*/, '')
+        .trim()
+      || DEFAULT_SETTINGS.timeTrackingDailyNoteHeading;
+    this.settings.timeTrackingDailyNotePlacement =
+      this.settings.timeTrackingDailyNotePlacement === 'bottom' ? 'bottom' : 'top';
     this.settings.timeTrackingSingleActiveSession = this.settings.timeTrackingSingleActiveSession !== false;
     this.settings.timeTrackingIgnoreArchivedFiles = this.settings.timeTrackingIgnoreArchivedFiles !== false;
     this.settings.activityLogPropertyKey = String(this.settings.activityLogPropertyKey || 'activity').trim() || 'activity';

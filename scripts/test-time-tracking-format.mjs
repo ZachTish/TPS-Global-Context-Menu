@@ -17,6 +17,9 @@ const baseRecord = {
   durationMinutes: 30,
   createdAt: '2026-05-06 09:00:00',
   updatedAt: '2026-05-06 09:30:00',
+  notesPath: 'Daily/2026-05-06.md',
+  notesHeading: 'Time Tracking',
+  notesBlockId: '^tps-time-tt-one',
 };
 
 test('normalizes frontmatter record arrays and JSON strings', () => {
@@ -28,6 +31,9 @@ test('normalizes frontmatter record arrays and JSON strings', () => {
 
   assert.equal(records.length, 2);
   assert.equal(records[0].id, 'tt_one');
+  assert.equal(records[0].notesPath, 'Daily/2026-05-06.md');
+  assert.equal(records[0].notesHeading, 'Time Tracking');
+  assert.equal(records[0].notesBlockId, 'tps-time-tt-one');
   assert.equal(records[1].targetType, 'heading');
 });
 

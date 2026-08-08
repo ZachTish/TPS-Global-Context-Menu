@@ -308,15 +308,14 @@ export class PanelActionService {
 
     if (isMd && this.plugin.settings.enableTimeTracking !== false) {
       const activeTimerCount = this.plugin.timeTrackingService.getActiveTimerCountForFileSync(currentFile);
-      menu.addItem(item => {
-        item.setTitle('Start Blank Daily Timer')
-          .setIcon('play')
-          .onClick(() => {
-            void this.plugin.timeTrackingService.startBlankDailyTaskTimer();
-          });
-      });
-
       if (activeTimerCount > 0) {
+        menu.addItem(item => {
+          item.setTitle('Open Work-Session Notes')
+            .setIcon('notebook-pen')
+            .onClick(() => {
+              void this.plugin.timeTrackingService.openActiveSessionNotesForFile(currentFile);
+            });
+        });
         menu.addItem(item => {
           item.setTitle(activeTimerCount > 1 ? `End Timer (${activeTimerCount})` : 'End Timer')
             .setIcon('square')
