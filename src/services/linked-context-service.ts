@@ -8,6 +8,7 @@ export interface LinkedContextItem {
   kind: LinkedContextKind;
   startLine: number;
   endLine: number;
+  renderStartLine: number;
   markdown: string;
 }
 
@@ -38,6 +39,14 @@ export function resolveLinkedContextRange(
     startLine: line,
     endLine: Math.max(line, (nextBoundary?.position.start.line ?? lineCount) - 1),
   };
+}
+
+export function extractLinkedContextMarkdown(
+  lines: readonly string[],
+  range: { kind: LinkedContextKind; startLine: number; endLine: number },
+): string {
+  const excerptStartLine = range.kind === 'heading' ? range.startLine + 1 : range.startLine;
+  return lines.slice(excerptStartLine, range.endLine + 1).join('\n');
 }
 
 export class LinkedContextService {
@@ -72,7 +81,8 @@ export class LinkedContextService {
           id: `${sourceFile.path}:${key}`,
           sourceFile,
           ...range,
-          markdown: lines.slice(range.startLine, range.endLine + 1).join('\n'),
+          renderStartLine: range.kind === 'heading' ? range.startLine + 1 : range.startLine,
+          markdown: extractLinkedContextMarkdown(lines, range),
         });
         if (range.kind === 'note') break;
       }

@@ -715,7 +715,7 @@ export class PersistentMenuManager {
     item: LinkedContextItem,
     targetFile: TFile,
   ): Promise<void> {
-    const card = panel.createDiv({ cls: 'tps-gcm-linked-context-card' });
+    const card = panel.createDiv({ cls: `tps-gcm-linked-context-card tps-gcm-linked-context-card--${item.kind}` });
     card.tabIndex = 0;
     card.setAttribute('role', 'button');
     card.setAttribute('aria-label', `Open source ${item.sourceFile.basename}, line ${item.startLine + 1}`);
@@ -724,6 +724,7 @@ export class PersistentMenuManager {
     meta.createSpan({ text: item.kind === 'note' ? 'whole note' : item.kind, cls: 'tps-gcm-linked-context-kind' });
     const body = card.createDiv({ cls: 'tps-gcm-linked-context-body' });
     await MarkdownRenderer.render(this.plugin.app, item.markdown || '\n', body, item.sourceFile.path, component);
+    this.enableLinkedContextTaskCheckboxes(body, card, item);
 
     const activate = (event: MouseEvent | KeyboardEvent) => {
       event.preventDefault();
@@ -749,6 +750,40 @@ export class PersistentMenuManager {
       card.addEventListener('mouseenter', (event) => activate(event));
       card.addEventListener('focus', (event) => activate(event as unknown as KeyboardEvent));
     }
+  }
+
+  private enableLinkedContextTaskCheckboxes(body: HTMLElement, card: HTMLElement, item: LinkedContextItem): void {
+    const taskLines = item.markdown.split(/\r?\n/)
+      .map((rawLine, index) => ({ rawLine, lineNumber: item.renderStartLine + index, parsed: parseTaskLine(rawLine) }))
+      .filter((entry) => entry.parsed !== null);
+    const checkboxes = Array.from(body.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'));
+    checkboxes.forEach((checkbox, index) => {
+      const taskLine = taskLines[index];
+      if (!taskLine) return;
+      checkbox.disabled = false;
+      checkbox.setAttribute('aria-label', `Toggle task completion in ${item.sourceFile.basename}`);
+      const stopCardActivation = (event: Event) => event.stopPropagation();
+      checkbox.addEventListener('click', stopCardActivation);
+      checkbox.addEventListener('keydown', stopCardActivation);
+      checkbox.addEventListener('change', async (event) => {
+        event.stopPropagation();
+        const requested = checkbox.checked;
+        checkbox.disabled = true;
+        const result = await this.plugin.taskApiService.setCompletion({
+          path: item.sourceFile.path,
+          lineNumber: taskLine.lineNumber,
+          rawLine: taskLine.rawLine,
+        }, requested);
+        if (!result.ok) {
+          checkbox.checked = !requested;
+          checkbox.disabled = false;
+          new Notice(result.error || 'The linked task could not be updated.');
+          return;
+        }
+        card.classList.toggle('is-completed', result.task?.isComplete === true);
+        this.ensureMenus();
+      });
+    });
   }
 
   private async openLinkedContextSource(item: LinkedContextItem): Promise<void> {

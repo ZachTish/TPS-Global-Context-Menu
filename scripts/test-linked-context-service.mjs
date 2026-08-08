@@ -24,12 +24,16 @@ test('frontmatter links show the whole note', async () => {
 });
 
 test('heading links include nested content until the next peer or parent heading', async () => {
-  const { resolveLinkedContextRange } = await loadService();
-  assert.deepEqual(resolveLinkedContextRange(3, 14, { headings: [
+  const { resolveLinkedContextRange, extractLinkedContextMarkdown } = await loadService();
+  const range = resolveLinkedContextRange(3, 14, { headings: [
     { level: 2, position: { start: { line: 3 } } },
     { level: 3, position: { start: { line: 6 } } },
     { level: 2, position: { start: { line: 9 } } },
-  ] }), { kind: 'heading', startLine: 3, endLine: 8 });
+  ] });
+  assert.deepEqual(range, { kind: 'heading', startLine: 3, endLine: 8 });
+  assert.equal(extractLinkedContextMarkdown([
+    '', '', '', '## Standup [[Target]]', '- first', '  - nested', '### Detail', 'body', '', '## Next',
+  ], range), '- first\n  - nested\n### Detail\nbody\n');
 });
 
 test('ordinary links show only their source line', async () => {

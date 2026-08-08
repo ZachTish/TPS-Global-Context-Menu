@@ -5315,10 +5315,9 @@ export const PLUGIN_STYLES = `
       .tps-gcm-linked-context-panel {
         width: min(860px, 100%);
         margin: 14px 0;
-        padding: 12px;
-        border: 1px solid var(--background-modifier-border);
-        border-radius: calc(10px * var(--tps-gcm-radius-scale));
-        background: color-mix(in srgb, var(--background-secondary) 72%, transparent);
+        padding: 0;
+        border: 0;
+        background: transparent;
       }
       .tps-gcm-linked-context-heading {
         margin: 0 0 10px;
@@ -5355,6 +5354,19 @@ export const PLUGIN_STYLES = `
       .tps-gcm-linked-context-source { color: var(--text-normal); font-weight: 600; }
       .tps-gcm-linked-context-kind { text-transform: uppercase; letter-spacing: 0.04em; }
       .tps-gcm-linked-context-body { pointer-events: none; }
+      .tps-gcm-linked-context-body input[type="checkbox"] { pointer-events: auto; cursor: pointer; }
+      .tps-gcm-linked-context-card--line .tps-gcm-linked-context-body {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        word-break: normal;
+        line-height: 1.5;
+      }
+      .tps-gcm-linked-context-card--line .tps-gcm-linked-context-body ul,
+      .tps-gcm-linked-context-card--line .tps-gcm-linked-context-body ol {
+        margin: 0;
+        padding-inline-start: 1.75em;
+      }
+      .tps-gcm-linked-context-card--line .tps-gcm-linked-context-body li { margin: 0; }
       .tps-gcm-linked-context-body > :first-child { margin-top: 0; }
       .tps-gcm-linked-context-body > :last-child { margin-bottom: 0; }
       .tps-gcm-parent-nav-button--top {

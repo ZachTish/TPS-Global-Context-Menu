@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.21.1
+
+- Linked context no longer draws an outer panel box; only the individual source cards provide borders, dimming, and hover/focus emphasis.
+- Heading-linked excerpts omit the linked heading itself and begin with its nested body while still opening the source at the heading.
+- Single-line excerpts use a dedicated wrapped layout for long task, bullet, and prose lines.
+- Task checkboxes inside line, heading-body, and whole-note excerpts are interactive. Toggling one uses GCM's canonical guarded completion API, including configured status mappings and normal completion follow-up, without opening the source note. All other card content remains read-only.
+- This backward-compatible patch changes no settings or note schema. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.21.0
 
 - **Show linked context** adds an optional, read-only incoming-link panel under **Child notes** settings. It can appear below the title or at the bottom of the current note.
