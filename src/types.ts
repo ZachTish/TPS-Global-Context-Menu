@@ -568,6 +568,9 @@ export interface TPSGlobalContextMenuSettings {
   enableTopParentNav: boolean;
   topParentNavPlacement: 'top' | 'bottom';
   ignoreEmbeddedChildrenInTopLinks: boolean;
+  enableLinkedContextPanel: boolean;
+  linkedContextPlacement: 'top' | 'bottom';
+  linkedContextOpenBehavior: 'same-tab' | 'new-tab' | 'hover-preview';
   dailyNavShowToday: boolean;
   enableAutoPopulateDailyNotes: boolean;
   inheritUnscheduledTasksFromDailyNotes: boolean;

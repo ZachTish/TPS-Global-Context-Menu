@@ -1967,6 +1967,12 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (this.settings.topParentNavPlacement !== 'top' && this.settings.topParentNavPlacement !== 'bottom') {
       this.settings.topParentNavPlacement = DEFAULT_SETTINGS.topParentNavPlacement;
     }
+    if (this.settings.linkedContextPlacement !== 'top' && this.settings.linkedContextPlacement !== 'bottom') {
+      this.settings.linkedContextPlacement = DEFAULT_SETTINGS.linkedContextPlacement;
+    }
+    if (!['same-tab', 'new-tab', 'hover-preview'].includes(this.settings.linkedContextOpenBehavior)) {
+      this.settings.linkedContextOpenBehavior = DEFAULT_SETTINGS.linkedContextOpenBehavior;
+    }
     this.settings.parentLinkFormat = normalizeParentLinkFormat(this.settings.parentLinkFormat);
     this.settings.enableBasesForcedLinkPreview = this.settings.enableBasesForcedLinkPreview === true;
     this.settings.collapseHeadingsOnOpen = this.settings.collapseHeadingsOnOpen === true;

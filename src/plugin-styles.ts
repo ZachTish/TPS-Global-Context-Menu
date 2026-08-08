@@ -5312,6 +5312,51 @@ export const PLUGIN_STYLES = `
         justify-content: flex-start;
         user-select: none;
       }
+      .tps-gcm-linked-context-panel {
+        width: min(860px, 100%);
+        margin: 14px 0;
+        padding: 12px;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: calc(10px * var(--tps-gcm-radius-scale));
+        background: color-mix(in srgb, var(--background-secondary) 72%, transparent);
+      }
+      .tps-gcm-linked-context-heading {
+        margin: 0 0 10px;
+        color: var(--text-muted);
+        font-size: var(--font-ui-small);
+        letter-spacing: 0.02em;
+      }
+      .tps-gcm-linked-context-card {
+        margin-top: 8px;
+        padding: 10px 12px;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 8px;
+        background: var(--background-primary);
+        opacity: 0.62;
+        cursor: pointer;
+        transition: opacity 120ms ease, border-color 120ms ease, background-color 120ms ease;
+      }
+      .tps-gcm-linked-context-card:hover,
+      .tps-gcm-linked-context-card:focus-visible,
+      .tps-gcm-linked-context-card:focus-within {
+        opacity: 1;
+        border-color: var(--interactive-accent);
+        background: color-mix(in srgb, var(--background-primary) 92%, var(--interactive-accent));
+        outline: none;
+      }
+      .tps-gcm-linked-context-meta {
+        display: flex;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: 6px;
+        color: var(--text-muted);
+        font-size: var(--font-ui-smaller);
+      }
+      .tps-gcm-linked-context-source { color: var(--text-normal); font-weight: 600; }
+      .tps-gcm-linked-context-kind { text-transform: uppercase; letter-spacing: 0.04em; }
+      .tps-gcm-linked-context-body { pointer-events: none; }
+      .tps-gcm-linked-context-body > :first-child { margin-top: 0; }
+      .tps-gcm-linked-context-body > :last-child { margin-bottom: 0; }
       .tps-gcm-parent-nav-button--top {
         margin-left: 0 !important;
       }

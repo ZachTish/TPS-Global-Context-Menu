@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.21.0
+
+- **Show linked context** adds an optional, read-only incoming-link panel under **Child notes** settings. It can appear below the title or at the bottom of the current note.
+- A link on an ordinary source line renders only that line. A link authored in a Markdown heading renders that heading and all nested content through the next heading of the same or higher level. A link in YAML frontmatter renders the complete source note. Duplicate links to the same source range are collapsed.
+- Every excerpt is visually bordered and subdued until hover or keyboard focus, clearly separating linked material from the current note. Activating a card can open its exact source line in the same tab, open it in a new tab, or invoke Obsidian's hover preview.
+- The feature is off by default, persists only its enablement, placement, and activation settings, and does not modify source or target notes. It uses Obsidian's resolved-link index and supports Markdown sources; unresolved links and non-Markdown sources are not rendered.
+- This is a backward-compatible minor release. Existing settings and note data require no migration. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.20.0
 
 - Time tracking now has one inferred-target start workflow. Starting from a task line links the session to that task; starting from a note context links it to that note. The note menu and panel no longer ask users to choose between **Track with task** and **Track with note**, and the redundant blank-Daily-Note-task command is replaced by **Open active work-session notes**.

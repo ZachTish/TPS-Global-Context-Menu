@@ -2038,6 +2038,48 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         })
       );
     new Setting(relationshipAutomation)
+      .setName('Show linked context')
+      .setDesc('Show read-only excerpts from notes that link to the current note. Heading links include their nested section; frontmatter links include the whole source note.')
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.enableLinkedContextPanel === true).onChange(async (value) => {
+          this.plugin.settings.enableLinkedContextPanel = value;
+          await this.plugin.saveSettings();
+          this.plugin.persistentMenuManager.ensureMenus();
+          this.display();
+        })
+      );
+    if (this.plugin.settings.enableLinkedContextPanel === true) {
+      new Setting(relationshipAutomation)
+        .setName('Linked context placement')
+        .setDesc('Place the linked material directly below the note title or after the note body.')
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('top', 'Below title')
+            .addOption('bottom', 'Bottom of note')
+            .setValue(this.plugin.settings.linkedContextPlacement || 'bottom')
+            .onChange(async (value: 'top' | 'bottom') => {
+              this.plugin.settings.linkedContextPlacement = value;
+              await this.plugin.saveSettings();
+              this.plugin.persistentMenuManager.ensureMenus();
+            })
+        );
+      new Setting(relationshipAutomation)
+        .setName('Linked context activation')
+        .setDesc('Choose what happens when a read-only source card is activated.')
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('same-tab', 'Open source in same tab')
+            .addOption('new-tab', 'Open source in new tab')
+            .addOption('hover-preview', 'Show hover preview')
+            .setValue(this.plugin.settings.linkedContextOpenBehavior || 'same-tab')
+            .onChange(async (value: 'same-tab' | 'new-tab' | 'hover-preview') => {
+              this.plugin.settings.linkedContextOpenBehavior = value;
+              await this.plugin.saveSettings();
+              this.plugin.persistentMenuManager.ensureMenus();
+            })
+        );
+    }
+    new Setting(relationshipAutomation)
       .setName('Hidden child-note tags')
       .setDesc('Comma-separated tags to exclude from the child-note panel, such as hide, dailynote, or project.')
       .addText((t) =>
