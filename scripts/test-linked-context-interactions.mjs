@@ -17,8 +17,11 @@ test('linked context task long press cancels on scroll movement and opens contex
   assert.match(manager, /}, 500\)/);
 });
 
-test('linked context has a compact coarse-pointer layout with touch-sized checkboxes', () => {
+test('linked context has a compact coarse-pointer layout without resizing native checkboxes', () => {
   assert.match(styles, /@media \(max-width: 700px\), \(pointer: coarse\)/);
-  assert.match(styles, /\.tps-gcm-linked-context-body input\[type="checkbox"\][\s\S]*width: 22px;[\s\S]*height: 22px;/);
+  assert.doesNotMatch(
+    styles,
+    /\.tps-gcm-linked-context-body input\[type="checkbox"\]\s*\{[^}]*width:\s*22px;/,
+  );
   assert.match(styles, /\.tps-gcm-linked-context-task[\s\S]*touch-action: pan-y;/);
 });

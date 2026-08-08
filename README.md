@@ -1,5 +1,10 @@
 # TPS Global Context Menu
 
+## 1.22.1
+
+- Linked-context task checkboxes once again use Obsidian's normal checkbox dimensions on desktop and mobile. The right-click and long-press task context menu introduced in 1.22.0 remains available.
+- The remaining compact mobile card layout, wrapping, and touch behavior are unchanged. No settings or note schema changed. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.22.0
 
 - Linked-context cards use a compact mobile layout with touch-sized checkboxes, wrapped metadata, safe long-content containment, tighter spacing, and clearer coarse-pointer emphasis.

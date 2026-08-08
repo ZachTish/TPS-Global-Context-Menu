@@ -5414,11 +5414,6 @@ export const PLUGIN_STYLES = `
         }
         .tps-gcm-linked-context-body ul,
         .tps-gcm-linked-context-body ol { padding-inline-start: 1.45em; }
-        .tps-gcm-linked-context-body input[type="checkbox"] {
-          width: 22px;
-          height: 22px;
-          margin-inline-end: 7px;
-        }
         .tps-gcm-linked-context-task {
           min-height: 36px;
           padding-block: 4px;
