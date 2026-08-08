@@ -760,6 +760,15 @@ export class PersistentMenuManager {
     checkboxes.forEach((checkbox, index) => {
       const taskLine = taskLines[index];
       if (!taskLine) return;
+      const taskRow = checkbox.closest<HTMLElement>('li.task-list-item, .task-list-item') || checkbox.parentElement;
+      if (taskRow) {
+        taskRow.dataset.tpsGcmContext = 'calendar-task';
+        taskRow.dataset.taskPath = item.sourceFile.path;
+        taskRow.dataset.taskLine = String(taskLine.lineNumber + 1);
+        taskRow.dataset.tpsCalendarTaskText = taskLine.parsed?.body || taskLine.rawLine;
+        taskRow.classList.add('tps-gcm-linked-context-task');
+        this.bindLinkedContextTaskLongPress(taskRow);
+      }
       checkbox.disabled = false;
       checkbox.setAttribute('aria-label', `Toggle task completion in ${item.sourceFile.basename}`);
       const stopCardActivation = (event: Event) => event.stopPropagation();
@@ -784,6 +793,40 @@ export class PersistentMenuManager {
         this.ensureMenus();
       });
     });
+  }
+
+  private bindLinkedContextTaskLongPress(taskRow: HTMLElement): void {
+    let timer: number | null = null;
+    let startX = 0;
+    let startY = 0;
+    const clear = (): void => {
+      if (timer !== null) window.clearTimeout(timer);
+      timer = null;
+      taskRow.classList.remove('is-long-pressing');
+    };
+    taskRow.addEventListener('pointerdown', (event: PointerEvent) => {
+      if (event.button !== 0 || event.pointerType === 'mouse' || event.target instanceof HTMLInputElement) return;
+      clear();
+      startX = event.clientX;
+      startY = event.clientY;
+      timer = window.setTimeout(() => {
+        timer = null;
+        if (!taskRow.isConnected) return;
+        taskRow.classList.add('is-long-pressing');
+        taskRow.dispatchEvent(new MouseEvent('contextmenu', {
+          bubbles: true,
+          cancelable: true,
+          clientX: event.clientX,
+          clientY: event.clientY,
+        }));
+      }, 500);
+    });
+    taskRow.addEventListener('pointermove', (event: PointerEvent) => {
+      if (Math.hypot(event.clientX - startX, event.clientY - startY) > 10) clear();
+    });
+    taskRow.addEventListener('pointerup', clear);
+    taskRow.addEventListener('pointercancel', clear);
+    taskRow.addEventListener('pointerleave', clear);
   }
 
   private async openLinkedContextSource(item: LinkedContextItem): Promise<void> {

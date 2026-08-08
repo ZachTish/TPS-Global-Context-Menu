@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.22.0
+
+- Linked-context cards use a compact mobile layout with touch-sized checkboxes, wrapped metadata, safe long-content containment, tighter spacing, and clearer coarse-pointer emphasis.
+- Tasks rendered inside linked context now expose GCM's canonical task context menu on desktop right-click and mobile long-press. Exact source path and line metadata are attached to the rendered task; touch movement cancels the long-press so note scrolling stays native.
+- No settings or note schema changed. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.21.1
 
 - Linked context no longer draws an outer panel box; only the individual source cards provide borders, dimming, and hover/focus emphasis.

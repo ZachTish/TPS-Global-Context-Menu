@@ -5369,6 +5369,62 @@ export const PLUGIN_STYLES = `
       .tps-gcm-linked-context-card--line .tps-gcm-linked-context-body li { margin: 0; }
       .tps-gcm-linked-context-body > :first-child { margin-top: 0; }
       .tps-gcm-linked-context-body > :last-child { margin-bottom: 0; }
+      .tps-gcm-linked-context-task { pointer-events: auto; }
+      .tps-gcm-linked-context-task.is-long-pressing {
+        background: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+        border-radius: 6px;
+      }
+      @media (max-width: 700px), (pointer: coarse) {
+        .tps-gcm-linked-context-panel {
+          width: 100%;
+          max-width: 100%;
+          margin: 12px 0 24px;
+        }
+        .tps-gcm-linked-context-heading {
+          margin-bottom: 8px;
+          padding-inline: 2px;
+          font-size: var(--font-ui-medium);
+        }
+        .tps-gcm-linked-context-card {
+          margin-top: 7px;
+          padding: 10px;
+          border-radius: 12px;
+          opacity: 0.82;
+          overflow: hidden;
+          -webkit-tap-highlight-color: transparent;
+        }
+        .tps-gcm-linked-context-meta {
+          align-items: baseline;
+          flex-wrap: wrap;
+          gap: 3px 10px;
+          margin-bottom: 7px;
+        }
+        .tps-gcm-linked-context-source {
+          min-width: 0;
+          max-width: 100%;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+        .tps-gcm-linked-context-kind { margin-inline-start: auto; }
+        .tps-gcm-linked-context-body {
+          font-size: var(--font-ui-medium);
+          line-height: 1.45;
+          overflow-wrap: anywhere;
+        }
+        .tps-gcm-linked-context-body ul,
+        .tps-gcm-linked-context-body ol { padding-inline-start: 1.45em; }
+        .tps-gcm-linked-context-body input[type="checkbox"] {
+          width: 22px;
+          height: 22px;
+          margin-inline-end: 7px;
+        }
+        .tps-gcm-linked-context-task {
+          min-height: 36px;
+          padding-block: 4px;
+          touch-action: pan-y;
+        }
+      }
       .tps-gcm-parent-nav-button--top {
         margin-left: 0 !important;
       }
