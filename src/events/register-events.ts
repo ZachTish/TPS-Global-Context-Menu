@@ -112,6 +112,9 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
         plugin.app.workspace.on('file-menu', (menu, file) => {
             if (plugin.settings.inlineMenuOnly) return;
             const targetEl = plugin.contextTargetService.peekRecentContextTarget(1200);
+            // Upstream Notebook Navigator owns its native menus. GCM integrates
+            // only with the co-installable TPS fork through its public API.
+            if (plugin.contextTargetService.isNotebookNavigatorContextTarget(targetEl)) return;
             const linkTarget = plugin.contextTargetService.resolveMarkdownNoteLinkTarget(targetEl);
             if (linkTarget instanceof TFile) {
                 plugin.menuController.addToNativeMenu(menu, [linkTarget]);
@@ -127,6 +130,8 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     plugin.registerEvent(
         plugin.app.workspace.on('files-menu', (menu, files) => {
             if (plugin.settings.inlineMenuOnly) return;
+            const targetEl = plugin.contextTargetService.peekRecentContextTarget(1200);
+            if (plugin.contextTargetService.isNotebookNavigatorContextTarget(targetEl)) return;
             const fileList = files.filter((f: any) => f && f.path && typeof f.path === 'string') as TFile[];
             if (fileList.length > 0) {
                 plugin.menuController.addToNativeMenu(menu, fileList);

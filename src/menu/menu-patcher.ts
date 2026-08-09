@@ -14,26 +14,6 @@ export function setupMenuPatch(plugin: TPSGlobalContextMenuPlugin): () => void {
     const originalShowAtPosition = Menu.prototype.showAtPosition;
     const originalShowAtMouseEvent = Menu.prototype.showAtMouseEvent;
 
-    const maybeInjectNotebookNavigatorItems = (menu: Menu, eventTarget?: EventTarget | null) => {
-        if (plugin.settings.inlineMenuOnly) return;
-        if ((menu as any)._tpsHandled) return;
-
-        const targetEl =
-            eventTarget instanceof HTMLElement
-                ? eventTarget
-                : plugin.contextTargetService.consumeRecentContextTarget(1200);
-        (menu as any)._tpsContextTarget = targetEl ?? null;
-
-        if (!plugin.contextTargetService.isNotebookNavigatorContextTarget(targetEl)) return;
-        if (!plugin.contextTargetService.isNotebookNavigatorFileContextTarget(targetEl)) return;
-
-        const syntheticMouseEvent = { target: targetEl } as unknown as MouseEvent;
-        const targets = plugin.contextTargetService.resolveTargets([], syntheticMouseEvent, { allowActiveFileFallback: false });
-        if (targets.length === 0) return;
-
-        plugin.menuController.addToNativeMenu(menu, targets);
-    };
-
     const reorderItems = (menu: Menu) => {
         if (!(menu as any)._tpsHandled) return;
         const items = (menu as any).items as any[] | undefined;
@@ -223,8 +203,10 @@ export function setupMenuPatch(plugin: TPSGlobalContextMenuPlugin): () => void {
     };
 
     Menu.prototype.showAtPosition = function (pos) {
-        maybeInjectNotebookNavigatorItems(this);
-        reorderItems(this);
+        const targetEl = plugin.contextTargetService.peekRecentContextTarget(1200);
+        if (!plugin.contextTargetService.isNotebookNavigatorContextTarget(targetEl)) {
+            reorderItems(this);
+        }
         try {
             return originalShowAtPosition.call(this, pos);
         } finally {
@@ -233,9 +215,11 @@ export function setupMenuPatch(plugin: TPSGlobalContextMenuPlugin): () => void {
     };
 
     Menu.prototype.showAtMouseEvent = function (evt) {
-        plugin.foldExpansionContextMenuService?.addMenuItemForTarget(this, evt?.target ?? null, evt ?? null);
-        maybeInjectNotebookNavigatorItems(this, evt?.target ?? null);
-        reorderItems(this);
+        const targetEl = evt?.target instanceof HTMLElement ? evt.target : null;
+        if (!plugin.contextTargetService.isNotebookNavigatorContextTarget(targetEl)) {
+            plugin.foldExpansionContextMenuService?.addMenuItemForTarget(this, targetEl, evt ?? null);
+            reorderItems(this);
+        }
         try {
             return originalShowAtMouseEvent.call(this, evt);
         } finally {

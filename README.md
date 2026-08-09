@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.24.1
+
+- GCM no longer injects, reorders, deduplicates, or otherwise changes context menus opened inside the upstream/non-TPS Notebook Navigator. Both its global Menu display patch and Obsidian `file-menu`/`files-menu` listeners explicitly yield to that view.
+- TPS Notebook Navigator integration is unchanged and continues through the TPS fork's public, lifecycle-safe menu API. Daily Note Home may still observe upstream Navigator selection/open gestures, but it does not intercept those events or add menu items.
+- No settings or note schema changed. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.24.0
 
 - TPS List task-tag grouping now uses the same task-local tag source as filtering: visible Markdown `#tags` and singular/plural inline tag fields are combined, deduplicated, and kept separate from source-note `file.tags`. Tagged tasks no longer fall into **No value** merely because the tag is written directly on the task line.

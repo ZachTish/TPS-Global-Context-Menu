@@ -13,6 +13,14 @@ const contextTargetSource = readFileSync(
   new URL('../src/services/context-target-service.ts', import.meta.url),
   'utf8',
 );
+const menuPatcherSource = readFileSync(
+  new URL('../src/menu/menu-patcher.ts', import.meta.url),
+  'utf8',
+);
+const registerEventsSource = readFileSync(
+  new URL('../src/events/register-events.ts', import.meta.url),
+  'utf8',
+);
 
 async function importIntentUtility() {
   const build = await esbuild.build({
@@ -110,13 +118,23 @@ test('Daily Note Home observes Notebook Navigator without taking over its events
   assert.doesNotMatch(serviceSource, /preventDefault\(|stopPropagation\(|stopImmediatePropagation\(/);
 });
 
-test('GCM expands virtualized Notebook Navigator selections only against the native count and clicked row', () => {
-  const inference = contextTargetSource.match(
-    /inferNotebookNavigatorCollectionSelection\([\s\S]*?private inferNotebookNavigatorTagCollection/,
-  )?.[0] || '';
-  assert.match(inference, /getNotebookNavigatorSelectionFromApi\(\)/);
-  assert.match(inference, /getNotebookNavigatorSelectionFromView\(contextEl\)/);
-  assert.match(inference, /files\.length !== expectedCount/);
-  assert.match(inference, /file\.path === primaryPath/);
-  assert.doesNotMatch(inference, /getNotebookNavigatorSelectionFromStorage/);
+test('GCM leaves upstream Notebook Navigator context menus entirely native', () => {
+  assert.doesNotMatch(menuPatcherSource, /maybeInjectNotebookNavigatorItems/);
+  assert.match(
+    menuPatcherSource,
+    /showAtPosition[\s\S]{0,300}!plugin\.contextTargetService\.isNotebookNavigatorContextTarget\(targetEl\)[\s\S]{0,120}reorderItems\(this\)/,
+  );
+  assert.match(
+    menuPatcherSource,
+    /showAtMouseEvent[\s\S]{0,300}!plugin\.contextTargetService\.isNotebookNavigatorContextTarget\(targetEl\)[\s\S]{0,250}reorderItems\(this\)/,
+  );
+  assert.match(
+    registerEventsSource,
+    /workspace\.on\('file-menu'[\s\S]{0,400}isNotebookNavigatorContextTarget\(targetEl\)\) return/,
+  );
+  assert.match(
+    registerEventsSource,
+    /workspace\.on\('files-menu'[\s\S]{0,400}isNotebookNavigatorContextTarget\(targetEl\)\) return/,
+  );
+  assert.match(menuPatcherSource, /originalShowAtMouseEvent\.call\(this, evt\)/);
 });
