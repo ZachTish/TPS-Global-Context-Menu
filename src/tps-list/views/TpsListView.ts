@@ -6496,25 +6496,34 @@ export class TpsListView extends BasesView {
   }
 
   private applyManualLaneOrder(groups: BasesEntryGroup[]): BasesEntryGroup[] {
+    const ungrouped = groups.filter((group) => this.getLaneId(group) === 'ungrouped');
+    const keyed = groups.filter((group) => this.getLaneId(group) !== 'ungrouped');
     const settings = this.plugin.settings;
     const map = (settings?.laneOrderByView || {}) as Record<string, string[]>;
     const viewId = this.getLaneOrderViewId();
     const legacyViewId = this.getLegacyUnknownBaseViewId();
     const saved = Array.isArray(map[viewId]) ? map[viewId] : Array.isArray(map[legacyViewId]) ? map[legacyViewId] : [];
-    if (!saved.length) return groups;
+    let orderedKeyed = keyed;
+    if (saved.length) {
+      const rank = new Map<string, number>();
+      saved.forEach((id, i) => rank.set(String(id), i));
 
-    const rank = new Map<string, number>();
-    saved.forEach((id, i) => rank.set(String(id), i));
+      orderedKeyed = keyed
+        .map((group, index) => ({ group, index, laneId: this.getLaneId(group) }))
+        .sort((a, b) => {
+          const ar = rank.has(a.laneId) ? (rank.get(a.laneId) as number) : Number.MAX_SAFE_INTEGER;
+          const br = rank.has(b.laneId) ? (rank.get(b.laneId) as number) : Number.MAX_SAFE_INTEGER;
+          if (ar !== br) return ar - br;
+          return a.index - b.index;
+        })
+        .map((item) => item.group);
+    }
 
-    return groups
-      .map((group, index) => ({ group, index, laneId: this.getLaneId(group) }))
-      .sort((a, b) => {
-        const ar = rank.has(a.laneId) ? (rank.get(a.laneId) as number) : Number.MAX_SAFE_INTEGER;
-        const br = rank.has(b.laneId) ? (rank.get(b.laneId) as number) : Number.MAX_SAFE_INTEGER;
-        if (ar !== br) return ar - br;
-        return a.index - b.index;
-      })
-      .map((item) => item.group);
+    // The per-view Top/Bottom control is authoritative. Saved manual lane order may rank
+    // real groups, but a stale `ungrouped` rank must never override the current view setting.
+    return this.getUngroupedPosition() === 'first'
+      ? [...ungrouped, ...orderedKeyed]
+      : [...orderedKeyed, ...ungrouped];
   }
 
   private getSelectedFiles(): TFile[] {

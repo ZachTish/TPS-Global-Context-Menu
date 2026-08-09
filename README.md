@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.24.5
+
+- TPS List now treats each Base view's **Items without a group → Top / Bottom** setting as authoritative, even when that view has a saved manual lane order from an earlier arrangement.
+- Manual ordering still controls populated groups, while unmatched/untagged items stay pinned to the selected edge. The same rule is reapplied after task-specific lanes are synthesized, so task rows cannot drift back to the bottom after grouping finishes.
+- Focused regression coverage validates both Top and Bottom against a stale saved position for the unmatched lane. The complete declared suite, TypeScript check, and separate production build passed; the final artifacts deployed to and byte-matched the isolated test runtime. No note schema or global setting changed; minimum supported Obsidian remains 1.10.0.
+
 ## 1.24.4
 
 - TPS Table now exposes **Items without a group → Top / Bottom** in its own view settings and applies that choice after normal ascending/descending group sorting. Existing views default to Bottom.

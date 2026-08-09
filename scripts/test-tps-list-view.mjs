@@ -396,6 +396,26 @@ test('TPS List view settings own unmatched placement and task grouping reads vis
     'key:#urgent',
   ]);
   assert.equal(view.getUngroupedPosition(), 'first');
+
+  const group = (key) => ({ key, entries: [], hasKey: () => key != null });
+  view.getLaneOrderViewId = () => 'Base::View';
+  view.getLegacyUnknownBaseViewId = () => 'unknown::View';
+  view.plugin.settings.laneOrderByView = {
+    'Base::View': ['key:hca', 'ungrouped', 'key:idea'],
+  };
+  const groups = [group('idea'), group(null), group('hca')];
+  assert.deepEqual(
+    view.applyManualLaneOrder(groups).map((entry) => entry.key),
+    [null, 'hca', 'idea'],
+    'Top must override a stale manual rank for the ungrouped lane',
+  );
+
+  config.set('ungroupedPosition', 'last');
+  assert.deepEqual(
+    view.applyManualLaneOrder(groups).map((entry) => entry.key),
+    ['hca', 'idea', null],
+    'Bottom must override a stale manual rank for the ungrouped lane',
+  );
   config.delete('ungroupedPosition');
   assert.equal(view.getUngroupedPosition(), 'last');
   assert.match(bridgeSource, /key: 'ungroupedPosition'[\s\S]{0,220}first: 'Top'[\s\S]{0,80}last: 'Bottom'/u);
