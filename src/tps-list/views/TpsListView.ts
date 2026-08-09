@@ -4125,6 +4125,12 @@ export class TpsListView extends BasesView {
     return Array.from(new Set(values.map((value) => `key:${value}`)));
   }
 
+  private getUngroupedPosition(): 'first' | 'last' {
+    const configured = String(this.getConfigValue('ungroupedPosition') || '').trim().toLowerCase();
+    if (configured === 'first' || configured === 'last') return configured;
+    return this.plugin.settings.ungroupedPosition === 'first' ? 'first' : 'last';
+  }
+
   private normalizeScheduledLaneValue(value: string): string {
     const raw = String(value || '').trim();
     const day = this.extractDateDay(raw);
@@ -4162,7 +4168,9 @@ export class TpsListView extends BasesView {
 
   private getTaskInlineValues(task: OpenTaskSubitem, propName: string): string[] {
     const normalized = this.normalizeInlinePropertyKey(this.getTaskInlinePropertyName(propName));
-    const values: string[] = [];
+    const values: string[] = normalized === 'tags'
+      ? readTaskLineTags(task.text).map((tag) => this.normalizeTaskTag(tag))
+      : [];
     for (const field of task.inlineFields ?? []) {
       const key = this.normalizeInlinePropertyKey(field.key);
       if (normalized === 'tags') {
@@ -4907,7 +4915,7 @@ export class TpsListView extends BasesView {
     if (forced.includeUngrouped && ungroupedWithForced.length === 0) {
       ungroupedWithForced.push(this.createSyntheticGroup(null));
     }
-    const mergedGroups = this.plugin.settings.ungroupedPosition === 'first'
+    const mergedGroups = this.getUngroupedPosition() === 'first'
       ? [...ungroupedWithForced, ...keyedWithForced]
       : [...keyedWithForced, ...ungroupedWithForced];
     const mergedWithSavedLanes = this.includeSavedLaneGroups(mergedGroups);
@@ -7530,7 +7538,7 @@ export class TpsListView extends BasesView {
       ungroupedWithForced.push(this.createSyntheticGroup(null));
     }
 
-    const ungroupedPos = this.plugin.settings.ungroupedPosition;
+    const ungroupedPos = this.getUngroupedPosition();
     let mergedGroups = ungroupedPos === 'first'
       ? [...ungroupedWithForced, ...keyedWithForced]
       : [...keyedWithForced, ...ungroupedWithForced];
@@ -8236,14 +8244,16 @@ export class TpsListView extends BasesView {
     row.addEventListener('contextmenu', (event: MouseEvent) => {
       event.preventDefault();
       event.stopPropagation();
-      void this.applyTpsListRowSelection(event, row, true);
-      if (isBullet) {
-        void this.openBulletLineContextMenu(event, file, task.line);
-        return;
-      }
-      if (!this.openTaskLineContextMenu(event, file.path, task.line)) {
-        void this.openTaskLine(file, task.line, row);
-      }
+      void (async () => {
+        await this.applyTpsListRowSelection(event, row, true);
+        if (isBullet) {
+          await this.openBulletLineContextMenu(event, file, task.line);
+          return;
+        }
+        if (!this.openTaskLineContextMenu(event, file.path, task.line)) {
+          await this.openTaskLine(file, task.line, row);
+        }
+      })();
     });
 
     const hidden = new Set(['tpsinlineprops', 'externalid', 'externaleventid', 'tpscalendaruid', 'tpscalendarsourceurl']);

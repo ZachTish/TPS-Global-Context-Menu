@@ -8,7 +8,25 @@ import { getCurrentBaseEmbedRenderContext, takePendingBaseEmbedRenderContext } f
 export const TPS_LIST_VIEW_TYPE = 'tps-list';
 
 export function createTpsListViewOptions(createButtonOptions: ViewOption): ViewOption[] {
-  return [createButtonOptions];
+  return [
+    {
+      type: 'group',
+      displayName: 'Grouping',
+      items: [
+        {
+          key: 'ungroupedPosition',
+          type: 'dropdown',
+          displayName: 'Items without a group',
+          default: 'last',
+          options: {
+            first: 'Top',
+            last: 'Bottom',
+          },
+        },
+      ],
+    },
+    createButtonOptions,
+  ];
 }
 
 export function createTpsListView(controller: QueryController, containerEl: HTMLElement, plugin: TPSGlobalContextMenuPlugin): BasesView {

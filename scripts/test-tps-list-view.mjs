@@ -325,9 +325,10 @@ test('TPS List aligns note, task, bullet, and heading rows through one semantic 
   );
   assert.match(
     gcmStyles,
-    /\.tps-list-native-row\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*14px minmax\(0, 1fr\);[\s\S]*?margin:\s*0;[\s\S]*?padding:\s*0;/u,
+    /\.tps-list-native-row\s*\{[\s\S]*?display:\s*grid;[\s\S]*?grid-template-columns:\s*var\(--checkbox-size, 18px\) minmax\(0, 1fr\);[\s\S]*?margin:\s*0;[\s\S]*?padding:\s*0;/u,
   );
-  assert.match(gcmStyles, /\.tps-list-native-leading\s*\{[\s\S]*?width:\s*14px;[\s\S]*?min-width:\s*14px;[\s\S]*?margin:\s*0;/u);
+  assert.match(gcmStyles, /\.tps-list-native-leading\s*\{[\s\S]*?width:\s*var\(--checkbox-size, 18px\);[\s\S]*?min-width:\s*var\(--checkbox-size, 18px\);[\s\S]*?margin:\s*0;/u);
+  assert.match(gcmStyles, /\.tps-list-native-checkbox\s*\{[\s\S]*?border-radius:\s*var\(--checkbox-radius, 4px\);[\s\S]*?box-shadow:\s*none;/u);
   assert.match(gcmStyles, /\.tps-list-native-row-body\s*\{[\s\S]*?min-width:\s*0;[\s\S]*?display:\s*flex;/u);
   assert.match(gcmStyles, /\.tps-list-native-row--task\s*\{[\s\S]*?padding-inline-start:\s*var\(--tps-list-task-indent, 0px\);/u);
   assert.doesNotMatch(gcmStyles, /\.tps-list-native-row--note\s*\{[^}]*?(?:margin-left|padding-left|text-indent)\s*:/u);
@@ -357,6 +358,7 @@ test('TPS List Shift-click selects every visible row kind in one persistent DOM 
   assert.match(viewSource, /mode = this\.toggleRowSelection\(selectionId\) \? 'toggle-off' : 'toggle-on'/);
   assert.match(viewSource, /candidate\.dataset\.tpsListSelectionId === this\.selectionAnchorRowId/);
   assert.match(viewSource, /syncTpsListSelectionRows\(selectedRows, anchorRow, this\.scrollEl\)/);
+  assert.match(viewSource, /contextmenu[\s\S]{0,350}await this\.applyTpsListRowSelection\(event, row, true\)[\s\S]{0,220}openTaskLineContextMenu/u);
   assert.match(viewSource, /row\.dataset\.tpsTaskContext = 'true'/);
   assert.match(viewSource, /if \(event\.shiftKey \|\| event\.metaKey \|\| event\.ctrlKey\) \{\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);\s*void this\.applyTpsListRowSelection\(event, row\)/);
   assert.match(mainSource, /void listView\?\.applyTpsListRowSelection\?\.\(evt, listRow\)/);
@@ -368,6 +370,35 @@ test('TPS List Shift-click selects every visible row kind in one persistent DOM 
   assert.match(viewSource, /const seen = new Set<string>\(\)/);
   assert.doesNotMatch(viewSource, /querySelectorAll<HTMLElement>\('\.tps-kanban-card\[data-path\]'\)/);
   assert.match(gcmStyles, /\.tps-list-native-row--selected\s*\{[\s\S]*color-mix\(in srgb, var\(--interactive-accent\) 10%, transparent\)/);
+});
+
+test('TPS List view settings own unmatched placement and task grouping reads visible task tags', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const config = new Map([
+    ['groupBy', { property: 'tags', direction: 'ASC' }],
+    ['ungroupedPosition', 'first'],
+  ]);
+  view.config = { get: (key) => config.get(key) };
+  view.plugin = { settings: { ungroupedPosition: 'last' } };
+
+  const task = {
+    itemKind: 'task',
+    line: 1,
+    text: 'Ship the fix #hca [tags:: project, #urgent]',
+    checkboxState: '[ ]',
+    inlineFields: [{ key: 'tags', value: 'project, #urgent' }],
+  };
+
+  assert.deepEqual(view.getTaskLaneIds(task, 'tags'), [
+    'key:#hca',
+    'key:#project',
+    'key:#urgent',
+  ]);
+  assert.equal(view.getUngroupedPosition(), 'first');
+  config.delete('ungroupedPosition');
+  assert.equal(view.getUngroupedPosition(), 'last');
+  assert.match(bridgeSource, /key: 'ungroupedPosition'[\s\S]{0,220}first: 'Top'[\s\S]{0,80}last: 'Bottom'/u);
 });
 
 test('ordered selection helper handles ranges and clears a toggled-off anchor', async () => {

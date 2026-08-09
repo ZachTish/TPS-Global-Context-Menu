@@ -892,7 +892,7 @@ test('GCM owns TPS List Bases registration and bundles the task-aware renderer',
   assert.match(tpsListBridgeSource, /plugin\.openBaseNotePreviewFromClick\(event, file, link, true\)/);
   assert.match(tpsListBridgeSource, /plugin\.openBaseNotePreviewFromClick\(event, file, anchorEl, true\)/);
   assert.match(stylesSource, /\.tps-list-native-rows\s*\{[\s\S]*list-style:\s*none;[\s\S]*padding:\s*0;/);
-  assert.match(stylesSource, /\.tps-list-native-row\s*\{[\s\S]*display:\s*grid;[\s\S]*grid-template-columns:\s*14px minmax\(0, 1fr\);/);
+  assert.match(stylesSource, /\.tps-list-native-row\s*\{[\s\S]*display:\s*grid;[\s\S]*grid-template-columns:\s*var\(--checkbox-size, 18px\) minmax\(0, 1fr\);/);
   assert.match(stylesSource, /\.tps-list-native-row--task\s*\{[\s\S]*padding-inline-start:\s*var\(--tps-list-task-indent, 0px\);/);
   assert.doesNotMatch(stylesSource, /\.tps-list-native-row--task\s*\{[\s\S]*margin-left:\s*calc\(-18px/);
 });

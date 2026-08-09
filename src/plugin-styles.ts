@@ -82,8 +82,8 @@ export const PLUGIN_STYLES = `
         content-visibility: auto;
         contain-intrinsic-block-size: 24px;
         display: grid;
-        grid-template-columns: 14px minmax(0, 1fr);
-        column-gap: 6px;
+        grid-template-columns: var(--checkbox-size, 18px) minmax(0, 1fr);
+        column-gap: 8px;
         align-items: center;
         min-height: 0;
         margin: 0;
@@ -103,9 +103,9 @@ export const PLUGIN_STYLES = `
       }
 
       .tps-list-native-leading {
-        width: 14px;
-        height: 14px;
-        min-width: 14px;
+        width: var(--checkbox-size, 18px);
+        height: var(--checkbox-size, 18px);
+        min-width: var(--checkbox-size, 18px);
         margin: 0;
         align-self: center;
       }
@@ -150,6 +150,11 @@ export const PLUGIN_STYLES = `
 
       .tps-list-native-checkbox {
         display: block;
+        flex: none;
+        padding: 0;
+        border-radius: var(--checkbox-radius, 4px);
+        background-color: transparent;
+        box-shadow: none;
       }
 
       .tps-list-native-bullet-marker,

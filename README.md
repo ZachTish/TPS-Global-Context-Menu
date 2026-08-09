@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.24.0
+
+- TPS List task-tag grouping now uses the same task-local tag source as filtering: visible Markdown `#tags` and singular/plural inline tag fields are combined, deduplicated, and kept separate from source-note `file.tags`. Tagged tasks no longer fall into **No value** merely because the tag is written directly on the task line.
+- TPS List view settings now include **Grouping → Items without a group**, with **Top** and **Bottom** choices stored in that Base view configuration. Existing views continue to default to **Bottom**.
+- Right-clicking a selected TPS List task now waits for the complete range/Cmd/Ctrl selection to resolve before GCM builds the context menu, so batch actions receive the visible selection instead of only the clicked task.
+- TPS List checkboxes and the shared leading column now use Obsidian's checkbox size/radius variables, with transparent row-integrated styling instead of the undersized custom 14px control.
+- No note schema or global plugin setting changed. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.23.2
 
 - GCM bulk actions in the normal Notebook Navigator now recover the complete live multi-selection even when virtualization leaves only the visible rows mounted in the DOM.
