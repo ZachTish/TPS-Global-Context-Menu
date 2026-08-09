@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.23.2
+
+- GCM bulk actions in the normal Notebook Navigator now recover the complete live multi-selection even when virtualization leaves only the visible rows mounted in the DOM.
+- Recovery is accepted only when one live Navigator state source resolves exactly the native menu's selected count and includes the right-clicked file. Persisted selection storage is not trusted for this path; a mismatch retains the scoped warning rather than risking a bulk action on the wrong files.
+- No settings or note schema changed. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.23.1
 
 - Calendar task status changes now re-resolve a rendered task by its unique authored `scheduled`, `start`, or `date` locator when unrelated line metadata changed after the calendar row was rendered.

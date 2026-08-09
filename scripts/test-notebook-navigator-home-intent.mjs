@@ -9,6 +9,10 @@ const serviceSource = readFileSync(
   new URL('../src/services/daily-note-home-service.ts', import.meta.url),
   'utf8',
 );
+const contextTargetSource = readFileSync(
+  new URL('../src/services/context-target-service.ts', import.meta.url),
+  'utf8',
+);
 
 async function importIntentUtility() {
   const build = await esbuild.build({
@@ -104,4 +108,15 @@ test('Daily Note Home observes Notebook Navigator without taking over its events
   assert.match(serviceSource, /notebookNavigatorHomeIntent\.shouldSuppress\(leaf, file\.path\)/);
   assert.match(serviceSource, /\.nn-quick-action-item/);
   assert.doesNotMatch(serviceSource, /preventDefault\(|stopPropagation\(|stopImmediatePropagation\(/);
+});
+
+test('GCM expands virtualized Notebook Navigator selections only against the native count and clicked row', () => {
+  const inference = contextTargetSource.match(
+    /inferNotebookNavigatorCollectionSelection\([\s\S]*?private inferNotebookNavigatorTagCollection/,
+  )?.[0] || '';
+  assert.match(inference, /getNotebookNavigatorSelectionFromApi\(\)/);
+  assert.match(inference, /getNotebookNavigatorSelectionFromView\(contextEl\)/);
+  assert.match(inference, /files\.length !== expectedCount/);
+  assert.match(inference, /file\.path === primaryPath/);
+  assert.doesNotMatch(inference, /getNotebookNavigatorSelectionFromStorage/);
 });

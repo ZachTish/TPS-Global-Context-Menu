@@ -886,6 +886,32 @@ export class ContextTargetService {
         const scopeRoot = this.getScopeRoot(contextEl, 'notebook-navigator');
         if (!scopeRoot) return [];
 
+        // Notebook Navigator virtualizes its file list, so DOM selection can
+        // contain only the mounted slice even though the native menu reports
+        // the complete selection. Trust a live state source only when it
+        // independently resolves the exact native count and includes the
+        // right-clicked row. This count/primary guard avoids reviving the old
+        // failure where an unrelated active editor file inflated selection.
+        const primaryPath = this.resolvePathFromElement(contextEl.closest<HTMLElement>('.nn-file, .nn-navitem') ?? contextEl);
+        const liveCandidates = [
+            this.getNotebookNavigatorSelectionFromApi(),
+            this.getNotebookNavigatorSelectionFromView(contextEl),
+        ];
+        for (const candidate of liveCandidates) {
+            const files = this.mergeFileLists([candidate]);
+            if (files.length !== expectedCount) continue;
+            if (primaryPath && !files.some((file) => file.path === primaryPath)) continue;
+            return files;
+        }
+
+        const mergedLive = this.mergeFileLists(liveCandidates);
+        if (
+            mergedLive.length === expectedCount
+            && (!primaryPath || mergedLive.some((file) => file.path === primaryPath))
+        ) {
+            return mergedLive;
+        }
+
         const selectedNavNodes = Array.from(
             scopeRoot.querySelectorAll<HTMLElement>(
                 [
