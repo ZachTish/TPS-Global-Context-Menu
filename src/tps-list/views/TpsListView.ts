@@ -1056,7 +1056,7 @@ export class TpsListView extends BasesView {
             await this.updateBulletLineTags(file, lineIndex, rawLine, 'add', (line) => (
               addInlineTagToTaskLine(line, tag)
             ));
-          }).open();
+          }, { suggestions: collectKnownVaultTags(this.app) }).open();
         });
       });
       if (current.length > 0) subMenu.addSeparator();

@@ -8974,6 +8974,32 @@ export const PLUGIN_STYLES = `
         padding: 6px 8px;
       }
 
+      .tps-gcm-text-input-suggestions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin: -4px 0 14px;
+        max-height: min(180px, 24vh);
+        overflow-y: auto;
+      }
+
+      .tps-gcm-text-input-suggestion {
+        background: var(--background-secondary);
+        border: 1px solid var(--background-modifier-border);
+        border-radius: var(--radius-s);
+        color: var(--text-muted);
+        font-size: var(--font-ui-small);
+        height: auto;
+        min-height: 34px;
+        padding: 6px 10px;
+      }
+
+      .tps-gcm-text-input-suggestion:hover,
+      .tps-gcm-text-input-suggestion:focus-visible {
+        background: var(--background-modifier-hover);
+        color: var(--text-normal);
+      }
+
       .tps-gcm-heading-link-suggest {
         position: fixed;
         z-index: 100001;

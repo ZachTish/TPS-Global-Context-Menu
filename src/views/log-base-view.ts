@@ -2771,7 +2771,7 @@ export class TpsTableView extends BasesView {
             await this.updateEntryLine(entry, (line) => (
               toggleLogLineSemanticTag(line, 'tags', tag, false)
             ));
-          }).open();
+          }, { suggestions: collectKnownVaultTags(this.plugin.app) }).open();
         });
       });
       if (current.length > 0) subMenu.addSeparator();

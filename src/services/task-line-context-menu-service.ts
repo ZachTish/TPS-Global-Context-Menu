@@ -4,6 +4,7 @@ import { FileSuggestModal } from '../modals/FileSuggestModal';
 import { RecurrenceModal } from '../modals/recurrence-modal';
 import { ScheduledModal } from '../modals/scheduled-modal';
 import { TextInputModal } from '../modals/text-input-modal';
+import { collectKnownVaultTags } from '../utils/known-tags';
 import { promptNestedLineDelete } from '../modals/nested-line-delete-modal';
 import type { CustomProperty, LinkedSubitemCheckboxMapping } from '../types';
 import {
@@ -1644,7 +1645,7 @@ export class TaskLineContextMenuService {
             const tag = String(value || '').trim();
             if (!tag) return;
             await this.updateTaskLines(contexts, (line) => addInlineTagToTaskLine(line, tag));
-          }).open();
+          }, { suggestions: collectKnownVaultTags(this.plugin.app) }).open();
         });
       });
 
@@ -1779,7 +1780,7 @@ export class TaskLineContextMenuService {
             const tag = String(value || '').trim();
             if (!tag) return;
             await this.updateTaskLine(context, (line) => addInlineTagToTaskLine(line, tag));
-          }).open();
+          }, { suggestions: collectKnownVaultTags(this.plugin.app) }).open();
         });
       });
       if (current.length > 0) subMenu.addSeparator();

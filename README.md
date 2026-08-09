@@ -1,5 +1,10 @@
 # TPS Global Context Menu
 
+## 1.23.0
+
+- Free-text task tag editors now show filtered existing vault-tag suggestions beneath the input on desktop and mobile. Tapping or clicking a suggestion fills the field; Enter saves exactly the typed value and never accepts a suggestion implicitly.
+- The suggestion behavior is shared by task context menus, TPS List, and TPS Table. New tags remain valid free text, suggestions are deduplicated case-insensitively, and the visible list is capped for mobile usability. No settings or note schema changed. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.22.1
 
 - Linked-context task checkboxes once again use Obsidian's normal checkbox dimensions on desktop and mobile. The right-click and long-press task context menu introduced in 1.22.0 remains available.
