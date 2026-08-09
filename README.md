@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.24.3
+
+- Task quick-editor tag fields now canonicalize typed and suggested values as Markdown hashtags. A value such as `test` is stored as `#test`, including hierarchical tags, instead of leaking into the task row as ordinary text.
+- Clicking a rendered tag or inline-property fragment now retains the complete task-row text as a resolution fallback. Calendar and Markdown task actions can therefore resolve the source task instead of reporting `Could not resolve the task line` merely because the click landed on a small metadata fragment.
+- Existing source content is not migrated automatically. Editing/saving an affected tag field canonicalizes its value; no settings or note schema changed. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.24.2
 
 - Opening a note now evaluates and writes its configured Notebook Navigator icon and color on the device that opened it, including user-role devices and mobile. The local visual refresh is coalesced for 75 ms instead of waiting for the controller-only two-second path.

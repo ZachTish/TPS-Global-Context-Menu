@@ -1115,9 +1115,10 @@ export class TaskLineContextMenuService {
       : [];
     const targetTexts = tableTaskIdentity
       ? []
-      : directTargetTexts.length
-        ? directTargetTexts
-        : this.getTaskElementSearchTexts(taskEl);
+      : Array.from(new Set([
+          ...directTargetTexts,
+          ...this.getTaskElementSearchTexts(taskEl),
+        ]));
     const candidateIndexes = this.getTaskLineCandidateIndexes(taskEl, lines, file, sourceEl);
     const lineIndex = resolveTaskLineIndex({
       lines,

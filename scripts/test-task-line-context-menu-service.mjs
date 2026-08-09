@@ -1061,6 +1061,11 @@ test('GCM intercepts Kanban and Calendar task rows before the note file menu', (
   assert.match(serviceSource, /TaskTimerScheduledConflictModal/);
   assert.match(serviceSource, /duplicateTaskBelowForTimer/);
   assert.match(serviceSource, /getTaskElementSearchTexts/);
+  assert.match(
+    serviceSource,
+    /\.\.\.directTargetTexts,[\s\S]*?\.\.\.this\.getTaskElementSearchTexts\(taskEl\)/u,
+    'a clicked tag/property fragment must retain the full task-row text as a resolution fallback',
+  );
   assert.match(serviceSource, /getTaskSearchTextVariants/);
   assert.match(serviceSource, /all day:\\s\*\(\?:true\|false\)/);
   assert.match(taskLineResolutionSource, /targetTexts\.some/);

@@ -5,6 +5,7 @@ import {
 } from '../utils/task-line-metadata';
 import { isEntityReferenceProperty } from '../utils/entity-property';
 import { propertyUsesEntityOptions } from '../utils/property-option-source';
+import { normalizeTagValue, parseTagInput } from '../utils/tag-utils';
 
 export type TaskEditorPropertyType =
   | 'text'
@@ -194,12 +195,20 @@ export function applyTaskEditorScheduleResult<
 
 export function normalizeTaskEditorPropertyValue(
   descriptor: Pick<TaskEditorPropertyDescriptor, 'type'> & {
+    key?: string;
     property?: CustomProperty | null;
   },
   value: string,
 ): string {
   const raw = String(value ?? '').trim();
   if (isEntityReferenceProperty(descriptor.property)) return raw;
+  if (isTaskTagProperty(descriptor)) {
+    return parseTagInput(raw)
+      .map((tag) => normalizeTagValue(tag))
+      .filter(Boolean)
+      .map((tag) => `#${tag}`)
+      .join(', ');
+  }
   if (descriptor.type === 'checkbox') return isTruthyTaskPropertyValue(raw) ? 'true' : 'false';
   if (descriptor.type === 'number' && raw) {
     const parsed = Number(raw);
@@ -219,6 +228,13 @@ export function normalizeTaskEditorPropertyValue(
       .join(', ');
   }
   return raw;
+}
+
+function isTaskTagProperty(
+  descriptor: { key?: string; property?: CustomProperty | null },
+): boolean {
+  const key = String(descriptor.key || '').trim().toLowerCase();
+  return key === 'tag' || key === 'tags' || descriptor.property?.listItemType === 'tag';
 }
 
 export function isTruthyTaskPropertyValue(value: string): boolean {

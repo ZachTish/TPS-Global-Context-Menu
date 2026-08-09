@@ -297,6 +297,23 @@ test('scheduled companion changes apply together while protected metadata cannot
   assert.equal(readInlineFieldValue(edited, 'parent'), 'keep_parent');
 });
 
+test('task tag property drafts persist canonical hashtags instead of leaking plain text', async () => {
+  const { buildTaskEditorPropertyChange, normalizeTaskEditorPropertyValue } = await propertiesPromise;
+  const descriptor = {
+    key: 'tags',
+    label: 'Tags',
+    type: 'list',
+    value: '#hca',
+    property: property('tags', 'list', { listItemType: 'tag' }),
+  };
+
+  assert.equal(normalizeTaskEditorPropertyValue(descriptor, 'test, #hca, project/alpha'), '#test, #hca, #project/alpha');
+  assert.deepEqual(
+    buildTaskEditorPropertyChange(descriptor, '#hca', 'test'),
+    { key: 'tags', value: '#test' },
+  );
+});
+
 test('quick-editor source keeps property commits atomic and provides mobile-safe property controls', () => {
   const serviceSource = readFileSync(new URL('../src/services/task-line-context-menu-service.ts', import.meta.url), 'utf8');
   const stylesSource = readFileSync(new URL('../src/plugin-styles.ts', import.meta.url), 'utf8');
