@@ -7,6 +7,7 @@ import { build } from 'esbuild';
 
 const logBaseViewSource = readFileSync(new URL('../src/views/log-base-view.ts', import.meta.url), 'utf8');
 const pluginStylesSource = readFileSync(new URL('../src/plugin-styles.ts', import.meta.url), 'utf8');
+const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
 
 function sourceBlock(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
@@ -397,6 +398,62 @@ test('TPS Table derives task status fields and follows the active view without s
   assert.match(logBaseViewSource, /mapSubitemCheckboxStateToStatus\(checkboxMappings, checkboxState\)/);
   assert.match(logBaseViewSource, /normalizeLinkedSubitemMappings\(this\.plugin\.settings\?\.linkedSubitemCheckboxMappings/);
   assert.match(logBaseViewSource, /statusService\?\.isDoneStatus/);
+});
+
+test('TPS Table grouping places unmatched rows from the view setting and uses mapped task status', async () => {
+  const [{ TpsTableView }, { groupTpsBaseRows }] = await Promise.all([
+    loadViewModule(),
+    loadGroupingModule(),
+  ]);
+  const File = globalThis.__TpsTableFormulaTestFile;
+  const file = Object.assign(new File(), {
+    path: 'Inbox/Status Rows.md',
+    name: 'Status Rows.md',
+    basename: 'Status Rows',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+  });
+  const view = Object.create(TpsTableView.prototype);
+  view.plugin = {
+    app: { metadataCache: { getFirstLinkpathDest: () => null } },
+  };
+  const task = {
+    file,
+    line: '- [ ] Canonical task status',
+    lineNumber: 0,
+    title: 'Canonical task status',
+    fields: {},
+    queryFields: { 'task.status': 'todo', checkboxstatus: 'todo' },
+  };
+  const noteLike = {
+    file,
+    line: '- Home Renovations [status:: working]',
+    lineNumber: 1,
+    title: 'Home Renovations',
+    fields: { status: 'working' },
+    queryFields: {},
+  };
+  const unmatched = {
+    file,
+    line: '- Plain row',
+    lineNumber: 2,
+    title: 'Plain row',
+    fields: {},
+    queryFields: {},
+  };
+
+  assert.equal(view.getEntryValue(task, 'status'), 'todo');
+  assert.equal(view.getEntryValue(task, 'task.status'), 'todo');
+  assert.equal(view.getEntryValue(noteLike, 'status'), 'working');
+  const groups = groupTpsBaseRows(
+    [task, noteLike, unmatched],
+    (entry) => view.getEntryRawValue(entry, 'status'),
+    'asc',
+    'first',
+  );
+  assert.deepEqual(groups.map((group) => group.key), [null, 'todo', 'working']);
+  assert.match(mainSource, /key: 'ungroupedPosition'[\s\S]{0,220}first: 'Top'[\s\S]{0,80}last: 'Bottom'/u);
+  assert.match(logBaseViewSource, /getConfigValue\('ungroupedPosition'\)/u);
 });
 
 test('TPS Table task tag filters use exact task-tag membership across aliases and Markdown forms', async () => {

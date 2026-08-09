@@ -1,6 +1,7 @@
 import { getTpsFormulaGroupValues } from '../services/tps-base-formula-service';
 
 export type TpsBaseGroupDirection = 'asc' | 'desc';
+export type TpsBaseUngroupedPosition = 'first' | 'last';
 
 export type TpsBaseGroupDescriptor = {
   property: string;
@@ -93,6 +94,7 @@ export function groupTpsBaseRows<T>(
   rows: T[],
   getValue: (row: T) => unknown,
   direction: TpsBaseGroupDirection = 'asc',
+  ungroupedPosition: TpsBaseUngroupedPosition = 'last',
 ): TpsBaseRowGroup<T>[] {
   const keyed = new Map<string, TpsBaseRowGroup<T>>();
   const ungrouped: T[] = [];
@@ -116,7 +118,11 @@ export function groupTpsBaseRows<T>(
     const result = collator.compare(left.key ?? '', right.key ?? '');
     return direction === 'desc' ? -result : result;
   });
-  if (ungrouped.length) groups.push({ key: null, rows: ungrouped });
+  if (ungrouped.length) {
+    const ungroupedGroup = { key: null, rows: ungrouped };
+    if (ungroupedPosition === 'first') groups.unshift(ungroupedGroup);
+    else groups.push(ungroupedGroup);
+  }
   return groups;
 }
 

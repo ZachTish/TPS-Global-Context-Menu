@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.24.4
+
+- TPS Table now exposes **Items without a group → Top / Bottom** in its own view settings and applies that choice after normal ascending/descending group sorting. Existing views default to Bottom.
+- A task row grouped or displayed by bare `status` now uses GCM's authoritative checkbox-mapped workflow value, including when the same vault also defines a relational note-level `status` property. Non-task rows continue to use their authored inline/note status, and formulas retain the explicit `task.status` namespace.
+- Focused regression coverage validates a mixed status view containing mapped tasks, authored-status non-task rows, and unmatched rows. No note schema or global setting changed; minimum supported Obsidian remains 1.10.0.
+
 ## 1.24.3
 
 - Task quick-editor tag fields now canonicalize typed and suggested values as Markdown hashtags. A value such as `test` is stored as `#test`, including hierarchical tags, instead of leaking into the task row as ordinary text.

@@ -595,8 +595,15 @@ export class TpsTableView extends BasesView {
 
     const columns = this.getColumns(entries);
     const groupBy = resolveTpsBaseGroupDescriptor(this.getConfigValue('groupBy'));
+    const ungroupedPosition = String(this.getConfigValue('ungroupedPosition') || '').trim().toLowerCase() === 'first'
+      ? 'first'
+      : 'last';
     const entryGroups = groupBy
-      ? groupTpsBaseRows(entries, (entry) => this.getEntryRawValue(entry, groupBy.property), groupBy.direction)
+      ? groupTpsBaseRows(entries,
+          (entry) => this.getEntryRawValue(entry, groupBy.property),
+          groupBy.direction,
+          ungroupedPosition,
+        )
       : [{ key: null, rows: entries }];
     const renderedEntries = entryGroups.flatMap((group) => group.rows);
     const totalsPosition = normalizeTotalsRowPosition(this.getConfigValue('totalsRow'));
@@ -663,6 +670,7 @@ export class TpsTableView extends BasesView {
       entries: entries.length,
       columns: columns.length,
       groupBy: groupBy?.property ?? null,
+      ungroupedPosition: groupBy ? ungroupedPosition : null,
       groups: groupBy ? entryGroups.length : 0,
       totalsPosition,
       totaledColumns,
@@ -2456,6 +2464,19 @@ export class TpsTableView extends BasesView {
     if (this.isFileLinkColumn(key)) return entry.file.basename;
     if (normalized === 'source' || normalized === 'path') return `${entry.file.path}:${entry.lineNumber + 1}`;
     if (normalized === 'linenumber') return String(entry.lineNumber + 1);
+    if (
+      parseTaskLine(entry.line)
+      && (normalized === 'status' || normalized === 'taskstatus' || normalized === 'taskcheckboxstatus' || normalized === 'checkboxstatus')
+    ) {
+      return this.displayInlineValue(
+        entry.queryFields?.['task.status']
+          ?? entry.queryFields?.taskstatus
+          ?? entry.queryFields?.checkboxstatus
+          ?? entry.queryFields?.status
+          ?? '',
+        entry.file.path,
+      );
+    }
     return this.displayInlineValue(entry.fields[normalized] ?? entry.queryFields?.[normalized] ?? '', entry.file.path);
   }
 

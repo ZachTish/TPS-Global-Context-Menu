@@ -212,6 +212,16 @@ function createTpsTableViewOptions(plugin: TPSGlobalContextMenuPlugin): ViewOpti
             bottom: 'Bottom',
           },
         },
+        {
+          key: 'ungroupedPosition',
+          type: 'dropdown',
+          displayName: 'Items without a group',
+          default: 'last',
+          options: {
+            first: 'Top',
+            last: 'Bottom',
+          },
+        },
       ],
     },
     createBaseCreateButtonOptions(plugin),
