@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.24.2
+
+- Opening a note now evaluates and writes its configured Notebook Navigator icon and color on the device that opened it, including user-role devices and mobile. The local visual refresh is coalesced for 75 ms instead of waiting for the controller-only two-second path.
+- Note-open remains narrowly scoped to visual fields. Smart-sort keys and hide-tag automation continue to require the controller role through startup and metadata-change workflows, avoiding duplicate general automation across synced devices.
+- Existing enablement, `Auto-apply on file open`, rule precedence, exclusions, user-edit guards, and clear-on-no-match behavior are preserved. No settings or note schema changed; minimum supported Obsidian remains 1.10.0.
+
 ## 1.24.1
 
 - GCM no longer injects, reorders, deduplicates, or otherwise changes context menus opened inside the upstream/non-TPS Notebook Navigator. Both its global Menu display patch and Obsidian `file-menu`/`files-menu` listeners explicitly yield to that view.

@@ -389,7 +389,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             }
             // Update checklist property for the newly opened note
             if (file instanceof TFile) {
-                if (plugin.canRunBackgroundAutomation() && plugin.notebookNavigatorRuleService.shouldAutoApplyOnFileOpen()) {
+                if (plugin.notebookNavigatorRuleService.shouldAutoApplyOnFileOpen()) {
                     logger.perf('file-open:scheduleNotebookNavigatorRules', { file: file.path });
                     plugin.notebookNavigatorRuleService.scheduleApply(file, {
                         reason: 'file-open',

@@ -17,6 +17,10 @@ const ruleSettingsSource = readFileSync(
   new URL('../src/notebook-navigator-settings/rules-section.ts', import.meta.url),
   'utf8',
 );
+const registerEventsSource = readFileSync(
+  new URL('../src/events/register-events.ts', import.meta.url),
+  'utf8',
+);
 
 function sourceBlock(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
@@ -252,6 +256,31 @@ test('sort writer preserves the unmatched fallback even with the legacy clear to
     context(),
   );
   assert.equal(noEnabledBuckets, null, 'the legacy clear toggle remains meaningful only with no enabled buckets');
+});
+
+test('note-open visual rules run locally without taking controller-owned sort and hide writes', () => {
+  const fileOpenGate = sourceBlock(
+    registerEventsSource,
+    "plugin.app.workspace.on('file-open'",
+    '// ── Reactive completedDate sync',
+  );
+  const applyBlock = sourceBlock(
+    serviceSource,
+    'async applyRulesToFile(',
+    'markUserEdited(',
+  );
+
+  assert.match(fileOpenGate, /shouldAutoApplyOnFileOpen\(\)/u);
+  assert.doesNotMatch(
+    fileOpenGate.match(/if \(file instanceof TFile\)[\s\S]*?scheduleApply\(file,[\s\S]*?\}\);/u)?.[0] || '',
+    /canRunBackgroundAutomation/u,
+  );
+  assert.match(serviceSource, /options\.reason === 'file-open'\s*\? 75/u);
+  assert.match(serviceSource, /requiresControllerAutomation\(options\.reason\)/u);
+  assert.match(serviceSource, /reason !== 'file-open'/u);
+  assert.match(applyBlock, /if \(options\.reason !== 'file-open'\) \{[\s\S]*computeSortKey[\s\S]*applyHideTagMutations/u);
+  assert.match(applyBlock, /applyScalarMutation\(frontmatter, iconField/u);
+  assert.match(applyBlock, /applyScalarMutation\(frontmatter, colorField/u);
 });
 
 test('zero enabled buckets produce no synthetic sort key', () => {

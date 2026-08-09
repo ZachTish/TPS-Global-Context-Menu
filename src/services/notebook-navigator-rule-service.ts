@@ -56,7 +56,6 @@ export class NotebookNavigatorRuleService {
   }
 
   shouldAutoApplyOnFileOpen(): boolean {
-    if (!this.plugin.canRunBackgroundAutomation()) return false;
     const settings = this.getSettings();
     return !!settings?.enabled && settings.autoApplyOnFileOpen !== false;
   }
@@ -90,11 +89,11 @@ export class NotebookNavigatorRuleService {
 
   scheduleApply(file: TFile, options: ApplyOptions = {}): void {
     if (!this.canApplyToFile(file)) return;
-    if (this.isAutomaticReason(options.reason) && !this.plugin.canRunBackgroundAutomation()) return;
+    if (this.requiresControllerAutomation(options.reason) && !this.plugin.canRunBackgroundAutomation()) return;
     const delay = options.reason === 'metadata-change'
       ? this.getMetadataDebounceMs()
       : options.reason === 'file-open'
-        ? 2000
+        ? 75
       : options.reason === 'create'
         ? 2200
         : 250;
@@ -131,7 +130,7 @@ export class NotebookNavigatorRuleService {
   async applyRulesToFile(file: TFile, options: ApplyOptions = {}): Promise<boolean> {
     if (!this.canApplyToFile(file)) return false;
     if (!this.isReady()) return false;
-    if (this.isAutomaticReason(options.reason) && !this.plugin.canRunBackgroundAutomation()) return false;
+    if (this.requiresControllerAutomation(options.reason) && !this.plugin.canRunBackgroundAutomation()) return false;
     if (this.shouldIgnore(file, options)) return false;
 
     const settings = this.getSettings();
@@ -160,12 +159,16 @@ export class NotebookNavigatorRuleService {
         this.applyScalarMutation(frontmatter, colorField, desiredColor);
       }
 
-      const sortKey = this.computeSortKey(ruleEngine, settings, context);
-      if (sortKey !== undefined) {
-        this.applyScalarMutation(frontmatter, settings.smartSort?.field || 'sort', sortKey);
-      }
+      // Opening a note is a latency-sensitive, device-local visual refresh.
+      // Controller-owned sweeps and metadata automation retain sort/hide writes.
+      if (options.reason !== 'file-open') {
+        const sortKey = this.computeSortKey(ruleEngine, settings, context);
+        if (sortKey !== undefined) {
+          this.applyScalarMutation(frontmatter, settings.smartSort?.field || 'sort', sortKey);
+        }
 
-      this.applyHideTagMutations(ruleEngine, settings, context, frontmatter);
+        this.applyHideTagMutations(ruleEngine, settings, context, frontmatter);
+      }
     });
     logger.perf('notebookRules:applyRulesToFile', {
       file: file.path,
@@ -316,6 +319,10 @@ export class NotebookNavigatorRuleService {
 
   private isAutomaticReason(reason: string | undefined): boolean {
     return reason === 'file-open' || reason === 'metadata-change' || !reason;
+  }
+
+  private requiresControllerAutomation(reason: string | undefined): boolean {
+    return this.isAutomaticReason(reason) && reason !== 'file-open';
   }
 
   private isNavigationTextInputActive(): boolean {
