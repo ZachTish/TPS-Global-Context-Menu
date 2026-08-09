@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.23.1
+
+- Calendar task status changes now re-resolve a rendered task by its unique authored `scheduled`, `start`, or `date` locator when unrelated line metadata changed after the calendar row was rendered.
+- Exact source lines and stable `tpsId`/`subitemId` identities remain higher priority. Duplicate calendar locators, rescheduled tasks, changed checkbox tokens, and changed status mappings still fail closed rather than updating a potentially wrong task.
+- No settings or note schema changed. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.23.0
 
 - Free-text task tag editors now show filtered existing vault-tag suggestions beneath the input on desktop and mobile. Tapping or clicking a suggestion fills the field; Enter saves exactly the typed value and never accepts a suggestion implicitly.

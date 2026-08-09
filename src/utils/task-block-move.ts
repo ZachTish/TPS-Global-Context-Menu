@@ -67,6 +67,24 @@ export function findCurrentTaskLineIndex(lines: string[], preferredIndex: number
   }
   if (ambiguousIdentity) return -1;
 
+  // Calendar rows can remain mounted while non-identity metadata on the task
+  // line changes (for example an automatic modified timestamp). Re-resolve a
+  // repeated-title task by its authored calendar locator before falling back
+  // to title-only matching. Every populated locator must still match and the
+  // result must be unique, so a moved/rescheduled or duplicated task fails
+  // closed instead of receiving the mutation.
+  const calendarIdentity = ['scheduled', 'start', 'date']
+    .map((key) => [key, readInlineFieldValue(sourceRawLine, key)] as const)
+    .filter((entry): entry is readonly [string, string] => Boolean(entry[1]));
+  if (calendarIdentity.length > 0) {
+    const calendarMatches = findTaskLineIndexes(
+      lines,
+      (line) => calendarIdentity.every(([key, value]) => readInlineFieldValue(line, key) === value),
+    );
+    if (calendarMatches.length === 1) return calendarMatches[0];
+    if (calendarMatches.length > 1) return -1;
+  }
+
   const normalizedTitle = normalizeTaskText(getPlainTaskTitle(title));
   if (!normalizedTitle) return -1;
   const titleMatches = findTaskLineIndexes(

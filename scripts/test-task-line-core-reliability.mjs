@@ -203,6 +203,32 @@ test('task relocation uses exact and stable identities and refuses ambiguous fal
   assert.equal(findCurrentTaskLineIndex(['before', exact], 1, exact, 'Exact task'), 1);
   assert.equal(findCurrentTaskLineIndex([exact, 'before'], 1, exact, 'Exact task'), 0);
 
+  const staleCalendarTask = '- [ ] Daily Standup [scheduled:: 2026-08-14 09:00] [modified:: old]';
+  assert.equal(
+    findCurrentTaskLineIndex(
+      [
+        '- [ ] Daily Standup [scheduled:: 2026-08-13 09:00] [modified:: current]',
+        '- [ ] Daily Standup [scheduled:: 2026-08-14 09:00] [modified:: current]',
+      ],
+      9,
+      staleCalendarTask,
+      'Daily Standup',
+    ),
+    1,
+  );
+  assert.equal(
+    findCurrentTaskLineIndex(
+      [
+        '- [ ] Daily Standup [scheduled:: 2026-08-14 09:00] [modified:: one]',
+        '- [ ] Daily Standup [scheduled:: 2026-08-14 09:00] [modified:: two]',
+      ],
+      9,
+      staleCalendarTask,
+      'Daily Standup',
+    ),
+    -1,
+  );
+
   const staleById = '- [ ] Original title [tpsId:: stable_1]';
   assert.equal(
     findCurrentTaskLineIndex(['- [ ] Renamed elsewhere [tpsId:: stable_1]'], 4, staleById, 'Original title'),
