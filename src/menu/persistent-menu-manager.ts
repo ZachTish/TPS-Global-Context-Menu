@@ -94,10 +94,13 @@ export class PersistentMenuManager {
   private noteReferencesPanels: Map<MarkdownView, HTMLElement> = new Map();
   private noteGraphPanels: Map<MarkdownView, HTMLElement> = new Map();
   private titleIcons: Map<MarkdownView, HTMLElement> = new Map();
+  private topSurfaceHosts: Map<MarkdownView, HTMLElement> = new Map();
   private topParentNavs: Map<MarkdownView, HTMLElement> = new Map();
   private bottomParentNavs: Map<MarkdownView, HTMLElement> = new Map();
-  private linkedContextPanels: Map<MarkdownView, { el: HTMLElement; component: Component; signature: string }> = new Map();
-  private linkedContextRequestIds: Map<MarkdownView, number> = new Map();
+  private linkedContextPanels: Map<MarkdownView, { el: HTMLElement; component: Component; signature: string; requestKey: string }> = new Map();
+  private linkedContextRequestIds: WeakMap<MarkdownView, number> = new WeakMap();
+  private linkedContextCollections: Map<string, Promise<LinkedContextItem[]>> = new Map();
+  private linkedContextRenders: Map<MarkdownView, { requestKey: string; promise: Promise<void> }> = new Map();
   private readonly linkedContextService: LinkedContextService;
   private nativePropertyInitializationInFlight: Set<string> = new Set();
   private nativePropertyObservers: Map<MarkdownView, MutationObserver> = new Map();
@@ -568,7 +571,11 @@ export class PersistentMenuManager {
       for (const view of Array.from(this.bottomParentNavs.keys())) {
         this.removeBottomParentNav(view);
       }
-      for (const view of Array.from(this.linkedContextPanels.keys())) {
+      const linkedContextViews = new Set([
+        ...this.linkedContextPanels.keys(),
+        ...this.linkedContextRenders.keys(),
+      ]);
+      for (const view of linkedContextViews) {
         this.removeLinkedContextPanel(view);
       }
       return;
@@ -655,58 +662,183 @@ export class PersistentMenuManager {
         this.removeBottomParentNav(view);
       }
     }
-    for (const view of Array.from(this.linkedContextPanels.keys())) {
+    const linkedContextViews = new Set([
+      ...this.linkedContextPanels.keys(),
+      ...this.linkedContextRenders.keys(),
+    ]);
+    for (const view of linkedContextViews) {
       if (!activeViews.has(view)) this.removeLinkedContextPanel(view);
+    }
+    for (const [view, host] of Array.from(this.topSurfaceHosts.entries())) {
+      if (!activeViews.has(view)) {
+        host.remove();
+        this.topSurfaceHosts.delete(view);
+      }
     }
   }
 
-  private removeLinkedContextPanel(view: MarkdownView): void {
+  private cancelLinkedContextRender(view: MarkdownView): void {
     this.linkedContextRequestIds.set(view, (this.linkedContextRequestIds.get(view) || 0) + 1);
+    this.linkedContextRenders.delete(view);
+  }
+
+  private unmountLinkedContextPanel(view: MarkdownView, options: { preserveMountHosts?: boolean } = {}): void {
     const mounted = this.linkedContextPanels.get(view);
     mounted?.component.unload();
     mounted?.el.remove();
     this.linkedContextPanels.delete(view);
     view.contentEl?.querySelectorAll<HTMLElement>('.tps-gcm-linked-context-panel').forEach((el) => el.remove());
+    if (options.preserveMountHosts !== true) {
+      this.removeEmptyTopSurfaceHost(view);
+      this.removeEmptyNoteFooterHosts(view);
+    }
+  }
+
+  private removeLinkedContextPanel(view: MarkdownView): void {
+    this.cancelLinkedContextRender(view);
+    this.unmountLinkedContextPanel(view);
+  }
+
+  private getLinkedContextRequestKey(view: MarkdownView, file: TFile): string {
+    const resolvedLinks = this.plugin.app.metadataCache.resolvedLinks || {};
+    const sourceVersions = Object.keys(resolvedLinks)
+      .filter((sourcePath) => sourcePath !== file.path && resolvedLinks[sourcePath]?.[file.path] > 0)
+      .sort((a, b) => a.localeCompare(b))
+      .map((sourcePath) => {
+        const sourceFile = this.plugin.app.vault.getAbstractFileByPath(sourcePath);
+        const linkCount = resolvedLinks[sourcePath]?.[file.path] || 0;
+        return `${sourcePath}:${sourceFile instanceof TFile ? sourceFile.stat.mtime : 0}:${linkCount}`;
+      })
+      .join('|');
+    const placement = this.plugin.settings.linkedContextPlacement === 'top' ? 'top' : 'bottom';
+    const behavior = String(this.plugin.settings.linkedContextOpenBehavior || 'same-tab');
+    return `${file.path}:${this.getViewModeSignature(view)}:${placement}:${behavior}:${sourceVersions}`;
+  }
+
+  private isLinkedContextRenderCurrent(
+    view: MarkdownView,
+    file: TFile,
+    requestId: number,
+    requestKey: string,
+  ): boolean {
+    return this.linkedContextRequestIds.get(view) === requestId
+      && view.file?.path === file.path
+      && this.plugin.settings.enableInlinePersistentMenus === true
+      && this.plugin.settings.enableLinkedContextPanel === true
+      && this.getLinkedContextRequestKey(view, file) === requestKey;
+  }
+
+  private getLinkedContextItems(requestKey: string, file: TFile): Promise<LinkedContextItem[]> {
+    const current = this.linkedContextCollections.get(requestKey);
+    if (current) return current;
+
+    const collection = this.linkedContextService.collect(file).finally(() => {
+      if (this.linkedContextCollections.get(requestKey) === collection) {
+        this.linkedContextCollections.delete(requestKey);
+      }
+    });
+    this.linkedContextCollections.set(requestKey, collection);
+    return collection;
   }
 
   private async ensureLinkedContextPanel(view: MarkdownView): Promise<void> {
     const file = view.file;
-    if (!this.plugin.settings.enableLinkedContextPanel || !(file instanceof TFile)) {
+    if (
+      this.plugin.settings.enableInlinePersistentMenus !== true
+      || this.plugin.settings.enableLinkedContextPanel !== true
+      || !(file instanceof TFile)
+    ) {
       this.removeLinkedContextPanel(view);
       return;
     }
+    const requestKey = this.getLinkedContextRequestKey(view, file);
+    const mounted = this.linkedContextPanels.get(view);
+    if (mounted?.requestKey === requestKey && mounted.el.isConnected) return;
+
+    const inFlight = this.linkedContextRenders.get(view);
+    if (inFlight?.requestKey === requestKey) {
+      await inFlight.promise;
+      return;
+    }
+
     const requestId = (this.linkedContextRequestIds.get(view) || 0) + 1;
     this.linkedContextRequestIds.set(view, requestId);
+    const renderPromise = this.renderLinkedContextPanel(view, file, requestId, requestKey);
+    const trackedPromise = renderPromise.finally(() => {
+      if (this.linkedContextRenders.get(view)?.promise === trackedPromise) {
+        this.linkedContextRenders.delete(view);
+      }
+    });
+    this.linkedContextRenders.set(view, { requestKey, promise: trackedPromise });
+    await trackedPromise;
+  }
+
+  private async renderLinkedContextPanel(
+    view: MarkdownView,
+    file: TFile,
+    requestId: number,
+    requestKey: string,
+  ): Promise<void> {
+    let candidateComponent: Component | null = null;
+    let candidatePanel: HTMLElement | null = null;
+    let committed = false;
     try {
-      const items = await this.linkedContextService.collect(file);
-      if (this.linkedContextRequestIds.get(view) !== requestId || view.file?.path !== file.path) return;
+      const items = await this.getLinkedContextItems(requestKey, file);
+      if (!this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
       if (items.length === 0) {
-        this.removeLinkedContextPanel(view);
+        this.unmountLinkedContextPanel(view);
         return;
       }
-      const signature = `${file.path}:${this.plugin.settings.linkedContextPlacement}:${this.plugin.settings.linkedContextOpenBehavior}:${items.map((item) => `${item.id}:${item.sourceFile.stat.mtime}`).join('|')}`;
+      const signature = `${requestKey}:${items.map((item) => `${item.id}:${item.sourceFile.stat.mtime}`).join('|')}`;
       const current = this.linkedContextPanels.get(view);
-      if (current?.signature === signature && current.el.isConnected) return;
-      this.removeLinkedContextPanel(view);
+      if (current?.signature === signature && current.el.isConnected) {
+        current.requestKey = requestKey;
+        return;
+      }
 
       const placement = this.plugin.settings.linkedContextPlacement === 'top' ? 'top' : 'bottom';
-      const anchor = placement === 'top' ? this.resolveInlineSubitemsAnchor(view) : null;
-      const parent = anchor?.parent || this.resolveNoteFooterParent(view);
-      if (!parent) return;
-      const component = new Component();
-      component.load();
-      const panel = document.createElement('section');
-      panel.className = `tps-gcm-linked-context-panel tps-gcm-linked-context-panel--${placement}`;
-      panel.contentEditable = 'false';
-      panel.setAttribute('aria-label', 'Linked context');
-      panel.createEl('h4', { text: 'Linked context', cls: 'tps-gcm-linked-context-heading' });
-      for (const item of items) await this.renderLinkedContextItem(panel, component, item, file);
-      if (anchor) anchor.parent.insertBefore(panel, anchor.reference);
-      else parent.appendChild(panel);
-      this.linkedContextPanels.set(view, { el: panel, component, signature });
+      candidateComponent = new Component();
+      candidateComponent.load();
+      candidatePanel = document.createElement('section');
+      candidatePanel.className = `tps-gcm-linked-context-panel tps-gcm-linked-context-panel--${placement}`;
+      candidatePanel.contentEditable = 'false';
+      candidatePanel.setAttribute('aria-label', 'Linked context');
+      candidatePanel.createEl('h4', { text: 'Linked context', cls: 'tps-gcm-linked-context-heading' });
+      for (const item of items) {
+        await this.renderLinkedContextItem(candidatePanel, candidateComponent, item, file);
+        if (!this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
+      }
+
+      if (!this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
+      const parent = this.resolveLinkedContextMount(view, placement);
+      if (!parent || !this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
+
+      this.unmountLinkedContextPanel(view, { preserveMountHosts: true });
+      if (!parent.isConnected || !this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
+      parent.appendChild(candidatePanel);
+      this.linkedContextPanels.set(view, {
+        el: candidatePanel,
+        component: candidateComponent,
+        signature,
+        requestKey,
+      });
+      committed = true;
+      if (placement === 'bottom') this.removeEmptyTopSurfaceHost(view);
+      else this.removeEmptyNoteFooterHosts(view);
     } catch (error) {
       logger.warn('[TPS GCM] Failed to render linked context', { file: file.path, error });
+    } finally {
+      if (!committed) {
+        this.disposeLinkedContextCandidate(candidateComponent, candidatePanel);
+        this.removeEmptyTopSurfaceHost(view);
+        this.removeEmptyNoteFooterHosts(view);
+      }
     }
+  }
+
+  private disposeLinkedContextCandidate(component: Component | null, panel: HTMLElement | null): void {
+    component?.unload();
+    panel?.remove();
   }
 
   private async renderLinkedContextItem(
@@ -1134,93 +1266,93 @@ export class PersistentMenuManager {
     return false;
   }
 
-  private resolveInlineSubitemsAnchor(view: MarkdownView): { parent: HTMLElement; reference: Element | null; titleEl?: Element | null } | null {
+  private resolveLinkedContextMount(view: MarkdownView, placement: 'top' | 'bottom'): HTMLElement | null {
+    return placement === 'top'
+      ? this.resolveLinkedContextTopHost(view)
+      : this.resolveNoteFooterParent(view);
+  }
+
+  private resolveLinkedContextTopHost(view: MarkdownView): HTMLElement | null {
+    const host = this.ensureTopSurfaceHost(view);
+    if (!host) return null;
+
+    // Tasks/Mentions navigation always occupies the first owned slot. Linked Context
+    // appends after it, so repeated refreshes cannot swap the two surfaces.
+    const nav = this.topParentNavs.get(view)
+      || host.querySelector<HTMLElement>(':scope > .tps-gcm-top-parent-nav');
+    if (nav?.isConnected && nav.parentElement === host && host.firstElementChild !== nav) {
+      host.prepend(nav);
+    }
+    return host;
+  }
+
+  private ensureTopSurfaceHost(view: MarkdownView): HTMLElement | null {
     const contentRoot = view.contentEl;
     if (!contentRoot) return null;
 
     const mode = getViewMode(view);
     if (!mode) return null;
+    const titleEl = this.resolveInlineTitleElement(view);
+    let parent = titleEl?.parentElement || null;
+    let reference: Element | null = titleEl?.nextElementSibling || null;
 
-    if (mode === 'preview') {
-      const previewView = contentRoot.querySelector<HTMLElement>('.markdown-preview-view');
-      if (!previewView) return null;
-      const previewSizer = previewView.querySelector<HTMLElement>('.markdown-preview-sizer');
-      if (!previewSizer) return null;
-
-      // In reading mode the panel is in-document-flow, directly after the title.
-      // Walk direct children of previewSizer to find the title/heading element.
-      const directChildren = Array.from(previewSizer.children) as HTMLElement[];
-
-      // Prefer inline-title as the anchor (Obsidian's inline-title feature)
-      const inlineTitleEl = directChildren.find(
-        (el) => el.classList.contains('inline-title') || el.dataset.type === 'inline-title'
+    if (mode === 'preview' && !parent) {
+      const previewSizer = contentRoot.querySelector<HTMLElement>(
+        '.markdown-preview-view .markdown-preview-sizer'
       );
-      if (inlineTitleEl) {
-        const idx = directChildren.indexOf(inlineTitleEl);
-        const nextSibling = directChildren[idx + 1] || null;
-        // Skip over any existing panel that might already be there
-        const refEl = (nextSibling && nextSibling.classList.contains('tps-gcm-subitems-panel'))
-          ? (directChildren[directChildren.indexOf(nextSibling) + 1] || null)
-          : nextSibling;
-        return { parent: previewSizer, reference: refEl, titleEl: inlineTitleEl };
+      if (previewSizer) {
+        parent = previewSizer;
+        reference = previewSizer.firstElementChild;
       }
-
-      // Fallback: after first h1 or h2
-      const firstHeading = directChildren.find(
-        (el) => el.tagName === 'H1' || el.tagName === 'H2'
-      );
-      if (firstHeading) {
-        const idx = directChildren.indexOf(firstHeading);
-        const nextSibling = directChildren[idx + 1] || null;
-        const refEl = (nextSibling && nextSibling.classList.contains('tps-gcm-subitems-panel'))
-          ? (directChildren[directChildren.indexOf(nextSibling) + 1] || null)
-          : nextSibling;
-        return { parent: previewSizer, reference: refEl, titleEl: firstHeading };
-      }
-
-      // Last fallback: prepend at top of preview sizer (no title found yet, retry later)
-      return {
-        parent: previewSizer,
-        reference: directChildren[0] || null,
-        titleEl: null,
-      };
-    }
-
-    if (mode === 'source') {
+    } else if (mode === 'source') {
       const sourceView = contentRoot.querySelector<HTMLElement>('.markdown-source-view');
-      if (!sourceView) return null;
-
-      const sizer = sourceView.querySelector<HTMLElement>('.cm-sizer') ||
-        sourceView.querySelector<HTMLElement>('.cm-content');
-
-      if (!sizer) return null;
-
-      // Search for the Inline Title within the CodeMirror sizer/content
-      const inlineTitleEl =
-        sizer.querySelector<HTMLElement>('.inline-title') ||
-        sizer.querySelector<HTMLElement>('.cm-line.inline-title');
-
-      if (inlineTitleEl) {
-        // If we found the title, we want to insert AFTER it.
-        // Note for CodeMirror: We are inserting into the DOM managed by CM.
-        // This is visually correct but might be fragile. 
-        // We anchor to the parent container (.cm-sizer usually)
-        return {
-          parent: inlineTitleEl.parentElement as HTMLElement,
-          reference: inlineTitleEl.nextElementSibling, // Insert before the next sibling (line 1)
-          titleEl: inlineTitleEl
-        };
+      const sizer = sourceView?.querySelector<HTMLElement>('.cm-sizer') || null;
+      const codeMirrorContent = titleEl?.closest<HTMLElement>('.cm-content') || null;
+      if (sizer && (!titleEl || codeMirrorContent)) {
+        parent = sizer;
+        reference = codeMirrorContent
+          || sizer.querySelector<HTMLElement>(':scope > [role="textbox"]')
+          || sizer.firstElementChild;
       }
-
-      // Fallback: no inline title found? Prepend to top of sizer
-      return {
-        parent: sizer,
-        reference: sizer.firstElementChild,
-        titleEl: null
-      };
     }
 
-    return null;
+    if (!parent) return null;
+    const discovered = Array.from(
+      contentRoot.querySelectorAll<HTMLElement>('.tps-gcm-title-surface-host')
+    );
+    let host = this.topSurfaceHosts.get(view) || null;
+    if (!host?.isConnected) host = discovered[0] || null;
+    for (const stray of discovered) {
+      if (stray !== host) stray.remove();
+    }
+
+    if (!host) {
+      host = document.createElement('div');
+      host.className = 'tps-gcm-title-surface-host';
+      host.contentEditable = 'false';
+    }
+    const alreadyPositioned = host.parentElement === parent
+      && (reference === host || host.nextElementSibling === reference);
+    if (!alreadyPositioned) parent.insertBefore(host, reference);
+    this.topSurfaceHosts.set(view, host);
+    return host;
+  }
+
+  private removeEmptyTopSurfaceHost(view: MarkdownView): void {
+    const host = this.topSurfaceHosts.get(view);
+    if (host && !host.children.length) {
+      host.remove();
+      this.topSurfaceHosts.delete(view);
+    }
+    view.contentEl?.querySelectorAll<HTMLElement>('.tps-gcm-title-surface-host').forEach((candidate) => {
+      if (!candidate.children.length) candidate.remove();
+    });
+  }
+
+  private removeEmptyNoteFooterHosts(view: MarkdownView): void {
+    view.contentEl?.querySelectorAll<HTMLElement>('.tps-gcm-note-footer-host').forEach((host) => {
+      if (!host.children.length) host.remove();
+    });
   }
 
   private resolveNoteFooterParent(view: MarkdownView): HTMLElement | null {
@@ -1233,10 +1365,9 @@ export class PersistentMenuManager {
     }
 
     if (mode === 'source') {
-      // In live preview, prefer mounting under CM content so we can place references
-      // relative to the last rendered line (instead of viewport bottom).
+      // Keep plugin-owned DOM outside CodeMirror's editable .cm-content. A direct
+      // .cm-sizer child still follows the note content without being reconciled as text.
       const hostRoot =
-        contentRoot.querySelector<HTMLElement>('.cm-content') ||
         contentRoot.querySelector<HTMLElement>('.cm-sizer') ||
         contentRoot.querySelector<HTMLElement>('.cm-contentContainer') ||
         contentRoot.querySelector<HTMLElement>('.cm-scroller');
@@ -3661,6 +3792,11 @@ export class PersistentMenuManager {
       }
       return;
     }
+    const topSurfaceHost = this.ensureTopSurfaceHost(view);
+    if (!topSurfaceHost) {
+      this.removeTopParentNav(view, { reserveFootprint: false });
+      return;
+    }
 
     const scheduledDate = this.getScheduledDateForFile(file);
     const showScheduledButton = showTopNavigation && relationshipPlacement === 'top' && scheduledDate !== null;
@@ -3683,14 +3819,14 @@ export class PersistentMenuManager {
       existing?.isConnected &&
       existing.dataset.filePath === file.path &&
       existing.dataset.signature === signature &&
-      existing.parentElement === titleEl.parentElement &&
-      existing.previousElementSibling === titleEl
+      existing.parentElement === topSurfaceHost &&
+      topSurfaceHost.firstElementChild === existing
     ) {
       this.ensureBottomParentNav(view);
       return;
     }
 
-    this.removeTopParentNav(view, { reserveFootprint: false });
+    this.removeTopParentNav(view, { reserveFootprint: false, preserveTopHost: true });
 
     const container = document.createElement('div');
     container.className = 'tps-gcm-top-parent-nav';
@@ -3726,7 +3862,7 @@ export class PersistentMenuManager {
       view.contentEl.classList.remove('tps-gcm-stacked-properties-active');
     }
 
-    titleEl.parentElement?.insertBefore(container, titleEl.nextElementSibling);
+    topSurfaceHost.prepend(container);
     this.topParentNavs.set(view, container);
     this.ensureBottomParentNav(view);
   }
@@ -3856,20 +3992,6 @@ export class PersistentMenuManager {
   private createRelationshipNavButtons(view: MarkdownView, file: TFile, placement: 'top' | 'bottom'): HTMLElement[] {
     const parentFiles = this.resolveParentFiles(file);
     const childFiles = this.resolveChildFiles(file);
-    const relationshipPaths = this.getParentChildRelationshipPaths(file, parentFiles);
-    const embeddedTargets = this.getEmbeddedMarkdownTargetPaths(file);
-    const promotedChecklistTargets = this.plugin.settings.ignoreEmbeddedChildrenInTopLinks
-      ? this.getPromotedChecklistLinkedTargetPaths(file)
-      : null;
-    const { incoming: rawIncoming, outgoing: rawOutgoing } = this.getDirectLinks(file);
-    const incoming = rawIncoming.filter((linkFile) => !relationshipPaths.has(linkFile.path));
-    const outgoing = rawOutgoing.filter((linkFile) => {
-      if (relationshipPaths.has(linkFile.path)) return false;
-      if (embeddedTargets?.has(linkFile.path)) return false;
-      if (promotedChecklistTargets?.has(linkFile.path)) return false;
-      return true;
-    });
-    const totalLinks = incoming.length + outgoing.length;
     const className = `tps-gcm-parent-nav-button tps-gcm-parent-nav-button--${placement}`;
     const buttons: HTMLElement[] = [];
 
@@ -3889,7 +4011,6 @@ export class PersistentMenuManager {
     });
 
     buttons.push(tasksButton);
-    void this.refreshNoteTasksButtonLabel(file, tasksLabel, tasksButton);
 
     buttons.push(...this.createExternalActionButtons(file, placement, className));
 
@@ -3913,39 +4034,36 @@ export class PersistentMenuManager {
       void this.refreshTopChildrenButtonLabel(file, childrenLabel, childrenButton);
     }
 
-    if (totalLinks > 0) {
-      const linksButton = document.createElement('button');
-      linksButton.type = 'button';
-      linksButton.className = className;
-      linksButton.title = 'View links and mentions';
-      setIcon(linksButton, 'link');
+    const linksButton = document.createElement('button');
+    linksButton.type = 'button';
+    linksButton.className = className;
+    linksButton.title = 'View links and mentions';
+    setIcon(linksButton, 'link');
 
-      const linksLabel = document.createElement('span');
-      linksLabel.className = 'tps-gcm-parent-nav-label';
-      linksLabel.textContent = totalLinks === 1 ? '1 Mention' : `${totalLinks} Mentions`;
-      linksButton.appendChild(linksLabel);
+    const linksLabel = document.createElement('span');
+    linksLabel.className = 'tps-gcm-parent-nav-label';
+    linksLabel.textContent = 'Mentions';
+    linksButton.appendChild(linksLabel);
 
-      addSafeClickListener(linksButton, () => {
-        const latestParents = this.resolveParentFiles(file);
-        const latestRelationshipPaths = this.getParentChildRelationshipPaths(file, latestParents);
-        const latestEmbeddedTargets = this.getEmbeddedMarkdownTargetPaths(file);
-        const latestPromotedChecklistTargets = this.plugin.settings.ignoreEmbeddedChildrenInTopLinks
-          ? this.getPromotedChecklistLinkedTargetPaths(file)
-          : null;
-        const { incoming: refreshedIncoming, outgoing: refreshedOutgoing } = this.getDirectLinks(file);
-        const currentIncoming = refreshedIncoming.filter((linkFile) => !latestRelationshipPaths.has(linkFile.path));
-        const currentOutgoing = refreshedOutgoing.filter((linkFile) => {
-          if (latestRelationshipPaths.has(linkFile.path)) return false;
-          if (latestEmbeddedTargets?.has(linkFile.path)) return false;
-          if (latestPromotedChecklistTargets?.has(linkFile.path)) return false;
-          return true;
-        });
-        this.toggleTopLinksPopover(linksButton, file, currentOutgoing, currentIncoming);
+    addSafeClickListener(linksButton, () => {
+      const latestParents = this.resolveParentFiles(file);
+      const latestRelationshipPaths = this.getParentChildRelationshipPaths(file, latestParents);
+      const latestEmbeddedTargets = this.getEmbeddedMarkdownTargetPaths(file);
+      const latestPromotedChecklistTargets = this.plugin.settings.ignoreEmbeddedChildrenInTopLinks
+        ? this.getPromotedChecklistLinkedTargetPaths(file)
+        : null;
+      const { incoming: refreshedIncoming, outgoing: refreshedOutgoing } = this.getDirectLinks(file);
+      const currentIncoming = refreshedIncoming.filter((linkFile) => !latestRelationshipPaths.has(linkFile.path));
+      const currentOutgoing = refreshedOutgoing.filter((linkFile) => {
+        if (latestRelationshipPaths.has(linkFile.path)) return false;
+        if (latestEmbeddedTargets?.has(linkFile.path)) return false;
+        if (latestPromotedChecklistTargets?.has(linkFile.path)) return false;
+        return true;
       });
+      this.toggleTopLinksPopover(linksButton, file, currentOutgoing, currentIncoming);
+    });
 
-      buttons.push(linksButton);
-      void this.refreshTopLinksButtonLabel(file, linksLabel, linksButton);
-    }
+    buttons.push(linksButton);
 
     if (parentFiles.length > 0) {
       const parentButton = document.createElement('button');
@@ -4678,32 +4796,6 @@ export class PersistentMenuManager {
     return isStrictSourceMode(view);
   }
 
-  private async refreshTopLinksButtonLabel(file: TFile, labelEl: HTMLElement, buttonEl: HTMLElement): Promise<void> {
-    try {
-      const references = await this.plugin.menuController.getPanelBuilder().collectReferenceGroups(file);
-      if (!labelEl.isConnected || !buttonEl.isConnected) return;
-      const groupCount = references.outgoing.length + references.incoming.length + references.mentions.length;
-      const occurrenceCount = [...references.outgoing, ...references.incoming, ...references.mentions]
-        .reduce((count, group) => count + group.occurrences.length, 0);
-      const count = occurrenceCount || groupCount;
-      if (count > 0) {
-        buttonEl.parentElement?.style.removeProperty('display');
-        buttonEl.style.display = '';
-        labelEl.textContent = count === 1 ? '1 Mention' : `${count} Mentions`;
-        buttonEl.title = 'View links and mentions';
-      } else {
-        buttonEl.style.display = 'none';
-        if (buttonEl.parentElement?.querySelectorAll('button').length === 1) {
-          buttonEl.parentElement.style.display = 'none';
-        }
-        labelEl.textContent = '';
-        buttonEl.title = 'View links and mentions';
-      }
-    } catch (error) {
-      logger.warn('[TPS GCM] Failed refreshing top links label', { file: file.path, error });
-    }
-  }
-
   private async refreshTopChildrenButtonLabel(file: TFile, labelEl: HTMLElement, buttonEl: HTMLElement): Promise<void> {
     try {
       const children = await this.resolveChildFilesForTopButton(file);
@@ -4760,24 +4852,6 @@ export class PersistentMenuManager {
         : 'Open calendar at scheduled time';
     } catch (error) {
       logger.warn('[TPS GCM] Failed counting calendar items for scheduled day', { date, error });
-    }
-  }
-
-  private async refreshNoteTasksButtonLabel(file: TFile, labelEl: HTMLElement, buttonEl: HTMLElement): Promise<void> {
-    try {
-      const tasks = await this.collectTasksInFile(file);
-      if (!labelEl.isConnected || !buttonEl.isConnected) return;
-      if (tasks.length > 0) {
-        labelEl.textContent = tasks.length === 1 ? '1 Task' : `${tasks.length} Tasks`;
-        buttonEl.title = `View ${tasks.length} task${tasks.length === 1 ? '' : 's'} in this note`;
-        buttonEl.style.display = '';
-      } else {
-        labelEl.textContent = 'Tasks';
-        buttonEl.title = 'No tasks in this note';
-        buttonEl.style.display = 'none';
-      }
-    } catch (error) {
-      logger.warn('[TPS GCM] Failed counting note tasks', { file: file.path, error });
     }
   }
 
@@ -5560,7 +5634,10 @@ export class PersistentMenuManager {
     return ordered;
   }
 
-  private removeTopParentNav(view: MarkdownView, options: { reserveFootprint?: boolean } = {}): void {
+  private removeTopParentNav(
+    view: MarkdownView,
+    options: { reserveFootprint?: boolean; preserveTopHost?: boolean } = {},
+  ): void {
     this.hideTopLinkPreviewCard();
     this.hideTopLinksPopover();
     const navEl = this.topParentNavs.get(view);
@@ -5572,8 +5649,8 @@ export class PersistentMenuManager {
       this.topParentNavs.delete(view);
     }
     // Clean up any remaining ones just in case
-    const titleEl = this.resolveInlineTitleElement(view);
-    titleEl?.parentElement?.querySelectorAll('.tps-gcm-top-parent-nav').forEach(node => node.remove());
+    view.contentEl?.querySelectorAll('.tps-gcm-top-parent-nav').forEach(node => node.remove());
+    if (options.preserveTopHost !== true) this.removeEmptyTopSurfaceHost(view);
     view.contentEl.classList.remove('tps-gcm-stacked-properties-active');
   }
 
@@ -6810,11 +6887,21 @@ export class PersistentMenuManager {
     for (const view of Array.from(this.bottomParentNavs.keys())) {
       this.removeBottomParentNav(view);
     }
+    const linkedContextViews = new Set([
+      ...this.linkedContextPanels.keys(),
+      ...this.linkedContextRenders.keys(),
+    ]);
+    for (const view of linkedContextViews) {
+      this.removeLinkedContextPanel(view);
+    }
     this.calendarButtonTimerStates.clear();
     this.stopCalendarButtonTimerInterval();
     for (const view of Array.from(this.menus.keys())) {
       this.cleanup(view);
     }
+    for (const host of this.topSurfaceHosts.values()) host.remove();
+    this.topSurfaceHosts.clear();
+    this.linkedContextCollections.clear();
     for (const [view, state] of this.scrollHideListeners.entries()) {
       state.scroller.removeEventListener('scroll', state.listener);
       this.scrollHideListeners.delete(view);

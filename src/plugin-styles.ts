@@ -5309,6 +5309,12 @@ export const PLUGIN_STYLES = `
         stroke-width: 2.5px;
       }
 
+      .tps-gcm-title-surface-host {
+        display: block;
+        width: 100%;
+        min-width: 0;
+      }
+
       .tps-gcm-top-parent-nav {
         margin: calc(4px * var(--tps-gcm-density)) 0 calc(8px * var(--tps-gcm-density));
         display: flex;

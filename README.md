@@ -1,5 +1,14 @@
 # TPS Global Context Menu
 
+## 1.25.1
+
+- Opening a note no longer lets the **Tasks**, **Mentions**, and top **Linked context** surfaces compete for the same title-adjacent DOM position. GCM owns one stable host with deterministic navigation-first ordering, so forced metadata refreshes cannot swap or detach the panels.
+- Linked-context collection and Markdown rendering are coalesced for repeated same-view requests. Candidates render off-DOM, recheck the active file, view mode, settings, and source revisions after asynchronous work, and unload instead of mounting when stale. Inactive leaves, mode switches, settings changes, and plugin unload all cancel unfinished renders.
+- Live Preview keeps linked-context hosts outside CodeMirror's editable `.cm-content`. Reading mode also retains a title-less fallback, and a ready replacement host is resolved before the current panel is atomically swapped.
+- Note opening no longer reads the note to count Tasks or scans link/reference indexes to decide whether to show Mentions. Both buttons remain available with stable neutral labels; Tasks are read only when opened, and Mentions performs one deferred complete references scan after its popover is connected, including unlinked textual mentions.
+- This backward-compatible patch adds no settings or note-data migration. Minimum supported Obsidian remains 1.10.0.
+- The 15 focused Linked Context regressions, TypeScript validation, complete declared suite, and a separate production build passed. In reloaded Obsidian 1.13.6, 25 forced header rebuilds and 16 rapid alternating note opens retained one connected shared host/panel, stable ordering and panel identity, and no pending render across Reading and Live Preview. The final runtime matched source byte for byte; persisted test settings and notes remained unchanged.
+
 ## 1.25.0
 
 - Task API v2 is now the canonical task-block move transaction for GCM context menus, drag-and-drop, and cross-plugin consumers. Callers can explicitly request `migrate-if-daily-note` and strict `exact-or-identity` source resolution; omitted options retain the compatible remove-source and append-to-end behavior.

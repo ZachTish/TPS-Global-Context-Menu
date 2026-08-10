@@ -2726,10 +2726,9 @@ export class PanelBuilder {
     body.className = 'tps-gcm-note-references-body';
     section.appendChild(body);
 
-    void this.refreshNoteReferencesPanel(rootFile, body);
     window.setTimeout(() => {
       void this.refreshNoteReferencesPanel(rootFile, body);
-    }, 250);
+    }, 0);
 
     return section;
   }
