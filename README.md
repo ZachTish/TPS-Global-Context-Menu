@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.24.6
+
+- Calendar task status changes now keep the source checkbox token and the optimistic menu selection as separate values. The atomic write guard compares the live task against the token that was present when the menu opened, instead of comparing it against the newly selected destination token and rejecting every real transition as stale.
+- The same correction applies to mapped status choices and custom mapped checkbox values in the shared task context menu. Genuine edits, relocations, ambiguous tasks, changed mappings, and externally changed checkbox tokens still fail closed.
+- Focused regression coverage reproduces the exact unchecked-to-complete optimistic-selection sequence and verifies that the pre-click token reaches the compare-and-swap guard. No settings, task syntax, public API, or note schema changed; minimum supported Obsidian remains 1.10.0.
+
 ## 1.24.5
 
 - TPS List now treats each Base view's **Items without a group → Top / Bottom** setting as authoritative, even when that view has a saved manual lane order from an earlier arrangement.

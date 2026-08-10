@@ -760,7 +760,38 @@ test('task-menu checkbox mutations reject a relocated same-title task whose work
   assert.equal(isTaskCheckboxWorkflowTokenCurrent('[X]', '[x]'), true, 'canonical checked spellings are one workflow token');
   assert.match(
     serviceSource,
-    /options\.checkboxMutation === true[\s\S]{0,120}!isTaskCheckboxWorkflowTokenCurrent\(currentParsed\.token, context\.checkboxToken\)[\s\S]{0,40}return content/u,
+    /options\.checkboxMutation === true[\s\S]{0,120}!isTaskCheckboxWorkflowTokenCurrent\(currentParsed\.token, expectedCheckboxToken\)[\s\S]{0,40}return content/u,
+  );
+});
+
+test('optimistic task-menu status labels preserve the pre-click token for the atomic write guard', async () => {
+  const { isTaskCheckboxWorkflowTokenCurrent } = await importTaskCheckboxWorkflowUtility();
+  const context = { checkboxToken: '[ ]' };
+  const expectedCheckboxToken = context.checkboxToken;
+  context.checkboxToken = '[x]';
+
+  assert.equal(
+    isTaskCheckboxWorkflowTokenCurrent('[ ]', context.checkboxToken),
+    false,
+    'the optimistic display token is not the expected source token',
+  );
+  assert.equal(
+    isTaskCheckboxWorkflowTokenCurrent('[ ]', expectedCheckboxToken),
+    true,
+    'the captured pre-click token permits the unchanged source mutation',
+  );
+  assert.match(serviceSource, /expectedCheckboxToken\?: string/u);
+  assert.match(
+    serviceSource,
+    /const expectedCheckboxToken = options\.checkboxMutation === true[\s\S]{0,120}options\.expectedCheckboxToken \|\| context\.checkboxToken/u,
+  );
+  assert.ok(
+    (serviceSource.match(/expectedCheckboxToken: previousToken/gu) || []).length >= 2,
+    'mapped and custom context-menu status changes must guard against the pre-click token',
+  );
+  assert.doesNotMatch(
+    serviceSource,
+    /!isTaskCheckboxWorkflowTokenCurrent\(currentParsed\.token, context\.checkboxToken\)/u,
   );
 });
 

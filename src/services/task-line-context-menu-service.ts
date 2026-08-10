@@ -124,6 +124,7 @@ type TaskLineHighlightKind = 'active' | 'selected';
 type TaskLineUpdateOptions = {
   checkboxMutation?: boolean;
   expectedMappingSignature?: string;
+  expectedCheckboxToken?: string;
 };
 
 type TaskEditorPropertyDraft = {
@@ -1835,6 +1836,7 @@ export class TaskLineContextMenuService {
             void this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, mapping.checkboxState), {
               checkboxMutation: true,
               expectedMappingSignature,
+              expectedCheckboxToken: previousToken,
             }).then((updated) => {
               if (!updated) setSelectedToken(previousToken);
             });
@@ -1864,6 +1866,7 @@ export class TaskLineContextMenuService {
               const updated = await this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, ownedMapping.checkboxState), {
                 checkboxMutation: true,
                 expectedMappingSignature,
+                expectedCheckboxToken: previousToken,
               });
               if (!updated) setSelectedToken(previousToken);
             }).open();
@@ -2401,6 +2404,9 @@ export class TaskLineContextMenuService {
     const expectedMappingSignature = options.checkboxMutation === true
       ? options.expectedMappingSignature || this.getCheckboxMutationSignature()
       : '';
+    const expectedCheckboxToken = options.checkboxMutation === true
+      ? options.expectedCheckboxToken || context.checkboxToken
+      : '';
 
     try {
       await this.plugin.app.vault.process(context.file, (content) => {
@@ -2415,7 +2421,7 @@ export class TaskLineContextMenuService {
         if (!currentParsed) return content;
         if (
           options.checkboxMutation === true
-          && !isTaskCheckboxWorkflowTokenCurrent(currentParsed.token, context.checkboxToken)
+          && !isTaskCheckboxWorkflowTokenCurrent(currentParsed.token, expectedCheckboxToken)
         ) return content;
         let liveMappings: LinkedSubitemCheckboxMapping[] | null = null;
         if (options.checkboxMutation === true) {
