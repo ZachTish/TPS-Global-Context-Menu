@@ -1,4 +1,5 @@
 import {
+  findAfterFrontmatterIndex,
   getPlainTaskTitle,
   getTaskDisplayTitle,
   parseTaskLine,
@@ -124,10 +125,22 @@ export function insertTaskBlockAfterFrontmatter(content: string, blockLines: str
   const cleanBlock = normalizeBlockLines(blockLines);
   if (!cleanBlock.length) return { content, lineIndex: -1 };
   const nextLines = [...parts.lines];
+  const lineIndex = findAfterFrontmatterIndex(nextLines);
+  nextLines.splice(lineIndex, 0, ...cleanBlock);
+  return {
+    content: joinContent(nextLines, parts.newline, true),
+    lineIndex,
+  };
+}
+
+export function insertTaskBlockAtEnd(content: string, blockLines: string[]): { content: string; lineIndex: number } {
+  const parts = splitContent(content);
+  const cleanBlock = normalizeBlockLines(blockLines);
+  if (!cleanBlock.length) return { content, lineIndex: -1 };
+  const nextLines = [...parts.lines];
   while (nextLines.length > 0 && nextLines[nextLines.length - 1].trim() === '') nextLines.pop();
   const lineIndex = nextLines.length;
-  if (nextLines.length > 0) nextLines.push(...cleanBlock);
-  else nextLines.push(...cleanBlock);
+  nextLines.push(...cleanBlock);
   return {
     content: joinContent(nextLines, parts.newline, true),
     lineIndex,

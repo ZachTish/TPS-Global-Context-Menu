@@ -1,12 +1,6 @@
 import { MarkdownView, Notice, TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { getTaskDisplayTitle, parseTaskLine } from '../utils/task-line-metadata';
-import {
-  extractTaskBlock,
-  findCurrentTaskLineIndex,
-  joinContent,
-  splitContent,
-} from '../utils/task-block-move';
 
 export const TPS_TASK_LINE_MIME = 'application/x-tps-task-line';
 export const TPS_TASK_LINE_POINTER_DROP_EVENT = 'tps-task-line-pointer-drop';
@@ -278,74 +272,27 @@ export class TaskLineDragService {
     targetFile: TFile,
     targetLineIndex: number,
   ): Promise<boolean> {
-    const sourceContent = await this.plugin.app.vault.cachedRead(sourceFile);
-    const sourceLines = splitContent(sourceContent);
-    const sourceIndex = findCurrentTaskLineIndex(sourceLines.lines, payload.line - 1, payload.rawLine, payload.text);
-    if (sourceIndex < 0) {
-      new Notice('Could not resolve the dragged task line.');
+    const result = await this.plugin.taskApiService.move(
+      {
+        path: sourceFile.path,
+        lineNumber: Math.max(0, payload.line - 1),
+        rawLine: payload.rawLine,
+        title: payload.text,
+      },
+      {
+        targetFile,
+        placement: 'line',
+        lineNumber: Math.max(0, targetLineIndex),
+        sourcePolicy: 'migrate-if-daily-note',
+        resolution: 'exact-or-identity',
+      },
+    );
+    if (!result.ok) {
+      const detail = String(result.error || '').trim();
+      new Notice(detail ? `Could not move task: ${detail}` : 'Could not move the dragged task.');
       return false;
     }
-    const block = extractTaskBlock(sourceLines.lines, sourceIndex);
-    if (!block.lines.length) return false;
-
-    if (sourceFile.path === targetFile.path) {
-      let changed = false;
-      await this.plugin.app.vault.process(sourceFile, (content) => {
-        const parts = splitContent(content);
-        const currentIndex = findCurrentTaskLineIndex(parts.lines, sourceIndex, payload.rawLine, payload.text);
-        if (currentIndex < 0) return content;
-        const currentBlock = extractTaskBlock(parts.lines, currentIndex);
-        if (targetLineIndex >= currentIndex && targetLineIndex <= currentBlock.endExclusive) return content;
-        const nextLines = [...parts.lines];
-        nextLines.splice(currentIndex, currentBlock.endExclusive - currentIndex);
-        const adjustedTarget = targetLineIndex > currentIndex
-          ? Math.max(0, targetLineIndex - (currentBlock.endExclusive - currentIndex))
-          : targetLineIndex;
-        nextLines.splice(Math.min(adjustedTarget, nextLines.length), 0, ...currentBlock.lines);
-        changed = true;
-        return joinContent(nextLines, parts.newline, parts.endsWithNewline);
-      });
-      if (changed) this.notifyMoved([sourceFile.path]);
-      return changed;
-    }
-
-    let inserted = false;
-    await this.plugin.app.vault.process(targetFile, (content) => {
-      const parts = splitContent(content);
-      const index = Math.min(Math.max(0, targetLineIndex), parts.lines.length);
-      const nextLines = [...parts.lines];
-      nextLines.splice(index, 0, ...block.lines);
-      inserted = true;
-      return joinContent(nextLines, parts.newline, true);
-    });
-    if (!inserted) return false;
-
-    let removed = false;
-    await this.plugin.app.vault.process(sourceFile, (content) => {
-      const parts = splitContent(content);
-      const currentIndex = findCurrentTaskLineIndex(parts.lines, sourceIndex, payload.rawLine, payload.text);
-      if (currentIndex < 0) return content;
-      const currentBlock = extractTaskBlock(parts.lines, currentIndex);
-      const nextLines = [...parts.lines];
-      nextLines.splice(currentIndex, currentBlock.endExclusive - currentIndex);
-      removed = true;
-      return joinContent(nextLines, parts.newline, parts.endsWithNewline);
-    });
-
-    this.notifyMoved([sourceFile.path, targetFile.path]);
-    if (!removed) new Notice('Copied the task, but the original line changed before it could be removed.');
-    return true;
-  }
-
-  private notifyMoved(paths: string[]): void {
-    this.plugin.eventService.emitFilesUpdated(Array.from(new Set(paths)));
-    this.plugin.overlayRenderingService?.invalidate({
-      reason: 'task-line-drag-move',
-      surfaces: ['menus', 'linked-subitems', 'live-preview-editors'],
-      rebuildInlineSubitems: true,
-      refreshLivePreviewEditors: true,
-      delayMs: 80,
-    });
+    return result.changed;
   }
 
   private resolveTaskLineContext(targetEl: HTMLElement): TaskLineDragContext | null {

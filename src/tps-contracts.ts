@@ -41,6 +41,7 @@ export interface TPSGcmApiChangedPayload extends TPSEventPayload {
   configurationVersion: number | null;
   taskLinesVersion: number | null;
   taskCheckboxesVersion: number | null;
+  tasksVersion: number | null;
   api: unknown | null;
 }
 

@@ -68,6 +68,40 @@ async function loadDailyNoteTaskSchedule() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
+async function loadFileNamingService() {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/services/file-naming-service.ts', import.meta.url))],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+    plugins: [{
+      name: 'file-naming-obsidian-stub',
+      setup(builder) {
+        builder.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian-stub', namespace: 'obsidian-stub' }));
+        builder.onLoad({ filter: /.*/, namespace: 'obsidian-stub' }, () => ({
+          loader: 'js',
+          contents: `
+            export class TFile {
+              constructor(path) {
+                this.path = path;
+                this.name = path.split('/').pop() || path;
+                this.extension = this.name.includes('.') ? this.name.split('.').pop() : '';
+                this.basename = this.name.replace(/\\.[^.]+$/, '');
+              }
+            }
+            export function normalizePath(path) {
+              return String(path || '').replace(/\\\\/g, '/').replace(/\\/{2,}/g, '/').replace(/^\\//, '');
+            }
+          `,
+        }));
+      },
+    }],
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
 async function loadNoteOperationService() {
   const result = await build({
     entryPoints: [fileURLToPath(new URL('../src/services/note-operation-service.ts', import.meta.url))],
@@ -577,11 +611,78 @@ test('Daily Note kind identity receives the title and filename sync exception', 
   assert.match(fileNamingSource, /loadPersistedDailyNoteConfiguration/u);
   assert.match(fileNamingSource, /await this\.dailyNoteConfigurationReady/u);
   assert.match(fileNamingSource, /getPeriodicDailyNoteOptions/u);
+  assert.match(fileNamingSource, /public async isDailyNoteFile\(file: TFile\): Promise<boolean>/u);
   assert.match(fileNamingSource, /knownDailyNoteConfigurations/u);
   assert.match(noteOperationSource, /registerDailyNoteConfiguration\(settings\.folder, settings\.format\)/u);
   assert.match(fileNamingSource, /preserveDailyNoteIdentity/u);
   assert.match(bulkEditSource, /const kind = this\.normalizeStringList\(\(frontmatter as any\)\.kind \|\| \(frontmatter as any\)\.kinds\)/u);
   assert.match(settingsSource, /Daily Notes keep their template or user title and retain the canonical Daily Notes filename\./u);
+});
+
+test('Daily Note move classification awaits persisted settings and honors Periodic Notes when Core is disabled', async () => {
+  const priorWindow = globalThis.window;
+  globalThis.window = {
+    moment(value, format) {
+      const text = String(value || '');
+      const patterns = {
+        'YYYY-MM-DD': /^\d{4}-\d{2}-\d{2}$/u,
+        'YYYY_MM_DD': /^\d{4}_\d{2}_\d{2}$/u,
+        'YYYY/MM/DD': /^\d{4}\/\d{2}\/\d{2}$/u,
+      };
+      const valid = Boolean(patterns[String(format || '')]?.test(text));
+      return { isValid: () => valid, format: () => text };
+    },
+  };
+  try {
+    const { FileNamingService } = await loadFileNamingService();
+    const createPlugin = ({ persisted, periodic }) => ({
+      settings: { dailyNoteDateFormat: '' },
+      app: {
+        internalPlugins: {
+          plugins: {
+            'daily-notes': {
+              enabled: false,
+              instance: { options: { folder: 'Disabled/Core', format: 'YYYY-MM-DD' } },
+            },
+          },
+        },
+        plugins: {
+          getPlugin(id) {
+            return id === 'periodic-notes' && periodic
+              ? { settings: { daily: periodic } }
+              : null;
+          },
+          plugins: {},
+        },
+        vault: {
+          configDir: '.obsidian',
+          getFiles: () => [],
+          adapter: {
+            async read() {
+              if (persisted == null) throw new Error('missing settings');
+              return JSON.stringify(persisted);
+            },
+          },
+        },
+      },
+    });
+
+    const periodicService = new FileNamingService(createPlugin({
+      persisted: { folder: 'Stale/Core', format: 'YYYY-MM-DD' },
+      periodic: { folder: 'Periodic/Daily', format: 'YYYY_MM_DD' },
+    }));
+    assert.equal(await periodicService.isDailyNoteFile({ path: 'Periodic/Daily/2026_08_10.md' }), true);
+    assert.equal(await periodicService.isDailyNoteFile({ path: 'Disabled/Core/2026-08-10.md' }), false);
+    assert.equal(await periodicService.isDailyNoteFile({ path: 'Projects/2026_08_10.md' }), false);
+
+    const persistedService = new FileNamingService(createPlugin({
+      persisted: { folder: 'Saved/Daily', format: 'YYYY/MM/DD' },
+      periodic: null,
+    }));
+    assert.equal(await persistedService.isDailyNoteFile({ path: 'Saved/Daily/2026/08/10.md' }), true);
+  } finally {
+    globalThis.window = priorWindow;
+  }
 });
 
 test('canonical GCM creation inserts the template once and preserves its readable title', async () => {

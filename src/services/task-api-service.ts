@@ -3,6 +3,7 @@ import type { TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import {
   addInlineTagToTaskLine,
+  findAfterFrontmatterIndex,
   getTaskDisplayTitle,
   insertLineAfterFrontmatter,
   parseTaskLine,
@@ -23,11 +24,14 @@ import {
   type TaskCheckboxWorkflowFieldOwnership,
 } from '../utils/task-checkbox-workflow-mutation';
 import {
+  buildDailyNoteScratchpadMovedTaskBlock,
   extractTaskBlock,
   findCurrentTaskLineIndex,
+  insertTaskBlockAtEnd,
   insertTaskBlockAfterFrontmatter,
   joinContent,
   removeTaskBlockFromContent,
+  replaceTaskBlockInContent,
   splitContent,
 } from '../utils/task-block-move';
 import {
@@ -111,6 +115,16 @@ export interface GcmTaskUpdateInput {
   replaceTags?: string[];
 }
 
+export interface GcmTaskMoveTarget {
+  targetFile?: TFile;
+  targetPath?: string;
+  line?: number;
+  lineNumber?: number;
+  placement?: 'end' | 'after-frontmatter' | 'line';
+  sourcePolicy?: 'remove' | 'migrate-if-daily-note';
+  resolution?: 'default' | 'exact-or-identity';
+}
+
 export interface GcmTaskMutationResult {
   ok: boolean;
   changed: boolean;
@@ -145,8 +159,10 @@ type TaskInputMappingPreflight =
   | { ok: true; plan: TaskInputMappingPlan }
   | { ok: false; error: string };
 
+type RejectedWriteState = 'unchanged' | 'committed' | 'conflicted';
+
 export class TaskApiService {
-  readonly version = 1;
+  readonly version = 2;
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
@@ -555,12 +571,16 @@ export class TaskApiService {
 
   async move(
     ref: GcmTaskRef,
-    target: { targetFile?: TFile; targetPath?: string; line?: number; lineNumber?: number; placement?: 'after-frontmatter' | 'line' },
+    target: GcmTaskMoveTarget,
   ): Promise<GcmTaskMutationResult> {
+    const strictResolution = target.resolution === 'exact-or-identity';
     const resolved = await this.resolveTask(ref);
-    if (!resolved) {
-      logger.flowWarn('TaskApi', 'move:source-unresolved', this.summarizeRef(ref));
-      return { ok: false, changed: false, task: null, error: 'Task line could not be resolved.' };
+    if (!resolved || (strictResolution && !this.moveRefMatchesLine(ref, resolved.record.rawLine))) {
+      logger.flowWarn('TaskApi', 'move:source-unresolved', {
+        ...this.summarizeRef(ref),
+        resolution: target.resolution || 'default',
+      });
+      return { ok: false, changed: false, task: null, error: 'Task line could not be resolved exactly.' };
     }
     const hasExplicitTarget = target.targetFile != null || !!String(target.targetPath || '').trim();
     const targetFile = this.resolveMarkdownFile(target.targetFile)
@@ -574,139 +594,336 @@ export class TaskApiService {
       });
       return { ok: false, changed: false, task: null, before: resolved.record, error: 'Target markdown file could not be resolved.' };
     }
+
+    const sameFile = resolved.file.path === targetFile.path;
+    const migrateDailySource = !sameFile
+      && target.sourcePolicy === 'migrate-if-daily-note'
+      && await this.plugin.fileNamingService.isDailyNoteFile(resolved.file);
     const context = {
       sourcePath: resolved.file.path,
       targetPath: targetFile.path,
       lineNumber: resolved.record.lineNumber,
-      placement: target.placement || 'after-frontmatter',
-      sameFile: resolved.file.path === targetFile.path,
+      placement: target.placement || 'end',
+      sameFile,
+      sourcePolicy: migrateDailySource ? 'daily-note-migrate' : 'remove',
+      resolution: target.resolution || 'default',
     };
     logger.flow('TaskApi', 'move:start', context);
 
-    try {
-      const sourceContent = await this.plugin.app.vault.cachedRead(resolved.file);
-      const sourceResolution = this.resolveMutableTaskLine(
-        sourceContent,
-        resolved.record.lineNumber,
-        resolved.record.rawLine,
-        resolved.record.title,
-      );
-      if (!sourceResolution) {
-        logger.flowWarn('TaskApi', 'move:source-line-missing', context);
-        return { ok: false, changed: false, task: null, before: resolved.record, error: 'Source task moved before it could be edited.' };
-      }
-      const { parts: sourceParts, index: sourceIndex } = sourceResolution;
-      const block = extractTaskBlock(sourceParts.lines, sourceIndex);
-      if (!block.lines.length) {
-        logger.flowWarn('TaskApi', 'move:empty-block', context);
-        return { ok: false, changed: false, task: null, before: resolved.record, error: 'Source task block is empty.' };
-      }
-
-      let insertedLineNumber = -1;
-      let sourceMutationResolved = false;
-      if (resolved.file.path === targetFile.path) {
+    if (sameFile) {
+      let insertedLineNumber = resolved.record.lineNumber;
+      let sourceResolved = false;
+      let changed = false;
+      try {
         await this.plugin.app.vault.process(resolved.file, (content) => {
           const currentResolution = this.resolveMutableTaskLine(
             content,
-            sourceIndex,
+            resolved.record.lineNumber,
             resolved.record.rawLine,
             resolved.record.title,
           );
           if (!currentResolution) return content;
-          const { parts, index: currentIndex } = currentResolution;
-          sourceMutationResolved = true;
-          const currentBlock = extractTaskBlock(parts.lines, currentIndex);
-          const requested = this.resolveTargetLineIndex(parts.lines.length, target);
-          if (requested >= currentIndex && requested <= currentBlock.endExclusive) return content;
-          const nextLines = [...parts.lines];
-          nextLines.splice(currentIndex, currentBlock.endExclusive - currentIndex);
-          const adjusted = requested > currentIndex ? requested - (currentBlock.endExclusive - currentIndex) : requested;
+          const currentRawLine = currentResolution.parts.lines[currentResolution.index] || '';
+          if (strictResolution && !this.moveRefMatchesLine(ref, currentRawLine)) return content;
+          const currentBlock = extractTaskBlock(currentResolution.parts.lines, currentResolution.index);
+          if (!currentBlock.lines.length) return content;
+          sourceResolved = true;
+          const requested = this.resolveTargetLineIndex(currentResolution.parts.lines, target);
+          if (requested >= currentResolution.index && requested <= currentBlock.endExclusive) {
+            insertedLineNumber = currentResolution.index;
+            return content;
+          }
+          const nextLines = [...currentResolution.parts.lines];
+          nextLines.splice(
+            currentResolution.index,
+            currentBlock.endExclusive - currentResolution.index,
+          );
+          const adjusted = requested > currentResolution.index
+            ? requested - (currentBlock.endExclusive - currentResolution.index)
+            : requested;
           insertedLineNumber = Math.min(Math.max(0, adjusted), nextLines.length);
           nextLines.splice(insertedLineNumber, 0, ...currentBlock.lines);
-          return joinContent(nextLines, parts.newline, parts.endsWithNewline);
-        });
-      } else {
-        await this.plugin.app.vault.process(targetFile, (content) => {
-          if (target.placement !== 'line') {
-            const inserted = insertTaskBlockAfterFrontmatter(content, block.lines);
-            insertedLineNumber = inserted.lineIndex;
-            return inserted.content;
-          }
-          const parts = splitContent(content);
-          insertedLineNumber = this.resolveTargetLineIndex(parts.lines.length, target);
-          const nextLines = [...parts.lines];
-          nextLines.splice(insertedLineNumber, 0, ...block.lines);
-          return joinContent(nextLines, parts.newline, true);
-        });
-        await this.plugin.app.vault.process(resolved.file, (content) => {
-          const currentResolution = this.resolveMutableTaskLine(
-            content,
-            sourceIndex,
-            resolved.record.rawLine,
-            resolved.record.title,
+          changed = true;
+          return joinContent(
+            nextLines,
+            currentResolution.parts.newline,
+            currentResolution.parts.endsWithNewline,
           );
-          if (!currentResolution) return content;
-          const removed = removeTaskBlockFromContent(
-            content,
-            currentResolution.index,
-            resolved.record.rawLine,
-            resolved.record.title,
-          );
-          sourceMutationResolved = removed.changed;
-          return removed.content;
         });
+      } catch (error) {
+        logger.flowError('TaskApi', 'move:same-file-failed', error, context);
+        return { ok: false, changed: false, task: null, before: resolved.record, error: getErrorMessage(error) };
       }
-
-      if (!sourceMutationResolved) {
-        let rolledBackTarget = resolved.file.path === targetFile.path;
-        if (!rolledBackTarget && insertedLineNumber >= 0) {
-          await this.plugin.app.vault.process(targetFile, (content) => {
-            const insertedResolution = this.resolveMutableTaskLine(
-              content,
-              insertedLineNumber,
-              block.lines[0] || resolved.record.rawLine,
-              resolved.record.title,
-            );
-            if (!insertedResolution) return content;
-            const removed = removeTaskBlockFromContent(
-              content,
-              insertedResolution.index,
-              block.lines[0] || resolved.record.rawLine,
-              resolved.record.title,
-            );
-            rolledBackTarget = removed.changed;
-            return removed.content;
-          });
-        }
-        logger.flowWarn('TaskApi', 'move:source-became-protected', {
-          ...context,
-          rolledBackTarget,
-        });
-        if (!rolledBackTarget) this.notifyChanged([targetFile.path], 'task-api-move-partial');
+      if (!sourceResolved) {
+        logger.flowWarn('TaskApi', 'move:source-became-protected', context);
         return {
           ok: false,
-          changed: !rolledBackTarget,
+          changed: false,
           task: null,
           before: resolved.record,
-          error: rolledBackTarget
-            ? 'Source task moved into protected Markdown before it could be moved.'
-            : 'Source task moved into protected Markdown and the target insertion could not be rolled back.',
+          error: 'Source task moved into protected Markdown before it could be moved.',
         };
       }
+      if (!changed) {
+        const task = await this.get({
+          path: resolved.file.path,
+          lineNumber: insertedLineNumber,
+          rawLine: resolved.record.rawLine,
+          title: resolved.record.title,
+        });
+        logger.flow('TaskApi', 'move:no-op', context);
+        return { ok: true, changed: false, task, before: resolved.record };
+      }
+      this.notifyChanged([resolved.file.path], 'task-api-move');
+      let task: GcmTaskRecord | null = null;
+      let refreshError = '';
+      try {
+        task = await this.get({
+          path: resolved.file.path,
+          lineNumber: insertedLineNumber,
+          rawLine: resolved.record.rawLine,
+          title: resolved.record.title,
+        });
+      } catch (error) {
+        refreshError = getErrorMessage(error);
+        logger.flowError('TaskApi', 'move:refresh-failed', error, context);
+      }
+      logger.flow('TaskApi', 'move:done', { ...context, insertedLineNumber, resolved: !!task });
+      return {
+        ok: true,
+        changed: true,
+        task,
+        before: resolved.record,
+        ...(refreshError ? { error: `Task moved, but the result could not be refreshed: ${refreshError}` } : {}),
+      };
+    }
 
-      const task = await this.get({
-        path: targetFile.path,
-        lineNumber: insertedLineNumber,
-        rawLine: block.lines[0] || resolved.record.rawLine,
-        title: resolved.record.title,
+    let capturedBlock: string[] = [];
+    let capturedLineNumber = resolved.record.lineNumber;
+    let capturedRawLine = resolved.record.rawLine;
+    try {
+      await this.plugin.app.vault.process(resolved.file, (content) => {
+        const currentResolution = this.resolveMutableTaskLine(
+          content,
+          resolved.record.lineNumber,
+          resolved.record.rawLine,
+          resolved.record.title,
+        );
+        if (!currentResolution) return content;
+        const currentRawLine = currentResolution.parts.lines[currentResolution.index] || '';
+        if (strictResolution && !this.moveRefMatchesLine(ref, currentRawLine)) return content;
+        const currentBlock = extractTaskBlock(currentResolution.parts.lines, currentResolution.index);
+        if (!currentBlock.lines.length) return content;
+        capturedBlock = [...currentBlock.lines];
+        capturedLineNumber = currentResolution.index;
+        capturedRawLine = currentRawLine;
+        return content;
       });
-      this.notifyChanged([resolved.file.path, targetFile.path], 'task-api-move');
-      logger.flow('TaskApi', 'move:done', { ...context, insertedLineNumber, blockLines: block.lines.length, resolved: !!task });
-      return { ok: true, changed: true, task, before: resolved.record };
     } catch (error) {
-      logger.flowError('TaskApi', 'move:failed', error, context);
+      logger.flowError('TaskApi', 'move:source-capture-failed', error, context);
       return { ok: false, changed: false, task: null, before: resolved.record, error: getErrorMessage(error) };
     }
+    if (!capturedBlock.length) {
+      logger.flowWarn('TaskApi', 'move:source-line-missing', context);
+      return {
+        ok: false,
+        changed: false,
+        task: null,
+        before: resolved.record,
+        error: 'Source task changed before it could be moved.',
+      };
+    }
+
+    let insertedLineNumber = -1;
+    let targetBeforeContent: string | null = null;
+    let targetExpectedContent: string | null = null;
+    try {
+      await this.plugin.app.vault.process(targetFile, (content) => {
+        targetBeforeContent = content;
+        if (target.placement !== 'line') {
+          const inserted = target.placement === 'after-frontmatter'
+            ? insertTaskBlockAfterFrontmatter(content, capturedBlock)
+            : insertTaskBlockAtEnd(content, capturedBlock);
+          insertedLineNumber = inserted.lineIndex;
+          targetExpectedContent = inserted.content;
+          return inserted.content;
+        }
+        const parts = splitContent(content);
+        insertedLineNumber = this.resolveTargetLineIndex(parts.lines, target);
+        const nextLines = [...parts.lines];
+        nextLines.splice(insertedLineNumber, 0, ...capturedBlock);
+        targetExpectedContent = joinContent(nextLines, parts.newline, true);
+        return targetExpectedContent;
+      });
+    } catch (error) {
+      const targetWriteState = targetBeforeContent != null && targetExpectedContent != null
+        ? await this.classifyRejectedWrite(targetFile, targetBeforeContent, targetExpectedContent)
+        : 'unchanged';
+      logger.flowError('TaskApi', 'move:target-write-failed', error, {
+        ...context,
+        targetWriteState,
+      });
+      if (targetWriteState !== 'committed') {
+        const changed = targetWriteState === 'conflicted';
+        if (changed) this.notifyChanged([targetFile.path], 'task-api-move-partial');
+        return {
+          ok: false,
+          changed,
+          task: null,
+          before: resolved.record,
+          error: changed
+            ? `Target write failed and the target changed before its outcome could be reconciled: ${getErrorMessage(error)}`
+            : getErrorMessage(error),
+        };
+      }
+      logger.flow('TaskApi', 'move:target-write-reconciled', {
+        ...context,
+        targetWriteState,
+      });
+    }
+    if (insertedLineNumber < 0 || targetBeforeContent == null || targetExpectedContent == null) {
+      return {
+        ok: false,
+        changed: false,
+        task: null,
+        before: resolved.record,
+        error: 'Task could not be inserted into the target note.',
+      };
+    }
+
+    let sourcePrepared = false;
+    let sourceBeforeContent: string | null = null;
+    let sourceExpectedContent: string | null = null;
+    let sourceCommitted = false;
+    let sourceWriteError: unknown = null;
+    let sourceWriteState: RejectedWriteState | null = null;
+    try {
+      await this.plugin.app.vault.process(resolved.file, (content) => {
+        const currentResolution = this.resolveMutableTaskLine(
+          content,
+          capturedLineNumber,
+          capturedRawLine,
+          resolved.record.title,
+        );
+        if (!currentResolution) return content;
+        const currentBlock = extractTaskBlock(currentResolution.parts.lines, currentResolution.index);
+        if (!this.taskBlocksMatch(currentBlock.lines, capturedBlock)) return content;
+
+        if (migrateDailySource) {
+          const migratedBlock = buildDailyNoteScratchpadMovedTaskBlock(capturedBlock, {
+            targetPath: targetFile.path,
+            movedAt: new Date(),
+          });
+          const replaced = replaceTaskBlockInContent(
+            content,
+            currentResolution.index,
+            capturedRawLine,
+            resolved.record.title,
+            migratedBlock,
+          );
+          sourcePrepared = replaced.changed;
+          if (replaced.changed) {
+            sourceBeforeContent = content;
+            sourceExpectedContent = replaced.content;
+          }
+          return replaced.content;
+        }
+
+        const removed = removeTaskBlockFromContent(
+          content,
+          currentResolution.index,
+          capturedRawLine,
+          resolved.record.title,
+        );
+        sourcePrepared = removed.changed;
+        if (removed.changed) {
+          sourceBeforeContent = content;
+          sourceExpectedContent = removed.content;
+        }
+        return removed.content;
+      });
+      sourceCommitted = sourcePrepared;
+    } catch (error) {
+      sourceWriteError = error;
+      sourceWriteState = sourceBeforeContent != null && sourceExpectedContent != null
+        ? await this.classifyRejectedWrite(resolved.file, sourceBeforeContent, sourceExpectedContent)
+        : 'unchanged';
+      sourceCommitted = sourceWriteState === 'committed';
+      if (sourceCommitted) {
+        logger.flow('TaskApi', 'move:source-write-reconciled', {
+          ...context,
+          sourceWriteState,
+        });
+      }
+    }
+
+    if (!sourceCommitted) {
+      if (sourceWriteState === 'conflicted') {
+        logger.flowWarn('TaskApi', 'move:source-write-conflicted', {
+          ...context,
+          error: sourceWriteError ? getErrorMessage(sourceWriteError) : '',
+        });
+        this.notifyChanged([resolved.file.path, targetFile.path], 'task-api-move-partial');
+        return {
+          ok: false,
+          changed: true,
+          task: null,
+          before: resolved.record,
+          error: `Source write failed and the source changed before its outcome could be reconciled; the target copy was preserved to avoid data loss: ${getErrorMessage(sourceWriteError)}`,
+        };
+      }
+      const rolledBackTarget = await this.rollbackTargetSnapshot(
+        targetFile,
+        targetBeforeContent,
+        targetExpectedContent,
+      );
+      logger.flowWarn('TaskApi', sourceWriteError ? 'move:source-write-failed' : 'move:source-changed', {
+        ...context,
+        rolledBackTarget,
+        sourceWriteState,
+        error: sourceWriteError ? getErrorMessage(sourceWriteError) : '',
+      });
+      if (!rolledBackTarget) this.notifyChanged([targetFile.path], 'task-api-move-partial');
+      return {
+        ok: false,
+        changed: !rolledBackTarget,
+        task: null,
+        before: resolved.record,
+        error: rolledBackTarget
+          ? sourceWriteError
+            ? `Source task could not be updated; the target copy was rolled back: ${getErrorMessage(sourceWriteError)}`
+            : 'Source task changed before it could be moved; the target copy was rolled back.'
+          : 'Source task changed before it could be updated and the target copy could not be rolled back.',
+      };
+    }
+
+    this.notifyChanged([resolved.file.path, targetFile.path], 'task-api-move');
+    let task: GcmTaskRecord | null = null;
+    let refreshError = '';
+    try {
+      task = await this.get({
+        path: targetFile.path,
+        lineNumber: insertedLineNumber,
+        rawLine: capturedBlock[0] || resolved.record.rawLine,
+        title: resolved.record.title,
+      });
+    } catch (error) {
+      refreshError = getErrorMessage(error);
+      logger.flowError('TaskApi', 'move:refresh-failed', error, context);
+    }
+    logger.flow('TaskApi', 'move:done', {
+      ...context,
+      insertedLineNumber,
+      blockLines: capturedBlock.length,
+      resolved: !!task,
+    });
+    return {
+      ok: true,
+      changed: true,
+      task,
+      before: resolved.record,
+      ...(refreshError ? { error: `Task moved, but the result could not be refreshed: ${refreshError}` } : {}),
+    };
   }
 
   async delete(ref: GcmTaskRef): Promise<GcmTaskMutationResult> {
@@ -1187,13 +1404,72 @@ export class TaskApiService {
     };
   }
 
-  private resolveTargetLineIndex(lineCount: number, target: { line?: number; lineNumber?: number }): number {
+  private resolveTargetLineIndex(lines: string[], target: GcmTaskMoveTarget): number {
+    const lineCount = lines.length;
+    if (target.placement === 'after-frontmatter') {
+      return findAfterFrontmatterIndex(lines);
+    }
     const raw = typeof target.lineNumber === 'number'
       ? target.lineNumber
       : typeof target.line === 'number'
         ? target.line - 1
         : lineCount;
     return Math.min(Math.max(0, Math.floor(raw)), lineCount);
+  }
+
+  private moveRefMatchesLine(ref: GcmTaskRef, rawLine: string): boolean {
+    const expectedRawLine = String(ref.rawLine || '');
+    if (expectedRawLine && rawLine === expectedRawLine) return true;
+    for (const key of ['tpsId', 'subitemId']) {
+      const expectedIdentity = readInlineFieldValue(expectedRawLine, key);
+      if (expectedIdentity && readInlineFieldValue(rawLine, key) === expectedIdentity) return true;
+    }
+    return false;
+  }
+
+  private taskBlocksMatch(left: string[], right: string[]): boolean {
+    return left.length === right.length && left.every((line, index) => line === right[index]);
+  }
+
+  private async classifyRejectedWrite(
+    file: TFile,
+    beforeContent: string,
+    expectedContent: string,
+  ): Promise<RejectedWriteState> {
+    try {
+      const currentContent = await this.plugin.app.vault.read(file);
+      if (currentContent === beforeContent) return 'unchanged';
+      if (currentContent === expectedContent) return 'committed';
+      return 'conflicted';
+    } catch (error) {
+      logger.flowError('TaskApi', 'move:write-reconciliation-failed', error, {
+        path: file.path,
+      });
+      return 'conflicted';
+    }
+  }
+
+  private async rollbackTargetSnapshot(
+    targetFile: TFile,
+    beforeContent: string,
+    expectedContent: string,
+  ): Promise<boolean> {
+    try {
+      await this.plugin.app.vault.process(targetFile, (content) =>
+        content === expectedContent ? beforeContent : content);
+    } catch (error) {
+      logger.flowError('TaskApi', 'move:rollback-failed', error, {
+        targetPath: targetFile.path,
+      });
+    }
+    try {
+      return await this.plugin.app.vault.read(targetFile) === beforeContent;
+    } catch (error) {
+      logger.flowError('TaskApi', 'move:rollback-verification-failed', error, {
+        targetPath: targetFile.path,
+      });
+      return false;
+    }
   }
 
   private async ensureTodayDailyNote(): Promise<TFile | null> {

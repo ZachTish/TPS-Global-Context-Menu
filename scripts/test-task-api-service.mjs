@@ -28,10 +28,21 @@ async function loadTaskApiModule() {
           loader: 'js',
           contents: `
             export class Notice {}
+            export class TFile {}
             export function normalizePath(value) {
               const path = String(value ?? '').trim().replace(/\\\\/g, '/').replace(/\\/{2,}/g, '/');
               return path || '/';
             }
+            export function moment(value) {
+              const text = String(value ?? '').trim();
+              const valid = /^\\d{4}-\\d{2}-\\d{2}$/.test(text);
+              return {
+                isValid: () => valid,
+                format: () => text,
+              };
+            }
+            moment.ISO_8601 = Symbol('ISO_8601');
+            moment.invalid = () => ({ isValid: () => false, format: () => '' });
           `,
         }));
       },
@@ -65,11 +76,14 @@ function createTaskApiFixture(TaskApiService) {
   const taskPath = 'Inbox/Tasks.md';
   const upperPath = 'Inbox/Upper.MD';
   const canonicalTaskFile = new ForeignFile(taskPath);
+  const dailyTaskPath = 'Inbox/Daily/2026-08-10.md';
+  const canonicalDailyTaskFile = new ForeignFile(dailyTaskPath);
   const canonicalUpperFile = new ForeignFile(upperPath, 'MD');
   const canonicalBaseFile = new ForeignFile('Inbox/Rows.base', 'base');
   const canonicalFolder = { path: 'Inbox', name: 'Inbox' };
   const files = new Map([
     [taskPath, canonicalTaskFile],
+    [dailyTaskPath, canonicalDailyTaskFile],
     [upperPath, canonicalUpperFile],
     [canonicalBaseFile.path, canonicalBaseFile],
     [canonicalFolder.path, canonicalFolder],
@@ -86,6 +100,15 @@ function createTaskApiFixture(TaskApiService) {
       '',
     ].join('\n')],
     [upperPath, '- [ ] Uppercase extension task\n'],
+    [dailyTaskPath, [
+      '---',
+      'title: Daily',
+      '---',
+      '',
+      '- [ ] Daily task [scheduled:: 2026-08-10 09:00:00] [tpsId:: task_daily]',
+      '  - [ ] supporting detail [subitemId:: child_daily]',
+      '',
+    ].join('\n')],
   ]);
   const reads = [];
   const processes = [];
@@ -140,6 +163,18 @@ function createTaskApiFixture(TaskApiService) {
     app: {
       vault,
       workspace: { getLeaf: () => ({}) },
+      internalPlugins: {
+        plugins: {
+          'daily-notes': {
+            instance: {
+              options: {
+                folder: 'Inbox/Daily',
+                format: 'YYYY-MM-DD',
+              },
+            },
+          },
+        },
+      },
     },
     settings: {
       properties: [],
@@ -187,7 +222,10 @@ function createTaskApiFixture(TaskApiService) {
       },
     },
     manifest: { id: 'tps-global-context-menu' },
-    fileNamingService: { getDailyNoteDateFormat: () => 'YYYY-MM-DD' },
+    fileNamingService: {
+      getDailyNoteDateFormat: () => 'YYYY-MM-DD',
+      isDailyNoteFile: (file) => file?.path === dailyTaskPath,
+    },
     noteOperationService: {
       async ensureDailyNote() {
         dailyNoteFallbackCalls += 1;
@@ -204,7 +242,9 @@ function createTaskApiFixture(TaskApiService) {
   return {
     service: new TaskApiService(plugin),
     taskPath,
+    dailyTaskPath,
     canonicalTaskFile,
+    canonicalDailyTaskFile,
     canonicalUpperFile,
     contents,
     reads,
@@ -241,7 +281,7 @@ test('GCM exposes a strategic task API for external agents', () => {
   assert.match(mainSource, /this\.taskApiService = new TaskApiService\(this\);/);
   assert.match(pluginApiSource, /tasks: plugin\.taskApiService/);
 
-  assert.match(taskApiSource, /readonly version = 1/);
+  assert.match(taskApiSource, /readonly version = 2/);
   assert.match(taskApiSource, /async list\(filter: GcmTaskListFilter = \{\}\)/);
   assert.match(taskApiSource, /async get\(ref: GcmTaskRef\)/);
   assert.match(taskApiSource, /async create\(input: GcmTaskCreateInput\)/);
@@ -334,6 +374,514 @@ test('compiled task API accepts foreign file-like values and keeps empty prefixe
 
   assert.equal(await fixture.service.focus(exact), true);
   assert.equal(fixture.opened.at(-1), fixture.canonicalTaskFile, 'focus must open the canonical vault object');
+});
+
+test('task API move preserves a Daily Note source as a migrated record', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(fixture.service.version, 2);
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.equal(result.task?.path, fixture.canonicalUpperFile.path);
+  assert.ok(fixture.contents.get(fixture.dailyTaskPath).includes(
+    '- [>] Daily task [scheduled:: 2026-08-10 09:00:00] [migratedTo:: [[Inbox/Upper]]]',
+  ));
+  assert.doesNotMatch(fixture.contents.get(fixture.dailyTaskPath), /\btpsId::|\bsubitemId::/u);
+  assert.doesNotMatch(fixture.contents.get(fixture.dailyTaskPath), /completedDate::/u);
+  assert.ok(fixture.contents.get(fixture.canonicalUpperFile.path).includes(
+    '- [ ] Daily task [scheduled:: 2026-08-10 09:00:00] [tpsId:: task_daily]',
+  ));
+  assert.ok(fixture.contents.get(fixture.canonicalUpperFile.path).includes(
+    '  - [ ] supporting detail [subitemId:: child_daily]',
+  ));
+});
+
+test('task API move rolls back a Daily Note target copy when the source cannot be marked migrated', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+  const originalTarget = fixture.contents.get(fixture.canonicalUpperFile.path);
+  const protectedSource = moveTaskIntoFenceBeforeNextSourceProcess(fixture, dailyTask);
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.changed, false);
+  assert.equal(fixture.contents.get(fixture.dailyTaskPath), protectedSource);
+  assert.equal(fixture.contents.get(fixture.canonicalUpperFile.path), originalTarget);
+});
+
+test('task API reconciles a rejected target write that left identical preexisting content unchanged', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+  const originalSource = fixture.contents.get(fixture.dailyTaskPath);
+  const originalTarget = [
+    dailyTask.rawLine,
+    '  - [ ] supporting detail [subitemId:: child_daily]',
+    '',
+  ].join('\n');
+  fixture.contents.set(fixture.canonicalUpperFile.path, originalTarget);
+  const process = fixture.plugin.app.vault.process.bind(fixture.plugin.app.vault);
+  let rejected = false;
+  fixture.plugin.app.vault.process = async (file, updater) => {
+    if (!rejected && file.path === fixture.canonicalUpperFile.path) {
+      rejected = true;
+      updater(fixture.contents.get(file.path));
+      throw new Error('synthetic target write rejection before commit');
+    }
+    return process(file, updater);
+  };
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    placement: 'line',
+    lineNumber: 0,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.changed, false);
+  assert.equal(fixture.contents.get(fixture.dailyTaskPath), originalSource);
+  assert.equal(fixture.contents.get(fixture.canonicalUpperFile.path), originalTarget);
+});
+
+test('task API continues a move when a rejected target write committed the exact expected content', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+  const process = fixture.plugin.app.vault.process.bind(fixture.plugin.app.vault);
+  let rejected = false;
+  fixture.plugin.app.vault.process = async (file, updater) => {
+    if (!rejected && file.path === fixture.canonicalUpperFile.path) {
+      rejected = true;
+      fixture.contents.set(file.path, updater(fixture.contents.get(file.path)));
+      throw new Error('synthetic target write rejection after commit');
+    }
+    return process(file, updater);
+  };
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.match(fixture.contents.get(fixture.dailyTaskPath), /migratedTo::/u);
+  assert.match(fixture.contents.get(fixture.canonicalUpperFile.path), /Daily task/u);
+});
+
+test('task API reports a partial outcome when a rejected target write leaves conflicting content', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+  const originalSource = fixture.contents.get(fixture.dailyTaskPath);
+  const process = fixture.plugin.app.vault.process.bind(fixture.plugin.app.vault);
+  let rejected = false;
+  fixture.plugin.app.vault.process = async (file, updater) => {
+    if (!rejected && file.path === fixture.canonicalUpperFile.path) {
+      rejected = true;
+      const expected = updater(fixture.contents.get(file.path));
+      fixture.contents.set(file.path, `${expected}conflicting target edit\n`);
+      throw new Error('synthetic conflicted target write');
+    }
+    return process(file, updater);
+  };
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.changed, true);
+  assert.equal(fixture.contents.get(fixture.dailyTaskPath), originalSource);
+  assert.match(fixture.contents.get(fixture.canonicalUpperFile.path), /Daily task/u);
+  assert.match(fixture.contents.get(fixture.canonicalUpperFile.path), /conflicting target edit/u);
+});
+
+test('task API v2 keeps destructive Daily Note moves opt-in compatible', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.doesNotMatch(fixture.contents.get(fixture.dailyTaskPath), /Daily task/u);
+  assert.doesNotMatch(fixture.contents.get(fixture.dailyTaskPath), /migratedTo::/u);
+});
+
+test('task API same-file moves report an unchanged in-block target as a no-op', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [task] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const before = fixture.contents.get(fixture.taskPath);
+
+  const result = await fixture.service.move(task, {
+    targetPath: fixture.taskPath,
+    placement: 'line',
+    lineNumber: task.lineNumber,
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, false);
+  assert.equal(fixture.contents.get(fixture.taskPath), before);
+});
+
+test('task API move placement keeps the append default and honors explicit after-frontmatter', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const targetContent = [
+    '---',
+    'title: Destination',
+    '---',
+    '',
+    '# Existing section',
+    'Existing body',
+    '',
+  ].join('\n');
+
+  const appendFixture = createTaskApiFixture(TaskApiService);
+  appendFixture.contents.set(appendFixture.canonicalUpperFile.path, targetContent);
+  const [appendTask] = await appendFixture.service.list({
+    paths: [appendFixture.taskPath],
+    includeCompleted: true,
+  });
+  const appended = await appendFixture.service.move(appendTask, {
+    targetPath: appendFixture.canonicalUpperFile.path,
+  });
+  assert.equal(appended.ok, true);
+  assert.equal(appended.task?.lineNumber, 6);
+  assert.match(
+    appendFixture.contents.get(appendFixture.canonicalUpperFile.path),
+    /Existing body\n- \[ \] Open task\n$/u,
+  );
+
+  const topFixture = createTaskApiFixture(TaskApiService);
+  topFixture.contents.set(topFixture.canonicalUpperFile.path, targetContent);
+  const [topTask] = await topFixture.service.list({
+    paths: [topFixture.taskPath],
+    includeCompleted: true,
+  });
+  const insertedAfterFrontmatter = await topFixture.service.move(topTask, {
+    targetPath: topFixture.canonicalUpperFile.path,
+    placement: 'after-frontmatter',
+  });
+  assert.equal(insertedAfterFrontmatter.ok, true);
+  assert.equal(insertedAfterFrontmatter.task?.lineNumber, 3);
+  assert.match(
+    topFixture.contents.get(topFixture.canonicalUpperFile.path),
+    /^---\ntitle: Destination\n---\n- \[ \] Open task\n\n# Existing section/u,
+  );
+});
+
+test('task API same-file after-frontmatter placement moves the complete block to the YAML boundary', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const tasks = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const workingTask = tasks.find((task) => task.title === 'Working task');
+
+  const result = await fixture.service.move(workingTask, {
+    targetPath: fixture.taskPath,
+    placement: 'after-frontmatter',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.equal(result.task?.lineNumber, 3);
+  assert.match(
+    fixture.contents.get(fixture.taskPath),
+    /^---\ntitle: Tasks\n---\n- \[\/\] Working task\n\n- \[ \] Open task/u,
+  );
+});
+
+test('task API captures the latest nested block before inserting the target copy', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+  fixture.contents.set(
+    fixture.dailyTaskPath,
+    fixture.contents.get(fixture.dailyTaskPath).replace('supporting detail', 'latest supporting detail'),
+  );
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(result.ok, true);
+  assert.match(fixture.contents.get(fixture.canonicalUpperFile.path), /latest supporting detail/u);
+  assert.match(fixture.contents.get(fixture.dailyTaskPath), /latest supporting detail/u);
+});
+
+test('task API rolls back when nested source content changes after target insertion', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+  const originalTarget = fixture.contents.get(fixture.canonicalUpperFile.path);
+  const process = fixture.plugin.app.vault.process.bind(fixture.plugin.app.vault);
+  let changedAfterCapture = false;
+  fixture.plugin.app.vault.process = async (file, updater) => {
+    if (!changedAfterCapture && file.path === fixture.canonicalUpperFile.path) {
+      changedAfterCapture = true;
+      fixture.contents.set(
+        fixture.dailyTaskPath,
+        fixture.contents.get(fixture.dailyTaskPath).replace('supporting detail', 'concurrent detail'),
+      );
+    }
+    return process(file, updater);
+  };
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.changed, false);
+  assert.match(fixture.contents.get(fixture.dailyTaskPath), /concurrent detail/u);
+  assert.doesNotMatch(fixture.contents.get(fixture.dailyTaskPath), /migratedTo::/u);
+  assert.equal(fixture.contents.get(fixture.canonicalUpperFile.path), originalTarget);
+});
+
+test('task API rolls back a target copy when the source write throws', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+  const originalSource = fixture.contents.get(fixture.dailyTaskPath);
+  const originalTarget = fixture.contents.get(fixture.canonicalUpperFile.path);
+  const process = fixture.plugin.app.vault.process.bind(fixture.plugin.app.vault);
+  let sourceCalls = 0;
+  fixture.plugin.app.vault.process = async (file, updater) => {
+    if (file.path === fixture.dailyTaskPath && ++sourceCalls === 2) {
+      throw new Error('synthetic source write failure');
+    }
+    return process(file, updater);
+  };
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.changed, false);
+  assert.equal(fixture.contents.get(fixture.dailyTaskPath), originalSource);
+  assert.equal(fixture.contents.get(fixture.canonicalUpperFile.path), originalTarget);
+});
+
+test('task API rolls back when the source updater ran but its rejected write did not commit', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+  const originalSource = fixture.contents.get(fixture.dailyTaskPath);
+  const originalTarget = fixture.contents.get(fixture.canonicalUpperFile.path);
+  const process = fixture.plugin.app.vault.process.bind(fixture.plugin.app.vault);
+  let sourceCalls = 0;
+  fixture.plugin.app.vault.process = async (file, updater) => {
+    if (file.path === fixture.dailyTaskPath && ++sourceCalls === 2) {
+      updater(fixture.contents.get(file.path));
+      throw new Error('synthetic source write rejection before commit');
+    }
+    return process(file, updater);
+  };
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.changed, false);
+  assert.equal(fixture.contents.get(fixture.dailyTaskPath), originalSource);
+  assert.equal(fixture.contents.get(fixture.canonicalUpperFile.path), originalTarget);
+});
+
+test('task API accepts a source write that committed exact expected content before rejecting', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+  const process = fixture.plugin.app.vault.process.bind(fixture.plugin.app.vault);
+  let sourceCalls = 0;
+  fixture.plugin.app.vault.process = async (file, updater) => {
+    if (file.path === fixture.dailyTaskPath && ++sourceCalls === 2) {
+      fixture.contents.set(file.path, updater(fixture.contents.get(file.path)));
+      throw new Error('synthetic source write rejection after commit');
+    }
+    return process(file, updater);
+  };
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.match(fixture.contents.get(fixture.dailyTaskPath), /migratedTo::/u);
+  assert.match(fixture.contents.get(fixture.canonicalUpperFile.path), /Daily task/u);
+});
+
+test('task API preserves the target copy when a rejected source write leaves conflicting source content', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+  const process = fixture.plugin.app.vault.process.bind(fixture.plugin.app.vault);
+  let sourceCalls = 0;
+  fixture.plugin.app.vault.process = async (file, updater) => {
+    if (file.path === fixture.dailyTaskPath && ++sourceCalls === 2) {
+      updater(fixture.contents.get(file.path));
+      fixture.contents.set(
+        file.path,
+        fixture.contents.get(file.path).replace('supporting detail', 'conflicting source detail'),
+      );
+      throw new Error('synthetic conflicted source write');
+    }
+    return process(file, updater);
+  };
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.changed, true);
+  assert.match(result.error || '', /target copy was preserved/u);
+  assert.match(fixture.contents.get(fixture.dailyTaskPath), /conflicting source detail/u);
+  assert.doesNotMatch(fixture.contents.get(fixture.dailyTaskPath), /migratedTo::/u);
+  assert.match(fixture.contents.get(fixture.canonicalUpperFile.path), /Daily task/u);
+});
+
+test('task API reports a partial target copy when source write and rollback both fail', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+  const originalSource = fixture.contents.get(fixture.dailyTaskPath);
+  const process = fixture.plugin.app.vault.process.bind(fixture.plugin.app.vault);
+  let sourceCalls = 0;
+  let targetCalls = 0;
+  fixture.plugin.app.vault.process = async (file, updater) => {
+    if (file.path === fixture.dailyTaskPath && ++sourceCalls === 2) {
+      throw new Error('synthetic source write failure');
+    }
+    if (file.path === fixture.canonicalUpperFile.path && ++targetCalls === 2) {
+      throw new Error('synthetic rollback failure');
+    }
+    return process(file, updater);
+  };
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(result.ok, false);
+  assert.equal(result.changed, true);
+  assert.equal(fixture.contents.get(fixture.dailyTaskPath), originalSource);
+  assert.match(fixture.contents.get(fixture.canonicalUpperFile.path), /Daily task/u);
+});
+
+test('task API reports a committed move when post-commit task refresh fails', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  const [dailyTask] = await fixture.service.list({
+    paths: [fixture.dailyTaskPath],
+    includeCompleted: true,
+  });
+  const process = fixture.plugin.app.vault.process.bind(fixture.plugin.app.vault);
+  const cachedRead = fixture.plugin.app.vault.cachedRead.bind(fixture.plugin.app.vault);
+  let sourceCalls = 0;
+  let sourceCommitted = false;
+  fixture.plugin.app.vault.process = async (file, updater) => {
+    const result = await process(file, updater);
+    if (file.path === fixture.dailyTaskPath && ++sourceCalls === 2) sourceCommitted = true;
+    return result;
+  };
+  fixture.plugin.app.vault.cachedRead = async (file) => {
+    if (sourceCommitted && file.path === fixture.canonicalUpperFile.path) {
+      throw new Error('synthetic refresh failure');
+    }
+    return cachedRead(file);
+  };
+
+  const result = await fixture.service.move(dailyTask, {
+    targetPath: fixture.canonicalUpperFile.path,
+    sourcePolicy: 'migrate-if-daily-note',
+    resolution: 'exact-or-identity',
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.changed, true);
+  assert.equal(result.task, null);
+  assert.match(result.error || '', /could not be refreshed/u);
+  assert.match(fixture.contents.get(fixture.dailyTaskPath), /migratedTo::/u);
+  assert.match(fixture.contents.get(fixture.canonicalUpperFile.path), /Daily task/u);
 });
 
 test('compiled task API excludes frontmatter, fenced, and indented code tasks', async () => {
@@ -1048,9 +1596,14 @@ test('task API mutations preserve safe task-specific behavior', () => {
   assert.match(taskApiSource, /this\.plugin\.app\.vault\.process\(targetFile/);
   assert.match(taskApiSource, /this\.plugin\.app\.vault\.process\(resolved\.file/);
   assert.match(taskApiSource, /insertLineAfterFrontmatter\(content, line\)/);
-  assert.match(taskApiSource, /insertTaskBlockAfterFrontmatter\(content, block\.lines\)/);
+  assert.match(taskApiSource, /insertTaskBlockAtEnd\(content, capturedBlock\)/);
+  assert.match(taskApiSource, /insertTaskBlockAfterFrontmatter\(content, capturedBlock\)/);
   assert.match(taskApiSource, /private resolveMutableTaskLine\(/);
-  assert.match(taskApiSource, /removeTaskBlockFromContent\(\s*content,\s*currentResolution\.index,\s*resolved\.record\.rawLine,\s*resolved\.record\.title/u);
+  assert.match(taskApiSource, /const currentBlock = extractTaskBlock\(currentResolution\.parts\.lines, currentResolution\.index\)/u);
+  assert.match(taskApiSource, /if \(!this\.taskBlocksMatch\(currentBlock\.lines, capturedBlock\)\) return content/u);
+  assert.match(taskApiSource, /removeTaskBlockFromContent\(\s*content,\s*currentResolution\.index,\s*capturedRawLine,\s*resolved\.record\.title/u);
+  assert.match(taskApiSource, /private async classifyRejectedWrite\(/u);
+  assert.match(taskApiSource, /private async rollbackTargetSnapshot\(/u);
   assert.ok(taskApiSource.includes('setTaskCheckboxWorkflowState(next, `[${marker}]`, workflowFieldOwnership)'));
   assert.ok(taskApiSource.includes('updateTaskCompletedDateForCheckboxState(next, `[${marker}]`'));
   assert.match(taskApiSource, /clearTaskCheckboxOwnedWorkflowFields/);

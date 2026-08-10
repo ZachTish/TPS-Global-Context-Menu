@@ -1150,6 +1150,10 @@ test('inline task checkboxes can start task-line drags for calendar drops', () =
   assert.match(dragServiceSource, /document\.dispatchEvent\(dropEvent\)/);
   assert.match(dragServiceSource, /targetEl\.closest\('\.cm-line, \.tps-gcm-linked-subitem-cm-line, \[data-line\]'\)/);
   assert.doesNotMatch(dragServiceSource, /closest\('\.tps-gcm-linked-subitem-task, \.tps-gcm-linked-subitem-checkbox, \.tps-gcm-checklist-toggle'\)\) return/);
+  assert.match(dragServiceSource, /await this\.plugin\.taskApiService\.move\(/);
+  assert.match(dragServiceSource, /sourcePolicy: 'migrate-if-daily-note'/);
+  assert.match(dragServiceSource, /resolution: 'exact-or-identity'/);
+  assert.doesNotMatch(dragServiceSource, /this\.plugin\.app\.vault\.process\(sourceFile/);
 });
 
 test('task menu can move a task to another file append-only without losing the source task first', () => {
@@ -1166,17 +1170,14 @@ test('task menu can move a task to another file append-only without losing the s
   assert.ok(moveTaskIndex > secondaryMenuStart, 'move task should remain in the secondary action section');
   assert.ok(moveTaskIndex < openTaskIndex, 'move task should be the first secondary action');
   assert.match(serviceSource, /new FileSuggestModal\(this\.plugin\.app, async \(targetFile\) => \{/);
-  assert.match(serviceSource, /insertTaskBlockAfterFrontmatter\(content, taskBlockLines\)/);
-  assert.match(serviceSource, /removeTaskBlockFromContent\(content, context\)/);
-  assert.match(serviceSource, /this\.isDailyNoteSourceFile\(sourceFile\)/);
-  assert.match(serviceSource, /buildDailyNoteScratchpadMovedTaskBlock\(taskBlockLines, \{/);
-  assert.match(serviceSource, /targetPath: targetFile\.path/);
-  assert.match(serviceSource, /movedAt: new Date\(\)/);
-  assert.match(serviceSource, /replaceTaskBlockInContent\(/);
-  assert.match(serviceSource, /await this\.plugin\.app\.vault\.process\(targetFile/);
-  assert.match(serviceSource, /await this\.plugin\.app\.vault\.process\(sourceFile/);
-  assert.match(serviceSource, /Copied task to \$\{targetFile\.basename\}; the original daily-note line changed before it could be marked/);
-  assert.match(serviceSource, /marked the daily-note record as migrated/);
+  assert.match(serviceSource, /await this\.plugin\.taskApiService\.move\(/);
+  assert.match(serviceSource, /lineNumber: context\.lineIndex/);
+  assert.match(serviceSource, /rawLine: context\.rawLine/);
+  assert.match(serviceSource, /targetFile,/);
+  assert.match(serviceSource, /sourcePolicy: 'migrate-if-daily-note'/);
+  assert.doesNotMatch(serviceSource, /private async rollbackTaskBlockFromTarget/);
+  assert.doesNotMatch(serviceSource, /private isDailyNoteSourceFile/);
+  assert.match(serviceSource, /marked the Daily Note record as migrated/);
 });
 
 test('task menu highlight targets task rows instead of broad rendered note containers', () => {
@@ -1226,6 +1227,7 @@ test('task block move helpers preserve nested content like extract selection wor
   const {
     extractTaskBlock,
     findCurrentTaskLineIndex,
+    insertTaskBlockAtEnd,
     insertTaskBlockAfterFrontmatter,
     removeTaskBlockFromContent,
     replaceTaskBlockInContent,
@@ -1259,6 +1261,21 @@ test('task block move helpers preserve nested content like extract selection wor
   const target = '---\ntitle: Target\n---\n\nExisting body\n';
   assert.equal(
     insertTaskBlockAfterFrontmatter(target, block.lines).content,
+    [
+      '---',
+      'title: Target',
+      '---',
+      '- [ ] parent task [scheduled:: 2026-06-03 10:00:00]',
+      '  - nested note',
+      '  - [ ] nested checkbox',
+      '    - deeper detail',
+      '',
+      'Existing body',
+      '',
+    ].join('\n'),
+  );
+  assert.equal(
+    insertTaskBlockAtEnd(target, block.lines).content,
     [
       '---',
       'title: Target',

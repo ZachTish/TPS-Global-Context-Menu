@@ -8,11 +8,7 @@ import { collectKnownVaultTags } from '../utils/known-tags';
 import { promptNestedLineDelete } from '../modals/nested-line-delete-modal';
 import type { CustomProperty, LinkedSubitemCheckboxMapping } from '../types';
 import {
-  buildDailyNoteScratchpadMovedTaskBlock,
   findCurrentTaskLineIndex,
-  insertTaskBlockAfterFrontmatter,
-  removeTaskBlockFromContent,
-  replaceTaskBlockInContent,
 } from '../utils/task-block-move';
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import {
@@ -47,7 +43,6 @@ import {
 import {
   getInheritedDailyNoteTaskScheduledValue,
   getIsoDateFromScheduledValue,
-  parseDailyNoteFileDate,
   resolveTaskScheduledValue,
 } from '../utils/daily-note-task-schedule';
 import {
@@ -2709,236 +2704,68 @@ export class TaskLineContextMenuService {
 
     const sourceFile = context.file;
     const sourcePath = sourceFile.path;
-    const initialLineNumber = context.lineNumber;
-    let taskBlockLines: string[] = [];
-    try {
-      await this.plugin.app.vault.process(sourceFile, (content) => {
-        const sourceUpdate = this.removeTaskBlockFromContent(content, context);
-        if (!sourceUpdate.changed) return content;
-        taskBlockLines = sourceUpdate.blockLines;
-        const parts = content.split(/\r?\n/);
-        const resolvedIndex = this.resolveLineIndex(parts, context);
-        if (resolvedIndex >= 0) {
-          context.lineIndex = resolvedIndex;
-          context.lineNumber = resolvedIndex + 1;
-          context.rawLine = parts[resolvedIndex] || context.rawLine;
-          context.title = getTaskDisplayTitle(context.rawLine);
-        }
-        return content;
-      });
-    } catch (error) {
-      logger.flowError('TaskLineContextMenu', 'move:source-read-failed', error, {
-        sourcePath,
-        targetPath: targetFile.path,
-        lineNumber: initialLineNumber,
-      });
-      new Notice('Could not read the task block to move.');
-      return false;
-    }
-    if (taskBlockLines.length === 0) {
-      new Notice('Could not find the task block to move.');
-      return false;
-    }
-    logger.flow('TaskLineContextMenu', 'move:start', {
-      sourcePath,
-      targetPath: targetFile.path,
-      lineNumber: context.lineNumber,
-      blockLines: taskBlockLines.length,
-    });
+    const preserveDailyRecord = sourcePath !== targetFile.path
+      && await this.plugin.fileNamingService.isDailyNoteFile(sourceFile);
+    const result = await this.plugin.taskApiService.move(
+      {
+        path: sourcePath,
+        lineNumber: context.lineIndex,
+        rawLine: context.rawLine,
+        title: context.title,
+      },
+      {
+        targetFile,
+        sourcePolicy: 'migrate-if-daily-note',
+        resolution: 'exact-or-identity',
+      },
+    );
 
-    if (targetFile.path === sourceFile.path) {
-      let changed = false;
-      try {
-        await this.plugin.app.vault.process(sourceFile, (content) => {
-          const update = this.moveTaskBlockWithinContent(content, context);
-          if (!update.changed) return content;
-          context.lineIndex = update.lineIndex;
-          context.lineNumber = update.lineIndex + 1;
-          context.rawLine = update.rawLine || context.rawLine;
-          changed = true;
-          return update.content;
-        });
-      } catch (error) {
-        logger.flowError('TaskLineContextMenu', 'move:same-file-failed', error, {
-          sourcePath,
-          lineNumber: initialLineNumber,
-        });
-        new Notice('Could not move the task within this note.');
-        return false;
-      }
-      if (!changed) {
-        new Notice('Could not move the task line.');
-        return false;
-      }
-      this.notifyTaskMoved([sourceFile.path]);
-      logger.flow('TaskLineContextMenu', 'move:done', {
+    if (!result.ok) {
+      const detail = String(result.error || '').trim();
+      new Notice(detail
+        ? `Could not move task: ${detail}`
+        : 'Could not move the task.');
+      logger.flowWarn('TaskLineContextMenu', 'move:rejected', {
         sourcePath,
         targetPath: targetFile.path,
-        outcome: 'same-file-end',
+        lineNumber: context.lineNumber,
+        changed: result.changed,
+        error: detail,
       });
-      new Notice(`Moved task to the end of ${sourceFile.basename}.`);
-      return true;
-    }
-
-    let insertedLineIndex = -1;
-    try {
-      await this.plugin.app.vault.process(targetFile, (content) => {
-        const inserted = insertTaskBlockAfterFrontmatter(content, taskBlockLines);
-        insertedLineIndex = inserted.lineIndex;
-        return inserted.content;
-      });
-    } catch (error) {
-      logger.flowError('TaskLineContextMenu', 'move:target-write-failed', error, {
-        sourcePath,
-        targetPath: targetFile.path,
-        lineNumber: initialLineNumber,
-      });
-      new Notice(`Could not add the task to ${targetFile.basename}.`);
       return false;
     }
-    if (insertedLineIndex < 0) {
-      new Notice(`Could not add the task to ${targetFile.basename}.`);
+    if (!result.changed) {
+      new Notice('The task is already in that position.');
+      logger.flow('TaskLineContextMenu', 'move:no-op', {
+        sourcePath,
+        targetPath: targetFile.path,
+        lineNumber: context.lineNumber,
+      });
       return false;
     }
 
-    if (this.isDailyNoteSourceFile(sourceFile)) {
-      const scratchpadBlock = buildDailyNoteScratchpadMovedTaskBlock(taskBlockLines, {
-        targetPath: targetFile.path,
-        movedAt: new Date(),
-      });
-      let preserved = false;
-      try {
-        await this.plugin.app.vault.process(sourceFile, (content) => {
-          const update = replaceTaskBlockInContent(
-            content,
-            context.lineIndex,
-            context.rawLine,
-            context.title,
-            scratchpadBlock,
-          );
-          if (!update.changed) return content;
-          preserved = true;
-          return update.content;
-        });
-      } catch (error) {
-        logger.flowError('TaskLineContextMenu', 'move:daily-source-mark-failed', error, {
-          sourcePath,
-          targetPath: targetFile.path,
-          lineNumber: initialLineNumber,
-        });
-      }
-
-      this.notifyTaskMoved([sourceFile.path, targetFile.path]);
-      new Notice(preserved
-        ? `Copied task to ${targetFile.basename}; marked the daily-note record as migrated.`
-        : `Copied task to ${targetFile.basename}; the original daily-note line changed before it could be marked.`);
-      logger.flow('TaskLineContextMenu', 'move:done', {
-        sourcePath,
-        targetPath: targetFile.path,
-        outcome: preserved ? 'daily-note-migrated' : 'daily-note-copied-source-changed',
-      });
-      return preserved;
+    if (result.task) {
+      context.file = targetFile;
+      context.lineIndex = result.task.lineNumber;
+      context.lineNumber = result.task.line;
+      context.rawLine = result.task.rawLine;
+      context.title = result.task.title;
+    } else {
+      context.file = targetFile;
     }
 
-    let removed = false;
-    try {
-      await this.plugin.app.vault.process(sourceFile, (content) => {
-        const update = this.removeTaskBlockFromContent(content, context);
-        if (!update.changed) return content;
-        removed = true;
-        return update.content;
-      });
-    } catch (error) {
-      logger.flowError('TaskLineContextMenu', 'move:source-remove-failed', error, {
-        sourcePath,
-        targetPath: targetFile.path,
-        lineNumber: initialLineNumber,
-      });
-    }
-
-    if (!removed) {
-      const rolledBack = await this.rollbackInsertedTaskBlock(targetFile, insertedLineIndex, taskBlockLines);
-      logger.flowWarn('TaskLineContextMenu', 'move:source-changed', {
-        sourcePath,
-        targetPath: targetFile.path,
-        lineNumber: initialLineNumber,
-        targetRolledBack: rolledBack,
-      });
-      new Notice(rolledBack
-        ? 'The task changed before it could be moved. No copy was left behind.'
-        : `The task changed before it could be removed; check ${targetFile.basename} for a duplicate.`);
-      return false;
-    }
-
-    context.file = targetFile;
-    context.lineIndex = Math.max(0, insertedLineIndex);
-    context.lineNumber = context.lineIndex + 1;
-    context.rawLine = taskBlockLines[0] || context.rawLine;
-
-    this.notifyTaskMoved([sourceFile.path, targetFile.path]);
-    new Notice(`Moved task to ${targetFile.basename}.`);
+    new Notice(preserveDailyRecord
+      ? `Copied task to ${targetFile.basename}; marked the Daily Note record as migrated.`
+      : targetFile.path === sourcePath
+        ? `Moved task to the end of ${sourceFile.basename}.`
+        : `Moved task to ${targetFile.basename}.`);
     logger.flow('TaskLineContextMenu', 'move:done', {
       sourcePath,
       targetPath: targetFile.path,
-      outcome: 'moved',
+      outcome: preserveDailyRecord ? 'daily-note-migrated' : 'moved',
+      resolved: result.task !== null,
     });
     return true;
-  }
-
-  private async rollbackInsertedTaskBlock(targetFile: TFile, lineIndex: number, blockLines: string[]): Promise<boolean> {
-    const rawLine = blockLines[0] || '';
-    const title = getTaskDisplayTitle(rawLine);
-    let removed = false;
-    try {
-      await this.plugin.app.vault.process(targetFile, (content) => {
-        const update = removeTaskBlockFromContent(content, lineIndex, rawLine, title);
-        if (!update.changed) return content;
-        removed = true;
-        return update.content;
-      });
-    } catch (error) {
-      logger.flowError('TaskLineContextMenu', 'move:rollback-failed', error, {
-        targetPath: targetFile.path,
-        lineNumber: lineIndex + 1,
-      });
-    }
-    return removed;
-  }
-
-  private isDailyNoteSourceFile(file: TFile): boolean {
-    return parseDailyNoteFileDate(this.plugin.app, this.plugin.settings, file) !== null;
-  }
-
-  private moveTaskBlockWithinContent(content: string, context: TaskLineContext): { content: string; changed: boolean; lineIndex: number; rawLine: string } {
-    const removed = this.removeTaskBlockFromContent(content, context);
-    if (!removed.changed) return { content, changed: false, lineIndex: context.lineIndex, rawLine: context.rawLine };
-    const inserted = insertTaskBlockAfterFrontmatter(removed.content, removed.blockLines);
-    return {
-      content: inserted.content,
-      changed: true,
-      lineIndex: inserted.lineIndex >= 0 ? inserted.lineIndex : 0,
-      rawLine: removed.blockLines[0] || context.rawLine,
-    };
-  }
-
-  private notifyTaskMoved(paths: string[]): void {
-    this.plugin.eventService.emitFilesUpdated(Array.from(new Set(paths)));
-    this.plugin.overlayRenderingService?.invalidate({
-      reason: 'task-line-context-menu-move',
-      surfaces: ['menus', 'linked-subitems', 'live-preview-editors'],
-      rebuildInlineSubitems: true,
-      refreshLivePreviewEditors: true,
-      delayMs: 80,
-    });
-  }
-
-  private removeTaskBlockFromContent(content: string, context: TaskLineContext): { content: string; changed: boolean; blockLines: string[] } {
-    const update = removeTaskBlockFromContent(content, context.lineIndex, context.rawLine, context.title);
-    return {
-      content: update.content,
-      changed: update.changed,
-      blockLines: update.block.lines,
-    };
   }
 
   private resolveLineIndex(lines: string[], context: TaskLineContext): number {

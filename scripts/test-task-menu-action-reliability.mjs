@@ -122,8 +122,13 @@ test('task note creation preserves legacy associations and refuses ambiguous mat
 });
 
 test('move, delete, and API writes expose stale or partial failures instead of reporting success', () => {
-  assert.match(menuSource, /rollbackInsertedTaskBlock/);
-  assert.match(menuSource, /targetRolledBack: rolledBack/);
+  assert.match(menuSource, /this\.plugin\.taskApiService\.move/);
+  assert.match(menuSource, /sourcePolicy: 'migrate-if-daily-note'/);
+  assert.match(menuSource, /resolution: 'exact-or-identity'/);
+  assert.match(taskApiSource, /rollbackTargetSnapshot/);
+  assert.match(taskApiSource, /targetWriteState/);
+  assert.match(taskApiSource, /sourceWriteState/);
+  assert.match(taskApiSource, /ok: false,[\s\S]{0,120}changed: true/);
   assert.match(menuSource, /private async deleteSingleTask/);
   assert.match(menuSource, /requestLineItemDelete\(this\.createTaskDeleteTarget\(context, 'task-menu-single'\)\)/);
   assert.match(menuSource, /promptNestedLineDelete\(this\.plugin\.app/);

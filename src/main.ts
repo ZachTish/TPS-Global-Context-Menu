@@ -460,6 +460,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       configurationVersion: Number(api?.configuration?.version) || null,
       taskLinesVersion: Number(api?.taskLines?.version) || null,
       taskCheckboxesVersion: Number(api?.taskCheckboxes?.version) || null,
+      tasksVersion: Number(api?.tasks?.version) || null,
     });
   }
 

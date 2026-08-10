@@ -56,6 +56,7 @@ export class FileNamingService {
         const internalPlugins = (this.plugin.app as any)?.internalPlugins;
         const dailyNotes = internalPlugins?.getPluginById?.('daily-notes')
             ?? internalPlugins?.plugins?.['daily-notes'];
+        if (dailyNotes?.enabled === false) return null;
         const options = dailyNotes?.instance?.options;
         return options && typeof options === 'object'
             ? options as Record<string, unknown>
@@ -94,6 +95,11 @@ export class FileNamingService {
         } catch {
             // Core Daily Notes may be disabled or may not have written settings yet.
         }
+    }
+
+    public async isDailyNoteFile(file: TFile): Promise<boolean> {
+        await this.dailyNoteConfigurationReady;
+        return this.isConfiguredDailyNotePath(file);
     }
 
     private isConfiguredDailyNotePath(file: TFile): boolean {
