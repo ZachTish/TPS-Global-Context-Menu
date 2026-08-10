@@ -159,13 +159,14 @@ function createTaskApiFixture(TaskApiService) {
     },
     sharedServices: { status },
     taskCheckboxHandler: {
-      async handleExternalChecklistStateMutation(file, previousState, nextState, updatedLines) {
+      async handleExternalChecklistStateMutation(file, previousState, nextState, updatedLines, lineIndex) {
         mutationTimeline.push('checklist-followup');
         checklistMutations.push({
           file,
           previousState,
           nextState,
           updatedLines: [...updatedLines],
+          lineIndex,
         });
       },
     },
@@ -571,6 +572,7 @@ test('setCompletion uses configured mappings and runs the canonical checklist fo
   assert.equal(fixture.checklistMutations[0].file, fixture.canonicalTaskFile);
   assert.equal(fixture.checklistMutations[0].previousState, '?');
   assert.equal(fixture.checklistMutations[0].nextState, '*');
+  assert.equal(fixture.checklistMutations[0].lineIndex, 4);
   assert.match(fixture.checklistMutations[0].updatedLines[4], /^- \[\*\] Open task/);
   assert.deepEqual(fixture.mutationTimeline, [
     'checklist-followup',

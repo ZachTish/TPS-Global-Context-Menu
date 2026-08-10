@@ -181,6 +181,7 @@ test('recurrence mapping failure performs zero markdown or template-store writes
   const service = new TaskRecurrenceService(plugin);
   await service.handleTaskCompletion({
     file: new TFile('Inbox/Recurring.md'),
+    lineIndex: 0,
     previousState: ' ',
     nextState: 'x',
     updatedLines: ['- [x] Repeat [recurrence:: GCM-AFTER-COMPLETION:P1D]'],
@@ -189,6 +190,46 @@ test('recurrence mapping failure performs zero markdown or template-store writes
   assert.equal(markdownMutations, 0);
   assert.equal(templateWrites, 0);
   assert.match(Notice.messages.at(-1) || '', /default status has no checkbox mapping/u);
+});
+
+test('ordinary task completion skips recurrence mapping validation even when the note contains another recurring task', async () => {
+  const { Notice, TaskRecurrenceService, TFile } = await importMappedTaskCreationServices();
+  Notice.messages.length = 0;
+  let markdownMutations = 0;
+  const plugin = {
+    settings: {
+      enableRecurrence: true,
+      recurrenceDefaultStatus: 'todo',
+      linkedSubitemCheckboxMappings: [
+        { checkboxState: '[bad]', statuses: ['todo'] },
+        { checkboxState: '[x]', statuses: ['complete'] },
+      ],
+    },
+    sharedServices: {
+      status: {
+        normalize: normalizeStatus,
+        getDoneStatuses: () => ['complete'],
+        getStatusPropertyKey: () => 'workflow',
+      },
+    },
+    subitemRelationshipSyncService: {
+      async mutateMarkdownBody() { markdownMutations += 1; },
+    },
+  };
+  const service = new TaskRecurrenceService(plugin);
+  await service.handleTaskCompletion({
+    file: new TFile('Inbox/Mixed.md'),
+    lineIndex: 0,
+    previousState: ' ',
+    nextState: 'x',
+    updatedLines: [
+      '- [x] Ordinary task',
+      '- [ ] Different recurring task [recurrence:: GCM-AFTER-COMPLETION:P1D]',
+    ],
+  });
+
+  assert.equal(markdownMutations, 0);
+  assert.deepEqual(Notice.messages, []);
 });
 
 test('recurrence uses a custom primary marker and removes stale relational status', async () => {
@@ -232,6 +273,7 @@ test('recurrence uses a custom primary marker and removes stale relational statu
   const service = new TaskRecurrenceService(plugin);
   await service.handleTaskCompletion({
     file,
+    lineIndex: 0,
     previousState: ' ',
     nextState: 'X',
     updatedLines: [...lines],
@@ -290,6 +332,7 @@ test('recurrence completion performs zero markdown or template writes when its c
   const service = new TaskRecurrenceService(plugin);
   await service.handleTaskCompletion({
     file,
+    lineIndex: 0,
     previousState: ' ',
     nextState: 'X',
     updatedLines: [...lines],

@@ -503,6 +503,7 @@ export class TaskApiService {
             previousMarker,
             nextMarker,
             updatedLines,
+            resolvedLineNumber,
           );
         } catch (error) {
           followupError = error;

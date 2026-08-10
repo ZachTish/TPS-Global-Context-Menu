@@ -3538,6 +3538,7 @@ export class PanelBuilder {
         previousState,
         newState,
         lines,
+        lineIndex,
       );
       // x / X / - are filtered out of the panel — fade and remove the row
       if (newState === 'x' || newState === 'X' || newState === '-') {

@@ -184,6 +184,7 @@ test('final-note evaluation reads post-recurrence content and sees a newly gener
       assert.equal(input.previousState, '?');
       assert.equal(input.nextState, '*');
       assert.equal(input.updatedLines, updatedLines);
+      assert.equal(input.lineIndex, 0);
       content.setContent(`${content.getContent()}\n- [?] Recurring item`);
     },
   });
@@ -193,6 +194,7 @@ test('final-note evaluation reads post-recurrence content and sees a newly gener
     '?',
     '*',
     updatedLines,
+    0,
   );
 
   assert.deepEqual(fixture.timeline, ['recurrence', 'read', 'property']);
@@ -211,6 +213,7 @@ test('recurrence and prompt failures do not prevent later follow-ups and the fir
       '?',
       '*',
       ['- [*] Recurring item'],
+      0,
     ),
     (error) => error === recurrenceError,
   );
@@ -229,6 +232,7 @@ test('an authoritative read failure still schedules checklist-property synchroni
       '?',
       '*',
       ['- [*] Recurring item'],
+      0,
     ),
     (error) => error === readError,
   );
@@ -247,6 +251,7 @@ test('a final-note prompt failure is surfaced after checklist-property synchroni
       '?',
       '*',
       ['- [*] Recurring item'],
+      0,
     ),
     (error) => error === promptError,
   );
@@ -266,6 +271,7 @@ test('a checklist-property scheduling failure is surfaced after recurrence and l
       '?',
       '*',
       ['- [*] Recurring item'],
+      0,
     ),
     (error) => error === propertyError,
   );

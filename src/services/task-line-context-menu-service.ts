@@ -2506,6 +2506,7 @@ export class TaskLineContextMenuService {
           previousMarker,
           nextMarker,
           updatedLines,
+          context.lineIndex,
         );
       } catch (error) {
         logger.flowError('TaskLineContextMenu', 'write:checkbox-followup-failed', error, {

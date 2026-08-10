@@ -172,6 +172,7 @@ export class TaskCheckboxHandler {
         let previousMarker = getCheckboxStateMarker(context.currentToken);
         const nextMarker = getCheckboxStateMarker(token);
         let updatedLines: string[] | null = null;
+        let updatedLineIndex = -1;
         let didWrite = false;
         let unresolvedWrite = false;
         let mappingGuardBlocked = false;
@@ -213,6 +214,7 @@ export class TaskCheckboxHandler {
 
             lines[lineIndex] = updatedLine;
             updatedLines = [...lines];
+            updatedLineIndex = lineIndex;
             didWrite = true;
             return true;
         });
@@ -236,7 +238,13 @@ export class TaskCheckboxHandler {
             return;
         }
         if (!didWrite || !updatedLines) return;
-        await this.handleExternalChecklistStateMutation(context.file, previousMarker, nextMarker, updatedLines);
+        await this.handleExternalChecklistStateMutation(
+            context.file,
+            previousMarker,
+            nextMarker,
+            updatedLines,
+            updatedLineIndex,
+        );
         new Notice(`Set checkbox to ${token}.`);
     }
 
@@ -415,6 +423,7 @@ export class TaskCheckboxHandler {
         previousState: string | null,
         nextState: string | null,
         updatedLines: string[],
+        lineIndex: number,
     ): Promise<void> {
         const failures: Array<{ stage: string; error: unknown }> = [];
         try {
@@ -423,6 +432,7 @@ export class TaskCheckboxHandler {
                 previousState,
                 nextState,
                 updatedLines,
+                lineIndex,
             });
         } catch (error) {
             failures.push({ stage: 'recurrence', error });

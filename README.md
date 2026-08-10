@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.24.7
+
+- Completing an ordinary task no longer runs recurring-task creation validation or shows a false **Could not create the recurring task** notice. Recurrence work starts only when the exact task line that changed contains a recurrence rule.
+- Checkbox completion follow-ups now carry the resolved task-line index through context-menu, native checkbox, TPS List/API, and checklist-panel routes. A completion can no longer select a different recurring task merely because it appears elsewhere in the same note.
+- Focused coverage includes an ordinary completed task sharing a note with another recurring task, invalid recurrence-default mapping, and exact line-index propagation. Genuine recurring tasks still validate their configured creation mapping and fail closed when it is invalid or changes during the write.
+
 ## 1.24.6
 
 - Calendar task status changes now keep the source checkbox token and the optimistic menu selection as separate values. The atomic write guard compares the live task against the token that was present when the menu opened, instead of comparing it against the newly selected destination token and rejecting every real transition as stale.

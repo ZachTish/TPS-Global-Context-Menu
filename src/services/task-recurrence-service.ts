@@ -39,6 +39,7 @@ type TaskRecurrenceTemplateEntry = {
 
 type CompletionContext = {
   file: TFile;
+  lineIndex: number;
   previousState: string | null;
   nextState: string | null;
   updatedLines: string[];
@@ -64,6 +65,9 @@ export class TaskRecurrenceService {
     if (isCompletedTaskMarker(context.previousState, this.getCompleteMarkers())) return;
     if (!isCompletedTaskMarker(context.nextState, this.getCompleteMarkers())) return;
 
+    const completedSnapshotLine = context.updatedLines[context.lineIndex] || '';
+    if (!extractTaskRecurrenceRule(completedSnapshotLine)) return;
+
     const creationMapping = this.resolveRecurrenceTaskCreationMapping();
     if (!creationMapping) {
       this.reportUnavailableCreationMapping('completion');
@@ -80,7 +84,7 @@ export class TaskRecurrenceService {
         mappingChanged = true;
         return false;
       }
-      const lineIndex = this.resolveCompletedLineIndex(lines, context.updatedLines);
+      const lineIndex = this.resolveCompletedLineIndex(lines, context.updatedLines, context.lineIndex);
       if (lineIndex < 0) return false;
 
       let completedLine = lines[lineIndex] || '';
@@ -270,14 +274,24 @@ export class TaskRecurrenceService {
     }).open();
   }
 
-  private resolveCompletedLineIndex(currentLines: string[], snapshotLines: string[]): number {
-    for (let index = 0; index < snapshotLines.length; index += 1) {
-      const snapshotLine = snapshotLines[index] || '';
-      if (!extractTaskRecurrenceRule(snapshotLine)) continue;
-      if (currentLines[index] === snapshotLine) return index;
-      if (currentLines[index] && stripVolatileCompletedDate(currentLines[index]) === stripVolatileCompletedDate(snapshotLine)) return index;
-    }
-    return -1;
+  private resolveCompletedLineIndex(
+    currentLines: string[],
+    snapshotLines: string[],
+    preferredLineIndex: number,
+  ): number {
+    const snapshotLine = snapshotLines[preferredLineIndex] || '';
+    if (!extractTaskRecurrenceRule(snapshotLine)) return -1;
+    if (currentLines[preferredLineIndex] === snapshotLine) return preferredLineIndex;
+    if (
+      currentLines[preferredLineIndex]
+      && stripVolatileCompletedDate(currentLines[preferredLineIndex]) === stripVolatileCompletedDate(snapshotLine)
+    ) return preferredLineIndex;
+    return findCurrentTaskLineIndex(
+      currentLines,
+      preferredLineIndex,
+      snapshotLine,
+      getTaskDisplayTitle(snapshotLine),
+    );
   }
 
   private async resolveTemplateLine(
