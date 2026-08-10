@@ -171,6 +171,8 @@ function createDailyNoteServiceHarness(TFile, {
     format: 'YYYY-MM-DD',
     template: templatePath,
   },
+  runtimeDailyNotesEnabled = true,
+  periodicDailyNotes = null,
   persistedDailyNotes = null,
   runtimeTemplates = null,
   persistedTemplates = null,
@@ -258,7 +260,7 @@ function createDailyNoteServiceHarness(TFile, {
       getPluginById(id) {
         if (id === 'daily-notes' && runtimeDailyNotes !== null) {
           return {
-            enabled: true,
+            enabled: runtimeDailyNotesEnabled,
             instance: {
               options: runtimeDailyNotes,
             },
@@ -277,7 +279,11 @@ function createDailyNoteServiceHarness(TFile, {
       plugins: {},
     },
     plugins: {
-      getPlugin: () => null,
+      getPlugin(id) {
+        return id === 'periodic-notes' && periodicDailyNotes !== null
+          ? { settings: { daily: periodicDailyNotes } }
+          : null;
+      },
       plugins: {
         'templater-obsidian': {
           settings: {
@@ -893,6 +899,44 @@ test('canonical GCM creation falls back to persisted Daily Notes settings before
   assert.equal(harness.stats.templaterRuns, 1);
 });
 
+test('a disabled Core Daily Notes wrapper cannot mask configured Periodic Notes', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes: {
+      folder: 'Disabled/Core',
+      format: 'YYYY-MM-DD',
+      template: '',
+    },
+    runtimeDailyNotesEnabled: false,
+    periodicDailyNotes: {
+      folder: 'Periodic/Daily',
+      format: 'YYYY_MM_DD',
+      template: 'Templates/Daily',
+    },
+    persistedDailyNotes: {
+      folder: 'Stale/Core',
+      format: 'YYYY-MM-DD',
+      template: '',
+    },
+  });
+  const service = new NoteOperationService(harness.plugin);
+  const file = await service.ensureDailyNote('2026-07-30 00:00:00');
+
+  assert.equal(file.path, 'Periodic/Daily/2026_07_30.md');
+  assert.match(harness.files.get(file.path), /Thursday planning/);
+  assert.match(harness.files.get(file.path), /Templater body/);
+  assert.equal(harness.stats.templaterRuns, 1);
+});
+
 test('partial runtime Daily Notes settings merge the persisted template and avoid the provider path', async () => {
   installDailyNoteMoment();
   const { NoteOperationService } = await loadNoteOperationService();
@@ -924,7 +968,7 @@ test('partial runtime Daily Notes settings merge the persisted template and avoi
   assert.equal(harness.stats.templaterRuns, 1);
 });
 
-test('an explicit blank runtime template does not revive a stale persisted template', async () => {
+test('a transient blank runtime template cannot mask the saved Daily Notes template', async () => {
   installDailyNoteMoment();
   const { NoteOperationService } = await loadNoteOperationService();
   class FakeFile {
@@ -944,6 +988,92 @@ test('an explicit blank runtime template does not revive a stale persisted templ
     persistedDailyNotes: {
       template: 'Templates/Daily',
     },
+  });
+  const service = new NoteOperationService(harness.plugin);
+  const file = await service.ensureDailyNote('2026-07-29 00:00:00');
+
+  assert.equal(file.path, 'Runtime/Daily/2026-07-29.md');
+  assert.match(harness.files.get(file.path), /Template section/);
+  assert.match(harness.files.get(file.path), /Templater body/);
+  assert.equal(harness.stats.templaterRuns, 1);
+});
+
+test('a durably blank Daily Notes template remains template-less', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes: {
+      folder: 'Runtime/Daily',
+      format: 'YYYY-MM-DD',
+      template: '',
+    },
+    persistedDailyNotes: {
+      template: '',
+    },
+  });
+  const service = new NoteOperationService(harness.plugin);
+  const file = await service.ensureDailyNote('2026-07-29 00:00:00');
+
+  assert.equal(file.path, 'Runtime/Daily/2026-07-29.md');
+  assert.doesNotMatch(harness.files.get(file.path), /Template section/);
+  assert.equal(harness.stats.templaterRuns, 0);
+});
+
+test('a configured runtime template wins over a different saved template', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes: {
+      folder: 'Runtime/Daily',
+      format: 'YYYY-MM-DD',
+      template: 'Templates/Daily',
+    },
+    persistedDailyNotes: {
+      template: 'Templates/Old Daily',
+    },
+  });
+  const service = new NoteOperationService(harness.plugin);
+  const file = await service.ensureDailyNote('2026-07-29 00:00:00');
+
+  assert.equal(file.path, 'Runtime/Daily/2026-07-29.md');
+  assert.match(harness.files.get(file.path), /Template section/);
+  assert.equal(harness.stats.templaterRuns, 1);
+});
+
+test('an unavailable saved Daily Notes file leaves a blank runtime template blank', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes: {
+      folder: 'Runtime/Daily',
+      format: 'YYYY-MM-DD',
+      template: '',
+    },
+    persistedDailyNotes: null,
   });
   const service = new NoteOperationService(harness.plugin);
   const file = await service.ensureDailyNote('2026-07-29 00:00:00');

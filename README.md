@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.24.8
+
+- System-created Daily Notes now treat the saved Daily Notes template as the durable automation source of truth while Core Daily Notes briefly exposes a blank startup default. A durably saved blank remains template-less, and an active nonblank runtime template still wins.
+- An explicitly disabled Core Daily Notes wrapper no longer masks an active Periodic Notes daily configuration. Periodic folder, format, template, Core variables, and Templater processing now remain authoritative in that fallback route.
+- The canonical `dailyNotes.ensureForIsoDate` API is unchanged, so TPS Calendar Base and TPS Controller receive the correction without companion releases. No settings or note schema changed; minimum supported Obsidian remains 1.10.0.
+- Validation passed all 23 focused Daily Note regressions and the complete declared suite, followed by a separate production build. In reloaded Obsidian 1.13.6, the public API created a canonical Daily Note with the configured template and target-date normalization; the original configuration was restored, QA files were archived, runtime artifacts byte-matched source, and production remained untouched.
+
 ## 1.24.7
 
 - Completing an ordinary task no longer runs recurring-task creation validation or shows a false **Could not create the recurring task** notice. Recurrence work starts only when the exact task line that changed contains a recurrence rule.
@@ -295,7 +302,7 @@
 ## 1.11.2
 
 - Daily Note creation now has one canonical, single-flight path across Home navigation and capture, Create task, time tracking, and the public GCM API. Each route copies the configured Daily Notes template before returning a writable file instead of creating a bare scheduled note.
-- Runtime Core Daily Notes settings merge field-by-field with persisted settings, Periodic Notes remains a supported fallback, extensionless template paths resolve normally, and slash-containing date formats create and recognize every nested folder. An explicitly blank runtime template remains authoritative.
+- Runtime Core Daily Notes settings merge field-by-field with persisted settings, Periodic Notes remains a supported fallback, extensionless template paths resolve normally, and slash-containing date formats create and recognize every nested folder. An explicitly blank runtime template remained authoritative in this release; 1.24.8 later superseded that startup precedence.
 - Core Templates `{{date}}`, `{{time}}`, and formatted variants use the configured formats and insertion time. Templater expressions are completed before frontmatter normalization or task/capture writes; unavailable, failed, or still-unprocessed templates fail closed instead of allowing a later write to race the template.
 - A configured template that is missing or unreadable no longer produces a permanent template-less Daily Note. Concurrent first-open requests share one creation, and existing incomplete template files can finish Templater processing on retry.
 - Daily Notes keep their canonical date filename while their template- or user-authored `title`/`Title` remains readable. The exception recognizes Core, persisted, and Periodic Notes paths—including nested formats—as well as established Daily Note kind/type/tag markers; only a missing or blank title receives the filename fallback.

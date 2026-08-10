@@ -1038,12 +1038,23 @@ export class NoteOperationService {
         const internalPlugins = (this.app as any).internalPlugins;
         const corePlugin = internalPlugins?.getPluginById?.('daily-notes')
             ?? internalPlugins?.plugins?.['daily-notes'];
-        const coreOptions = corePlugin?.instance?.options;
+        const coreOptions = corePlugin?.enabled === false
+            ? null
+            : corePlugin?.instance?.options;
         if (coreOptions && typeof coreOptions === 'object') {
             const hasRuntimeFormat = typeof coreOptions.format === 'string';
             const hasRuntimeFolder = typeof coreOptions.folder === 'string';
-            const hasRuntimeTemplate = typeof coreOptions.template === 'string';
             const persisted = await this.readPersistedDailyNoteSettings();
+            const runtimeTemplate = typeof coreOptions.template === 'string'
+                ? String(coreOptions.template || '').trim()
+                : '';
+            const persistedTemplate = String(persisted?.template || '').trim();
+            const template = runtimeTemplate || persistedTemplate;
+            if (!runtimeTemplate && persistedTemplate) {
+                logger.flow('DailyNote', 'settings:persisted-template-recovered', {
+                    source: 'core-runtime-empty',
+                });
+            }
             return {
                 format: (
                     hasRuntimeFormat
@@ -1055,9 +1066,7 @@ export class NoteOperationService {
                         ? String(coreOptions.folder || '').trim()
                         : String(persisted?.folder || '').trim(),
                 ).replace(/^\/+|\/+$/g, ''),
-                template: hasRuntimeTemplate
-                    ? String(coreOptions.template || '').trim()
-                    : String(persisted?.template || '').trim(),
+                template,
                 ...templateFormats,
             };
         }
