@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.25.2
+
+- Daily Notes API v2 now exposes the canonical task-schedule inheritance policy as a read-only cross-plugin capability. Consumers can distinguish configured Daily Notes from ordinary notes and honor **Inherit Daily Note date for unscheduled tasks** without reading GCM's private settings.
+- The API lifecycle payload publishes `dailyNotesVersion` so consumers can detect this capability alongside GCM's other versioned surfaces.
+- TPS Controller 0.3.11 uses the policy to stop unscheduled Daily Note tasks from receiving inherited reminders when the setting is off. Existing GCM task surfaces, settings, defaults, note data, and Daily Note recognition are unchanged.
+- This backward-compatible patch adds no setting or migration and keeps minimum Obsidian compatibility at 1.10.0.
+
 ## 1.25.1
 
 - Opening a note no longer lets the **Tasks**, **Mentions**, and top **Linked context** surfaces compete for the same title-adjacent DOM position. GCM owns one stable host with deterministic navigation-first ordering, so forced metadata refreshes cannot swap or detach the panels.

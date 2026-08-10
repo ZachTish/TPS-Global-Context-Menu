@@ -458,6 +458,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       lineMetadataVersion: Number(api?.lineMetadata?.version) || null,
       entityIndexVersion: Number(api?.entityIndex?.version) || null,
       configurationVersion: Number(api?.configuration?.version) || null,
+      dailyNotesVersion: Number(api?.dailyNotes?.version) || null,
       taskLinesVersion: Number(api?.taskLines?.version) || null,
       taskCheckboxesVersion: Number(api?.taskCheckboxes?.version) || null,
       tasksVersion: Number(api?.tasks?.version) || null,

@@ -12,7 +12,12 @@ import {
     normalizeLinkedSubitemMappings,
 } from './utils/linked-subitem-mapping';
 import { TPS_EVENTS, TPS_LEGACY_EVENTS } from './tps-contracts';
-import { findExistingDailyNoteForIsoDate, getDailyNotePathForIsoDate } from './utils/daily-note-task-schedule';
+import {
+    dailyNoteTaskScheduleInheritanceEnabled,
+    findExistingDailyNoteForIsoDate,
+    getDailyNotePathForIsoDate,
+    parseDailyNoteFileDate,
+} from './utils/daily-note-task-schedule';
 import { tpsBaseFormulaService } from './services/tps-base-formula-service';
 import {
     parseTaskTagValues,
@@ -804,10 +809,14 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             execute: (action: any, context: any) => plugin.homeComponentActionService.execute(action, context),
         },
         dailyNotes: {
-            version: 1,
+            version: 2,
             findForIsoDate: (isoDate: string) => findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, isoDate),
             pathForIsoDate: (isoDate: string) => getDailyNotePathForIsoDate(plugin.app, plugin.settings, isoDate),
             ensureForIsoDate: (isoDate: string) => plugin.noteOperationService.ensureDailyNote(`${isoDate} 00:00:00`),
+            getTaskSchedulePolicy: (file: Pick<TFile, 'path' | 'basename'>) => ({
+                isDailyNote: parseDailyNoteFileDate(plugin.app, plugin.settings, file) !== null,
+                inheritUnscheduled: dailyNoteTaskScheduleInheritanceEnabled(plugin.settings),
+            }),
         },
         configuration: {
             version: 1,
