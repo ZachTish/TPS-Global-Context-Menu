@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.26.0
+
+- Calendar, Tasks, and Mentions can now be shown or hidden independently from **Menus & surfaces → Note navigation**. All three settings default on, so existing installations retain their current controls until the user changes them.
+- The existing note-navigation master and placement controls now live beside those button choices. Their persisted keys and defaults are unchanged, and every setting remains editable while the inline-menu or note-navigation master is off.
+- The Calendar toggle controls only the Calendar popover. The scheduled Daily Note shortcut remains available independently, and the same choices apply below the title and in the bottom toolbar.
+- Top-navigation cache identity includes each visibility setting, so changes rebuild the active note immediately. An all-hidden row is removed, including after registered external actions resolve hidden or fail asynchronously, while a shared host that still contains Linked Context is preserved.
+- This backward-compatible minor release adds three default-on scalar settings and no note-data migration. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.26.0.md`.
+
 ## 1.25.3
 
 - Mobile Calendar Base status selections now coalesce repeated GCM callbacks for the same task and destination checkbox state into one in-flight vault mutation. This prevents successful first writes from racing duplicate submissions that incorrectly reported **That task changed before it could be updated**.
@@ -748,6 +756,7 @@ TPS Table and TPS List use the same source-aware picker for empty and populated 
 ## Settings Surface
 
 - Settings open on an always-visible **Choose what to configure** hub with five destinations: **Rules & fields**, **Menus & surfaces**, **Workflows**, **Appearance**, and **Advanced**. Only the selected page is rendered.
+- **Menus & surfaces → Note navigation** owns the existing note-navigation master and placement plus independent default-on Calendar, Tasks, and Mentions visibility controls. These settings stay editable while either master is off, use the same button factories for below-title and bottom-toolbar placement, and do not alter the scheduled Daily Note shortcut.
 - **Rules & fields** has a flat selector for Frontmatter rules, Custom fields, and View mode. Frontmatter rules expose direct Sort buckets, Tag rules, and Icon + color editors; Custom fields keeps placement/display controls beside field definitions; View mode keeps its master controls, keys, folders, and rules on one page.
 - **Workflows** has direct buttons for Home & daily notes, Tasks, Child notes, Recurrence, and Time tracking. Advanced rule safeguards, each repeated custom-field editor, and the compact Base query reference are the only intentional disclosures.
 - Retired type-profile automation settings are stripped during settings normalization and on the next settings save. Semantic record fields such as `kind`, `runKind`, `runType`, and the generic `log`/`run` contracts remain supported; the GCM `Type` custom property remains the existing folder-move control.

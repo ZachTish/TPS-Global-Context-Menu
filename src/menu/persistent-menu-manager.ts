@@ -3808,6 +3808,9 @@ export class PersistentMenuManager {
       mode,
       showTopNavigation ? 'nav' : 'no-nav',
       relationshipPlacement,
+      this.plugin.settings.showCalendarNavButton !== false ? 'calendar' : 'no-calendar',
+      this.plugin.settings.showTasksNavButton !== false ? 'tasks' : 'no-tasks',
+      this.plugin.settings.showMentionsNavButton !== false ? 'mentions' : 'no-mentions',
       showScheduledButton && scheduledDate ? scheduledDate.toISOString() : 'no-scheduled',
       isCurrentDailyNote ? 'daily' : 'not-daily',
       showStackedProperties ? 'stacked' : 'no-stacked',
@@ -3832,12 +3835,14 @@ export class PersistentMenuManager {
     container.className = 'tps-gcm-top-parent-nav';
     container.dataset.filePath = file.path;
     container.dataset.signature = signature;
-    container.style.display = showScheduledButton ? '' : 'none';
+    container.style.display = 'none';
 
     if (showScheduledButton && scheduledDate) {
-      for (const button of this.createScheduledNavButtons(view, file, scheduledDate, isCurrentDailyNote, 'top')) {
+      const scheduledButtons = this.createScheduledNavButtons(view, file, scheduledDate, isCurrentDailyNote, 'top');
+      for (const button of scheduledButtons) {
         container.appendChild(button);
       }
+      if (scheduledButtons.length > 0) container.style.display = '';
     }
 
     if (showTopNavigation && relationshipPlacement === 'top') {
@@ -3860,6 +3865,13 @@ export class PersistentMenuManager {
       container.appendChild(stackedPropertiesPanel);
     } else {
       view.contentEl.classList.remove('tps-gcm-stacked-properties-active');
+    }
+
+    if (container.childElementCount === 0) {
+      this.topParentNavs.delete(view);
+      this.removeEmptyTopSurfaceHost(view);
+      this.ensureBottomParentNav(view);
+      return;
     }
 
     topSurfaceHost.prepend(container);
@@ -3948,24 +3960,26 @@ export class PersistentMenuManager {
     const className = `tps-gcm-parent-nav-button tps-gcm-parent-nav-button--${placement}`;
     const buttons: HTMLElement[] = [];
 
-    const calendarButton = document.createElement('button');
-    calendarButton.type = 'button';
-    calendarButton.className = className;
-    calendarButton.title = 'Open calendar at scheduled time';
-    setIcon(calendarButton, 'calendar-clock');
+    if (this.plugin.settings.showCalendarNavButton !== false) {
+      const calendarButton = document.createElement('button');
+      calendarButton.type = 'button';
+      calendarButton.className = className;
+      calendarButton.title = 'Open calendar at scheduled time';
+      setIcon(calendarButton, 'calendar-clock');
 
-    const calendarLabel = document.createElement('span');
-    calendarLabel.className = 'tps-gcm-parent-nav-label';
-    calendarLabel.textContent = 'Calendar';
-    calendarButton.appendChild(calendarLabel);
-    this.trackCalendarButtonTimer(file, scheduledDate, calendarLabel, calendarButton);
+      const calendarLabel = document.createElement('span');
+      calendarLabel.className = 'tps-gcm-parent-nav-label';
+      calendarLabel.textContent = 'Calendar';
+      calendarButton.appendChild(calendarLabel);
+      this.trackCalendarButtonTimer(file, scheduledDate, calendarLabel, calendarButton);
 
-    addSafeClickListener(calendarButton, (evt) => {
-      evt.preventDefault();
-      void this.showCalendarItemsPopover(calendarButton, scheduledDate, file);
-    });
+      addSafeClickListener(calendarButton, (evt) => {
+        evt.preventDefault();
+        void this.showCalendarItemsPopover(calendarButton, scheduledDate, file);
+      });
 
-    buttons.push(calendarButton);
+      buttons.push(calendarButton);
+    }
 
     if (!isCurrentDailyNote) {
       const dailyNoteButton = document.createElement('button');
@@ -3995,22 +4009,24 @@ export class PersistentMenuManager {
     const className = `tps-gcm-parent-nav-button tps-gcm-parent-nav-button--${placement}`;
     const buttons: HTMLElement[] = [];
 
-    const tasksButton = document.createElement('button');
-    tasksButton.type = 'button';
-    tasksButton.className = className;
-    tasksButton.title = 'View tasks in this note';
-    setIcon(tasksButton, 'list-checks');
+    if (this.plugin.settings.showTasksNavButton !== false) {
+      const tasksButton = document.createElement('button');
+      tasksButton.type = 'button';
+      tasksButton.className = className;
+      tasksButton.title = 'View tasks in this note';
+      setIcon(tasksButton, 'list-checks');
 
-    const tasksLabel = document.createElement('span');
-    tasksLabel.className = 'tps-gcm-parent-nav-label';
-    tasksLabel.textContent = 'Tasks';
-    tasksButton.appendChild(tasksLabel);
+      const tasksLabel = document.createElement('span');
+      tasksLabel.className = 'tps-gcm-parent-nav-label';
+      tasksLabel.textContent = 'Tasks';
+      tasksButton.appendChild(tasksLabel);
 
-    addSafeClickListener(tasksButton, () => {
-      void this.showNoteTasksPopover(tasksButton, file);
-    });
+      addSafeClickListener(tasksButton, () => {
+        void this.showNoteTasksPopover(tasksButton, file);
+      });
 
-    buttons.push(tasksButton);
+      buttons.push(tasksButton);
+    }
 
     buttons.push(...this.createExternalActionButtons(file, placement, className));
 
@@ -4034,36 +4050,38 @@ export class PersistentMenuManager {
       void this.refreshTopChildrenButtonLabel(file, childrenLabel, childrenButton);
     }
 
-    const linksButton = document.createElement('button');
-    linksButton.type = 'button';
-    linksButton.className = className;
-    linksButton.title = 'View links and mentions';
-    setIcon(linksButton, 'link');
+    if (this.plugin.settings.showMentionsNavButton !== false) {
+      const linksButton = document.createElement('button');
+      linksButton.type = 'button';
+      linksButton.className = className;
+      linksButton.title = 'View links and mentions';
+      setIcon(linksButton, 'link');
 
-    const linksLabel = document.createElement('span');
-    linksLabel.className = 'tps-gcm-parent-nav-label';
-    linksLabel.textContent = 'Mentions';
-    linksButton.appendChild(linksLabel);
+      const linksLabel = document.createElement('span');
+      linksLabel.className = 'tps-gcm-parent-nav-label';
+      linksLabel.textContent = 'Mentions';
+      linksButton.appendChild(linksLabel);
 
-    addSafeClickListener(linksButton, () => {
-      const latestParents = this.resolveParentFiles(file);
-      const latestRelationshipPaths = this.getParentChildRelationshipPaths(file, latestParents);
-      const latestEmbeddedTargets = this.getEmbeddedMarkdownTargetPaths(file);
-      const latestPromotedChecklistTargets = this.plugin.settings.ignoreEmbeddedChildrenInTopLinks
-        ? this.getPromotedChecklistLinkedTargetPaths(file)
-        : null;
-      const { incoming: refreshedIncoming, outgoing: refreshedOutgoing } = this.getDirectLinks(file);
-      const currentIncoming = refreshedIncoming.filter((linkFile) => !latestRelationshipPaths.has(linkFile.path));
-      const currentOutgoing = refreshedOutgoing.filter((linkFile) => {
-        if (latestRelationshipPaths.has(linkFile.path)) return false;
-        if (latestEmbeddedTargets?.has(linkFile.path)) return false;
-        if (latestPromotedChecklistTargets?.has(linkFile.path)) return false;
-        return true;
+      addSafeClickListener(linksButton, () => {
+        const latestParents = this.resolveParentFiles(file);
+        const latestRelationshipPaths = this.getParentChildRelationshipPaths(file, latestParents);
+        const latestEmbeddedTargets = this.getEmbeddedMarkdownTargetPaths(file);
+        const latestPromotedChecklistTargets = this.plugin.settings.ignoreEmbeddedChildrenInTopLinks
+          ? this.getPromotedChecklistLinkedTargetPaths(file)
+          : null;
+        const { incoming: refreshedIncoming, outgoing: refreshedOutgoing } = this.getDirectLinks(file);
+        const currentIncoming = refreshedIncoming.filter((linkFile) => !latestRelationshipPaths.has(linkFile.path));
+        const currentOutgoing = refreshedOutgoing.filter((linkFile) => {
+          if (latestRelationshipPaths.has(linkFile.path)) return false;
+          if (latestEmbeddedTargets?.has(linkFile.path)) return false;
+          if (latestPromotedChecklistTargets?.has(linkFile.path)) return false;
+          return true;
+        });
+        this.toggleTopLinksPopover(linksButton, file, currentOutgoing, currentIncoming);
       });
-      this.toggleTopLinksPopover(linksButton, file, currentOutgoing, currentIncoming);
-    });
 
-    buttons.push(linksButton);
+      buttons.push(linksButton);
+    }
 
     if (parentFiles.length > 0) {
       const parentButton = document.createElement('button');
@@ -4180,7 +4198,7 @@ export class PersistentMenuManager {
       button.toggleClass('is-hidden', visible !== true);
       if (!visible) {
         button.style.display = 'none';
-        button.remove();
+        this.removeExternalActionButton(button);
         return;
       }
       button.style.removeProperty('display');
@@ -4197,6 +4215,44 @@ export class PersistentMenuManager {
     } catch (error) {
       logger.warn('[TPS GCM] Failed to refresh external action button', action.id, error);
       button.toggleClass('is-hidden', true);
+      button.style.display = 'none';
+      this.removeExternalActionButton(button);
+    }
+  }
+
+  private removeExternalActionButton(button: HTMLElement): void {
+    const remove = () => {
+      const navigationContainer = button.parentElement;
+      button.remove();
+      this.removeNavigationContainerIfEmpty(navigationContainer);
+    };
+    if (button.parentElement) {
+      remove();
+      return;
+    }
+    void Promise.resolve().then(remove);
+  }
+
+  private removeNavigationContainerIfEmpty(container: HTMLElement | null): void {
+    if (!container || container.childElementCount > 0) return;
+
+    if (container.classList.contains('tps-gcm-top-parent-nav')) {
+      for (const [view, nav] of this.topParentNavs) {
+        if (nav !== container) continue;
+        this.topParentNavs.delete(view);
+        container.remove();
+        this.removeEmptyTopSurfaceHost(view);
+        return;
+      }
+    }
+
+    if (container.classList.contains('tps-gcm-bottom-parent-nav')) {
+      for (const [view, nav] of this.bottomParentNavs) {
+        if (nav !== container) continue;
+        this.bottomParentNavs.delete(view);
+        break;
+      }
+      container.remove();
     }
   }
 

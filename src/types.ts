@@ -567,6 +567,9 @@ export interface TPSGlobalContextMenuSettings {
   enableDailyNoteNav: boolean;
   enableTopParentNav: boolean;
   topParentNavPlacement: 'top' | 'bottom';
+  showCalendarNavButton: boolean;
+  showTasksNavButton: boolean;
+  showMentionsNavButton: boolean;
   ignoreEmbeddedChildrenInTopLinks: boolean;
   enableLinkedContextPanel: boolean;
   linkedContextPlacement: 'top' | 'bottom';

@@ -984,6 +984,71 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           }),
         );
 
+      activePage.createEl('h4', { text: 'Note navigation' });
+      activePage.createEl('p', {
+        text: 'Choose which note-navigation shortcuts appear and where they are placed.',
+        cls: 'setting-item-description',
+      });
+
+      new Setting(activePage)
+        .setName('Show note navigation')
+        .setDesc('Show note-navigation controls below the title or in the bottom note toolbar.')
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.enableTopParentNav === true).onChange(async (value) => {
+            this.plugin.settings.enableTopParentNav = value;
+            await this.plugin.saveSettings();
+            this.plugin.persistentMenuManager.ensureMenus();
+          }),
+        );
+
+      new Setting(activePage)
+        .setName('Navigation placement')
+        .setDesc('Place note-navigation controls below the title or in the bottom note toolbar.')
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('top', 'Below title')
+            .addOption('bottom', 'Bottom toolbar')
+            .setValue(this.plugin.settings.topParentNavPlacement || 'top')
+            .onChange(async (value: 'top' | 'bottom') => {
+              this.plugin.settings.topParentNavPlacement = value;
+              await this.plugin.saveSettings();
+              this.plugin.persistentMenuManager.ensureMenus();
+            }),
+        );
+
+      new Setting(activePage)
+        .setName('Show Calendar button')
+        .setDesc('Show the Calendar popover shortcut for scheduled notes. The separate Daily Note shortcut stays available.')
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.showCalendarNavButton !== false).onChange(async (value) => {
+            this.plugin.settings.showCalendarNavButton = value;
+            await this.plugin.saveSettings();
+            this.plugin.persistentMenuManager.ensureMenus();
+          }),
+        );
+
+      new Setting(activePage)
+        .setName('Show Tasks button')
+        .setDesc('Show the task-list shortcut for the current note.')
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.showTasksNavButton !== false).onChange(async (value) => {
+            this.plugin.settings.showTasksNavButton = value;
+            await this.plugin.saveSettings();
+            this.plugin.persistentMenuManager.ensureMenus();
+          }),
+        );
+
+      new Setting(activePage)
+        .setName('Show Mentions button')
+        .setDesc('Show the links-and-mentions shortcut for the current note.')
+        .addToggle((toggle) =>
+          toggle.setValue(this.plugin.settings.showMentionsNavButton !== false).onChange(async (value) => {
+            this.plugin.settings.showMentionsNavButton = value;
+            await this.plugin.saveSettings();
+            this.plugin.persistentMenuManager.ensureMenus();
+          }),
+        );
+
       if (this.plugin.settings.enableInlinePersistentMenus) {
         new Setting(activePage)
           .setName('Inline menu only')
@@ -1995,7 +2060,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       relationshipAutomation.dataset.tpsSettingsRoute = 'child-notes';
       relationshipAutomation.createEl('h4', { text: 'Child notes' });
       relationshipAutomation.createEl('p', {
-        text: 'Parent links, page-connections navigation, completion classification, and child-panel filters.',
+        text: 'Parent links, completion classification, and child-panel filters.',
         cls: 'setting-item-description',
       });
     new Setting(relationshipAutomation).setName('Child parent property key').setDesc('Frontmatter key used on child notes to store parent links. Multiple parents are stored as an array under this key. Legacy parent/parents/childOf values are still read and migrated on write.').addText(t => t.setValue(this.plugin.settings.parentLinkFrontmatterKey || 'parent').onChange(async v => { this.plugin.settings.parentLinkFrontmatterKey = v.trim() || 'parent'; await this.plugin.saveSettings(); }));
@@ -2010,21 +2075,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           .onChange(async (value: 'wikilink' | 'markdown-title') => {
             this.plugin.settings.parentLinkFormat = normalizeParentLinkFormat(value);
             await this.plugin.saveSettings();
-          })
-      );
-    new Setting(relationshipAutomation).setName('Show page connections navigation').setDesc('Show a navigation button for incoming and outgoing links.').addToggle(t => t.setValue(this.plugin.settings.enableTopParentNav).onChange(async v => { this.plugin.settings.enableTopParentNav = v; await this.plugin.saveSettings(); this.plugin.persistentMenuManager.ensureMenus(); }));
-    new Setting(relationshipAutomation)
-      .setName('Connections button placement')
-      .setDesc('Move the mentions, parents, and children buttons either below the title or into the bottom note toolbar.')
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('top', 'Below title')
-          .addOption('bottom', 'Bottom toolbar')
-          .setValue(this.plugin.settings.topParentNavPlacement || 'top')
-          .onChange(async (value: 'top' | 'bottom') => {
-            this.plugin.settings.topParentNavPlacement = value;
-            await this.plugin.saveSettings();
-            this.plugin.persistentMenuManager.ensureMenus();
           })
       );
     new Setting(relationshipAutomation)
