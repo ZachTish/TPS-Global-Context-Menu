@@ -168,6 +168,46 @@ test('repeated note-open ensures share one same-key linked-context render', () =
   assert.match(ensureSource, /await inFlight\.promise/);
 });
 
+test('opening another note removes stale linked context before its replacement scan starts', () => {
+  const ensureSource = methodSource(
+    'private async ensureLinkedContextPanel',
+    'private async renderLinkedContextPanel',
+  );
+  const mountedIndex = ensureSource.indexOf('const mounted = this.linkedContextPanels.get(view)');
+  const staleGuardIndex = ensureSource.indexOf('mounted.filePath !== file.path');
+  const requestKeyIndex = ensureSource.indexOf('const requestKey = this.getLinkedContextRequestKey');
+
+  assert.ok(mountedIndex >= 0, 'the currently mounted panel must be inspected');
+  assert.ok(staleGuardIndex > mountedIndex, 'the mounted panel must be checked against the newly opened file');
+  assert.ok(
+    requestKeyIndex > staleGuardIndex,
+    'stale interactive content must be removed before the incoming-link revision scan starts',
+  );
+  assert.match(
+    ensureSource.slice(staleGuardIndex, requestKeyIndex),
+    /unmountLinkedContextPanel\(view, \{ preserveMountHosts: true \}\)/,
+  );
+  assert.match(manager, /filePath: file\.path/);
+});
+
+test('per-card linked-context freshness checks do not rescan the whole vault', () => {
+  const renderSource = methodSource(
+    'private async renderLinkedContextPanel',
+    'private disposeLinkedContextCandidate',
+  );
+  const loopStart = renderSource.indexOf('for (const item of items)');
+  const finalRevisionCheck = renderSource.indexOf(
+    'if (!this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;',
+    loopStart,
+  );
+
+  assert.ok(loopStart >= 0, 'linked-context items must render in a loop');
+  assert.ok(finalRevisionCheck > loopStart, 'the full revision must be checked at the commit boundary');
+  const perCardSource = renderSource.slice(loopStart, finalRevisionCheck);
+  assert.match(perCardSource, /isLinkedContextRenderActive\(view, file, requestId\)/);
+  assert.doesNotMatch(perCardSource, /isLinkedContextRenderCurrent|getLinkedContextRequestKey/);
+});
+
 test('canceling a linked-context render clears same-key coalescing for reactivation', () => {
   const cancelSource = methodSource(
     'private cancelLinkedContextRender',

@@ -189,14 +189,15 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     }, 250, false);
     const scheduleResponsiveMenuRefresh = (
         file: TFile,
-        opts: { rebuildInlineSubitems?: boolean; delayMs?: number; lateDelayMs?: number } = {}
+        opts: { ensureMenus?: boolean; force?: boolean; rebuildInlineSubitems?: boolean; delayMs?: number; lateDelayMs?: number } = {}
     ) => {
         if (!(file instanceof TFile) || file.extension !== 'md') return;
         overlayRendering.invalidate({
             reason: 'responsive-menu-refresh',
             file,
             surfaces: ['menus'],
-            force: true,
+            force: opts.force !== false,
+            ensureMenus: opts.ensureMenus === true,
             rebuildInlineSubitems: opts.rebuildInlineSubitems === true,
             delayMs: typeof opts.delayMs === 'number' ? opts.delayMs : 200,
         });
@@ -400,7 +401,12 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                     plugin.taskCheckboxHandler.scheduleChecklistPropertyUpdate(file);
                 }
                 previousActiveFile = file;
-                scheduleResponsiveMenuRefresh(file, { rebuildInlineSubitems: true, delayMs: 300 });
+                scheduleResponsiveMenuRefresh(file, {
+                    ensureMenus: true,
+                    force: false,
+                    rebuildInlineSubitems: true,
+                    delayMs: 300,
+                });
 
                 // ── Note-open reconciliation hooks ─────────────────────────────────
                 // 0. Repair broken parent body links from childOf backlinks before any

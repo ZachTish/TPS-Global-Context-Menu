@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.26.1
+
+- Note navigation and **Linked context** now reconcile as one stable note surface when Calendar, Tasks, Mentions, and context cards are all present. Opening another note removes the prior note's interactive context immediately instead of leaving stale cards beneath the new note while the replacement renders.
+- Repeated note-open, mobile-settle, layout, and mode checks reuse an unchanged bottom navigation row rather than destroying and rebuilding it. The delayed file-open pass can still attach UI that was not ready initially without replacing already-correct navigation.
+- Linked-context card rendering now uses constant-time file/request checks after each asynchronous card and performs the whole incoming-link revision check once at commit. One navigation construction also reuses its already-resolved child-note set instead of repeating the vault-wide reverse-child scan.
+- Same-file Linked Context updates retain the existing panel until a complete replacement is ready, and navigation/empty-state caches remain independent from the context host. The three navigation visibility settings introduced in 1.26.0 remain optional workarounds rather than a requirement for stable coexistence.
+- This backward-compatible patch changes no setting defaults, public API, commands, or note data. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.26.1.md`.
+
 ## 1.26.0
 
 - Calendar, Tasks, and Mentions can now be shown or hidden independently from **Menus & surfaces → Note navigation**. All three settings default on, so existing installations retain their current controls until the user changes them.
@@ -757,6 +765,7 @@ TPS Table and TPS List use the same source-aware picker for empty and populated 
 
 - Settings open on an always-visible **Choose what to configure** hub with five destinations: **Rules & fields**, **Menus & surfaces**, **Workflows**, **Appearance**, and **Advanced**. Only the selected page is rendered.
 - **Menus & surfaces → Note navigation** owns the existing note-navigation master and placement plus independent default-on Calendar, Tasks, and Mentions visibility controls. These settings stay editable while either master is off, use the same button factories for below-title and bottom-toolbar placement, and do not alter the scheduled Daily Note shortcut.
+- Note navigation and **Linked context** share stable mount ownership but independent visibility. Repeated note-open and layout reconciliation reuses unchanged top and bottom navigation, removes context belonging to the previously opened file before replacement work begins, and swaps same-file context only after its complete candidate is ready.
 - **Rules & fields** has a flat selector for Frontmatter rules, Custom fields, and View mode. Frontmatter rules expose direct Sort buckets, Tag rules, and Icon + color editors; Custom fields keeps placement/display controls beside field definitions; View mode keeps its master controls, keys, folders, and rules on one page.
 - **Workflows** has direct buttons for Home & daily notes, Tasks, Child notes, Recurrence, and Time tracking. Advanced rule safeguards, each repeated custom-field editor, and the compact Base query reference are the only intentional disclosures.
 - Retired type-profile automation settings are stripped during settings normalization and on the next settings save. Semantic record fields such as `kind`, `runKind`, `runType`, and the generic `log`/`run` contracts remain supported; the GCM `Type` custom property remains the existing folder-move control.

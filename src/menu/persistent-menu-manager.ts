@@ -97,7 +97,13 @@ export class PersistentMenuManager {
   private topSurfaceHosts: Map<MarkdownView, HTMLElement> = new Map();
   private topParentNavs: Map<MarkdownView, HTMLElement> = new Map();
   private bottomParentNavs: Map<MarkdownView, HTMLElement> = new Map();
-  private linkedContextPanels: Map<MarkdownView, { el: HTMLElement; component: Component; signature: string; requestKey: string }> = new Map();
+  private linkedContextPanels: Map<MarkdownView, {
+    el: HTMLElement;
+    component: Component;
+    signature: string;
+    requestKey: string;
+    filePath: string;
+  }> = new Map();
   private linkedContextRequestIds: WeakMap<MarkdownView, number> = new WeakMap();
   private linkedContextCollections: Map<string, Promise<LinkedContextItem[]>> = new Map();
   private linkedContextRenders: Map<MarkdownView, { requestKey: string; promise: Promise<void> }> = new Map();
@@ -721,11 +727,19 @@ export class PersistentMenuManager {
     requestId: number,
     requestKey: string,
   ): boolean {
+    return this.isLinkedContextRenderActive(view, file, requestId)
+      && this.getLinkedContextRequestKey(view, file) === requestKey;
+  }
+
+  private isLinkedContextRenderActive(
+    view: MarkdownView,
+    file: TFile,
+    requestId: number,
+  ): boolean {
     return this.linkedContextRequestIds.get(view) === requestId
       && view.file?.path === file.path
       && this.plugin.settings.enableInlinePersistentMenus === true
-      && this.plugin.settings.enableLinkedContextPanel === true
-      && this.getLinkedContextRequestKey(view, file) === requestKey;
+      && this.plugin.settings.enableLinkedContextPanel === true;
   }
 
   private getLinkedContextItems(requestKey: string, file: TFile): Promise<LinkedContextItem[]> {
@@ -751,8 +765,15 @@ export class PersistentMenuManager {
       this.removeLinkedContextPanel(view);
       return;
     }
-    const requestKey = this.getLinkedContextRequestKey(view, file);
     const mounted = this.linkedContextPanels.get(view);
+    if (mounted && mounted.filePath !== file.path) {
+      // A MarkdownView is reused when the user opens another note. Remove the
+      // previous note's interactive context immediately; retaining it until the
+      // replacement finishes can show stale tasks beneath the new note title.
+      this.unmountLinkedContextPanel(view, { preserveMountHosts: true });
+    }
+
+    const requestKey = this.getLinkedContextRequestKey(view, file);
     if (mounted?.requestKey === requestKey && mounted.el.isConnected) return;
 
     const inFlight = this.linkedContextRenders.get(view);
@@ -784,8 +805,9 @@ export class PersistentMenuManager {
     let committed = false;
     try {
       const items = await this.getLinkedContextItems(requestKey, file);
-      if (!this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
+      if (!this.isLinkedContextRenderActive(view, file, requestId)) return;
       if (items.length === 0) {
+        if (!this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
         this.unmountLinkedContextPanel(view);
         return;
       }
@@ -806,21 +828,26 @@ export class PersistentMenuManager {
       candidatePanel.createEl('h4', { text: 'Linked context', cls: 'tps-gcm-linked-context-heading' });
       for (const item of items) {
         await this.renderLinkedContextItem(candidatePanel, candidateComponent, item, file);
-        if (!this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
+        // MarkdownRenderer yields for every card. Generation/file/settings checks
+        // must run after each yield, but rebuilding the full incoming-link revision
+        // here turns an N-card render into N whole-vault scans. Revalidate that
+        // expensive revision once at the final commit boundary instead.
+        if (!this.isLinkedContextRenderActive(view, file, requestId)) return;
       }
 
       if (!this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
       const parent = this.resolveLinkedContextMount(view, placement);
-      if (!parent || !this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
+      if (!parent || !this.isLinkedContextRenderActive(view, file, requestId)) return;
 
       this.unmountLinkedContextPanel(view, { preserveMountHosts: true });
-      if (!parent.isConnected || !this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
+      if (!parent.isConnected || !this.isLinkedContextRenderActive(view, file, requestId)) return;
       parent.appendChild(candidatePanel);
       this.linkedContextPanels.set(view, {
         el: candidatePanel,
         component: candidateComponent,
         signature,
         requestKey,
+        filePath: file.path,
       });
       committed = true;
       if (placement === 'bottom') this.removeEmptyTopSurfaceHost(view);
@@ -3751,7 +3778,7 @@ export class PersistentMenuManager {
     const showStackedProperties = wantsTopProperties && !this.isStrictSourceMode(view);
     const showTopNavigation = this.plugin.settings.enableTopParentNav === true;
     const relationshipPlacement = this.getTopParentNavPlacement();
-    if (!showTopNavigation || relationshipPlacement !== 'bottom') {
+    if (!showTopNavigation) {
       this.removeBottomParentNav(view);
     }
 
@@ -3787,14 +3814,13 @@ export class PersistentMenuManager {
     const titleEl = this.resolveInlineTitleElement(view);
     if (!titleEl) {
       this.removeTopParentNav(view, { reserveFootprint: false });
-      if (relationshipPlacement === 'bottom') {
-        this.ensureBottomParentNav(view);
-      }
+      this.ensureBottomParentNav(view, undefined, { force: options.force === true });
       return;
     }
     const topSurfaceHost = this.ensureTopSurfaceHost(view);
     if (!topSurfaceHost) {
       this.removeTopParentNav(view, { reserveFootprint: false });
+      this.ensureBottomParentNav(view, undefined, { force: options.force === true });
       return;
     }
 
@@ -3803,6 +3829,9 @@ export class PersistentMenuManager {
     const currentCache = this.plugin.app.metadataCache.getFileCache(file);
     const isCurrentDailyNote = this.isDailyNoteFile(file, currentCache);
     const mode = getViewMode(view) || 'unknown';
+    const externalActionSignature = (this.plugin.getExternalActions?.() || [])
+      .map((action) => `${action.pluginId}:${action.id}`)
+      .join(',');
     const signature = [
       file.path,
       mode,
@@ -3814,6 +3843,7 @@ export class PersistentMenuManager {
       showScheduledButton && scheduledDate ? scheduledDate.toISOString() : 'no-scheduled',
       isCurrentDailyNote ? 'daily' : 'not-daily',
       showStackedProperties ? 'stacked' : 'no-stacked',
+      externalActionSignature || 'no-external-actions',
       'custom',
     ].join('|');
     const existing = this.topParentNavs.get(view) || null;
@@ -3825,7 +3855,7 @@ export class PersistentMenuManager {
       existing.parentElement === topSurfaceHost &&
       topSurfaceHost.firstElementChild === existing
     ) {
-      this.ensureBottomParentNav(view);
+      this.ensureBottomParentNav(view, undefined, { force: options.force === true });
       return;
     }
 
@@ -3870,13 +3900,13 @@ export class PersistentMenuManager {
     if (container.childElementCount === 0) {
       this.topParentNavs.delete(view);
       this.removeEmptyTopSurfaceHost(view);
-      this.ensureBottomParentNav(view);
+      this.ensureBottomParentNav(view, undefined, { force: options.force === true });
       return;
     }
 
     topSurfaceHost.prepend(container);
     this.topParentNavs.set(view, container);
-    this.ensureBottomParentNav(view);
+    this.ensureBottomParentNav(view, undefined, { force: options.force === true });
   }
 
   private getTopParentNavPlacement(): 'top' | 'bottom' {
@@ -3900,29 +3930,88 @@ export class PersistentMenuManager {
       .includes('tps/food');
   }
 
-  private ensureBottomParentNav(view: MarkdownView, menuEl?: HTMLElement | null): void {
-    const existing = this.bottomParentNavs.get(view);
-    if (existing) {
-      existing.remove();
-      this.bottomParentNavs.delete(view);
-    }
-
+  private ensureBottomParentNav(
+    view: MarkdownView,
+    menuEl?: HTMLElement | null,
+    options: { force?: boolean } = {},
+  ): void {
     const file = view.file;
-    if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return;
-    if (this.plugin.settings.enableTopParentNav !== true) return;
-    if (this.fileMatchesIgnoreRules(file, this.plugin.settings.inlineMenu_IgnoreRules)) return;
+    if (
+      !(file instanceof TFile)
+      || file.extension?.toLowerCase() !== 'md'
+      || this.plugin.settings.enableTopParentNav !== true
+      || this.fileMatchesIgnoreRules(file, this.plugin.settings.inlineMenu_IgnoreRules)
+    ) {
+      this.removeBottomParentNav(view);
+      return;
+    }
     const renderFullParentNav = this.getTopParentNavPlacement() === 'bottom';
     const renderMobileExternalActions = Platform.isMobile || document.body.classList.contains('is-mobile') || document.body.classList.contains('is-phone');
-    if (!renderFullParentNav && !renderMobileExternalActions) return;
+    if (!renderFullParentNav && !renderMobileExternalActions) {
+      this.removeBottomParentNav(view);
+      return;
+    }
 
     const targets = menuEl
       ? [menuEl]
       : [this.menus.get(view)?.live, this.menus.get(view)?.reading].filter((el): el is HTMLElement => !!el?.isConnected);
+    if (!targets.length) {
+      this.removeBottomParentNav(view);
+      return;
+    }
+
+    const scheduledDate = this.getScheduledDateForFile(file);
+    const isCurrentDailyNote = this.isDailyNoteFile(file, this.plugin.app.metadataCache.getFileCache(file));
+    const externalActionSignature = (this.plugin.getExternalActions?.() || [])
+      .map((action) => `${action.pluginId}:${action.id}`)
+      .join(',');
+    const signature = [
+      file.path,
+      getViewMode(view) || 'unknown',
+      renderFullParentNav ? 'full' : 'external-only',
+      renderMobileExternalActions ? 'mobile-external' : 'desktop',
+      this.plugin.settings.showCalendarNavButton !== false ? 'calendar' : 'no-calendar',
+      this.plugin.settings.showTasksNavButton !== false ? 'tasks' : 'no-tasks',
+      this.plugin.settings.showMentionsNavButton !== false ? 'mentions' : 'no-mentions',
+      scheduledDate ? scheduledDate.toISOString() : 'no-scheduled',
+      isCurrentDailyNote ? 'daily' : 'not-daily',
+      externalActionSignature || 'no-external-actions',
+      'custom',
+    ].join('|');
+
+    const tracked = this.bottomParentNavs.get(view);
+    if (tracked && !tracked.isConnected) this.bottomParentNavs.delete(view);
+    let nextTracked: HTMLElement | null = null;
 
     for (const targetMenu of targets) {
-      targetMenu.querySelectorAll('.tps-gcm-bottom-parent-nav').forEach((node) => node.remove());
       const actionBar = targetMenu.querySelector<HTMLElement>('.tps-gcm-action-bar');
-      if (!actionBar) continue;
+      const existingGroups = Array.from(targetMenu.querySelectorAll<HTMLElement>('.tps-gcm-bottom-parent-nav'));
+      if (!actionBar) {
+        existingGroups.forEach((node) => node.remove());
+        delete targetMenu.dataset.tpsGcmBottomNavSignature;
+        delete targetMenu.dataset.tpsGcmBottomNavState;
+        continue;
+      }
+
+      const existingGroup = existingGroups.find((group) => group.parentElement === actionBar) || null;
+      const cachedSignature = targetMenu.dataset.tpsGcmBottomNavSignature || '';
+      const cachedState = targetMenu.dataset.tpsGcmBottomNavState || '';
+      const mountedStateIsCurrent = cachedState === 'mounted'
+        && existingGroup?.isConnected
+        && existingGroup.dataset.signature === signature
+        && actionBar.firstElementChild === existingGroup;
+      const emptyStateIsCurrent = cachedState === 'empty' && existingGroup === null;
+      if (!options.force && cachedSignature === signature && (mountedStateIsCurrent || emptyStateIsCurrent)) {
+        existingGroups.forEach((group) => {
+          if (group !== existingGroup) group.remove();
+        });
+        if (existingGroup) nextTracked = existingGroup;
+        continue;
+      }
+
+      existingGroups.forEach((node) => node.remove());
+      targetMenu.dataset.tpsGcmBottomNavSignature = signature;
+      targetMenu.dataset.tpsGcmBottomNavState = 'empty';
 
       const buttons = renderFullParentNav
         ? [
@@ -3935,12 +4024,17 @@ export class PersistentMenuManager {
       const group = document.createElement('div');
       group.className = 'tps-gcm-bottom-parent-nav';
       group.dataset.filePath = file.path;
+      group.dataset.signature = signature;
       for (const button of buttons) {
         group.appendChild(button);
       }
       actionBar.insertBefore(group, actionBar.firstChild);
-      this.bottomParentNavs.set(view, group);
+      targetMenu.dataset.tpsGcmBottomNavState = 'mounted';
+      nextTracked = group;
     }
+
+    if (nextTracked) this.bottomParentNavs.set(view, nextTracked);
+    else this.bottomParentNavs.delete(view);
   }
 
   private createScheduledNavButtonsForFile(view: MarkdownView, file: TFile, placement: 'top' | 'bottom'): HTMLElement[] {
@@ -4047,7 +4141,7 @@ export class PersistentMenuManager {
       });
 
       buttons.push(childrenButton);
-      void this.refreshTopChildrenButtonLabel(file, childrenLabel, childrenButton);
+      void this.refreshTopChildrenButtonLabel(file, childFiles, childrenLabel, childrenButton);
     }
 
     if (this.plugin.settings.showMentionsNavButton !== false) {
@@ -4247,6 +4341,13 @@ export class PersistentMenuManager {
     }
 
     if (container.classList.contains('tps-gcm-bottom-parent-nav')) {
+      const targetMenu = container.closest<HTMLElement>('.tps-global-context-menu--persistent');
+      if (
+        targetMenu
+        && targetMenu.dataset.tpsGcmBottomNavSignature === container.dataset.signature
+      ) {
+        targetMenu.dataset.tpsGcmBottomNavState = 'empty';
+      }
       for (const [view, nav] of this.bottomParentNavs) {
         if (nav !== container) continue;
         this.bottomParentNavs.delete(view);
@@ -4852,9 +4953,14 @@ export class PersistentMenuManager {
     return isStrictSourceMode(view);
   }
 
-  private async refreshTopChildrenButtonLabel(file: TFile, labelEl: HTMLElement, buttonEl: HTMLElement): Promise<void> {
+  private async refreshTopChildrenButtonLabel(
+    file: TFile,
+    knownChildren: readonly TFile[],
+    labelEl: HTMLElement,
+    buttonEl: HTMLElement,
+  ): Promise<void> {
     try {
-      const children = await this.resolveChildFilesForTopButton(file);
+      const children = await this.resolveChildFilesForTopButton(file, knownChildren);
       if (!labelEl.isConnected || !buttonEl.isConnected) return;
       const count = children.length;
       if (count > 0) {
@@ -5740,8 +5846,12 @@ export class PersistentMenuManager {
       this.bottomParentNavs.delete(view);
     }
     const instances = this.menus.get(view);
-    instances?.live?.querySelectorAll('.tps-gcm-bottom-parent-nav').forEach((node) => node.remove());
-    instances?.reading?.querySelectorAll('.tps-gcm-bottom-parent-nav').forEach((node) => node.remove());
+    for (const menu of [instances?.live, instances?.reading]) {
+      if (!menu) continue;
+      delete menu.dataset.tpsGcmBottomNavSignature;
+      delete menu.dataset.tpsGcmBottomNavState;
+      menu.querySelectorAll('.tps-gcm-bottom-parent-nav').forEach((node) => node.remove());
+    }
   }
 
   private getParentChildRelationshipPaths(file: TFile, knownParents?: TFile[]): Set<string> {
@@ -5774,7 +5884,7 @@ export class PersistentMenuManager {
     return Array.from(childFiles.values());
   }
 
-  private async resolveChildFilesForTopButton(file: TFile): Promise<TFile[]> {
+  private async resolveChildFilesForTopButton(file: TFile, knownChildren?: readonly TFile[]): Promise<TFile[]> {
     const childFiles = new Map<string, TFile>();
     try {
       const bodyLinks = await this.plugin.bodySubitemLinkService.scanFile(file);
@@ -5787,7 +5897,7 @@ export class PersistentMenuManager {
       logger.warn('[TPS GCM] Failed scanning body child links for top button', { file: file.path, error });
     }
 
-    for (const child of this.resolveChildFiles(file)) {
+    for (const child of knownChildren ?? this.resolveChildFiles(file)) {
       childFiles.set(child.path, child);
     }
 
@@ -6834,7 +6944,7 @@ export class PersistentMenuManager {
         this.removeNoteReferencesPanel(view);
         this.removeNoteGraphPanel(view);
         this.ensureInlineTitleIcon(view);
-        this.ensureTopParentNav(view, { force: true });
+        this.ensureTopParentNav(view, { force });
       }
     }
   }

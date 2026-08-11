@@ -10,6 +10,10 @@ const managerSource = readFileSync(
   new URL("../src/menu/persistent-menu-manager.ts", import.meta.url),
   "utf8",
 );
+const eventsSource = readFileSync(
+  new URL("../src/events/register-events.ts", import.meta.url),
+  "utf8",
+);
 const settingsTabSource = readFileSync(
   new URL("../src/settings-tab.ts", import.meta.url),
   "utf8",
@@ -143,6 +147,11 @@ test("top navigation cache identity includes every independent visibility choice
       `${key} must invalidate the cached top navigation`,
     );
   }
+  assert.match(
+    signatureSource,
+    /externalActionSignature/,
+    "external action registration changes must invalidate the cached top navigation",
+  );
   assert.match(
     ensureTopSource,
     /const showTopNavigation = this\.plugin\.settings\.enableTopParentNav === true/,
@@ -290,4 +299,132 @@ test("asynchronously hidden external actions cannot leave an empty navigation co
   assert.match(refreshSource, /topParentNavs\.delete\(view\)/);
   assert.match(refreshSource, /removeEmptyTopSurfaceHost\(view\)/);
   assert.match(refreshSource, /bottomParentNavs\.delete\(view\)/);
+});
+
+test("bottom navigation reconciliation reuses mounted and intentionally empty states", () => {
+  const ensureTopSource = sourceBetween(
+    managerSource,
+    "public ensureTopParentNav",
+    "private getTopParentNavPlacement",
+  );
+  assert.doesNotMatch(
+    ensureTopSource,
+    /!showTopNavigation \|\| relationshipPlacement !== 'bottom'/,
+    "top placement must not tear down a stable mobile external-action group before reconciliation",
+  );
+  assert.match(
+    ensureTopSource,
+    /ensureBottomParentNav\(view, undefined, \{ force: options\.force === true \}\)/,
+  );
+
+  const ensureBottomSource = sourceBetween(
+    managerSource,
+    "private ensureBottomParentNav",
+    "private createScheduledNavButtonsForFile",
+  );
+  const cacheGuardIndex = ensureBottomSource.indexOf(
+    "if (!options.force && cachedSignature === signature",
+  );
+  const buttonFactoryIndex = ensureBottomSource.indexOf("const buttons =");
+
+  assert.ok(cacheGuardIndex >= 0, "bottom navigation needs a non-forced cache guard");
+  assert.ok(
+    cacheGuardIndex < buttonFactoryIndex,
+    "a cache hit must return before relationship and external button factories run",
+  );
+  assert.match(ensureBottomSource, /dataset\.tpsGcmBottomNavSignature/);
+  assert.match(ensureBottomSource, /cachedState === 'mounted'/);
+  assert.match(ensureBottomSource, /cachedState === 'empty'/);
+  assert.match(ensureBottomSource, /group\.dataset\.signature = signature/);
+  for (const key of visibilityKeys) {
+    assert.match(
+      ensureBottomSource,
+      new RegExp(`\\b${key}\\b`),
+      `${key} must invalidate the cached bottom navigation`,
+    );
+  }
+
+  const emptyCleanupSource = sourceBetween(
+    managerSource,
+    "private removeNavigationContainerIfEmpty",
+    "private async resolveExternalActionValue",
+  );
+  assert.match(
+    emptyCleanupSource,
+    /tpsGcmBottomNavSignature === container\.dataset\.signature[\s\S]*tpsGcmBottomNavState = 'empty'/,
+    "async removal of the last hidden external action must cache the empty result",
+  );
+
+  const removeBottomSource = sourceBetween(
+    managerSource,
+    "private removeBottomParentNav",
+    "private getParentChildRelationshipPaths",
+  );
+  assert.match(removeBottomSource, /delete menu\.dataset\.tpsGcmBottomNavSignature/);
+  assert.match(removeBottomSource, /delete menu\.dataset\.tpsGcmBottomNavState/);
+});
+
+test("note-open refresh attaches late hosts without forcing stable navigation rebuilds", () => {
+  const helperSource = sourceBetween(
+    eventsSource,
+    "const scheduleResponsiveMenuRefresh",
+    "plugin.registerEvent(plugin.app.workspace.on('layout-change'",
+  );
+  assert.match(helperSource, /ensureMenus\?: boolean/);
+  assert.match(helperSource, /force: opts\.force !== false/);
+  assert.match(helperSource, /ensureMenus: opts\.ensureMenus === true/);
+
+  const fileOpenSource = sourceBetween(
+    eventsSource,
+    "plugin.app.workspace.on('file-open'",
+    "// ── Reactive completedDate sync",
+  );
+  assert.match(
+    fileOpenSource,
+    /scheduleResponsiveMenuRefresh\(file, \{[\s\S]*?ensureMenus: true,[\s\S]*?force: false,[\s\S]*?delayMs: 300/,
+  );
+
+  const refreshMenusSource = sourceBetween(
+    managerSource,
+    "  refreshMenusForFile(\n",
+    "private shouldDeferStructuralRefreshForTyping",
+  );
+  assert.match(refreshMenusSource, /ensureTopParentNav\(view, \{ force \}\)/);
+  assert.doesNotMatch(refreshMenusSource, /ensureTopParentNav\(view, \{ force: true \}\)/);
+});
+
+test("one relationship-nav construction enumerates reverse children only once", () => {
+  const relationshipSource = sourceBetween(
+    managerSource,
+    "private createRelationshipNavButtons(",
+    "private createExternalActionButtons(",
+  );
+  assert.equal(
+    [...relationshipSource.matchAll(/this\.resolveChildFiles\(file\)/g)].length,
+    1,
+  );
+  assert.match(
+    relationshipSource,
+    /refreshTopChildrenButtonLabel\(file, childFiles, childrenLabel, childrenButton\)/,
+  );
+
+  const labelRefreshSource = sourceBetween(
+    managerSource,
+    "private async refreshTopChildrenButtonLabel",
+    "private getScheduledDateForFile",
+  );
+  assert.match(
+    labelRefreshSource,
+    /resolveChildFilesForTopButton\(file, knownChildren\)/,
+  );
+
+  const childResolverSource = sourceBetween(
+    managerSource,
+    "private async resolveChildFilesForTopButton",
+    "private getEmbeddedMarkdownTargetPaths",
+  );
+  assert.match(
+    childResolverSource,
+    /knownChildren \?\? this\.resolveChildFiles\(file\)/,
+  );
 });
