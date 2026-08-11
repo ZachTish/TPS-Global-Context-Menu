@@ -154,6 +154,7 @@ function taskElSurface(element: HTMLElement): string {
 
 export class TaskLineContextMenuService {
   private selectedTaskContexts = new Map<string, TaskLineContext>();
+  private pendingTaskStatusMutations = new Map<string, Promise<boolean>>();
   private taskSelectionAnchor: TaskLineContext | null = null;
   private tpsListSelectionSyncGeneration = 0;
   private tpsListSelectionOwner: HTMLElement | null = null;
@@ -168,6 +169,7 @@ export class TaskLineContextMenuService {
   dispose(): void {
     this.closeTaskEditor();
     this.clearTaskSelection();
+    this.pendingTaskStatusMutations.clear();
   }
 
   async openQuickEditorForElement(taskEl: HTMLElement, sourceEl: HTMLElement | null = taskEl): Promise<boolean> {
@@ -426,10 +428,12 @@ export class TaskLineContextMenuService {
           return;
         }
         const expectedMappingSignature = this.getCheckboxMutationSignature(mappings);
-        const updated = await this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, nextToken), {
-          checkboxMutation: true,
+        const updated = await this.updateTaskStatus(
+          context,
+          nextToken,
           expectedMappingSignature,
-        });
+          currentToken,
+        );
         if (!updated) return;
         logger.flow('TaskQuickEditor', 'status:toggle', {
           path: context.file.path,
@@ -971,10 +975,13 @@ export class TaskLineContextMenuService {
           .setIcon(mapping.icon || 'square')
           .setChecked(selected)
           .onClick(() => {
-            void this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, mapping.checkboxState), {
-              checkboxMutation: true,
+            const expectedCheckboxToken = context.checkboxToken;
+            void this.updateTaskStatus(
+              context,
+              mapping.checkboxState,
               expectedMappingSignature,
-            }).then((updated) => {
+              expectedCheckboxToken,
+            ).then((updated) => {
               if (!updated) return;
               logger.flow('TaskLineContextMenu', 'status-picker:change', {
                 path: context.file.path,
@@ -1004,6 +1011,40 @@ export class TaskLineContextMenuService {
     );
   }
 
+  private updateTaskStatus(
+    context: TaskLineContext,
+    checkboxState: string,
+    expectedMappingSignature: string,
+    expectedCheckboxToken: string,
+  ): Promise<boolean> {
+    const mutationKey = `${this.getTaskContextKey(context)}:${checkboxState}`;
+    const pending = this.pendingTaskStatusMutations.get(mutationKey);
+    if (pending) {
+      logger.flow('TaskLineContextMenu', 'status-write:duplicate-coalesced', {
+        path: context.file.path,
+        renderedLineNumber: context.lineIndex + 1,
+        checkboxState,
+      });
+      return pending;
+    }
+
+    const mutation = this.updateTaskLine(
+      context,
+      (line) => this.setTaskStatusCheckboxState(line, checkboxState),
+      {
+        checkboxMutation: true,
+        expectedMappingSignature,
+        expectedCheckboxToken,
+      },
+    ).finally(() => {
+      if (this.pendingTaskStatusMutations.get(mutationKey) === mutation) {
+        this.pendingTaskStatusMutations.delete(mutationKey);
+      }
+    });
+    this.pendingTaskStatusMutations.set(mutationKey, mutation);
+    return mutation;
+  }
+
   private showTaskEditorStatusMenu(
     context: TaskLineContext,
     button: HTMLInputElement,
@@ -1023,10 +1064,13 @@ export class TaskLineContextMenuService {
           .setIcon(mapping.icon || 'square')
           .setChecked(selected)
           .onClick(() => {
-            void this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, mapping.checkboxState), {
-              checkboxMutation: true,
+            const expectedCheckboxToken = context.checkboxToken;
+            void this.updateTaskStatus(
+              context,
+              mapping.checkboxState,
               expectedMappingSignature,
-            }).then((updated) => {
+              expectedCheckboxToken,
+            ).then((updated) => {
               if (!updated) return;
               logger.flow('TaskQuickEditor', 'status:change', {
                 path: context.file.path,
@@ -1828,11 +1872,12 @@ export class TaskLineContextMenuService {
           sub.onClick(() => {
             const previousToken = context.checkboxToken;
             setSelectedToken(mapping.checkboxState);
-            void this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, mapping.checkboxState), {
-              checkboxMutation: true,
+            void this.updateTaskStatus(
+              context,
+              mapping.checkboxState,
               expectedMappingSignature,
-              expectedCheckboxToken: previousToken,
-            }).then((updated) => {
+              previousToken,
+            ).then((updated) => {
               if (!updated) setSelectedToken(previousToken);
             });
           });
@@ -1858,11 +1903,12 @@ export class TaskLineContextMenuService {
               }
               const previousToken = context.checkboxToken;
               setSelectedToken(ownedMapping.checkboxState);
-              const updated = await this.updateTaskLine(context, (line) => this.setTaskStatusCheckboxState(line, ownedMapping.checkboxState), {
-                checkboxMutation: true,
+              const updated = await this.updateTaskStatus(
+                context,
+                ownedMapping.checkboxState,
                 expectedMappingSignature,
-                expectedCheckboxToken: previousToken,
-              });
+                previousToken,
+              );
               if (!updated) setSelectedToken(previousToken);
             }).open();
           });

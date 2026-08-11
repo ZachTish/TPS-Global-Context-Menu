@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.25.3
+
+- Mobile Calendar Base status selections now coalesce repeated GCM callbacks for the same task and destination checkbox state into one in-flight vault mutation. This prevents successful first writes from racing duplicate submissions that incorrectly reported **That task changed before it could be updated**.
+- The existing atomic task-revision and checkbox-mapping guards remain fail-closed for genuine external edits. Quick-editor toggles, status pickers, mapped status choices, and custom mapped checkbox choices share the guarded writer.
+- Duplicate semantic status mappings remain distinct exact checkbox choices by design; for example, separately configured `[/]` and `[\\]` Working markers both remain available.
+
 ## 1.25.2
 
 - Daily Notes API v2 now exposes the canonical task-schedule inheritance policy as a read-only cross-plugin capability. Consumers can distinguish configured Daily Notes from ordinary notes and honor **Inherit Daily Note date for unscheduled tasks** without reading GCM's private settings.

@@ -39,8 +39,12 @@ const taskLineResolutionSource = readFileSync(new URL('../src/utils/task-line-re
 test('task checkbox UI mutations share ownership cleanup and atomic mapping guards', () => {
   assert.doesNotMatch(serviceSource, /setTaskCheckboxToken\(/u);
   assert.ok(
-    (serviceSource.match(/this\.setTaskStatusCheckboxState\(/gu) || []).length >= 7,
-    'quick toggle, Base picker, quick status, multi-select, context menu, custom marker, and timer duplication must share cleanup',
+    (serviceSource.match(/this\.updateTaskStatus\(/gu) || []).length >= 5,
+    'quick toggle, Base picker, quick status, context menu, and custom marker must share the guarded status writer',
+  );
+  assert.ok(
+    (serviceSource.match(/this\.setTaskStatusCheckboxState\(/gu) || []).length >= 3,
+    'the guarded status writer, multi-select, and timer duplication must share checkbox-owned field cleanup',
   );
   assert.match(serviceSource, /getTaskCheckboxWorkflowMutationSignature\(/u);
   assert.match(serviceSource, /expectedMappingSignature/u);
@@ -786,12 +790,49 @@ test('optimistic task-menu status labels preserve the pre-click token for the at
     /const expectedCheckboxToken = options\.checkboxMutation === true[\s\S]{0,120}options\.expectedCheckboxToken \|\| context\.checkboxToken/u,
   );
   assert.ok(
-    (serviceSource.match(/expectedCheckboxToken: previousToken/gu) || []).length >= 2,
-    'mapped and custom context-menu status changes must guard against the pre-click token',
+    (serviceSource.match(/this\.updateTaskStatus\([\s\S]{0,180}previousToken/gu) || []).length >= 2,
+    'mapped and custom context-menu status changes must pass the pre-click token to the shared status writer',
   );
   assert.doesNotMatch(
     serviceSource,
     /!isTaskCheckboxWorkflowTokenCurrent\(currentParsed\.token, context\.checkboxToken\)/u,
+  );
+});
+
+test('duplicate mobile status selections share one in-flight task mutation', async () => {
+  const pending = new Map();
+  let writes = 0;
+  let finishWrite;
+  const write = new Promise((resolve) => {
+    finishWrite = resolve;
+  });
+  const run = (key) => {
+    const existing = pending.get(key);
+    if (existing) return existing;
+    writes += 1;
+    const mutation = write.finally(() => {
+      if (pending.get(key) === mutation) pending.delete(key);
+    });
+    pending.set(key, mutation);
+    return mutation;
+  };
+
+  const first = run('Daily/2026-08-11.md:4:[/]');
+  const duplicate = run('Daily/2026-08-11.md:4:[/]');
+  assert.equal(first, duplicate, 'the duplicate caller must await the original status write');
+  assert.equal(writes, 1, 'only one vault mutation may start for the same task and destination status');
+  finishWrite(true);
+  await Promise.all([first, duplicate]);
+  assert.equal(pending.size, 0, 'the in-flight registry clears after the durable write settles');
+
+  assert.match(serviceSource, /private pendingTaskStatusMutations = new Map<string, Promise<boolean>>\(\)/u);
+  assert.match(
+    serviceSource,
+    /const pending = this\.pendingTaskStatusMutations\.get\(mutationKey\);[\s\S]{0,220}status-write:duplicate-coalesced[\s\S]{0,180}return pending;/u,
+  );
+  assert.match(
+    serviceSource,
+    /this\.updateTaskLine\([\s\S]{0,420}\.finally\(\(\) => \{[\s\S]{0,220}delete\(mutationKey\)/u,
   );
 });
 
