@@ -107,6 +107,10 @@ import {
 } from './services/tps-base-write-target-service';
 import { normalizePropertyOptionSources } from './utils/property-option-source';
 import { normalizeAcceptedKindSetting } from './utils/property-option-setting';
+import {
+  collectPropertyKeyDiagnostics,
+  normalizePropertyKeyIdentity,
+} from './utils/property-key-identity';
 import { ArchiveFileService } from './services/archive-file-service';
 import { TpsNotebookNavigatorMenuBridge } from './services/tps-notebook-navigator-menu-bridge';
 import { shouldReuseCustomPropertyPreviewPanel } from './services/custom-property-visibility';
@@ -220,6 +224,16 @@ function createTpsTableViewOptions(plugin: TPSGlobalContextMenuPlugin): ViewOpti
           options: {
             first: 'Top',
             last: 'Bottom',
+          },
+        },
+        {
+          key: 'multiValueGrouping',
+          type: 'dropdown',
+          displayName: 'Items with multiple values',
+          default: 'separate',
+          options: {
+            separate: 'Show in every matching group',
+            combined: 'Show in one combined group',
           },
         },
       ],
@@ -943,8 +957,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       row.dataset.tpsGcmContext === 'table-task'
       || (Boolean(row.dataset.taskPath) && Boolean(row.dataset.taskLine))
     ) {
-      const tableView = (row as any).__tpsTableView;
-      tableView?.applyEntryContextSelection?.(evt, row);
       logger.flow('TpsTableView', 'context-menu:task-handoff', {
         path: row.dataset.taskPath || row.dataset.path || '',
         lineNumber: Number(row.dataset.taskLine || row.dataset.line || '0'),
@@ -2114,6 +2126,18 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       )
     );
     logger.setLoggingEnabled(this.settings.enableLogging);
+    const propertyKeyDiagnostics = collectPropertyKeyDiagnostics(this.settings.properties);
+    if (propertyKeyDiagnostics.length > 0) {
+      logger.flowWarn('Settings', 'custom-property-keys:invalid', {
+        blankCount: propertyKeyDiagnostics.filter((diagnostic) => diagnostic.code === 'blank').length,
+        duplicateKeys: Array.from(new Set(
+          propertyKeyDiagnostics
+            .filter((diagnostic) => diagnostic.code === 'duplicate')
+            .map((diagnostic) => normalizePropertyKeyIdentity(diagnostic.key)),
+        )),
+        action: 'preserved-for-manual-repair',
+      });
+    }
     const normalizedAuthoritativeHomeSettingKeys = AUTHORITATIVE_HOME_SETTING_KEYS.filter((key) =>
       !Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key)
       || loadedSettingsRecord[key] !== this.settings[key],

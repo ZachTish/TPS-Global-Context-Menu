@@ -31,6 +31,7 @@ export function reconcileTaskStatusLine(
     completedAt?: Date;
     completeMarkers?: string[];
     normalizeStatus?: LinkedSubitemStatusNormalizer;
+    syncStatusToCheckbox?: boolean;
   } = {},
 ): TaskStatusCheckboxReconcileResult {
   const rawLine = String(line || '');
@@ -39,12 +40,25 @@ export function reconcileTaskStatusLine(
 
   const body = String(taskMatch[4] || '');
   const field = findInlineField(body, statusKey);
-  if (!field) return { changed: false, line: rawLine };
-
-  const status = normalizeInlineStatusValue(field.value);
   const currentCheckboxState = normalizeLinkedSubitemCheckboxState(`[${taskMatch[2] || ' '}]`);
   if (!currentCheckboxState) return { changed: false, line: rawLine };
   const currentMapping = getLinkedSubitemMappingForState(mappings, currentCheckboxState);
+  const completeMarkers = options.completeMarkers ?? getLinkedSubitemCompleteMarkers(mappings);
+
+  if (!field || options.syncStatusToCheckbox === false) {
+    if (!currentMapping) return { changed: false, line: rawLine };
+    const nextLine = updateTaskCompletedDateForCheckboxState(rawLine, currentCheckboxState, {
+      ...options,
+      completeMarkers,
+    });
+    return {
+      changed: nextLine !== rawLine,
+      line: nextLine,
+      checkboxState: currentCheckboxState,
+    };
+  }
+
+  const status = normalizeInlineStatusValue(field.value);
   const normalizedStatus = normalizeStatusForCompare(status, options.normalizeStatus);
   const currentAlreadyRepresentsStatus = currentMapping?.statuses.some(
     (mappedStatus) => normalizeStatusForCompare(mappedStatus, options.normalizeStatus) === normalizedStatus,
@@ -56,7 +70,6 @@ export function reconcileTaskStatusLine(
 
   const nextBody = removeInlineField(body, field);
   const withoutStatusLine = `${taskMatch[1]}${checkboxState}${nextBody ? ` ${nextBody}` : ''}`;
-  const completeMarkers = options.completeMarkers ?? getLinkedSubitemCompleteMarkers(mappings);
   const nextLine = updateTaskCompletedDateForCheckboxState(withoutStatusLine, checkboxState, {
     ...options,
     completeMarkers,

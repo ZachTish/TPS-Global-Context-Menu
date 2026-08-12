@@ -902,7 +902,7 @@ export class MenuBuilder {
         source: this.plugin,
         menu: subMenu,
         property: prop,
-        currentValue: isList || current === 'Mixed' ? '' : current,
+        currentValue: isList ? currentItems : current === 'Mixed' ? '' : current,
         onClear: () => this.removeContextProperty(entries, prop.key, 'context-entity-clear'),
         onChooseLiteral: (value) => isList
           ? this.addContextListValue(entries, prop, value, false, 'context-list-literal-option')

@@ -14,6 +14,7 @@ export interface TaskLineResolutionInput {
   targetTexts: string[];
   exactTaskText?: string;
   exactLineIdentity?: string;
+  requireExactLineIdentity?: boolean;
 }
 
 export function buildTaskLineCandidateIndexes(metadata: TaskLineCandidateMetadata): number[] {
@@ -64,6 +65,7 @@ export function resolveTaskLineIndex(input: TaskLineResolutionInput): number {
       return identityMatches.length === 1 ? identityMatches[0] : -1;
     }
   }
+  if (input.requireExactLineIdentity) return -1;
 
   if (hasExactTaskText) {
     const titleMatches = input.lines.reduce<number[]>((indexes, line, index) => {

@@ -41,18 +41,10 @@ export function joinContent(lines: string[], newline: string, endsWithNewline: b
 
 export function findCurrentTaskLineIndex(lines: string[], preferredIndex: number, rawLine: string, title: string): number {
   const sourceRawLine = String(rawLine || '');
-  if (
-    sourceRawLine
-    && preferredIndex >= 0
-    && parseTaskLine(lines[preferredIndex] || '')
-    && lines[preferredIndex] === sourceRawLine
-  ) {
-    return preferredIndex;
-  }
-
   if (sourceRawLine) {
     const exactMatches = findTaskLineIndexes(lines, (line) => line === sourceRawLine);
     if (exactMatches.length === 1) return exactMatches[0];
+    if (exactMatches.length > 1) return -1;
   }
 
   let ambiguousIdentity = false;

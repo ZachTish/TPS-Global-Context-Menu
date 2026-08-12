@@ -41,8 +41,10 @@ export function calculateTpsTableTotals(columns: readonly TpsTableTotalColumnInp
 }
 
 function isSummableColumnKey(key: string): boolean {
-  const canonical = String(key || '')
-    .replace(/^(?:note|line|log)\./i, '')
+  const raw = String(key || '').trim();
+  if (/^(?:file|line)\./iu.test(raw)) return false;
+  const canonical = raw
+    .replace(/^(?:note|log)\./i, '')
     .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
     .trim()
     .toLowerCase();

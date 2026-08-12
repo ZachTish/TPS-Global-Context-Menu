@@ -43,6 +43,9 @@ test('TPS Table totals reject mixed data and metadata-like numeric columns', asy
     { key: 'price', values: ['10', 'unknown', '20'] },
     { key: 'completedDate', values: ['20260712', '20260713'] },
     { key: 'lineNumber', values: ['4', '8'] },
+    { key: 'line.number', values: ['4', '8'] },
+    { key: 'line.level', values: ['1', '2'] },
+    { key: 'file.size', values: ['100', '200'] },
     { key: 'foodId', values: ['101', '102'] },
   ]);
   assert.deepEqual(Object.fromEntries(result.values), { qty: '3' });

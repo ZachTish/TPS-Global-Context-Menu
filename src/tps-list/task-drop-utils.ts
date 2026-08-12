@@ -1,4 +1,31 @@
 import { replaceKanbanTaskLineCheckboxState } from './task-checkbox-utils';
+import { normalizePropertyKeyIdentity } from '../utils/property-key-identity';
+import type { CustomProperty } from '../types';
+import {
+  isLinkListProperty,
+  mergeLinkList,
+  mergeMixedList,
+  mergeStringList,
+  removeLinkListValues,
+  removeStringListValues,
+} from '../utils/list-utils';
+import {
+  mergeEntityReferenceList,
+  mergeMixedEntityReferenceList,
+  removeEntityReferenceListValues,
+  removeMixedEntityReferenceListValues,
+} from '../utils/entity-property';
+import { propertyUsesEntityOptions } from '../utils/property-option-source';
+import {
+  readInlineFieldCarrierValues,
+  setLogInlineFieldValue,
+} from '../views/log-line-utils';
+import {
+  addInlineTagToTaskLine,
+  parseTaskTagValues,
+  readTaskLineTags,
+  removeInlineTagFromTaskLine,
+} from '../utils/task-line-metadata';
 
 export type KanbanTaskLineItemKind = 'task' | 'bullet';
 
@@ -17,6 +44,7 @@ export type BuildKanbanTaskDropLineOptions = {
   statusCheckboxState?: string | null;
   filterCheckboxState?: string | null;
   statusFieldKeysToRemove?: readonly string[];
+  configuredProperty?: CustomProperty | null;
   isStatusPropertyName: (propName: string | null | undefined) => boolean;
 };
 
@@ -46,30 +74,43 @@ export function normalizeKanbanWritableTaskTag(value: string): string {
 }
 
 export function normalizeKanbanInlinePropertyKey(key: string): string {
-  return String(key || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  return normalizePropertyKeyIdentity(key);
 }
 
 export function updateKanbanInlineTaskTag(line: string, value: string, sourceLaneValues: string[] = []): string {
   const cleanTag = normalizeKanbanWritableTaskTag(value);
-  const sourceTags = sourceLaneValues
+  const sourceTags = new Set(sourceLaneValues
     .map((sourceValue) => normalizeKanbanWritableTaskTag(sourceValue))
-    .filter((sourceTag) => sourceTag && sourceTag.toLowerCase() !== cleanTag.toLowerCase());
+    .filter((sourceTag) => sourceTag && sourceTag.toLowerCase() !== cleanTag.toLowerCase())
+    .map((sourceTag) => sourceTag.toLowerCase()));
+  const inlineTags = parseTaskTagValues([
+    readInlineFieldCarrierValues(line, 'tag'),
+    readInlineFieldCarrierValues(line, 'tags'),
+  ]);
 
-  let nextLine = String(line ?? '');
+  // Semantic task tags can be persisted as raw hashtags or singular/plural
+  // inline carriers. Remove the source lane from both forms, then collapse
+  // surviving inline-only values into one canonical plural carrier.
+  let nextLine = removeKanbanInlineTaskProperties(String(line ?? ''), ['tag', 'tags']);
   for (const sourceTag of sourceTags) {
-    const escapedSource = sourceTag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    nextLine = nextLine
-      .replace(new RegExp(`(^|\\s)#${escapedSource}(?=\\s|$)`, 'giu'), '$1')
-      .replace(/[ \t]{2,}/gu, ' ')
-      .replace(/\s+$/u, '');
+    nextLine = removeInlineTagFromTaskLine(nextLine, sourceTag);
   }
 
-  if (!cleanTag) return nextLine;
-  const tag = `#${cleanTag}`;
-  if (new RegExp(`(^|\\s)${tag.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=\\s|$)`, 'iu').test(nextLine)) {
-    return nextLine;
+  if (cleanTag) nextLine = addInlineTagToTaskLine(nextLine, cleanTag);
+  const rawTags = new Set(readTaskLineTags(nextLine).map((tag) => tag.toLowerCase()));
+  const remainingInlineTags = inlineTags.filter((tag) => (
+    !sourceTags.has(tag.toLowerCase())
+    && tag.toLowerCase() !== cleanTag.toLowerCase()
+    && !rawTags.has(tag.toLowerCase())
+  ));
+  if (remainingInlineTags.length > 0) {
+    nextLine = setLogInlineFieldValue(
+      nextLine,
+      'tags',
+      remainingInlineTags.map((tag) => `#${tag}`).join(', '),
+    );
   }
-  return `${nextLine.replace(/\s+$/u, '')} ${tag}`;
+  return nextLine;
 }
 
 export function updateKanbanInlineTaskPropertyText(
@@ -77,6 +118,7 @@ export function updateKanbanInlineTaskPropertyText(
   propName: string,
   value: string | null,
   sourceLaneValues: string[] = [],
+  configuredProperty: CustomProperty | null = null,
 ): string {
   const normalizedProp = normalizeKanbanInlinePropertyKey(propName);
   const normalizedValue = String(value ?? '').trim();
@@ -84,11 +126,50 @@ export function updateKanbanInlineTaskPropertyText(
     return updateKanbanInlineTaskTag(line, normalizedValue, sourceLaneValues);
   }
 
-  const escaped = propName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const inlineField = new RegExp(`\\s*(?:\\[|\\()${escaped}\\s*::\\s*[^\\]\\)]+(?:\\]|\\))`, 'i');
-  const withoutExisting = String(line ?? '').replace(inlineField, '').replace(/\s+$/u, '');
+  if (configuredProperty?.type === 'list') {
+    const current = readInlineFieldCarrierValues(line, configuredProperty.key).join(', ');
+    let nextValues = readKanbanListValuesAfterRemoval(current, sourceLaneValues, configuredProperty);
+    const removedLine = removeKanbanInlineTaskProperties(line, [configuredProperty.key]);
+    if (normalizedValue) {
+      const incomingIsEntity = propertyUsesEntityOptions(configuredProperty) && /^\s*\[\[/u.test(normalizedValue);
+      nextValues = incomingIsEntity
+        ? isLinkListProperty(configuredProperty)
+          ? mergeEntityReferenceList(nextValues, normalizedValue)
+          : mergeMixedEntityReferenceList(nextValues, normalizedValue)
+        : isLinkListProperty(configuredProperty)
+          ? mergeLinkList(nextValues, normalizedValue)
+          : propertyUsesEntityOptions(configuredProperty)
+            ? mergeMixedList(nextValues, normalizedValue)
+            : mergeStringList(nextValues, normalizedValue);
+    }
+    if (!nextValues.length) return removedLine;
+    return `${removedLine.replace(/\s+$/u, '')} [${configuredProperty.key}:: ${nextValues.join(', ')}]`;
+  }
+
+  // Remove every exact-key carrier with the balanced metadata parser. A flat
+  // regular expression can leave malformed `]]` fragments or stale duplicate
+  // scalar values behind.
+  const withoutExisting = removeKanbanInlineTaskProperties(line, [propName]);
   if (!normalizedValue) return withoutExisting;
-  return `${withoutExisting} [${propName}:: ${normalizedValue}]`;
+  return `${withoutExisting.replace(/\s+$/u, '')} [${propName}:: ${normalizedValue}]`;
+}
+
+function readKanbanListValuesAfterRemoval(
+  current: string,
+  sourceLaneValues: readonly string[],
+  property: CustomProperty,
+): string[] {
+  let nextValues: string[] = mergeStringList([], current);
+  for (const sourceValue of sourceLaneValues) {
+    nextValues = propertyUsesEntityOptions(property)
+      ? isLinkListProperty(property)
+        ? removeEntityReferenceListValues(nextValues, sourceValue)
+        : removeMixedEntityReferenceListValues(nextValues, sourceValue)
+      : isLinkListProperty(property)
+        ? removeLinkListValues(nextValues, sourceValue)
+        : removeStringListValues(nextValues, sourceValue);
+  }
+  return nextValues;
 }
 
 /**
@@ -184,6 +265,7 @@ export function buildKanbanTaskDropLine(options: BuildKanbanTaskDropLineOptions)
       options.propName,
       options.value,
       options.sourceLaneValues ?? [],
+      options.configuredProperty ?? null,
     );
   } else {
     nextLine = updateKanbanInlineTaskPropertyText(
@@ -191,6 +273,7 @@ export function buildKanbanTaskDropLine(options: BuildKanbanTaskDropLineOptions)
       options.propName,
       options.value,
       options.sourceLaneValues ?? [],
+      options.configuredProperty ?? null,
     );
   }
 

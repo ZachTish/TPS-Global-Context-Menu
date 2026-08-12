@@ -17,6 +17,15 @@ import {
   propertyUsesManualOptions,
 } from '../utils/property-option-source';
 import {
+  isLinkListProperty,
+  isTagListProperty,
+  parseLinkListInput,
+  parseMixedListInput,
+  parseStringListInput,
+} from '../utils/list-utils';
+import { getEntityReferenceTargetIdentity } from '../utils/entity-property';
+import { parseTagInput } from '../utils/tag-utils';
+import {
   queryAcceptedEntityRecords,
   resolveCurrentEntityReferenceChoice,
 } from './EntitySuggestModal';
@@ -59,7 +68,15 @@ export class PropertyValueSuggestModal extends FuzzySuggestModal<PropertyValueCh
   }
 
   renderSuggestion(match: FuzzyMatch<PropertyValueChoice>, el: HTMLElement): void {
-    el.createDiv({ cls: 'tps-gcm-entity-suggest-label', text: match.item.label });
+    const selected = this.isCurrentListMember(match.item);
+    el.createDiv({
+      cls: 'tps-gcm-entity-suggest-label',
+      text: selected ? `✓ ${match.item.label}` : match.item.label,
+    });
+    if (selected) {
+      el.addClass('is-selected');
+      el.setAttr('aria-selected', 'true');
+    }
     if (match.item.detail) {
       el.createEl('small', {
         cls: 'tps-gcm-entity-suggest-path',
@@ -68,12 +85,40 @@ export class PropertyValueSuggestModal extends FuzzySuggestModal<PropertyValueCh
     }
   }
 
+  private isCurrentListMember(item: PropertyValueChoice): boolean {
+    if (this.property.type !== 'list' || (item.kind !== 'literal' && item.kind !== 'entity')) return false;
+    const members = isLinkListProperty(this.property)
+      ? parseLinkListInput(this.currentValue)
+      : propertyUsesEntityOptions(this.property)
+        ? parseMixedListInput(this.currentValue)
+        : isTagListProperty(this.property)
+          ? parseTagInput(this.currentValue)
+          : parseStringListInput(this.currentValue);
+    const identity = this.getListMemberIdentity(item.value);
+    return Boolean(identity) && members.some((member) => this.getListMemberIdentity(member) === identity);
+  }
+
+  private getListMemberIdentity(value: unknown): string {
+    const raw = String(value ?? '').trim();
+    if (!raw) return '';
+    const linkTarget = getEntityReferenceTargetIdentity(raw);
+    if (linkTarget) return `link:${linkTarget}`;
+    if (isTagListProperty(this.property)) {
+      const tag = parseTagInput(raw)[0] || '';
+      return tag ? `tag:${tag}` : '';
+    }
+    return `literal:${raw.toLocaleLowerCase()}`;
+  }
+
   onChooseItem(item: PropertyValueChoice, _evt: MouseEvent | KeyboardEvent): void {
     if (item.kind === 'custom') {
+      const isList = this.property.type === 'list';
       new TextInputModal(
         this.app,
-        this.property.label || this.property.key,
-        this.currentValue,
+        isList
+          ? `${this.property.label || this.property.key} — add new item`
+          : this.property.label || this.property.key,
+        isList ? '' : this.currentValue,
         (value) => {
           const next = String(value || '').trim();
           if (!next) {
@@ -127,11 +172,12 @@ export class PropertyValueSuggestModal extends FuzzySuggestModal<PropertyValueCh
       detail: 'Clear value',
     }];
     if (propertyUsesManualOptions(this.property)) {
+      const isList = this.property.type === 'list';
       items.push({
         kind: 'custom',
         value: '',
-        label: 'Set custom value…',
-        detail: 'Manual',
+        label: isList ? 'Add new list item…' : 'Set custom value…',
+        detail: isList ? 'Create a manual list value' : 'Manual',
       });
     }
     for (const literal of getEffectivePropertyOptions(this.app, this.property)) {

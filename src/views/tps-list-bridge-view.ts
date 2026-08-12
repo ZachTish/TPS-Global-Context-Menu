@@ -23,6 +23,16 @@ export function createTpsListViewOptions(createButtonOptions: ViewOption): ViewO
             last: 'Bottom',
           },
         },
+        {
+          key: 'multiValueGrouping',
+          type: 'dropdown',
+          displayName: 'Items with multiple values',
+          default: 'separate',
+          options: {
+            separate: 'Show in every matching group',
+            combined: 'Show in one combined group',
+          },
+        },
       ],
     },
     createButtonOptions,

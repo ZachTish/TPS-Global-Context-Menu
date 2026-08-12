@@ -253,6 +253,11 @@ test('task relocation uses exact and stable identities and refuses ambiguous fal
     findCurrentTaskLineIndex([exact, exact], 9, exact, 'Exact task'),
     -1,
   );
+  assert.equal(
+    findCurrentTaskLineIndex([exact, exact], 0, exact, 'Exact task'),
+    -1,
+    'a duplicate exact revision stays ambiguous even at the preferred coordinate',
+  );
   const duplicateIdentity = '- [ ] Original [tpsId:: duplicate_1]';
   assert.equal(
     findCurrentTaskLineIndex(

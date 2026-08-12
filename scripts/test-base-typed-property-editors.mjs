@@ -396,7 +396,7 @@ test('empty Accepted-Kind TPS Table cells stay property-owned and open the entit
   );
   assert.match(
     configuredRenderer,
-    /propertyUsesEntityOptions\(property\)[\s\S]*?entry\.fields\[normalizeInlineKey\(property\.key\)\] \?\? ''/,
+    /propertyUsesEntityOptions\(property\)[\s\S]*?entry\.fields\[normalizePropertyKeyIdentity\(property\.key\)\] \?\? ''/,
     'entity-backed fields must read the stored field rather than a synthetic query value',
   );
   assert.match(
@@ -478,13 +478,13 @@ test('TPS List renders empty typed cells and routes task and note edits through 
   );
   assert.match(
     tpsList,
-    /configuredProperty\.type === 'kind'[\s\S]*?\|\| configuredProperty\.type === 'list'[\s\S]*?this\.openListTaskEntityPicker/,
-    'configured lists must use their manual, vault, and entity source picker for task lines',
+    /configuredProperty\?\.type === 'list'[\s\S]*?this\.openListTaskListEditor\(span, file, task, configuredProperty\)/,
+    'configured task lists must expose additive selection plus per-value removal',
   );
   assert.match(
     tpsList,
-    /configuredProperty\.type === 'kind'[\s\S]*?\|\| configuredProperty\.type === 'list'[\s\S]*?openPropertyValueSuggestModal\(/,
-    'configured lists must use their manual, vault, and entity source picker for notes',
+    /configuredProperty[\s\S]*?configuredProperty\.type === 'list'[\s\S]*?this\.openListNoteListEditor\(span, file, writableProp, rawValue, configuredProperty\)/,
+    'configured note lists must expose additive selection plus per-value removal',
   );
   assert.match(
     tpsList,
@@ -510,11 +510,11 @@ test('TPS List renders empty typed cells and routes task and note edits through 
   );
   for (const [label, editor] of [['task', taskEditor], ['note', noteEditor]]) {
     assert.ok(
-      editor.indexOf('this.isTagProperty(') < editor.indexOf("configuredProperty.type === 'list'"),
+      editor.indexOf('this.isTagProperty(') < editor.indexOf("configuredProperty?.type === 'list'"),
       `${label} tag lists must keep the vault tag picker ahead of the generic list picker`,
     );
     assert.ok(
-      editor.indexOf('this.isDatetimeProperty(') < editor.indexOf("configuredProperty.type === 'list'"),
+      editor.indexOf('this.isDatetimeProperty(') < editor.indexOf("configuredProperty?.type === 'list'"),
       `${label} datetime fields must keep the scheduled picker ahead of the generic list picker`,
     );
   }
@@ -522,11 +522,73 @@ test('TPS List renders empty typed cells and routes task and note edits through 
   assert.match(tpsList, /source line changed while the property picker was open/);
   assert.match(
     tpsList,
-    /choice\.kind === 'clear'[\s\S]*?setLogInlineFieldValue\(line, property\.key, null\)[\s\S]*?setLogInlineFieldValue\(line, property\.key, choice\.value\)[\s\S]*?setLogInlineFieldValue\(line, property\.key, next\.join\(', '\)\)/,
+    /applyLogBasePropertyValueChoice\(line, property, choice\)[\s\S]*?addLogBaseListPropertyValue\([\s\S]*?removeLogBaseListPropertyValue\(line, property, value\)/,
     'the combined picker must clear, replace scalar values, and add list values through the exact-line mutation',
   );
   assert.match(tpsList, /collectTpsListInlineFields\(text\)/);
   assert.doesNotMatch(tpsList, /mergeEntityReferenceList\(fm\[actualKey\] \?\? rawValue/);
+});
+
+test('TPS List and TPS Table give recurrence, snooze, and folder fields canonical typed behavior', () => {
+  const tableRenderer = sourceBlock(
+    logBase,
+    'private renderConfiguredPropertyCell(',
+    'private renderTableBooleanCell(',
+  );
+  const tableDispatcher = sourceBlock(
+    logBase,
+    'private openConfiguredPropertyCellEditor(',
+    'private openConfiguredPropertyValuePicker(',
+  );
+  const tableRecurrence = sourceBlock(
+    logBase,
+    'private openRecurrenceCellEditor(',
+    'private openSelectorCellEditor(',
+  );
+  assert.match(tableRenderer, /property\.type === 'folder'[\s\S]*?entry\.file\.parent\?\.path \|\| '\/'[\s\S]*?tpsTableCellIntent = 'source-folder'/u);
+  assert.match(tableDispatcher, /property\.type === 'recurrence'[\s\S]*?openRecurrenceCellEditor\(entry, property\)/u);
+  assert.match(tableDispatcher, /property\.type === 'folder'\) return/u);
+  assert.match(logBase, /property\?\.type === 'datetime'[\s\S]{0,100}property\?\.type === 'snooze'/u);
+  assert.match(tableRecurrence, /new RecurrenceModal\([\s\S]*?setConfiguredCellValue\(entry, property, rule \|\| null, 'recurrence'\)[\s\S]*?showEndsOn: false/u);
+
+  const listTaskDispatcher = sourceBlock(
+    tpsList,
+    'private startListTaskPropertyEdit(',
+    'private async openListTaskWorkflowStatusPicker(',
+  );
+  const listRecurrence = sourceBlock(
+    tpsList,
+    'private async openListTaskRecurrencePicker(',
+    'private startListNotePropertyEdit(',
+  );
+  const listNoteDispatcher = sourceBlock(
+    tpsList,
+    'private startListNotePropertyEdit(',
+    'private startListPropertyInput(',
+  );
+  assert.match(tpsList, /configuredForProperty\?\.type === 'folder'[\s\S]*?text: folder[\s\S]*?editable: false/u);
+  assert.match(tpsList, /sourceFolderProperty = configuredProperty\?\.type === 'folder'/u);
+  assert.match(tpsList, /noteRecurrenceProperty = configuredProperty\?\.type === 'recurrence'/u);
+  assert.match(
+    tpsList,
+    /displayValue = noteRecurrenceProperty && !value \? 'Not recurring' : value/u,
+    'an unset whole-note recurrence must not look like an editable add-property affordance',
+  );
+  assert.match(
+    tpsList,
+    /Recurrence is read-only in GCM; edit the note frontmatter property directly/u,
+    'TPS List must explain the same whole-note recurrence policy as canonical GCM',
+  );
+  assert.match(
+    tpsList,
+    /noteRecurrenceProperty \? ' tps-list-native-property--readonly' : ''/u,
+  );
+  assert.match(listTaskDispatcher, /configuredProperty\?\.type === 'recurrence'[\s\S]*?openListTaskRecurrencePicker/u);
+  assert.match(listTaskDispatcher, /configuredProperty\?\.type === 'folder'\) return/u);
+  assert.match(listRecurrence, /new RecurrenceModal\([\s\S]*?mutateRenderedTaskLine\([\s\S]*?'recurrence-update'[\s\S]*?showEndsOn: false/u);
+  assert.match(listNoteDispatcher, /configuredProperty\?\.type === 'folder' \|\| configuredProperty\?\.type === 'recurrence'/u);
+  assert.match(listNoteDispatcher, /configuredProperty\?\.type === 'snooze'[\s\S]*?menuController\.openSnoozeModal/u);
+  assert.match(tpsList, /property\?\.type === 'datetime'[\s\S]{0,100}property\?\.type === 'snooze'/u);
 });
 
 test('TPS List generic note edits preserve the live frontmatter value type', () => {

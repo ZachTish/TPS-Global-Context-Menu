@@ -21,6 +21,10 @@ import {
 } from './utils/property-option-setting';
 import { normalizeAcceptsKind } from './utils/entity-property';
 import {
+  createUniquePropertyKey,
+  getPropertyKeyDiagnostic,
+} from './utils/property-key-identity';
+import {
   DEFAULT_LINKED_SUBITEM_MAPPINGS,
   mergeLinkedSubitemMappingPresentation,
   normalizeLinkedSubitemCheckboxState,
@@ -1370,7 +1374,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       this.renderProperties(propertiesConfigContainer);
       new Setting(propertyConfig)
         .addButton(btn => btn.setButtonText('Add field').setCta().onClick(async () => {
-          this.plugin.settings.properties.push({ id: Date.now().toString(), label: 'New Property', key: 'new_prop', type: 'text' });
+          const key = createUniquePropertyKey('new_prop', this.plugin.settings.properties);
+          this.plugin.settings.properties.push({ id: Date.now().toString(), label: 'New Property', key, type: 'text' });
           await this.plugin.saveSettings();
           this.display();
         }));
@@ -2454,14 +2459,36 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           }));
 
       // Key
-      new Setting(fields)
+      const keySetting = new Setting(fields)
         .setName('Frontmatter Key')
+        .setDesc('Required. Matching ignores case but preserves punctuation and interior spaces.')
         .addText(text => text
           .setValue(prop.key)
           .onChange(async (value) => {
-            prop.key = value;
+            const candidate = value.trim();
+            const diagnostic = getPropertyKeyDiagnostic(this.plugin.settings.properties, index, candidate);
+            text.inputEl.setAttribute('aria-invalid', diagnostic ? 'true' : 'false');
+            keySetting.settingEl.toggleClass('tps-gcm-setting-item--invalid', !!diagnostic);
+            keySetting.descEl.setText(
+              diagnostic?.code === 'blank'
+                ? 'A frontmatter key is required. The saved key was not changed.'
+                : diagnostic?.code === 'duplicate'
+                  ? `Another field already uses "${candidate}" (case-insensitive). The saved key was not changed.`
+                  : 'Required. Matching ignores case but preserves punctuation and interior spaces.',
+            );
+            if (diagnostic) return;
+            prop.key = candidate;
             await this.plugin.saveSettings();
           }));
+      const persistedKeyDiagnostic = getPropertyKeyDiagnostic(this.plugin.settings.properties, index);
+      keySetting.settingEl.toggleClass('tps-gcm-setting-item--invalid', !!persistedKeyDiagnostic);
+      const keyInput = keySetting.controlEl.querySelector<HTMLInputElement>('input');
+      keyInput?.setAttribute('aria-invalid', persistedKeyDiagnostic ? 'true' : 'false');
+      if (persistedKeyDiagnostic?.code === 'blank') {
+        keySetting.descEl.setText('This saved field has no key. Enter a unique key to make it usable.');
+      } else if (persistedKeyDiagnostic?.code === 'duplicate') {
+        keySetting.descEl.setText(`This saved key is also used by ${persistedKeyDiagnostic.duplicateIndexes.length} other field${persistedKeyDiagnostic.duplicateIndexes.length === 1 ? '' : 's'}. Enter a unique key; TPS will not rename it automatically.`);
+      }
 
       // Type
       new Setting(fields)

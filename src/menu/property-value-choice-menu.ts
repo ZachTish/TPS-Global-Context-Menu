@@ -7,19 +7,30 @@ import type {
   EntityIndexSourceLike,
   EntityReferenceChoice,
 } from '../utils/entity-property';
-import { normalizeAcceptsKind } from '../utils/entity-property';
+import {
+  getEntityReferenceTargetIdentity,
+  normalizeAcceptsKind,
+} from '../utils/entity-property';
+import {
+  isLinkListProperty,
+  isTagListProperty,
+  parseLinkListInput,
+  parseMixedListInput,
+  parseStringListInput,
+} from '../utils/list-utils';
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import {
   propertyUsesEntityOptions,
   propertyUsesManualOptions,
 } from '../utils/property-option-source';
+import { parseTagInput } from '../utils/tag-utils';
 
 export interface PropertyValueChoiceMenuOptions {
   app: App;
   source: EntityIndexQueryable | EntityIndexSourceLike | null | undefined;
   menu: Menu;
   property: CustomProperty;
-  currentValue?: string;
+  currentValue?: unknown;
   onClear: () => unknown | Promise<unknown>;
   onChooseLiteral: (value: string) => unknown | Promise<unknown>;
   onChooseEntity: (choice: EntityReferenceChoice) => unknown | Promise<unknown>;
@@ -47,24 +58,35 @@ export function addPropertyValueChoiceMenuItems(
   const literals = getEffectivePropertyOptions(app, property);
   const allowManual = propertyUsesManualOptions(property);
   const allowEntities = propertyUsesEntityOptions(property);
+  const isList = property.type === 'list';
+  const selectedListValues = isList
+    ? getSelectedListValues(property, currentValue)
+    : [];
+  const selectedListIdentities = new Set(
+    selectedListValues
+      .map((value) => getListValueIdentity(property, value))
+      .filter(Boolean),
+  );
 
   menu.addItem((item) => {
     item
       .setTitle('(none)')
-      .setChecked(!current)
+      .setChecked(isList ? selectedListValues.length === 0 : !current)
       .onClick(() => { void onClear(); });
   });
 
   if (allowManual) {
     menu.addItem((item) => {
       item
-        .setTitle('Set custom value…')
+        .setTitle(isList ? 'Add new list item…' : 'Set custom value…')
         .setIcon('pencil')
         .onClick(() => {
           new TextInputModal(
             app,
-            property.label || property.key,
-            current,
+            isList
+              ? `${property.label || property.key} — add new item`
+              : property.label || property.key,
+            isList ? '' : current,
             (value) => {
               const next = String(value || '').trim();
               if (!next) {
@@ -83,7 +105,9 @@ export function addPropertyValueChoiceMenuItems(
     menu.addItem((item) => {
       item
         .setTitle(literal)
-        .setChecked(current === literal)
+        .setChecked(isList
+          ? selectedListIdentities.has(getListValueIdentity(property, literal))
+          : current === literal)
         .onClick(() => { void onChooseLiteral(literal); });
     });
   }
@@ -101,6 +125,30 @@ export function addPropertyValueChoiceMenuItems(
         });
     });
   }
+}
+
+function getSelectedListValues(property: CustomProperty, value: unknown): string[] {
+  if (isLinkListProperty(property)) return parseLinkListInput(value);
+  if (propertyUsesEntityOptions(property)) return parseMixedListInput(value);
+  if (isTagListProperty(property)) return parseTagInput(value);
+  return parseStringListInput(value);
+}
+
+function getListValueIdentity(property: CustomProperty, value: unknown): string {
+  const raw = String(value ?? '').trim();
+  if (!raw) return '';
+  const linkTarget = getEntityReferenceTargetIdentity(raw);
+  if (linkTarget) return `link:${linkTarget}`;
+  if (isLinkListProperty(property)) {
+    const normalizedLink = parseLinkListInput(raw)[0] || '';
+    const normalizedTarget = getEntityReferenceTargetIdentity(normalizedLink);
+    return normalizedTarget ? `link:${normalizedTarget}` : '';
+  }
+  if (isTagListProperty(property)) {
+    const normalizedTag = parseTagInput(raw)[0] || '';
+    return normalizedTag ? `tag:${normalizedTag}` : '';
+  }
+  return `literal:${raw.toLocaleLowerCase()}`;
 }
 
 function formatEntityPickerTitle(property: CustomProperty): string {

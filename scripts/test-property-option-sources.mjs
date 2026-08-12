@@ -368,6 +368,11 @@ test('every entity-enabled list editor uses storage-aware mixed-list mutation', 
   ];
   for (const path of paths) {
     const source = readFileSync(new URL(path, import.meta.url), 'utf8');
+    if (path === '../src/views/log-base-view.ts') {
+      assert.match(source, /addLogBaseListPropertyValue/);
+      assert.match(source, /removeLogBaseListPropertyValue/);
+      continue;
+    }
     assert.match(
       source,
       /mergeMixedEntityReferenceList/,

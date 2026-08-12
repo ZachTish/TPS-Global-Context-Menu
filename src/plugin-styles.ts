@@ -96,6 +96,21 @@ export const PLUGIN_STYLES = `
 
       .tps-list-native-row--task {
         padding-inline-start: var(--tps-list-task-indent, 0px);
+        touch-action: pan-y;
+      }
+
+      .tps-list-native-row--drag-ready,
+      .tps-list-native-row--task.tps-kanban-card-task--dragging {
+        touch-action: none;
+        user-select: none;
+        -webkit-user-select: none;
+      }
+
+      .tps-list-native-row--task.tps-kanban-card-task--dragging {
+        opacity: 0.7;
+        outline: 1px solid var(--interactive-accent);
+        outline-offset: 1px;
+        border-radius: 4px;
       }
 
       .tps-list-native-row--heading {
@@ -250,6 +265,41 @@ export const PLUGIN_STYLES = `
         width: 1em;
         height: 1em;
         margin: 0;
+      }
+
+      .tps-list-native-property-checkbox-clear,
+      .tps-log-base-boolean-clear {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 20px;
+        min-width: 20px;
+        height: 20px;
+        min-height: 20px;
+        margin: 0;
+        padding: 0;
+        border: 0;
+        border-radius: 4px;
+        background: transparent;
+        color: var(--text-muted);
+        font-size: 16px;
+        line-height: 1;
+        cursor: pointer;
+      }
+
+      .tps-list-native-property-checkbox-clear:hover,
+      .tps-list-native-property-checkbox-clear:focus-visible,
+      .tps-log-base-boolean-clear:hover,
+      .tps-log-base-boolean-clear:focus-visible {
+        background: var(--background-modifier-hover);
+        color: var(--text-normal);
+        outline: 2px solid var(--interactive-accent);
+        outline-offset: 1px;
+      }
+
+      .tps-list-native-property-checkbox-clear:disabled,
+      .tps-log-base-boolean-clear:disabled {
+        display: none;
       }
 
       .tps-list-native-property--readonly {
@@ -432,6 +482,7 @@ export const PLUGIN_STYLES = `
 
       .tps-log-base-boolean-control--editable {
         cursor: pointer;
+        gap: 4px;
       }
 
       .tps-log-base-boolean-checkbox {

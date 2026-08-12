@@ -43,13 +43,26 @@ import {
 import { resolveBaseEmbedSourcePath } from '../../views/base-embed-context';
 import { getOrderedSelectionRange, toggleOrderedSelection } from '../../utils/ordered-selection';
 import { hashSelectionIdentity } from '../../utils/selection-identity';
+import { getTaskLineIdentity } from '../../utils/task-line-resolution';
 import { resolveBulletLineSourceTarget } from '../bullet-line-source-target';
 import { requestLineItemDelete } from '../../services/line-item-delete-service';
 import { TextInputModal } from '../../modals/text-input-modal';
 import { ScheduledModal } from '../../modals/scheduled-modal';
+import { RecurrenceModal } from '../../modals/recurrence-modal';
 import { TagSuggestModal } from '../../modals/TagSuggestModal';
 import { getPlainDisplayTitle } from '../../utils/display-title';
 import {
+  collectPropertyValuesByKey,
+  findPropertyKeyCaseInsensitive,
+  normalizePropertyKeyIdentity,
+} from '../../utils/property-key-identity';
+import {
+  addLogBaseListPropertyValue,
+  applyLogBasePropertyValueChoice,
+  removeLogBaseListPropertyValue,
+} from '../../views/log-base-property-choice';
+import {
+  readInlineFieldCarrierValues,
   setLogInlineFieldValue,
   setVisibleLineText,
   toggleLogLineSemanticTag,
@@ -77,6 +90,15 @@ import {
   resolveTpsBaseGroupDescriptor,
 } from '../../views/base-row-grouping';
 import {
+  compareTpsBaseValues,
+  getTpsBaseAdditiveKindValues,
+  getTpsBaseGroupValues,
+  resolveTpsBaseMultiValueGroupingMode,
+  resolveTpsBaseValueSemantics,
+  type TpsBaseMultiValueGroupingMode,
+  type TpsBaseValueSemantics,
+} from '../../views/base-value-semantics';
+import {
   resolveTpsBaseDateExpression,
   resolveTpsBaseLineCreationPlan,
   type TpsBaseLineCreationPlan,
@@ -87,9 +109,14 @@ import {
   isEntityReferenceProperty,
   mergeEntityReferenceList,
   mergeMixedEntityReferenceList,
+  removeEntityReferenceListValues,
+  removeMixedEntityReferenceListValues,
   resolveConfiguredProperty,
 } from '../../utils/entity-property';
 import { openPropertyValueSuggestModal } from '../../modals/PropertyValueSuggestModal';
+import {
+  showPropertyValueChoiceMenuAtElement,
+} from '../../menu/property-value-choice-menu';
 import {
   addLineEntityPropertyMenus,
   getConfiguredLineContextPropertyKeys,
@@ -104,6 +131,8 @@ import {
   parseLinkListInput,
   parseMixedListInput,
   parseStringListInput,
+  removeLinkListValues,
+  removeStringListValues,
 } from '../../utils/list-utils';
 import { collectKnownVaultTags } from '../../utils/known-tags';
 import {
@@ -126,7 +155,6 @@ import {
   formatTpsFormulaValue,
   getTpsFormulaComparableValues,
   getTpsFormulaGroupValues,
-  getTpsFormulaSortKey,
   hasTpsFormulaReference,
   isTpsFormulaTruthy,
   tpsBaseFormulaService,
@@ -136,6 +164,10 @@ import {
   type TpsFormulaRowSession,
 } from '../../services/tps-base-formula-service';
 import { getOwningWorkspaceFile } from '../../views/base-view-owner';
+import {
+  evaluateLogBaseFilterRoots,
+  type LogBaseFilterContext,
+} from '../../views/log-base-filter';
 
 export const TPS_LIST_VIEW_TYPE = 'tps-list';
 
@@ -191,6 +223,9 @@ type ActiveTaskPointerDrag = {
   startX: number;
   startY: number;
   moved: boolean;
+  activated: boolean;
+  activationTimer: number | null;
+  detachLostPointerCapture: (() => void) | null;
   cardEl: HTMLElement;
 };
 
@@ -247,6 +282,7 @@ type TaskDropPlan = {
   changes: string[];
   filterTags: string[];
   filterStatus: string | null;
+  targetError: string | null;
   mappingError: string | null;
   currentLine: string;
   nextLine: string;
@@ -283,6 +319,10 @@ type NoteCreationDefaults = {
 };
 
 const TPS_TASK_LINE_POINTER_DROP_EVENT = 'tps-task-line-pointer-drop';
+// Match familiar mobile long-press timing while leaving a 10px touch slop so
+// ordinary vertical scrolling cancels before TPS takes pointer capture.
+const TPS_LIST_TOUCH_DRAG_HOLD_MS = 550;
+const TPS_LIST_POINTER_DRAG_DISTANCE_PX = 10;
 
 const MOBILE_UI_KEYBOARD_HIDDEN_CLASS = 'tps-tps-mobile-ui-keyboard-hidden';
 const MOBILE_UI_GESTURE_HIDDEN_CLASS = 'tps-tps-mobile-ui-gesture-hidden';
@@ -533,6 +573,7 @@ export class TpsListView extends BasesView {
   private allTasksByPath = new Map<string, OpenTaskSubitem[]>();
   private openTaskOverflowByPath = new Map<string, number>();
   private openTasksLoading = new Set<string>();
+  private taskCacheEpochByPath = new Map<string, number>();
   private baseFileFilterCache: TpsBaseDefinitionCache | null = null;
   private baseFileFiltersLoadingKey: string | null = null;
   private baseFileFiltersLoadingPromise: Promise<boolean> | null = null;
@@ -555,12 +596,16 @@ export class TpsListView extends BasesView {
   private mobileKeyboardTimeout: number | null = null;
   private mobileGestureRevealTimeout: number | null = null;
   private activeTaskPointerDrag: ActiveTaskPointerDrag | null = null;
+  private renderedDisplayLanesById = new Map<string, DisplayLaneGroup>();
+  private suppressTaskRowClickUntil = 0;
   private taskFormulaSessions = new WeakMap<OpenTaskSubitem, TpsFormulaRowSession>();
   private formulaFileContexts = new Map<string, NonNullable<TpsFormulaRecordContext['file']>>();
   private formulaThisValue: Record<string, unknown> | null | undefined;
   private formulaDiagnostics = new Set<string>();
   private formulaFilterFailureSequence = 0;
   private formulaNow: Date | undefined;
+  private noteSemanticReconciliationRevision = 0;
+  private noteSemanticReconciliationCache: { key: string; entries: BasesEntry[] } | null = null;
 
   constructor(controller: QueryController, scrollEl: HTMLElement, plugin: any) {
     super(controller);
@@ -859,7 +904,67 @@ export class TpsListView extends BasesView {
     return true;
   }
 
-  private openBulletLineEditor(event: Event, file: TFile, oneBasedLine: number): boolean {
+  private async resolveRenderedLineRevision(
+    file: TFile,
+    oneBasedLine: number,
+    expectedRawLine: string,
+    scope: string,
+    itemLabel: 'heading' | 'line item',
+  ): Promise<{ lineIndex: number; rawLine: string } | null> {
+    const preferredIndex = Math.max(0, oneBasedLine - 1);
+    const expectedLine = String(expectedRawLine ?? '');
+    if (!expectedLine) {
+      flowWarn(scope, 'open:missing-rendered-revision', { path: file.path, line: oneBasedLine });
+      new Notice(`That ${itemLabel} is out of date. Refresh the view and try again.`);
+      return null;
+    }
+    try {
+      const content = await this.app.vault.cachedRead(file);
+      const parts = splitLineItemContent(content);
+      const lineIndex = resolveExactLineRevisionIndex(parts.lines, preferredIndex, expectedLine);
+      if (lineIndex < 0) {
+        flowWarn(scope, 'open:stale-target', { path: file.path, line: oneBasedLine });
+        new Notice(`That ${itemLabel} changed since this list was rendered. Refresh the view and try again.`);
+        return null;
+      }
+      return { lineIndex, rawLine: parts.lines[lineIndex] ?? expectedLine };
+    } catch (error) {
+      flowError(scope, 'open:source-read-failed', error, { path: file.path, line: oneBasedLine });
+      new Notice(`Could not verify the ${itemLabel}.`);
+      return null;
+    }
+  }
+
+  private async openRenderedLineInNote(
+    file: TFile,
+    oneBasedLine: number,
+    expectedRawLine: string,
+    sourceEl: HTMLElement | undefined,
+    scope: string,
+    itemLabel: 'heading' | 'line item',
+  ): Promise<void> {
+    const revision = await this.resolveRenderedLineRevision(
+      file,
+      oneBasedLine,
+      expectedRawLine,
+      scope,
+      itemLabel,
+    );
+    if (!revision) return;
+    try {
+      await this.openTaskLine(file, revision.lineIndex + 1, sourceEl);
+    } catch (error) {
+      flowError(scope, 'open-line:failed', error, { path: file.path, line: revision.lineIndex + 1 });
+      new Notice(`Could not open the ${itemLabel}.`);
+    }
+  }
+
+  private openBulletLineEditor(
+    event: Event,
+    file: TFile,
+    oneBasedLine: number,
+    expectedRawLine: string,
+  ): boolean {
     const service = this.getGcmPlugin()?.homeCaptureService || this.getGcmApi()?.homeCaptureService;
     if (typeof service?.openLineEditor !== 'function') return false;
     event.preventDefault();
@@ -867,15 +972,19 @@ export class TpsListView extends BasesView {
     if ('stopImmediatePropagation' in event && typeof event.stopImmediatePropagation === 'function') {
       event.stopImmediatePropagation();
     }
-    try {
-      void Promise.resolve(service.openLineEditor(file, Math.max(0, oneBasedLine - 1))).catch((error) => {
-        flowError('BulletLineEditor', 'open:failed', error, { path: file.path, line: oneBasedLine });
-        new Notice('Could not open the line editor.');
-      });
-    } catch (error) {
+    void this.resolveRenderedLineRevision(
+      file,
+      oneBasedLine,
+      expectedRawLine,
+      'BulletLineEditor',
+      'line item',
+    ).then(async (revision) => {
+      if (!revision) return;
+      await service.openLineEditor(file, revision.lineIndex);
+    }).catch((error) => {
       flowError('BulletLineEditor', 'open:failed', error, { path: file.path, line: oneBasedLine });
       new Notice('Could not open the line editor.');
-    }
+    });
     return true;
   }
 
@@ -1136,12 +1245,20 @@ export class TpsListView extends BasesView {
     event: MouseEvent,
     file: TFile,
     oneBasedLine: number,
+    expectedRawLine: string,
     row: HTMLElement,
   ): Promise<void> {
-    const lineIndex = Math.max(0, oneBasedLine - 1);
     try {
-      const content = await this.app.vault.cachedRead(file);
-      const rawLine = content.split(/\r?\n/)[lineIndex] || '';
+      const revision = await this.resolveRenderedLineRevision(
+        file,
+        oneBasedLine,
+        expectedRawLine,
+        'HeadingLineMenu',
+        'heading',
+      );
+      if (!revision) return;
+      const { lineIndex, rawLine } = revision;
+      const resolvedOneBasedLine = lineIndex + 1;
       const plugin = this.getGcmPlugin();
       const menu = new Menu();
       const addHeadingAction = (
@@ -1185,7 +1302,14 @@ export class TpsListView extends BasesView {
       }
 
       addHeadingAction('Open heading in note', 'file-text', () => {
-        void this.openTaskLine(file, oneBasedLine, row);
+        void this.openRenderedLineInNote(
+          file,
+          resolvedOneBasedLine,
+          rawLine,
+          row,
+          'HeadingLineMenu',
+          'heading',
+        );
       });
       addHeadingAction('Delete heading', 'trash-2', () => {
         void requestLineItemDelete({
@@ -1207,7 +1331,7 @@ export class TpsListView extends BasesView {
             });
             flow('HeadingLineMenu', 'delete:done', {
               path: file.path,
-              line: oneBasedLine,
+              line: resolvedOneBasedLine,
               mode,
               nestedContentLineCount,
             });
@@ -1224,7 +1348,7 @@ export class TpsListView extends BasesView {
       menu.showAtPosition({ x: event.clientX, y: event.clientY });
       flow('HeadingLineMenu', 'open', {
         path: file.path,
-        line: oneBasedLine,
+        line: resolvedOneBasedLine,
       });
     } catch (error) {
       flowError('HeadingLineMenu', 'open:failed', error, { path: file.path, line: oneBasedLine });
@@ -1232,11 +1356,23 @@ export class TpsListView extends BasesView {
     }
   }
 
-  private async openBulletLineContextMenu(event: MouseEvent, file: TFile, oneBasedLine: number): Promise<void> {
-    const lineIndex = Math.max(0, oneBasedLine - 1);
+  private async openBulletLineContextMenu(
+    event: MouseEvent,
+    file: TFile,
+    oneBasedLine: number,
+    expectedRawLine: string,
+  ): Promise<void> {
     try {
-      const content = await this.app.vault.cachedRead(file);
-      const rawLine = content.split(/\r?\n/)[lineIndex] || '';
+      const revision = await this.resolveRenderedLineRevision(
+        file,
+        oneBasedLine,
+        expectedRawLine,
+        'BulletLineMenu',
+        'line item',
+      );
+      if (!revision) return;
+      const { lineIndex, rawLine } = revision;
+      const resolvedOneBasedLine = lineIndex + 1;
       const plugin = this.getGcmPlugin();
       const api = this.getGcmApi();
       const linkService = this.getGcmServices()?.links;
@@ -1292,14 +1428,14 @@ export class TpsListView extends BasesView {
         });
       }
       addLineAction('Edit full line...', 'text-cursor-input', () => {
-        this.openBulletLineEditor(event, file, oneBasedLine);
+        this.openBulletLineEditor(event, file, resolvedOneBasedLine, rawLine);
       });
       if (sourceNote && sourceNote.path !== file.path) {
         addLineAction('Open source note', 'external-link', () => {
           void this.openOrFocusFile(sourceNote).catch((error) => {
             flowError('BulletLineMenu', 'open-source:failed', error, {
               path: file.path,
-              line: oneBasedLine,
+              line: resolvedOneBasedLine,
               sourceNotePath: sourceNote.path,
             });
             new Notice('Could not open the source note.');
@@ -1307,10 +1443,14 @@ export class TpsListView extends BasesView {
         });
       }
       addLineAction('Open line in note', 'file-text', () => {
-        void this.openTaskLine(file, oneBasedLine).catch((error) => {
-          flowError('BulletLineMenu', 'open-line:failed', error, { path: file.path, line: oneBasedLine });
-          new Notice('Could not open the source line.');
-        });
+        void this.openRenderedLineInNote(
+          file,
+          resolvedOneBasedLine,
+          rawLine,
+          undefined,
+          'BulletLineMenu',
+          'line item',
+        );
       });
       addLineAction('Delete line item', 'trash-2', () => {
         void requestLineItemDelete({
@@ -1332,7 +1472,7 @@ export class TpsListView extends BasesView {
             });
             flow('BulletLineMenu', 'delete:done', {
               path: file.path,
-              line: oneBasedLine,
+              line: resolvedOneBasedLine,
               mode,
               nestedContentLineCount,
             });
@@ -1343,11 +1483,11 @@ export class TpsListView extends BasesView {
         addLineAction('Create note for bullet', 'file-plus-2', () => {
           try {
             void Promise.resolve(lineService.createNoteForLine(context)).catch((error) => {
-              flowError('BulletLineMenu', 'create-note:failed', error, { path: file.path, line: oneBasedLine });
+              flowError('BulletLineMenu', 'create-note:failed', error, { path: file.path, line: resolvedOneBasedLine });
               new Notice('Could not create a note for this line.');
             });
           } catch (error) {
-            flowError('BulletLineMenu', 'create-note:failed', error, { path: file.path, line: oneBasedLine });
+            flowError('BulletLineMenu', 'create-note:failed', error, { path: file.path, line: resolvedOneBasedLine });
             new Notice('Could not create a note for this line.');
           }
         });
@@ -1367,7 +1507,7 @@ export class TpsListView extends BasesView {
       menu.showAtPosition({ x: event.clientX, y: event.clientY });
       flow('BulletLineMenu', 'open', {
         path: file.path,
-        line: oneBasedLine,
+        line: resolvedOneBasedLine,
         menuTargetPath: menuTarget.path,
         sourceNotePath: sourceNote?.path || null,
         sourceRoute: sourceDecision.resolution?.route || 'source-fallback',
@@ -1520,8 +1660,7 @@ export class TpsListView extends BasesView {
     const file = this.getBaseContextFile();
     if (!file) return null;
     const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-    const normalizedKey = this.normalizeInlinePropertyKey(key);
-    const actualKey = Object.keys(frontmatter ?? {}).find((candidate) => this.normalizeInlinePropertyKey(candidate) === normalizedKey);
+    const actualKey = findPropertyKeyCaseInsensitive(frontmatter, key);
     const value = actualKey ? frontmatter?.[actualKey] : undefined;
     if (value == null) return null;
     if (value instanceof Date) return value.toISOString().slice(0, 10);
@@ -1742,12 +1881,14 @@ export class TpsListView extends BasesView {
 
     this.registerEvent(this.app.metadataCache.on('changed', (file) => {
       if (!(file instanceof TFile)) return;
+      this.invalidateNoteSemanticReconciliation();
       if (!this.isVisibleFile(file.path)) return;
       this.refreshDebounced();
     }));
 
     this.registerEvent(this.app.vault.on('modify', (file) => {
       if (!(file instanceof TFile)) return;
+      this.invalidateNoteSemanticReconciliation();
       if (file.path === this.getBaseSourcePath()) {
         this.baseFileFilterCache = null;
         this.embeddedBaseFilterCache = null;
@@ -1766,16 +1907,30 @@ export class TpsListView extends BasesView {
 
     this.registerEvent(this.app.vault.on('create', (file) => {
       if (!(file instanceof TFile)) return;
+      this.invalidateNoteSemanticReconciliation();
       this.refreshDebounced();
       this.queuePostCreateRefresh();
     }));
 
-    // Keep board stable through file lifecycle changes while this view is open.
-    this.registerEvent(this.app.vault.on('rename', () => this.refreshDebounced()));
+    // Keep synthesized rows stable through file lifecycle changes even when
+    // their source note is not one of the native Bases result entries.
+    this.registerEvent(this.app.vault.on('rename', (file, oldPath) => {
+      this.invalidateNoteSemanticReconciliation();
+      if (oldPath) this.clearTaskCachesForPath(oldPath);
+      if (file instanceof TFile) this.clearTaskCachesForPath(file.path);
+      this.refreshDebounced();
+    }));
     this.registerEvent(this.app.vault.on('delete', (file) => {
       if (!(file instanceof TFile)) return;
-      if (!this.isVisibleFile(file.path)) return;
-      this.refreshDebounced();
+      this.invalidateNoteSemanticReconciliation();
+      this.clearTaskCachesForPath(file.path);
+      const taskFilter = this.getTaskRootFilterFromBaseFilters();
+      if (
+        this.isVisibleFile(file.path)
+        || taskFilter.mode === 'tasks'
+        || taskFilter.mode === 'bullets'
+        || taskFilter.hasTaskDirective
+      ) this.refreshDebounced();
     }));
 
     this.registerEvent(this.app.workspace.on('file-open', (file) => {
@@ -1834,11 +1989,17 @@ export class TpsListView extends BasesView {
     this.registerDomEvent(document, 'pointercancel', (evt: PointerEvent) => {
       this.cancelTaskPointerDrag(evt);
     }, { capture: true });
+    this.registerDomEvent(window, 'blur', () => this.clearActiveTaskPointerDrag());
+    this.registerDomEvent(document, 'visibilitychange', () => {
+      if (document.visibilityState !== 'visible') this.clearActiveTaskPointerDrag();
+    });
     this.render();
     window.setTimeout(() => this.render(), 300);
   }
 
   onunload(): void {
+    this.clearActiveTaskPointerDrag();
+    this.renderedDisplayLanesById.clear();
     const taskSelectionService = this.getGcmPlugin()?.taskLineContextMenuService || this.getGcmApi()?.taskLineContextMenuService;
     taskSelectionService?.releaseTpsListSelection?.(this.scrollEl);
     this.detachWheelHandler();
@@ -2172,6 +2333,7 @@ export class TpsListView extends BasesView {
   }
 
   private clearTaskCachesForPath(path: string): void {
+    this.taskCacheEpochByPath.set(path, (this.taskCacheEpochByPath.get(path) ?? 0) + 1);
     this.openTasksByPath.delete(path);
     this.allTasksByPath.delete(path);
     this.allTasksByPath.delete(`${path}:bullets`);
@@ -2181,13 +2343,20 @@ export class TpsListView extends BasesView {
   }
 
   private loadOpenTasksForFile(file: TFile): void {
-    if (this.openTasksLoading.has(file.path)) return;
+    const sourcePath = file.path;
+    if (this.openTasksLoading.has(sourcePath)) return;
     const generation = this.renderGeneration;
-    this.openTasksLoading.add(file.path);
+    const cacheEpoch = this.taskCacheEpochByPath.get(sourcePath) ?? 0;
+    this.openTasksLoading.add(sourcePath);
     void this.app.vault.cachedRead(file)
       .then((content) => {
+        if ((this.taskCacheEpochByPath.get(sourcePath) ?? 0) !== cacheEpoch) return;
+        const liveFile = typeof this.app.vault.getFileByPath === 'function'
+          ? this.app.vault.getFileByPath(sourcePath)
+          : file;
+        if (liveFile !== file || file.path !== sourcePath) return;
         const taskFilter = this.getTaskRootFilterFromBaseFilters();
-        if (generation !== this.renderGeneration && !this.isVisibleFile(file.path) && !this.isTaskSourceFile(file, taskFilter)) return;
+        if (generation !== this.renderGeneration && !this.isVisibleFile(sourcePath) && !this.isTaskSourceFile(file, taskFilter)) return;
         const limit = this.getOpenTaskPreviewLimit();
         const documentLines = scanMarkdownDocumentLines(content);
         const allTasks = this.parseOpenTasks(
@@ -2212,17 +2381,18 @@ export class TpsListView extends BasesView {
           : openCandidates.length;
         const openTasks = openCandidates.slice(0, normalizedLimit);
         const overflowCount = Math.max(0, openCandidates.length - openTasks.length);
-        this.openTasksByPath.set(file.path, openTasks);
-        this.allTasksByPath.set(file.path, enrichedAllTasks);
-        this.openTaskOverflowByPath.set(file.path, overflowCount);
+        this.openTasksByPath.set(sourcePath, openTasks);
+        this.allTasksByPath.set(sourcePath, enrichedAllTasks);
+        this.openTaskOverflowByPath.set(sourcePath, overflowCount);
       })
       .catch(() => {
-        this.openTasksByPath.set(file.path, []);
-        this.allTasksByPath.set(file.path, []);
-        this.openTaskOverflowByPath.set(file.path, 0);
+        if ((this.taskCacheEpochByPath.get(sourcePath) ?? 0) !== cacheEpoch) return;
+        this.openTasksByPath.set(sourcePath, []);
+        this.allTasksByPath.set(sourcePath, []);
+        this.openTaskOverflowByPath.set(sourcePath, 0);
       })
       .finally(() => {
-        this.openTasksLoading.delete(file.path);
+        this.openTasksLoading.delete(sourcePath);
         // Vault-wide task views can read hundreds of source files at once.
         // Repaint once when the batch settles instead of once per file.
         if (this.openTasksLoading.size === 0) this.refreshDebounced();
@@ -2378,6 +2548,7 @@ export class TpsListView extends BasesView {
       const prefix = raw.slice(0, dot);
       if (prefix === 'note') return raw.slice(dot + 1); // "note.status" → "status"
       if (prefix === 'formula') return raw;
+      if (['task', 'line', 'heading', 'tps', 'kanban'].includes(prefix)) return raw;
       return null; // other file namespaces are not line-level group values
     }
 
@@ -2436,11 +2607,15 @@ export class TpsListView extends BasesView {
     const name = String(propName || '').trim().toLowerCase();
     const id = String(propId || '').trim().toLowerCase();
     if (!propId || !id) return false;
+    const normalized = this.normalizeTaskPropertyId(propId);
+    if (normalized === 'kind' || normalized === 'explicitkind' || normalized === 'entitykind') return true;
     if (name === 'tags' || id.endsWith('.tags') || id === 'tags') return true;
+    if (this.getConfiguredCustomProperty(propId)?.type === 'list') return true;
 
     const entries: BasesEntry[] = this.data?.data ?? [];
+    const semantics = this.getOrderingSemantics(propId);
     for (const entry of entries) {
-      const values = this.extractGroupValues(entry.getValue(propId as any));
+      const values = getTpsBaseGroupValues(entry.getValue(propId as any), semantics, 'separate');
       if (values.length > 1) return true;
     }
     return false;
@@ -2459,7 +2634,16 @@ export class TpsListView extends BasesView {
 
     const groupedEntries = nativeGroups.flatMap((group) => group.entries ?? []);
     const nativeEntries: BasesEntry[] = groupedEntries.length ? groupedEntries : (this.data?.data ?? []);
-    if (propId && isSourceNoteGroupProperty(propId)) {
+    const reconciledEntries = this.reconcileNativeNoteEntries(nativeEntries);
+    if (reconciledEntries !== nativeEntries) {
+      if (propId && (isSourceNoteGroupProperty(propId) || this.getConfiguredCustomProperty(propId)?.type === 'folder')) {
+        return this.groupEntriesBySourceNote(reconciledEntries, propId);
+      }
+      return propId
+        ? this.groupEntriesByProperty(reconciledEntries, propId)
+        : [{ key: null, entries: reconciledEntries, hasKey: () => false } as unknown as BasesEntryGroup];
+    }
+    if (propId && (isSourceNoteGroupProperty(propId) || this.getConfiguredCustomProperty(propId)?.type === 'folder')) {
       return nativeEntries.length
         ? this.groupEntriesBySourceNote(nativeEntries, propId)
         : nativeGroups;
@@ -2469,6 +2653,217 @@ export class TpsListView extends BasesView {
     // result with synthesized line rows later; it never recreates note rows
     // that Bases intentionally excluded.
     return nativeGroups;
+  }
+
+  /**
+   * Obsidian Bases normally owns note inclusion. Two TPS field contracts are
+   * intentionally different from native frontmatter lookup, though: bare
+   * `kind` includes the structural `note` kind as well as authored kinds, and
+   * configured Folder properties always reflect the file's current parent.
+   *
+   * When either contract participates in the effective filter tree, recover
+   * only missing notes whose *complete* filter tree can be evaluated true by
+   * the shared strict evaluator. Unsupported syntax and unavailable indexes
+   * fail closed, and active native search remains solely owned by Bases.
+   */
+  private reconcileNativeNoteEntries(nativeEntries: BasesEntry[]): BasesEntry[] {
+    if (!this.isBaseFileFilterReady()) {
+      this.scheduleBaseFileFilterLoad();
+      return nativeEntries;
+    }
+    if (this.getActiveBasesSearchQuery()) return nativeEntries;
+    const roots = this.getBaseFilterRoots();
+    if (!roots.length || !roots.some((root) => this.filterTreeUsesNoteSemanticOverride(root))) return nativeEntries;
+    if (roots.some((root) => this.filterTreeUsesUnsupportedNoteContextReference(root))) return nativeEntries;
+
+    const reconciliationKey = this.getNoteSemanticReconciliationKey(nativeEntries, roots);
+    if (this.noteSemanticReconciliationCache?.key === reconciliationKey) {
+      return this.noteSemanticReconciliationCache.entries;
+    }
+
+    const entriesByPath = new Map<string, BasesEntry>();
+    for (const entry of nativeEntries) {
+      if (entry?.file?.path && !entriesByPath.has(entry.file.path)) entriesByPath.set(entry.file.path, entry);
+    }
+    let recovered = 0;
+    let removed = 0;
+    for (const file of this.app.vault.getMarkdownFiles()) {
+      const nativeEntry = entriesByPath.get(file.path);
+      const frontmatter = this.getNoteFilterFrontmatter(file);
+      const context = this.createNoteFilterContext(file, frontmatter);
+      const matches = evaluateLogBaseFilterRoots(roots, context);
+      if (nativeEntry) {
+        // A conclusive semantic mismatch must remove a native false-positive
+        // (for example, stale Folder frontmatter after a move). If evaluation
+        // is unavailable, preserve Bases' native result instead.
+        if (matches === false && !context.filterFailed && !context.formulaFailed) {
+          entriesByPath.delete(file.path);
+          removed += 1;
+        }
+        continue;
+      }
+      if (matches !== true) continue;
+      entriesByPath.set(file.path, this.createSyntheticNoteEntry(file, frontmatter));
+      recovered += 1;
+    }
+    if (!recovered && !removed) {
+      this.noteSemanticReconciliationCache = { key: reconciliationKey, entries: nativeEntries };
+      return nativeEntries;
+    }
+    flow('TpsListView', 'note-filter-semantics:reconciled', {
+      base: this.getBaseSourcePath(),
+      nativeRows: nativeEntries.length,
+      recoveredRows: recovered,
+      removedRows: removed,
+    });
+    const reconciledEntries = Array.from(entriesByPath.values());
+    this.noteSemanticReconciliationCache = { key: reconciliationKey, entries: reconciledEntries };
+    return reconciledEntries;
+  }
+
+  private getNoteSemanticReconciliationKey(nativeEntries: BasesEntry[], roots: unknown[]): string {
+    const nativePaths = nativeEntries
+      .map((entry) => String(entry?.file?.path || ''))
+      .filter(Boolean)
+      .join('\u001f');
+    const folderProperties = (this.getGcmSettings()?.properties || [])
+      .filter((property: CustomProperty) => property?.type === 'folder')
+      .map((property: CustomProperty) => [property.id, property.key])
+      .sort((left: unknown[], right: unknown[]) => String(left[0] || left[1] || '').localeCompare(String(right[0] || right[1] || '')));
+    return [
+      String(this.noteSemanticReconciliationRevision || 0),
+      this.stableFilterSignature(roots),
+      this.stableFilterSignature(folderProperties),
+      nativePaths,
+    ].join('\u001e');
+  }
+
+  private invalidateNoteSemanticReconciliation(): void {
+    this.noteSemanticReconciliationRevision = (this.noteSemanticReconciliationRevision || 0) + 1;
+    this.noteSemanticReconciliationCache = null;
+  }
+
+  private filterTreeUsesNoteSemanticOverride(node: unknown): boolean {
+    if (!node) return false;
+    if (Array.isArray(node)) return node.some((child) => this.filterTreeUsesNoteSemanticOverride(child));
+    if (typeof node === 'string') {
+      const property = this.readDirectFilterProperty(node);
+      return property ? this.isNoteSemanticOverrideProperty(property) : false;
+    }
+    if (typeof node !== 'object') return false;
+    const record = node as Record<string, unknown>;
+    const property = this.readFilterObjectProperty(record);
+    if (property && this.isNoteSemanticOverrideProperty(property)) return true;
+    return Object.values(record).some((value) => this.filterTreeUsesNoteSemanticOverride(value));
+  }
+
+  private filterTreeUsesUnsupportedNoteContextReference(node: unknown): boolean {
+    if (typeof node === 'string') {
+      return /\bthis\.(?!scheduled\b|date\b)/iu.test(node);
+    }
+    if (Array.isArray(node)) return node.some((child) => this.filterTreeUsesUnsupportedNoteContextReference(child));
+    if (!node || typeof node !== 'object') return false;
+    return Object.values(node as Record<string, unknown>)
+      .some((value) => this.filterTreeUsesUnsupportedNoteContextReference(value));
+  }
+
+  private readDirectFilterProperty(rawExpression: string): string | null {
+    const expression = String(rawExpression || '').trim().replace(/^!+\s*/u, '');
+    const method = expression.match(/^([\s\S]+?)\.[\p{L}_$][\p{L}\p{N}_$-]*\s*\(/u);
+    if (method?.[1]) return method[1].trim();
+    const comparison = expression.match(/^([\s\S]+?)\s*(?:!==|!=|>=|<=|==|=|>|<|\bis\s+not\b|\bdoes\s+not\s+equal\b|\bnot\s+equals\b|\bequals?\b|\bis\b)\s*/iu);
+    return comparison?.[1]?.trim() || null;
+  }
+
+  private isNoteSemanticOverrideProperty(rawProperty: string): boolean {
+    const property = String(rawProperty || '').trim();
+    if (!property) return false;
+    if (property.toLocaleLowerCase() === 'kind') return true;
+    return this.getConfiguredCustomProperty(property)?.type === 'folder';
+  }
+
+  private getNoteFilterFrontmatter(file: TFile): Record<string, unknown> {
+    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    return frontmatter && typeof frontmatter === 'object'
+      ? frontmatter as Record<string, unknown>
+      : {};
+  }
+
+  private getNoteExplicitKindValues(frontmatter: Record<string, unknown>): string[] {
+    const values: string[] = [];
+    for (const [key, rawValue] of Object.entries(frontmatter)) {
+      const normalized = normalizePropertyKeyIdentity(key);
+      if (!['kind', 'explicitkind', 'entitykind'].includes(normalized)) continue;
+      const source = Array.isArray(rawValue) ? rawValue : rawValue == null ? [] : [rawValue];
+      for (const value of source) {
+        const text = String(value ?? '').trim();
+        if (text) values.push(text);
+      }
+    }
+    return Array.from(new Set(values));
+  }
+
+  private createNoteFilterContext(file: TFile, frontmatter: Record<string, unknown>): LogBaseFilterContext {
+    const cache = this.app.metadataCache.getFileCache(file) as any;
+    const filterFrontmatter: Record<string, unknown> = { ...frontmatter };
+    const folder = file.parent?.path || '/';
+    for (const property of this.getGcmSettings()?.properties || []) {
+      if (property?.type !== 'folder') continue;
+      const aliases = [property.key, property.id]
+        .map((value) => String(value || '').trim())
+        .filter(Boolean);
+      for (const alias of aliases) {
+        const actualKey = findPropertyKeyCaseInsensitive(filterFrontmatter, alias);
+        filterFrontmatter[actualKey || alias] = folder;
+      }
+    }
+    const explicitKinds = this.getNoteExplicitKindValues(frontmatter);
+    const fields: Record<string, unknown> = { ...filterFrontmatter };
+    fields.explicitkind = explicitKinds;
+    return {
+      fields: fields as Record<string, string>,
+      file: {
+        path: file.path,
+        name: file.name,
+        basename: file.basename,
+        extension: file.extension,
+        folder,
+        size: Number(file.stat?.size || 0),
+        ctime: Number(file.stat?.ctime || 0),
+        mtime: Number(file.stat?.mtime || 0),
+        tags: parseTaskTagValues([
+          this.asArray(frontmatter.tags),
+          this.asArray(cache?.tags).map((tag: any) => tag?.tag ?? tag),
+        ]),
+        links: this.asArray(cache?.links).map((link: any) => link?.link ?? link),
+        frontmatter: filterFrontmatter,
+      },
+      contextDate: this.getBaseContextFrontmatterValue('scheduled'),
+      rowKind: 'note',
+    };
+  }
+
+  private createSyntheticNoteEntry(file: TFile, frontmatter: Record<string, unknown>): BasesEntry {
+    const findFrontmatterValue = (rawKey: string): unknown => {
+      const actualKey = findPropertyKeyCaseInsensitive(frontmatter, rawKey);
+      return actualKey == null ? null : frontmatter[actualKey];
+    };
+    return {
+      file,
+      getValue: (rawProperty: any) => {
+        const property = String(rawProperty || '').trim();
+        const lower = property.toLocaleLowerCase();
+        if (this.getConfiguredCustomProperty(property)?.type === 'folder') return file.parent?.path || '/';
+        if (lower === 'file.path' || lower === 'path') return file.path;
+        if (lower === 'file.name') return file.name;
+        if (lower === 'file.basename' || lower === 'name' || lower === 'title') return file.basename;
+        if (lower === 'file.folder') return file.parent?.path || '/';
+        if (lower === 'file.ext' || lower === 'file.extension') return file.extension;
+        const key = this.getFrontmatterPropNameFromId(property)
+          ?? property.replace(/^note\./iu, '');
+        return findFrontmatterValue(key);
+      },
+    } as BasesEntry;
   }
 
   private groupsContainEntries(groups: BasesEntryGroup[]): boolean {
@@ -2489,16 +2884,37 @@ export class TpsListView extends BasesView {
       } as unknown as BasesEntryGroup];
     }
 
-    return this.groupEntriesByValue(entries, (entry) => entry.getValue(propId as any));
+    const normalized = this.normalizeTaskPropertyId(propId);
+    return this.groupEntriesByValue(
+      entries,
+      (entry) => normalized === 'kind'
+        ? getTpsBaseAdditiveKindValues('note', this.getEntryValue(entry, propId))
+        : normalized === 'itemkind' || normalized === 'itemtype'
+          ? 'note'
+          : normalized === 'explicitkind' || normalized === 'entitykind'
+            ? getTpsBaseAdditiveKindValues(null, this.getEntryValue(entry, propId))
+            : entry.getValue(propId as any),
+      this.getOrderingSemantics(propId),
+      this.getMultiValueGroupingMode(),
+    );
   }
 
   private groupEntriesBySourceNote(entries: BasesEntry[], propId: string): BasesEntryGroup[] {
-    return this.groupEntriesByValue(entries, (entry) => getSourceNoteGroupValue(entry.file, propId));
+    return this.groupEntriesByValue(
+      entries,
+      (entry) => this.getConfiguredCustomProperty(propId)?.type === 'folder'
+        ? entry.file.parent?.path || '/'
+        : getSourceNoteGroupValue(entry.file, propId),
+      this.getOrderingSemantics(propId),
+      this.getMultiValueGroupingMode(),
+    );
   }
 
   private groupEntriesByValue(
     entries: BasesEntry[],
     getValue: (entry: BasesEntry) => unknown,
+    semantics: TpsBaseValueSemantics = { kind: 'auto', collection: false },
+    multiValueMode: TpsBaseMultiValueGroupingMode = 'separate',
   ): BasesEntryGroup[] {
 
     const byKey = new Map<string, BasesEntry[]>();
@@ -2506,7 +2922,7 @@ export class TpsListView extends BasesView {
     const ungrouped: BasesEntry[] = [];
 
     for (const entry of entries) {
-      const values = this.extractGroupValues(getValue(entry));
+      const values = getTpsBaseGroupValues(getValue(entry), semantics, multiValueMode);
       if (!values.length) {
         ungrouped.push(entry);
         continue;
@@ -2594,32 +3010,54 @@ export class TpsListView extends BasesView {
       seen.add(lower);
       props.push(prop);
     }
-    return props.slice(0, 4);
+    return props;
   }
 
   private sortEntriesForView(entries: BasesEntry[]): BasesEntry[] {
     const sortDescriptors = this.getSortDescriptors();
     if (!sortDescriptors.length) return entries;
 
-    return [...entries].sort((a, b) => {
+    return entries.map((entry, index) => ({ entry, index })).sort((a, b) => {
       for (const { prop, direction } of sortDescriptors) {
-        const av = this.sortValue(a, prop);
-        const bv = this.sortValue(b, prop);
-        if (av < bv) return direction === 'desc' ? 1 : -1;
-        if (av > bv) return direction === 'desc' ? -1 : 1;
+        const result = compareTpsBaseValues(
+          this.getNativeSortValue(a.entry, prop),
+          this.getNativeSortValue(b.entry, prop),
+          this.getOrderingSemantics(prop),
+          direction,
+        );
+        if (result !== 0) return result;
       }
-      return a.file.path.localeCompare(b.file.path);
-    });
+      return a.index - b.index;
+    }).map(({ entry }) => entry);
   }
 
-  private sortValue(entry: BasesEntry, propId: string): string {
+  private getNativeSortValue(entry: BasesEntry, propId: string): unknown {
     const lower = String(propId || '').trim().toLowerCase();
-    if (lower === 'file.name' || lower === 'name' || lower === 'title') return String(entry.file?.basename || entry.file?.name || '').toLowerCase();
-    if (lower === 'file.path' || lower === 'path') return String(entry.file?.path || '').toLowerCase();
-    const raw = entry.getValue(propId.includes('.') ? propId as any : `note.${propId}` as any);
-    if (Array.isArray(raw)) return raw.map((value) => String(value ?? '').trim().toLowerCase()).filter(Boolean).join('\u0000');
-    if (raw instanceof Date) return raw.toISOString();
-    return String(raw ?? '').trim().toLowerCase();
+    if (lower === 'file.name' || lower === 'name' || lower === 'title') return entry.file?.basename || entry.file?.name || '';
+    if (lower === 'file.path' || lower === 'path') return entry.file?.path || '';
+    if (this.getConfiguredCustomProperty(propId)?.type === 'folder') return entry.file?.parent?.path || '/';
+    const normalized = this.normalizeTaskPropertyId(propId);
+    const authored = this.getEntryValue(entry, propId.includes('.') ? propId : `note.${propId}`);
+    if (normalized === 'kind') return getTpsBaseAdditiveKindValues('note', authored);
+    if (normalized === 'itemkind' || normalized === 'itemtype') return 'note';
+    if (normalized === 'explicitkind' || normalized === 'entitykind') {
+      return getTpsBaseAdditiveKindValues(null, authored);
+    }
+    return authored;
+  }
+
+  private getOrderingSemantics(propId: string): TpsBaseValueSemantics {
+    if (/^formula\./iu.test(String(propId || '').trim())) {
+      return resolveTpsBaseValueSemantics(propId, null);
+    }
+    if (this.isStatusPropertyName(propId)) return { kind: 'choice', collection: false };
+    const normalized = this.normalizeTaskPropertyId(propId);
+    if (normalized === 'kind') return { kind: 'choice', collection: true, itemKind: 'choice' };
+    if (normalized === 'itemkind' || normalized === 'itemtype') return { kind: 'choice', collection: false };
+    if (normalized === 'explicitkind' || normalized === 'entitykind') {
+      return { kind: 'choice', collection: true, itemKind: 'choice' };
+    }
+    return resolveTpsBaseValueSemantics(propId, this.getConfiguredCustomProperty(propId));
   }
 
   private extractGroupValues(raw: unknown): string[] {
@@ -2762,7 +3200,7 @@ export class TpsListView extends BasesView {
   }
 
   private normalizeInlinePropertyKey(key: string): string {
-    return String(key || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+    return normalizePropertyKeyIdentity(key);
   }
 
   private getTaskInlinePropertyName(propName: string | null | undefined): string {
@@ -3634,6 +4072,9 @@ export class TpsListView extends BasesView {
     const raw = String(propRaw || '').trim();
     const lower = raw.toLowerCase();
     if (!raw || lower.startsWith('note.') || lower.startsWith('file.')) return null;
+    if (this.getConfiguredCustomProperty(raw)?.type === 'folder') {
+      return [file?.parent?.path || '/'].map((value) => value.toLowerCase());
+    }
     if (lower.startsWith('formula.')) {
       if (!(file instanceof TFile)) {
         this.markFormulaFilterFailure();
@@ -3649,7 +4090,7 @@ export class TpsListView extends BasesView {
         .filter(Boolean);
     }
     const prop = raw.replace(/^(?:task|tps|kanban)\./i, '');
-    const normalized = this.normalizeInlinePropertyKey(prop);
+    const normalized = this.normalizeTaskPropertyId(raw);
     if (['itemtype', 'itemkind', 'kind', 'open', 'isopen', 'done', 'isdone', 'completed', 'complete'].includes(normalized)) return null;
     if (['title', 'tasktitle', 'text', 'linetext', 'headingtext'].includes(normalized)) {
       return [this.getTaskVisibleTitle(task).toLowerCase()];
@@ -3669,7 +4110,12 @@ export class TpsListView extends BasesView {
     if (['tag', 'tags'].includes(normalized)) {
       return this.getTaskInlineValues(task, 'tags').map((tag) => tag.toLowerCase());
     }
-    return this.getTaskInlineValues(task, normalized).map((value) => value.toLowerCase());
+    const configuredProperty = this.getConfiguredCustomProperty(raw);
+    const values = this.getTaskInlineValues(task, configuredProperty?.key || prop);
+    return (configuredProperty?.type === 'list'
+      ? values.flatMap((value) => this.parseConfiguredListValues(configuredProperty, value))
+      : values)
+      .map((value) => value.toLowerCase());
   }
 
   private compareTaskFilterValues(left: unknown, right: unknown): number {
@@ -3926,7 +4372,7 @@ export class TpsListView extends BasesView {
         this.reportFormulaFailure(failure, file, task);
       });
     }
-    const normalizedProp = this.normalizeInlinePropertyKey(propRaw.replace(/^task\./i, '').replace(/^tps\./i, ''));
+    const normalizedProp = this.normalizeTaskPropertyId(propRaw);
     const operator = this.readFilterObjectOperator(node);
     const values = this.readFilterObjectValues(node).map((value) => this.resolveBaseContextToken(value) || value);
     const isNegated = this.isNegatedFilterOperator(operator);
@@ -4097,6 +4543,9 @@ export class TpsListView extends BasesView {
     file: TFile | null = null,
   ): string[] {
     const propId = this.getGroupByPropId(propName) ?? propName;
+    if (propId && this.getConfiguredCustomProperty(propId)?.type === 'folder') {
+      return [getTpsBaseGroupLaneId(file?.parent?.path || '/')];
+    }
     if (isSourceNoteGroupProperty(propId)) {
       const sourceNoteValue = getSourceNoteGroupValue(file, propId);
       return [getTpsBaseGroupLaneId(sourceNoteValue)];
@@ -4108,27 +4557,60 @@ export class TpsListView extends BasesView {
         this.reportFormulaFailure(result, file, task);
         return ['ungrouped'];
       }
-      const values = this.extractGroupValues(result.value);
+      const values = getTpsBaseGroupValues(
+        result.value,
+        this.getOrderingSemantics(String(propId)),
+        this.getMultiValueGroupingMode(),
+      );
       return values.length
-        ? Array.from(new Set(values.map((value) => `key:${value}`)))
+        ? Array.from(new Set(values.map((value) => getTpsBaseGroupLaneId(value))))
         : ['ungrouped'];
     }
-    const normalized = this.normalizeInlinePropertyKey(this.getTaskInlinePropertyName(propName));
+    const normalized = this.normalizeTaskPropertyId(String(propId || propName || ''));
+    const inlinePropertyKey = this.getConfiguredCustomProperty(String(propId || propName || ''))?.key
+      || this.getTaskInlinePropertyName(propName);
     if (this.isStatusPropertyName(propName)) {
       if (task.itemKind !== 'task') return ['ungrouped'];
       const status = this.getMappedStatusForTask(task);
       return status ? [this.getLaneIdForStatus(status)] : ['ungrouped'];
     }
-    const values = this.getTaskInlineValues(task, normalized)
+    const semanticValues = normalized === 'kind'
+      ? getTpsBaseAdditiveKindValues(
+          task.itemKind === 'heading' ? `h${task.headingLevel || 1}` : task.itemKind || 'task',
+          this.getTaskExplicitKindValues(task),
+        )
+      : normalized === 'itemkind' || normalized === 'itemtype'
+        ? [task.itemKind === 'heading' ? `h${task.headingLevel || 1}` : task.itemKind || 'task']
+        : normalized === 'explicitkind' || normalized === 'entitykind'
+          ? this.getTaskExplicitKindValues(task)
+          : ['title', 'text', 'linetext', 'headingtext'].includes(normalized)
+            ? [this.getTaskVisibleTitle(task)]
+            : ['line', 'linenumber', 'taskline', 'headingline'].includes(normalized)
+              ? [String(task.line)]
+              : ['level', 'headinglevel'].includes(normalized)
+                ? task.itemKind === 'heading' && task.headingLevel ? [String(task.headingLevel)] : []
+                : this.getTaskInlineValues(task, inlinePropertyKey);
+    const values = semanticValues
       .map((value) => normalized === 'scheduled' ? this.normalizeScheduledLaneValue(value) : value);
     if (!values.length) return ['ungrouped'];
-    return Array.from(new Set(values.map((value) => `key:${value}`)));
+    const groupedValues = getTpsBaseGroupValues(
+      values,
+      this.getOrderingSemantics(String(propId || propName || '')),
+      this.getMultiValueGroupingMode(),
+    );
+    return groupedValues.length
+      ? Array.from(new Set(groupedValues.map((value) => getTpsBaseGroupLaneId(value))))
+      : ['ungrouped'];
   }
 
   private getUngroupedPosition(): 'first' | 'last' {
     const configured = String(this.getConfigValue('ungroupedPosition') || '').trim().toLowerCase();
     if (configured === 'first' || configured === 'last') return configured;
     return this.plugin.settings.ungroupedPosition === 'first' ? 'first' : 'last';
+  }
+
+  private getMultiValueGroupingMode(): TpsBaseMultiValueGroupingMode {
+    return resolveTpsBaseMultiValueGroupingMode(this.getConfigValue('multiValueGrouping'));
   }
 
   private normalizeScheduledLaneValue(value: string): string {
@@ -4163,22 +4645,24 @@ export class TpsListView extends BasesView {
     const normalizedProp = this.normalizeInlinePropertyKey(this.getTaskInlinePropertyName(propRaw));
     const expected = String(expectedValue || '').trim().toLowerCase();
     if (normalizedProp === 'scheduled') return this.taskValuesMatch(propRaw, currentValues, expected);
+    if (this.getConfiguredCustomProperty(propRaw)?.type === 'list') {
+      return this.taskValuesMatch(propRaw, currentValues, expected);
+    }
     return currentValues.some((current) => String(current || '').trim().toLowerCase().includes(expected));
   }
 
   private getTaskInlineValues(task: OpenTaskSubitem, propName: string): string[] {
-    const normalized = this.normalizeInlinePropertyKey(this.getTaskInlinePropertyName(propName));
-    const values: string[] = normalized === 'tags'
+    const identity = normalizePropertyKeyIdentity(this.getTaskInlinePropertyName(propName));
+    const semantic = this.normalizeInlinePropertyKey(this.getTaskInlinePropertyName(propName));
+    const values: string[] = semantic === 'tags'
       ? readTaskLineTags(task.text).map((tag) => this.normalizeTaskTag(tag))
-      : [];
-    for (const field of task.inlineFields ?? []) {
-      const key = this.normalizeInlinePropertyKey(field.key);
-      if (normalized === 'tags') {
+      : collectPropertyValuesByKey(task.inlineFields, identity);
+    if (semantic === 'tags') {
+      for (const field of task.inlineFields ?? []) {
+        const key = normalizePropertyKeyIdentity(field.key);
         if (key === 'tag' || key === 'tags') {
           values.push(...parseTaskTagValues(field.value).map((tag) => this.normalizeTaskTag(tag)));
         }
-      } else if (key === normalized) {
-        values.push(String(field.value || '').trim());
       }
     }
     return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean)));
@@ -4233,7 +4717,7 @@ export class TpsListView extends BasesView {
     for (const field of task.inlineFields ?? []) {
       const key = String(field.key || '').trim();
       if (!key) continue;
-      const normalized = this.normalizeInlinePropertyKey(key);
+      const normalized = normalizePropertyKeyIdentity(key);
       if (!normalized) continue;
       const group = inlineGroups.get(normalized) ?? { aliases: new Set<string>(), values: [] };
       group.aliases.add(key);
@@ -4472,16 +4956,17 @@ export class TpsListView extends BasesView {
     sourceLaneValues: string[] = [],
   ): Promise<void> {
     const plan = await this.buildTaskDropPlan(file, line, propName, value, sourceLaneValues);
-    if (plan.mappingError) {
+    const blockingError = plan.targetError ?? plan.mappingError;
+    if (blockingError) {
       flowWarn('TaskDrop', 'blocked', {
-        reason: 'unmapped-status',
-        error: plan.mappingError,
+        reason: plan.targetError ? 'stale-source-revision' : 'unmapped-status',
+        error: blockingError,
         path: file.path,
         line,
         propName,
         value,
       });
-      new Notice(plan.mappingError);
+      new Notice(blockingError);
       return;
     }
     await this.applyInlineTaskDropPlan(file, line, propName, value, sourceLaneValues, {
@@ -4498,18 +4983,27 @@ export class TpsListView extends BasesView {
     propName: string,
     value: string | null,
     sourceLaneValues: string[] = [],
+    expectedRawLine = '',
   ): Promise<boolean> {
-    const plan = await this.buildTaskDropPlan(file, line, propName, value, sourceLaneValues);
-    if (plan.mappingError) {
+    const plan = await this.buildTaskDropPlan(
+      file,
+      line,
+      propName,
+      value,
+      sourceLaneValues,
+      expectedRawLine,
+    );
+    const blockingError = plan.targetError ?? plan.mappingError;
+    if (blockingError) {
       flowWarn('TaskDrop', 'blocked', {
-        reason: 'unmapped-status',
-        error: plan.mappingError,
+        reason: plan.targetError ? 'stale-source-revision' : 'unmapped-status',
+        error: blockingError,
         path: file.path,
         line,
         propName,
         value,
       });
-      new Notice(plan.mappingError);
+      new Notice(blockingError);
       return false;
     }
     if (!plan.changes.length) {
@@ -4563,6 +5057,7 @@ export class TpsListView extends BasesView {
     propName: string,
     value: string | null,
     sourceLaneValues: string[] = [],
+    expectedRawLine = '',
   ): Promise<TaskDropPlan> {
     const filter = this.getTaskRootFilterFromBaseFilters();
     const filterTags = Array.from(filter.tags).filter((tag) => !filter.excludeTags.has(tag));
@@ -4574,7 +5069,17 @@ export class TpsListView extends BasesView {
     const displayValue = value == null || value === '' ? '(empty)' : String(value);
     const targetLine = Math.max(1, Math.floor(Number(line || 1)));
     const content = await this.app.vault.cachedRead(file);
-    const currentLine = content.split(/\r?\n/)[targetLine - 1] ?? '';
+    const parts = splitLineItemContent(content);
+    const expectedSourceRevision = String(expectedRawLine || '');
+    const preferredIndex = targetLine - 1;
+    const resolvedIndex = expectedSourceRevision
+      ? resolveExactLineRevisionIndex(parts.lines, preferredIndex, expectedSourceRevision)
+      : preferredIndex;
+    const targetError = expectedSourceRevision && resolvedIndex < 0
+      ? 'Could not move this line item because its source revision changed or is no longer unique. Refresh the view and try again.'
+      : null;
+    const resolvedTargetLine = resolvedIndex >= 0 ? resolvedIndex + 1 : targetLine;
+    const currentLine = parts.lines[resolvedIndex] ?? '';
     const parsedLine = this.parseLineItem(currentLine, true);
     const itemKind = parsedLine?.itemKind ?? 'task';
     const requestsStatusChange = this.isStatusPropertyName(propName) && itemKind !== 'bullet';
@@ -4620,7 +5125,7 @@ export class TpsListView extends BasesView {
     } else if (!this.isStatusPropertyName(propName) && filter.statuses.size > 1) {
       changes.push(`Base allows multiple statuses (${Array.from(filter.statuses).join(', ')}), so status will not be guessed.`);
     }
-    nextLine = mappingError
+    nextLine = targetError || mappingError
       ? currentLine
       : buildKanbanTaskDropLine({
           line: currentLine,
@@ -4631,16 +5136,18 @@ export class TpsListView extends BasesView {
           statusCheckboxState,
           filterCheckboxState,
           statusFieldKeysToRemove: this.getWorkflowStatusFieldKeysToClear(),
+          configuredProperty: this.getConfiguredCustomProperty(propName),
           isStatusPropertyName: (name) => this.isStatusPropertyName(name),
         });
 
-    changes.unshift(`${itemKind === 'bullet' ? 'Bullet' : 'Task'}: ${file.path}:${targetLine}`);
+    changes.unshift(`${itemKind === 'bullet' ? 'Bullet' : 'Task'}: ${file.path}:${resolvedTargetLine}`);
     changes.push(`Current line: ${currentLine}`);
     changes.push(`Result line: ${nextLine}`);
     return {
       changes,
       filterTags,
       filterStatus: itemKind === 'bullet' ? null : filterStatus,
+      targetError,
       mappingError,
       currentLine,
       nextLine,
@@ -4741,6 +5248,7 @@ export class TpsListView extends BasesView {
       ...parsed,
       path,
       line,
+      rawLine: typeof parsed.rawLine === 'string' ? parsed.rawLine : undefined,
       sourceLaneValues: Array.isArray(parsed.sourceLaneValues) ? parsed.sourceLaneValues : [],
     };
   }
@@ -4752,16 +5260,22 @@ export class TpsListView extends BasesView {
     if (!Number.isFinite(x) || !Number.isFinite(y)) return;
     const targetEl = document.elementFromPoint(x, y) as HTMLElement | null;
     if (!targetEl || !this.containerEl.contains(targetEl)) return;
-    const laneEl = targetEl.closest('.tps-kanban-lane') as HTMLElement | null;
-    if (!laneEl) return;
+    const displayLane = this.getRenderedDisplayLaneFromElement(targetEl);
+    if (!displayLane) return;
     const propName = this.getGroupByPropName();
     if (!this.isWritableTaskGroupingProperty(propName)) return;
-    const displayLaneId = laneEl.dataset.displayLaneId || '';
-    const displayLane = displayLaneId ? this.getCurrentDisplayLaneById(displayLaneId) : null;
-    if (!displayLane) return;
     const parsed = this.parseTaskPointerDropPayload(detail.payload);
     const taskFile = parsed?.path ? this.app.vault.getFileByPath(parsed.path) : null;
     if (!parsed || !taskFile || !parsed.line) return;
+    if (!parsed.rawLine) {
+      flowWarn('TaskDrop', 'blocked', {
+        reason: 'missing-source-revision',
+        path: parsed.path,
+        line: parsed.line,
+      });
+      new Notice('Could not move this line item because its source revision is unavailable. Refresh the view and try again.');
+      return;
+    }
 
     evt.preventDefault();
     const targetSelection = await this.resolveDropValueForDisplayLane(displayLane);
@@ -4772,6 +5286,7 @@ export class TpsListView extends BasesView {
       propName,
       targetSelection.value,
       Array.isArray(parsed.sourceLaneValues) ? parsed.sourceLaneValues : [],
+      parsed.rawLine,
     );
     this.render();
   }
@@ -4787,12 +5302,24 @@ export class TpsListView extends BasesView {
     if (event.button !== 0) return;
     if (task.itemKind === 'heading') return;
     if (!this.isWritableTaskGroupingProperty(propName)) return;
+    const expectedRawLine = String(task.rawLine || '');
+    if (!expectedRawLine) {
+      flowWarn('TaskDrop', 'blocked', {
+        reason: 'missing-source-revision',
+        path: file.path,
+        line: task.line,
+      });
+      new Notice('Could not start this drag because the source revision is unavailable. Refresh the view and try again.');
+      return;
+    }
+    this.clearActiveTaskPointerDrag();
+    const isTouch = event.pointerType === 'touch';
     this.activeTaskPointerDrag = {
       pointerId: event.pointerId,
       itemKind: task.itemKind || 'task',
       path: file.path,
       line: task.line,
-      rawLine: '',
+      rawLine: expectedRawLine,
       checkboxState: task.itemKind === 'bullet'
         ? undefined
         : this.getMappedCheckboxStateForTask(task) || undefined,
@@ -4803,12 +5330,37 @@ export class TpsListView extends BasesView {
       startX: event.clientX,
       startY: event.clientY,
       moved: false,
+      activated: !isTouch,
+      activationTimer: null,
+      detachLostPointerCapture: null,
       cardEl,
     };
-    try {
-      cardEl.setPointerCapture(event.pointerId);
-    } catch {
-      // Pointer capture is best-effort in embedded Obsidian webviews.
+    const active = this.activeTaskPointerDrag;
+    const onLostPointerCapture = () => this.clearActiveTaskPointerDrag(active.pointerId);
+    cardEl.addEventListener('lostpointercapture', onLostPointerCapture);
+    active.detachLostPointerCapture = () => cardEl.removeEventListener('lostpointercapture', onLostPointerCapture);
+    if (isTouch) {
+      active.activationTimer = window.setTimeout(() => {
+        if (this.activeTaskPointerDrag !== active) return;
+        if (!cardEl.isConnected) {
+          this.clearActiveTaskPointerDrag(active.pointerId);
+          return;
+        }
+        active.activationTimer = null;
+        active.activated = true;
+        cardEl.addClass('tps-list-native-row--drag-ready');
+        try {
+          cardEl.setPointerCapture(event.pointerId);
+        } catch {
+          // Pointer capture is best-effort in embedded Obsidian webviews.
+        }
+      }, TPS_LIST_TOUCH_DRAG_HOLD_MS);
+    } else {
+      try {
+        cardEl.setPointerCapture(event.pointerId);
+      } catch {
+        // Pointer capture is best-effort in embedded Obsidian webviews.
+      }
     }
   }
 
@@ -4817,29 +5369,32 @@ export class TpsListView extends BasesView {
     if (!active || active.pointerId !== event.pointerId) return;
     const deltaX = Math.abs(event.clientX - active.startX);
     const deltaY = Math.abs(event.clientY - active.startY);
-    if (Math.max(deltaX, deltaY) < 8) return;
+    if (Math.max(deltaX, deltaY) < TPS_LIST_POINTER_DRAG_DISTANCE_PX) return;
+    if (!active.activated) {
+      // A normal touch pan must scroll the list rather than accidentally move
+      // a task. Long-press activates the drag before movement begins.
+      this.clearActiveTaskPointerDrag(active.pointerId);
+      return;
+    }
     active.moved = true;
+    event.preventDefault();
+    event.stopPropagation();
     active.cardEl.addClass('tps-kanban-card-task--dragging');
   }
 
   private async handleTaskPointerUp(event: PointerEvent): Promise<void> {
     const active = this.activeTaskPointerDrag;
     if (!active || active.pointerId !== event.pointerId) return;
-    this.activeTaskPointerDrag = null;
-    active.cardEl.removeClass('tps-kanban-card-task--dragging');
-    try {
-      active.cardEl.releasePointerCapture(event.pointerId);
-    } catch {
-      // Ignore capture cleanup failures.
-    }
-    if (!active.moved) return;
+    this.clearActiveTaskPointerDrag(active.pointerId);
+    if (!active.moved || !active.activated) return;
+    this.suppressTaskRowClickUntil = Date.now() + 500;
 
     event.preventDefault();
     event.stopPropagation();
 
     const releaseTarget = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
-    const laneEl = releaseTarget?.closest('.tps-kanban-lane') as HTMLElement | null;
-    if (!laneEl) {
+    const targetDisplayLane = this.getRenderedDisplayLaneFromElement(releaseTarget);
+    if (!targetDisplayLane) {
       const dropEvent = new CustomEvent(TPS_TASK_LINE_POINTER_DROP_EVENT, {
         bubbles: true,
         cancelable: true,
@@ -4852,12 +5407,17 @@ export class TpsListView extends BasesView {
       document.dispatchEvent(dropEvent);
       return;
     }
-    const displayLaneId = laneEl.dataset.displayLaneId || '';
-    const targetDisplayLane = displayLaneId
-      ? this.getCurrentDisplayLaneById(displayLaneId)
-      : null;
-    if (!targetDisplayLane || targetDisplayLane.id === active.displayLane.id) return;
+    if (targetDisplayLane.id === active.displayLane.id) return;
     if (!this.isWritableTaskGroupingProperty(active.propName)) return;
+    if (!active.rawLine) {
+      flowWarn('TaskDrop', 'blocked', {
+        reason: 'missing-source-revision',
+        path: active.path,
+        line: active.line,
+      });
+      new Notice('Could not move this line item because its source revision is unavailable. Refresh the view and try again.');
+      return;
+    }
 
     const taskFile = this.app.vault.getFileByPath(active.path);
     if (!taskFile) return;
@@ -4869,6 +5429,7 @@ export class TpsListView extends BasesView {
       active.propName,
       targetSelection.value,
       active.sourceLaneValues.length ? active.sourceLaneValues : this.getDisplayLaneWritableValues(active.displayLane),
+      active.rawLine,
     );
     this.render();
   }
@@ -4876,8 +5437,33 @@ export class TpsListView extends BasesView {
   private cancelTaskPointerDrag(event: PointerEvent): void {
     const active = this.activeTaskPointerDrag;
     if (!active || active.pointerId !== event.pointerId) return;
+    this.clearActiveTaskPointerDrag(active.pointerId);
+  }
+
+  private clearActiveTaskPointerDrag(pointerId?: number): void {
+    const active = this.activeTaskPointerDrag;
+    if (!active || (pointerId != null && active.pointerId !== pointerId)) return;
     this.activeTaskPointerDrag = null;
+    if (active.activationTimer != null) window.clearTimeout(active.activationTimer);
+    active.detachLostPointerCapture?.();
     active.cardEl.removeClass('tps-kanban-card-task--dragging');
+    active.cardEl.removeClass('tps-list-native-row--drag-ready');
+    try {
+      if (active.cardEl.hasPointerCapture?.(active.pointerId)) {
+        active.cardEl.releasePointerCapture(active.pointerId);
+      }
+    } catch {
+      // Ignore capture cleanup failures for detached/rerendered rows.
+    }
+  }
+
+  private getRenderedDisplayLaneFromElement(target: Element | null | undefined): DisplayLaneGroup | null {
+    const laneEl = target?.closest<HTMLElement>(
+      '.tps-list-native-group[data-display-lane-id], .tps-kanban-lane[data-display-lane-id]',
+    ) ?? null;
+    if (!laneEl || !this.containerEl.contains(laneEl)) return null;
+    const displayLaneId = String(laneEl.dataset.displayLaneId || '').trim();
+    return displayLaneId ? this.renderedDisplayLanesById.get(displayLaneId) ?? null : null;
   }
 
   private buildPointerTaskDropPayload(active: ActiveTaskPointerDrag): TaskDropPayload & { type: 'task-line'; source: 'tps-list' } {
@@ -5044,12 +5630,7 @@ export class TpsListView extends BasesView {
   }
 
   private findFrontmatterKeyCaseInsensitive(frontmatter: Record<string, unknown>, target: string): string | null {
-    const normalizedTarget = String(target || '').trim().toLowerCase();
-    if (!normalizedTarget) return null;
-    for (const key of Object.keys(frontmatter || {})) {
-      if (String(key || '').trim().toLowerCase() === normalizedTarget) return key;
-    }
-    return null;
+    return findPropertyKeyCaseInsensitive(frontmatter, target);
   }
 
   private getFrontmatterValueCaseInsensitive(frontmatter: Record<string, unknown>, key: string): unknown {
@@ -5060,11 +5641,11 @@ export class TpsListView extends BasesView {
   private formatCardPropertyValue(value: unknown): string {
     if (value === null || value === undefined || value === '') return '';
     if (Array.isArray(value)) {
-      return value
+      const items = value
         .map((item) => String(item ?? '').replace(/^#/, '').trim())
-        .filter((item) => item && item.toLowerCase() !== 'null' && item.toLowerCase() !== 'undefined')
-        .slice(0, 3)
-        .join(', ');
+        .filter((item) => item && item.toLowerCase() !== 'null' && item.toLowerCase() !== 'undefined');
+      if (items.length <= 3) return items.join(', ');
+      return `${items.slice(0, 3).join(', ')} +${items.length - 3} more`;
     }
     if (typeof value === 'boolean') return value ? 'true' : 'false';
     const raw = String(value).trim();
@@ -6254,7 +6835,7 @@ export class TpsListView extends BasesView {
   private collectTaskRootFilterObject(node: Record<string, unknown>, filter: KanbanTaskRootFilter, parentNegated = false): void {
     const propRaw = String(node.property ?? node.field ?? '').trim();
     if (!propRaw) return;
-    const normalizedProp = this.normalizeInlinePropertyKey(propRaw.replace(/^task\./i, '').replace(/^tps\./i, ''));
+    const normalizedProp = this.normalizeTaskPropertyId(propRaw);
     const rawValues = node.values ?? node.value;
     const values = Array.isArray(rawValues) ? rawValues : rawValues == null ? [] : [rawValues];
     const operator = String(node.operator ?? node.op ?? '').trim().toLowerCase();
@@ -6678,11 +7259,40 @@ export class TpsListView extends BasesView {
       return text ? { text, title: text, kind: 'formula', editable: false } : null;
     }
     const normalized = this.normalizeTaskPropertyId(propId);
-    if (!normalized || hidden.has(normalized)) return null;
+    const propertyIdentity = normalizePropertyKeyIdentity(this.getTaskInlinePropertyName(propId));
+    if (!normalized || hidden.has(propertyIdentity)) return null;
     const workflowStatusReference = this.isStatusPropertyName(propId);
     const configuredForProperty = workflowStatusReference
       ? null
       : this.getConfiguredCustomProperty(propId);
+
+    // Folder properties describe the source file location. They are never an
+    // inline line field, and rendering a stale [folderPath:: ...] value would
+    // contradict the file that owns the task/bullet/heading.
+    if (configuredForProperty?.type === 'folder') {
+      const folder = file.parent?.path || '/';
+      return {
+        text: folder,
+        title: `Source folder: ${folder}`,
+        kind: 'folder',
+        editable: false,
+        rawValue: folder,
+      };
+    }
+
+    if (configuredForProperty?.type === 'kind' && normalized === 'kind') {
+      const explicitKinds = this.getTaskExplicitKindValues(task);
+      if (!explicitKinds.length) return null;
+      const value = explicitKinds.join(', ');
+      return {
+        text: value,
+        title: `${configuredForProperty.label || configuredForProperty.key}: ${value}`,
+        kind: 'kind',
+        editable: true,
+        propName: configuredForProperty.key,
+        rawValue: value,
+      };
+    }
 
     if ((normalized === 'status' || normalized === 'checkboxstatus') && workflowStatusReference) {
       if (task.itemKind === 'heading') return null;
@@ -6734,9 +7344,28 @@ export class TpsListView extends BasesView {
       };
     }
 
+    if (configuredForProperty?.type === 'list') {
+      const values = this.getTaskInlineValues(task, configuredForProperty.key)
+        .flatMap((value) => this.parseConfiguredListValues(configuredForProperty, value));
+      const unique = Array.from(new Set(values));
+      if (unique.length === 0) return null;
+      const rawValue = unique.join(', ');
+      const text = isEntityReferenceProperty(configuredForProperty)
+        ? this.formatEntityPropertyValue(rawValue, configuredForProperty)
+        : this.formatTaskCardField(configuredForProperty.key, rawValue);
+      return {
+        text,
+        title: `${configuredForProperty.label || configuredForProperty.key}: ${rawValue}`,
+        kind: isEntityReferenceProperty(configuredForProperty) ? 'entity' : 'list',
+        editable: true,
+        propName: configuredForProperty.key,
+        rawValue,
+      };
+    }
+
     for (const field of task.inlineFields ?? []) {
-      const key = this.normalizeInlinePropertyKey(field.key);
-      if (!key || key !== normalized || hidden.has(key)) continue;
+      const key = normalizePropertyKeyIdentity(field.key);
+      if (!key || key !== propertyIdentity || hidden.has(key)) continue;
       const value = String(field.value || '').trim();
       if (!value) return null;
       const configuredProperty = configuredForProperty
@@ -6775,8 +7404,27 @@ export class TpsListView extends BasesView {
     const raw = String(propId || '').trim();
     if (!raw) return '';
     const lower = raw.toLowerCase();
-    if (lower === 'file.name' || lower === 'file.basename' || lower === 'file.fullname' || lower === 'file.link') return 'path';
-    if (lower === 'title' || lower === 'task.title') return 'title';
+    const virtualAliases: Record<string, string> = {
+      'file.name': 'path',
+      'file.basename': 'path',
+      'file.fullname': 'path',
+      'file.link': 'path',
+      'task.title': 'title',
+      'task.text': 'text',
+      'task.status': 'status',
+      'task.checkboxstatus': 'checkboxstatus',
+      'task.tags': 'tags',
+      'task.tag': 'tag',
+      'line.title': 'linetext',
+      'line.text': 'linetext',
+      'line.number': 'line',
+      'heading.title': 'headingtext',
+      'heading.text': 'headingtext',
+      'heading.level': 'headinglevel',
+      'heading.line': 'line',
+    };
+    if (virtualAliases[lower]) return virtualAliases[lower];
+    if (lower === 'title') return 'title';
     const frontmatterProp = this.getFrontmatterPropNameFromId(raw);
     const withoutPrefix = lower.startsWith('task.') ? raw.slice(5) : frontmatterProp ?? raw;
     const normalized = this.normalizeInlinePropertyKey(withoutPrefix);
@@ -7062,7 +7710,7 @@ export class TpsListView extends BasesView {
   private getTaskCreationDefaultsFromPlan(plan: TpsBaseLineCreationPlan): TaskCreationDefaults {
     const inlineFields = new Map<string, { key: string; value: string }>();
     for (const [key, value] of Object.entries(plan.fields)) {
-      inlineFields.set(this.normalizeInlinePropertyKey(key), { key, value });
+      inlineFields.set(normalizePropertyKeyIdentity(key), { key, value });
     }
     return {
       mode: plan.kind === 'task' ? 'tasks' : plan.kind === 'bullet' ? 'bullets' : plan.kind === 'heading' ? 'headings' : undefined,
@@ -7323,7 +7971,7 @@ export class TpsListView extends BasesView {
       )
     ) return null;
     return {
-      inlineFields: new Map([[this.normalizeInlinePropertyKey(rawKey), { key: rawKey, value }]]),
+      inlineFields: new Map([[normalizePropertyKeyIdentity(rawKey), { key: rawKey, value }]]),
       tags: new Set(),
       excludedStatuses: new Set(),
       excludedTags: new Set(),
@@ -7387,8 +8035,9 @@ export class TpsListView extends BasesView {
         || this.isRelationalStatusPropertyReference(propRaw)
       )
     ) {
+      const writableKey = propRaw.replace(/^task\./i, '').replace(/^tps\./i, '');
       return {
-        inlineFields: new Map([[normalizedProp, { key: propRaw.replace(/^task\./i, '').replace(/^tps\./i, ''), value: values[0] }]]),
+        inlineFields: new Map([[normalizePropertyKeyIdentity(writableKey), { key: writableKey, value: values[0] }]]),
         tags: new Set(),
         excludedStatuses: new Set(),
         excludedTags: new Set(),
@@ -7502,6 +8151,9 @@ export class TpsListView extends BasesView {
   private render(preserveScroll = true): void {
     this.renderGeneration += 1;
     if (!this.shouldRenderView()) return;
+    const generation = this.renderGeneration;
+    this.clearActiveTaskPointerDrag();
+    this.renderedDisplayLanesById.clear();
     this.taskFormulaSessions = new WeakMap<OpenTaskSubitem, TpsFormulaRowSession>();
     this.formulaFileContexts?.clear();
     this.formulaThisValue = undefined;
@@ -7517,14 +8169,16 @@ export class TpsListView extends BasesView {
     const propId = this.getGroupByPropId(propName);
     const listGrouping = this.isLikelyListGroupingProperty(propName, propId);
     const sourceGroups = this.getSourceGroupsForRender(propId, listGrouping);
-    void this.renderAsync(sourceGroups, propName, scrollState);
+    void this.renderAsync(sourceGroups, propName, scrollState, generation);
   }
 
   private async renderAsync(
     sourceGroups: BasesEntryGroup[],
     propName: string | null,
     scrollState: TpsListRenderScrollState | null = null,
+    generation = this.renderGeneration,
   ): Promise<void> {
+    if (generation !== this.renderGeneration) return;
     this.activeNotePath = this.getActiveMarkdownPath();
     const allGroups = this.mergeGroupsByLaneId(sourceGroups);
 
@@ -7573,6 +8227,8 @@ export class TpsListView extends BasesView {
       ? new Map<string, LaneRenderItem[]>()
       : this.buildLaneRenderItemsByLane(groups, parentByChild);
     const displayLanes = this.buildDisplayLaneGroups(groups);
+    if (generation !== this.renderGeneration) return;
+    this.renderedDisplayLanesById = new Map(displayLanes.map((lane) => [lane.id, lane]));
     const renderItemsByDisplayLane = new Map<string, LaneRenderItem[]>();
     const taskItemsByDisplayLane = new Map<string, TaskRenderItem[]>();
     for (const displayLane of displayLanes) {
@@ -7612,13 +8268,12 @@ export class TpsListView extends BasesView {
       }).filter((id): id is string => !!id);
       const visible = new Set(this.renderedRowOrder);
       const retainedSelection = new Set(Array.from(this.selectedRowIds).filter((id) => visible.has(id)));
-      const selectionPruned = retainedSelection.size !== this.selectedRowIds.size;
       this.selectedRowIds = retainedSelection;
       const anchorPruned = !!this.selectionAnchorRowId && !visible.has(this.selectionAnchorRowId);
       if (anchorPruned) this.selectionAnchorRowId = null;
       this.syncSelectionClasses();
       const taskSelectionService = this.getGcmPlugin()?.taskLineContextMenuService || this.getGcmApi()?.taskLineContextMenuService;
-      if ((selectionPruned || anchorPruned) && typeof taskSelectionService?.reconcileTpsListSelectionRows === 'function') {
+      if (typeof taskSelectionService?.reconcileTpsListSelectionRows === 'function') {
         const anchorRow = this.selectionAnchorRowId
           ? Array.from(this.containerEl.querySelectorAll<HTMLElement>(
               '.tps-list-native-row[data-tps-list-selection-id]',
@@ -7652,7 +8307,10 @@ export class TpsListView extends BasesView {
       const taskItems = taskItemsByDisplayLane.get(displayLane.id) ?? [];
       if (noteItems.length === 0 && taskItems.length === 0) continue;
 
-      const group = list.createDiv({ cls: 'tps-list-native-group' });
+      const group = list.createDiv({
+        cls: 'tps-list-native-group',
+        attr: { 'data-display-lane-id': displayLane.id },
+      });
       const groupLabel = this.formatListGroupLabel(propName, displayLane.label);
       if (groupLabel) {
         group.createDiv({ cls: 'tps-list-native-group-label', text: groupLabel });
@@ -7699,6 +8357,7 @@ export class TpsListView extends BasesView {
     const propId = this.getGroupByPropId(propName) ?? propName;
     const normalized = String(propId || '').trim().toLowerCase();
     return !isSourceNoteGroupProperty(propId)
+      && this.getConfiguredCustomProperty(propId)?.type !== 'folder'
       && !normalized.startsWith('file.')
       && !normalized.startsWith('formula.');
   }
@@ -7724,28 +8383,28 @@ export class TpsListView extends BasesView {
     for (const descriptor of sortDescriptors) {
       const av = this.getListSortValue(a, descriptor.prop);
       const bv = this.getListSortValue(b, descriptor.prop);
-      const aEmpty = av.length === 0;
-      const bEmpty = bv.length === 0;
-      if (aEmpty && !bEmpty) return 1;
-      if (!aEmpty && bEmpty) return -1;
-      if (av < bv) return descriptor.direction === 'desc' ? 1 : -1;
-      if (av > bv) return descriptor.direction === 'desc' ? -1 : 1;
+      const result = compareTpsBaseValues(
+        av,
+        bv,
+        this.getOrderingSemantics(descriptor.prop),
+        descriptor.direction,
+      );
+      if (result !== 0) return result;
     }
     return a.nativeIndex - b.nativeIndex;
   }
 
-  private getListSortValue(row: TpsListRowItem, propId: string): string {
+  private getListSortValue(row: TpsListRowItem, propId: string): unknown {
     if (row.kind === 'note') {
       if (/^formula\./iu.test(String(propId || '').trim())) {
-        const raw = this.getEntryValue(row.item.entry, propId);
-        return getTpsFormulaSortKey(raw);
+        return this.normalizeFormulaSortOperand(this.getEntryValue(row.item.entry, propId));
       }
-      return this.sortValue(row.item.entry, propId);
+      return this.getNativeSortValue(row.item.entry, propId);
     }
     return this.getTaskSortValue(row.item, propId);
   }
 
-  private getTaskSortValue(item: TaskRenderItem, propId: string): string {
+  private getTaskSortValue(item: TaskRenderItem, propId: string): unknown {
     const raw = String(propId || '').trim();
     if (/^formula\./iu.test(raw)) {
       const result = this.getTaskFormulaSession(item.file, item.task).get(raw);
@@ -7753,44 +8412,44 @@ export class TpsListView extends BasesView {
         this.reportFormulaFailure(result, item.file, item.task);
         return '';
       }
-      return getTpsFormulaSortKey(result.value);
+      return this.normalizeFormulaSortOperand(result.value);
     }
     const lower = raw.toLowerCase();
     const normalized = this.normalizeTaskPropertyId(raw);
-    if (lower === 'file.path' || lower === 'path' || lower === 'task.path' || normalized === 'filepath') return item.file.path.toLowerCase();
-    if (lower === 'title' || lower === 'task.title') return this.getTaskVisibleTitle(item.task).toLowerCase();
+    if (this.getConfiguredCustomProperty(raw)?.type === 'folder') return item.file.parent?.path || '/';
+    if (lower === 'file.path' || lower === 'path' || lower === 'task.path' || normalized === 'filepath') return item.file.path;
+    if (lower === 'title' || lower === 'task.title') return this.getTaskVisibleTitle(item.task);
     if (lower === 'file.name' || lower === 'file.basename' || lower === 'file.fullname' || lower === 'name' || normalized === 'path') {
-      return item.file.basename.toLowerCase();
+      return item.file.basename;
     }
     if (normalized === 'status' && !this.isRelationalStatusPropertyReference(raw)) {
       if (item.task.itemKind === 'heading') return '';
       return item.task.itemKind === 'bullet' ? 'bullet' : this.getMappedStatusForTask(item.task);
     }
-    if (normalized === 'kind' || normalized === 'itemkind' || normalized === 'itemtype') {
-      return item.task.itemKind === 'heading' ? `h${item.task.headingLevel || 1}` : item.task.itemKind === 'bullet' ? 'bullet' : 'task';
+    const structuralKind = item.task.itemKind === 'heading'
+      ? `h${item.task.headingLevel || 1}`
+      : item.task.itemKind === 'bullet' ? 'bullet' : 'task';
+    if (normalized === 'kind') {
+      return getTpsBaseAdditiveKindValues(structuralKind, this.getTaskExplicitKindValues(item.task));
     }
-    if (normalized === 'line') return String(item.task.line).padStart(8, '0');
-    const values = this.getTaskInlineValues(item.task, normalized);
+    if (normalized === 'itemkind' || normalized === 'itemtype') return structuralKind;
+    if (normalized === 'explicitkind' || normalized === 'entitykind') return this.getTaskExplicitKindValues(item.task);
+    if (['title', 'text', 'linetext', 'headingtext'].includes(normalized)) return this.getTaskVisibleTitle(item.task);
+    if (normalized === 'line') return item.task.line;
+    if (normalized === 'level' || normalized === 'headinglevel') {
+      return item.task.itemKind === 'heading' ? item.task.headingLevel ?? '' : '';
+    }
+    const configuredProperty = this.getConfiguredCustomProperty(raw);
+    const values = this.getTaskInlineValues(
+      item.task,
+      configuredProperty?.key || this.getTaskInlinePropertyName(raw),
+    );
     if (!values.length) return '';
-    return values
-      .map((value) => this.normalizeTaskSortValue(normalized, value))
-      .filter(Boolean)
-      .join('\u0000');
+    return values.length === 1 ? values[0] : values;
   }
 
-  private normalizeTaskSortValue(normalizedKey: string, value: string): string {
-    const raw = String(value || '').trim();
-    if (!raw) return '';
-    if (this.isDateLikeProperty(normalizedKey)) {
-      const date = raw.match(/\b(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?\b/u);
-      if (date) {
-        const time = date[2] ? `${date[2].padStart(2, '0')}:${date[3]}:${date[4] || '00'}` : '00:00:00';
-        return `${date[1]}T${time}`;
-      }
-    }
-    const numeric = Number(raw);
-    if (Number.isFinite(numeric) && /^-?\d+(?:\.\d+)?$/u.test(raw)) return String(numeric).padStart(12, '0');
-    return raw.toLowerCase();
+  private normalizeFormulaSortOperand(value: unknown): unknown {
+    return value instanceof Date ? value.getTime() : value;
   }
 
   private createListNoteRow(
@@ -7868,8 +8527,17 @@ export class TpsListView extends BasesView {
       const rawValue = this.getEntryValue(entry, propId);
       const propName = this.getFrontmatterPropNameFromId(propId) ?? propId;
       const configuredProperty = this.getConfiguredCustomProperty(propId);
-      const entityReference = isEntityReferenceProperty(configuredProperty);
-      const editable = this.isWritableNotePropertyId(propId);
+      const sourceFolderProperty = configuredProperty?.type === 'folder';
+      // Canonical GCM keeps whole-note recurrence read-only: editing only the
+      // rule would bypass the recurrence service's series/template lifecycle.
+      // Task-line recurrence remains editable through its stale-safe modal.
+      const noteRecurrenceProperty = configuredProperty?.type === 'recurrence';
+      const entityReference = !sourceFolderProperty
+        && !noteRecurrenceProperty
+        && isEntityReferenceProperty(configuredProperty);
+      const editable = this.isWritableNotePropertyId(propId)
+        && !sourceFolderProperty
+        && !noteRecurrenceProperty;
       const formulaBoolean = /^formula\./iu.test(String(propId || '').trim())
         ? getReadOnlyBooleanFormulaPresentation(rawValue)
         : null;
@@ -7900,19 +8568,47 @@ export class TpsListView extends BasesView {
               return false;
             }
           },
+          async () => {
+            try {
+              await this.processFrontmatter(entry.file, (fm) => {
+                const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, propName) || propName;
+                delete fm[actualKey];
+              });
+              emitFilesUpdated(this.app, [entry.file.path], 'tps-list');
+              this.render(false);
+              return true;
+            } catch (error) {
+              flowError('ListProperty', 'boolean-note-clear:failed', error, {
+                path: entry.file.path,
+                property: propName,
+              });
+              new Notice(`Could not clear ${configuredProperty?.label || propName}.`);
+              return false;
+            }
+          },
         );
         continue;
       }
       const typedEmptyTarget = Boolean(configuredProperty) || editable;
+      const effectiveRawValue = sourceFolderProperty ? entry.file.parent?.path || '/' : rawValue;
       const value = entityReference
-        ? this.formatEntityPropertyValue(rawValue, configuredProperty!)
-        : this.formatCardPropertyValue(rawValue);
+        ? this.formatEntityPropertyValue(effectiveRawValue, configuredProperty!)
+        : this.formatCardPropertyValue(effectiveRawValue);
       if (!value && !typedEmptyTarget) continue;
+      const propertyLabel = configuredProperty?.label || propName;
+      const displayValue = noteRecurrenceProperty && !value ? 'Not recurring' : value;
+      const readOnlyRecurrenceTitle = noteRecurrenceProperty
+        ? `${propertyLabel}: ${displayValue}. Recurrence is read-only in GCM; edit the note frontmatter property directly.`
+        : '';
       const span = parent.createSpan({
-        cls: `tps-list-native-property${editable ? ' tps-list-native-property--editable' : ''}${!value ? ' is-empty' : ''}`,
-        text: value || `+ ${configuredProperty?.label || propName}`,
+        cls: `tps-list-native-property${editable ? ' tps-list-native-property--editable' : ''}${noteRecurrenceProperty ? ' tps-list-native-property--readonly' : ''}${!value ? ' is-empty' : ''}`,
+        text: displayValue || `+ ${propertyLabel}`,
         attr: {
-          title: editable ? `${value ? 'Edit' : 'Set'} ${configuredProperty?.label || propName}` : value,
+          title: readOnlyRecurrenceTitle || (editable ? `${value ? 'Edit' : 'Set'} ${propertyLabel}` : value),
+          ...(noteRecurrenceProperty ? {
+            'aria-label': readOnlyRecurrenceTitle,
+            'data-tps-list-read-only-reason': 'recurrence',
+          } : {}),
           ...(editable ? { role: 'button', tabindex: '0' } : {}),
         },
       });
@@ -7937,8 +8633,9 @@ export class TpsListView extends BasesView {
     propertyLabel: string,
     rawValue: unknown,
     commit: (next: boolean) => Promise<boolean>,
+    clear: () => Promise<boolean>,
   ): HTMLElement {
-    const control = parent.createEl('label', {
+    const control = parent.createEl('span', {
       cls: 'tps-list-native-property tps-list-native-property--checkbox tps-list-native-property--editable',
     });
     const checkbox = control.createEl('input', {
@@ -7946,6 +8643,15 @@ export class TpsListView extends BasesView {
       attr: { type: 'checkbox' },
     });
     const stateText = control.createSpan({ cls: 'tps-list-native-property-checkbox-label' });
+    const clearButton = control.createEl('button', {
+      cls: 'tps-list-native-property-checkbox-clear',
+      text: '×',
+      attr: {
+        type: 'button',
+        title: `Clear ${propertyLabel}`,
+        'aria-label': `Clear ${propertyLabel}`,
+      },
+    });
     let currentValue = rawValue;
     const renderState = (value: unknown) => {
       const presentation = getBooleanPropertyPresentation(value);
@@ -7956,6 +8662,7 @@ export class TpsListView extends BasesView {
       else checkbox.removeAttribute('aria-invalid');
       stateText.setText(`${propertyLabel}: ${presentation.text}`);
       control.dataset.tpsListBooleanState = presentation.state;
+      clearButton.disabled = presentation.state === 'unset';
     };
     renderState(currentValue);
     const stop = (event: Event) => event.stopPropagation();
@@ -7970,6 +8677,7 @@ export class TpsListView extends BasesView {
       currentValue = next;
       renderState(next);
       checkbox.disabled = true;
+      clearButton.disabled = true;
       void commit(next).then((changed) => {
         if (!changed) {
           currentValue = previous;
@@ -7977,6 +8685,26 @@ export class TpsListView extends BasesView {
         }
       }).finally(() => {
         checkbox.disabled = false;
+        renderState(currentValue);
+      });
+    });
+    clearButton.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (clearButton.disabled) return;
+      const previous = currentValue;
+      currentValue = undefined;
+      renderState(currentValue);
+      checkbox.disabled = true;
+      clearButton.disabled = true;
+      void clear().then((changed) => {
+        if (!changed) {
+          currentValue = previous;
+          renderState(previous);
+        }
+      }).finally(() => {
+        checkbox.disabled = false;
+        renderState(currentValue);
       });
     });
     return control;
@@ -8062,13 +8790,25 @@ export class TpsListView extends BasesView {
       event.preventDefault();
       event.stopPropagation();
       if (event.shiftKey || event.metaKey || event.ctrlKey) return;
-      void this.openTaskLine(file, task.line, row);
+      void this.openRenderedLineInNote(
+        file,
+        task.line,
+        task.rawLine || '',
+        row,
+        'HeadingLineOpen',
+        'heading',
+      );
     });
     row.addEventListener('contextmenu', (event: MouseEvent) => {
+      if (this.activeTaskPointerDrag?.cardEl === row) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       void this.applyTpsListRowSelection(event, row, true);
-      void this.openHeadingLineContextMenu(event, file, task.line, row);
+      void this.openHeadingLineContextMenu(event, file, task.line, task.rawLine || '', row);
     });
 
     const hidden = new Set(['tpsinlineprops', 'externalid', 'externaleventid', 'tpscalendaruid', 'tpscalendarsourceurl']);
@@ -8189,6 +8929,7 @@ export class TpsListView extends BasesView {
     if (!isBullet) {
       row.dataset.taskPath = file.path;
       row.dataset.taskLine = String(task.line);
+      if (task.rawLine) row.dataset.taskLineIdentity = getTaskLineIdentity(task.rawLine);
       row.dataset.tpsGcmContext = 'kanban-task';
       row.dataset.tpsKanbanPath = file.path;
       row.dataset.tpsKanbanLine = String(task.line);
@@ -8236,27 +8977,49 @@ export class TpsListView extends BasesView {
     });
     title.addEventListener('pointerdown', (event: PointerEvent) => {
       event.stopPropagation();
+      this.beginTaskPointerDrag(event, file, task, propName, displayLane, row);
     });
     title.addEventListener('click', (event: MouseEvent) => {
+      if (Date.now() < this.suppressTaskRowClickUntil) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       void this.applyTpsListRowSelection(event, row);
       if (event.shiftKey || event.metaKey || event.ctrlKey) {
         event.preventDefault();
         event.stopPropagation();
         return;
       }
-      if (isBullet && this.openBulletLineEditor(event, file, task.line)) return;
+      if (isBullet && this.openBulletLineEditor(event, file, task.line, task.rawLine || '')) return;
       if (!isBullet && this.openTaskQuickEditor(event, row, title)) return;
       event.preventDefault();
       event.stopPropagation();
+      if (isBullet) {
+        void this.openRenderedLineInNote(
+          file,
+          task.line,
+          task.rawLine || '',
+          row,
+          'BulletLineOpen',
+          'line item',
+        );
+        return;
+      }
       void this.openTaskLine(file, task.line, row);
     });
     row.addEventListener('contextmenu', (event: MouseEvent) => {
+      if (this.activeTaskPointerDrag?.cardEl === row) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       void (async () => {
         await this.applyTpsListRowSelection(event, row, true);
         if (isBullet) {
-          await this.openBulletLineContextMenu(event, file, task.line);
+          await this.openBulletLineContextMenu(event, file, task.line, task.rawLine || '');
           return;
         }
         if (!this.openTaskLineContextMenu(event, file.path, task.line)) {
@@ -8414,6 +9177,20 @@ export class TpsListView extends BasesView {
         if (changed) this.render(false);
         return changed;
       },
+      async () => {
+        const expectedLine = await this.resolveRenderedTaskLine(file, task, 'boolean-property-clear');
+        if (!expectedLine) return false;
+        const changed = await this.mutateRenderedTaskLine(
+          file,
+          task.line,
+          expectedLine,
+          propertyKey,
+          'boolean-property-clear',
+          (line) => setLogInlineFieldValue(line, propertyKey, null),
+        );
+        if (changed) this.render(false);
+        return changed;
+      },
     );
   }
 
@@ -8452,13 +9229,21 @@ export class TpsListView extends BasesView {
       );
       return;
     }
+    if (!propertyUsesEntityOptions(configuredProperty) && configuredProperty?.type === 'recurrence') {
+      void this.openListTaskRecurrencePicker(file, task, configuredProperty);
+      return;
+    }
+    if (configuredProperty?.type === 'folder') return;
+    if (configuredProperty?.type === 'list') {
+      void this.openListTaskListEditor(span, file, task, configuredProperty);
+      return;
+    }
     if (
       configuredProperty
       && (
         isEntityReferenceProperty(configuredProperty)
         || configuredProperty.type === 'selector'
         || configuredProperty.type === 'kind'
-        || configuredProperty.type === 'list'
       )
     ) {
       const gcm = this.getGcmPlugin();
@@ -8531,7 +9316,9 @@ export class TpsListView extends BasesView {
   ): Promise<void> {
     const expectedLine = await this.resolveRenderedTaskLine(file, task, 'entity-picker');
     if (!expectedLine) return;
-    const currentValue = readInlineFieldValue(expectedLine, property.key);
+    const currentValue = property.type === 'list'
+      ? readInlineFieldCarrierValues(expectedLine, property.key).join(', ')
+      : readInlineFieldValue(expectedLine, property.key);
     openPropertyValueSuggestModal(this.app, source, property, currentValue, async (choice) => {
       const changed = await this.mutateRenderedTaskLine(
         file,
@@ -8539,25 +9326,7 @@ export class TpsListView extends BasesView {
         expectedLine,
         property.key,
         'property-choice-update',
-        (line) => {
-          if (choice.kind === 'clear') {
-            return setLogInlineFieldValue(line, property.key, null);
-          }
-          if (property.type !== 'list') {
-            return setLogInlineFieldValue(line, property.key, choice.value);
-          }
-          const current = readInlineFieldValue(line, property.key);
-          const next = choice.kind === 'entity'
-            ? isLinkListProperty(property)
-              ? mergeEntityReferenceList(current, choice.value)
-              : mergeMixedEntityReferenceList(current, choice.value)
-            : isLinkListProperty(property)
-              ? mergeLinkList(current, choice.value)
-              : propertyUsesEntityOptions(property)
-                ? mergeMixedList(current, choice.value)
-                : mergeStringList(current, choice.value);
-          return setLogInlineFieldValue(line, property.key, next.join(', '));
-        },
+        (line) => applyLogBasePropertyValueChoice(line, property, choice),
         {
           source: choice.kind,
           acceptedKind: property.acceptsKind,
@@ -8567,36 +9336,117 @@ export class TpsListView extends BasesView {
     });
   }
 
+  private async openListTaskListEditor(
+    anchor: HTMLElement,
+    file: TFile,
+    task: OpenTaskSubitem,
+    property: CustomProperty,
+  ): Promise<void> {
+    const expectedLine = await this.resolveRenderedTaskLine(file, task, 'list-property-editor');
+    if (!expectedLine) return;
+    const current = readInlineFieldCarrierValues(expectedLine, property.key).join(', ');
+    const values = this.parseConfiguredListValues(property, current);
+    const menu = new Menu();
+    menu.addItem((item) => item
+      .setTitle('(none)')
+      .setChecked(values.length === 0)
+      .onClick(() => {
+        void this.mutateRenderedTaskLine(
+          file,
+          task.line,
+          expectedLine,
+          property.key,
+          'list-property-clear',
+          (line) => setLogInlineFieldValue(line, property.key, null),
+        ).then((changed) => {
+          if (changed) this.render(false);
+        });
+      }));
+    menu.addItem((item) => item
+      .setTitle('Add value…')
+      .setIcon('plus')
+      .onClick(() => {
+        openPropertyValueSuggestModal(this.app, this.getGcmPlugin(), property, current, async (choice) => {
+          const changed = await this.mutateRenderedTaskLine(
+            file,
+            task.line,
+            expectedLine,
+            property.key,
+            'list-property-add',
+            (line) => choice.kind === 'clear'
+              ? setLogInlineFieldValue(line, property.key, null)
+              : addLogBaseListPropertyValue(
+                  line,
+                  property,
+                  choice.value,
+                  choice.kind === 'entity' ? 'entity' : 'literal',
+                ),
+            { source: choice.kind, acceptedKind: property.acceptsKind },
+          );
+          if (changed) this.render(false);
+        });
+      }));
+    if (values.length > 0) {
+      menu.addSeparator();
+      values.forEach((value) => menu.addItem((item) => item
+        .setTitle(`Remove ${/^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value}`)
+        .setIcon('x')
+        .onClick(() => {
+          void this.mutateRenderedTaskLine(
+            file,
+            task.line,
+            expectedLine,
+            property.key,
+            'list-property-remove',
+            (line) => removeLogBaseListPropertyValue(line, property, value),
+          ).then((changed) => {
+            if (changed) this.render(false);
+          });
+        })));
+    }
+    showPropertyValueChoiceMenuAtElement(menu, anchor);
+  }
+
   private async resolveRenderedTaskLine(
     file: TFile,
     task: OpenTaskSubitem,
     source: string,
   ): Promise<string> {
+    const expectedLine = String(task.rawLine ?? '');
+    const targetLine = Math.max(1, Math.floor(Number(task.line || 1)));
+    if (!expectedLine) {
+      flowWarn('ListProperty', `${source}:target-unresolved`, {
+        path: file.path,
+        line: targetLine,
+        reason: 'missing-source-revision',
+      });
+      new Notice('Could not resolve the source line.');
+      return '';
+    }
     try {
       const content = await this.app.vault.cachedRead(file);
       const parts = splitLineItemContent(content);
-      const directLine = parts.lines[Math.max(0, task.line - 1)] || '';
-      const taskText = String(task.text || '').replace(/\s+/g, ' ').trim();
-      const matchesTask = (line: string): boolean => {
+      const resolvedIndex = resolveExactLineRevisionIndex(parts.lines, targetLine - 1, expectedLine);
+      if (resolvedIndex >= 0) {
+        const line = parts.lines[resolvedIndex] || '';
         const parsed = task.itemKind === 'heading'
           ? parseTpsListHeadingLine(line)
           : this.parseLineItem(line, true);
-        return !!parsed
-          && this.cleanTaskText(parsed.text).replace(/\s+/g, ' ').trim() === taskText;
-      };
-      if (matchesTask(directLine)) {
-        return directLine;
+        if (parsed) return line;
       }
-      const matches = parts.lines.filter(matchesTask);
-      if (matches.length === 1) return matches[0];
     } catch (error) {
       flowError('ListProperty', `${source}:read-failed`, error, {
         path: file.path,
-        line: task.line,
+        line: targetLine,
       });
       new Notice('Could not read the source line.');
       return '';
     }
+    flowWarn('ListProperty', `${source}:target-unresolved`, {
+      path: file.path,
+      line: targetLine,
+      reason: 'stale-or-ambiguous-source-revision',
+    });
     new Notice('Could not resolve the source line.');
     return '';
   }
@@ -8666,7 +9516,7 @@ export class TpsListView extends BasesView {
     const semanticTaskTags = /^(?:tag|tags)$/iu.test(this.normalizeInlinePropertyKey(propertyKey));
     const current = semanticTaskTags
       ? readTaskLineTags(expectedLine)
-      : parseTaskTagValues(readInlineFieldValue(expectedLine, propertyKey));
+      : parseTaskTagValues(readInlineFieldCarrierValues(expectedLine, propertyKey));
     new TagSuggestModal(this.app, [...collectKnownVaultTags(this.app), ...current], async (tag, selected) => {
       const changed = await this.mutateRenderedTaskLine(
         file,
@@ -8678,7 +9528,7 @@ export class TpsListView extends BasesView {
           if (semanticTaskTags) {
             return toggleLogLineSemanticTag(line, propertyKey, tag, selected);
           }
-          const existing = parseTaskTagValues(readInlineFieldValue(line, propertyKey));
+          const existing = parseTaskTagValues(readInlineFieldCarrierValues(line, propertyKey));
           const normalizedTag = tag.toLocaleLowerCase();
           const next = selected
             ? existing.filter((value) => value.toLocaleLowerCase() !== normalizedTag)
@@ -8746,6 +9596,37 @@ export class TpsListView extends BasesView {
     }).open();
   }
 
+  private async openListTaskRecurrencePicker(
+    file: TFile,
+    task: OpenTaskSubitem,
+    property: CustomProperty,
+  ): Promise<void> {
+    const expectedLine = await this.resolveRenderedTaskLine(file, task, 'recurrence-picker');
+    if (!expectedLine) return;
+    const current = readInlineFieldValue(expectedLine, property.key);
+    const scheduled = readInlineFieldValue(expectedLine, 'scheduled');
+    const startDate = scheduled ? new Date(scheduled.replace(' ', 'T')) : new Date();
+    new RecurrenceModal(
+      this.app,
+      current,
+      Number.isNaN(startDate.getTime()) ? new Date() : startDate,
+      '',
+      async (rule) => {
+        const changed = await this.mutateRenderedTaskLine(
+          file,
+          task.line,
+          expectedLine,
+          property.key,
+          'recurrence-update',
+          (line) => setLogInlineFieldValue(line, property.key, rule || null),
+          { cleared: !rule },
+        );
+        if (changed) this.render(false);
+      },
+      { showEndsOn: false },
+    ).open();
+  }
+
   private startListNotePropertyEdit(
     span: HTMLElement,
     file: TFile,
@@ -8755,6 +9636,19 @@ export class TpsListView extends BasesView {
     const writableProp = this.getFrontmatterPropNameFromId(propName) ?? propName;
     if (!writableProp || span.hasClass('tps-list-native-property--editing')) return;
     const configuredProperty = this.getConfiguredCustomProperty(writableProp);
+    if (configuredProperty?.type === 'folder' || configuredProperty?.type === 'recurrence') return;
+    if (!propertyUsesEntityOptions(configuredProperty) && configuredProperty?.type === 'snooze') {
+      const menuController = this.getGcmPlugin()?.menuController || this.getGcmApi()?.menuController;
+      if (typeof menuController?.openSnoozeModal !== 'function') {
+        new Notice('The snooze picker is not available.');
+        return;
+      }
+      const frontmatter = {
+        ...(this.app.metadataCache.getFileCache(file)?.frontmatter || {}),
+      };
+      menuController.openSnoozeModal([{ file, frontmatter }], configuredProperty.key || writableProp);
+      return;
+    }
     if (
       !propertyUsesEntityOptions(configuredProperty)
       && this.isTagProperty(configuredProperty, writableProp)
@@ -8813,11 +9707,17 @@ export class TpsListView extends BasesView {
     }
     if (
       configuredProperty
+      && configuredProperty.type === 'list'
+    ) {
+      this.openListNoteListEditor(span, file, writableProp, rawValue, configuredProperty);
+      return;
+    }
+    if (
+      configuredProperty
       && (
         isEntityReferenceProperty(configuredProperty)
         || configuredProperty.type === 'selector'
         || configuredProperty.type === 'kind'
-        || configuredProperty.type === 'list'
       )
     ) {
       const gcm = this.getGcmPlugin();
@@ -8876,6 +9776,97 @@ export class TpsListView extends BasesView {
       emitFilesUpdated(this.app, [file.path], 'tps-list');
       this.render(false);
     });
+  }
+
+  private openListNoteListEditor(
+    anchor: HTMLElement,
+    file: TFile,
+    propertyKey: string,
+    rawValue: unknown,
+    property: CustomProperty,
+  ): void {
+    const values = this.parseConfiguredListValues(property, rawValue);
+    const menu = new Menu();
+    const mutate = async (
+      route: string,
+      updater: (current: unknown) => unknown[] | null,
+    ): Promise<void> => {
+      try {
+        await this.processFrontmatter(file, (fm) => {
+          const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, propertyKey) || propertyKey;
+          const next = updater(fm[actualKey]);
+          if (next && next.length > 0) fm[actualKey] = next;
+          else delete fm[actualKey];
+        });
+        emitFilesUpdated(this.app, [file.path], 'tps-list');
+        this.render(false);
+        flow('ListProperty', route, { path: file.path, property: property.key });
+      } catch (error) {
+        flowError('ListProperty', `${route}:failed`, error, { path: file.path, property: property.key });
+        new Notice(`Could not update ${property.label || property.key}.`);
+      }
+    };
+    menu.addItem((item) => item
+      .setTitle('(none)')
+      .setChecked(values.length === 0)
+      .onClick(() => { void mutate('list-note-clear', () => null); }));
+    menu.addItem((item) => item
+      .setTitle('Add value…')
+      .setIcon('plus')
+      .onClick(() => {
+        openPropertyValueSuggestModal(
+          this.app,
+          this.getGcmPlugin(),
+          property,
+          this.stringifyEditablePropertyValue(rawValue),
+          async (choice) => {
+            await mutate('list-note-add', (current) => {
+              if (choice.kind === 'clear') return null;
+              return choice.kind === 'entity'
+                ? isLinkListProperty(property)
+                  ? mergeEntityReferenceList(current, choice.value)
+                  : mergeMixedEntityReferenceList(current, choice.value)
+                : isLinkListProperty(property)
+                  ? mergeLinkList(current, choice.value)
+                  : propertyUsesEntityOptions(property)
+                    ? mergeMixedList(current, choice.value)
+                    : mergeStringList(current, choice.value);
+            });
+          },
+        );
+      }));
+    if (values.length > 0) {
+      menu.addSeparator();
+      values.forEach((value) => menu.addItem((item) => item
+        .setTitle(`Remove ${/^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value}`)
+        .setIcon('x')
+        .onClick(() => {
+          void mutate('list-note-remove', (current) => this.removeConfiguredListValue(property, current, value));
+        })));
+    }
+    showPropertyValueChoiceMenuAtElement(menu, anchor);
+  }
+
+  private parseConfiguredListValues(property: CustomProperty, value: unknown): string[] {
+    if (propertyUsesEntityOptions(property)) {
+      return isLinkListProperty(property) ? parseLinkListInput(value) : parseMixedListInput(value);
+    }
+    return isLinkListProperty(property) ? parseLinkListInput(value) : parseStringListInput(value);
+  }
+
+  private removeConfiguredListValue(
+    property: CustomProperty,
+    current: unknown,
+    value: string,
+  ): string[] {
+    if (propertyUsesEntityOptions(property)) {
+      return isLinkListProperty(property)
+        ? removeEntityReferenceListValues(current, value)
+        : removeMixedEntityReferenceListValues(current, value);
+    }
+    return isLinkListProperty(property)
+      ? removeLinkListValues(current, value)
+      : removeStringListValues(current, value);
   }
 
   private startListPropertyInput(
@@ -9012,6 +10003,7 @@ export class TpsListView extends BasesView {
 
   private isDatetimeProperty(property: CustomProperty | null, reference: string): boolean {
     return property?.type === 'datetime'
+      || property?.type === 'snooze'
       || this.normalizeInlinePropertyKey(property?.key || reference) === 'scheduled';
   }
 
@@ -9055,6 +10047,8 @@ export class TpsListView extends BasesView {
         'line',
         'level',
         'headinglevel',
+        'status',
+        'checkboxstatus',
         'taskstatus',
       ].includes(normalized)
     ) return null;

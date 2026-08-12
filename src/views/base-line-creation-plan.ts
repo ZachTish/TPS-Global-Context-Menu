@@ -354,17 +354,18 @@ function applyCondition(
     expression: condition.expression,
   };
   const property = normalizeProperty(condition.property);
+  const semanticReference = normalizeSemanticReference(property);
   const semanticProperty = normalizeSemanticProperty(property);
-  if (property.startsWith('formula.') || property.startsWith('formula[')) {
+  if (semanticReference.startsWith('formula.') || semanticReference.startsWith('formula[')) {
     // Formula outputs are computed, read-only values. They may validate a
     // prospective row later, but they can never become Markdown defaults.
     return [markUnsupported(state, context, `${path}: ${condition.expression}`)];
   }
   if (
     effectivePositive
-    && property.startsWith('task.')
-    && property !== 'task.path'
-    && property !== 'task.file.path'
+    && semanticReference.startsWith('task.')
+    && semanticReference !== 'task.path'
+    && semanticReference !== 'task.file.path'
   ) {
     const inferredTask = applyKind(state, 'task', true, source, context);
     if (!inferredTask) return [];
@@ -382,7 +383,7 @@ function applyCondition(
     ));
   }
 
-  if (property === 'file.path' || property === 'task.path') {
+  if (semanticReference === 'file.path' || semanticReference === 'task.path') {
     if (!EQUALITY_OPERATORS.has(semanticOperator)) {
       return [markUnsupported(state, context, `${path}: ${condition.expression}`)];
     }
@@ -391,7 +392,7 @@ function applyCondition(
     ));
   }
 
-  if (isFileOrNoteMetadata(property)) {
+  if (isFileOrNoteMetadata(semanticReference)) {
     return [markUnsupported(state, context, `${path}: ${condition.expression}`)];
   }
 
@@ -410,7 +411,7 @@ function applyCondition(
   if (
     STATUS_PROPERTIES.has(semanticProperty)
     && EQUALITY_OPERATORS.has(semanticOperator)
-    && (context.options.isWorkflowStatusProperty?.(property) ?? true)
+    && (context.options.isWorkflowStatusProperty?.(semanticReference) ?? true)
   ) {
     return applyAlternatives(state, resolvedValues, source, context, path, (candidate, rawValue) => (
       applyStatus(candidate, rawValue, effectivePositive, source, context)
@@ -423,7 +424,12 @@ function applyCondition(
     ));
   }
 
-  const fieldKey = sanitizeFieldKey(semanticProperty);
+  // Semantic aliases deliberately use a compact representation so friendly
+  // reserved spellings such as `item kind` still select structural behavior.
+  // Writable custom keys must instead retain their authored identity: a Base
+  // filter on `client id` has to create `[client id:: ...]`, not a different
+  // `clientid` field that the same exact-key filter would immediately reject.
+  const fieldKey = sanitizeFieldKey(stripWritablePropertyNamespace(property));
   if (!fieldKey || ['title', 'line', 'source', 'extension', 'ext'].includes(semanticProperty)) {
     return [markUnsupported(state, context, `${path}: ${condition.expression}`)];
   }
@@ -1006,11 +1012,19 @@ function normalizeComparableTargetPath(value: unknown): string | null {
 }
 
 function normalizeProperty(value: unknown): string {
-  return String(value ?? '').trim().toLowerCase().replace(/\s+/gu, '');
+  return String(value ?? '').trim().toLocaleLowerCase();
 }
 
 function normalizeSemanticProperty(property: string): string {
-  return property.replace(/^(?:tps|kanban|task)\./u, '');
+  return stripWritablePropertyNamespace(normalizeSemanticReference(property));
+}
+
+function normalizeSemanticReference(property: string): string {
+  return property.replace(/\s+/gu, '');
+}
+
+function stripWritablePropertyNamespace(property: string): string {
+  return property.replace(/^(?:tps|kanban|task)\s*\.\s*/u, '');
 }
 
 function isFileOrNoteMetadata(property: string): boolean {
@@ -1037,7 +1051,11 @@ function normalizeTag(value: string): string {
 }
 
 function sanitizeFieldKey(value: string): string {
-  return String(value || '').trim().replace(/[\[\]:]+/gu, '').replace(/\s+/gu, ' ');
+  const authored = String(value || '').trim();
+  // Inline-field delimiters cannot be represented safely inside a key. Fail
+  // closed instead of silently rewriting the key into one that no longer
+  // satisfies the creation filter.
+  return /[\[\]:]/u.test(authored) ? '' : authored;
 }
 
 function parseBoolean(value: string): boolean | null {

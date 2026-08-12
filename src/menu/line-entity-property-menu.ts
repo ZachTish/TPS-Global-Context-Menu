@@ -220,7 +220,7 @@ function addLineConfiguredPropertyMenu(
       source: options.plugin as any,
       menu: subMenu,
       property,
-      currentValue: isList ? '' : rawValue,
+      currentValue: isList ? current : rawValue,
       onClear: () => runLineMutation(options, property, 'clear', (line) => (
         isTags
           ? current.reduce(

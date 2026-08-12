@@ -120,10 +120,364 @@ test('TPS Table evaluates deterministic Base date arithmetic against generated d
   );
 });
 
-test('unsupported branches stay unknown instead of hiding rows', async () => {
+test('unsupported branches fail closed and expose structured diagnostics', async () => {
   const { evaluateLogBaseFilterNode } = await loadModule();
-  assert.equal(evaluateLogBaseFilterNode({ or: ['unsupported.magic()', 'food == "eggs"'] }, context), null);
+  const failures = [];
+  const diagnosticContext = { ...context, onFilterFailure: (failure) => failures.push(failure) };
+  assert.equal(evaluateLogBaseFilterNode({ or: ['unsupported.magic()', 'food == "eggs"'] }, diagnosticContext), false);
   assert.equal(evaluateLogBaseFilterNode({ and: ['unsupported.magic()', 'food == "eggs"'] }, context), false);
+  assert.equal(diagnosticContext.filterFailed, true);
+  assert.ok(failures.some((failure) => failure.code === 'unsupported-filter-operator'));
+});
+
+test('TPS Table filter matrix covers scalar, list, tag, number, date, boolean, file, frontmatter, structural, and workflow values', async () => {
+  const { evaluateLogBaseFilterRoots } = await loadModule();
+  const matrixContext = {
+    fields: {
+      food: 'watermelon',
+      labels: ['alpha', 'beta'],
+      'Résumé Score': '10',
+      due: '2026-08-12T14:30:00',
+      enabled: 'true',
+      open: 'true',
+      done: 'false',
+      'task.status': 'working',
+    },
+    rowKind: 'task',
+    title: 'Review launch',
+    rawLine: '- [\\] Review launch #hca #ops',
+    lineNumber: 42,
+    taskTags: ['hca', 'ops'],
+    file: {
+      path: 'Projects/Launch/Plan.md',
+      name: 'Plan.md',
+      basename: 'Plan',
+      extension: 'md',
+      folder: 'Projects/Launch',
+      size: 2048,
+      ctime: new Date('2026-08-01T12:00:00Z'),
+      mtime: new Date('2026-08-12T12:00:00Z'),
+      tags: ['hca', 'project/active'],
+      links: ['People/Smith, Ada', 'Calendar'],
+      frontmatter: {
+        'Café Status': 'ready',
+        labels: ['alpha', 'beta'],
+        approved: true,
+        nested: { owner: '[[People/Smith, Ada|Ada]]' },
+      },
+    },
+  };
+  const predicates = [
+    'food == "watermelon"',
+    { property: 'labels', operator: 'containsAll', values: ['alpha', 'beta'] },
+    'task.tags.containsAll(hca, ops)',
+    'Résumé Score >= 10',
+    'due >= date("2026-08-12")',
+    'enabled == true',
+    'file.size > 1000',
+    'file.ctime >= date("2026-08-01")',
+    'file.mtime < date("2026-08-13")',
+    'file.hasTag(project)',
+    'file.inFolder("Projects")',
+    'file.hasLink([[People/Smith, Ada|Ada]])',
+    'file.hasProperty("Café Status")',
+    'note["Café Status"] == "ready"',
+    { property: 'note.labels', operator: 'containsAll', values: ['alpha', 'beta'] },
+    'note.approved == true',
+    'file.properties["nested"].owner == "[[People/Smith, Ada|Ada]]"',
+    'kind == task',
+    'task.status == working',
+    'task.open == true',
+    'task.title.contains("launch")',
+    'line.number == 42',
+  ];
+  for (const predicate of predicates) {
+    assert.equal(evaluateLogBaseFilterRoots([predicate], matrixContext), true, JSON.stringify(predicate));
+  }
+  assert.equal(evaluateLogBaseFilterRoots(['note.approved == false'], matrixContext), false);
+  assert.equal(evaluateLogBaseFilterRoots(['task.tags.contains(daily)'], matrixContext), false);
+  assert.equal(evaluateLogBaseFilterRoots(['file.inFolder("Archive")'], matrixContext), false);
+  assert.equal(evaluateLogBaseFilterRoots(['note.missing.isEmpty()'], matrixContext), true);
+  assert.equal(evaluateLogBaseFilterRoots(['note.missing == "value"'], matrixContext), false);
+});
+
+test('TPS Table filters keep punctuation-distinct authored keys isolated across inline and frontmatter paths', async () => {
+  const { evaluateLogBaseFilterRoots } = await loadModule();
+  const identityContext = {
+    ...context,
+    rowKind: 'task',
+    lineNumber: 42,
+    fields: {
+      'client-id': 'inline-hyphen',
+      client_id: 'inline-underscore',
+      'client.id': 'inline-dot',
+      'task.status': 'working',
+    },
+    file: {
+      ...context.file,
+      folder: 'Projects/Identity',
+      frontmatter: {
+        'client-id': 'note-hyphen',
+        client_id: 'note-underscore',
+        'client.id': 'note-dot',
+      },
+    },
+  };
+
+  const matches = [
+    'CLIENT-ID == "inline-hyphen"',
+    'client_id == "inline-underscore"',
+    'client.id == "inline-dot"',
+    '["client.id"] == "inline-dot"',
+    'task["client.id"] == "inline-dot"',
+    'note.CLIENT-ID == "note-hyphen"',
+    'note.client_id == "note-underscore"',
+    'note["client.id"] == "note-dot"',
+    'frontmatter["client.id"] == "note-dot"',
+    'file.properties["client.id"] == "note-dot"',
+    'task.status == working',
+    'line.lineNumber == 42',
+    'file.folderPath == "Projects/Identity"',
+  ];
+  for (const filter of matches) {
+    assert.equal(evaluateLogBaseFilterRoots([filter], identityContext), true, filter);
+  }
+
+  const nonMatches = [
+    'client-id == "inline-underscore"',
+    'client_id == "inline-hyphen"',
+    'client.id == "inline-hyphen"',
+    '["client.id"] == "inline-underscore"',
+    'note.client-id == "note-underscore"',
+    'note.client_id == "note-hyphen"',
+    'note["client.id"] == "note-hyphen"',
+    'file.properties["client.id"] == "note-underscore"',
+  ];
+  for (const filter of nonMatches) {
+    assert.equal(evaluateLogBaseFilterRoots([filter], identityContext), false, filter);
+  }
+  assert.equal(
+    evaluateLogBaseFilterRoots(['item-kind == task'], identityContext),
+    false,
+    'a punctuation-bearing authored key must not collapse into structural itemKind',
+  );
+  assert.equal(evaluateLogBaseFilterRoots(['itemKind == task'], identityContext), true);
+
+  const collisionOnlyContext = {
+    ...identityContext,
+    fields: { client_id: 'inline-underscore' },
+    file: {
+      ...identityContext.file,
+      frontmatter: { client_id: 'note-underscore' },
+    },
+  };
+  assert.equal(evaluateLogBaseFilterRoots(['client-id.exists()'], collisionOnlyContext), false);
+  assert.equal(evaluateLogBaseFilterRoots(['note.client-id.exists()'], collisionOnlyContext), false);
+});
+
+test('TPS Table argument parsing preserves quoted commas and unquoted wikilinks', async () => {
+  const { evaluateLogBaseFilterRoots } = await loadModule();
+  const argumentContext = {
+    ...context,
+    file: {
+      ...context.file,
+      frontmatter: {
+        aliases: ['alpha,beta', 'gamma'],
+        references: ['[[People/Smith, Ada|Ada]]'],
+      },
+    },
+  };
+  assert.equal(evaluateLogBaseFilterRoots(['note.aliases.containsAny("alpha,beta", "missing")'], argumentContext), true);
+  assert.equal(evaluateLogBaseFilterRoots(['note.references.contains([[People/Smith, Ada|Ada]])'], argumentContext), true);
+  assert.equal(evaluateLogBaseFilterRoots(['note.references.contains("[[People/Smith, Ada|Ada]]")'], argumentContext), true);
+});
+
+test('TPS Table nested boolean filters preserve decisive short-circuiting and never negate an invalid filter into a match', async () => {
+  const { evaluateLogBaseFilterNode } = await loadModule();
+  const failures = [];
+  const nestedContext = { ...context, onFilterFailure: (failure) => failures.push(failure) };
+  assert.equal(evaluateLogBaseFilterNode({ all: [{ any: ['food == "watermelon"', 'food == "eggs"'] }, { not: 'protein < 5' }] }, nestedContext), true);
+  assert.equal(evaluateLogBaseFilterNode({ not: 'unknown.method()' }, nestedContext), false);
+  assert.equal(evaluateLogBaseFilterNode({ or: ['food == "watermelon"', 'unknown.method()'] }, nestedContext), true);
+  assert.equal(failures.length, 1, 'unreachable invalid branch is not evaluated');
+});
+
+test('TPS Table invalid syntax, object operators, ambiguous groups, and unavailable indexes all fail closed', async () => {
+  const { evaluateLogBaseFilterNode } = await loadModule();
+  const failures = [];
+  const invalidContext = { ...context, onFilterFailure: (failure) => failures.push(failure) };
+  const filters = [
+    'protein approximately 6',
+    'food.contains("unterminated)',
+    { property: 'protein', operator: 'approximately', value: 6 },
+    { and: ['food == watermelon'], or: ['protein > 5'] },
+    { and: [] },
+    'file.backlinks.isNotEmpty()',
+  ];
+  for (const filter of filters) {
+    assert.equal(evaluateLogBaseFilterNode(filter, invalidContext), false, JSON.stringify(filter));
+  }
+  assert.ok(failures.some((failure) => failure.code === 'unsupported-filter-syntax'));
+  assert.ok(failures.some((failure) => failure.code === 'invalid-filter-arguments'));
+  assert.ok(failures.some((failure) => failure.code === 'unsupported-filter-operator'));
+  assert.ok(failures.some((failure) => failure.code === 'ambiguous-filter-group'));
+  assert.ok(failures.some((failure) => failure.code === 'empty-filter-group'));
+  assert.ok(failures.some((failure) => failure.code === 'unsupported-file-index'));
+});
+
+test('TPS Table loadEntries excludes unevaluable rows and records a visible fail-closed diagnostic', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const file = {
+    path: 'Inbox/Unsafe.md',
+    name: 'Unsafe.md',
+    basename: 'Unsafe',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+    stat: { size: 24, ctime: 1, mtime: 2 },
+  };
+  const view = Object.create(TpsTableView.prototype);
+  view.containerEl = { closest: () => null };
+  view.filterDiagnostics = new Map();
+  view.plugin = {
+    settings: { properties: [], linkedSubitemCheckboxMappings: [] },
+    app: {
+      vault: {
+        getMarkdownFiles: () => [file],
+        getFileByPath: () => null,
+        cachedRead: async () => 'Record [food:: watermelon]',
+      },
+      metadataCache: {
+        getFileCache: () => ({ frontmatter: {}, tags: [], links: [] }),
+        getFirstLinkpathDest: () => null,
+      },
+    },
+    sharedServices: { status: { normalize: (value) => value, isDoneStatus: () => false } },
+  };
+  view.getEffectiveBaseFilterRoots = async () => ['protein approximately 6'];
+  view.getBaseFile = () => null;
+  view.getViewName = () => 'Safety';
+  view.getHomeContextDate = () => null;
+  view.getLineCreateContextPath = () => null;
+  view.lineMatches = () => true;
+  view.lineMatchesHomeDateContext = () => true;
+  view.sortEntries = (entries) => entries;
+
+  assert.deepEqual(await view.loadEntries(), []);
+  assert.equal(view.filterDiagnostics.size, 1);
+  assert.ok(['syntax-error', 'unsupported-filter-syntax'].includes(Array.from(view.filterDiagnostics.values())[0].code));
+  assert.match(logBaseViewSource, /tps-log-base-filter-error/);
+  assert.match(logBaseViewSource, /role: 'alert'/);
+  assert.match(logBaseViewSource, /filters:rows-failed-closed/);
+  assert.doesNotMatch(logBaseViewSource, /filters:unsupported-rows-included/);
+});
+
+test('filterless lineFilterKey Tables discover matching lines when native Base rows are empty', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const File = globalThis.__TpsTableFormulaTestFile;
+  const file = new File();
+  Object.assign(file, {
+    path: 'Inbox/Table Rows.md',
+    name: 'Table Rows.md',
+    basename: 'Table Rows',
+    extension: 'md',
+    parent: { path: 'Inbox' },
+    stat: { size: 180, ctime: 1, mtime: 2 },
+  });
+  const view = Object.create(TpsTableView.prototype);
+  view.data = { data: [], groupedData: [] };
+  view.config = { lineFilterKey: 'item' };
+  view.containerEl = { closest: () => null };
+  view.plugin = {
+    settings: { properties: [], linkedSubitemCheckboxMappings: [] },
+    app: {
+      vault: {
+        getMarkdownFiles: () => [file],
+        getFileByPath: () => null,
+        cachedRead: async () => [
+          '- Alpha [item:: Alpha] [score:: 98]',
+          '- Ignore this line [other:: value]',
+          '- Beta [item:: Beta] [score:: 91]',
+        ].join('\n'),
+      },
+      workspace: { getActiveFile: () => null },
+      metadataCache: {
+        getFileCache: () => ({ frontmatter: {}, tags: [], links: [] }),
+        getFirstLinkpathDest: () => null,
+      },
+    },
+    sharedServices: { status: { normalize: (value) => value, isDoneStatus: () => false } },
+  };
+  view.getEffectiveBaseFilterRoots = async () => [];
+  view.getBaseFile = () => null;
+  view.getHomeContextDate = () => null;
+  view.getLineCreateContextPath = () => null;
+  view.lineMatchesHomeDateContext = () => true;
+  view.sortEntries = (entries) => entries;
+
+  const entries = await view.loadEntries();
+  assert.deepEqual(entries.map((entry) => entry.fields.item), ['Alpha', 'Beta']);
+  assert.deepEqual(entries.map((entry) => entry.lineNumber + 1), [1, 3]);
+});
+
+test('TPS Table external row menus relocate only a unique captured rendered revision', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const file = new globalThis.__TpsTableFormulaTestFile();
+  file.path = 'Inbox/Rendered revision.md';
+  const renderedLine = 'Record [owner:: Ada]';
+  let content = ['Inserted', '# Records', renderedLine].join('\n');
+  const opened = [];
+  const view = Object.create(TpsTableView.prototype);
+  view.plugin = {
+    app: {
+      vault: {
+        getAbstractFileByPath: () => file,
+        cachedRead: async () => content,
+      },
+    },
+  };
+  view.openEntryContextMenu = (_event, entry) => opened.push(entry);
+  const event = {
+    preventDefault() {},
+    stopPropagation() {},
+    stopImmediatePropagation() {},
+  };
+  const row = {
+    dataset: { path: file.path, line: '2' },
+    __tpsTableEntryRevision: {
+      path: file.path,
+      lineNumber: 1,
+      rawLine: renderedLine,
+    },
+    querySelectorAll: () => [],
+  };
+  const settle = () => new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(view.handleExternalRowContextMenu(event, row), true);
+  await settle();
+  assert.equal(opened.length, 1);
+  assert.equal(opened[0].lineNumber, 2, 'an inserted line may relocate a unique exact revision');
+  assert.equal(opened[0].line, renderedLine);
+
+  content = ['Inserted', '# Records', 'Record [owner:: Grace]'].join('\n');
+  assert.equal(view.handleExternalRowContextMenu(event, row), true);
+  await settle();
+  assert.equal(opened.length, 1, 'a replaced revision must not open the row now at its old coordinate');
+
+  content = [renderedLine, '# Records', renderedLine].join('\n');
+  assert.equal(view.handleExternalRowContextMenu(event, row), true);
+  await settle();
+  assert.equal(opened.length, 1, 'duplicate exact revisions are ambiguous and must fail closed');
+
+  const renderEntry = sourceBlock(logBaseViewSource, 'private renderEntry(', 'private renderConfiguredPropertyCell(');
+  const externalMenu = sourceBlock(
+    logBaseViewSource,
+    'handleExternalRowContextMenu(evt: MouseEvent, row: HTMLElement): boolean',
+    'private getEntryValue(',
+  );
+  assert.match(renderEntry, /__tpsTableEntryRevision = \{[\s\S]*?rawLine: entry\.line/);
+  assert.match(externalMenu, /resolveExactLineRevisionIndex\([\s\S]*?renderedRevision\.rawLine/);
+  assert.match(externalMenu, /context-menu:stale-target/);
+  assert.doesNotMatch(externalMenu, /content\.split\('\n'\)\[lineNumber\]/);
 });
 
 test('TPS Table heading rows satisfy generic and exact structural kind filters', async () => {
@@ -173,6 +527,21 @@ test('TPS Table exposes clean heading titles, levels, and raw tags as synthesize
   assert.equal(entries[0].queryFields.headinglevel, '1');
   assert.equal(entries[0].queryFields.tags, '#qa-heading');
   assert.equal(view.getEntryValue(entries[0], 'heading.level'), '1');
+  assert.equal(view.getEntryOrderingValue(entries[0], 'heading.level'), '1');
+  assert.equal(view.getEntryValue(entries[0], 'task.title'), 'Launch plan');
+  assert.equal(view.getEntryValue(entries[0], 'line.text'), 'Launch plan');
+  assert.equal(view.getEntryValue(entries[0], 'heading.text'), 'Launch plan');
+  assert.equal(view.getEntryOrderingValue(entries[0], 'task.title'), 'Launch plan');
+  assert.equal(view.getEntryOrderingValue(entries[0], 'line.text'), 'Launch plan');
+  assert.equal(view.getEntryOrderingValue(entries[0], 'heading.text'), 'Launch plan');
+  assert.equal(view.getEntryValue(entries[0], 'line.number'), String(entries[0].lineNumber + 1));
+  assert.equal(view.getEntryValue(entries[0], 'heading.line'), String(entries[0].lineNumber + 1));
+  assert.equal(view.getEntryOrderingValue(entries[0], 'line.number'), entries[0].lineNumber + 1);
+  assert.equal(view.getEntryOrderingValue(entries[0], 'heading.line'), String(entries[0].lineNumber + 1));
+  assert.equal(view.getWritableInlineColumnKey('line.number'), null);
+  assert.equal(view.getWritableInlineColumnKey('heading.level'), null);
+  assert.equal(view.getWritableInlineColumnKey('heading.line'), null);
+  assert.equal(view.getWritableInlineColumnKey('task.title'), null);
   assert.equal(view.getEntryValue(entries[0], 'tags'), '#qa-heading');
 });
 
@@ -742,11 +1111,13 @@ test('TPS Table loadEntries keeps task query aliases out of inferred display col
 
   const entries = await view.loadEntries();
   assert.equal(entries.length, 2);
-  assert.deepEqual(Object.keys(entries[0].fields), ['kind']);
+  assert.deepEqual(Object.keys(entries[0].fields), []);
+  assert.equal(entries[0].queryFields.kind, 'task');
+  assert.equal(entries[0].queryFields.itemkind, 'task');
   assert.equal(entries[0].queryFields.status, 'todo');
   assert.equal(entries[1].queryFields.status, 'complete');
   const columns = view.getColumns(entries).map((column) => column.key);
-  assert.deepEqual(columns, ['kind', 'source', 'line']);
+  assert.deepEqual(columns, ['source', 'line']);
 });
 
 test('TPS Table creation-time filter reads fail closed while rendering remains tolerant', async () => {
@@ -815,6 +1186,12 @@ test('TPS Table resolves persisted filters from its owning standalone Base leaf'
       name: 'Standalone Tasks',
       get: (key) => key === 'filters' ? runtimeRoot : null,
     };
+    view.queryController = {
+      // Obsidian 1.13 serializes its internal query comparison cache here.
+      // It is not a Base filter expression and must not become an effective
+      // root merely because it is a non-empty string.
+      queryState: JSON.stringify({ filter: { internal: 'compiled' }, formulas: {} }),
+    };
     view.plugin = {
       app: {
         workspace: {
@@ -849,6 +1226,182 @@ test('TPS Table resolves persisted filters from its owning standalone Base leaf'
   );
   assert.match(resolverBlock, /getOwningWorkspaceFile\(this\.plugin\.app, this\.containerEl, 'base'\)/);
   assert.doesNotMatch(resolverBlock, /controller|queryController|getActiveFile/);
+});
+
+test('TPS Table ignores serialized Obsidian query state while loading persisted structural task filters', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const File = globalThis.__TpsTableFormulaTestFile;
+  const baseFile = new File();
+  Object.assign(baseFile, {
+    path: 'Examples/TPS Base Filter Lab/Bases/02 - Task Status - TPS Table.base',
+    name: '02 - Task Status - TPS Table.base',
+    basename: '02 - Task Status - TPS Table',
+    extension: 'base',
+    parent: { path: 'Examples/TPS Base Filter Lab/Bases' },
+    stat: { size: 300, ctime: 1, mtime: 2 },
+  });
+  const taskFile = new File();
+  Object.assign(taskFile, {
+    path: 'Examples/TPS Base Filter Lab/Data/Tasks/Personal/Tasks.md',
+    name: 'Tasks.md',
+    basename: 'Tasks',
+    extension: 'md',
+    parent: { path: 'Examples/TPS Base Filter Lab/Data/Tasks/Personal' },
+    stat: { size: 180, ctime: 1, mtime: 2 },
+  });
+  const definition = {
+    filters: {
+      and: [
+        'kind == "task"',
+        'file.path.startsWith("Examples/TPS Base Filter Lab/Data/Tasks/")',
+      ],
+    },
+    views: [{ type: 'tps-table', name: '07 All tasks again' }],
+  };
+  const taskLine = '- [ ] Compare HCA insurance discounts [area:: personal] [tag:: #quickwin]';
+  const view = Object.create(TpsTableView.prototype);
+  view.config = { name: '07 All tasks again', get: () => null };
+  view.queryController = {
+    queryState: JSON.stringify({ filter: { internal: 'compiled-filter-cache' }, formulas: {} }),
+  };
+  view.containerEl = { closest: () => null };
+  view.plugin = {
+    settings: {
+      properties: [],
+      linkedSubitemCheckboxMappings: [{ checkboxState: '[ ]', statuses: ['todo'] }],
+    },
+    app: {
+      vault: {
+        getMarkdownFiles: () => [taskFile],
+        getFileByPath: () => null,
+        cachedRead: async (file) => file === baseFile ? JSON.stringify(definition) : taskLine,
+      },
+      workspace: { getActiveFile: () => null },
+      metadataCache: {
+        getFileCache: (file) => ({
+          frontmatter: file === taskFile ? { kind: 'task-source' } : {},
+          tags: [],
+          links: [],
+        }),
+        getFirstLinkpathDest: () => null,
+      },
+    },
+    sharedServices: {
+      status: {
+        normalize: (value) => String(value || '').toLowerCase(),
+        isDoneStatus: () => false,
+      },
+    },
+  };
+  view.getBaseFile = () => baseFile;
+  view.getHomeContextDate = () => null;
+  view.getLineCreateContextPath = () => null;
+  view.lineMatchesHomeDateContext = () => true;
+  view.sortEntries = (entries) => entries;
+
+  const roots = await view.getEffectiveBaseFilterRoots();
+  assert.deepEqual(roots, [definition.filters]);
+  const entries = await view.loadEntries();
+  assert.deepEqual(entries.map((entry) => entry.line), [taskLine]);
+  assert.equal(entries[0].queryFields.kind, 'task');
+});
+
+test('TPS Table resolves and switches the active persisted view within its owning Base surface', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const File = globalThis.__TpsTableFormulaTestFile;
+  const baseFile = new File();
+  Object.assign(baseFile, {
+    path: 'Bases/View lifecycle.base',
+    name: 'View lifecycle.base',
+    basename: 'View lifecycle',
+    extension: 'base',
+    stat: { mtime: 1 },
+  });
+  const activeRoot = { and: ['task.tags.contains(home)'] };
+  const wholeRoot = { and: ['kind == "task"'] };
+  const definition = {
+    filters: wholeRoot,
+    views: [
+      { type: 'tps-table', name: '01 All tasks', filters: activeRoot },
+      { type: 'tps-table', name: '07 All tasks again' },
+      { type: 'table', name: 'Native decoy', filters: { and: ['decoy == true'] } },
+    ],
+  };
+  let configuredName = 'TPS Table';
+  let visibleName = '01 All tasks';
+  const activeViewLabel = {
+    hidden: false,
+    get textContent() { return visibleName; },
+    getAttribute: () => null,
+  };
+  const header = {
+    matches: (selector) => selector.includes('.bases-header'),
+    querySelectorAll: (selector) => selector === '.bases-toolbar-views-menu .text-button-label' ? [activeViewLabel] : [],
+  };
+  const baseView = {
+    previousElementSibling: header,
+  };
+  const owningBaseSurface = {
+    querySelectorAll: () => [header],
+  };
+  const unrelatedSurface = {
+    querySelectorAll: () => [{
+      hidden: false,
+      textContent: '07 All tasks again',
+      getAttribute: () => null,
+    }],
+  };
+  const view = Object.create(TpsTableView.prototype);
+  view.containerEl = {
+    closest: (selector) => selector === '.bases-view'
+      ? baseView
+      : selector.includes('.workspace-leaf') ? owningBaseSurface : null,
+    ownerDocument: { body: unrelatedSurface },
+  };
+  view.config = {
+    get name() { return configuredName; },
+    get: (key) => key === 'filters' ? activeRoot : null,
+  };
+  view.plugin = {
+    app: {
+      vault: {
+        cachedRead: async () => JSON.stringify(definition),
+      },
+    },
+  };
+  view.getBaseFile = () => baseFile;
+
+  assert.deepEqual(
+    await view.getEffectiveBaseFilterRoots(),
+    [activeRoot, wholeRoot],
+    'an unresolved initial config uses the exact visible view in this Base only',
+  );
+  assert.equal(view.getViewName(), '01 All tasks');
+
+  configuredName = '01 All tasks';
+  visibleName = '07 All tasks again';
+  assert.deepEqual(
+    await view.getEffectiveBaseFilterRoots(),
+    [wholeRoot],
+    'switching to a view without its own filter drops the prior active-view root',
+  );
+  assert.equal(view.getViewName(), '07 All tasks again');
+
+  configuredName = 'TPS Table';
+  assert.deepEqual(
+    await view.getEffectiveBaseFilterRoots(),
+    [wholeRoot],
+    'a generic initial config cannot keep a stale runtime filter after the visible view changes',
+  );
+
+  configuredName = '01 All tasks';
+  visibleName = '01 All tasks';
+  assert.deepEqual(
+    await view.getEffectiveBaseFilterRoots(),
+    [activeRoot, wholeRoot],
+    'switching back recomputes the matching active-view root',
+  );
+  assert.equal(view.getViewName(), '01 All tasks');
 });
 
 test('TPS Table never falls through to native note creation when mobile loses the Base identity', async () => {

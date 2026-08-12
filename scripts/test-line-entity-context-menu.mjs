@@ -21,6 +21,14 @@ const menuBuilderSource = readFileSync(
   new URL('../src/menu/menu-builder.ts', import.meta.url),
   'utf8',
 );
+const panelBuilderSource = readFileSync(
+  new URL('../src/menu/panel-builder.ts', import.meta.url),
+  'utf8',
+);
+const taskContextMenuSource = readFileSync(
+  new URL('../src/services/task-line-context-menu-service.ts', import.meta.url),
+  'utf8',
+);
 const menuControllerSource = readFileSync(
   new URL('../src/menu/menu-controller.ts', import.meta.url),
   'utf8',
@@ -34,6 +42,7 @@ async function loadHarness() {
   const result = await build({
     entryPoints: [
       fileURLToPath(new URL('../src/menu/line-entity-property-menu.ts', import.meta.url)),
+      fileURLToPath(new URL('../src/menu/property-value-choice-menu.ts', import.meta.url)),
       fileURLToPath(new URL('../src/utils/task-line-metadata.ts', import.meta.url)),
       fileURLToPath(new URL('../src/views/log-line-utils.ts', import.meta.url)),
     ],
@@ -162,6 +171,81 @@ function createOptionApp(frontmatters) {
     },
   };
 }
+
+test('list choice menus check every selected text, tag, and link value', async () => {
+  const { addPropertyValueChoiceMenuItems } = await loadHarness();
+  const cases = [
+    {
+      property: {
+        id: 'labels',
+        key: 'labels',
+        label: 'Labels',
+        type: 'list',
+        listItemType: 'text',
+        optionSources: ['manual'],
+        options: ['Alpha', 'Beta', 'Gamma'],
+      },
+      currentValue: 'Alpha, Beta',
+      checked: ['Alpha', 'Beta'],
+    },
+    {
+      property: {
+        id: 'tags',
+        key: 'tags',
+        label: 'Tags',
+        type: 'list',
+        listItemType: 'tag',
+        optionSources: ['manual'],
+        options: ['hca', 'idea', 'project'],
+      },
+      currentValue: ['#HCA', 'idea'],
+      checked: ['hca', 'idea'],
+    },
+    {
+      property: {
+        id: 'projects',
+        key: 'projects',
+        label: 'Projects',
+        type: 'list',
+        listItemType: 'link',
+        optionSources: ['manual'],
+        options: [
+          '[[Projects/Alpha|Option Alpha]]',
+          '[[Projects/Beta]]',
+          '[[Projects/Gamma]]',
+        ],
+      },
+      currentValue: '[[Projects/Alpha|Stored Alpha]], [[Projects/Beta|Stored Beta]]',
+      checked: ['[[Projects/Alpha|Option Alpha]]', '[[Projects/Beta]]'],
+    },
+  ];
+
+  for (const scenario of cases) {
+    const menu = new FakeMenu();
+    addPropertyValueChoiceMenuItems({
+      app: createOptionApp([]),
+      source: null,
+      menu,
+      property: scenario.property,
+      currentValue: scenario.currentValue,
+      onClear: () => {},
+      onChooseLiteral: () => {},
+      onChooseEntity: () => {},
+    });
+    const checked = menu.items
+      .filter((item) => item.checked)
+      .map((item) => item.title);
+    assert.deepEqual(checked, scenario.checked, scenario.property.id);
+    assert.equal(menu.items.find((item) => item.title === '(none)').checked, false);
+  }
+});
+
+test('every list choice-menu surface forwards its persisted selections', () => {
+  assert.match(source, /currentValue: isList \? current : rawValue/u);
+  assert.match(taskContextMenuSource, /currentValue: isList \? current : currentValue/u);
+  assert.match(menuBuilderSource, /currentValue: isList \? currentItems : current === 'Mixed' \? '' : current/u);
+  assert.match(panelBuilderSource, /currentValue: current,[\s\S]*?onClear: \(\) => this\.clearStackedEntityList/u);
+});
 
 test('line property visibility honors context rules, semantic tags, and @@ independence', async () => {
   const { resolveLineEntityContextProperties } = await loadHarness();
@@ -358,7 +442,7 @@ test('line text-list menus merge manual and vault choices instead of replacing t
     { labels: 'vault-beta' },
   ]);
   const file = { path: 'Examples/Relational Records.md' };
-  let line = '- Bullet row [labels:: existing] [priority:: high] ^vault-list';
+  let line = '- Bullet row [labels:: manual-first, vault-beta] [priority:: high] ^vault-list';
   const menu = new FakeMenu();
   harness.addLineEntityPropertyMenus({
     app,
@@ -379,16 +463,24 @@ test('line text-list menus merge manual and vault choices instead of replacing t
     submenuTitles,
     [
       '(none)',
-      'Set custom value…',
+      'Add new list item…',
       'manual-first',
       'vault-alpha',
       'vault-beta',
-      'Remove existing',
+      'Remove manual-first',
+      'Remove vault-beta',
     ],
   );
+  assert.deepEqual(
+    menu.items[0].submenu.items
+      .filter((item) => item.checked)
+      .map((item) => item.title),
+    ['manual-first', 'vault-beta'],
+    'every persisted list value must be visibly selected in its choice menu',
+  );
 
-  menu.items[0].submenu.items.find((item) => item.title === 'vault-beta').click();
-  assert.equal(harness.readInlineFieldValue(line, 'labels'), 'existing, vault-beta');
+  menu.items[0].submenu.items.find((item) => item.title === 'vault-alpha').click();
+  assert.equal(harness.readInlineFieldValue(line, 'labels'), 'manual-first, vault-beta, vault-alpha');
   assert.equal(harness.readInlineFieldValue(line, 'priority'), 'high');
   assert.match(line, /\^vault-list$/u);
 });

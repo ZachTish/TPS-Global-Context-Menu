@@ -1,5 +1,6 @@
 import { normalizePath } from 'obsidian';
 import { normalizeLinkedSubitemCheckboxState } from '../utils/linked-subitem-mapping';
+import { normalizePropertyKeyIdentity } from '../utils/property-key-identity';
 
 export type KanbanTaskCreationDefaultsLike = {
   status?: string | null;
@@ -65,6 +66,7 @@ export function resolveKanbanRootTaskTargetPath(defaultsTargetPath?: string | nu
 export function buildKanbanRootTaskLine(options: BuildKanbanRootTaskLineOptions): string | null {
   const writablePropName = options.propName ? getTaskInlinePropertyName(options.propName) : '';
   const normalizedProp = writablePropName ? normalizeInlinePropertyKey(writablePropName) : '';
+  const propertyIdentity = normalizePropertyKeyIdentity(writablePropName);
   const isStatusProperty = options.isStatusPropertyName ?? isDefaultStatusPropertyName;
   const itemKind = options.itemKind === 'bullet' || options.itemKind === 'heading' ? options.itemKind : 'task';
   const title = String(options.title || '').trim()
@@ -111,7 +113,7 @@ export function buildKanbanRootTaskLine(options: BuildKanbanRootTaskLineOptions)
   for (const [defaultProp, field] of options.defaults.inlineFields) {
     if (
       !field.value
-      || defaultProp === normalizedProp
+      || defaultProp === propertyIdentity
       || defaultProp === 'tags'
       || isStatusProperty(field.key)
     ) continue;
@@ -167,7 +169,7 @@ function getCheckboxMarker(rawState: string): string {
 }
 
 function normalizeInlinePropertyKey(key: string): string {
-  return String(key || '').trim().toLowerCase().replace(/[\s_-]+/g, '');
+  return normalizePropertyKeyIdentity(key);
 }
 
 function getTaskInlinePropertyName(propName: string | null | undefined): string {

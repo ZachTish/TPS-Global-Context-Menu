@@ -1,6 +1,7 @@
 import { replaceLeadingLinkDisplayTitle } from '../utils/display-title';
 import { splitLineItemContent } from '../utils/line-item-deletion';
 import { normalizeTagValue } from '../utils/tag-utils';
+import { normalizePropertyKeyIdentity } from '../utils/property-key-identity';
 import {
   appendLineBlockId,
   parseTaskTagValues,
@@ -27,16 +28,38 @@ export interface LogLineContentMutation {
 }
 
 export function normalizeInlineKey(key: string): string {
-  return String(key || '').replace(/^note\./, '').replace(/[^A-Za-z0-9]/g, '').toLowerCase();
+  return normalizePropertyKeyIdentity(String(key || '').replace(/^note\./iu, ''));
 }
 
 export function readInlineFields(line: string): Record<string, string> {
   const fields: Record<string, string> = {};
   for (const field of readTaskInlineFields(line)) {
-    const key = normalizeInlineKey(field.key);
+    const key = normalizePropertyKeyIdentity(field.key);
     if (key) fields[key] = field.value.trim();
   }
   return fields;
+}
+
+/**
+ * Preserve every authored carrier for list-aware Table display, sorting, and
+ * grouping. Scalar callers continue to use `readInlineFields`, whose
+ * last-authored value remains the compatibility contract.
+ */
+export function readInlineFieldValues(line: string): Record<string, string[]> {
+  const fields: Record<string, string[]> = {};
+  for (const field of readTaskInlineFields(line)) {
+    const key = normalizePropertyKeyIdentity(field.key);
+    if (!key) continue;
+    const values = fields[key] ?? [];
+    values.push(field.value.trim());
+    fields[key] = values;
+  }
+  return fields;
+}
+
+/** Return every authored carrier for one case-insensitive inline property. */
+export function readInlineFieldCarrierValues(line: string, key: string): string[] {
+  return readInlineFieldValues(line)[normalizePropertyKeyIdentity(key)] ?? [];
 }
 
 export function readLogLineTags(raw: unknown): string[] {
@@ -122,11 +145,11 @@ export function setLogInlineFieldValue(
   const source = blockId ? stripLineBlockId(line) : String(line || '');
   const cleanKey = String(key || '').replace(/^note\./u, '').trim();
   if (!cleanKey) return String(line || '');
-  const normalizedKey = cleanKey.toLocaleLowerCase();
+  const normalizedKey = normalizePropertyKeyIdentity(cleanKey);
   const indentation = source.match(/^[\t ]*/u)?.[0] || '';
   let withoutExisting = source;
   const matchingFields = readSemanticInlineFieldRanges(source)
-    .filter((field) => field.key.toLocaleLowerCase() === normalizedKey);
+    .filter((field) => normalizePropertyKeyIdentity(field.key) === normalizedKey);
   const matchingRanges = collapseEmptiedInlineFieldComments(source, matchingFields)
     .sort((left, right) => right.start - left.start);
   for (const range of matchingRanges) {
@@ -215,7 +238,14 @@ export function getLogEntryStableIdentity(entry: Pick<LogLineReference, 'fields'
 }
 
 export function resolveEntryLineNumber(lines: string[], entry: LogLineReference): number {
-  if (entry.line && lines[entry.lineNumber] === entry.line) return entry.lineNumber;
+  if (entry.line) {
+    const exactMatches = lines.reduce<number[]>((indexes, line, index) => {
+      if (line === entry.line) indexes.push(index);
+      return indexes;
+    }, []);
+    if (exactMatches.length === 1) return exactMatches[0];
+    if (exactMatches.length > 1) return -1;
+  }
   const identity = getLogEntryStableIdentity(entry);
   if (!identity) return -1;
   const matches = lines.reduce<number[]>((indexes, line, index) => {

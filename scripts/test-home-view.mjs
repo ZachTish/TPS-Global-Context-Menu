@@ -714,11 +714,11 @@ test('TPS Table create command override uses selectable commands and resilient e
   assert.match(stylesSource, /\.tps-log-base-cell--header\s*\{[\s\S]*background:\s*var\(--background-secondary\) !important;/);
 });
 
-test('TPS Table supports persistent Shift-click range selection without opening rows', () => {
+test('TPS Table supports persistent task-only Shift-click range selection without opening rows', () => {
   assert.match(logBaseViewSource, /private selectedEntryIds = new Set<string>\(\)/);
   assert.match(logBaseViewSource, /private selectionAnchorId: string \| null = null/);
-  assert.match(logBaseViewSource, /private renderedEntryOrder: string\[\] = \[\]/);
-  assert.match(logBaseViewSource, /this\.renderedEntryOrder = renderedEntries\.map\(\(entry\) => entry\.selectionId\)/);
+  assert.match(logBaseViewSource, /private renderedTaskEntryOrder: string\[\] = \[\]/);
+  assert.match(logBaseViewSource, /this\.renderedTaskEntryOrder = getTpsTableTaskSelectionOrder\(renderedEntries\)/);
   assert.match(logBaseViewSource, /function getLogEntrySelectionId\(/);
   assert.match(logBaseViewSource, /getLogEntryStableIdentity\(\{ fields \}\)/);
   assert.match(logBaseViewSource, /hashSelectionIdentity\(line\)/);
@@ -726,21 +726,66 @@ test('TPS Table supports persistent Shift-click range selection without opening 
   assert.match(logBaseViewSource, /row\.addEventListener\('click', \(evt: MouseEvent\) => this\.handleEntryClick\(evt, entry\)\)/);
   assert.match(logBaseViewSource, /handleEntryModifierClick\(evt, entry\)[\s\S]{0,120}\{ capture: true \}/);
   assert.match(logBaseViewSource, /evt\.stopImmediatePropagation\(\)/);
-  assert.match(logBaseViewSource, /toggleOrderedSelection\(this\.selectedEntryIds, id, this\.renderedEntryOrder\)/);
+  assert.match(logBaseViewSource, /constrainTpsTableTaskSelection\(this\.selectedEntryIds, this\.renderedTaskEntryOrder\)/);
+  assert.match(logBaseViewSource, /toggleOrderedSelection\(taskSelection, id, this\.renderedTaskEntryOrder\)/);
   assert.match(logBaseViewSource, /mode: result\.removed \? 'toggle-off' : 'toggle-on'/);
   assert.match(logBaseViewSource, /link\.addEventListener\('click', \(event: MouseEvent\) => \{\s*if \(event\.shiftKey \|\| event\.metaKey \|\| event\.ctrlKey\) return;/);
-  assert.match(logBaseViewSource, /if \(evt\.shiftKey\) \{\s*evt\.preventDefault\(\);\s*evt\.stopPropagation\(\);\s*this\.selectEntryRange\(entry\.selectionId\);\s*return;/);
-  assert.match(logBaseViewSource, /getOrderedSelectionRange\(this\.renderedEntryOrder, this\.selectionAnchorId, id\)/);
+  assert.match(logBaseViewSource, /if \(evt\.shiftKey && taskSelectable\) \{\s*evt\.preventDefault\(\);\s*evt\.stopPropagation\(\);\s*this\.selectEntryRange\(entry\.selectionId\);\s*return;/);
+  assert.match(logBaseViewSource, /getOrderedSelectionRange\(this\.renderedTaskEntryOrder, this\.selectionAnchorId, id\)/);
   assert.match(logBaseViewSource, /applyEntryContextSelection\(evt: MouseEvent, row: HTMLElement\): boolean/);
+  assert.match(logBaseViewSource, /async applyTpsTableRowSelection\(/);
+  assert.match(logBaseViewSource, /syncTpsTableSelectionRows\?\.\(/);
+  assert.match(logBaseViewSource, /releaseTpsTableSelection\?\.\(this\.containerEl\)/);
   assert.match(logBaseViewSource, /const entryId = row\.dataset\.entryId/);
   assert.match(logBaseViewSource, /else if \(!this\.selectedEntryIds\.has\(entryId\)\) \{\s*this\.selectOnlyEntry\(entryId\)/);
   assert.match(logBaseViewSource, /row\.classList\.toggle\('tps-log-base-row--selected', selected\)/);
   assert.match(logBaseViewSource, /row\.setAttribute\('aria-selected', selected \? 'true' : 'false'\)/);
+  assert.equal(
+    (logBaseViewSource.match(/this\.reconcileRenderedTaskSelection\(\)/gu) || []).length,
+    2,
+    'empty and populated Table rerenders must both reconcile the canonical task selection',
+  );
+  assert.match(
+    logBaseViewSource,
+    /if \(!entries\.length\) \{[\s\S]{0,500}this\.reconcileRenderedTaskSelection\(\);[\s\S]{0,180}return;/u,
+    'an empty rerender must clear task contexts which are no longer rendered',
+  );
+  assert.match(
+    logBaseViewSource,
+    /private reconcileRenderedTaskSelection\(\): void \{[\s\S]{0,900}reconcileTpsTableSelectionRows\?\.\([\s\S]{0,200}this\.containerEl/u,
+    'a populated rerender must replace canonical contexts with the newly rendered selected rows',
+  );
+  assert.match(logBaseViewSource, /if \(!isTpsTableTaskSelectionEntry\(entry\)\) return;/);
+  assert.match(logBaseViewSource, /row\.dataset\.tpsTableBatchSelectable = 'true'/);
+  assert.match(logBaseViewSource, /if \(row\.dataset\.tpsTableBatchSelectable !== 'true'\) \{\s*this\.selectOnlyEntry\(entryId\);/);
+  assert.match(logBaseViewSource, /\.tps-log-base-row--selected\[data-entry-id\]\[data-tps-table-batch-selectable="true"\]/);
   assert.match(logBaseViewSource, /void this\.openEntry\(entry\)/);
   assert.match(logBaseViewSource, /requestLineItemDelete\(\{/);
   assert.match(logBaseViewSource, /source: 'tps-table-menu'/);
   assert.match(logBaseViewSource, /resolveLineIndex: \(lines\) => resolveEntryLineNumber\(lines, entry\)/);
   assert.match(stylesSource, /\.tps-log-base-row--selected \.tps-log-base-cell\s*\{[\s\S]*color-mix\(in srgb, var\(--interactive-accent\) 10%, transparent\)/);
+});
+
+test('TPS Table batch selection helpers exclude bullets and headings while preserving task order', async () => {
+  const {
+    constrainTpsTableTaskSelection,
+    getTpsTableTaskSelectionOrder,
+    isTpsTableTaskSelectionEntry,
+  } = await loadPureModule('../src/views/tps-table-selection.ts');
+  const entries = [
+    { selectionId: 'bullet-a', line: '- Plain bullet' },
+    { selectionId: 'task-a', line: '- [ ] First task' },
+    { selectionId: 'heading-a', line: '## Heading' },
+    { selectionId: 'task-b', line: '1. [x] Second task' },
+  ];
+
+  assert.equal(isTpsTableTaskSelectionEntry(entries[0]), false);
+  assert.equal(isTpsTableTaskSelectionEntry(entries[1]), true);
+  assert.deepEqual(getTpsTableTaskSelectionOrder(entries), ['task-a', 'task-b']);
+  assert.deepEqual(
+    [...constrainTpsTableTaskSelection(['bullet-a', 'task-a', 'heading-a', 'task-b'], ['task-a', 'task-b'])],
+    ['task-a', 'task-b'],
+  );
 });
 
 test('TPS Home shows a running time-tracked note indicator from the timer service', () => {
@@ -1053,6 +1098,11 @@ test('TPS Table title edits preserve record fields and stale writes resolve by s
     line: original,
     fields: readInlineFields(original),
   }), -1);
+  assert.equal(resolveEntryLineNumber([original, original], {
+    lineNumber: 0,
+    line: original,
+    fields: readInlineFields(original),
+  }), -1, 'a duplicate at the preferred coordinate must remain ambiguous');
   assert.match(logBaseViewSource, /context-menu:health-food-handoff/);
   assert.match(logBaseViewSource, /openFoodLogEntryMenuFromLine/);
   assert.match(logBaseViewSource, /plugin\.openFileInLeaf/);

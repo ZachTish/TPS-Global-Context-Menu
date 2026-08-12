@@ -50,6 +50,18 @@ async function loadTableCreationModule() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
+async function loadFilterModule() {
+  const result = await build({
+    entryPoints: [fileURLToPath(new URL('../src/views/log-base-filter.ts', import.meta.url))],
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
 test('whole-Base kind and active-view fields resolve additively', async () => {
   const { resolveTpsBaseLineCreationPlan } = await loadModule();
   const plan = resolveTpsBaseLineCreationPlan([
@@ -218,6 +230,54 @@ test('entity links, tags, and scheduled defaults compose additively like a task 
     }),
     expectedLine,
   );
+});
+
+test('creation preserves exact authored custom-key identity for string and object filters', async () => {
+  const [
+    { resolveTpsBaseLineCreationPlan },
+    { buildTpsTableMarkdownLine },
+    { evaluateLogBaseFilterRoots },
+  ] = await Promise.all([loadModule(), loadTableCreationModule(), loadFilterModule()]);
+  const roots = [
+    'kind == "task"',
+    'client id == "A-17"',
+    { property: 'client-id', operator: 'equals', value: 'B-18' },
+    { field: 'client_id', comparison: 'equals', expected: 'C-19' },
+  ];
+
+  const plan = resolveTpsBaseLineCreationPlan(roots);
+
+  assert.equal(plan.blockedReason, null);
+  assert.equal(plan.kind, 'task');
+  assert.deepEqual(plan.fields, {
+    'client id': 'A-17',
+    'client-id': 'B-18',
+    client_id: 'C-19',
+  });
+  const line = buildTpsTableMarkdownLine('task', 'Identity check', plan.fields, { checkboxState: '[ ]' });
+  assert.equal(
+    line,
+    '- [ ] Identity check [client id:: A-17] [client-id:: B-18] [client_id:: C-19]',
+  );
+  assert.equal(evaluateLogBaseFilterRoots(roots, {
+    fields: plan.fields,
+    rowKind: 'task',
+    title: 'Identity check',
+    rawLine: line,
+    file: {
+      path: 'Inbox/Identity.md',
+      name: 'Identity.md',
+      basename: 'Identity',
+      extension: 'md',
+      folder: 'Inbox',
+      tags: [],
+      frontmatter: {},
+    },
+  }), true, 'the created row must prospectively satisfy the exact same Base filters');
+
+  const reservedAliasPlan = resolveTpsBaseLineCreationPlan(['item kind == "task"']);
+  assert.equal(reservedAliasPlan.kind, 'task', 'compact reserved aliases still resolve structurally');
+  assert.deepEqual(reservedAliasPlan.fields, {});
 });
 
 test('the production Shopping query shape inherits task kind and adds the view tag', async () => {

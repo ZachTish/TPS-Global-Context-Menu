@@ -822,7 +822,7 @@ test('checkbox mutation integration preserves a configured relational status fie
   );
   assert.match(
     tableSource,
-    /queryFields\[normalizeInlineKey\(relationalStatus\.key\)\] = fields\[[\s\S]{0,120}normalizeInlineKey\(relationalStatus\.key\)[\s\S]{0,40}\];/u,
+    /const relationalKey = normalizePropertyKeyIdentity\(relationalStatus\.key\);[\s\S]{0,180}queryFields\[relationalKey\] = fields\[relationalKey\];/u,
   );
 });
 

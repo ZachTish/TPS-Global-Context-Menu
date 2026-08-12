@@ -273,6 +273,11 @@ async function loadFormulaService() {
 }
 
 test('GCM is the sole TPS List source and runtime owner', () => {
+  assert.match(
+    viewSource,
+    /row\.dataset\.taskLineIdentity = getTaskLineIdentity\(task\.rawLine\)/,
+    'rendered TPS List task rows must carry their exact source-line fingerprint',
+  );
   assert.match(bridgeSource, /new TpsListView/);
   assert.match(viewSource, /export class TpsListView extends BasesView/);
   assert.match(viewSource, /type = TPS_LIST_VIEW_TYPE/);
@@ -364,6 +369,11 @@ test('TPS List Shift-click selects every visible row kind in one persistent DOM 
   assert.match(mainSource, /void listView\?\.applyTpsListRowSelection\?\.\(evt, listRow\)/);
   assert.match(mainSource, /applyTpsListRowSelection[\s\S]{0,300}openBaseNotePreviewFromClick/);
   assert.match(viewSource, /reconcileTpsListSelectionRows\(/);
+  assert.doesNotMatch(
+    viewSource,
+    /\(selectionPruned \|\| anchorPruned\) && typeof taskSelectionService\?\.reconcileTpsListSelectionRows/,
+    'every rerender must refresh canonical selected task coordinates, even when local selection IDs remain visible',
+  );
   assert.match(viewSource, /releaseTpsListSelection\?\.\(this\.scrollEl\)/);
   assert.match(viewSource, /row\.classList\.toggle\('tps-list-native-row--selected', selected\)/);
   assert.match(viewSource, /row\.setAttribute\('aria-selected', selected \? 'true' : 'false'\)/);
@@ -471,6 +481,11 @@ test('line-item deletion either removes a subtree or promotes nested content one
     ['- child', '  continuation', '  - grandchild', '- sibling'].join('\n'),
   );
   assert.equal(resolveExactLineRevisionIndex(lines, 0, '- [ ] parent'), 0);
+  assert.equal(
+    resolveExactLineRevisionIndex(['same', 'same'], 0, 'same'),
+    -1,
+    'a duplicate at the preferred coordinate must not impersonate the captured revision',
+  );
   assert.equal(resolveExactLineRevisionIndex(['same', 'same'], 5, 'same'), -1);
 
   const crlf = '- parent\r\n  child\r\nnext\r\n';
@@ -500,6 +515,86 @@ test('line-item deletion either removes a subtree or promotes nested content one
   );
   assert.equal(extractHeadingSectionBlock(['### Empty', '## Next'], 0).nestedContentLineCount, 0);
   assert.equal(extractHeadingSectionBlock(['not a heading'], 0).lines.length, 0);
+});
+
+test('TPS List configured property editors resolve only an exact, unambiguous rendered revision', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const file = { path: 'Inbox/Property editor revision.md' };
+  const original = '- [ ] Ship safely <!-- tps-inline-props: {"externalId":"original"} -->';
+  const replacedComment = '- [ ] Ship safely <!-- tps-inline-props: {"externalId":"replacement"} -->';
+  const task = {
+    itemKind: 'task',
+    line: 2,
+    text: 'Ship safely',
+    rawLine: original,
+  };
+  let content = ['# Tasks', 'Inserted paragraph', 'Intervening text', original].join('\n');
+  view.app = { vault: { cachedRead: async () => content } };
+
+  assert.equal(
+    await view.resolveRenderedTaskLine(file, task, 'test-property-editor'),
+    original,
+    'a source revision shifted by an insertion may relocate when its exact line is unique',
+  );
+
+  content = ['# Tasks', replacedComment].join('\n');
+  assert.equal(
+    await view.resolveRenderedTaskLine(file, task, 'test-property-editor'),
+    '',
+    'a hidden-comment replacement with the same visible title is a stale revision',
+  );
+
+  content = ['# Tasks', replacedComment, original, original].join('\n');
+  assert.equal(
+    await view.resolveRenderedTaskLine(file, task, 'test-property-editor'),
+    '',
+    'duplicate exact revisions away from the rendered position are ambiguous',
+  );
+
+  assert.match(
+    sourceBlock(
+      viewSource,
+      'private async resolveRenderedTaskLine(',
+      'private async mutateRenderedTaskLine(',
+    ),
+    /const expectedLine = String\(task\.rawLine \?\? ''\)[\s\S]*resolveExactLineRevisionIndex\(parts\.lines, targetLine - 1, expectedLine\)/u,
+  );
+});
+
+test('TPS List heading and bullet entry points relocate only a unique rendered revision', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const file = { path: 'Inbox/List entry revision.md' };
+  const renderedLine = '- Bullet [owner:: Ada]';
+  let content = ['# List', 'Inserted', renderedLine].join('\n');
+  view.app = { vault: { cachedRead: async () => content } };
+
+  assert.deepEqual(
+    await view.resolveRenderedLineRevision(file, 2, renderedLine, 'BulletLineOpen', 'line item'),
+    { lineIndex: 2, rawLine: renderedLine },
+    'a unique captured revision may relocate after an insertion',
+  );
+
+  content = ['# List', 'Inserted', '- Bullet [owner:: Grace]'].join('\n');
+  assert.equal(
+    await view.resolveRenderedLineRevision(file, 2, renderedLine, 'BulletLineOpen', 'line item'),
+    null,
+    'a different line at the old coordinate must not impersonate the rendered bullet',
+  );
+
+  content = [renderedLine, '# List', renderedLine].join('\n');
+  assert.equal(
+    await view.resolveRenderedLineRevision(file, 2, renderedLine, 'HeadingLineOpen', 'heading'),
+    null,
+    'duplicate exact revisions are ambiguous and must fail closed',
+  );
+
+  assert.equal(
+    await view.resolveRenderedLineRevision(file, 2, '', 'HeadingLineOpen', 'heading'),
+    null,
+    'entry points without a captured revision must fail closed',
+  );
 });
 
 test('TPS List resolves the Home-stamped Daily Note before Base and workspace fallbacks', async () => {
@@ -684,11 +779,85 @@ test('TPS List task drops reject unmapped statuses before confirmation and write
   assert.equal(content, '- [?] Concurrent edit');
 });
 
+test('TPS List pointer drops re-resolve the exact source revision and fail closed when it is ambiguous', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const file = { path: 'Inbox/Tasks.md' };
+  const sourceLine = '- [ ] Move me [project:: Alpha]';
+  let content = `# inserted before drop\n${sourceLine}\n- [ ] Neighbor`;
+  let confirmationCalls = 0;
+  let processCalls = 0;
+
+  view.app = {
+    vault: {
+      async cachedRead(receivedFile) {
+        assert.equal(receivedFile, file);
+        return content;
+      },
+      async process(receivedFile, updater) {
+        assert.equal(receivedFile, file);
+        processCalls += 1;
+        content = updater(content);
+      },
+    },
+    workspace: { trigger() {} },
+  };
+  view.getTaskRootFilterFromBaseFilters = () => ({
+    tags: new Set(),
+    excludeTags: new Set(),
+    statuses: new Set(),
+  });
+  view.isStatusPropertyName = () => false;
+  view.normalizeInlinePropertyKey = (value) => String(value || '').trim().toLowerCase();
+  view.getWorkflowStatusFieldKeysToClear = () => [];
+  view.clearTaskCachesForPath = () => {};
+  view.confirmTaskDrop = async () => {
+    confirmationCalls += 1;
+    return true;
+  };
+
+  assert.equal(
+    await view.confirmAndApplyInlineTaskDrop(file, 1, 'project', 'Beta', [], sourceLine),
+    true,
+    'an insertion before drop must not redirect the write to the new numeric line',
+  );
+  assert.equal(content, '# inserted before drop\n- [ ] Move me [project:: Beta]\n- [ ] Neighbor');
+  assert.equal(confirmationCalls, 1);
+  assert.equal(processCalls, 1);
+
+  content = `${sourceLine}\n- [ ] Neighbor`;
+  view.confirmTaskDrop = async () => {
+    confirmationCalls += 1;
+    content = `# inserted during confirmation\n${content}`;
+    return true;
+  };
+  assert.equal(
+    await view.confirmAndApplyInlineTaskDrop(file, 1, 'project', 'Gamma', [], sourceLine),
+    true,
+    'the captured plan must re-resolve the same revision again during the atomic write',
+  );
+  assert.equal(content, '# inserted during confirmation\n- [ ] Move me [project:: Gamma]\n- [ ] Neighbor');
+  assert.equal(confirmationCalls, 2);
+  assert.equal(processCalls, 2);
+
+  content = `# inserted before ambiguous duplicates\n${sourceLine}\n${sourceLine}`;
+  const ambiguousContent = content;
+  assert.equal(
+    await view.confirmAndApplyInlineTaskDrop(file, 1, 'project', 'Wrong target', [], sourceLine),
+    false,
+    'two shifted exact matches cannot establish one mutation identity',
+  );
+  assert.equal(content, ambiguousContent);
+  assert.equal(confirmationCalls, 2, 'an ambiguous source must be blocked before confirmation');
+  assert.equal(processCalls, 2, 'an ambiguous source must be blocked before vault.process');
+});
+
 test('TPS List status drops remove only checkbox-owned inline status fields', async () => {
   const {
     buildKanbanTaskDropLine,
     parseKanbanLineItem,
     removeKanbanInlineTaskProperties,
+    updateKanbanInlineTaskPropertyText,
   } = await loadTaskDropUtils();
   const isStatusPropertyName = (name) => String(name || '').toLowerCase() === 'status';
   assert.equal(
@@ -734,6 +903,64 @@ test('TPS List status drops remove only checkbox-owned inline status fields', as
     '- [xx] Malformed checkbox-shaped line',
     'unsupported checkbox-shaped lines fail closed instead of becoming tasks or bullets',
   );
+  assert.equal(
+    updateKanbanInlineTaskPropertyText(
+      '- [ ] Task [projects:: Alpha] [projects:: Beta]',
+      'projects',
+      'Gamma',
+      ['Beta'],
+      { id: 'projects', label: 'Projects', key: 'projects', type: 'list', listItemType: 'text' },
+    ),
+    '- [ ] Task [projects:: Alpha, Gamma]',
+    'dragging from a repeated list carrier removes the actual source lane and preserves every sibling value',
+  );
+  assert.equal(
+    updateKanbanInlineTaskPropertyText(
+      '- [ ] Task [owner:: [[People/Ada|Ada]]] [project:: Alpha] [owner:: [[People/Bob|Bob]]]',
+      'owner',
+      '[[People/Carol|Carol]]',
+      ['[[People/Bob|Bob]]'],
+      { id: 'owner', label: 'Owner', key: 'owner', type: 'list', listItemType: 'link' },
+    ),
+    '- [ ] Task [project:: Alpha] [owner:: [[People/Ada|Ada]], [[People/Carol|Carol]]]',
+    'link-list lane moves preserve balanced wikilinks and canonicalize repeated carriers',
+  );
+  assert.equal(
+    updateKanbanInlineTaskPropertyText(
+      '- [ ] Task [owner:: [[People/Ada|Ada]]] [project:: Alpha] [owner:: stale]',
+      'owner',
+      '[[People/Carol|Carol]]',
+    ),
+    '- [ ] Task [project:: Alpha] [owner:: [[People/Carol|Carol]]]',
+    'scalar lane moves remove every matching carrier without corrupting nested brackets',
+  );
+
+  const semanticTagMove = buildKanbanTaskDropLine({
+    line: '- [ ] Task #alpha #keep [tag:: #alpha] [tags:: #other] [tags:: #alpha, #third] [owner:: [[People/Ada|Ada]]] ^task-id',
+    propName: 'tags',
+    value: 'beta',
+    sourceLaneValues: ['#alpha'],
+    isStatusPropertyName,
+  });
+  assert.deepEqual(
+    parseKanbanLineItem(semanticTagMove, true)?.text.includes('[owner:: [[People/Ada|Ada]]]'),
+    true,
+    'semantic tag moves preserve unrelated balanced metadata',
+  );
+  assert.doesNotMatch(semanticTagMove, /(?:^|\s)#alpha(?=\s|$)|\[(?:tag|tags)::[^\]]*#alpha/iu);
+  assert.match(semanticTagMove, /(?:^|\s)#beta(?=\s|\^|$)/iu);
+  assert.match(semanticTagMove, /(?:^|\s)#keep(?=\s|\^|$)/iu);
+  assert.equal((semanticTagMove.match(/\[tags::/giu) || []).length, 1, 'repeated singular/plural carriers collapse to one');
+  assert.match(semanticTagMove, /\[tags::\s*#other, #third\]/iu);
+
+  const clearedSemanticLane = buildKanbanTaskDropLine({
+    line: '- [ ] Task [tag:: #alpha] [tags:: #alpha]',
+    propName: 'tags',
+    value: null,
+    sourceLaneValues: ['alpha'],
+    isStatusPropertyName,
+  });
+  assert.equal(clearedSemanticLane, '- [ ] Task', 'dropping into the empty lane clears every source carrier');
 });
 
 test('TPS List task tag filters use exact task-tag membership across aliases and Markdown forms', async () => {
@@ -847,7 +1074,7 @@ test('TPS List task tag filters use exact task-tag membership across aliases and
   );
 });
 
-test('TPS List treats native Bases rows as the sole note-inclusion authority', async () => {
+test('TPS List keeps native Bases note inclusion authoritative when no semantic override is active', async () => {
   const { TpsListView } = await loadTpsListViewHarness();
   const view = Object.create(TpsListView.prototype);
   const included = { file: { path: 'Inbox/Included.md' }, getValue: () => null };
@@ -863,13 +1090,17 @@ test('TPS List treats native Bases rows as the sole note-inclusion authority', a
     },
   };
   view.data = { data: [included], groupedData: nativeGroups };
+  view.isBaseFileFilterReady = () => true;
+  view.getActiveBasesSearchQuery = () => '';
+  view.getBaseFilterRoots = () => [];
+  view.getConfiguredCustomProperty = () => null;
 
   assert.deepEqual(view.getSourceGroupsForRender(null, false), nativeGroups);
   assert.equal(vaultScans, 0, 'note rendering must never recreate rows by scanning the vault');
   assert.equal(
     view.getSourceGroupsForRender(null, false).flatMap((group) => group.entries).includes(excluded),
     false,
-    'a note excluded by native Bases filters/search/formulas cannot be re-added by TPS',
+    'ordinary note filters/search/formulas remain native-owned',
   );
   assert.doesNotMatch(viewSource, /getFallbackNoteEntriesFromBaseFilters|getFallbackNoteFormulaSession|__tpsFormulaFallback/u);
 });
@@ -958,7 +1189,11 @@ test('TPS List keeps unmapped task identity but never invents workflow state or 
 
   view.isWritableTaskGroupingProperty = () => true;
   view.getDisplayLaneWritableValues = () => [];
-  const cardEl = { setPointerCapture() {} };
+  const cardEl = {
+    setPointerCapture() {},
+    addEventListener() {},
+    removeEventListener() {},
+  };
   view.beginTaskPointerDrag(
     { button: 0, pointerId: 9, clientX: 1, clientY: 2 },
     file,
@@ -1258,7 +1493,8 @@ test('TPS List parses, displays, and safely renames Markdown headings', async ()
   assert.match(viewSource, /addHeadingAction\(`Title: \$\{getTpsListHeadingDisplayTitle\(rawLine\)/);
   assert.match(viewSource, /this\.promptRenderedLineTitle\('heading', file, lineIndex, rawLine\)/);
   assert.match(viewSource, /addHeadingAction\('Open heading in note', 'file-text'/);
-  assert.match(viewSource, /openHeadingLineContextMenu\(event, file, task\.line, row\)/);
+  assert.match(viewSource, /openHeadingLineContextMenu\(event, file, task\.line, task\.rawLine \|\| '', row\)/);
+  assert.match(viewSource, /openRenderedLineInNote\([\s\S]{0,180}task\.rawLine \|\| ''[\s\S]{0,180}'HeadingLineOpen'/);
   assert.match(viewSource, /addHeadingAction\('Delete heading', 'trash-2'/);
   assert.match(viewSource, /source: 'tps-list-heading-menu'/);
   assert.match(viewSource, /blockKind: 'heading-section'/);
@@ -1274,10 +1510,13 @@ test('TPS List parses, displays, and safely renames Markdown headings', async ()
 });
 
 test('TPS List opens plain bullets in the line editor and composes the normal GCM menu', () => {
-  assert.match(viewSource, /if \(isBullet && this\.openBulletLineEditor\(event, file, task\.line\)\) return;/);
+  assert.match(viewSource, /if \(isBullet && this\.openBulletLineEditor\(event, file, task\.line, task\.rawLine \|\| ''\)\) return;/);
   assert.match(viewSource, /if \(!isBullet && this\.openTaskQuickEditor\(event, row, title\)\) return;/);
-  assert.match(viewSource, /service\.openLineEditor\(file, Math\.max\(0, oneBasedLine - 1\)\)/);
-  assert.match(viewSource, /this\.openBulletLineContextMenu\(event, file, task\.line\)/);
+  assert.match(viewSource, /resolveRenderedLineRevision\([\s\S]{0,180}'BulletLineEditor'[\s\S]{0,180}service\.openLineEditor\(file, revision\.lineIndex\)/);
+  assert.match(viewSource, /this\.openBulletLineContextMenu\(event, file, task\.line, task\.rawLine \|\| ''\)/);
+  assert.match(viewSource, /resolveExactLineRevisionIndex\(parts\.lines, preferredIndex, expectedLine\)/);
+  assert.match(viewSource, /open:stale-target/);
+  assert.match(viewSource, /Refresh the view and try again/);
   assert.match(viewSource, /setTitle\(title\)[\s\S]{0,220}setSection\(section\)/);
   assert.match(viewSource, /addLineAction\(`Title: \$\{getPlainDisplayTitle\(visibleLineText\(rawLine\)\)/);
   assert.match(viewSource, /this\.promptRenderedLineTitle\('bullet', file, lineIndex, rawLine\)/);
@@ -1394,7 +1633,7 @@ test('TPS List and TPS Table group synthesized rows by their containing source n
   assert.match(logBaseSource, /groupTpsBaseRows\(entries/);
   assert.match(logBaseSource, /tps-log-base-group-row/);
   assert.match(logBaseSource, /scope: 'rowgroup'/);
-  assert.match(logBaseSource, /this\.renderedEntryOrder = renderedEntries\.map/);
+  assert.match(logBaseSource, /this\.renderedTaskEntryOrder = getTpsTableTaskSelectionOrder\(renderedEntries\)/);
   assert.doesNotMatch(logBaseSource, /tps-log-base-row tps-log-base-row--group/);
 });
 
@@ -2079,9 +2318,9 @@ test('TPS List formulas power synthesized task display, filtering, grouping, sor
   assert.equal(view.getTaskFormulaSession(file, task).get('blank_is_present').value, true);
   assert.equal(view.getTaskFormulaSession(file, task).get('raw_is_source').value, true);
   assert.equal(view.getTaskFormulaSession(file, task).get('raw_checkbox_state').value, true);
-  assert.deepEqual(view.getTaskLaneIds(task, 'formula.bucket', file), ['key:High']);
+  assert.deepEqual(view.getTaskLaneIds(task, 'formula.bucket', file), ['key:high']);
   view.config = { groupBy: { property: 'formula.owner', direction: 'asc' } };
-  assert.deepEqual(view.getTaskLaneIds(task, 'formula.owner', file), ['key:People/Ada.md']);
+  assert.deepEqual(view.getTaskLaneIds(task, 'formula.owner', file), ['key:people/ada.md']);
   assert.ok(view.getTaskSortValue({ file, task, laneId: 'key:High' }, 'formula.total'));
   const nativeEntry = { file, getValue: () => new Date(2026, 7, 10) };
   assert.equal(
@@ -2168,4 +2407,272 @@ test('GCM exposes the canonical nesting-aware line metadata parser as a versione
   assert.match(pluginApiSource, /scanDocument:\s*\(content:\s*string\)\s*=>\s*Object\.freeze\([\s\S]*?getMarkdownContentLines\(content\)/u);
   assert.match(pluginApiSource, /parseLine:\s*\(line:\s*string\)\s*=>\s*\{\s*const parsed = parseLineEntityMetadata\(line\);[\s\S]*?fields:\s*parsed\?\.fields\s*\?\?\s*\[\],[\s\S]*?tags:\s*parsed\?\.tags\s*\?\?\s*\[\],[\s\S]*?displayTitle:\s*parsed\?\.displayTitle\s*\?\?\s*''/u);
   assert.doesNotMatch(pluginApiSource, /parseLine:[\s\S]{0,500}readTaskInlineFields|parseLine:[\s\S]{0,500}readTaskLineTags/u);
+});
+
+test('TPS List pointer drag resolves the real rendered group and cleans up mouse and mobile state', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const displayLane = {
+    id: 'display:hca',
+    label: 'hca',
+    groups: [],
+    laneIds: ['key:hca'],
+  };
+  const laneEl = { dataset: { displayLaneId: displayLane.id } };
+  const target = {
+    closest: (selector) => {
+      assert.match(selector, /\.tps-list-native-group\[data-display-lane-id\]/u);
+      return laneEl;
+    },
+  };
+  view.containerEl = { contains: (candidate) => candidate === laneEl };
+  view.renderedDisplayLanesById = new Map([[displayLane.id, displayLane]]);
+  assert.equal(view.getRenderedDisplayLaneFromElement(target), displayLane);
+  view.containerEl = { contains: () => false };
+  assert.equal(view.getRenderedDisplayLaneFromElement(target), null, 'foreign/stale group elements fail closed');
+
+  const priorWindow = globalThis.window;
+  let timerCallback = null;
+  let timerCleared = false;
+  globalThis.window = {
+    setTimeout: (callback) => (timerCallback = callback, 41),
+    clearTimeout: (id) => { if (id === 41) timerCleared = true; },
+  };
+  try {
+    view.isWritableTaskGroupingProperty = () => true;
+    view.getDisplayLaneWritableValues = () => ['hca'];
+    const classes = new Set();
+    let captured = false;
+    let lostPointerCapture = null;
+    const cardEl = {
+      isConnected: true,
+      addClass: (name) => classes.add(name),
+      removeClass: (name) => classes.delete(name),
+      addEventListener: (name, callback) => { if (name === 'lostpointercapture') lostPointerCapture = callback; },
+      removeEventListener: (name, callback) => {
+        if (name === 'lostpointercapture' && lostPointerCapture === callback) lostPointerCapture = null;
+      },
+      setPointerCapture: () => { captured = true; },
+      hasPointerCapture: () => captured,
+      releasePointerCapture: () => { captured = false; },
+    };
+    const task = {
+      itemKind: 'task',
+      line: 3,
+      text: 'Move me',
+      rawLine: '- [ ] Move me [tags:: hca]',
+      checkboxState: '[ ]',
+    };
+    const file = { path: 'Inbox/Tasks.md' };
+    view.getMappedCheckboxStateForTask = () => '[ ]';
+    view.getTaskVisibleTitle = () => 'Move me';
+    view.beginTaskPointerDrag(
+      { button: 0, pointerId: 7, pointerType: 'touch', clientX: 10, clientY: 10 },
+      file,
+      task,
+      'tags',
+      displayLane,
+      cardEl,
+    );
+    assert.equal(view.activeTaskPointerDrag.activated, false);
+    assert.equal(view.activeTaskPointerDrag.rawLine, task.rawLine);
+    assert.equal(view.buildPointerTaskDropPayload(view.activeTaskPointerDrag).rawLine, task.rawLine);
+    assert.equal(captured, false, 'touch scrolling keeps pointer capture off before long press');
+    timerCallback();
+    assert.equal(view.activeTaskPointerDrag.activated, true);
+    assert.equal(captured, true);
+    assert.equal(classes.has('tps-list-native-row--drag-ready'), true);
+    view.handleTaskPointerMove({
+      pointerId: 7,
+      clientX: 30,
+      clientY: 10,
+      preventDefault() {},
+      stopPropagation() {},
+    });
+    assert.equal(view.activeTaskPointerDrag.moved, true);
+    view.cancelTaskPointerDrag({ pointerId: 7 });
+    assert.equal(view.activeTaskPointerDrag, null);
+    assert.equal(captured, false);
+    assert.equal(classes.size, 0);
+
+    timerCallback = null;
+    timerCleared = false;
+    view.beginTaskPointerDrag(
+      { button: 0, pointerId: 8, pointerType: 'touch', clientX: 10, clientY: 10 },
+      file,
+      task,
+      'tags',
+      displayLane,
+      cardEl,
+    );
+    view.handleTaskPointerMove({ pointerId: 8, clientX: 10, clientY: 30 });
+    assert.equal(view.activeTaskPointerDrag, null, 'a touch pan before long press remains a scroll gesture');
+    assert.equal(timerCleared, true);
+
+    view.beginTaskPointerDrag(
+      { button: 0, pointerId: 9, pointerType: 'mouse', clientX: 10, clientY: 10 },
+      file,
+      task,
+      'tags',
+      displayLane,
+      cardEl,
+    );
+    assert.equal(typeof lostPointerCapture, 'function');
+    lostPointerCapture();
+    assert.equal(view.activeTaskPointerDrag, null, 'lost pointer capture always releases drag state');
+  } finally {
+    globalThis.window = priorWindow;
+  }
+
+  const renderList = sourceBlock(viewSource, 'private renderList(', 'private formatListGroupLabel(');
+  assert.match(renderList, /'data-display-lane-id': displayLane\.id/u);
+  assert.match(viewSource, /this\.renderedDisplayLanesById = new Map\(displayLanes\.map/u);
+  assert.match(viewSource, /TPS_LIST_TOUCH_DRAG_HOLD_MS = 550/u);
+  assert.match(viewSource, /TPS_LIST_POINTER_DRAG_DISTANCE_PX = 10/u);
+  assert.match(viewSource, /registerDomEvent\(document, 'pointercancel'/u);
+  assert.match(viewSource, /registerDomEvent\(window, 'blur', \(\) => this\.clearActiveTaskPointerDrag\(\)\)/u);
+  assert.match(viewSource, /visibilitychange[\s\S]*?clearActiveTaskPointerDrag/u);
+  assert.match(viewSource, /onunload\(\): void \{[\s\S]*?this\.clearActiveTaskPointerDrag\(\)/u);
+  assert.match(
+    sourceBlock(viewSource, 'private async handleTaskPointerDropEvent(', 'private beginTaskPointerDrag('),
+    /this\.confirmAndApplyInlineTaskDrop\([\s\S]*?parsed\.rawLine/u,
+    'cross-view pointer drops must pass their captured source revision into planning',
+  );
+  assert.match(
+    sourceBlock(viewSource, 'private async handleTaskPointerUp(', 'private cancelTaskPointerDrag('),
+    /this\.confirmAndApplyInlineTaskDrop\([\s\S]*?active\.rawLine/u,
+    'local pointer drops must pass their captured source revision into planning',
+  );
+  assert.match(
+    sourceBlock(viewSource, 'private createListTaskRow(', 'private renderListTaskBooleanProperty('),
+    /title\.addEventListener\('pointerdown',[\s\S]*?this\.beginTaskPointerDrag\(event, file, task, propName, displayLane, row\)/u,
+    'the visible task title must be a usable mouse and long-press drag surface',
+  );
+  assert.match(
+    sourceBlock(viewSource, 'private createListTaskRow(', 'private renderListTaskBooleanProperty('),
+    /contextmenu[\s\S]*?this\.activeTaskPointerDrag\?\.cardEl === row[\s\S]*?event\.preventDefault\(\)[\s\S]*?return/u,
+    'the synthetic touch context menu must not race an armed long-press drag',
+  );
+  assert.doesNotMatch(
+    sourceBlock(viewSource, 'private getCardPropertyIds(', 'private sortEntriesForView('),
+    /slice\(0,\s*4\)/u,
+    'every field selected in the Base must remain visible in TPS List',
+  );
+});
+
+test('TPS List invalidates synthesized task-only rows for delete and rename events', async () => {
+  const lifecycle = sourceBlock(viewSource, '// Keep synthesized rows stable', "this.registerEvent(this.app.workspace.on('file-open'");
+  assert.match(lifecycle, /vault\.on\('rename',[\s\S]*?clearTaskCachesForPath\(oldPath\)[\s\S]*?clearTaskCachesForPath\(file\.path\)/u);
+  assert.match(lifecycle, /vault\.on\('delete',[\s\S]*?clearTaskCachesForPath\(file\.path\)/u);
+  assert.match(lifecycle, /taskFilter\.mode === 'tasks'[\s\S]*?taskFilter\.mode === 'bullets'[\s\S]*?taskFilter\.hasTaskDirective/u);
+
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const file = { path: 'Inbox/Deleted task source.md' };
+  let resolveRead;
+  let liveFile = file;
+  let refreshes = 0;
+  view.app = {
+    vault: {
+      cachedRead: () => new Promise((resolve) => { resolveRead = resolve; }),
+      getFileByPath: () => liveFile,
+    },
+  };
+  view.renderGeneration = 1;
+  view.refreshDebounced = () => { refreshes += 1; };
+  view.openTasksByPath = new Map();
+  view.allTasksByPath = new Map();
+  view.openTaskOverflowByPath = new Map();
+  view.openTasksLoading = new Set();
+  view.taskCacheEpochByPath = new Map();
+
+  view.loadOpenTasksForFile(file);
+  view.clearTaskCachesForPath(file.path);
+  resolveRead('- [ ] stale deleted task');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(view.allTasksByPath.has(file.path), false, 'an invalidated async read cannot restore stale rows');
+  assert.equal(view.openTasksLoading.size, 0);
+  assert.equal(refreshes, 1, 'the settled batch schedules one clean reload');
+
+  refreshes = 0;
+  view.loadOpenTasksForFile(file);
+  liveFile = null;
+  resolveRead('- [ ] stale deleted task');
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(view.allTasksByPath.has(file.path), false, 'a deleted/renamed file identity cannot commit its read');
+  assert.equal(refreshes, 1);
+});
+
+test('TPS List special field routing is consistent for task, bullet, heading, and note rows', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const file = {
+    path: 'Projects/QA.md',
+    parent: { path: 'Projects' },
+  };
+  view.isStatusPropertyName = () => false;
+  view.getFrontmatterPropNameFromId = () => null;
+  view.getConfiguredCustomProperty = () => ({
+    id: 'folder',
+    key: 'folderPath',
+    label: 'Folder',
+    type: 'folder',
+  });
+  for (const itemKind of ['task', 'bullet', 'heading']) {
+    assert.deepEqual(
+      view.getTaskPropertyValue(file, { itemKind }, 'folderPath', new Set()),
+      {
+        text: 'Projects',
+        title: 'Source folder: Projects',
+        kind: 'folder',
+        editable: false,
+        rawValue: 'Projects',
+      },
+    );
+  }
+
+  const span = { hasClass: () => false };
+  let recurrenceRoutes = 0;
+  let snoozeRoutes = 0;
+  let scalarRoutes = 0;
+  view.isTagProperty = () => false;
+  view.openListTaskRecurrencePicker = () => { recurrenceRoutes += 1; };
+  view.openListTaskScheduledPicker = () => { snoozeRoutes += 1; };
+  view.openListTaskScalarEditor = () => { scalarRoutes += 1; };
+  for (const itemKind of ['task', 'bullet', 'heading']) {
+    const task = { itemKind };
+    view.getConfiguredCustomProperty = () => ({
+      id: 'recurrence',
+      key: 'recurrence',
+      label: 'Recurrence',
+      type: 'recurrence',
+    });
+    view.startListTaskPropertyEdit(span, file, task, {
+      text: 'daily',
+      kind: 'recurrence',
+      editable: true,
+      propName: 'recurrence',
+      rawValue: 'FREQ=DAILY',
+    });
+    view.getConfiguredCustomProperty = () => ({
+      id: 'snooze',
+      key: 'snooze',
+      label: 'Snooze',
+      type: 'snooze',
+    });
+    view.startListTaskPropertyEdit(span, file, task, {
+      text: 'tomorrow',
+      kind: 'snooze',
+      editable: true,
+      propName: 'snooze',
+      rawValue: '2026-08-13 09:00',
+    });
+  }
+  assert.equal(recurrenceRoutes, 3);
+  assert.equal(snoozeRoutes, 3);
+  assert.equal(scalarRoutes, 0);
+
+  const noteRenderer = sourceBlock(viewSource, 'private renderListNoteProperties(', 'private createListBooleanPropertyControl(');
+  assert.match(noteRenderer, /sourceFolderProperty[\s\S]*?entry\.file\.parent\?\.path \|\| '\/'/u);
+  assert.match(noteRenderer, /noteRecurrenceProperty[\s\S]*?&& !noteRecurrenceProperty/u);
 });

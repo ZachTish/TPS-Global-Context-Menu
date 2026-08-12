@@ -37,18 +37,13 @@ export function resolveExactLineRevisionIndex(
   preferredIndex: number,
   expectedLine: string,
 ): number {
-  if (
-    Number.isInteger(preferredIndex)
-    && preferredIndex >= 0
-    && preferredIndex < lines.length
-    && lines[preferredIndex] === expectedLine
-  ) {
-    return preferredIndex;
-  }
   const matches: number[] = [];
   lines.forEach((line, index) => {
     if (line === expectedLine) matches.push(index);
   });
+  // A matching hint is not sufficient identity: an indistinguishable line may
+  // have been inserted at the old coordinate while the original moved. Exact
+  // line consumers fail closed whenever the captured revision is not unique.
   return matches.length === 1 ? matches[0] : -1;
 }
 

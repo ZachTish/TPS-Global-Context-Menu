@@ -139,8 +139,8 @@ test('all migrated GCM owners route through the explicit mutation service', () =
   assert.match(tpsList, /const service = this\.getGcmPlugin\(\)\?\.frontmatterMutationService;/u);
   assert.equal(
     [...tpsList.matchAll(/await this\.processFrontmatter\(file, \(fm\) =>/gu)].length,
-    4,
-    'all four TPS List note-property editors must use the owned service',
+    5,
+    'all five TPS List note-property editors, including checkbox clear, must use the owned service',
   );
 });
 

@@ -188,6 +188,32 @@ test('the entity picker constrains choices to accepted Kind values and has no fr
   );
 });
 
+test('list property editors expose a blank additive manual entry instead of editing the full current list', () => {
+  assert.match(
+    sources.propertyValueModal,
+    /isList \? 'Add new list item…' : 'Set custom value…'/,
+  );
+  assert.match(
+    sources.propertyValueModal,
+    /isList \? '' : this\.currentValue/,
+    'TPS List and entity-backed TPS Table pickers must start a new list item with a blank input',
+  );
+  assert.match(
+    sources.propertyChoiceMenu,
+    /setTitle\(isList \? 'Add new list item…' : 'Set custom value…'\)/,
+  );
+  assert.match(
+    sources.propertyChoiceMenu,
+    /isList \? '' : current/,
+    'native TPS Table list menus must not prefill the editor with the serialized existing list',
+  );
+  assert.match(
+    sources.propertyValueModal,
+    /renderSuggestion\([\s\S]*?isCurrentListMember\(match\.item\)[\s\S]*?✓[\s\S]*?aria-selected[\s\S]*?private isCurrentListMember\(/,
+    'the fuzzy add-value picker must identify values that are already members of the list',
+  );
+});
+
 test('all major editors keep Kind constraints while combined surfaces expose manual, vault, and entity choices', () => {
   const combinedEntityRoutes = [
     ['badge renderer', sources.badgeRenderer],
@@ -261,7 +287,10 @@ test('TPS Table constrained cells render when empty and isolate picker clicks fr
   );
 
   assert.match(renderEntry, /if \(configuredProperty\) \{\s*this\.renderConfiguredPropertyCell\(cell, entry, column, configuredProperty\)/);
-  assert.match(configuredRenderer, /propertyUsesEntityOptions\(property\)[\s\S]*?entry\.fields\[normalizeInlineKey\(property\.key\)\] \?\? ''/);
+  assert.match(
+    configuredRenderer,
+    /property\.type === 'list'[\s\S]*?storedValues[\s\S]*?propertyUsesEntityOptions\(property\)[\s\S]*?entry\.fields\[normalizePropertyKeyIdentity\(property\.key\)\] \?\? ''/,
+  );
   assert.match(configuredRenderer, /display \|\| `\+ \$\{property\.label \|\| column\.label\}`/);
   assert.match(configuredRenderer, /this\.openConfiguredPropertyCellEditor\(entry, column, property, cell\)/);
   assert.match(typedCell, /cell\.setAttr\('role', 'button'\)/);
@@ -273,6 +302,11 @@ test('TPS Table constrained cells render when empty and isolate picker clicks fr
   assert.match(typedCell, /event\.key !== 'Enter' && event\.key !== ' '/);
   assert.match(dispatcher, /propertyUsesEntityOptions\(property\)[\s\S]*?this\.openConfiguredPropertyValuePicker\(entry, property\)/);
   assert.match(propertyValuePicker, /openPropertyValueSuggestModal\(/);
+  assert.match(
+    propertyValuePicker,
+    /property\.type === 'list'[\s\S]*?readInlineFieldCarrierValues\(entry\.line, property\.key\)\.join\(', '\)/,
+    'TPS Table entity-backed list pickers must receive every repeated carrier',
+  );
   assert.match(propertyValuePicker, /applyLogBasePropertyValueChoice\(line, property, choice\)/);
   assert.match(propertyValuePicker, /source: choice\.kind/);
 });
@@ -283,10 +317,10 @@ test('TPS List renders empty constrained note and task properties as editable pi
     'private renderListNoteProperties(',
     'private isWritableNotePropertyId(',
   );
-  assert.match(noteProperties, /const entityReference = isEntityReferenceProperty\(configuredProperty\)/);
+  assert.match(noteProperties, /const entityReference = [\s\S]*?isEntityReferenceProperty\(configuredProperty\)/);
   assert.match(noteProperties, /const typedEmptyTarget = Boolean\(configuredProperty\) \|\| editable/);
   assert.match(noteProperties, /if \(!value && !typedEmptyTarget\) continue;/);
-  assert.match(noteProperties, /text:\s*value \|\| `\+ \$\{configuredProperty\?\.label \|\| propName\}`/);
+  assert.match(noteProperties, /text:\s*displayValue \|\| `\+ \$\{propertyLabel\}`/);
   assert.match(noteProperties, /\.\.\.\(editable \? \{ role: 'button', tabindex: '0' \} : \{\}\)/);
 
   const taskRow = sourceBlock(
@@ -323,10 +357,16 @@ test('TPS List renders empty constrained note and task properties as editable pi
   );
   assert.match(taskEditor, /this\.openListTaskEntityPicker\(file, task, configuredProperty, gcm\)/);
   assert.match(entityTaskPicker, /openPropertyValueSuggestModal\(this\.app, source, property, currentValue/);
-  assert.match(entityTaskPicker, /choice\.kind === 'clear'/);
-  assert.match(entityTaskPicker, /choice\.kind === 'entity'[\s\S]*?mergeEntityReferenceList\(current, choice\.value\)/);
-  assert.match(entityTaskPicker, /mergeLinkList\(current, choice\.value\)/);
-  assert.match(entityTaskPicker, /mergeStringList\(current, choice\.value\)/);
+  assert.match(
+    entityTaskPicker,
+    /property\.type === 'list'[\s\S]*?readInlineFieldCarrierValues\(expectedLine, property\.key\)\.join\(', '\)/,
+    'entity-backed list pickers must receive every repeated carrier for selected-state rendering',
+  );
+  assert.match(
+    entityTaskPicker,
+    /applyLogBasePropertyValueChoice\(line, property, choice\)/,
+    'task entity/list edits must share the aggregate, repeated-carrier-safe mutation path',
+  );
   assert.match(taskMutation, /resolveExactLineRevisionIndex\(parts\.lines, targetLine - 1, expectedLine\)/);
   assert.match(taskMutation, /\$\{event\}:stale-target/);
   assert.match(noteEditor, /openPropertyValueSuggestModal\(\s*this\.app,\s*gcm,\s*configuredProperty/);

@@ -51,7 +51,6 @@ export class TaskStatusCheckboxReconcileService extends Component {
   }
 
   scheduleFile(file: TFile, reason: string, delayMs = RECONCILE_DELAY_MS): void {
-    if (!this.isEnabled()) return;
     if (!this.isMarkdownFile(file)) return;
     if (this.filesBeingProcessed.has(file.path)) return;
     this.pendingFiles.set(file.path, file);
@@ -59,7 +58,7 @@ export class TaskStatusCheckboxReconcileService extends Component {
   }
 
   async reconcileFileNow(file: TFile): Promise<number> {
-    if (!this.isEnabled() || !this.isMarkdownFile(file)) return 0;
+    if (!this.isMarkdownFile(file)) return 0;
     if (this.filesBeingProcessed.has(file.path)) return 0;
 
     const statusKey = this.getStatusKey();
@@ -86,6 +85,7 @@ export class TaskStatusCheckboxReconcileService extends Component {
             completedAt,
             completeMarkers,
             normalizeStatus,
+            syncStatusToCheckbox: this.isStatusSyncEnabled(),
           });
           if (result.changed) changeCount += 1;
           return result.line;
@@ -122,11 +122,6 @@ export class TaskStatusCheckboxReconcileService extends Component {
   }
 
   private async flushPendingFiles(): Promise<void> {
-    if (!this.isEnabled()) {
-      this.pendingFiles.clear();
-      return;
-    }
-
     if (!this.isEditorQuiet()) {
       this.scheduleFlush('editor-not-quiet', 400);
       return;
@@ -139,7 +134,7 @@ export class TaskStatusCheckboxReconcileService extends Component {
     }
   }
 
-  private isEnabled(): boolean {
+  private isStatusSyncEnabled(): boolean {
     return this.plugin.settings.reconcileTaskStatusToCheckbox !== false;
   }
 

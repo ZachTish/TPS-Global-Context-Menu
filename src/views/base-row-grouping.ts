@@ -1,4 +1,9 @@
-import { getTpsFormulaGroupValues } from '../services/tps-base-formula-service';
+import {
+  compareTpsBaseValues,
+  getTpsBaseGroupValues,
+  type TpsBaseMultiValueGroupingMode,
+  type TpsBaseValueSemantics,
+} from './base-value-semantics';
 
 export type TpsBaseGroupDirection = 'asc' | 'desc';
 export type TpsBaseUngroupedPosition = 'first' | 'last';
@@ -95,12 +100,14 @@ export function groupTpsBaseRows<T>(
   getValue: (row: T) => unknown,
   direction: TpsBaseGroupDirection = 'asc',
   ungroupedPosition: TpsBaseUngroupedPosition = 'last',
+  multiValueMode: TpsBaseMultiValueGroupingMode = 'separate',
+  semantics: TpsBaseValueSemantics = { kind: 'auto', collection: false },
 ): TpsBaseRowGroup<T>[] {
   const keyed = new Map<string, TpsBaseRowGroup<T>>();
   const ungrouped: T[] = [];
 
   for (const row of rows) {
-    const values = cleanGroupValues(getValue(row));
+    const values = getTpsBaseGroupValues(getValue(row), semantics, multiValueMode);
     if (!values.length) {
       ungrouped.push(row);
       continue;
@@ -113,10 +120,13 @@ export function groupTpsBaseRows<T>(
     }
   }
 
-  const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+  const groupSemantics: TpsBaseValueSemantics = multiValueMode === 'combined'
+    ? semantics
+    : semantics.collection
+      ? { kind: semantics.itemKind || semantics.kind, collection: false }
+      : semantics;
   const groups = Array.from(keyed.values()).sort((left, right) => {
-    const result = collator.compare(left.key ?? '', right.key ?? '');
-    return direction === 'desc' ? -result : result;
+    return compareTpsBaseValues(left.key, right.key, groupSemantics, direction);
   });
   if (ungrouped.length) {
     const ungroupedGroup = { key: null, rows: ungrouped };
@@ -127,11 +137,7 @@ export function groupTpsBaseRows<T>(
 }
 
 function cleanGroupValue(value: unknown): string | null {
-  const text = getTpsFormulaGroupValues(value)[0] ?? '';
+  const text = getTpsBaseGroupValues(value, { kind: 'auto', collection: false })[0] ?? '';
   if (!text || text.toLowerCase() === 'null' || text.toLowerCase() === 'undefined') return null;
   return text;
-}
-
-function cleanGroupValues(value: unknown): string[] {
-  return getTpsFormulaGroupValues(value);
 }

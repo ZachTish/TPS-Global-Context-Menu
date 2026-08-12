@@ -158,6 +158,8 @@ export class TaskLineContextMenuService {
   private taskSelectionAnchor: TaskLineContext | null = null;
   private tpsListSelectionSyncGeneration = 0;
   private tpsListSelectionOwner: HTMLElement | null = null;
+  private tpsTableSelectionSyncGeneration = 0;
+  private tpsTableSelectionOwner: HTMLElement | null = null;
   private activeHighlightEls = new Set<HTMLElement>();
   private selectedHighlightEls = new Set<HTMLElement>();
   private taskEditorEl: HTMLElement | null = null;
@@ -191,15 +193,18 @@ export class TaskLineContextMenuService {
     if (this.isTaskInteractionBoundary(target) || this.isTaskPropertyTarget(target)) return false;
     const taskEl = this.resolveTaskElement(target);
     if (!taskEl) return false;
-    const listSelection = taskElSurface(taskEl) === 'tps-list'
+    const surface = taskElSurface(taskEl);
+    const baseSelection = surface === 'tps-list'
       ? this.routeTpsListSelection(evt, taskEl, true)
-      : null;
+      : surface === 'tps-table'
+        ? this.routeTpsTableSelection(evt, taskEl, true)
+        : null;
 
     evt.preventDefault();
     evt.stopPropagation();
     evt.stopImmediatePropagation();
 
-    void (listSelection ?? Promise.resolve()).then(() => this.resolveContext(taskEl, target)).then((context) => {
+    void (baseSelection ?? Promise.resolve()).then(() => this.resolveContext(taskEl, target)).then((context) => {
       if (!context) {
         new Notice('Could not resolve the task line.');
         return;
@@ -266,6 +271,23 @@ export class TaskLineContextMenuService {
     } | undefined;
     if (typeof view?.applyTpsListRowSelection !== 'function') return null;
     return view.applyTpsListRowSelection(evt, taskEl, preserveIfSelected);
+  }
+
+  private routeTpsTableSelection(
+    evt: MouseEvent,
+    taskEl: HTMLElement,
+    preserveIfSelected = false,
+  ): Promise<void> | null {
+    const tableRoot = taskEl.closest<HTMLElement>('.tps-log-base');
+    const view = (tableRoot as any)?.__tpsTableView as {
+      applyTpsTableRowSelection?: (
+        event: MouseEvent,
+        target: HTMLElement,
+        preserve?: boolean,
+      ) => Promise<void>;
+    } | undefined;
+    if (typeof view?.applyTpsTableRowSelection !== 'function') return null;
+    return view.applyTpsTableRowSelection(evt, taskEl, preserveIfSelected);
   }
 
   private isTaskEditorExcludedTarget(target: HTMLElement | null): boolean {
@@ -1149,11 +1171,11 @@ export class TaskLineContextMenuService {
     const content = await this.plugin.app.vault.cachedRead(file);
     const lines = content.split(/\r?\n/);
 
-    const tableTaskIdentity = this.getTableTaskIdentity(taskEl);
-    const directTargetTexts = sourceEl && sourceEl !== taskEl && tableTaskIdentity == null
+    const renderedTaskIdentity = this.getRenderedTaskIdentity(taskEl);
+    const directTargetTexts = sourceEl && sourceEl !== taskEl && renderedTaskIdentity == null
       ? this.getDirectTaskElementSearchTexts(sourceEl)
       : [];
-    const targetTexts = tableTaskIdentity
+    const targetTexts = renderedTaskIdentity
       ? []
       : Array.from(new Set([
           ...directTargetTexts,
@@ -1164,8 +1186,9 @@ export class TaskLineContextMenuService {
       lines,
       candidateIndexes,
       targetTexts,
-      exactTaskText: tableTaskIdentity?.taskText,
-      exactLineIdentity: tableTaskIdentity?.lineIdentity,
+      exactTaskText: renderedTaskIdentity?.taskText,
+      exactLineIdentity: renderedTaskIdentity?.lineIdentity,
+      requireExactLineIdentity: taskElSurface(taskEl) === 'tps-list',
     });
     if (lineIndex < 0) {
       logger.flowWarn('TaskLineResolve', 'line:unresolved', {
@@ -1313,11 +1336,13 @@ export class TaskLineContextMenuService {
       });
   }
 
-  private getTableTaskIdentity(taskEl: HTMLElement): { taskText: string; lineIdentity: string } | null {
-    if (taskEl.dataset.tpsGcmContext !== 'table-task') return null;
+  private getRenderedTaskIdentity(taskEl: HTMLElement): { taskText: string; lineIdentity: string } | null {
+    const surface = taskElSurface(taskEl);
+    if (surface !== 'tps-table' && surface !== 'tps-list') return null;
     return {
       taskText: String(
         taskEl.dataset.taskText
+        ?? taskEl.dataset.tpsKanbanTaskText
         ?? taskEl.querySelector<HTMLElement>('.tps-log-base-cell[data-key="title"], [data-key="title"]')?.textContent
         ?? '',
       ).trim(),
@@ -1340,6 +1365,10 @@ export class TaskLineContextMenuService {
     if (surface !== 'tps-list') {
       this.tpsListSelectionSyncGeneration += 1;
       this.tpsListSelectionOwner = null;
+    }
+    if (surface !== 'tps-table') {
+      this.tpsTableSelectionSyncGeneration += 1;
+      this.tpsTableSelectionOwner = null;
     }
     const key = this.getTaskContextKey(context);
     if (this.selectedTaskContexts.has(key)) {
@@ -1435,6 +1464,8 @@ export class TaskLineContextMenuService {
   ): Promise<void> {
     const generation = ++this.tpsListSelectionSyncGeneration;
     this.tpsListSelectionOwner = owner;
+    this.tpsTableSelectionSyncGeneration += 1;
+    this.tpsTableSelectionOwner = null;
     const taskRows = rows.filter((row) => row.matches(
       '[data-tps-gcm-context="kanban-task"][data-task-path][data-task-line]',
     ));
@@ -1474,6 +1505,58 @@ export class TaskLineContextMenuService {
     if (this.tpsListSelectionOwner !== owner) return;
     this.tpsListSelectionSyncGeneration += 1;
     this.tpsListSelectionOwner = null;
+    this.selectedTaskContexts.clear();
+    this.taskSelectionAnchor = null;
+    this.refreshTaskSelectionHighlights();
+  }
+
+  async syncTpsTableSelectionRows(
+    rows: HTMLElement[],
+    anchorRow: HTMLElement | null,
+    owner: HTMLElement,
+  ): Promise<void> {
+    const generation = ++this.tpsTableSelectionSyncGeneration;
+    this.tpsTableSelectionOwner = owner;
+    this.tpsListSelectionSyncGeneration += 1;
+    this.tpsListSelectionOwner = null;
+    const taskRows = rows.filter((row) => row.matches(
+      '[data-tps-gcm-context="table-task"][data-task-path][data-task-line]',
+    ));
+    const anchorTaskRow = anchorRow?.matches(
+      '[data-tps-gcm-context="table-task"][data-task-path][data-task-line]',
+    ) ? anchorRow : null;
+    const [resolved, anchorContext] = await Promise.all([
+      Promise.all(taskRows.map((row) => this.resolveContext(row, row))),
+      anchorTaskRow ? this.resolveContext(anchorTaskRow, anchorTaskRow) : Promise.resolve(null),
+    ]);
+    if (generation !== this.tpsTableSelectionSyncGeneration) return;
+    const contexts = resolved.filter((candidate): candidate is TaskLineContext => candidate != null);
+    this.selectedTaskContexts.clear();
+    for (const context of contexts) {
+      this.selectedTaskContexts.set(this.getTaskContextKey(context), { ...context });
+    }
+    this.taskSelectionAnchor = anchorContext ? { ...anchorContext } : null;
+    this.refreshTaskSelectionHighlights(anchorTaskRow ?? undefined);
+    logger.flow('TaskSelection', 'changed', {
+      mode: 'tps-table-sync',
+      selectedCount: this.selectedTaskContexts.size,
+      visibleSelectionCount: rows.length,
+    });
+  }
+
+  reconcileTpsTableSelectionRows(
+    rows: HTMLElement[],
+    anchorRow: HTMLElement | null,
+    owner: HTMLElement,
+  ): Promise<void> {
+    if (this.tpsTableSelectionOwner !== owner) return Promise.resolve();
+    return this.syncTpsTableSelectionRows(rows, anchorRow, owner);
+  }
+
+  releaseTpsTableSelection(owner: HTMLElement): void {
+    if (this.tpsTableSelectionOwner !== owner) return;
+    this.tpsTableSelectionSyncGeneration += 1;
+    this.tpsTableSelectionOwner = null;
     this.selectedTaskContexts.clear();
     this.taskSelectionAnchor = null;
     this.refreshTaskSelectionHighlights();
@@ -1992,7 +2075,7 @@ export class TaskLineContextMenuService {
         source: this.plugin,
         menu: subMenu,
         property,
-        currentValue: isList ? '' : currentValue,
+        currentValue: isList ? current : currentValue,
         onClear: () => this.updateTaskLine(
           context,
           (line) => setInlineFieldValueOnTaskLine(line, property.key, null),

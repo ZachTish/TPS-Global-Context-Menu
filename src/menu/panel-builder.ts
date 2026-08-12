@@ -1078,7 +1078,7 @@ export class PanelBuilder {
       source: this.plugin,
       menu,
       property: prop,
-      currentValue: '',
+      currentValue: current,
       onClear: () => this.clearStackedEntityList(anchor, entries, prop),
       onChooseLiteral: (value) => this.addStackedEntityListValue(
         anchor,

@@ -2,6 +2,7 @@ import { BasesEntry, BasesView, Menu, Notice, QueryController, TFile, normalizeP
 import TPSGlobalContextMenuPlugin from '../main';
 import { TextInputModal } from '../modals/text-input-modal';
 import { ScheduledModal } from '../modals/scheduled-modal';
+import { RecurrenceModal } from '../modals/recurrence-modal';
 import { TagSuggestModal } from '../modals/TagSuggestModal';
 import { FileSuggestModal } from '../modals/FileSuggestModal';
 import * as logger from '../logger';
@@ -10,6 +11,8 @@ import {
   getLogEntryStableIdentity,
   normalizeInlineKey,
   readInlineFields,
+  readInlineFieldCarrierValues,
+  readInlineFieldValues,
   readLogLineTags,
   readLogLinePropertyTags,
   removeLogLineTag,
@@ -23,13 +26,21 @@ import {
 import { getPlainDisplayTitle } from '../utils/display-title';
 import { resolveHomeFoodLineDateKey } from './home-food-date';
 import { composeEffectiveFilterRoots, extractFilterRootCandidates, extractPersistedFilterRoots } from '../tps-list/base-filter-roots';
-import { evaluateLogBaseFilterRoots, type LogBaseFilterContext } from './log-base-filter';
+import {
+  evaluateLogBaseFilterRoots,
+  type LogBaseFilterContext,
+  type LogBaseFilterFailure,
+} from './log-base-filter';
 import { getCurrentBaseEmbedRenderContext, takePendingBaseEmbedRenderContext } from './base-embed-context';
 import { calculateTpsTableTotals, normalizeTotalsRowPosition, type TpsTableTotalsRowPosition } from './log-base-totals';
 import { getOrderedSelectionRange, toggleOrderedSelection } from '../utils/ordered-selection';
 import { hashSelectionIdentity } from '../utils/selection-identity';
 import { requestLineItemDelete } from '../services/line-item-delete-service';
 import { normalizeTagValue } from '../utils/tag-utils';
+import {
+  findPropertyKeyCaseInsensitive,
+  normalizePropertyKeyIdentity,
+} from '../utils/property-key-identity';
 import type { KanbanCheckboxMappingLike } from '../tps-list/task-checkbox-utils';
 import {
   mapStatusToSubitemCheckboxState,
@@ -57,25 +68,23 @@ import {
   type TpsBaseGroupDescriptor,
   type TpsBaseRowGroup,
 } from './base-row-grouping';
+import {
+  compareTpsBaseValues,
+  getTpsBaseAdditiveKindValues,
+  resolveTpsBaseMultiValueGroupingMode,
+  resolveTpsBaseValueSemantics,
+  type TpsBaseValueSemantics,
+} from './base-value-semantics';
 import { resolveTpsBaseLineCreationPlan } from './base-line-creation-plan';
 import {
   formatFileWikilink,
   getWikilinkDisplayText,
   isLinkListProperty,
-  mergeLinkList,
-  mergeMixedList,
-  mergeStringList,
   parseLinkListInput,
   parseMixedListInput,
   parseStringListInput,
-  removeLinkListValues,
-  removeStringListValues,
 } from '../utils/list-utils';
 import {
-  mergeEntityReferenceList,
-  mergeMixedEntityReferenceList,
-  removeEntityReferenceListValues,
-  removeMixedEntityReferenceListValues,
   resolveConfiguredProperty,
 } from '../utils/entity-property';
 import type { CustomProperty } from '../types';
@@ -92,14 +101,17 @@ import {
   showPropertyValueChoiceMenuAtElement,
 } from '../menu/property-value-choice-menu';
 import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
-import { splitLineItemContent } from '../utils/line-item-deletion';
+import { resolveExactLineRevisionIndex, splitLineItemContent } from '../utils/line-item-deletion';
 import { addLineEntityPropertyMenus } from '../menu/line-entity-property-menu';
 import type { TaskLineContext } from '../services/task-line-context-menu-service';
-import { applyLogBasePropertyValueChoice } from './log-base-property-choice';
+import {
+  addLogBaseListPropertyValue,
+  applyLogBasePropertyValueChoice,
+  removeLogBaseListPropertyValue,
+} from './log-base-property-choice';
 import {
   extractTpsBaseFormulaDefinitions,
   formatTpsFormulaValue,
-  getTpsFormulaSortKey,
   hasTpsFormulaReference,
   tpsBaseFormulaService,
   type TpsCompiledFormulaSet,
@@ -116,7 +128,12 @@ import {
   normalizeInlineBooleanPropertyValue,
 } from '../utils/boolean-property';
 import { parseLineEntityMetadata } from '../services/line-entity-source-provider';
-import { scanMarkdownDocumentLines } from '../utils/markdown-document-lines';
+import { MarkdownDocumentLineCache } from '../utils/markdown-document-line-cache';
+import {
+  constrainTpsTableTaskSelection,
+  getTpsTableTaskSelectionOrder,
+  isTpsTableTaskSelectionEntry,
+} from './tps-table-selection';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
 const TPS_TABLE_TITLE_ALIASES = new Set([
@@ -131,6 +148,30 @@ const TPS_TABLE_TITLE_ALIASES = new Set([
   'headingtitle',
 ]);
 
+/**
+ * Authored inline keys preserve punctuation, but documented structural Table
+ * columns use dotted namespaces. Resolve only that reserved virtual surface to
+ * its synthesized query-field identity so `heading.level` stays distinct from
+ * an arbitrary authored key such as `client-id`.
+ */
+function normalizeTpsTableVirtualKey(key: unknown): string {
+  const raw = String(key ?? '').trim().toLocaleLowerCase();
+  const aliases: Record<string, string> = {
+    'task.title': 'tasktitle',
+    'task.text': 'tasktext',
+    'task.status': 'taskstatus',
+    'task.checkboxstatus': 'taskcheckboxstatus',
+    'line.title': 'linetitle',
+    'line.text': 'linetext',
+    'line.number': 'linenumber',
+    'heading.title': 'headingtitle',
+    'heading.text': 'headingtext',
+    'heading.level': 'headinglevel',
+    'heading.line': 'headingline',
+  };
+  return aliases[raw] ?? normalizePropertyKeyIdentity(raw);
+}
+
 interface LogLineEntry {
   id: string;
   selectionId: string;
@@ -139,8 +180,15 @@ interface LogLineEntry {
   line: string;
   title: string;
   fields: Record<string, string>;
+  fieldValues?: Record<string, string[]>;
   queryFields?: Record<string, string>;
   formulaSession?: TpsFormulaRowSession;
+}
+
+interface RenderedLogLineRevision {
+  path: string;
+  lineNumber: number;
+  rawLine: string;
 }
 
 function getLogEntrySelectionId(
@@ -249,11 +297,14 @@ export class TpsTableView extends BasesView {
   private activeContextRow: HTMLElement | null = null;
   private selectedEntryIds = new Set<string>();
   private selectionAnchorId: string | null = null;
-  private renderedEntryOrder: string[] = [];
+  private renderedTaskEntryOrder: string[] = [];
   private columnWidths: Record<string, number> = {};
   private compiledFormulaSet: TpsCompiledFormulaSet = tpsBaseFormulaService.compile({}, 'tps-table:unresolved');
   private formulaDiagnostics = new Set<string>();
+  private filterDiagnostics = new Map<string, LogBaseFilterFailure>();
   private formulaNow: Date | undefined;
+  private sourceLineCache: MarkdownDocumentLineCache<TFile> | undefined;
+  private resolvedBaseViewName = '';
   constructor(controller: QueryController, containerEl: HTMLElement, private plugin: TPSGlobalContextMenuPlugin) {
     super(controller);
     this.containerEl = containerEl;
@@ -271,13 +322,30 @@ export class TpsTableView extends BasesView {
 
   onload(): void {
     this.registerEvent(this.plugin.app.vault.on('modify', (file) => {
+      if (file instanceof TFile && file.extension === 'md') this.sourceLineCache?.invalidate(file.path);
       if (file instanceof TFile && (file.extension === 'md' || file.extension === 'base')) this.queueRender();
     }));
     this.registerEvent(this.plugin.app.vault.on('create', (file) => {
-      if (file instanceof TFile && file.extension === 'md') this.queueRender();
+      if (file instanceof TFile && file.extension === 'md') {
+        this.sourceLineCache?.invalidate(file.path);
+        this.queueRender();
+      }
     }));
     this.registerEvent(this.plugin.app.vault.on('delete', (file) => {
-      if (file instanceof TFile && file.extension === 'md') this.queueRender();
+      if (file instanceof TFile && file.extension === 'md') {
+        this.sourceLineCache?.invalidate(file.path);
+        this.queueRender();
+      }
+    }));
+    this.registerEvent(this.plugin.app.vault.on('rename', (file, oldPath) => {
+      if (!(file instanceof TFile)) return;
+      const oldPathLower = String(oldPath || '').toLowerCase();
+      const affectsMarkdown = file.extension === 'md' || oldPathLower.endsWith('.md');
+      const affectsBase = file.extension === 'base' || oldPathLower.endsWith('.base');
+      if (affectsMarkdown) {
+        this.sourceLineCache?.invalidateRename(oldPath, file.path);
+      }
+      if (affectsMarkdown || affectsBase) this.queueRender();
     }));
     void this.render();
   }
@@ -288,9 +356,13 @@ export class TpsTableView extends BasesView {
 
   onunload(): void {
     if (this.refreshTimer != null) window.clearTimeout(this.refreshTimer);
+    this.renderGeneration += 1;
+    this.sourceLineCache?.clear();
+    this.sourceLineCache = undefined;
+    this.plugin.taskLineContextMenuService?.releaseTpsTableSelection?.(this.containerEl);
     this.selectedEntryIds.clear();
     this.selectionAnchorId = null;
-    this.renderedEntryOrder = [];
+    this.renderedTaskEntryOrder = [];
     const previousScroller = this.containerEl.querySelector<HTMLElement>('.tps-log-base-table-scroll');
     const previousScrollLeft = previousScroller?.scrollLeft ?? 0;
     const previousScrollTop = previousScroller?.scrollTop ?? 0;
@@ -442,17 +514,17 @@ export class TpsTableView extends BasesView {
         ...taskQueryFields,
       };
       if (relationalStatus) {
-        if (fields[normalizeInlineKey(relationalStatus.key)] == null) {
-          delete queryFields[normalizeInlineKey(relationalStatus.key)];
+        const relationalKey = normalizePropertyKeyIdentity(relationalStatus.key);
+        if (fields[relationalKey] == null) {
+          delete queryFields[relationalKey];
         } else {
-          queryFields[normalizeInlineKey(relationalStatus.key)] = fields[
-            normalizeInlineKey(relationalStatus.key)
-          ];
+          queryFields[relationalKey] = fields[relationalKey];
         }
         if (taskQueryFields.status) queryFields['task.status'] = taskQueryFields.status;
         else delete queryFields['task.status'];
       }
     }
+    queryFields = this.applyConfiguredSourceFileFields(queryFields, targetFile);
     logger.flow('TpsTableView', 'create-line:start', {
       kind: defaults.kind,
       targetPath,
@@ -575,6 +647,9 @@ export class TpsTableView extends BasesView {
   }
 
   private queueRender(): void {
+    // Invalidate an active render immediately. The debounced replacement gets
+    // its own generation when it starts.
+    this.renderGeneration += 1;
     if (this.refreshTimer != null) window.clearTimeout(this.refreshTimer);
     this.refreshTimer = window.setTimeout(() => {
       this.refreshTimer = null;
@@ -586,6 +661,7 @@ export class TpsTableView extends BasesView {
     const generation = ++this.renderGeneration;
     const start = performance.now();
     this.formulaDiagnostics.clear();
+    this.filterDiagnostics.clear();
     this.formulaNow = new Date();
     const entries = await this.loadEntries();
     if (generation !== this.renderGeneration) {
@@ -598,18 +674,22 @@ export class TpsTableView extends BasesView {
     const ungroupedPosition = String(this.getConfigValue('ungroupedPosition') || '').trim().toLowerCase() === 'first'
       ? 'first'
       : 'last';
+    const multiValueGrouping = resolveTpsBaseMultiValueGroupingMode(this.getConfigValue('multiValueGrouping'));
+    const groupSemantics = groupBy ? this.getOrderingSemantics(groupBy.property) : null;
     const entryGroups = groupBy
       ? groupTpsBaseRows(entries,
-          (entry) => this.getEntryRawValue(entry, groupBy.property),
+          (entry) => this.getEntryOrderingValue(entry, groupBy.property),
           groupBy.direction,
           ungroupedPosition,
+          multiValueGrouping,
+          groupSemantics!,
         )
       : [{ key: null, rows: entries }];
     const renderedEntries = entryGroups.flatMap((group) => group.rows);
     const totalsPosition = normalizeTotalsRowPosition(this.getConfigValue('totalsRow'));
     this.renderedResultCount = entries.length;
-    this.renderedEntryOrder = renderedEntries.map((entry) => entry.selectionId);
-    const visibleEntryIds = new Set(this.renderedEntryOrder);
+    this.renderedTaskEntryOrder = getTpsTableTaskSelectionOrder(renderedEntries);
+    const visibleEntryIds = new Set(renderedEntries.map((entry) => entry.selectionId));
     this.selectedEntryIds = new Set([...this.selectedEntryIds].filter((id) => visibleEntryIds.has(id)));
     if (this.selectionAnchorId && !visibleEntryIds.has(this.selectionAnchorId)) this.selectionAnchorId = null;
     const previousScroller = this.containerEl.querySelector<HTMLElement>('.tps-log-base-table-scroll');
@@ -619,8 +699,21 @@ export class TpsTableView extends BasesView {
 
     this.syncNativeResultsCountSoon();
 
+    if (this.filterDiagnostics.size > 0) {
+      const diagnostics = Array.from(this.filterDiagnostics.values());
+      const first = diagnostics[0];
+      this.containerEl.createDiv({
+        cls: 'tps-log-base-empty tps-log-base-filter-error',
+        attr: { role: 'alert' },
+        text: `TPS Table excluded rows because ${diagnostics.length === 1 ? 'a filter could not' : 'some filters could not'} be evaluated safely. ${first?.message || 'Review the Base filters.'}`,
+      });
+    }
+
     if (!entries.length) {
-      this.containerEl.createDiv({ cls: 'tps-log-base-empty', text: 'No matching log lines found.' });
+      if (this.filterDiagnostics.size === 0) {
+        this.containerEl.createDiv({ cls: 'tps-log-base-empty', text: 'No matching log lines found.' });
+      }
+      this.reconcileRenderedTaskSelection();
       logger.flow('TpsTableView', 'render:empty', { durationMs: Math.round(performance.now() - start) });
       return;
     }
@@ -665,12 +758,14 @@ export class TpsTableView extends BasesView {
     if (totalsPosition === 'bottom') totaledColumns = this.renderTotalsRow(tbody, entries, columns, totalsPosition);
     tableScroller.scrollLeft = Math.min(previousScrollLeft, Math.max(0, tableScroller.scrollWidth - tableScroller.clientWidth));
     tableScroller.scrollTop = Math.min(previousScrollTop, Math.max(0, tableScroller.scrollHeight - tableScroller.clientHeight));
+    this.reconcileRenderedTaskSelection();
 
     logger.flow('TpsTableView', 'render:done', {
       entries: entries.length,
       columns: columns.length,
       groupBy: groupBy?.property ?? null,
       ungroupedPosition: groupBy ? ungroupedPosition : null,
+      multiValueGrouping: groupBy ? multiValueGrouping : null,
       groups: groupBy ? entryGroups.length : 0,
       totalsPosition,
       totaledColumns,
@@ -680,27 +775,33 @@ export class TpsTableView extends BasesView {
 
   private async loadEntries(): Promise<LogLineEntry[]> {
     const entries: LogLineEntry[] = [];
+    const loadGeneration = typeof this.renderGeneration === 'number' ? this.renderGeneration : null;
+    const isCancelled = (): boolean => loadGeneration != null && loadGeneration !== this.renderGeneration;
     const filterRoots = await this.getEffectiveBaseFilterRoots();
+    if (isCancelled()) return [];
     const sourceFiles = filterRoots.length ? this.plugin.app.vault.getMarkdownFiles() : this.getSourceFiles();
     const checkboxMappings = this.getTaskCheckboxMappings();
-    let unknownFilterRows = 0;
-    for (const file of sourceFiles) {
-      let content = '';
-      try {
-        content = await this.plugin.app.vault.cachedRead(file);
-      } catch (error) {
-        logger.flowWarn('TpsTableView', 'source-read:failed', { path: file.path, error: logger.errorSummary(error) });
+    let failedClosedFilterRows = 0;
+    const sourceLineCache = this.getSourceLineCache();
+    sourceLineCache.prune(sourceFiles);
+    const sourceBatch = await sourceLineCache.readMany(sourceFiles, { isCancelled });
+    if (sourceBatch.cancelled || isCancelled()) return [];
+    for (const sourceResult of sourceBatch.results) {
+      const file = sourceResult.file;
+      if (sourceResult.ok === false) {
+        logger.flowWarn('TpsTableView', 'source-read:failed', { path: file.path, error: logger.errorSummary(sourceResult.error) });
         continue;
       }
-      scanMarkdownDocumentLines(content).forEach((documentLine) => {
-        if (!documentLine.isContent) return;
+      for (const documentLine of sourceResult.lines) {
+        if (!documentLine.isContent) continue;
         const { text: line, index } = documentLine;
         const fields = readInlineFields(line);
+        const fieldValues = readInlineFieldValues(line);
         const heading = parseTpsListHeadingLine(line);
         const markdownKind = getTpsTableMarkdownLineKind(line);
         const rowKind = heading ? `h${heading.headingLevel}` : markdownKind;
-        const explicitKind = String(fields.kind || '').trim();
-        if (rowKind && !fields.kind) fields.kind = rowKind;
+        const explicitKinds = getTpsBaseAdditiveKindValues(null, fieldValues.kind ?? fields.kind);
+        const explicitKind = explicitKinds.join(', ');
         let queryFields = { ...fields };
         if (rowKind) {
           queryFields.kind = rowKind;
@@ -743,23 +844,24 @@ export class TpsTableView extends BasesView {
             ...taskQueryFields,
           };
           if (relationalStatus) {
-            if (fields[normalizeInlineKey(relationalStatus.key)] == null) {
-              delete queryFields[normalizeInlineKey(relationalStatus.key)];
+            const relationalKey = normalizePropertyKeyIdentity(relationalStatus.key);
+            if (fields[relationalKey] == null) {
+              delete queryFields[relationalKey];
             } else {
-              queryFields[normalizeInlineKey(relationalStatus.key)] = fields[
-                normalizeInlineKey(relationalStatus.key)
-              ];
+              queryFields[relationalKey] = fields[relationalKey];
             }
             if (taskQueryFields.status) queryFields['task.status'] = taskQueryFields.status;
             else delete queryFields['task.status'];
           }
         }
-        if (!this.lineMatches(queryFields) && !(markdownKind && hasTpsTableLineKindFilter(filterRoots))) return;
+        queryFields = this.applyConfiguredSourceFileFields(queryFields, file);
+        if (!this.lineMatches(queryFields) && !(markdownKind && hasTpsTableLineKindFilter(filterRoots))) continue;
         const filterContext = this.createFilterContext(queryFields, file, line, rowKind, index + 1);
         const filterResult = evaluateLogBaseFilterRoots(filterRoots, filterContext);
-        if (filterResult === false) return;
-        if (filterResult == null && filterRoots.length) unknownFilterRows += 1;
-        if (!this.lineMatchesHomeDateContext(fields, file)) return;
+        if (filterContext.filterFailed) failedClosedFilterRows += 1;
+        if (filterResult === false) continue;
+        if (filterResult == null && filterRoots.length) failedClosedFilterRows += 1;
+        if (!this.lineMatchesHomeDateContext(fields, file)) continue;
         entries.push({
           id: `${file.path}:${index}`,
           selectionId: getLogEntrySelectionId(file.path, index, line, fields),
@@ -768,19 +870,54 @@ export class TpsTableView extends BasesView {
           line,
           title: getTpsTableLineDisplayTitle(line),
           fields,
+          fieldValues,
           queryFields,
           formulaSession: filterContext.formulaSession,
         });
-      });
+      }
+      if (isCancelled()) return [];
     }
-    if (unknownFilterRows) {
-      logger.flowWarn('TpsTableView', 'filters:unsupported-rows-included', {
+    if (failedClosedFilterRows) {
+      logger.flowWarn('TpsTableView', 'filters:rows-failed-closed', {
         base: this.getBaseFile()?.path || null,
         viewName: this.getViewName(),
-        rows: unknownFilterRows,
+        rows: failedClosedFilterRows,
       });
     }
     return this.sortEntries(entries);
+  }
+
+  private applyConfiguredSourceFileFields(fields: Record<string, string>, file: TFile): Record<string, string> {
+    let resolved = fields;
+    for (const property of this.plugin.settings?.properties || []) {
+      if (property.type !== 'folder') continue;
+      if (resolved === fields) resolved = { ...fields };
+      resolved[normalizePropertyKeyIdentity(property.key)] = file.parent?.path || '/';
+    }
+    return resolved;
+  }
+
+  private applyConfiguredSourceFileFrontmatter(
+    frontmatter: Record<string, unknown>,
+    file: TFile,
+  ): Record<string, unknown> {
+    const folderProperties = (this.plugin.settings?.properties || []).filter((property) => property.type === 'folder');
+    if (!folderProperties.length) return frontmatter;
+    const resolved = { ...frontmatter };
+    for (const property of folderProperties) {
+      const authoredKey = findPropertyKeyCaseInsensitive(resolved, property.key);
+      resolved[authoredKey || property.key] = file.parent?.path || '/';
+    }
+    return resolved;
+  }
+
+  private getSourceLineCache(): MarkdownDocumentLineCache<TFile> {
+    if (!this.sourceLineCache) {
+      this.sourceLineCache = new MarkdownDocumentLineCache<TFile>(
+        (file) => this.plugin.app.vault.cachedRead(file),
+      );
+    }
+    return this.sourceLineCache;
   }
 
   private getTaskCheckboxMappings(): KanbanCheckboxMappingLike[] {
@@ -838,17 +975,14 @@ export class TpsTableView extends BasesView {
   }
 
   private async getEffectiveBaseFilterRoots(failOnReadError = false): Promise<unknown[]> {
-    const runtimeRoots = extractFilterRootCandidates([
-      this.config?.get?.('filters'),
-      (this.config as any)?.filters,
-      (this as any)?.view?.filters,
-      (this as any)?.controller?.viewConfig?.filters,
-      (this as any)?.controller?.config?.filters,
-      (this as any)?.queryController?.query?.filters,
-      (this as any)?.queryController?.queryState,
-    ]);
+    const runtimeRoots = this.getRuntimeBaseFilterRoots();
     const stampedRoots = this.getStampedBaseFilterRoots(failOnReadError);
-    if (stampedRoots) return composeEffectiveFilterRoots(runtimeRoots, stampedRoots);
+    if (stampedRoots) {
+      return composeEffectiveFilterRoots(
+        this.runtimeBaseFiltersMatchResolvedView() ? runtimeRoots : [],
+        stampedRoots,
+      );
+    }
     const baseFile = this.getBaseFile();
     if (!baseFile) {
       this.compiledFormulaSet = tpsBaseFormulaService.compile({}, 'tps-table:unresolved');
@@ -861,8 +995,11 @@ export class TpsTableView extends BasesView {
         extractTpsBaseFormulaDefinitions(parsed),
         `${baseFile.path}:${Number(baseFile.stat?.mtime || 0)}`,
       );
-      const persisted = extractPersistedFilterRoots(parsed, this.getViewName(), new Set([TPS_TABLE_VIEW_TYPE]));
-      const roots = composeEffectiveFilterRoots(runtimeRoots, persisted.filters || []);
+      const persisted = this.resolvePersistedFilterRoots(parsed);
+      const roots = composeEffectiveFilterRoots(
+        this.runtimeBaseFiltersMatchResolvedView() ? runtimeRoots : [],
+        persisted.filters || [],
+      );
       logger.flow('TpsTableView', 'filters:resolved', {
         base: baseFile.path,
         viewName: persisted.viewName || this.getViewName(),
@@ -891,7 +1028,7 @@ export class TpsTableView extends BasesView {
         extractTpsBaseFormulaDefinitions(parsed),
         `tps-table:stamped:${source}`,
       );
-      return extractPersistedFilterRoots(parsed, this.getViewName(), new Set([TPS_TABLE_VIEW_TYPE])).filters;
+      return this.resolvePersistedFilterRoots(parsed).filters;
     } catch (error) {
       this.compiledFormulaSet = tpsBaseFormulaService.compile({}, 'tps-table:stamped-invalid');
       logger.flowWarn('TpsTableView', 'filters:stamped-definition-invalid', { error: logger.errorSummary(error) });
@@ -939,10 +1076,22 @@ export class TpsTableView extends BasesView {
       inlineGroups.set(normalized, group);
     }
     const formulaFields: Record<string, unknown> = { ...fields };
+    const filterFields: Record<string, unknown> = { ...fields };
     for (const [normalized, group] of inlineGroups) {
       const aggregate: unknown = group.values.length > 1 ? [...group.values] : group.values[0] ?? '';
       formulaFields[normalized] = aggregate;
       for (const alias of group.aliases) formulaFields[alias] = aggregate;
+      const configuredProperty = Array.from(group.aliases)
+        .map((alias) => resolveConfiguredProperty(this.plugin.settings?.properties || [], alias))
+        .find((property) => property?.type === 'list');
+      if (configuredProperty) {
+        const listValues = group.values.flatMap((value) => propertyUsesEntityOptions(configuredProperty)
+          ? isLinkListProperty(configuredProperty) ? parseLinkListInput(value) : parseMixedListInput(value)
+          : isLinkListProperty(configuredProperty) ? parseLinkListInput(value) : parseStringListInput(value));
+        const aggregateList = Array.from(new Set(listValues.map((value) => value.trim()).filter(Boolean)));
+        filterFields[normalized] = aggregateList;
+        for (const alias of group.aliases) filterFields[alias] = aggregateList;
+      }
     }
     if (rowKind === 'task') {
       const owned = this.getTaskWorkflowOwnedFieldKeys();
@@ -954,7 +1103,10 @@ export class TpsTableView extends BasesView {
       }
     }
     const cache = this.plugin.app.metadataCache.getFileCache(file);
-    const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
+    const frontmatter = this.applyConfiguredSourceFileFrontmatter(
+      (cache?.frontmatter || {}) as Record<string, unknown>,
+      file,
+    );
     const frontmatterTags = Array.isArray(frontmatter.tags) ? frontmatter.tags : frontmatter.tags ? [frontmatter.tags] : [];
     const tags = parseTaskTagValues([
       ...(cache?.tags || []).map((tag) => tag.tag),
@@ -979,7 +1131,12 @@ export class TpsTableView extends BasesView {
     const contextCache = contextFile instanceof TFile
       ? this.plugin.app.metadataCache.getFileCache(contextFile)
       : null;
-    const contextFrontmatter = (contextCache?.frontmatter || {}) as Record<string, unknown>;
+    const contextFrontmatter = contextFile instanceof TFile
+      ? this.applyConfiguredSourceFileFrontmatter(
+          (contextCache?.frontmatter || {}) as Record<string, unknown>,
+          contextFile,
+        )
+      : (contextCache?.frontmatter || {}) as Record<string, unknown>;
     const contextDate = this.getHomeContextDate();
     const thisValue: Record<string, unknown> = {
       ...contextFrontmatter,
@@ -1086,9 +1243,13 @@ export class TpsTableView extends BasesView {
       now: this.formulaNow,
     };
     return {
-      fields,
+      fields: filterFields,
+      configuredProperties: this.plugin.settings?.properties || [],
       contextDate,
       rowKind,
+      title,
+      rawLine: line,
+      lineNumber: oneBasedLineNumber,
       taskTags: taskTags.length ? taskTags : undefined,
       file: {
         path: file.path,
@@ -1096,7 +1257,11 @@ export class TpsTableView extends BasesView {
         basename: file.basename,
         extension: file.extension,
         folder: file.parent?.path || '',
+        size: Number(file.stat?.size || 0),
+        ctime: Number(file.stat?.ctime || 0),
+        mtime: Number(file.stat?.mtime || 0),
         tags,
+        links: (cache?.links || []).map((link) => link.link),
         frontmatter,
       },
       formulaSession: tpsBaseFormulaService.createSession(
@@ -1105,6 +1270,9 @@ export class TpsTableView extends BasesView {
       ),
       onFormulaFailure: (result) => {
         this.reportFormulaFailureAt(file, oneBasedLineNumber, result);
+      },
+      onFilterFailure: (failure) => {
+        this.reportFilterFailureAt(file, oneBasedLineNumber, failure);
       },
     };
   }
@@ -1126,7 +1294,14 @@ export class TpsTableView extends BasesView {
         }
       }
     }
-    return Array.from(byPath.values());
+    const nativeFiles = Array.from(byPath.values());
+    // A filterless custom Base view can receive an empty native note dataset
+    // even though its lineFilterKey intentionally targets synthesized Markdown
+    // rows. With no native source constraint to preserve, scan the vault and
+    // let the row-level key contract select the matching lines.
+    return nativeFiles.length > 0
+      ? nativeFiles
+      : this.plugin.app.vault.getMarkdownFiles();
   }
 
   private lineMatchesHomeDateContext(fields: Record<string, string>, file: TFile): boolean {
@@ -1341,19 +1516,71 @@ export class TpsTableView extends BasesView {
   private sortEntries(entries: LogLineEntry[]): LogLineEntry[] {
     const descriptors = this.getSortDescriptors();
     if (!descriptors.length) return entries;
-    return [...entries].sort((a, b) => {
+    return entries.map((entry, index) => ({ entry, index })).sort((a, b) => {
       for (const descriptor of descriptors) {
-        const av = /^formula\./iu.test(descriptor.key)
-          ? getTpsFormulaSortKey(this.getEntryRawValue(a, descriptor.key))
-          : this.getEntryValue(a, descriptor.key).toLowerCase();
-        const bv = /^formula\./iu.test(descriptor.key)
-          ? getTpsFormulaSortKey(this.getEntryRawValue(b, descriptor.key))
-          : this.getEntryValue(b, descriptor.key).toLowerCase();
-        if (av < bv) return descriptor.direction === 'desc' ? 1 : -1;
-        if (av > bv) return descriptor.direction === 'desc' ? -1 : 1;
+        const semantics = this.getOrderingSemantics(descriptor.key);
+        const result = compareTpsBaseValues(
+          this.getEntryOrderingValue(a.entry, descriptor.key),
+          this.getEntryOrderingValue(b.entry, descriptor.key),
+          semantics,
+          descriptor.direction,
+        );
+        if (result !== 0) return result;
       }
-      return b.id.localeCompare(a.id);
-    });
+      return a.index - b.index;
+    }).map(({ entry }) => entry);
+  }
+
+  private getOrderingSemantics(key: string): TpsBaseValueSemantics {
+    const property = this.isExplicitTaskWorkflowStatusColumn(key)
+      ? this.createTaskWorkflowStatusProperty({ key, label: labelForKey(key) })
+      : resolveConfiguredProperty(this.plugin.settings?.properties || [], key);
+    const normalized = normalizeTpsTableVirtualKey(key);
+    if (normalized === 'kind') return { kind: 'choice', collection: true, itemKind: 'choice' };
+    if (normalized === 'itemkind' || normalized === 'itemtype') return { kind: 'choice', collection: false };
+    if (normalized === 'explicitkind' || normalized === 'entitykind') {
+      return { kind: 'choice', collection: true, itemKind: 'choice' };
+    }
+    return resolveTpsBaseValueSemantics(key, property);
+  }
+
+  private getEntryOrderingValue(entry: LogLineEntry, key: string): unknown {
+    if (/^formula\./iu.test(String(key || '').trim())) return this.getEntryRawValue(entry, key);
+    const configuredProperty = resolveConfiguredProperty(this.plugin.settings?.properties || [], key);
+    if (configuredProperty?.type === 'folder') return entry.file.parent?.path || '/';
+    if (configuredProperty?.type === 'list') return this.getEntryConfiguredPropertyValueItems(entry, configuredProperty);
+    const sourceNoteValue = getSourceNoteGroupValue(entry.file, key);
+    if (sourceNoteValue !== undefined) return sourceNoteValue;
+    const normalized = normalizeTpsTableVirtualKey(key);
+    const rowKind = this.getEntryStructuralKind(entry);
+    if (normalized === 'kind') {
+      return getTpsBaseAdditiveKindValues(rowKind, entry.fieldValues?.kind ?? entry.fields.kind);
+    }
+    if (normalized === 'itemkind' || normalized === 'itemtype') return rowKind;
+    if (normalized === 'explicitkind' || normalized === 'entitykind') {
+      const explicitKinds = getTpsBaseAdditiveKindValues(null, entry.fieldValues?.kind ?? entry.fields.kind);
+      return explicitKinds.length > 1 ? explicitKinds : explicitKinds[0] ?? '';
+    }
+    if (TPS_TABLE_TITLE_ALIASES.has(normalized)) return entry.title;
+    if (this.isFileLinkColumn(key)) return entry.file.path;
+    if (normalized === 'source' || normalized === 'path') return `${entry.file.path}:${entry.lineNumber + 1}`;
+    if (normalized === 'linenumber') return entry.lineNumber + 1;
+    if (
+      parseTaskLine(entry.line)
+      && (normalized === 'status' || normalized === 'taskstatus' || normalized === 'taskcheckboxstatus' || normalized === 'checkboxstatus')
+    ) {
+      return entry.queryFields?.['task.status']
+        ?? entry.queryFields?.taskstatus
+        ?? entry.queryFields?.checkboxstatus
+        ?? entry.queryFields?.status
+        ?? '';
+    }
+    return entry.fields[normalized] ?? entry.queryFields?.[normalized] ?? '';
+  }
+
+  private getEntryStructuralKind(entry: Pick<LogLineEntry, 'line'>): string {
+    const heading = parseTpsListHeadingLine(entry.line);
+    return heading ? `h${heading.headingLevel}` : getTpsTableMarkdownLineKind(entry.line) || '';
   }
 
   private getSortDescriptors(): Array<{ key: string; direction: 'asc' | 'desc' }> {
@@ -1380,8 +1607,14 @@ export class TpsTableView extends BasesView {
     row.dataset.entryId = entry.selectionId;
     row.dataset.path = entry.file.path;
     row.dataset.line = String(entry.lineNumber + 1);
-    if (/^\s*(?:[-*+]|\d+[.)])\s+\[[^\]\r\n]?\]\s+/u.test(entry.line)) {
+    (row as any).__tpsTableEntryRevision = {
+      path: entry.file.path,
+      lineNumber: entry.lineNumber,
+      rawLine: entry.line,
+    } satisfies RenderedLogLineRevision;
+    if (isTpsTableTaskSelectionEntry(entry)) {
       row.dataset.tpsGcmContext = 'table-task';
+      row.dataset.tpsTableBatchSelectable = 'true';
       row.dataset.taskPath = entry.file.path;
       row.dataset.taskLine = String(entry.lineNumber + 1);
       row.dataset.taskText = getTaskDisplayTitle(entry.line);
@@ -1475,10 +1708,17 @@ export class TpsTableView extends BasesView {
     property: CustomProperty,
   ): void {
     const entityOptions = propertyUsesEntityOptions(property);
+    if (property.type === 'folder') {
+      const folder = entry.file.parent?.path || '/';
+      cell.dataset.tpsTableCellIntent = 'source-folder';
+      cell.setAttr('aria-label', `${property.label || column.label}: ${folder}`);
+      cell.setText(folder);
+      return;
+    }
     if (!entityOptions && isBooleanPropertyType(property.type)) {
       const current = normalizeInlineBooleanPropertyValue(
-        entry.fields[normalizeInlineKey(property.key)]
-          ?? entry.queryFields?.[normalizeInlineKey(property.key)],
+        entry.fields[normalizePropertyKeyIdentity(property.key)]
+          ?? entry.queryFields?.[normalizePropertyKeyIdentity(property.key)],
       );
       this.renderTableBooleanCell(
         cell,
@@ -1500,6 +1740,22 @@ export class TpsTableView extends BasesView {
             return false;
           }
         },
+        async () => {
+          try {
+            return await this.updateEntryLine(
+              entry,
+              (line) => setLogInlineFieldValue(line, property.key, null),
+            );
+          } catch (error) {
+            logger.flowError('TpsTableView', 'boolean-property-cell:clear-failed', error, {
+              path: entry.file.path,
+              lineNumber: entry.lineNumber + 1,
+              property: property.key,
+            });
+            new Notice(`Could not clear ${property.label || property.key}.`);
+            return false;
+          }
+        },
       );
       return;
     }
@@ -1507,9 +1763,7 @@ export class TpsTableView extends BasesView {
       const currentTags = readLogLinePropertyTags(
         entry.line,
         property.key,
-        entry.fields[normalizeInlineKey(property.key)]
-          ?? entry.queryFields?.[normalizeInlineKey(property.key)]
-          ?? '',
+        readInlineFieldCarrierValues(entry.line, property.key),
       );
       const display = currentTags.map((tag) => `#${tag}`).join(', ');
       this.configureTypedCell(
@@ -1522,8 +1776,8 @@ export class TpsTableView extends BasesView {
     }
 
     if (!entityOptions && this.isDatetimeColumn(column, property)) {
-      const current = entry.fields[normalizeInlineKey(property.key)]
-        ?? entry.queryFields?.[normalizeInlineKey(property.key)]
+      const current = entry.fields[normalizePropertyKeyIdentity(property.key)]
+        ?? entry.queryFields?.[normalizePropertyKeyIdentity(property.key)]
         ?? '';
       this.configureTypedCell(
         cell,
@@ -1535,12 +1789,15 @@ export class TpsTableView extends BasesView {
     }
 
     const taskWorkflowStatus = this.isTaskStatusSelector(entry, property);
+    const storedValues = this.getEntryConfiguredPropertyValues(entry, property);
     const current = taskWorkflowStatus
       ? entry.queryFields?.status ?? entry.queryFields?.checkboxstatus ?? ''
-      : propertyUsesEntityOptions(property)
-        ? entry.fields[normalizeInlineKey(property.key)] ?? ''
-        : entry.fields[normalizeInlineKey(property.key)]
-          ?? entry.queryFields?.[normalizeInlineKey(property.key)]
+            : property.type === 'list'
+                ? storedValues
+              : propertyUsesEntityOptions(property)
+                ? entry.fields[normalizePropertyKeyIdentity(property.key)] ?? ''
+              : entry.fields[normalizePropertyKeyIdentity(property.key)]
+          ?? entry.queryFields?.[normalizePropertyKeyIdentity(property.key)]
           ?? '';
     const display = this.formatConfiguredPropertyCellValue(current, property);
     this.configureTypedCell(
@@ -1556,10 +1813,11 @@ export class TpsTableView extends BasesView {
     propertyLabel: string,
     rawValue: unknown,
     commit?: (next: boolean) => Promise<boolean>,
+    clear?: () => Promise<boolean>,
   ): void {
     cell.empty();
     cell.dataset.tpsTableCellIntent = commit ? 'boolean-property' : 'formula';
-    const control = cell.createEl(commit ? 'label' : 'span', {
+    const control = cell.createEl('span', {
       cls: `tps-log-base-boolean-control${commit ? ' tps-log-base-boolean-control--editable' : ' tps-log-base-boolean-control--readonly'}`,
     });
     const checkbox = control.createEl('input', {
@@ -1569,6 +1827,17 @@ export class TpsTableView extends BasesView {
         ...(commit ? {} : { disabled: 'true', 'aria-readonly': 'true' }),
       },
     });
+    const clearButton = commit && clear
+      ? control.createEl('button', {
+        cls: 'tps-log-base-boolean-clear',
+        text: '×',
+        attr: {
+          type: 'button',
+          title: `Clear ${propertyLabel}`,
+          'aria-label': `Clear ${propertyLabel}`,
+        },
+      })
+      : null;
     let currentValue = rawValue;
     const renderState = (value: unknown) => {
       const presentation = getBooleanPropertyPresentation(value);
@@ -1579,6 +1848,7 @@ export class TpsTableView extends BasesView {
       control.dataset.tpsBooleanState = presentation.state;
       if (presentation.state === 'invalid') checkbox.setAttribute('aria-invalid', 'true');
       else checkbox.removeAttribute('aria-invalid');
+      if (clearButton) clearButton.disabled = presentation.state === 'unset';
     };
     renderState(currentValue);
     const stop = (event: Event) => event.stopPropagation();
@@ -1593,6 +1863,7 @@ export class TpsTableView extends BasesView {
       currentValue = next;
       renderState(next);
       checkbox.disabled = true;
+      if (clearButton) clearButton.disabled = true;
       void commit(next).then((changed) => {
         if (!changed) {
           currentValue = previous;
@@ -1600,6 +1871,26 @@ export class TpsTableView extends BasesView {
         }
       }).finally(() => {
         checkbox.disabled = false;
+        renderState(currentValue);
+      });
+    });
+    clearButton?.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (clearButton.disabled) return;
+      const previous = currentValue;
+      currentValue = undefined;
+      renderState(currentValue);
+      checkbox.disabled = true;
+      clearButton.disabled = true;
+      void clear().then((changed) => {
+        if (!changed) {
+          currentValue = previous;
+          renderState(previous);
+        }
+      }).finally(() => {
+        checkbox.disabled = false;
+        renderState(currentValue);
       });
     });
   }
@@ -1658,7 +1949,7 @@ export class TpsTableView extends BasesView {
       return null;
     }
     const key = raw.replace(/^(?:note|task|line|log|tps|kanban)\./iu, '').trim();
-    const normalized = normalizeInlineKey(key);
+    const normalized = normalizeTpsTableVirtualKey(raw);
     if (!normalized) return null;
     const readOnly = new Set([
       'title',
@@ -1687,6 +1978,10 @@ export class TpsTableView extends BasesView {
       'complete',
       'checkboxstatus',
       'taskstatus',
+      'tasktitle',
+      'tasktext',
+      'linetitle',
+      'headingtitle',
       'tpsinlineprops',
     ]);
     return readOnly.has(normalized) ? null : key;
@@ -1718,12 +2013,33 @@ export class TpsTableView extends BasesView {
     return raw;
   }
 
+  private getEntryConfiguredPropertyValues(entry: LogLineEntry, property: CustomProperty): string {
+    return this.getEntryConfiguredPropertyValueItems(entry, property).join(', ');
+  }
+
+  private getEntryConfiguredPropertyValueItems(entry: LogLineEntry, property: CustomProperty): string[] {
+    const normalized = normalizePropertyKeyIdentity(property.key);
+    const authored = entry.fieldValues?.[normalized] ?? [];
+    const stored = authored.length > 0
+      ? authored
+      : [entry.fields[normalized] ?? entry.queryFields?.[normalized] ?? ''];
+    const merged = stored.flatMap((value) => propertyUsesEntityOptions(property)
+      ? isLinkListProperty(property) ? parseLinkListInput(value) : parseMixedListInput(value)
+      : isLinkListProperty(property) ? parseLinkListInput(value) : parseStringListInput(value));
+    return Array.from(new Set(merged.map((value) => value.trim()).filter(Boolean)));
+  }
+
   private openConfiguredPropertyCellEditor(
     entry: LogLineEntry,
     column: LogTableColumn,
     property: CustomProperty,
     anchor: HTMLElement,
   ): void {
+    if (property.type === 'folder') return;
+    if (property.type === 'list') {
+      this.openListCellEditor(entry, property, anchor);
+      return;
+    }
     if (propertyUsesEntityOptions(property)) {
       this.openConfiguredPropertyValuePicker(entry, property);
       return;
@@ -1739,16 +2055,16 @@ export class TpsTableView extends BasesView {
       this.openChoiceCellEditor(entry, property, anchor);
       return;
     }
-    if (property.type === 'list') {
-      this.openListCellEditor(entry, property, anchor);
-      return;
-    }
     if (property.type === 'checkbox') {
       this.openCheckboxCellEditor(entry, property, anchor);
       return;
     }
+    if (property.type === 'recurrence') {
+      this.openRecurrenceCellEditor(entry, property);
+      return;
+    }
 
-    const current = readInlineFieldValue(entry.line, property.key);
+    const current = this.getEntryConfiguredPropertyValues(entry, property);
     new TextInputModal(
       this.plugin.app,
       property.label || column.label,
@@ -1768,7 +2084,9 @@ export class TpsTableView extends BasesView {
     entry: LogLineEntry,
     property: CustomProperty,
   ): void {
-    const currentValue = readInlineFieldValue(entry.line, property.key);
+    const currentValue = property.type === 'list'
+      ? readInlineFieldCarrierValues(entry.line, property.key).join(', ')
+      : readInlineFieldValue(entry.line, property.key);
     logger.flow('TpsTableView', 'property-picker:open', {
       path: entry.file.path,
       lineNumber: entry.lineNumber + 1,
@@ -1804,7 +2122,7 @@ export class TpsTableView extends BasesView {
     property: CustomProperty,
     anchor: HTMLElement,
   ): void {
-    const current = readInlineFieldValue(entry.line, property.key);
+    const current = readInlineFieldCarrierValues(entry.line, property.key).join(', ');
     const menu = new Menu();
     addPropertyValueChoiceMenuItems({
       app: this.plugin.app,
@@ -1854,7 +2172,7 @@ export class TpsTableView extends BasesView {
     property: CustomProperty,
     anchor: HTMLElement,
   ): void {
-    const current = readInlineFieldValue(entry.line, property.key);
+    const current = readInlineFieldCarrierValues(entry.line, property.key).join(', ');
     const items = propertyUsesEntityOptions(property)
       ? isLinkListProperty(property)
         ? parseLinkListInput(current)
@@ -1868,7 +2186,7 @@ export class TpsTableView extends BasesView {
       source: this.plugin,
       menu,
       property,
-      currentValue: '',
+      currentValue: current,
       onClear: () => this.setConfiguredCellValue(entry, property, null, 'list-clear'),
       onChooseLiteral: (value) => this.addConfiguredListCellValue(entry, property, value, 'literal'),
       onChooseEntity: (choice) => this.addConfiguredListCellValue(
@@ -1922,19 +2240,10 @@ export class TpsTableView extends BasesView {
     value: string,
     route: 'literal' | 'entity' | 'file',
   ): Promise<void> {
-    await this.updateEntryLine(entry, (line) => {
-      const current = readInlineFieldValue(line, property.key);
-      const next = route === 'entity'
-        ? isLinkListProperty(property)
-          ? mergeEntityReferenceList(current, value)
-          : mergeMixedEntityReferenceList(current, value)
-        : isLinkListProperty(property)
-          ? mergeLinkList(current, value)
-          : propertyUsesEntityOptions(property)
-            ? mergeMixedList(current, value)
-            : mergeStringList(current, value);
-      return setLogInlineFieldValue(line, property.key, next.join(', '));
-    });
+    await this.updateEntryLine(
+      entry,
+      (line) => addLogBaseListPropertyValue(line, property, value, route),
+    );
     logger.flow('TpsTableView', 'list-cell:add', {
       path: entry.file.path,
       lineNumber: entry.lineNumber + 1,
@@ -1948,21 +2257,10 @@ export class TpsTableView extends BasesView {
     property: CustomProperty,
     value: string,
   ): Promise<void> {
-    await this.updateEntryLine(entry, (line) => {
-      const current = readInlineFieldValue(line, property.key);
-      const next = propertyUsesEntityOptions(property)
-        ? isLinkListProperty(property)
-          ? removeEntityReferenceListValues(current, value)
-          : removeMixedEntityReferenceListValues(current, value)
-        : isLinkListProperty(property)
-          ? removeLinkListValues(current, value)
-          : removeStringListValues(current, value);
-      return setLogInlineFieldValue(
-        line,
-        property.key,
-        next.length > 0 ? next.join(', ') : null,
-      );
-    });
+    await this.updateEntryLine(
+      entry,
+      (line) => removeLogBaseListPropertyValue(line, property, value),
+    );
     logger.flow('TpsTableView', 'list-cell:remove', {
       path: entry.file.path,
       lineNumber: entry.lineNumber + 1,
@@ -2024,6 +2322,7 @@ export class TpsTableView extends BasesView {
 
   private isDatetimeColumn(column: LogTableColumn, property: CustomProperty | null): boolean {
     return property?.type === 'datetime'
+      || property?.type === 'snooze'
       || normalizeInlineKey(property?.key || column.key) === 'scheduled';
   }
 
@@ -2040,8 +2339,7 @@ export class TpsTableView extends BasesView {
   private isExplicitTaskWorkflowStatusColumn(reference: unknown): boolean {
     const normalized = String(reference || '')
       .trim()
-      .toLowerCase()
-      .replace(/[\s_-]+/gu, '');
+      .toLowerCase();
     return normalized === 'task.status'
       || normalized === 'task.checkboxstatus'
       || normalized === 'checkboxstatus';
@@ -2063,7 +2361,7 @@ export class TpsTableView extends BasesView {
     const current = readLogLinePropertyTags(
       entry.line,
       key,
-      readInlineFieldValue(entry.line, key),
+      readInlineFieldCarrierValues(entry.line, key),
     );
     const available = [...collectKnownVaultTags(this.plugin.app), ...current];
     new TagSuggestModal(this.plugin.app, available, async (tag, selected) => {
@@ -2074,8 +2372,8 @@ export class TpsTableView extends BasesView {
               line,
               key,
               selected
-                ? removeLogLineTag(readInlineFieldValue(line, key), tag)
-                : addLogLineTag(readInlineFieldValue(line, key), tag),
+                ? removeLogLineTag(readInlineFieldCarrierValues(line, key), tag)
+                : addLogLineTag(readInlineFieldCarrierValues(line, key), tag),
             )
       ));
       logger.flow('TpsTableView', 'tag-cell:toggle', {
@@ -2092,7 +2390,7 @@ export class TpsTableView extends BasesView {
   }
 
   private openScheduledCellEditor(entry: LogLineEntry, property: CustomProperty): void {
-    const isScheduled = normalizeInlineKey(property.key) === 'scheduled';
+    const isScheduled = normalizePropertyKeyIdentity(property.key) === 'scheduled';
     const current = readInlineFieldValue(entry.line, property.key);
     const timeEstimate = Number.parseInt(readInlineFieldValue(entry.line, 'timeEstimate') || '0', 10) || 0;
     const allDay = /^true$/iu.test(readInlineFieldValue(entry.line, 'allDay'));
@@ -2126,6 +2424,22 @@ export class TpsTableView extends BasesView {
       fieldLabel: property.label || property.key,
       showTimeDetails: false,
     }).open();
+  }
+
+  private openRecurrenceCellEditor(entry: LogLineEntry, property: CustomProperty): void {
+    const current = readInlineFieldValue(entry.line, property.key);
+    const scheduled = readInlineFieldValue(entry.line, 'scheduled');
+    const startDate = scheduled ? new Date(scheduled.replace(' ', 'T')) : new Date();
+    new RecurrenceModal(
+      this.plugin.app,
+      current,
+      Number.isNaN(startDate.getTime()) ? new Date() : startDate,
+      '',
+      async (rule) => {
+        await this.setConfiguredCellValue(entry, property, rule || null, 'recurrence');
+      },
+      { showEndsOn: false },
+    ).open();
   }
 
   private openSelectorCellEditor(
@@ -2223,7 +2537,7 @@ export class TpsTableView extends BasesView {
 
   private isTaskStatusSelector(entry: LogLineEntry, property: CustomProperty): boolean {
     if (propertyUsesEntityOptions(property)) return false;
-    const normalizedKey = normalizeInlineKey(property.key);
+    const normalizedKey = normalizePropertyKeyIdentity(property.key);
     const normalizedId = normalizeInlineKey(property.id);
     const configuredStatusKey = normalizeInlineKey(
       this.plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status',
@@ -2298,24 +2612,27 @@ export class TpsTableView extends BasesView {
       evt.stopPropagation();
       return;
     }
-    if (evt.shiftKey) {
+    const taskSelectable = isTpsTableTaskSelectionEntry(entry);
+    if (evt.shiftKey && taskSelectable) {
       evt.preventDefault();
       evt.stopPropagation();
       this.selectEntryRange(entry.selectionId);
       return;
     }
-    if (evt.metaKey || evt.ctrlKey) {
+    if ((evt.metaKey || evt.ctrlKey) && taskSelectable) {
       evt.preventDefault();
       evt.stopPropagation();
       this.toggleEntrySelection(entry.selectionId);
       return;
     }
     this.selectOnlyEntry(entry.selectionId);
+    if (!taskSelectable) this.plugin.taskLineContextMenuService?.releaseTpsTableSelection?.(this.containerEl);
     void this.openEntry(entry);
   }
 
   private handleEntryModifierClick(evt: MouseEvent, entry: LogLineEntry): void {
     if (!evt.shiftKey && !evt.metaKey && !evt.ctrlKey) return;
+    if (!isTpsTableTaskSelectionEntry(entry)) return;
     evt.preventDefault();
     evt.stopPropagation();
     evt.stopImmediatePropagation();
@@ -2331,7 +2648,8 @@ export class TpsTableView extends BasesView {
   }
 
   private toggleEntrySelection(id: string): void {
-    const result = toggleOrderedSelection(this.selectedEntryIds, id, this.renderedEntryOrder);
+    const taskSelection = constrainTpsTableTaskSelection(this.selectedEntryIds, this.renderedTaskEntryOrder);
+    const result = toggleOrderedSelection(taskSelection, id, this.renderedTaskEntryOrder);
     this.selectedEntryIds = result.selected;
     this.selectionAnchorId = result.anchor;
     this.syncEntrySelectionClasses();
@@ -2342,12 +2660,12 @@ export class TpsTableView extends BasesView {
   }
 
   private selectEntryRange(id: string): void {
-    if (!this.selectionAnchorId || !this.renderedEntryOrder.includes(this.selectionAnchorId)) {
+    if (!this.selectionAnchorId || !this.renderedTaskEntryOrder.includes(this.selectionAnchorId)) {
       this.selectOnlyEntry(id);
       logger.flow('TpsTableView', 'selection:changed', { mode: 'range-fallback', selectedCount: 1 });
       return;
     }
-    const range = getOrderedSelectionRange(this.renderedEntryOrder, this.selectionAnchorId, id);
+    const range = getOrderedSelectionRange(this.renderedTaskEntryOrder, this.selectionAnchorId, id);
     this.selectedEntryIds.clear();
     for (const selectedId of range) this.selectedEntryIds.add(selectedId);
     this.syncEntrySelectionClasses();
@@ -2366,9 +2684,34 @@ export class TpsTableView extends BasesView {
     });
   }
 
+  private reconcileRenderedTaskSelection(): void {
+    const selectedRows = Array.from(this.containerEl.querySelectorAll<HTMLElement>(
+      '.tps-log-base-row--selected[data-entry-id][data-tps-table-batch-selectable="true"]',
+    ));
+    const anchorRow = this.selectionAnchorId
+      ? selectedRows.find((candidate) => candidate.dataset.entryId === this.selectionAnchorId) ?? null
+      : null;
+    const reconciliation = this.plugin.taskLineContextMenuService?.reconcileTpsTableSelectionRows?.(
+      selectedRows,
+      anchorRow,
+      this.containerEl,
+    );
+    if (!reconciliation) return;
+    void reconciliation.catch((error) => {
+      logger.flowError('TpsTableView', 'selection:reconcile-failed', error, {
+        selectedCount: selectedRows.length,
+      });
+    });
+  }
+
   applyEntryContextSelection(evt: MouseEvent, row: HTMLElement): boolean {
     const entryId = row.dataset.entryId;
     if (!entryId) return false;
+    if (row.dataset.tpsTableBatchSelectable !== 'true') {
+      this.selectOnlyEntry(entryId);
+      this.plugin.taskLineContextMenuService?.releaseTpsTableSelection?.(this.containerEl);
+      return true;
+    }
     if (evt.shiftKey) {
       this.selectEntryRange(entryId);
     } else if (evt.metaKey || evt.ctrlKey) {
@@ -2377,6 +2720,32 @@ export class TpsTableView extends BasesView {
       this.selectOnlyEntry(entryId);
     }
     return true;
+  }
+
+  async applyTpsTableRowSelection(
+    evt: MouseEvent,
+    target: HTMLElement,
+    preserveIfSelected = false,
+  ): Promise<void> {
+    const row = target.closest<HTMLElement>('.tps-log-base-row[data-entry-id]');
+    if (!row || !this.containerEl.contains(row)) return;
+    if (row.dataset.tpsTableBatchSelectable !== 'true') return;
+    const entryId = row.dataset.entryId;
+    if (!entryId) return;
+    if (!(preserveIfSelected && this.selectedEntryIds.has(entryId) && !evt.shiftKey && !evt.metaKey && !evt.ctrlKey)) {
+      this.applyEntryContextSelection(evt, row);
+    }
+    const selectedRows = Array.from(this.containerEl.querySelectorAll<HTMLElement>(
+      '.tps-log-base-row--selected[data-entry-id][data-tps-table-batch-selectable="true"]',
+    ));
+    const anchorRow = this.selectionAnchorId
+      ? selectedRows.find((candidate) => candidate.dataset.entryId === this.selectionAnchorId) ?? null
+      : null;
+    await this.plugin.taskLineContextMenuService?.syncTpsTableSelectionRows?.(
+      selectedRows,
+      anchorRow,
+      this.containerEl,
+    );
   }
 
   private renderTotalsRow(
@@ -2410,13 +2779,25 @@ export class TpsTableView extends BasesView {
   }
 
   handleExternalRowContextMenu(evt: MouseEvent, row: HTMLElement): boolean {
-    const path = row.dataset.path;
-    const oneBasedLine = Number(row.dataset.line || '0');
-    if (!path || !Number.isInteger(oneBasedLine) || oneBasedLine < 1) return false;
+    const renderedRevision = (row as any).__tpsTableEntryRevision as RenderedLogLineRevision | undefined;
+    const path = String(renderedRevision?.path || row.dataset.path || '').trim();
+    if (!path) return false;
 
     evt.preventDefault();
     evt.stopPropagation();
     evt.stopImmediatePropagation();
+
+    if (
+      !renderedRevision
+      || renderedRevision.path !== path
+      || !Number.isInteger(renderedRevision.lineNumber)
+      || renderedRevision.lineNumber < 0
+      || typeof renderedRevision.rawLine !== 'string'
+    ) {
+      logger.flowWarn('TpsTableView', 'context-menu:missing-rendered-revision', { path });
+      new Notice('That table row is out of date. Refresh the view and try again.');
+      return true;
+    }
 
     const file = this.plugin.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) {
@@ -2424,14 +2805,29 @@ export class TpsTableView extends BasesView {
       return true;
     }
 
+    const columns = Array.from(row.querySelectorAll<HTMLElement>('.tps-log-base-cell[data-key]')).map((cell) => ({
+      key: cell.dataset.key || '',
+      label: cell.dataset.label || labelForKey(cell.dataset.key || ''),
+    })).filter((column) => column.key);
+
     void this.plugin.app.vault.cachedRead(file).then((content) => {
-      const lineNumber = oneBasedLine - 1;
-      const line = content.split('\n')[lineNumber] ?? '';
+      const parts = splitLineItemContent(content);
+      const lineNumber = resolveExactLineRevisionIndex(
+        parts.lines,
+        renderedRevision.lineNumber,
+        renderedRevision.rawLine,
+      );
+      if (lineNumber < 0) {
+        logger.flowWarn('TpsTableView', 'context-menu:stale-target', {
+          path: file.path,
+          renderedLineNumber: renderedRevision.lineNumber + 1,
+        });
+        new Notice('That table row changed since it was rendered. Refresh the view and try again.');
+        return;
+      }
+      const line = parts.lines[lineNumber] ?? '';
       const fields = readInlineFields(line);
-      const columns = Array.from(row.querySelectorAll<HTMLElement>('.tps-log-base-cell[data-key]')).map((cell) => ({
-        key: cell.dataset.key || '',
-        label: cell.dataset.label || labelForKey(cell.dataset.key || ''),
-      })).filter((column) => column.key);
+      const fieldValues = readInlineFieldValues(line);
       this.openEntryContextMenu(evt, {
         id: `${file.path}:${lineNumber}`,
         selectionId: getLogEntrySelectionId(file.path, lineNumber, line, fields),
@@ -2440,9 +2836,13 @@ export class TpsTableView extends BasesView {
         line,
         title: getTpsTableLineDisplayTitle(line),
         fields,
+        fieldValues,
       }, row, columns);
     }).catch((error) => {
-      logger.flowError('TpsTableView', 'context-menu:source-read-failed', error, { path: file.path, lineNumber: oneBasedLine });
+      logger.flowError('TpsTableView', 'context-menu:source-read-failed', error, {
+        path: file.path,
+        lineNumber: renderedRevision.lineNumber + 1,
+      });
       new Notice(`Could not read source file: ${path}`);
     });
     return true;
@@ -2457,9 +2857,25 @@ export class TpsTableView extends BasesView {
       }
       return formatTpsFormulaValue(result.value);
     }
+    const configuredProperty = resolveConfiguredProperty(this.plugin.settings?.properties || [], key);
+    if (configuredProperty?.type === 'folder') return entry.file.parent?.path || '/';
+    if (configuredProperty?.type === 'list') {
+      return this.displayInlineValue(
+        this.getEntryConfiguredPropertyValues(entry, configuredProperty),
+        entry.file.path,
+      );
+    }
     const sourceNoteValue = getSourceNoteGroupValue(entry.file, key);
     if (sourceNoteValue !== undefined) return sourceNoteValue ?? '';
-    const normalized = normalizeInlineKey(key);
+    const normalized = normalizeTpsTableVirtualKey(key);
+    const rowKind = this.getEntryStructuralKind(entry);
+    if (normalized === 'kind' && !configuredProperty) {
+      return getTpsBaseAdditiveKindValues(rowKind, entry.fieldValues?.kind ?? entry.fields.kind).join(', ');
+    }
+    if (normalized === 'itemkind' || normalized === 'itemtype') return rowKind;
+    if (normalized === 'explicitkind' || normalized === 'entitykind') {
+      return getTpsBaseAdditiveKindValues(null, entry.fieldValues?.kind ?? entry.fields.kind).join(', ');
+    }
     if (TPS_TABLE_TITLE_ALIASES.has(normalized)) return entry.title;
     if (this.isFileLinkColumn(key)) return entry.file.basename;
     if (normalized === 'source' || normalized === 'path') return `${entry.file.path}:${entry.lineNumber + 1}`;
@@ -2533,6 +2949,24 @@ export class TpsTableView extends BasesView {
     });
   }
 
+  private reportFilterFailureAt(file: TFile, oneBasedLineNumber: number, failure: LogBaseFilterFailure): void {
+    const key = [failure.code, failure.expression, failure.property, failure.operator].map((value) => String(value || '')).join(':');
+    this.filterDiagnostics ??= new Map<string, LogBaseFilterFailure>();
+    if (this.filterDiagnostics.has(key)) return;
+    this.filterDiagnostics.set(key, failure);
+    logger.flowWarn('TpsTableView', 'filters:evaluation-failed-closed', {
+      base: this.getBaseFile()?.path || null,
+      viewName: this.getViewName(),
+      code: failure.code,
+      message: failure.message,
+      expression: failure.expression || '',
+      property: failure.property || '',
+      operator: failure.operator || '',
+      samplePath: file.path,
+      sampleLine: oneBasedLineNumber,
+    });
+  }
+
   private isFileLinkColumn(key: string): boolean {
     const raw = String(key || '').replace(/^note\./, '').trim().toLowerCase();
     return raw === 'file.name'
@@ -2567,7 +3001,79 @@ export class TpsTableView extends BasesView {
   }
 
   private getViewName(): string {
-    return String((this.config as any)?.name || this.config?.get?.('name') || 'TPS Table').trim() || 'TPS Table';
+    return this.resolvedBaseViewName || this.getConfiguredBaseViewName() || 'TPS Table';
+  }
+
+  private resolvePersistedFilterRoots(
+    parsed: Record<string, unknown> | null | undefined,
+  ): ReturnType<typeof extractPersistedFilterRoots> {
+    const acceptedTypes = new Set([TPS_TABLE_VIEW_TYPE]);
+    const known = extractPersistedFilterRoots(parsed, '', acceptedTypes).viewNames;
+    const requestedViewName = this.resolveCurrentBaseViewName(new Set(known));
+    const persisted = extractPersistedFilterRoots(parsed, requestedViewName, acceptedTypes);
+    this.resolvedBaseViewName = persisted.viewName;
+    return persisted;
+  }
+
+  private runtimeBaseFiltersMatchResolvedView(): boolean {
+    if (!this.resolvedBaseViewName) return true;
+    return this.getConfiguredBaseViewName() === this.resolvedBaseViewName;
+  }
+
+  private resolveCurrentBaseViewName(knownViewNames: ReadonlySet<string>): string {
+    const visible = this.getVisibleBaseViewName(knownViewNames);
+    if (visible) return visible;
+    return this.getConfiguredBaseViewName(knownViewNames);
+  }
+
+  private getConfiguredBaseViewName(knownViewNames?: ReadonlySet<string>): string {
+    const candidates = [
+      (this.config as any)?.name,
+      this.config?.get?.('name'),
+      (this as any)?.view?.name,
+      (this as any)?.controller?.viewConfig?.name,
+      (this as any)?.controller?.config?.name,
+      (this as any)?.queryController?.query?.name,
+      (this as any)?.queryController?.view?.name,
+    ];
+    for (const candidate of candidates) {
+      const value = String(candidate || '').trim();
+      if (value && (!knownViewNames || knownViewNames.has(value))) return value;
+    }
+    return '';
+  }
+
+  private getRuntimeBaseFilterRoots(): unknown[] {
+    return extractFilterRootCandidates([
+      this.config?.get?.('filters'),
+      (this.config as any)?.filters,
+      (this as any)?.view?.filters,
+      (this as any)?.controller?.viewConfig?.filters,
+      (this as any)?.controller?.config?.filters,
+      (this as any)?.queryController?.query?.filters,
+    ]);
+  }
+
+  private getVisibleBaseViewName(knownViewNames: ReadonlySet<string>): string {
+    if (!knownViewNames.size) return '';
+    const header = this.getNearestBasesHeader();
+    if (!header) return '';
+    const selectors = [
+      '.bases-toolbar-views-menu .text-button-label',
+      '.bases-toolbar-views-menu [aria-label]',
+      '.bases-toolbar-views-menu',
+    ];
+    for (const selector of selectors) {
+      const elements = header.matches(selector)
+        ? [header]
+        : Array.from(header.querySelectorAll<HTMLElement>(selector));
+      for (const element of elements) {
+        if (element.hidden || element.getAttribute('aria-hidden') === 'true') continue;
+        const text = String(element.textContent || element.getAttribute('aria-label') || '').trim();
+        if (knownViewNames.has(text)) return text;
+      }
+    }
+    return '';
   }
 
   hasCreateCommandOverride(): boolean {
@@ -2909,6 +3415,14 @@ export class TpsTableView extends BasesView {
   }
 
   private getNearestBasesHeader(): HTMLElement | null {
+    const view = this.containerEl.closest<HTMLElement>('.bases-view');
+    let sibling = view?.previousElementSibling as HTMLElement | null | undefined;
+    while (sibling) {
+      if (sibling.matches('.bases-view-header, .base-view-header, .bases-toolbar, .bases-header, .view-header')) {
+        return sibling;
+      }
+      sibling = sibling.previousElementSibling as HTMLElement | null;
+    }
     const root = this.containerEl.closest('.workspace-leaf, .internal-embed, .markdown-embed, .cm-embed-block') as HTMLElement | null;
     if (!root) return null;
     const headers = Array.from(root.querySelectorAll<HTMLElement>('.bases-view-header, .base-view-header, .bases-toolbar, .bases-header, .view-header'));

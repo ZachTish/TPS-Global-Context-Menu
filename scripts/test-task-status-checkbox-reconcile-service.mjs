@@ -101,6 +101,47 @@ test('task status reconciliation leaves unrelated and unmapped lines alone', asy
   );
 });
 
+test('native checkbox changes synchronize completedDate without requiring an inline status field', async () => {
+  const { reconcileTaskStatusLine } = await importUtility();
+  const completedAt = new Date(2026, 7, 11, 19, 12, 13);
+
+  assert.equal(
+    reconcileTaskStatusLine('- [x] Checked in Obsidian', 'status', mappings, { completedAt }).line,
+    '- [x] Checked in Obsidian [completedDate:: 2026-08-11 19:12:13]',
+  );
+  assert.equal(
+    reconcileTaskStatusLine(
+      '- [ ] Reopened in Obsidian [completedDate:: 2026-08-10 08:00:00]',
+      'status',
+      mappings,
+      { completedAt },
+    ).line,
+    '- [ ] Reopened in Obsidian',
+  );
+  assert.equal(
+    reconcileTaskStatusLine('- [z] Custom state [completedDate:: 2026-08-10 08:00:00]', 'status', mappings, { completedAt }).line,
+    '- [z] Custom state [completedDate:: 2026-08-10 08:00:00]',
+    'unmapped markers must retain their user-authored metadata',
+  );
+});
+
+test('completedDate follows native checkbox state when inline status-to-checkbox sync is disabled', async () => {
+  const { reconcileTaskStatusLine } = await importUtility();
+
+  assert.equal(
+    reconcileTaskStatusLine(
+      '- [x] Manual completion [status:: todo]',
+      'status',
+      mappings,
+      {
+        syncStatusToCheckbox: false,
+        completedAt: new Date(2026, 7, 11, 19, 12, 13),
+      },
+    ).line,
+    '- [x] Manual completion [status:: todo] [completedDate:: 2026-08-11 19:12:13]',
+  );
+});
+
 test('task status reconciliation preserves an alternate marker and honors canonical status aliases', async () => {
   const { reconcileTaskStatusLine } = await importUtility();
   const alternateMappings = [
@@ -126,7 +167,7 @@ test('task status reconciliation preserves an alternate marker and honors canoni
   );
 });
 
-test('task status reconciliation is registered as an enabled GCM automation', () => {
+test('task reconciliation is registered and keeps completedDate independent of status-sync enablement', () => {
   assert.match(serviceSource, /export class TaskStatusCheckboxReconcileService extends Component/);
   assert.match(serviceSource, /vault\.process\(file, \(data\) =>/);
   assert.match(serviceSource, /workspace\.on\('editor-change'/);
@@ -137,6 +178,8 @@ test('task status reconciliation is registered as an enabled GCM automation', ()
   assert.match(serviceSource, /reconcileTaskStatusLine\(line, statusKey, mappings, \{[\s\S]{0,180}normalizeStatus/);
   assert.match(serviceSource, /data\.includes\('\\r'\) \? '\\r' : '\\n'/);
   assert.match(serviceSource, /getCompleteMarkers\(mappings\)/);
+  assert.match(serviceSource, /syncStatusToCheckbox: this\.isStatusSyncEnabled\(\)/);
+  assert.doesNotMatch(serviceSource, /scheduleFile[\s\S]{0,180}if \(!this\.isStatusSyncEnabled\(\)\) return/);
   assert.match(mainSource, /new TaskStatusCheckboxReconcileService\(this\)/);
   assert.match(mainSource, /this\.addChild\(this\.taskStatusCheckboxReconcileService\)/);
   assert.match(settingsSource, /Sync inline status to checkbox marker/);

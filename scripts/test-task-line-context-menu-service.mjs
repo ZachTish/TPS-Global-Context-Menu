@@ -62,6 +62,17 @@ test('task resolution inherits exact source metadata from rendered surface hosts
   assert.match(serviceSource, /TaskLineResolve', 'line:unresolved'/);
 });
 
+test('TPS Table task ranges synchronize into the canonical batch task menu before opening', () => {
+  assert.match(serviceSource, /surface === 'tps-table'[\s\S]{0,120}this\.routeTpsTableSelection\(evt, taskEl, true\)/);
+  assert.match(serviceSource, /void \(baseSelection \?\? Promise\.resolve\(\)\)\.then\(\(\) => this\.resolveContext/);
+  assert.match(serviceSource, /private routeTpsTableSelection\(/);
+  assert.match(serviceSource, /applyTpsTableRowSelection\?:/);
+  assert.match(serviceSource, /async syncTpsTableSelectionRows\(/);
+  assert.match(serviceSource, /mode: 'tps-table-sync'/);
+  assert.match(serviceSource, /releaseTpsTableSelection\(owner: HTMLElement\)/);
+  assert.doesNotMatch(mainSource, /tableView\?\.applyEntryContextSelection\?\.\(evt, row\)/);
+});
+
 test('Home Daily Note tasks use standard task interactions while the capture editor stays isolated', () => {
   assert.doesNotMatch(serviceSource, /'\.tps-home-capture-preview-body'/);
   assert.match(serviceSource, /isTaskInteractionBoundary[\s\S]*\.tps-home-native-capture-editor/);
@@ -742,10 +753,57 @@ test('TPS Table property cells resolve through the row task identity and exact o
   );
   assert.match(logBaseViewSource, /row\.dataset\.taskText = getTaskDisplayTitle\(entry\.line\)/);
   assert.match(logBaseViewSource, /row\.dataset\.taskLineIdentity = getTaskLineIdentity\(entry\.line\)/);
-  assert.match(serviceSource, /const tableTaskIdentity = this\.getTableTaskIdentity\(taskEl\)/);
-  assert.match(serviceSource, /sourceEl && sourceEl !== taskEl && tableTaskIdentity == null/);
+  assert.match(serviceSource, /const renderedTaskIdentity = this\.getRenderedTaskIdentity\(taskEl\)/);
+  assert.match(serviceSource, /sourceEl && sourceEl !== taskEl && renderedTaskIdentity == null/);
   assert.match(serviceSource, /renderedLine: taskEl\.dataset\.tpsGcmContext === 'table-task' \? null : renderedLine/);
   assert.doesNotMatch(serviceSource, /add\(pluginLine, false\)/);
+});
+
+test('TPS List task rows relocate only by their exact rendered line identity', async () => {
+  const { getTaskLineIdentity, resolveTaskLineIndex } = await importTaskLineResolutionUtility();
+  const renderedLine = '- [ ] Buy';
+  const shiftedLines = [
+    '- [ ] Buy milk',
+    renderedLine,
+  ];
+
+  assert.equal(
+    resolveTaskLineIndex({
+      lines: shiftedLines,
+      candidateIndexes: [0],
+      targetTexts: [],
+      exactTaskText: 'Buy',
+      exactLineIdentity: getTaskLineIdentity(renderedLine),
+      requireExactLineIdentity: true,
+    }),
+    1,
+    'a near-title insertion at the stale coordinate must not receive the rendered task action',
+  );
+  assert.equal(
+    resolveTaskLineIndex({
+      lines: [renderedLine, renderedLine],
+      candidateIndexes: [0],
+      targetTexts: [],
+      exactTaskText: 'Buy',
+      exactLineIdentity: getTaskLineIdentity(renderedLine),
+      requireExactLineIdentity: true,
+    }),
+    -1,
+    'indistinguishable rendered source lines must remain ambiguous',
+  );
+  assert.equal(
+    resolveTaskLineIndex({
+      lines: ['- [ ] Buy'],
+      candidateIndexes: [0],
+      targetTexts: [],
+      exactTaskText: 'Buy',
+      requireExactLineIdentity: true,
+    }),
+    -1,
+    'a TPS List row without its rendered fingerprint must fail closed',
+  );
+  assert.match(serviceSource, /surface !== 'tps-table' && surface !== 'tps-list'/);
+  assert.match(serviceSource, /requireExactLineIdentity: taskElSurface\(taskEl\) === 'tps-list'/);
 });
 
 test('task-menu checkbox mutations reject a relocated same-title task whose workflow token changed', async () => {
