@@ -220,7 +220,19 @@ test('TPS Home separates dashboard UI from daily-note capture storage', () => {
   assert.match(viewSource, /if \(Platform\.isMobile\) \{/);
   assert.match(viewSource, /renderMobileQuickCapture/);
   assert.match(viewSource, /createEl\('textarea'/);
-  assert.match(viewSource, /homeCaptureService\.capture\(value, today\.clone\(\), \{ task \}\)/);
+  assert.match(viewSource, /homeCaptureService\.capture\(value, today\.clone\(\), \{[\s\S]*?historyCause:[\s\S]*?surface: 'home-quick-capture-mobile'/u);
+  assert.match(viewSource, /'home-quick-capture-desktop'/u);
+  assert.match(viewSource, /private async beginHomeTaskHistory\(/u);
+  assert.match(viewSource, /private async commitHomeTaskHistory\(/u);
+  assert.match(viewSource, /this\.applyHomeTaskHistoryIdentities\(replacement, historyIntents\)/u);
+  assert.match(viewSource, /await this\.commitHomeTaskHistory\(historyIntents, processed\)/u);
+  assert.match(viewSource, /candidates\.push\(\{ action: 'task\.delete', beforeRawLine/u);
+  assert.match(viewSource, /candidates\.push\(\{ action: 'task\.create', beforeRawLine: nextRawLine/u);
+  assert.match(captureServiceSource, /classifyHomeCaptureLineHistoryAction\(this\.snapshot\.value, replacement\)/u);
+  assert.match(captureServiceSource, /surface: 'home-line-editor'/u);
+  assert.match(captureServiceSource, /surface: 'home-capture-form'/u);
+  assert.match(captureServiceSource, /surface: 'home-capture-modal'/u);
+  assert.match(captureServiceSource, /private async beginCaptureTaskHistory\(/u);
   assert.match(viewSource, /idleDailyNoteWrite: false/);
   assert.match(viewSource, /resolveHomeCaptureLineRange\(content, editTarget\.line\)/);
   assert.match(viewSource, /quick-capture:mobile-edit-saved/);
@@ -1129,7 +1141,8 @@ test('Home workout date scoping composes in memory without generated Base writes
 
 test('TPS Home does not keep a second inline task or food parser', () => {
   assert.doesNotMatch(viewSource, /readInlineFieldValue/);
-  assert.doesNotMatch(viewSource, /parseTaskLine/);
+  assert.match(viewSource, /parseTaskLine,[\s\S]*?from '\.\.\/utils\/task-line-metadata'/u);
+  assert.doesNotMatch(viewSource, /function parseTaskLine|const parseTaskLine\s*=/u);
   assert.doesNotMatch(viewSource, /getTaskDisplayTitle/);
   assert.doesNotMatch(viewSource, /readTodayFood/);
   assert.doesNotMatch(viewSource, /readDailyFoodTotals/);

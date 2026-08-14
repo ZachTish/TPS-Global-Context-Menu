@@ -102,6 +102,14 @@ import {
 } from '../menu/property-value-choice-menu';
 import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
 import { resolveExactLineRevisionIndex, splitLineItemContent } from '../utils/line-item-deletion';
+import {
+  abortDirectTaskHistory,
+  beginDirectTaskHistory,
+  commitDirectTaskHistory,
+  ensureDirectTaskHistoryIdentity,
+  type DirectTaskHistoryLocation,
+  type DirectTaskHistoryLogContext,
+} from '../utils/direct-task-history';
 import { addLineEntityPropertyMenus } from '../menu/line-entity-property-menu';
 import type { TaskLineContext } from '../services/task-line-context-menu-service';
 import {
@@ -535,66 +543,154 @@ export class TpsTableView extends BasesView {
       selectedBranches: defaults.diagnostics.selectedBranches,
     });
     this.formulaNow = new Date();
+    const historyService = this.plugin.itemHistoryService;
+    const historyContext: DirectTaskHistoryLogContext = {
+      action: 'task.create',
+      surface: 'tps-table',
+      path: targetPath,
+      lineNumber: 0,
+    };
+    const historyHandle = defaults.kind === 'task'
+      ? await beginDirectTaskHistory(historyService, {
+          action: historyContext.action,
+          cause: {
+            kind: 'user',
+            sourcePluginId: 'tps-global-context-menu',
+            surface: historyContext.surface,
+          },
+          before: {
+            path: targetPath,
+            lineNumber: 0,
+            rawLine: line,
+          },
+        })
+      : null;
     let blockedReason: 'mismatch' | 'formula-unresolved' | 'mapping-changed' | null = null;
-    await this.plugin.app.vault.process(targetFile, (content) => {
-      if (defaults.kind === 'task') {
-        const liveMappings = this.getTaskCheckboxMappings();
-        const liveState = desiredTaskStatus
-          ? mapStatusToSubitemCheckboxState(liveMappings, desiredTaskStatus, {
-              normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
-              normalizedMappings: true,
-            })
-          : null;
-        const liveStatus = checkboxState
-          ? mapSubitemCheckboxStateToStatus(liveMappings, checkboxState, { normalizedMappings: true })
-          : null;
-        if (
-          !liveState
-          || liveState !== checkboxState
-          || this.plugin.sharedServices.status.normalize(liveStatus) !== this.plugin.sharedServices.status.normalize(desiredTaskStatus)
-          || this.classifyTaskDoneStatus(desiredTaskStatus) !== plannedDoneClassification
-        ) {
-          blockedReason = 'mapping-changed';
+    let insertedLine = line;
+    let insertedLineIndex = -1;
+    let historyReady = true;
+    let writeAccepted = false;
+    let processedContent = '';
+    try {
+      processedContent = await this.plugin.app.vault.process(targetFile, (content) => {
+        if (defaults.kind === 'task') {
+          const liveMappings = this.getTaskCheckboxMappings();
+          const liveState = desiredTaskStatus
+            ? mapStatusToSubitemCheckboxState(liveMappings, desiredTaskStatus, {
+                normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+                normalizedMappings: true,
+              })
+            : null;
+          const liveStatus = checkboxState
+            ? mapSubitemCheckboxStateToStatus(liveMappings, checkboxState, { normalizedMappings: true })
+            : null;
+          if (
+            !liveState
+            || liveState !== checkboxState
+            || this.plugin.sharedServices.status.normalize(liveStatus) !== this.plugin.sharedServices.status.normalize(desiredTaskStatus)
+            || this.classifyTaskDoneStatus(desiredTaskStatus) !== plannedDoneClassification
+          ) {
+            blockedReason = 'mapping-changed';
+            return content;
+          }
+        }
+        const nextLineNumber = content.length === 0
+          ? 1
+          : content.split('\n').length + (content.endsWith('\n') ? 0 : 1);
+        insertedLineIndex = nextLineNumber - 1;
+        insertedLine = line;
+        if (defaults.kind === 'task') {
+          const historyIdentity = ensureDirectTaskHistoryIdentity(
+            historyService,
+            historyHandle,
+            line,
+            historyContext,
+          );
+          insertedLine = historyIdentity.line;
+          historyReady = historyIdentity.ready;
+        }
+        const filterContext = this.createFilterContext(
+          queryFields,
+          targetFile,
+          insertedLine,
+          rowKind,
+          nextLineNumber,
+        );
+        const prospectiveMatch = evaluateLogBaseFilterRoots(
+          filterRoots,
+          filterContext,
+        );
+        if (filterContext.formulaFailed) {
+          blockedReason = 'formula-unresolved';
           return content;
         }
+        if (prospectiveMatch === false) {
+          blockedReason = 'mismatch';
+          return content;
+        }
+        if (prospectiveMatch == null && hasTpsFormulaReference(filterRoots)) {
+          blockedReason = 'formula-unresolved';
+          return content;
+        }
+        if (prospectiveMatch == null) {
+          logger.flowWarn('TpsTableView', 'create-line:filter-validation-partial', {
+            kind: defaults.kind,
+            targetPath,
+            nextLineNumber,
+            unsupportedFilters: defaults.diagnostics.unsupportedFilters,
+          });
+        }
+        writeAccepted = true;
+        historyContext.lineNumber = insertedLineIndex;
+        return appendTpsTableMarkdownLine(content, insertedLine);
+      });
+    } catch (error) {
+      let reconciled = false;
+      if (writeAccepted && insertedLineIndex >= 0) {
+        try {
+          const currentContent = await this.plugin.app.vault.read(targetFile);
+          const currentLines = String(currentContent || '').split(/\r?\n/u);
+          const exactMatches = currentLines
+            .map((currentLine, index) => currentLine === insertedLine ? index : -1)
+            .filter((index) => index >= 0);
+          const confirmedIndex = currentLines[insertedLineIndex] === insertedLine
+            ? insertedLineIndex
+            : historyHandle && historyReady && exactMatches.length === 1
+              ? exactMatches[0]
+              : -1;
+          if (confirmedIndex >= 0) {
+            insertedLineIndex = confirmedIndex;
+            historyContext.lineNumber = confirmedIndex;
+            processedContent = currentContent;
+            reconciled = true;
+            logger.flow('TpsTableView', 'create-line:write-reconciled', {
+              kind: defaults.kind,
+              targetPath,
+              insertedLineNumber: confirmedIndex + 1,
+            });
+          }
+        } catch (readError) {
+          logger.flowError('TpsTableView', 'create-line:write-reconciliation-failed', readError, {
+            kind: defaults.kind,
+            targetPath,
+          });
+        }
       }
-      const nextLineNumber = content.length === 0
-        ? 1
-        : content.split('\n').length + (content.endsWith('\n') ? 0 : 1);
-      const filterContext = this.createFilterContext(
-        queryFields,
-        targetFile,
-        line,
-        rowKind,
-        nextLineNumber,
-      );
-      const prospectiveMatch = evaluateLogBaseFilterRoots(
-        filterRoots,
-        filterContext,
-      );
-      if (filterContext.formulaFailed) {
-        blockedReason = 'formula-unresolved';
-        return content;
-      }
-      if (prospectiveMatch === false) {
-        blockedReason = 'mismatch';
-        return content;
-      }
-      if (prospectiveMatch == null && hasTpsFormulaReference(filterRoots)) {
-        blockedReason = 'formula-unresolved';
-        return content;
-      }
-      if (prospectiveMatch == null) {
-        logger.flowWarn('TpsTableView', 'create-line:filter-validation-partial', {
+      if (!reconciled) {
+        if (!writeAccepted || !historyHandle || !historyReady) {
+          await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+        }
+        logger.flowError('TpsTableView', 'create-line:write-failed', error, {
           kind: defaults.kind,
           targetPath,
-          nextLineNumber,
-          unsupportedFilters: defaults.diagnostics.unsupportedFilters,
+          historyResolution: writeAccepted && historyHandle && historyReady ? 'pending-recovery' : 'aborted',
         });
+        new Notice(`Could not create the ${defaults.kind}.`);
+        return true;
       }
-      return appendTpsTableMarkdownLine(content, line);
-    });
+    }
     if (blockedReason) {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
       logger.flowWarn('TpsTableView', 'create-line:blocked', {
         reason: blockedReason === 'mismatch'
           ? 'prospective-line-does-not-match-filters'
@@ -610,6 +706,31 @@ export class TpsTableView extends BasesView {
           ? 'TPS Table did not create the task because its checkbox mapping changed before the write.'
           : 'TPS Table did not create the item because its formula filter could not be evaluated reliably.');
       return true;
+    }
+    const persistedLine = String(processedContent || '').split(/\r?\n/u)[insertedLineIndex] || '';
+    if (!writeAccepted || insertedLineIndex < 0 || persistedLine !== insertedLine) {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+      logger.flowWarn('TpsTableView', 'create-line:write-unconfirmed', {
+        kind: defaults.kind,
+        targetPath,
+        insertedLineNumber: insertedLineIndex + 1,
+      });
+      new Notice(`Could not confirm the new ${defaults.kind}. Refresh and try again.`);
+      return true;
+    }
+    if (defaults.kind === 'task') {
+      if (historyReady) {
+        await commitDirectTaskHistory(historyService, historyHandle, {
+          after: {
+            path: targetPath,
+            lineNumber: insertedLineIndex,
+            rawLine: persistedLine,
+          },
+          outcome: 'committed',
+        }, historyContext);
+      } else {
+        await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+      }
     }
     logger.flow('TpsTableView', 'create-line:done', { kind: defaults.kind, targetPath });
     this.queueRender();
@@ -3333,6 +3454,7 @@ export class TpsTableView extends BasesView {
 
   private async deleteEntry(entry: LogLineEntry): Promise<void> {
     const isHeading = parseTpsListHeadingLine(entry.line) != null;
+    const isTask = parseTaskLine(entry.line) != null;
     await requestLineItemDelete({
       app: this.plugin.app,
       file: entry.file,
@@ -3341,22 +3463,90 @@ export class TpsTableView extends BasesView {
       itemLabel: isHeading ? 'heading' : 'record',
       source: 'tps-table-menu',
       ...(isHeading ? { blockKind: 'heading-section' as const } : {}),
+      ...(isTask ? {
+        taskHistory: {
+          service: this.plugin.itemHistoryService,
+          cause: {
+            kind: 'user' as const,
+            sourcePluginId: 'tps-global-context-menu' as const,
+            surface: 'delete',
+          },
+        },
+      } : {}),
       resolveLineIndex: (lines) => resolveEntryLineNumber(lines, entry),
       onDeleted: () => this.queueRender(),
     });
   }
 
   private async updateEntryLine(entry: LogLineEntry, updater: (line: string) => string | null): Promise<boolean> {
+    const expectedIsTask = parseTaskLine(entry.line) != null;
+    const historyService = this.plugin.itemHistoryService;
+    const historyContext: DirectTaskHistoryLogContext = {
+      action: 'task.update',
+      surface: 'tps-table',
+      path: entry.file.path,
+      lineNumber: entry.lineNumber,
+    };
+    const historyHandle = expectedIsTask
+      ? await beginDirectTaskHistory(historyService, {
+          action: historyContext.action,
+          cause: {
+            kind: 'user',
+            sourcePluginId: 'tps-global-context-menu',
+            surface: historyContext.surface,
+          },
+          before: {
+            path: entry.file.path,
+            lineNumber: entry.lineNumber,
+            rawLine: entry.line,
+          },
+        })
+      : null;
     let mutation: ReturnType<typeof mutateLogLineContent> = {
       content: '',
       outcome: 'unchanged',
       lineNumber: entry.lineNumber,
     };
-    await this.plugin.app.vault.process(entry.file, (content) => {
-      mutation = mutateLogLineContent(content, entry, updater);
-      return mutation.content;
-    });
+    let committedLine = '';
+    let historyReady = true;
+    let confirmedHistoryBefore: DirectTaskHistoryLocation | undefined;
+    try {
+      await this.plugin.app.vault.process(entry.file, (content) => {
+        mutation = mutateLogLineContent(content, entry, (currentLine) => {
+          if (historyHandle && parseTaskLine(currentLine)) {
+            confirmedHistoryBefore = {
+              path: entry.file.path,
+              lineNumber: mutation.lineNumber,
+              rawLine: currentLine,
+            };
+          }
+          const nextLine = updater(currentLine);
+          if (!historyHandle || nextLine === null || nextLine === currentLine) {
+            if (historyHandle && nextLine === null) historyReady = false;
+            return nextLine;
+          }
+          if (!parseTaskLine(currentLine) || !parseTaskLine(nextLine)) {
+            historyReady = false;
+            return nextLine;
+          }
+          const ensured = ensureDirectTaskHistoryIdentity(
+            historyService,
+            historyHandle,
+            nextLine,
+            historyContext,
+          );
+          committedLine = ensured.line;
+          historyReady = ensured.ready;
+          return ensured.line;
+        });
+        return mutation.content;
+      });
+    } catch (error) {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+      throw error;
+    }
     if (mutation.outcome === 'stale') {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
       logger.flowWarn('TpsTableView', 'record-mutation:stale-target', {
         path: entry.file.path,
         renderedLineNumber: entry.lineNumber + 1,
@@ -3364,6 +3554,21 @@ export class TpsTableView extends BasesView {
       });
       new Notice('That log row changed before it could be updated. Refresh and try again.');
       return false;
+    }
+    if (confirmedHistoryBefore) confirmedHistoryBefore.lineNumber = mutation.lineNumber;
+    if (mutation.outcome === 'changed' && historyReady && committedLine) {
+      await commitDirectTaskHistory(historyService, historyHandle, {
+        ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+        after: {
+          path: entry.file.path,
+          lineNumber: mutation.lineNumber,
+          rawLine: committedLine,
+        },
+        sourceDisposition: 'retained',
+        outcome: 'committed',
+      }, historyContext);
+    } else {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
     }
     logger.flow('TpsTableView', 'record-mutation:done', {
       path: entry.file.path,

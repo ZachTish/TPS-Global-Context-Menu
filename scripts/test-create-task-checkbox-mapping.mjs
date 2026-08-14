@@ -115,6 +115,7 @@ test('manual create derives ordered options and rebuilds the line from the selec
   let content = '# Tasks\n';
   let processCalls = 0;
   let dailyNoteCalls = 0;
+  const historyEvents = [];
   const plugin = {
     settings: {
       linkedSubitemCheckboxMappings: mappings(),
@@ -130,11 +131,29 @@ test('manual create derives ordered options and rebuilds the line from the selec
         return file;
       },
     },
+    itemHistoryService: {
+      async beginTaskMutation(input) {
+        historyEvents.push({ type: 'begin', input });
+        return { id: 'pending-create' };
+      },
+      ensureTaskIdentity(_handle, line) {
+        historyEvents.push({ type: 'ensure' });
+        return `${line} [tpsId:: create-history-id]`;
+      },
+      async commitTaskMutation(_handle, input) {
+        historyEvents.push({ type: 'commit', input });
+      },
+      async abortTaskMutation() {
+        historyEvents.push({ type: 'abort' });
+      },
+    },
     app: {
       vault: {
         async process(_file, updater) {
           processCalls += 1;
+          historyEvents.push({ type: 'process-start' });
           content = updater(content);
+          historyEvents.push({ type: 'process-done' });
         },
         async cachedRead() { return content; },
       },
@@ -159,7 +178,23 @@ test('manual create derives ordered options and rebuilds the line from the selec
   assert.equal(processCalls, 1);
   assert.equal(dailyNoteCalls, 1);
   assert.match(content, /- \[o\] Mapped task/);
+  assert.match(content, /\[tpsId:: create-history-id\]/u);
   assert.doesNotMatch(content, /untrusted prebuilt line|\[x\]/);
+  assert.deepEqual(historyEvents.map((event) => event.type), [
+    'begin',
+    'process-start',
+    'ensure',
+    'process-done',
+    'commit',
+  ]);
+  assert.deepEqual(historyEvents[0].input.cause, {
+    kind: 'user',
+    sourcePluginId: 'tps-global-context-menu',
+    surface: 'create-task-modal',
+  });
+  assert.equal(historyEvents[4].input.after.path, file.path);
+  assert.equal(historyEvents[4].input.after.lineNumber, 1);
+  assert.match(historyEvents[4].input.after.rawLine, /\[tpsId:: create-history-id\]/u);
 });
 
 test('manual create fails before target creation or processing when mappings are missing or stale', async () => {

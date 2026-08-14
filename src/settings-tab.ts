@@ -1975,6 +1975,62 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           })
       );
     new Setting(taskAutomation)
+      .setName('After moving a task from a Daily Note')
+      .setDesc('Choose whether a cross-note move leaves a migrated scratchpad record or removes the complete source block. The destination task keeps its stable identity either way.')
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('mark-migrated', 'Keep a migrated marker')
+          .addOption('remove', 'Remove the source block')
+          .setValue(this.plugin.settings.dailyNoteTaskMoveSourceBehavior)
+          .onChange(async (value) => {
+            if (value !== 'mark-migrated' && value !== 'remove') return;
+            this.plugin.settings.dailyNoteTaskMoveSourceBehavior = value;
+            await this.plugin.saveSettings();
+          })
+      );
+    new Setting(taskAutomation)
+      .setName('Keep local item history')
+      .setDesc('Record committed user actions such as task status, priority, tag, checkbox, move, and delete changes in a private plugin datastore. On its first tracked change, a surviving task receives a stable tpsId in the same note edit so later events remain attached to that task. Vault-relative before/after note paths, including filenames, are stored; other task edits are recorded without their text. Raw task content and note bodies are never stored, background automation is excluded, and this data stays on this device.')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.enableItemHistory !== false)
+          .onChange(async (value) => {
+            const previous = this.plugin.settings.enableItemHistory !== false;
+            if (Object.is(value, previous)) return;
+            this.plugin.settings.enableItemHistory = value;
+            this.plugin.itemHistoryService?.updateEnabled(value);
+            try {
+              await this.plugin.saveSettings();
+            } catch (error) {
+              this.plugin.settings.enableItemHistory = previous;
+              this.plugin.itemHistoryService?.updateEnabled(previous);
+              this.redisplayPreservingRouteFocus('tasks');
+              throw error;
+            }
+            this.redisplayPreservingRouteFocus('tasks');
+          })
+      );
+    if (this.plugin.settings.enableItemHistory !== false) {
+      new Setting(taskAutomation)
+        .setName('Item history retention')
+        .setDesc('Events are also capped at 200 per item and 25,000 across the vault. Older events are pruned locally.')
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('30', '30 days')
+            .addOption('90', '90 days')
+            .addOption('180', '180 days')
+            .addOption('365', '1 year')
+            .setValue(String(this.plugin.settings.itemHistoryRetentionDays || 90))
+            .onChange(async (value) => {
+              const days = Number.parseInt(value, 10);
+              if (!Number.isFinite(days) || days < 1) return;
+              this.plugin.settings.itemHistoryRetentionDays = days;
+              await this.plugin.saveSettings();
+              await this.plugin.itemHistoryService?.prune();
+            })
+        );
+    }
+    new Setting(taskAutomation)
       .setName('Hide completed checkbox lines')
       .setDesc('Hide checked task lines and cancelled task lines like - [x] and - [-] in reading view and live preview. Source mode stays unchanged, and live preview includes a temporary reveal button.')
       .addToggle((toggle) =>

@@ -171,6 +171,7 @@ function createNativeCheckboxMutationFixture(
   return {
     handler,
     context,
+    plugin,
     getContent: () => content,
   };
 }
@@ -292,6 +293,39 @@ test('native checkbox menu clears checkbox-owned workflow fields without touchin
   assert.match(rawLine, /\[priority:: high\]/u);
   assert.match(rawLine, /`\[task\.status:: example\]`/u);
   assert.doesNotMatch(semanticLine, /\[(?:taskStatus|task\.status|task\.checkboxStatus|checkboxStatus)::/iu);
+});
+
+test('native checkbox menu journals the committed user action with an atomic stable identity', async () => {
+  const { TaskCheckboxHandler } = await handlerModule;
+  const fixture = createNativeCheckboxMutationFixture(TaskCheckboxHandler);
+  const history = { begin: [], ensure: [], commit: [], abort: [] };
+  fixture.plugin.itemHistoryService = {
+    async beginTaskMutation(input) {
+      history.begin.push(structuredClone(input));
+      return { operationId: 'op_checkbox', entityId: 'item_checkbox' };
+    },
+    ensureTaskIdentity(handle, line) {
+      history.ensure.push({ handle, line });
+      return `${line} [tpsId:: ${handle.entityId}]`;
+    },
+    async commitTaskMutation(handle, input) {
+      history.commit.push({ handle, input: structuredClone(input) });
+    },
+    async abortTaskMutation(handle) {
+      history.abort.push(handle);
+    },
+  };
+
+  await fixture.handler.setTaskCheckboxState(fixture.context, '[x]');
+
+  assert.match(fixture.getContent(), /\[tpsId:: item_checkbox\]/u);
+  assert.equal(history.begin.length, 1);
+  assert.equal(history.begin[0].action, 'task.checkbox');
+  assert.equal(history.begin[0].cause.surface, 'checkbox-context-menu');
+  assert.equal(history.commit.length, 1);
+  assert.equal(history.commit[0].input.outcome, 'committed');
+  assert.match(history.commit[0].input.after.rawLine, /\[tpsId:: item_checkbox\]/u);
+  assert.equal(history.abort.length, 0);
 });
 
 test('native checkbox menu refuses a mapping change inside the body mutation callback', async () => {

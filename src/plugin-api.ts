@@ -28,6 +28,10 @@ import {
     readLineEntityInlineFieldValue,
 } from './services/line-entity-source-provider';
 import { getMarkdownContentLines } from './utils/markdown-document-lines';
+import type {
+    ItemHistoryQueryOptions,
+    ItemHistoryTaskReference,
+} from './services/item-history-service';
 
 type ChecklistTaskState = string;
 
@@ -886,6 +890,16 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         },
         taskCheckboxes: taskCheckboxesApi,
         tasks: plugin.taskApiService,
+        history: {
+            version: 1,
+            resolveEntity: (reference: string | ItemHistoryTaskReference) =>
+                plugin.itemHistoryService.resolveEntity(reference),
+            query: (reference: string | ItemHistoryTaskReference, options?: ItemHistoryQueryOptions) =>
+                plugin.itemHistoryService.query(reference, options),
+            stats: () => plugin.itemHistoryService.stats(),
+            prune: () => plugin.itemHistoryService.prune(),
+            clear: () => plugin.itemHistoryService.clear(),
+        },
         ui: {
             shouldForceBaseLinkPreview: () => plugin.settings.enableBasesForcedLinkPreview === true,
         },

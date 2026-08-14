@@ -37,6 +37,36 @@ const context = {
   basePath: 'Daily Note Feed.base',
 };
 
+test('Home action routing exists before persisted Home views can be restored', () => {
+  const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  const serviceInitialization = 'this.homeComponentActionService = new HomeComponentActionService(this);';
+  const viewRegistration = 'this.registerView(TPS_HOME_VIEW_TYPE';
+  const captureInitialization = 'this.homeCaptureService = new HomeCaptureService(this);';
+  const captureHandlerRegistration = 'this.homeComponentActionService.register(HOME_CAPTURE_COMMAND_ID';
+  const serviceIndex = mainSource.indexOf(serviceInitialization);
+  const viewIndex = mainSource.indexOf(viewRegistration);
+  const captureIndex = mainSource.indexOf(captureInitialization);
+  const handlerIndex = mainSource.indexOf(captureHandlerRegistration);
+
+  assert.equal(
+    mainSource.split(serviceInitialization).length - 1,
+    1,
+    'the Home action service must have one lifecycle owner',
+  );
+  assert.ok(
+    [serviceIndex, viewIndex, captureIndex, handlerIndex].every((index) => index >= 0),
+    'the lifecycle contract requires the service, view, capture dependency, and built-in registration',
+  );
+  assert.ok(
+    serviceIndex < viewIndex,
+    'registerView may synchronously restore a persisted Home leaf, so its action service must already exist',
+  );
+  assert.ok(
+    captureIndex < handlerIndex,
+    'built-in capture handlers must still wait for HomeCaptureService',
+  );
+});
+
 test('Home action settings normalize malformed input, targets, and duplicate IDs', async () => {
   const { normalizeHomeComponentActions } = await loadCore();
   assert.deepEqual(normalizeHomeComponentActions(null), {});

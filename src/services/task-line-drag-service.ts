@@ -283,8 +283,13 @@ export class TaskLineDragService {
         targetFile,
         placement: 'line',
         lineNumber: Math.max(0, targetLineIndex),
-        sourcePolicy: 'migrate-if-daily-note',
+        sourcePolicy: 'configured-daily-note',
         resolution: 'exact-or-identity',
+      },
+      {
+        kind: 'user',
+        sourcePluginId: 'tps-global-context-menu',
+        surface: 'task-line-drag',
       },
     );
     if (!result.ok) {

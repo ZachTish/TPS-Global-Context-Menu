@@ -55,6 +55,37 @@ test('task checkbox UI mutations share ownership cleanup and atomic mapping guar
   assert.match(taskCheckboxHandlerSource, /getLinkedSubitemMappingForState\(liveMappings, token/u);
 });
 
+test('direct task UI writes journal only confirmed user mutations with atomic identity injection', () => {
+  const updateStart = serviceSource.indexOf('private async updateTaskLine(');
+  const updateEnd = serviceSource.indexOf('private async updateTaskLines(', updateStart);
+  const updateSource = serviceSource.slice(updateStart, updateEnd);
+  assert.ok(updateStart >= 0 && updateEnd > updateStart);
+  assert.match(updateSource, /await beginDirectTaskHistory\(this\.plugin\.itemHistoryService/u);
+  assert.ok(
+    updateSource.indexOf('beginDirectTaskHistory') < updateSource.indexOf('this.plugin.app.vault.process'),
+    'the pending history intent must be written before the task mutation starts',
+  );
+  assert.match(updateSource, /ensureDirectTaskHistoryIdentity\([\s\S]{0,420}lines\[lineIndex\] = nextLine/u);
+  assert.match(updateSource, /if \(!changed\) \{[\s\S]{0,220}abortDirectTaskHistory/u);
+  assert.match(updateSource, /confirmedHistoryBefore = \{[\s\S]{0,160}rawLine: currentLine/u);
+  assert.match(updateSource, /commitDirectTaskHistory\([\s\S]{0,180}confirmedBefore: confirmedHistoryBefore/u);
+  assert.match(updateSource, /sourceDisposition: 'retained'/u);
+  assert.match(updateSource, /sourceDisposition: 'removed'/u);
+  assert.match(updateSource, /surface: context\.isCalendarTask \? 'calendar-task-context-menu' : 'task-line-context-menu'/u);
+  assert.match(taskCheckboxHandlerSource, /action: 'task\.checkbox'/u);
+  assert.match(taskCheckboxHandlerSource, /surface: 'checkbox-context-menu'/u);
+  assert.match(taskCheckboxHandlerSource, /ensureDirectTaskHistoryIdentity\([\s\S]{0,420}lines\[lineIndex\] = updatedLine/u);
+  assert.match(taskCheckboxHandlerSource, /confirmedHistoryBefore = \{[\s\S]{0,160}rawLine: currentLine/u);
+  const deleteTargetStart = serviceSource.indexOf('private createTaskDeleteTarget(');
+  const deleteTargetEnd = serviceSource.indexOf('private async moveTaskToFile(', deleteTargetStart);
+  const deleteTargetSource = serviceSource.slice(deleteTargetStart, deleteTargetEnd);
+  assert.ok(deleteTargetStart >= 0 && deleteTargetEnd > deleteTargetStart);
+  assert.match(deleteTargetSource, /taskHistory: \{[\s\S]{0,180}service: this\.plugin\.itemHistoryService/u);
+  assert.match(deleteTargetSource, /kind: 'user'/u);
+  assert.match(deleteTargetSource, /sourcePluginId: 'tps-global-context-menu'/u);
+  assert.match(deleteTargetSource, /surface: context\.isCalendarTask \? 'calendar-task-context-menu' : 'task-line-context-menu'/u);
+});
+
 test('task resolution inherits exact source metadata from rendered surface hosts', () => {
   assert.match(serviceSource, /closest<HTMLElement>\('\[data-task-path\], \[data-tps-kanban-path\], \[data-source-path\], \[data-file-path\], \[data-path\]'\)/);
   assert.match(serviceSource, /metadataHost\?\.dataset\.sourcePath/);
@@ -91,6 +122,13 @@ test('GCM task and bullet line flows can create a linked child note without drop
   assert.match(dailyInboxLineSource, /inheritParentTemporalMetadata: false/);
   assert.match(dailyInboxLineSource, /\(currentLine\) => this\.associateLineWithNote\(currentLine, noteFile\.path, title\)/);
   assert.match(dailyInboxLineSource, /private associateLineWithNote\(line: string, notePath: string, fallbackTitle: string\)/);
+  const dailyInboxUpdateStart = dailyInboxLineSource.indexOf('private async updateLineInFile(');
+  const dailyInboxUpdateEnd = dailyInboxLineSource.indexOf('private resolveLineIndex(', dailyInboxUpdateStart);
+  const dailyInboxUpdateSource = dailyInboxLineSource.slice(dailyInboxUpdateStart, dailyInboxUpdateEnd);
+  assert.match(dailyInboxUpdateSource, /await beginDirectTaskHistory\(this\.plugin\.itemHistoryService/u);
+  assert.match(dailyInboxUpdateSource, /confirmedHistoryBefore = \{[\s\S]{0,160}rawLine: currentLine/u);
+  assert.match(dailyInboxUpdateSource, /ensureDirectTaskHistoryIdentity\(/u);
+  assert.match(dailyInboxUpdateSource, /commitDirectTaskHistory\([\s\S]{0,220}confirmedBefore: confirmedHistoryBefore/u);
   assert.doesNotMatch(dailyInboxLineSource, /setTaskAssociatedNotePath\(context\.rawLine, noteFile\.path\)/);
   assert.match(dailyInboxLineSource, /if \(!sourceUpdated\) \{[\s\S]{0,420}stage: 'write-source-association'[\s\S]{0,180}return null;/);
   assert.ok(
@@ -1250,7 +1288,7 @@ test('inline task checkboxes can start task-line drags for calendar drops', () =
   assert.match(dragServiceSource, /targetEl\.closest\('\.cm-line, \.tps-gcm-linked-subitem-cm-line, \[data-line\]'\)/);
   assert.doesNotMatch(dragServiceSource, /closest\('\.tps-gcm-linked-subitem-task, \.tps-gcm-linked-subitem-checkbox, \.tps-gcm-checklist-toggle'\)\) return/);
   assert.match(dragServiceSource, /await this\.plugin\.taskApiService\.move\(/);
-  assert.match(dragServiceSource, /sourcePolicy: 'migrate-if-daily-note'/);
+  assert.match(dragServiceSource, /sourcePolicy: 'configured-daily-note'/);
   assert.match(dragServiceSource, /resolution: 'exact-or-identity'/);
   assert.doesNotMatch(dragServiceSource, /this\.plugin\.app\.vault\.process\(sourceFile/);
 });
@@ -1273,7 +1311,9 @@ test('task menu can move a task to another file append-only without losing the s
   assert.match(serviceSource, /lineNumber: context\.lineIndex/);
   assert.match(serviceSource, /rawLine: context\.rawLine/);
   assert.match(serviceSource, /targetFile,/);
-  assert.match(serviceSource, /sourcePolicy: 'migrate-if-daily-note'/);
+  assert.match(serviceSource, /sourcePolicy: 'configured-daily-note'/);
+  assert.match(serviceSource, /dailyNoteTaskMoveSourceBehavior !== 'remove'/);
+  assert.match(serviceSource, /removed it from the Daily Note/);
   assert.doesNotMatch(serviceSource, /private async rollbackTaskBlockFromTarget/);
   assert.doesNotMatch(serviceSource, /private isDailyNoteSourceFile/);
   assert.match(serviceSource, /marked the Daily Note record as migrated/);
@@ -1615,7 +1655,9 @@ test('create task command appends to today daily note and does not create task s
   assert.match(createTaskServiceSource, /updateTaskLineTimestamps\(taskLine/);
   assert.match(createTaskServiceSource, /vault\.process\(targetFile, \(content\) => \{/);
   assert.match(createTaskServiceSource, /isLinkedSubitemSemanticCheckboxPlanCurrent\(/);
-  assert.match(createTaskServiceSource, /return insertLineAfterFrontmatter\(content, stampedTaskLine\)/);
+  assert.match(createTaskServiceSource, /return insertLineAfterFrontmatter\(content, insertedTaskLine\)/);
+  assert.match(createTaskServiceSource, /surface: 'create-task-modal'/);
+  assert.match(createTaskServiceSource, /ensureDirectTaskHistoryIdentity\(/);
   assert.match(createTaskServiceSource, /openCreateTaskModalWithCanonicalTarget/);
   assert.match(createTaskModalSource, /Natural language schedule text is parsed into the Scheduled field/);
   assert.match(createTaskModalSource, /parseCreateTaskInput\(this\.titleInput\?\.getValue\?\.\(\) \|\| ''\)/);

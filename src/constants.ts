@@ -189,6 +189,10 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   // Default paths for new items
   defaultAttachmentsPath: '',
   checklistPromotionBehavior: 'remove',
+  dailyNoteTaskMoveSourceBehavior: 'mark-migrated',
+  enableItemHistory: true,
+  itemHistoryRetentionDays: 90,
+  itemHistoryMaxEntries: 25000,
   tpsBaseWriteFallbackMode: 'today-daily-note',
   tpsBaseWriteFallbackPath: '',
 

@@ -22,9 +22,21 @@ import { addHomeBaseContextFilter, resolveHomeBaseDefinitionSourcePath } from '.
 import { FileSuggestModal } from '../modals/FileSuggestModal';
 import { SerializedLatestSettingWriter } from '../services/serialized-latest-setting-writer';
 import {
+  parseTaskLine,
   preserveTpsInlinePropsMetadata,
   stripTaskInlinePropsMetadata,
 } from '../utils/task-line-metadata';
+import { scanMarkdownDocumentLines } from '../utils/markdown-document-lines';
+import { ensureTaskHistoryIdentity, getTaskHistoryIdentity } from '../services/item-history-core';
+import {
+  abortDirectTaskHistory,
+  beginDirectTaskHistory,
+  commitDirectTaskHistory,
+  ensureDirectTaskHistoryIdentity,
+  type DirectTaskHistoryAction,
+  type DirectTaskHistoryHandle,
+  type DirectTaskHistoryLogContext,
+} from '../utils/direct-task-history';
 
 export const TPS_HOME_VIEW_TYPE = 'tps-home';
 
@@ -131,6 +143,14 @@ interface HomeCaptureEditorSession {
   conflictRecoveryScheduled: boolean;
   internalChange: boolean;
   operationPromise: Promise<'saved' | 'conflict' | 'stale'> | null;
+}
+
+interface HomeTaskHistoryIntent {
+  handle: DirectTaskHistoryHandle | null;
+  context: DirectTaskHistoryLogContext;
+  lineOffset: number;
+  nextRawLine: string;
+  ready: boolean;
 }
 
 class HomeCaptureRevisionConflictError extends Error {
@@ -1112,17 +1132,44 @@ export class TpsHomeView extends ItemView {
         if (editFile && editSnapshot && editTarget) {
           if (!this.plugin.homeCaptureService.validateCaptureValue(value, today.clone())) return;
           let conflict = false;
-          await this.app.vault.process(editFile, (current) => {
-            const replacement = preserveTpsInlinePropsMetadata(editSnapshot!.value, value);
-            const next = replaceHomeCaptureRangeIfUnchanged(current, editSnapshot!, [editSnapshot!.value], replacement);
-            if (next == null) {
-              conflict = true;
-              return current;
-            }
-            return next;
-          });
+          let replacement = preserveTpsInlinePropsMetadata(editSnapshot.value, value);
+          if (replacement === editSnapshot.value) {
+            this.homeCaptureEditTarget = null;
+            await this.render();
+            return;
+          }
+          const historyIntents = await this.beginHomeTaskHistory(
+            editFile,
+            'update',
+            editSnapshot.value,
+            replacement,
+            editTarget.line,
+            'home-quick-capture-mobile',
+          );
+          if (!this.isHomeRenderCurrent(generation) || !textarea.isConnected || textarea.value.trim() !== value) {
+            await this.abortHomeTaskHistory(historyIntents);
+            return;
+          }
+          replacement = this.applyHomeTaskHistoryIdentities(replacement, historyIntents);
+          let processed: string;
+          let changed = false;
+          try {
+            processed = await this.app.vault.process(editFile, (current) => {
+              const next = replaceHomeCaptureRangeIfUnchanged(current, editSnapshot!, [editSnapshot!.value], replacement);
+              if (next == null) {
+                conflict = true;
+                return current;
+              }
+              changed = next !== current;
+              return next;
+            });
+          } catch (error) {
+            await this.abortHomeTaskHistory(historyIntents);
+            throw error;
+          }
           this.homeCaptureEditTarget = null;
           if (conflict) {
+            await this.abortHomeTaskHistory(historyIntents);
             logger.flowWarn('HomeView', 'quick-capture:mobile-edit-conflict', {
               target: editFile.path,
               selectedDate: today.format('YYYY-MM-DD'),
@@ -1130,6 +1177,11 @@ export class TpsHomeView extends ItemView {
             });
             new Notice('That Daily Note line changed on another device. Nothing was replaced.', 10000);
           } else {
+            if (changed) {
+              await this.commitHomeTaskHistory(historyIntents, processed);
+            } else {
+              await this.abortHomeTaskHistory(historyIntents);
+            }
             logger.flow('HomeView', 'quick-capture:mobile-edit-saved', {
               target: editFile.path,
               selectedDate: today.format('YYYY-MM-DD'),
@@ -1176,7 +1228,16 @@ export class TpsHomeView extends ItemView {
             return;
           }
         }
-        const saved = await this.plugin.homeCaptureService.capture(value, today.clone(), { task });
+        const saved = await this.plugin.homeCaptureService.capture(value, today.clone(), {
+          task,
+          historyCause: task
+            ? {
+                kind: 'user',
+                sourcePluginId: 'tps-global-context-menu',
+                surface: 'home-quick-capture-mobile',
+              }
+            : undefined,
+        });
         if (!saved) return;
         logger.flow('HomeView', 'quick-capture:mobile-submitted', {
           target: saved.path,
@@ -1375,6 +1436,34 @@ export class TpsHomeView extends ItemView {
       return 'conflict';
     }
 
+    const historyMode = action === 'capture-task'
+      ? 'create'
+      : action === 'edit-save'
+        ? 'update'
+        : null;
+    const startLine = session.cm.state.doc.lineAt(
+      Math.min(session.rangeFrom, session.cm.state.doc.length),
+    ).number - 1;
+    const historyIntents = historyMode
+      ? await this.beginHomeTaskHistory(
+          session.file,
+          historyMode,
+          historyMode === 'update' ? session.snapshot.value : replacement,
+          replacement,
+          startLine,
+          'home-quick-capture-desktop',
+        )
+      : [];
+    if (historyIntents.length > 0 && (
+      (allowTeardown ? !this.isHomeCaptureSessionMounted(session) : !this.isHomeCaptureSessionCurrent(session))
+      || session.conflict
+      || this.getHomeCaptureSessionValue(session) !== currentValue
+    )) {
+      await this.abortHomeTaskHistory(historyIntents);
+      return 'stale';
+    }
+    replacement = this.applyHomeTaskHistoryIdentities(replacement, historyIntents);
+
     this.replaceHomeCaptureSessionEditorValue(session, replacement);
     const allowedValues = new Set(session.allowedValues);
     allowedValues.add(replacement);
@@ -1390,6 +1479,7 @@ export class TpsHomeView extends ItemView {
         return next;
       });
     } catch (error) {
+      await this.abortHomeTaskHistory(historyIntents);
       logger.flowError('HomeView', 'quick-capture:range-process-failed', error, {
         target: session.file.path,
         action,
@@ -1398,11 +1488,13 @@ export class TpsHomeView extends ItemView {
       return 'conflict';
     }
     if (revisionConflict) {
+      await this.abortHomeTaskHistory(historyIntents);
       await this.handleHomeCaptureRevisionConflict(session, action);
       return 'conflict';
     }
 
     session.settled = true;
+    await this.commitHomeTaskHistory(historyIntents, processed);
     (session.view as MarkdownView & { data: string }).data = processed;
     try {
       await session.view.save();
@@ -1418,6 +1510,153 @@ export class TpsHomeView extends ItemView {
       mode: session.editTarget ? 'edit-line' : 'new-line',
     });
     return 'saved';
+  }
+
+  private async beginHomeTaskHistory(
+    file: TFile,
+    mode: 'create' | 'update',
+    beforeValue: string,
+    nextValue: string,
+    startLine: number,
+    surface: string,
+  ): Promise<HomeTaskHistoryIntent[]> {
+    const beforeLines = String(beforeValue || '').replace(/\r\n?/gu, '\n').split('\n');
+    const nextLines = String(nextValue || '').replace(/\r\n?/gu, '\n').split('\n');
+    const candidates: Array<{
+      action: DirectTaskHistoryAction;
+      beforeRawLine: string;
+      nextRawLine: string;
+      lineOffset: number;
+    }> = [];
+    if (mode === 'create') {
+      nextLines.forEach((nextRawLine, lineOffset) => {
+        if (parseTaskLine(nextRawLine)) {
+          candidates.push({ action: 'task.create', beforeRawLine: nextRawLine, nextRawLine, lineOffset });
+        }
+      });
+    } else if (beforeLines[0] !== nextLines[0]) {
+      const beforeRawLine = beforeLines[0] || '';
+      const nextRawLine = nextLines[0] || '';
+      const beforeTask = parseTaskLine(beforeRawLine) !== null;
+      const nextTask = parseTaskLine(nextRawLine) !== null;
+      if (beforeTask && nextTask) {
+        candidates.push({ action: 'task.update', beforeRawLine, nextRawLine, lineOffset: 0 });
+      } else if (beforeTask) {
+        candidates.push({ action: 'task.delete', beforeRawLine, nextRawLine, lineOffset: 0 });
+      } else if (nextTask) {
+        candidates.push({ action: 'task.create', beforeRawLine: nextRawLine, nextRawLine, lineOffset: 0 });
+      }
+    }
+    const intents: HomeTaskHistoryIntent[] = [];
+    for (const candidate of candidates) {
+      const context: DirectTaskHistoryLogContext = {
+        action: candidate.action,
+        surface,
+        path: file.path,
+        lineNumber: startLine + candidate.lineOffset,
+      };
+      const handle = await beginDirectTaskHistory(this.plugin.itemHistoryService, {
+        action: context.action,
+        cause: {
+          kind: 'user',
+          sourcePluginId: 'tps-global-context-menu',
+          surface,
+        },
+        before: {
+          path: file.path,
+          lineNumber: context.lineNumber,
+          rawLine: candidate.beforeRawLine,
+        },
+      });
+      intents.push({
+        handle,
+        context,
+        lineOffset: candidate.lineOffset,
+        nextRawLine: candidate.nextRawLine,
+        ready: true,
+      });
+    }
+    return intents;
+  }
+
+  private applyHomeTaskHistoryIdentities(
+    replacement: string,
+    intents: HomeTaskHistoryIntent[],
+  ): string {
+    if (intents.length === 0) return replacement;
+    const lines = String(replacement || '').replace(/\r\n?/gu, '\n').split('\n');
+    for (const intent of intents) {
+      if (intent.context.action === 'task.delete') continue;
+      const currentLine = lines[intent.lineOffset] ?? intent.nextRawLine;
+      const ensured = ensureDirectTaskHistoryIdentity(
+        this.plugin.itemHistoryService,
+        intent.handle,
+        currentLine,
+        intent.context,
+      );
+      intent.ready = ensured.ready;
+      intent.nextRawLine = ensured.line;
+      lines[intent.lineOffset] = ensured.line;
+    }
+    return lines.join('\n');
+  }
+
+  private async commitHomeTaskHistory(
+    intents: HomeTaskHistoryIntent[],
+    currentContent: string,
+  ): Promise<void> {
+    if (intents.length === 0) return;
+    const documentLines = scanMarkdownDocumentLines(currentContent);
+    for (const intent of intents) {
+      if (!intent.handle || !intent.ready) {
+        await abortDirectTaskHistory(this.plugin.itemHistoryService, intent.handle, intent.context);
+        continue;
+      }
+      if (intent.context.action === 'task.delete') {
+        const replacement = documentLines.find((line) => line.index === intent.context.lineNumber);
+        if (!replacement || replacement.text !== intent.nextRawLine || parseTaskLine(replacement.text)) {
+          await abortDirectTaskHistory(this.plugin.itemHistoryService, intent.handle, intent.context);
+          continue;
+        }
+        await commitDirectTaskHistory(this.plugin.itemHistoryService, intent.handle, {
+          outcome: 'committed',
+        }, intent.context);
+        continue;
+      }
+      const expectedIdentity = getTaskHistoryIdentity(intent.nextRawLine);
+      const matches = expectedIdentity
+        ? documentLines.filter((line) => {
+            if (!line.isContent || !parseTaskLine(line.text) || getTaskHistoryIdentity(line.text) !== expectedIdentity) {
+              return false;
+            }
+            try {
+              ensureTaskHistoryIdentity(line.text, expectedIdentity);
+              return true;
+            } catch {
+              return false;
+            }
+          })
+        : [];
+      if (matches.length !== 1) {
+        await abortDirectTaskHistory(this.plugin.itemHistoryService, intent.handle, intent.context);
+        continue;
+      }
+      const after = matches[0];
+      await commitDirectTaskHistory(this.plugin.itemHistoryService, intent.handle, {
+        after: {
+          path: intent.context.path,
+          lineNumber: after.index,
+          rawLine: after.text,
+        },
+        ...(intent.context.action === 'task.update' ? { sourceDisposition: 'retained' as const } : {}),
+        outcome: 'committed',
+      }, intent.context);
+    }
+  }
+
+  private async abortHomeTaskHistory(intents: HomeTaskHistoryIntent[]): Promise<void> {
+    await Promise.all(intents.map((intent) =>
+      abortDirectTaskHistory(this.plugin.itemHistoryService, intent.handle, intent.context)));
   }
 
   private async handleHomeCaptureRevisionConflict(session: HomeCaptureEditorSession, action: string): Promise<void> {

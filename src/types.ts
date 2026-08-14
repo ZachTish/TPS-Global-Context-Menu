@@ -51,6 +51,7 @@ export interface VirtualBaseEmbedProperty {
 export type GcmLiveMenuPosition = 'left' | 'center' | 'right';
 export type ParentLinkFormat = 'wikilink' | 'markdown-title';
 export type ChecklistPromotionBehavior = 'remove' | 'complete-and-link' | 'link-only';
+export type DailyNoteTaskMoveSourceBehavior = 'mark-migrated' | 'remove';
 export type LinkedSubitemCheckboxStyle = 'native' | 'soft-link' | 'accent';
 export type TimeTrackingStorageMode = 'daily-note' | 'source-note' | 'dedicated-note';
 export type TimeTrackingDailyNotePlacement = 'top' | 'bottom';
@@ -592,6 +593,10 @@ export interface TPSGlobalContextMenuSettings {
   // Default paths for new items
   defaultAttachmentsPath: string;
   checklistPromotionBehavior: ChecklistPromotionBehavior;
+  dailyNoteTaskMoveSourceBehavior: DailyNoteTaskMoveSourceBehavior;
+  enableItemHistory: boolean;
+  itemHistoryRetentionDays: number;
+  itemHistoryMaxEntries: number;
   tpsBaseWriteFallbackMode: TpsBaseWriteFallbackMode;
   tpsBaseWriteFallbackPath: string;
 

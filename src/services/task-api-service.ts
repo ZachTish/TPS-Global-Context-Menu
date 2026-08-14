@@ -45,6 +45,8 @@ import * as logger from '../logger';
 import { findRelationalStatusProperty } from '../utils/property-option-source';
 import { classifyMappedTaskCheckboxState } from '../utils/task-checkbox-classification';
 import { scanMarkdownDocumentLines } from '../utils/markdown-document-lines';
+import type { ItemHistoryUserCause } from './item-history-service';
+import { ensureTaskHistoryIdentity, getTaskHistoryIdentity } from './item-history-core';
 
 const INLINE_FIELD_GLOBAL_RE = /(?:^|\s)([\[(])\s*([A-Za-z0-9_-]+)\s*::\s*([^\]\)]*)[\])]/g;
 
@@ -61,6 +63,8 @@ export interface GcmTaskRef {
 export interface GcmTaskRecord {
   type: 'task-line';
   id: string;
+  /** Stable history identity when the line already has a TPS-owned task or subitem ID. */
+  stableId: string | null;
   path: string;
   line: number;
   lineNumber: number;
@@ -121,7 +125,11 @@ export interface GcmTaskMoveTarget {
   line?: number;
   lineNumber?: number;
   placement?: 'end' | 'after-frontmatter' | 'line';
-  sourcePolicy?: 'remove' | 'migrate-if-daily-note';
+  /**
+   * `configured-daily-note` follows GCM's user setting for cross-file moves
+   * from Daily Notes. The two legacy policies remain explicit and stable.
+   */
+  sourcePolicy?: 'remove' | 'migrate-if-daily-note' | 'configured-daily-note';
   resolution?: 'default' | 'exact-or-identity';
 }
 
@@ -136,6 +144,7 @@ export interface GcmTaskMutationResult {
 interface TaskUpdateExecutionOptions {
   checklistFollowup?: boolean;
   completionTarget?: boolean;
+  historyAction?: 'task.update' | 'task.checkbox';
 }
 
 interface PostFollowupTaskIdentity {
@@ -160,9 +169,19 @@ type TaskInputMappingPreflight =
   | { ok: false; error: string };
 
 type RejectedWriteState = 'unchanged' | 'committed' | 'conflicted';
+type TaskHistoryAction = 'task.update' | 'task.checkbox' | 'task.move' | 'task.migrate' | 'task.delete' | 'task.create';
+type TaskHistoryLocator = { path: string; lineNumber: number; rawLine: string };
+type TaskHistoryHandle = Awaited<ReturnType<TPSGlobalContextMenuPlugin['itemHistoryService']['beginTaskMutation']>>;
+type TaskHistoryCommit = {
+  confirmedBefore?: TaskHistoryLocator;
+  after?: TaskHistoryLocator;
+  sourceDisposition?: 'removed' | 'migrated' | 'retained';
+  outcome?: 'committed' | 'partial';
+};
 
 export class TaskApiService {
-  readonly version = 2;
+  readonly version = 3;
+  private readonly historyIdentityFailures = new WeakSet<object>();
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
@@ -199,7 +218,7 @@ export class TaskApiService {
     return resolved?.record ?? null;
   }
 
-  async create(input: GcmTaskCreateInput): Promise<GcmTaskMutationResult> {
+  async create(input: GcmTaskCreateInput, cause?: ItemHistoryUserCause): Promise<GcmTaskMutationResult> {
     const title = String(input.title || '').replace(/\s+/g, ' ').trim();
     if (!title && !String(input.rawLine || '').trim()) {
       logger.flowWarn('TaskApi', 'create:invalid-input', { hasTitle: !!title, hasRawLine: !!String(input.rawLine || '').trim() });
@@ -254,8 +273,17 @@ export class TaskApiService {
       { create: true },
       mappingPreflight.plan,
     );
+    const historyHandle = await this.beginHistoryMutation('task.create', cause, {
+      path: targetFile.path,
+      lineNumber: 0,
+      rawLine: line,
+    });
+    let insertedRawLine = line;
     let insertedLineNumber = -1;
     let writeAccepted = false;
+    let writeCommitted = false;
+    let createBeforeContent: string | null = null;
+    let createExpectedContent: string | null = null;
     let mappingGuardBlocked = false;
 
     try {
@@ -271,19 +299,24 @@ export class TaskApiService {
           return content;
         }
         writeAccepted = true;
+        createBeforeContent = content;
+        insertedRawLine = this.ensureHistoryIdentity(historyHandle, line);
         if (input.placement === 'end') {
           const newline = content.includes('\r\n') ? '\r\n' : '\n';
           const separator = content.endsWith('\n') || content.length === 0 ? '' : newline;
           const previousLines = content.length ? content.split(/\r?\n/).length - (content.endsWith('\n') ? 1 : 0) : 0;
           insertedLineNumber = previousLines;
-          return `${content}${separator}${line}${newline}`;
+          createExpectedContent = `${content}${separator}${insertedRawLine}${newline}`;
+          return createExpectedContent;
         }
-        const next = insertLineAfterFrontmatter(content, line);
-        insertedLineNumber = this.findInsertedLineIndex(next, line);
+        const next = insertLineAfterFrontmatter(content, insertedRawLine);
+        insertedLineNumber = this.findInsertedLineIndex(next, insertedRawLine);
+        createExpectedContent = next;
         return next;
       });
 
       if (!writeAccepted) {
+        await this.abortHistoryMutation(historyHandle);
         if (mappingGuardBlocked) {
           logger.flowWarn('TaskApi', 'create:mapping-changed', context);
         }
@@ -296,12 +329,21 @@ export class TaskApiService {
             : 'Task could not be inserted.',
         };
       }
+      writeCommitted = true;
 
       const task = await this.get({
         path: targetFile.path,
         lineNumber: insertedLineNumber,
-        rawLine: line,
+        rawLine: insertedRawLine,
         title,
+      });
+      await this.commitHistoryMutation(historyHandle, {
+        after: {
+          path: targetFile.path,
+          lineNumber: insertedLineNumber,
+          rawLine: insertedRawLine,
+        },
+        outcome: 'committed',
       });
       this.notifyChanged([targetFile.path], 'task-api-create');
       if (input.notice !== false) new Notice(`Created task in ${targetFile.basename}`);
@@ -313,57 +355,90 @@ export class TaskApiService {
       });
       return { ok: true, changed: true, task };
     } catch (error) {
+      const writeState = writeCommitted
+        ? 'committed'
+        : createBeforeContent != null && createExpectedContent != null
+          ? await this.classifyRejectedWrite(targetFile, createBeforeContent, createExpectedContent)
+          : 'unchanged';
+      const contentChanged = writeState !== 'unchanged';
+      if (writeState === 'committed') {
+        await this.commitHistoryMutation(historyHandle, {
+          after: {
+            path: targetFile.path,
+            lineNumber: Math.max(0, insertedLineNumber),
+            rawLine: insertedRawLine,
+          },
+          outcome: 'partial',
+        });
+      } else {
+        await this.abortHistoryMutation(historyHandle);
+      }
       logger.flowError('TaskApi', 'create:failed', error, context);
-      return { ok: false, changed: false, task: null, error: getErrorMessage(error) };
+      return { ok: false, changed: contentChanged, task: null, error: getErrorMessage(error) };
     }
   }
 
-  async update(ref: GcmTaskRef, input: GcmTaskUpdateInput): Promise<GcmTaskMutationResult> {
-    return this.updateTask(ref, input);
+  async update(
+    ref: GcmTaskRef,
+    input: GcmTaskUpdateInput,
+    cause?: ItemHistoryUserCause,
+  ): Promise<GcmTaskMutationResult> {
+    return this.updateTask(ref, input, {}, cause);
   }
 
-  setCheckbox(ref: GcmTaskRef, checkbox: string): Promise<GcmTaskMutationResult> {
-    return this.update(ref, { checkbox });
+  setCheckbox(ref: GcmTaskRef, checkbox: string, cause?: ItemHistoryUserCause): Promise<GcmTaskMutationResult> {
+    return this.updateTask(ref, { checkbox }, { historyAction: 'task.checkbox' }, cause);
   }
 
   /**
    * Applies GCM's configured complete/todo mapping and runs the same note-level
    * recurrence, final-status, and checklist-property follow-up as GCM's UI.
    */
-  setCompletion(ref: GcmTaskRef, completed: boolean): Promise<GcmTaskMutationResult> {
+  setCompletion(ref: GcmTaskRef, completed: boolean, cause?: ItemHistoryUserCause): Promise<GcmTaskMutationResult> {
     return this.updateTask(ref, { status: completed ? 'complete' : 'todo' }, {
       checklistFollowup: true,
       completionTarget: completed,
-    });
+      historyAction: 'task.checkbox',
+    }, cause);
   }
 
-  setStatus(ref: GcmTaskRef, status: string): Promise<GcmTaskMutationResult> {
-    return this.update(ref, { status });
+  setStatus(ref: GcmTaskRef, status: string, cause?: ItemHistoryUserCause): Promise<GcmTaskMutationResult> {
+    return this.update(ref, { status }, cause);
   }
 
-  setScheduled(ref: GcmTaskRef, scheduled: string | null): Promise<GcmTaskMutationResult> {
-    return this.update(ref, { fields: { scheduled } });
+  setScheduled(ref: GcmTaskRef, scheduled: string | null, cause?: ItemHistoryUserCause): Promise<GcmTaskMutationResult> {
+    return this.update(ref, { fields: { scheduled } }, cause);
   }
 
-  setField(ref: GcmTaskRef, key: string, value: string | number | boolean | null): Promise<GcmTaskMutationResult> {
+  setField(
+    ref: GcmTaskRef,
+    key: string,
+    value: string | number | boolean | null,
+    cause?: ItemHistoryUserCause,
+  ): Promise<GcmTaskMutationResult> {
     const cleanKey = String(key || '').trim();
     if (!cleanKey) {
       return Promise.resolve({ ok: false, changed: false, task: null, error: 'Field key is required.' });
     }
-    return this.update(ref, { fields: { [cleanKey]: value } });
+    return this.update(ref, { fields: { [cleanKey]: value } }, cause);
   }
 
-  setFields(ref: GcmTaskRef, fields: Record<string, string | number | boolean | null | undefined>): Promise<GcmTaskMutationResult> {
+  setFields(
+    ref: GcmTaskRef,
+    fields: Record<string, string | number | boolean | null | undefined>,
+    cause?: ItemHistoryUserCause,
+  ): Promise<GcmTaskMutationResult> {
     if (!fields || typeof fields !== 'object' || !Object.keys(fields).length) {
       return Promise.resolve({ ok: false, changed: false, task: null, error: 'At least one field is required.' });
     }
-    return this.update(ref, { fields });
+    return this.update(ref, { fields }, cause);
   }
 
   private async updateTask(
     ref: GcmTaskRef,
     input: GcmTaskUpdateInput,
     options: TaskUpdateExecutionOptions = {},
+    cause?: ItemHistoryUserCause,
   ): Promise<GcmTaskMutationResult> {
     const mappingPreflight = this.preflightTaskInputMappings(input);
     if ('error' in mappingPreflight) {
@@ -384,10 +459,19 @@ export class TaskApiService {
       };
     }
     const before = resolved.record;
+    const historyHandle = await this.beginHistoryMutation(options.historyAction || 'task.update', cause, {
+      path: before.path,
+      lineNumber: before.lineNumber,
+      rawLine: before.rawLine,
+    });
     let changed = false;
+    let writeCommitted = false;
+    let updateBeforeContent: string | null = null;
+    let updateExpectedContent: string | null = null;
     let writeResolved = false;
     let resolvedLineNumber = before.lineNumber;
     let nextRawLine = before.rawLine;
+    let confirmedHistoryBefore: TaskHistoryLocator | undefined;
     let previousMarker: string | null = null;
     let nextMarker: string | null = null;
     let updatedLines: string[] | null = null;
@@ -428,6 +512,11 @@ export class TaskApiService {
         const { parts, index } = currentResolution;
         resolvedLineNumber = index;
         const current = parts.lines[index] || '';
+        confirmedHistoryBefore = {
+          path: resolved.file.path,
+          lineNumber: index,
+          rawLine: current,
+        };
         nextRawLine = current;
         const currentRecord = this.recordFromLine(resolved.file.path, index, current, parts.lines);
         if (currentRecord) resolvedCurrentTask = currentRecord;
@@ -462,7 +551,7 @@ export class TaskApiService {
             : currentState.isOpen || currentState.isMigrated;
           if (alreadyAtTarget) return content;
         }
-        const next = this.applyTaskInputToLine(current, input, { update: true }, mappingPreflight.plan);
+        let next = this.applyTaskInputToLine(current, input, { update: true }, mappingPreflight.plan);
         const nextParsed = liveMappings ? parseTaskLine(next) : null;
         if (
           liveMappings
@@ -475,6 +564,7 @@ export class TaskApiService {
           return content;
         }
         if (next === current) return content;
+        next = this.ensureHistoryIdentity(historyHandle, next);
         parts.lines[index] = next;
         nextRawLine = next;
         if (options.checklistFollowup) {
@@ -483,10 +573,14 @@ export class TaskApiService {
           updatedLines = [...parts.lines];
         }
         changed = true;
-        return joinContent(parts.lines, parts.newline, parts.endsWithNewline);
+        updateBeforeContent = content;
+        updateExpectedContent = joinContent(parts.lines, parts.newline, parts.endsWithNewline);
+        return updateExpectedContent;
       });
+      writeCommitted = changed;
 
       if (mappingGuardBlocked) {
+        await this.abortHistoryMutation(historyHandle);
         logger.flowWarn('TaskApi', 'update:mapping-changed', context);
         return {
           ok: false,
@@ -498,6 +592,7 @@ export class TaskApiService {
       }
 
       if (!writeResolved) {
+        await this.abortHistoryMutation(historyHandle);
         logger.flowWarn('TaskApi', 'update:stale-target', context);
         return {
           ok: false,
@@ -535,6 +630,25 @@ export class TaskApiService {
         });
       }
       if (changed) this.notifyChanged([resolved.file.path], 'task-api-update');
+      if (changed && options.checklistFollowup && !task) {
+        await this.abortHistoryMutation(historyHandle);
+      } else if (changed) {
+        const confirmedHistoryAfter = options.checklistFollowup && task
+          ? { lineNumber: task.lineNumber, rawLine: task.rawLine }
+          : { lineNumber: resolvedLineNumber, rawLine: nextRawLine };
+        await this.commitHistoryMutation(historyHandle, {
+          ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+          after: {
+            path: resolved.file.path,
+            lineNumber: confirmedHistoryAfter.lineNumber,
+            rawLine: confirmedHistoryAfter.rawLine,
+          },
+          sourceDisposition: 'retained',
+          outcome: followupError ? 'partial' : 'committed',
+        });
+      } else {
+        await this.abortHistoryMutation(historyHandle);
+      }
       if (followupError) {
         logger.flowWarn('TaskApi', 'update:checkbox-followup-incomplete', {
           ...context,
@@ -552,8 +666,33 @@ export class TaskApiService {
       logger.flow('TaskApi', 'update:done', { ...context, changed, resolved: !!task });
       return { ok: true, changed, task, before };
     } catch (error) {
+      const writeState = writeCommitted
+        ? 'committed'
+        : updateBeforeContent != null && updateExpectedContent != null
+          ? await this.classifyRejectedWrite(resolved.file, updateBeforeContent, updateExpectedContent)
+          : 'unchanged';
+      if (writeState === 'committed') {
+        await this.commitHistoryMutation(historyHandle, {
+          ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+          after: {
+            path: resolved.file.path,
+            lineNumber: resolvedLineNumber,
+            rawLine: nextRawLine,
+          },
+          sourceDisposition: 'retained',
+          outcome: 'partial',
+        });
+      } else {
+        await this.abortHistoryMutation(historyHandle);
+      }
       logger.flowError('TaskApi', 'update:failed', error, context);
-      return { ok: false, changed: false, task: null, before, error: getErrorMessage(error) };
+      return {
+        ok: false,
+        changed: writeState !== 'unchanged',
+        task: null,
+        before,
+        error: getErrorMessage(error),
+      };
     }
   }
 
@@ -572,7 +711,25 @@ export class TaskApiService {
   async move(
     ref: GcmTaskRef,
     target: GcmTaskMoveTarget,
+    cause?: ItemHistoryUserCause,
   ): Promise<GcmTaskMutationResult> {
+    const sourcePolicy = target?.sourcePolicy;
+    if (
+      sourcePolicy !== undefined
+      && sourcePolicy !== 'remove'
+      && sourcePolicy !== 'migrate-if-daily-note'
+      && sourcePolicy !== 'configured-daily-note'
+    ) {
+      logger.flowWarn('TaskApi', 'move:unsupported-source-policy', {
+        hasSourcePolicy: true,
+      });
+      return {
+        ok: false,
+        changed: false,
+        task: null,
+        error: 'Unsupported source policy. The task was not moved.',
+      };
+    }
     const strictResolution = target.resolution === 'exact-or-identity';
     const resolved = await this.resolveTask(ref);
     if (!resolved || (strictResolution && !this.moveRefMatchesLine(ref, resolved.record.rawLine))) {
@@ -596,24 +753,53 @@ export class TaskApiService {
     }
 
     const sameFile = resolved.file.path === targetFile.path;
-    const migrateDailySource = !sameFile
-      && target.sourcePolicy === 'migrate-if-daily-note'
+    const sourceIsDailyNote = !sameFile
+      && target.sourcePolicy !== 'remove'
       && await this.plugin.fileNamingService.isDailyNoteFile(resolved.file);
+    const migrateDailySource = sourceIsDailyNote && (
+      target.sourcePolicy === 'migrate-if-daily-note'
+      || (
+        target.sourcePolicy === 'configured-daily-note'
+        && this.plugin.settings.dailyNoteTaskMoveSourceBehavior !== 'remove'
+      )
+    );
+    const configuredDailySourceRemoval = sourceIsDailyNote
+      && target.sourcePolicy === 'configured-daily-note'
+      && this.plugin.settings.dailyNoteTaskMoveSourceBehavior === 'remove';
     const context = {
       sourcePath: resolved.file.path,
       targetPath: targetFile.path,
       lineNumber: resolved.record.lineNumber,
       placement: target.placement || 'end',
       sameFile,
-      sourcePolicy: migrateDailySource ? 'daily-note-migrate' : 'remove',
+      sourcePolicy: migrateDailySource
+        ? 'daily-note-migrate'
+        : configuredDailySourceRemoval
+          ? 'daily-note-remove'
+          : 'remove',
       resolution: target.resolution || 'default',
     };
     logger.flow('TaskApi', 'move:start', context);
+    const historyHandle = await this.beginHistoryMutation(
+      migrateDailySource ? 'task.migrate' : 'task.move',
+      cause,
+      {
+        path: resolved.file.path,
+        lineNumber: resolved.record.lineNumber,
+        rawLine: resolved.record.rawLine,
+      },
+      targetFile.path,
+    );
+    let confirmedHistoryBefore: TaskHistoryLocator | undefined;
 
     if (sameFile) {
       let insertedLineNumber = resolved.record.lineNumber;
+      let movedRawLine = resolved.record.rawLine;
       let sourceResolved = false;
       let changed = false;
+      let writeCommitted = false;
+      let sameFileBeforeContent: string | null = null;
+      let sameFileExpectedContent: string | null = null;
       try {
         await this.plugin.app.vault.process(resolved.file, (content) => {
           const currentResolution = this.resolveMutableTaskLine(
@@ -627,6 +813,11 @@ export class TaskApiService {
           if (strictResolution && !this.moveRefMatchesLine(ref, currentRawLine)) return content;
           const currentBlock = extractTaskBlock(currentResolution.parts.lines, currentResolution.index);
           if (!currentBlock.lines.length) return content;
+          confirmedHistoryBefore = {
+            path: resolved.file.path,
+            lineNumber: currentResolution.index,
+            rawLine: currentRawLine,
+          };
           sourceResolved = true;
           const requested = this.resolveTargetLineIndex(currentResolution.parts.lines, target);
           if (requested >= currentResolution.index && requested <= currentBlock.endExclusive) {
@@ -642,19 +833,51 @@ export class TaskApiService {
             ? requested - (currentBlock.endExclusive - currentResolution.index)
             : requested;
           insertedLineNumber = Math.min(Math.max(0, adjusted), nextLines.length);
-          nextLines.splice(insertedLineNumber, 0, ...currentBlock.lines);
+          const movedBlock = [...currentBlock.lines];
+          movedBlock[0] = this.ensureHistoryIdentity(historyHandle, movedBlock[0] || currentRawLine);
+          movedRawLine = movedBlock[0];
+          nextLines.splice(insertedLineNumber, 0, ...movedBlock);
           changed = true;
-          return joinContent(
+          sameFileBeforeContent = content;
+          sameFileExpectedContent = joinContent(
             nextLines,
             currentResolution.parts.newline,
             currentResolution.parts.endsWithNewline,
           );
+          return sameFileExpectedContent;
         });
+        writeCommitted = changed;
       } catch (error) {
+        const writeState = writeCommitted
+          ? 'committed'
+          : sameFileBeforeContent != null && sameFileExpectedContent != null
+            ? await this.classifyRejectedWrite(resolved.file, sameFileBeforeContent, sameFileExpectedContent)
+            : 'unchanged';
+        if (writeState === 'committed') {
+          await this.commitHistoryMutation(historyHandle, {
+            ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+            after: {
+              path: resolved.file.path,
+              lineNumber: insertedLineNumber,
+              rawLine: movedRawLine,
+            },
+            outcome: 'partial',
+          });
+          this.notifyChanged([resolved.file.path], 'task-api-move-partial');
+        } else {
+          await this.abortHistoryMutation(historyHandle);
+        }
         logger.flowError('TaskApi', 'move:same-file-failed', error, context);
-        return { ok: false, changed: false, task: null, before: resolved.record, error: getErrorMessage(error) };
+        return {
+          ok: false,
+          changed: writeState !== 'unchanged',
+          task: null,
+          before: resolved.record,
+          error: getErrorMessage(error),
+        };
       }
       if (!sourceResolved) {
+        await this.abortHistoryMutation(historyHandle);
         logger.flowWarn('TaskApi', 'move:source-became-protected', context);
         return {
           ok: false,
@@ -665,10 +888,11 @@ export class TaskApiService {
         };
       }
       if (!changed) {
+        await this.abortHistoryMutation(historyHandle);
         const task = await this.get({
           path: resolved.file.path,
           lineNumber: insertedLineNumber,
-          rawLine: resolved.record.rawLine,
+          rawLine: movedRawLine,
           title: resolved.record.title,
         });
         logger.flow('TaskApi', 'move:no-op', context);
@@ -688,6 +912,16 @@ export class TaskApiService {
         refreshError = getErrorMessage(error);
         logger.flowError('TaskApi', 'move:refresh-failed', error, context);
       }
+      await this.commitHistoryMutation(historyHandle, {
+        ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+        after: {
+          path: resolved.file.path,
+          lineNumber: insertedLineNumber,
+          rawLine: movedRawLine,
+        },
+        sourceDisposition: 'retained',
+        outcome: refreshError ? 'partial' : 'committed',
+      });
       logger.flow('TaskApi', 'move:done', { ...context, insertedLineNumber, resolved: !!task });
       return {
         ok: true,
@@ -720,10 +954,12 @@ export class TaskApiService {
         return content;
       });
     } catch (error) {
+      await this.abortHistoryMutation(historyHandle);
       logger.flowError('TaskApi', 'move:source-capture-failed', error, context);
       return { ok: false, changed: false, task: null, before: resolved.record, error: getErrorMessage(error) };
     }
     if (!capturedBlock.length) {
+      await this.abortHistoryMutation(historyHandle);
       logger.flowWarn('TaskApi', 'move:source-line-missing', context);
       return {
         ok: false,
@@ -733,17 +969,25 @@ export class TaskApiService {
         error: 'Source task changed before it could be moved.',
       };
     }
+    confirmedHistoryBefore = {
+      path: resolved.file.path,
+      lineNumber: capturedLineNumber,
+      rawLine: capturedRawLine,
+    };
 
     let insertedLineNumber = -1;
+    let targetBlock = [...capturedBlock];
     let targetBeforeContent: string | null = null;
     let targetExpectedContent: string | null = null;
     try {
       await this.plugin.app.vault.process(targetFile, (content) => {
         targetBeforeContent = content;
+        targetBlock = [...capturedBlock];
+        targetBlock[0] = this.ensureHistoryIdentity(historyHandle, targetBlock[0] || capturedRawLine);
         if (target.placement !== 'line') {
           const inserted = target.placement === 'after-frontmatter'
-            ? insertTaskBlockAfterFrontmatter(content, capturedBlock)
-            : insertTaskBlockAtEnd(content, capturedBlock);
+            ? insertTaskBlockAfterFrontmatter(content, targetBlock)
+            : insertTaskBlockAtEnd(content, targetBlock);
           insertedLineNumber = inserted.lineIndex;
           targetExpectedContent = inserted.content;
           return inserted.content;
@@ -751,7 +995,7 @@ export class TaskApiService {
         const parts = splitContent(content);
         insertedLineNumber = this.resolveTargetLineIndex(parts.lines, target);
         const nextLines = [...parts.lines];
-        nextLines.splice(insertedLineNumber, 0, ...capturedBlock);
+        nextLines.splice(insertedLineNumber, 0, ...targetBlock);
         targetExpectedContent = joinContent(nextLines, parts.newline, true);
         return targetExpectedContent;
       });
@@ -766,6 +1010,10 @@ export class TaskApiService {
       if (targetWriteState !== 'committed') {
         const changed = targetWriteState === 'conflicted';
         if (changed) this.notifyChanged([targetFile.path], 'task-api-move-partial');
+        // A conflicted target is neither the pre-write nor expected snapshot.
+        // Its task/locator outcome is unconfirmed, so never fabricate history
+        // from the expected target block.
+        await this.abortHistoryMutation(historyHandle);
         return {
           ok: false,
           changed,
@@ -782,6 +1030,7 @@ export class TaskApiService {
       });
     }
     if (insertedLineNumber < 0 || targetBeforeContent == null || targetExpectedContent == null) {
+      await this.abortHistoryMutation(historyHandle);
       return {
         ok: false,
         changed: false,
@@ -808,6 +1057,11 @@ export class TaskApiService {
         if (!currentResolution) return content;
         const currentBlock = extractTaskBlock(currentResolution.parts.lines, currentResolution.index);
         if (!this.taskBlocksMatch(currentBlock.lines, capturedBlock)) return content;
+        confirmedHistoryBefore = {
+          path: resolved.file.path,
+          lineNumber: currentResolution.index,
+          rawLine: currentResolution.parts.lines[currentResolution.index] || capturedRawLine,
+        };
 
         if (migrateDailySource) {
           const migratedBlock = buildDailyNoteScratchpadMovedTaskBlock(capturedBlock, {
@@ -864,6 +1118,22 @@ export class TaskApiService {
           error: sourceWriteError ? getErrorMessage(sourceWriteError) : '',
         });
         this.notifyChanged([resolved.file.path, targetFile.path], 'task-api-move-partial');
+        const confirmedTarget = historyHandle
+          ? await this.confirmMovedTargetForHistory(targetFile, targetBlock[0] || capturedRawLine)
+          : null;
+        if (confirmedTarget) {
+          await this.commitHistoryMutation(historyHandle, {
+            ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+            after: {
+              path: confirmedTarget.path,
+              lineNumber: confirmedTarget.lineNumber,
+              rawLine: confirmedTarget.rawLine,
+            },
+            outcome: 'partial',
+          });
+        } else {
+          await this.abortHistoryMutation(historyHandle);
+        }
         return {
           ok: false,
           changed: true,
@@ -884,6 +1154,26 @@ export class TaskApiService {
         error: sourceWriteError ? getErrorMessage(sourceWriteError) : '',
       });
       if (!rolledBackTarget) this.notifyChanged([targetFile.path], 'task-api-move-partial');
+      if (rolledBackTarget) {
+        await this.abortHistoryMutation(historyHandle);
+      } else {
+        const confirmedTarget = historyHandle
+          ? await this.confirmMovedTargetForHistory(targetFile, targetBlock[0] || capturedRawLine)
+          : null;
+        if (confirmedTarget) {
+          await this.commitHistoryMutation(historyHandle, {
+            ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+            after: {
+              path: confirmedTarget.path,
+              lineNumber: confirmedTarget.lineNumber,
+              rawLine: confirmedTarget.rawLine,
+            },
+            outcome: 'partial',
+          });
+        } else {
+          await this.abortHistoryMutation(historyHandle);
+        }
+      }
       return {
         ok: false,
         changed: !rolledBackTarget,
@@ -904,12 +1194,29 @@ export class TaskApiService {
       task = await this.get({
         path: targetFile.path,
         lineNumber: insertedLineNumber,
-        rawLine: capturedBlock[0] || resolved.record.rawLine,
+        rawLine: targetBlock[0] || resolved.record.rawLine,
         title: resolved.record.title,
       });
     } catch (error) {
       refreshError = getErrorMessage(error);
       logger.flowError('TaskApi', 'move:refresh-failed', error, context);
+    }
+    const confirmedHistoryTarget = historyHandle
+      ? await this.confirmMovedTargetForHistory(targetFile, targetBlock[0] || capturedRawLine)
+      : null;
+    if (confirmedHistoryTarget) {
+      await this.commitHistoryMutation(historyHandle, {
+        ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+        after: {
+          path: confirmedHistoryTarget.path,
+          lineNumber: confirmedHistoryTarget.lineNumber,
+          rawLine: confirmedHistoryTarget.rawLine,
+        },
+        sourceDisposition: migrateDailySource ? 'migrated' : 'removed',
+        outcome: 'committed',
+      });
+    } else {
+      await this.abortHistoryMutation(historyHandle);
     }
     logger.flow('TaskApi', 'move:done', {
       ...context,
@@ -926,13 +1233,22 @@ export class TaskApiService {
     };
   }
 
-  async delete(ref: GcmTaskRef): Promise<GcmTaskMutationResult> {
+  async delete(ref: GcmTaskRef, cause?: ItemHistoryUserCause): Promise<GcmTaskMutationResult> {
     const resolved = await this.resolveTask(ref);
     if (!resolved) {
       logger.flowWarn('TaskApi', 'delete:target-unresolved', this.summarizeRef(ref));
       return { ok: false, changed: false, task: null, error: 'Task line could not be resolved.' };
     }
+    const historyHandle = await this.beginHistoryMutation('task.delete', cause, {
+      path: resolved.file.path,
+      lineNumber: resolved.record.lineNumber,
+      rawLine: resolved.record.rawLine,
+    });
     let changed = false;
+    let writeCommitted = false;
+    let deleteBeforeContent: string | null = null;
+    let deleteExpectedContent: string | null = null;
+    let confirmedHistoryBefore: TaskHistoryLocator | undefined;
     const context = {
       path: resolved.file.path,
       lineNumber: resolved.record.lineNumber,
@@ -948,6 +1264,12 @@ export class TaskApiService {
           resolved.record.title,
         );
         if (!currentResolution) return content;
+        const currentRawLine = currentResolution.parts.lines[currentResolution.index] || '';
+        confirmedHistoryBefore = {
+          path: resolved.file.path,
+          lineNumber: currentResolution.index,
+          rawLine: currentRawLine,
+        };
         const result = removeTaskBlockFromContent(
           content,
           currentResolution.index,
@@ -955,9 +1277,15 @@ export class TaskApiService {
           resolved.record.title,
         );
         changed = result.changed;
+        if (result.changed) {
+          deleteBeforeContent = content;
+          deleteExpectedContent = result.content;
+        }
         return result.content;
       });
+      writeCommitted = changed;
       if (!changed) {
+        await this.abortHistoryMutation(historyHandle);
         logger.flowWarn('TaskApi', 'delete:stale-target', context);
         return {
           ok: false,
@@ -967,12 +1295,37 @@ export class TaskApiService {
           error: 'Task line changed before it could be deleted.',
         };
       }
+      await this.commitHistoryMutation(historyHandle, {
+        ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+        sourceDisposition: 'removed',
+        outcome: 'committed',
+      });
       this.notifyChanged([resolved.file.path], 'task-api-delete');
       logger.flow('TaskApi', 'delete:done', { ...context, changed });
       return { ok: true, changed, task: null, before: resolved.record };
     } catch (error) {
+      const writeState = writeCommitted
+        ? 'committed'
+        : deleteBeforeContent != null && deleteExpectedContent != null
+          ? await this.classifyRejectedWrite(resolved.file, deleteBeforeContent, deleteExpectedContent)
+          : 'unchanged';
+      if (writeState === 'committed') {
+        await this.commitHistoryMutation(historyHandle, {
+          ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+          sourceDisposition: 'removed',
+          outcome: 'partial',
+        });
+      } else {
+        await this.abortHistoryMutation(historyHandle);
+      }
       logger.flowError('TaskApi', 'delete:failed', error, context);
-      return { ok: false, changed: false, task: null, before: resolved.record, error: getErrorMessage(error) };
+      return {
+        ok: false,
+        changed: writeState !== 'unchanged',
+        task: null,
+        before: resolved.record,
+        error: getErrorMessage(error),
+      };
     }
   }
 
@@ -999,9 +1352,13 @@ export class TaskApiService {
     const blockLineCount = Array.isArray(allLines)
       ? Math.max(1, extractTaskBlock(allLines, lineNumber).lines.length)
       : 1;
+    const stableId = readInlineFieldValue(rawLine, 'tpsId')
+      || readInlineFieldValue(rawLine, 'subitemId')
+      || null;
     return {
       type: 'task-line',
       id: `${path}:${lineNumber + 1}`,
+      stableId,
       path,
       line: lineNumber + 1,
       lineNumber,
@@ -1469,6 +1826,106 @@ export class TaskApiService {
         targetPath: targetFile.path,
       });
       return false;
+    }
+  }
+
+  private async confirmMovedTargetForHistory(
+    targetFile: TFile,
+    expectedRawLine: string,
+  ): Promise<GcmTaskRecord | null> {
+    const expectedIdentity = getTaskHistoryIdentity(expectedRawLine);
+    if (!expectedIdentity) return null;
+    try {
+      const content = await this.plugin.app.vault.read(targetFile);
+      const documentLines = scanMarkdownDocumentLines(content);
+      const lines = documentLines.map((line) => line.text);
+      const matches: GcmTaskRecord[] = [];
+      for (const line of documentLines) {
+        if (
+          !line.isContent
+          || line.text !== expectedRawLine
+          || getTaskHistoryIdentity(line.text) !== expectedIdentity
+        ) continue;
+        try {
+          // Reject a line that presents the expected primary identity alongside
+          // a different secondary identity. The returned injection is ignored:
+          // confirmation is read-only and requires a live identity above.
+          ensureTaskHistoryIdentity(line.text, expectedIdentity);
+        } catch {
+          continue;
+        }
+        const record = this.recordFromLine(targetFile.path, line.index, line.text, lines);
+        if (record) matches.push(record);
+      }
+      return matches.length === 1 ? matches[0] : null;
+    } catch (error) {
+      logger.flowError('TaskApi', 'move:history-target-confirmation-failed', error, {
+        targetPath: targetFile.path,
+      });
+      return null;
+    }
+  }
+
+  private async beginHistoryMutation(
+    action: TaskHistoryAction,
+    cause: ItemHistoryUserCause | undefined,
+    before: TaskHistoryLocator,
+    targetPath?: string,
+  ): Promise<TaskHistoryHandle> {
+    if (!cause || cause.kind !== 'user') return null;
+    try {
+      return await this.plugin.itemHistoryService?.beginTaskMutation({
+        action,
+        cause,
+        before,
+        ...(targetPath ? { targetPath } : {}),
+      }) ?? null;
+    } catch (error) {
+      logger.flowError('TaskApi', 'history:begin-failed', error, {
+        action,
+        path: before.path,
+        lineNumber: before.lineNumber,
+      });
+      return null;
+    }
+  }
+
+  private ensureHistoryIdentity(handle: TaskHistoryHandle, line: string): string {
+    if (!handle) return line;
+    try {
+      const ensured = this.plugin.itemHistoryService.ensureTaskIdentity(handle, line);
+      if (typeof ensured === 'string') return ensured;
+      this.historyIdentityFailures.add(handle);
+      return line;
+    } catch (error) {
+      this.historyIdentityFailures.add(handle);
+      logger.flowError('TaskApi', 'history:identity-failed', error, {});
+      return line;
+    }
+  }
+
+  private async commitHistoryMutation(handle: TaskHistoryHandle, result: TaskHistoryCommit): Promise<void> {
+    if (!handle) return;
+    if (this.historyIdentityFailures.has(handle)) {
+      this.historyIdentityFailures.delete(handle);
+      await this.abortHistoryMutation(handle);
+      return;
+    }
+    try {
+      await this.plugin.itemHistoryService.commitTaskMutation(handle, result);
+    } catch (error) {
+      logger.flowError('TaskApi', 'history:commit-failed', error, {});
+      await this.abortHistoryMutation(handle);
+    }
+  }
+
+  private async abortHistoryMutation(handle: TaskHistoryHandle): Promise<void> {
+    if (!handle) return;
+    this.historyIdentityFailures.delete(handle);
+    try {
+      await this.plugin.itemHistoryService.abortTaskMutation(handle);
+    } catch (error) {
+      logger.flowError('TaskApi', 'history:abort-failed', error, {});
     }
   }
 

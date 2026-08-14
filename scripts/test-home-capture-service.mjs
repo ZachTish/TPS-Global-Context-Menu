@@ -200,7 +200,15 @@ function createPluginHarness({
   return { plugin, files, folders, opened, dailyNoteEnsures };
 }
 
-const { HomeCaptureService } = await loadCaptureServiceModule();
+const { HomeCaptureService, classifyHomeCaptureLineHistoryAction } = await loadCaptureServiceModule();
+
+test('Home line-editor history classifies task updates and task/bullet conversions', () => {
+  assert.equal(classifyHomeCaptureLineHistoryAction('- [ ] Task', '- [x] Task'), 'task.update');
+  assert.equal(classifyHomeCaptureLineHistoryAction('- [ ] Task', '- Bullet'), 'task.delete');
+  assert.equal(classifyHomeCaptureLineHistoryAction('- Bullet', '- [ ] Task'), 'task.create');
+  assert.equal(classifyHomeCaptureLineHistoryAction('- Bullet', '- Changed bullet'), null);
+  assert.equal(classifyHomeCaptureLineHistoryAction('- [ ] Task', '- [ ] Task'), null);
+});
 
 test('Home capture writes selected-day daily notes through Daily Notes settings', async () => {
   installMomentStub();
@@ -411,6 +419,120 @@ test('Home capture can write selected-day daily notes as unchecked tasks', async
   assert.deepEqual(globalThis.__notices.slice(-1), ['Added task to 2026-07-10.']);
 });
 
+test('explicit Home task captures inject stable identities atomically and commit exact saved locators', async () => {
+  installMomentStub();
+  const { plugin, files } = createPluginHarness({
+    dailyNotes: {
+      folder: 'Inbox/TPS Home QA',
+      format: 'YYYY-MM-DD',
+    },
+  });
+  const history = [];
+  let sequence = 0;
+  plugin.itemHistoryService = {
+    async beginTaskMutation(input) {
+      sequence += 1;
+      history.push({ type: 'begin', input: structuredClone(input) });
+      return { operationId: `op-${sequence}`, entityId: `home-${sequence}` };
+    },
+    ensureTaskIdentity(handle, line) {
+      history.push({ type: 'ensure', entityId: handle.entityId });
+      return `${line} [tpsId:: ${handle.entityId}]`;
+    },
+    async commitTaskMutation(handle, input) {
+      history.push({ type: 'commit', entityId: handle.entityId, input: structuredClone(input) });
+    },
+    async abortTaskMutation(handle) {
+      history.push({ type: 'abort', entityId: handle.entityId });
+    },
+  };
+  const service = new HomeCaptureService(plugin);
+
+  const file = await service.capture('Call HVAC\nBook inspection', window.moment('2026-07-10'), {
+    task: true,
+    historyCause: {
+      kind: 'user',
+      sourcePluginId: 'tps-global-context-menu',
+      surface: 'home-quick-capture-mobile',
+    },
+  });
+
+  const saved = files.get(file.path);
+  assert.match(saved, /- \[ \] Call HVAC .*\[tpsId:: home-1\]/u);
+  assert.match(saved, /- \[ \] Book inspection .*\[tpsId:: home-2\]/u);
+  assert.deepEqual(history.map((event) => event.type), [
+    'begin',
+    'begin',
+    'ensure',
+    'ensure',
+    'commit',
+    'commit',
+  ]);
+  const commits = history.filter((event) => event.type === 'commit');
+  assert.equal(commits.length, 2);
+  for (const commit of commits) {
+    assert.equal(
+      saved.split('\n')[commit.input.after.lineNumber],
+      commit.input.after.rawLine,
+      'history must commit the exact line saved in the Daily Note',
+    );
+    assert.equal(commit.input.outcome, 'committed');
+  }
+  assert.equal(history.filter((event) => event.type === 'abort').length, 0);
+});
+
+test('Home task history failures stay fail-open while plain captures remain untracked', async () => {
+  installMomentStub();
+  const { plugin, files } = createPluginHarness({
+    dailyNotes: {
+      folder: 'Inbox/TPS Home QA',
+      format: 'YYYY-MM-DD',
+    },
+  });
+  const history = [];
+  plugin.itemHistoryService = {
+    async beginTaskMutation() {
+      history.push('begin');
+      return { operationId: 'op-fail-open', entityId: 'home-fail-open' };
+    },
+    ensureTaskIdentity() {
+      history.push('ensure');
+      throw new Error('synthetic identity failure');
+    },
+    async commitTaskMutation() {
+      history.push('commit');
+    },
+    async abortTaskMutation() {
+      history.push('abort');
+    },
+  };
+  const service = new HomeCaptureService(plugin);
+  const cause = {
+    kind: 'user',
+    sourcePluginId: 'tps-global-context-menu',
+    surface: 'home-quick-capture-mobile',
+  };
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  let taskFile;
+  try {
+    taskFile = await service.capture('Fail-open task', window.moment('2026-07-13'), {
+      task: true,
+      historyCause: cause,
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  assert.match(files.get(taskFile.path), /- \[ \] Fail-open task/u);
+  assert.doesNotMatch(files.get(taskFile.path), /tpsId::/u);
+  assert.deepEqual(history, ['begin', 'ensure', 'abort']);
+
+  history.length = 0;
+  await service.capture('Plain note', window.moment('2026-07-13'), { historyCause: cause });
+  assert.deepEqual(history, [], 'explicit user metadata must not turn a plain capture into task history');
+});
+
 test('Daily note preview maps formatted and ID-bearing historical rows to exact Quick Capture lines', () => {
   installMomentStub();
   const { plugin } = createPluginHarness();
@@ -570,7 +692,7 @@ test('capture line editors hide and preserve GCM inline-property carriers', () =
   assert.match(serviceSource, /initialValue: stripTaskInlinePropsMetadata\(this\.snapshot\.value\)/u);
   assert.match(serviceSource, /preserveTpsInlinePropsMetadata\(this\.snapshot\.value, value\.trim\(\)\)/u);
   assert.match(homeSource, /textarea\.value = editSnapshot \? stripTaskInlinePropsMetadata\(editSnapshot\.value\) : ''/u);
-  assert.match(homeSource, /preserveTpsInlinePropsMetadata\(editSnapshot!\.value, value\)/u);
+  assert.match(homeSource, /preserveTpsInlinePropsMetadata\(editSnapshot\.value, value\)/u);
   assert.match(homeSource, /preserveTpsInlinePropsMetadata\(originalEditLine, value\)/u);
 });
 

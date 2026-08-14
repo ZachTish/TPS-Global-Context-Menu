@@ -101,6 +101,14 @@ import {
 } from '../utils/property-option-source';
 import { addPropertyValueChoiceMenuItems } from '../menu/property-value-choice-menu';
 import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
+import {
+  abortDirectTaskHistory,
+  beginDirectTaskHistory,
+  commitDirectTaskHistory,
+  ensureDirectTaskHistoryIdentity,
+  type DirectTaskHistoryLocation,
+  type DirectTaskHistoryLogContext,
+} from '../utils/direct-task-history';
 
 export type TaskLineContext = {
   file: TFile;
@@ -120,6 +128,7 @@ type TaskLineUpdateOptions = {
   checkboxMutation?: boolean;
   expectedMappingSignature?: string;
   expectedCheckboxToken?: string;
+  historyTerminalDelete?: boolean;
 };
 
 type TaskEditorPropertyDraft = {
@@ -1116,6 +1125,7 @@ export class TaskLineContextMenuService {
           ), {
             checkboxMutation: true,
             expectedMappingSignature,
+            historyTerminalDelete: true,
           }).then((updated) => {
             if (!updated) return;
             logger.flow('TaskQuickEditor', 'status:bullet', {
@@ -2389,10 +2399,32 @@ export class TaskLineContextMenuService {
       return null;
     }
     const duplicateLine = this.buildTimerDuplicateTaskLine(context, checkboxState);
+    const historyContext: DirectTaskHistoryLogContext = {
+      action: 'task.create',
+      surface: 'task-timer-duplicate',
+      path: context.file.path,
+      lineNumber: context.lineIndex + 1,
+    };
+    const historyHandle = await beginDirectTaskHistory(this.plugin.itemHistoryService, {
+      action: historyContext.action,
+      cause: {
+        kind: 'user',
+        sourcePluginId: 'tps-global-context-menu',
+        surface: historyContext.surface,
+      },
+      before: {
+        path: context.file.path,
+        lineNumber: historyContext.lineNumber,
+        rawLine: duplicateLine,
+      },
+    });
     let insertedIndex = -1;
+    let insertedRawLine = duplicateLine;
     let mappingGuardBlocked = false;
+    let historyReady = true;
+    let processedContent = '';
     try {
-      await this.plugin.app.vault.process(context.file, (content) => {
+      processedContent = await this.plugin.app.vault.process(context.file, (content) => {
         const newline = content.includes('\r\n') ? '\r\n' : '\n';
         const endsWithNewline = /\r?\n$/.test(content);
         const lines = content.split(/\r?\n/);
@@ -2411,10 +2443,19 @@ export class TaskLineContextMenuService {
           return content;
         }
         insertedIndex = lineIndex + 1;
-        lines.splice(insertedIndex, 0, duplicateLine);
+        const historyIdentity = ensureDirectTaskHistoryIdentity(
+          this.plugin.itemHistoryService,
+          historyHandle,
+          duplicateLine,
+          historyContext,
+        );
+        insertedRawLine = historyIdentity.line;
+        historyReady = historyIdentity.ready;
+        lines.splice(insertedIndex, 0, insertedRawLine);
         return `${lines.join(newline)}${endsWithNewline ? newline : ''}`;
       });
     } catch (error) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       logger.flowError('TaskLineContextMenu', 'timer-duplicate:failed', error, {
         path: context.file.path,
         renderedLineNumber: context.lineIndex + 1,
@@ -2424,6 +2465,7 @@ export class TaskLineContextMenuService {
     }
 
     if (mappingGuardBlocked) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       logger.flowWarn('TaskLineContextMenu', 'timer-duplicate:mapping-changed', {
         path: context.file.path,
         renderedLineNumber: context.lineIndex + 1,
@@ -2433,12 +2475,39 @@ export class TaskLineContextMenuService {
     }
 
     if (insertedIndex < 0) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       new Notice('Could not create a new task under the scheduled task.');
       return null;
     }
 
-    const parsed = parseTaskLine(duplicateLine);
-    if (!parsed) return null;
+    const persistedRawLine = String(processedContent || '').split(/\r?\n/u)[insertedIndex] || '';
+    if (persistedRawLine !== insertedRawLine) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+      logger.flowWarn('TaskLineContextMenu', 'timer-duplicate:unconfirmed', {
+        path: context.file.path,
+        insertedLineNumber: insertedIndex + 1,
+      });
+      new Notice('Could not confirm the new timer task. Refresh and try again.');
+      return null;
+    }
+
+    const parsed = parseTaskLine(persistedRawLine);
+    if (!parsed) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+      return null;
+    }
+    if (historyReady) {
+      await commitDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, {
+        after: {
+          path: context.file.path,
+          lineNumber: insertedIndex,
+          rawLine: persistedRawLine,
+        },
+        outcome: 'committed',
+      }, historyContext);
+    } else {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+    }
     this.plugin.eventService.emitFilesUpdated([context.file.path]);
     this.plugin.overlayRenderingService?.invalidate({
       reason: 'task-line-context-menu-duplicate-for-timer',
@@ -2452,8 +2521,8 @@ export class TaskLineContextMenuService {
       file: context.file,
       lineIndex: insertedIndex,
       lineNumber: insertedIndex + 1,
-      rawLine: duplicateLine,
-      title: getTaskDisplayTitle(duplicateLine),
+      rawLine: persistedRawLine,
+      title: getTaskDisplayTitle(persistedRawLine),
       checkboxToken: parsed.token,
       isCalendarTask: false,
       calendarAllDay: false,
@@ -2519,12 +2588,39 @@ export class TaskLineContextMenuService {
     updater: (line: string) => string,
     options: TaskLineUpdateOptions = {},
   ): Promise<boolean> {
+    const historyTerminalDelete = options.historyTerminalDelete === true;
+    const historyContext: DirectTaskHistoryLogContext = {
+      action: historyTerminalDelete
+        ? 'task.delete'
+        : options.checkboxMutation === true
+          ? 'task.checkbox'
+          : 'task.update',
+      surface: context.isCalendarTask ? 'calendar-task-context-menu' : 'task-line-context-menu',
+      path: context.file.path,
+      lineNumber: context.lineIndex,
+    };
+    const historyHandle = await beginDirectTaskHistory(this.plugin.itemHistoryService, {
+      action: historyContext.action,
+      cause: {
+        kind: 'user',
+        sourcePluginId: 'tps-global-context-menu',
+        surface: historyContext.surface,
+      },
+      before: {
+        path: context.file.path,
+        lineNumber: context.lineIndex,
+        rawLine: context.rawLine,
+      },
+    });
     let resolved = false;
     let changed = false;
+    let historyReady = true;
+    let historyOutcome: 'committed' | 'partial' = 'committed';
     let previousMarker: string | null = null;
     let nextMarker: string | null = null;
     let updatedLines: string[] | null = null;
     let mappingGuardBlocked = false;
+    let confirmedHistoryBefore: DirectTaskHistoryLocation | undefined;
     const expectedMappingSignature = options.checkboxMutation === true
       ? options.expectedMappingSignature || this.getCheckboxMutationSignature()
       : '';
@@ -2543,6 +2639,11 @@ export class TaskLineContextMenuService {
         const currentLine = lines[lineIndex] || '';
         const currentParsed = parseTaskLine(currentLine);
         if (!currentParsed) return content;
+        confirmedHistoryBefore = {
+          path: context.file.path,
+          lineNumber: lineIndex,
+          rawLine: currentLine,
+        };
         if (
           options.checkboxMutation === true
           && !isTaskCheckboxWorkflowTokenCurrent(currentParsed.token, expectedCheckboxToken)
@@ -2582,6 +2683,18 @@ export class TaskLineContextMenuService {
           format: this.plugin.settings.fileTimestampFormat,
           markModified: true,
         });
+        if (historyTerminalDelete) {
+          historyReady = historyReady && nextParsed == null;
+        } else {
+          const historyIdentity = ensureDirectTaskHistoryIdentity(
+            this.plugin.itemHistoryService,
+            historyHandle,
+            nextLine,
+            historyContext,
+          );
+          nextLine = historyIdentity.line;
+          historyReady = historyReady && historyIdentity.ready;
+        }
         lines[lineIndex] = nextLine;
         context.lineIndex = lineIndex;
         context.lineNumber = lineIndex + 1;
@@ -2595,6 +2708,7 @@ export class TaskLineContextMenuService {
         return `${lines.join(newline)}${endsWithNewline ? newline : ''}`;
       });
     } catch (error) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       logger.flowError('TaskLineContextMenu', 'write:failed', error, {
         path: context.file.path,
         renderedLineNumber: context.lineIndex + 1,
@@ -2605,6 +2719,7 @@ export class TaskLineContextMenuService {
     }
 
     if (mappingGuardBlocked) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       logger.flowWarn('TaskLineContextMenu', 'write:mapping-changed', {
         path: context.file.path,
         renderedLineNumber: context.lineIndex + 1,
@@ -2614,6 +2729,7 @@ export class TaskLineContextMenuService {
     }
 
     if (!resolved) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       logger.flowWarn('TaskLineContextMenu', 'write:stale-target', {
         path: context.file.path,
         renderedLineNumber: context.lineIndex + 1,
@@ -2621,7 +2737,10 @@ export class TaskLineContextMenuService {
       new Notice('That task changed before it could be updated. Refresh and try again.');
       return false;
     }
-    if (!changed) return true;
+    if (!changed) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+      return true;
+    }
 
     if (options.checkboxMutation === true && updatedLines) {
       try {
@@ -2633,12 +2752,38 @@ export class TaskLineContextMenuService {
           context.lineIndex,
         );
       } catch (error) {
+        historyOutcome = 'partial';
         logger.flowError('TaskLineContextMenu', 'write:checkbox-followup-failed', error, {
           path: context.file.path,
           lineNumber: context.lineNumber,
         });
         new Notice('Task updated, but its follow-up status sync did not finish.');
       }
+    }
+    if (historyReady) {
+      await commitDirectTaskHistory(
+        this.plugin.itemHistoryService,
+        historyHandle,
+        historyTerminalDelete
+          ? {
+              ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+              sourceDisposition: 'removed',
+              outcome: historyOutcome,
+            }
+          : {
+              ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+              after: {
+                path: context.file.path,
+                lineNumber: context.lineIndex,
+                rawLine: context.rawLine,
+              },
+              sourceDisposition: 'retained',
+              outcome: historyOutcome,
+            },
+        historyContext,
+      );
+    } else {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
     }
     this.plugin.eventService.emitFilesUpdated([context.file.path]);
     this.plugin.overlayRenderingService?.invalidate({
@@ -2805,6 +2950,14 @@ export class TaskLineContextMenuService {
       rawLine: context.rawLine,
       itemLabel: 'task',
       source,
+      taskHistory: {
+        service: this.plugin.itemHistoryService,
+        cause: {
+          kind: 'user',
+          sourcePluginId: 'tps-global-context-menu',
+          surface: context.isCalendarTask ? 'calendar-task-context-menu' : 'task-line-context-menu',
+        },
+      },
       resolveLineIndex: (lines) => findCurrentTaskLineIndex(
         lines,
         context.lineIndex,
@@ -2833,8 +2986,10 @@ export class TaskLineContextMenuService {
 
     const sourceFile = context.file;
     const sourcePath = sourceFile.path;
-    const preserveDailyRecord = sourcePath !== targetFile.path
+    const sourceIsDailyNote = sourcePath !== targetFile.path
       && await this.plugin.fileNamingService.isDailyNoteFile(sourceFile);
+    const preserveDailyRecord = sourceIsDailyNote
+      && this.plugin.settings.dailyNoteTaskMoveSourceBehavior !== 'remove';
     const result = await this.plugin.taskApiService.move(
       {
         path: sourcePath,
@@ -2844,8 +2999,13 @@ export class TaskLineContextMenuService {
       },
       {
         targetFile,
-        sourcePolicy: 'migrate-if-daily-note',
+        sourcePolicy: 'configured-daily-note',
         resolution: 'exact-or-identity',
+      },
+      {
+        kind: 'user',
+        sourcePluginId: 'tps-global-context-menu',
+        surface: context.isCalendarTask ? 'calendar-task-context-menu' : 'task-line-context-menu',
       },
     );
 
@@ -2885,13 +3045,19 @@ export class TaskLineContextMenuService {
 
     new Notice(preserveDailyRecord
       ? `Copied task to ${targetFile.basename}; marked the Daily Note record as migrated.`
+      : sourceIsDailyNote
+        ? `Moved task to ${targetFile.basename}; removed it from the Daily Note.`
       : targetFile.path === sourcePath
         ? `Moved task to the end of ${sourceFile.basename}.`
         : `Moved task to ${targetFile.basename}.`);
     logger.flow('TaskLineContextMenu', 'move:done', {
       sourcePath,
       targetPath: targetFile.path,
-      outcome: preserveDailyRecord ? 'daily-note-migrated' : 'moved',
+      outcome: preserveDailyRecord
+        ? 'daily-note-migrated'
+        : sourceIsDailyNote
+          ? 'daily-note-removed'
+          : 'moved',
       resolved: result.task !== null,
     });
     return true;

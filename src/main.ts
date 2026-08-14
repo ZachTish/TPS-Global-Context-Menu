@@ -114,6 +114,7 @@ import {
 import { ArchiveFileService } from './services/archive-file-service';
 import { TpsNotebookNavigatorMenuBridge } from './services/tps-notebook-navigator-menu-bridge';
 import { shouldReuseCustomPropertyPreviewPanel } from './services/custom-property-visibility';
+import { ItemHistoryService } from './services/item-history-service';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -344,6 +345,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   aiAssistedTaskService: AiAssistedTaskService;
   taskRecurrenceService: TaskRecurrenceService;
   taskApiService: TaskApiService;
+  itemHistoryService: ItemHistoryService;
   eventService: GcmEventService;
   identityService: TpsIdentityService;
   cardContentService: CardContentService;
@@ -476,6 +478,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       taskLinesVersion: Number(api?.taskLines?.version) || null,
       taskCheckboxesVersion: Number(api?.taskCheckboxes?.version) || null,
       tasksVersion: Number(api?.tasks?.version) || null,
+      itemHistoryVersion: Number(api?.history?.version) || null,
     });
   }
 
@@ -487,6 +490,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     installDateContainsPolyfill();
     this.register(installVisibleViewportContract());
+    this.homeComponentActionService = new HomeComponentActionService(this);
     this.registerView(TPS_HOME_VIEW_TYPE, (leaf) => new TpsHomeView(leaf, this));
     this.registerBasesView(TPS_TABLE_VIEW_TYPE, {
       name: 'TPS Table',
@@ -535,9 +539,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.createTaskService = new CreateTaskService(this);
     this.aiAssistedTaskService = new AiAssistedTaskService(this);
     this.taskRecurrenceService = new TaskRecurrenceService(this);
-    this.taskApiService = new TaskApiService(this);
     this.eventService = new GcmEventService(this);
     this.identityService = new TpsIdentityService(this);
+    this.itemHistoryService = new ItemHistoryService(this);
+    await this.itemHistoryService.setup();
+    this.taskApiService = new TaskApiService(this);
     this.cardContentService = new CardContentService();
     this.identityMigrationService = new IdentityMigrationService(this);
     this.canvasPropertiesService = new CanvasPropertiesService(this);
@@ -550,7 +556,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.homeCaptureService = new HomeCaptureService(this);
     this.baseLineEditProtocolService = new BaseLineEditProtocolService(this);
     this.baseLineEditProtocolService.register();
-    this.homeComponentActionService = new HomeComponentActionService(this);
     this.archiveFileService = new ArchiveFileService(this);
     this.register(this.homeComponentActionService.register(HOME_CAPTURE_COMMAND_ID, (context) => (
       this.homeCaptureService.openCaptureModalForContext(context)
@@ -1891,6 +1896,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.taskLineDragService?.dispose();
     this.taskCheckboxHandler?.dispose();
     this.taskLineContextMenuService?.dispose();
+    this.itemHistoryService?.dispose();
     this.linkedSubitemCheckboxService?.detach();
     this.hideCompletedCheckboxesService?.detach();
     this.notebookNavigatorRuleService?.dispose();
@@ -1988,6 +1994,21 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     ) {
       this.settings.checklistPromotionBehavior = DEFAULT_SETTINGS.checklistPromotionBehavior;
     }
+    if (
+      this.settings.dailyNoteTaskMoveSourceBehavior !== 'mark-migrated'
+      && this.settings.dailyNoteTaskMoveSourceBehavior !== 'remove'
+    ) {
+      this.settings.dailyNoteTaskMoveSourceBehavior = DEFAULT_SETTINGS.dailyNoteTaskMoveSourceBehavior;
+    }
+    this.settings.enableItemHistory = this.settings.enableItemHistory !== false;
+    const itemHistoryRetentionDays = Number(this.settings.itemHistoryRetentionDays);
+    this.settings.itemHistoryRetentionDays = Number.isFinite(itemHistoryRetentionDays)
+      ? Math.min(365, Math.max(1, Math.floor(itemHistoryRetentionDays)))
+      : DEFAULT_SETTINGS.itemHistoryRetentionDays;
+    const itemHistoryMaxEntries = Number(this.settings.itemHistoryMaxEntries);
+    this.settings.itemHistoryMaxEntries = Number.isFinite(itemHistoryMaxEntries)
+      ? Math.min(25000, Math.max(100, Math.floor(itemHistoryMaxEntries)))
+      : DEFAULT_SETTINGS.itemHistoryMaxEntries;
     if (this.settings.topParentNavPlacement !== 'top' && this.settings.topParentNavPlacement !== 'bottom') {
       this.settings.topParentNavPlacement = DEFAULT_SETTINGS.topParentNavPlacement;
     }

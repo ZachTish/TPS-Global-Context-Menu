@@ -70,6 +70,14 @@ import {
 } from '../../views/log-line-utils';
 import { resolveExactLineRevisionIndex, splitLineItemContent } from '../../utils/line-item-deletion';
 import {
+  abortDirectTaskHistory,
+  beginDirectTaskHistory,
+  commitDirectTaskHistory,
+  ensureDirectTaskHistoryIdentity,
+  type DirectTaskHistoryLocation,
+  type DirectTaskHistoryLogContext,
+} from '../../utils/direct-task-history';
+import {
   scanMarkdownDocumentLines,
   type MarkdownDocumentLine,
 } from '../../utils/markdown-document-lines';
@@ -5172,6 +5180,31 @@ export class TpsListView extends BasesView {
     const targetLine = Math.max(1, Math.floor(Number(line || 1)));
     const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
     let resolvedLine = targetLine;
+    let committedLine = '';
+    let historyReady = true;
+    let confirmedHistoryBefore: DirectTaskHistoryLocation | undefined;
+    const historyService = this.plugin?.itemHistoryService;
+    const historyContext: DirectTaskHistoryLogContext = {
+      action: 'task.update',
+      surface: 'tps-list',
+      path: file.path,
+      lineNumber: targetLine - 1,
+    };
+    const historyHandle = this.parseLineItem(plan.currentLine, true)?.itemKind === 'task'
+      ? await beginDirectTaskHistory(historyService, {
+          action: historyContext.action,
+          cause: {
+            kind: 'user',
+            sourcePluginId: 'tps-global-context-menu',
+            surface: historyContext.surface,
+          },
+          before: {
+            path: file.path,
+            lineNumber: targetLine - 1,
+            rawLine: plan.currentLine,
+          },
+        })
+      : null;
     flow('TaskDrop', 'apply:start', {
       path: file.path,
       line: targetLine,
@@ -5182,24 +5215,52 @@ export class TpsListView extends BasesView {
       filterStatus: plan.filterStatus,
     });
 
-    await this.app.vault.process(file, (content) => {
-      const parts = splitLineItemContent(content);
-      const index = resolveExactLineRevisionIndex(parts.lines, targetLine - 1, plan.currentLine);
-      if (index < 0) {
-        mutation.outcome = 'stale';
-        return content;
-      }
-      const current = parts.lines[index] || '';
-      if (!this.parseLineItem(current, true)) return content;
-      const next = plan.nextLine;
-      if (next === current) return content;
-      parts.lines[index] = next;
-      resolvedLine = index + 1;
-      mutation.outcome = 'changed';
-      return `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`;
-    });
+    try {
+      await this.app.vault.process(file, (content) => {
+        const parts = splitLineItemContent(content);
+        const index = resolveExactLineRevisionIndex(parts.lines, targetLine - 1, plan.currentLine);
+        if (index < 0) {
+          mutation.outcome = 'stale';
+          return content;
+        }
+        const current = parts.lines[index] || '';
+        confirmedHistoryBefore = {
+          path: file.path,
+          lineNumber: index,
+          rawLine: current,
+        };
+        const currentItem = this.parseLineItem(current, true);
+        if (!currentItem) return content;
+        const next = plan.nextLine;
+        if (next === current) return content;
+        let finalNext = next;
+        if (historyHandle) {
+          if (currentItem.itemKind !== 'task') {
+            historyReady = false;
+          } else {
+            const ensured = ensureDirectTaskHistoryIdentity(
+              historyService,
+              historyHandle,
+              next,
+              historyContext,
+            );
+            finalNext = ensured.line;
+            historyReady = ensured.ready;
+          }
+        }
+        parts.lines[index] = finalNext;
+        committedLine = finalNext;
+        resolvedLine = index + 1;
+        mutation.outcome = 'changed';
+        return `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`;
+      });
+    } catch (error) {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+      throw error;
+    }
 
     if (mutation.outcome === 'stale') {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
       flowWarn('TaskDrop', 'apply:stale-target', {
         path: file.path,
         requestedLine: targetLine,
@@ -5210,8 +5271,24 @@ export class TpsListView extends BasesView {
       return false;
     }
     if (mutation.outcome === 'changed') {
+      if (historyReady && committedLine) {
+        await commitDirectTaskHistory(historyService, historyHandle, {
+          ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+          after: {
+            path: file.path,
+            lineNumber: resolvedLine - 1,
+            rawLine: committedLine,
+          },
+          sourceDisposition: 'retained',
+          outcome: 'committed',
+        }, historyContext);
+      } else {
+        await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+      }
       this.clearTaskCachesForPath(file.path);
       emitFilesUpdated(this.app, [file.path], 'tps-list');
+    } else {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
     }
     flow('TaskDrop', mutation.outcome === 'changed' ? 'apply:done' : 'apply:no-change', {
       path: file.path,
@@ -5530,53 +5607,112 @@ export class TpsListView extends BasesView {
     let changed = false;
     let blockedReason = '';
     let resolvedLine = targetLine;
+    let committedLine = '';
+    let historyReady = true;
+    let confirmedHistoryBefore: DirectTaskHistoryLocation | undefined;
+    const historyService = this.plugin?.itemHistoryService;
+    const historyContext: DirectTaskHistoryLogContext = {
+      action: 'task.checkbox',
+      surface: 'tps-list',
+      path: file.path,
+      lineNumber: targetLine - 1,
+    };
+    const historyHandle = this.parseLineItem(expectedRawLine, true)?.itemKind === 'task'
+      ? await beginDirectTaskHistory(historyService, {
+          action: historyContext.action,
+          cause: {
+            kind: 'user',
+            sourcePluginId: 'tps-global-context-menu',
+            surface: historyContext.surface,
+          },
+          before: {
+            path: file.path,
+            lineNumber: targetLine - 1,
+            rawLine: expectedRawLine,
+          },
+        })
+      : null;
     flow('TaskCheckbox', 'update:start', {
       path: file.path,
       line: targetLine,
       nextState,
     });
 
-    await this.app.vault.process(file, (content) => {
-      const parts = splitLineItemContent(content);
-      const index = resolveExactLineRevisionIndex(parts.lines, targetLine - 1, expectedRawLine);
-      if (index < 0) {
-        blockedReason = 'stale-source-revision';
-        return content;
-      }
-      const current = parts.lines[index];
-      const taskMatch = current.match(/^\s*(?:[-*+]|\d+[.)])\s+(\[[^\]\r\n]*\])\s+/u);
-      if (!taskMatch) {
-        blockedReason = 'not-task-line';
-        return content;
-      }
-      const currentState = this.normalizeCheckboxState(taskMatch[1]);
-      if (!currentState || !this.getStatusForCheckboxState(currentState)) {
-        blockedReason = 'unmapped-current-state';
-        return content;
-      }
-      if (expectedState && currentState !== expectedState) {
-        blockedReason = 'stale-checkbox-state';
-        return content;
-      }
-      const currentToggleTarget = getKanbanToggleCheckboxState(currentState, this.getGcmCheckboxMappings());
-      if (!currentToggleTarget || currentToggleTarget !== nextState) {
-        blockedReason = 'stale-toggle-mapping';
-        return content;
-      }
-      const next = replaceKanbanTaskLineCheckboxState(current, nextState);
-      if (next === current) {
-        blockedReason = 'unchanged';
-        return content;
-      }
-      parts.lines[index] = next;
-      resolvedLine = index + 1;
-      changed = true;
-      return `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`;
-    });
+    try {
+      await this.app.vault.process(file, (content) => {
+        const parts = splitLineItemContent(content);
+        const index = resolveExactLineRevisionIndex(parts.lines, targetLine - 1, expectedRawLine);
+        if (index < 0) {
+          blockedReason = 'stale-source-revision';
+          return content;
+        }
+        const current = parts.lines[index];
+        confirmedHistoryBefore = {
+          path: file.path,
+          lineNumber: index,
+          rawLine: current,
+        };
+        const taskMatch = current.match(/^\s*(?:[-*+]|\d+[.)])\s+(\[[^\]\r\n]*\])\s+/u);
+        if (!taskMatch) {
+          blockedReason = 'not-task-line';
+          return content;
+        }
+        const currentState = this.normalizeCheckboxState(taskMatch[1]);
+        if (!currentState || !this.getStatusForCheckboxState(currentState)) {
+          blockedReason = 'unmapped-current-state';
+          return content;
+        }
+        if (expectedState && currentState !== expectedState) {
+          blockedReason = 'stale-checkbox-state';
+          return content;
+        }
+        const currentToggleTarget = getKanbanToggleCheckboxState(currentState, this.getGcmCheckboxMappings());
+        if (!currentToggleTarget || currentToggleTarget !== nextState) {
+          blockedReason = 'stale-toggle-mapping';
+          return content;
+        }
+        const next = replaceKanbanTaskLineCheckboxState(current, nextState);
+        if (next === current) {
+          blockedReason = 'unchanged';
+          return content;
+        }
+        const ensured = ensureDirectTaskHistoryIdentity(
+          historyService,
+          historyHandle,
+          next,
+          historyContext,
+        );
+        parts.lines[index] = ensured.line;
+        committedLine = ensured.line;
+        historyReady = ensured.ready;
+        resolvedLine = index + 1;
+        changed = true;
+        return `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`;
+      });
+    } catch (error) {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+      throw error;
+    }
 
     if (changed) {
+      if (historyReady && committedLine) {
+        await commitDirectTaskHistory(historyService, historyHandle, {
+          ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+          after: {
+            path: file.path,
+            lineNumber: resolvedLine - 1,
+            rawLine: committedLine,
+          },
+          sourceDisposition: 'retained',
+          outcome: 'committed',
+        }, historyContext);
+      } else {
+        await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+      }
       this.clearTaskCachesForPath(file.path);
       emitFilesUpdated(this.app, [file.path], 'tps-list');
+    } else {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
     }
     flow('TaskCheckbox', changed ? 'update:done' : 'update:no-change', {
       path: file.path,
@@ -7509,9 +7645,7 @@ export class TpsListView extends BasesView {
       return;
     }
 
-    const title = await new Promise<string | null>((resolve) => {
-      new TaskTitleModal(this.app, 'TPS List', itemKind, resolve).open();
-    });
+    const title = await this.promptForRootLineTitle(itemKind);
     if (!title) {
       flow('CreateRootTask', 'cancelled-title', { lane: displayLane.label, itemKind });
       return;
@@ -7570,48 +7704,136 @@ export class TpsListView extends BasesView {
     });
     this.formulaNow = new Date();
     this.taskFormulaSessions = new WeakMap<OpenTaskSubitem, TpsFormulaRowSession>();
+    const historyService = this.plugin?.itemHistoryService;
+    const historyContext: DirectTaskHistoryLogContext = {
+      action: 'task.create',
+      surface: 'tps-list',
+      path: targetFile.path,
+      lineNumber: 0,
+    };
+    const historyHandle = itemKind === 'task'
+      ? await beginDirectTaskHistory(historyService, {
+          action: historyContext.action,
+          cause: {
+            kind: 'user',
+            sourcePluginId: 'tps-global-context-menu',
+            surface: historyContext.surface,
+          },
+          before: {
+            path: targetFile.path,
+            lineNumber: 0,
+            rawLine: taskLine,
+          },
+        })
+      : null;
     let blockedReason: 'mismatch' | 'formula-unresolved' | 'mapping-changed' | null = null;
-    await this.app.vault.process(targetFile, (content) => {
-      if (itemKind === 'task') {
-        const liveState = this.getCheckboxStateForStatus(desiredTaskStatus);
-        const liveStatus = plannedCheckboxState
-          ? this.getStatusForCheckboxState(plannedCheckboxState)
-          : '';
-        if (
-          !desiredTaskStatus
-          || !plannedCheckboxState
-          || liveState !== plannedCheckboxState
-          || liveStatus !== desiredTaskStatus
-        ) {
-          blockedReason = 'mapping-changed';
+    let insertedLine = taskLine;
+    let insertedLineIndex = -1;
+    let historyReady = true;
+    let writeAccepted = false;
+    let processedContent = '';
+    try {
+      processedContent = await this.app.vault.process(targetFile, (content) => {
+        if (itemKind === 'task') {
+          const liveState = this.getCheckboxStateForStatus(desiredTaskStatus);
+          const liveStatus = plannedCheckboxState
+            ? this.getStatusForCheckboxState(plannedCheckboxState)
+            : '';
+          if (
+            !desiredTaskStatus
+            || !plannedCheckboxState
+            || liveState !== plannedCheckboxState
+            || liveStatus !== desiredTaskStatus
+          ) {
+            blockedReason = 'mapping-changed';
+            return content;
+          }
+        }
+        const nextLineNumber = this.getAppendedLineNumber(content);
+        insertedLineIndex = nextLineNumber - 1;
+        insertedLine = taskLine;
+        if (itemKind === 'task') {
+          const historyIdentity = ensureDirectTaskHistoryIdentity(
+            historyService,
+            historyHandle,
+            taskLine,
+            historyContext,
+          );
+          insertedLine = historyIdentity.line;
+          historyReady = historyIdentity.ready;
+        }
+        const creationFilterMatch = this.lineMatchesCreationFilters(
+          insertedLine,
+          targetFile,
+          effectiveFilterRoots,
+          nextLineNumber,
+        );
+        if (creationFilterMatch === false) {
+          blockedReason = 'mismatch';
           return content;
         }
+        if (creationFilterMatch == null && hasTpsFormulaReference(effectiveFilterRoots)) {
+          blockedReason = 'formula-unresolved';
+          return content;
+        }
+        if (creationFilterMatch == null) {
+          flowWarn('CreateRootTask', 'filter-validation-partial', {
+            path: targetFile.path,
+            itemKind,
+            nextLineNumber,
+          });
+        }
+        writeAccepted = true;
+        historyContext.lineNumber = insertedLineIndex;
+        return this.insertLineAfterFrontmatter(content, insertedLine);
+      });
+    } catch (error) {
+      let reconciled = false;
+      if (writeAccepted && insertedLineIndex >= 0) {
+        try {
+          const currentContent = await this.app.vault.read(targetFile);
+          const currentLines = String(currentContent || '').split(/\r?\n/u);
+          const exactMatches = currentLines
+            .map((line, index) => line === insertedLine ? index : -1)
+            .filter((index) => index >= 0);
+          const confirmedIndex = currentLines[insertedLineIndex] === insertedLine
+            ? insertedLineIndex
+            : historyHandle && historyReady && exactMatches.length === 1
+              ? exactMatches[0]
+              : -1;
+          if (confirmedIndex >= 0) {
+            insertedLineIndex = confirmedIndex;
+            historyContext.lineNumber = confirmedIndex;
+            processedContent = currentContent;
+            reconciled = true;
+            flow('CreateRootTask', 'write-reconciled', {
+              path: targetFile.path,
+              itemKind,
+              insertedLineNumber: confirmedIndex + 1,
+            });
+          }
+        } catch (readError) {
+          flowError('CreateRootTask', 'write-reconciliation-failed', readError, {
+            path: targetFile.path,
+            itemKind,
+          });
+        }
       }
-      const nextLineNumber = this.getAppendedLineNumber(content);
-      const creationFilterMatch = this.lineMatchesCreationFilters(
-        taskLine,
-        targetFile,
-        effectiveFilterRoots,
-        nextLineNumber,
-      );
-      if (creationFilterMatch === false) {
-        blockedReason = 'mismatch';
-        return content;
-      }
-      if (creationFilterMatch == null && hasTpsFormulaReference(effectiveFilterRoots)) {
-        blockedReason = 'formula-unresolved';
-        return content;
-      }
-      if (creationFilterMatch == null) {
-        flowWarn('CreateRootTask', 'filter-validation-partial', {
+      if (!reconciled) {
+        if (!writeAccepted || !historyHandle || !historyReady) {
+          await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+        }
+        flowError('CreateRootTask', 'write-failed', error, {
           path: targetFile.path,
           itemKind,
-          nextLineNumber,
+          historyResolution: writeAccepted && historyHandle && historyReady ? 'pending-recovery' : 'aborted',
         });
+        new Notice(`Could not create the ${itemKind}.`);
+        return;
       }
-      return this.insertLineAfterFrontmatter(content, taskLine);
-    });
+    }
     if (blockedReason) {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
       flowWarn('CreateRootTask', 'blocked', {
         reason: blockedReason === 'mismatch'
           ? 'prospective-line-does-not-match-filters'
@@ -7629,6 +7851,32 @@ export class TpsListView extends BasesView {
       return;
     }
 
+    const persistedLine = String(processedContent || '').split(/\r?\n/u)[insertedLineIndex] || '';
+    if (!writeAccepted || insertedLineIndex < 0 || persistedLine !== insertedLine) {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+      flowWarn('CreateRootTask', 'write-unconfirmed', {
+        path: targetFile.path,
+        itemKind,
+        insertedLineNumber: insertedLineIndex + 1,
+      });
+      new Notice(`Could not confirm the new ${itemKind}. Refresh and try again.`);
+      return;
+    }
+    if (itemKind === 'task') {
+      if (historyReady) {
+        await commitDirectTaskHistory(historyService, historyHandle, {
+          after: {
+            path: targetFile.path,
+            lineNumber: insertedLineIndex,
+            rawLine: persistedLine,
+          },
+          outcome: 'committed',
+        }, historyContext);
+      } else {
+        await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+      }
+    }
+
     this.clearTaskCachesForPath(targetFile.path);
     emitFilesUpdated(this.app, [targetFile.path], 'tps-list');
     this.queuePostCreateRefresh();
@@ -7636,6 +7884,12 @@ export class TpsListView extends BasesView {
     if (this.plugin.settings.openTaskDestinationAfterCreate !== false) {
       await this.openOrFocusFile(targetFile);
     }
+  }
+
+  private async promptForRootLineTitle(itemKind: KanbanRootLineKind): Promise<string | null> {
+    return await new Promise<string | null>((resolve) => {
+      new TaskTitleModal(this.app, 'TPS List', itemKind, resolve).open();
+    });
   }
 
   private buildRootTaskLine(
@@ -9462,28 +9716,82 @@ export class TpsListView extends BasesView {
   ): Promise<boolean> {
     const targetLine = Math.max(1, Math.floor(Number(line || 1)));
     const expectedIsHeading = parseTpsListHeadingLine(expectedLine) != null;
+    const expectedItem = expectedIsHeading ? null : this.parseLineItem(expectedLine, true);
     const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
     let resolvedLine = targetLine;
-    await this.app.vault.process(file, (content) => {
-      const parts = splitLineItemContent(content);
-      const index = resolveExactLineRevisionIndex(parts.lines, targetLine - 1, expectedLine);
-      if (index < 0) {
-        mutation.outcome = 'stale';
-        return content;
-      }
-      const currentLine = parts.lines[index] || '';
-      const currentMatchesKind = expectedIsHeading
-        ? parseTpsListHeadingLine(currentLine) != null
-        : this.parseLineItem(currentLine, true) != null;
-      if (!currentMatchesKind) return content;
-      const nextLine = updater(currentLine);
-      if (nextLine === currentLine) return content;
-      parts.lines[index] = nextLine;
-      resolvedLine = index + 1;
-      mutation.outcome = 'changed';
-      return `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`;
-    });
+    let committedLine = '';
+    let historyReady = true;
+    let confirmedHistoryBefore: DirectTaskHistoryLocation | undefined;
+    const historyService = this.plugin?.itemHistoryService;
+    const historyContext: DirectTaskHistoryLogContext = {
+      action: 'task.update',
+      surface: 'tps-list',
+      path: file.path,
+      lineNumber: targetLine - 1,
+    };
+    const historyHandle = expectedItem?.itemKind === 'task'
+      ? await beginDirectTaskHistory(historyService, {
+          action: historyContext.action,
+          cause: {
+            kind: 'user',
+            sourcePluginId: 'tps-global-context-menu',
+            surface: historyContext.surface,
+          },
+          before: {
+            path: file.path,
+            lineNumber: targetLine - 1,
+            rawLine: expectedLine,
+          },
+        })
+      : null;
+    try {
+      await this.app.vault.process(file, (content) => {
+        const parts = splitLineItemContent(content);
+        const index = resolveExactLineRevisionIndex(parts.lines, targetLine - 1, expectedLine);
+        if (index < 0) {
+          mutation.outcome = 'stale';
+          return content;
+        }
+        const currentLine = parts.lines[index] || '';
+        confirmedHistoryBefore = {
+          path: file.path,
+          lineNumber: index,
+          rawLine: currentLine,
+        };
+        const currentItem = expectedIsHeading ? null : this.parseLineItem(currentLine, true);
+        const currentMatchesKind = expectedIsHeading
+          ? parseTpsListHeadingLine(currentLine) != null
+          : currentItem != null;
+        if (!currentMatchesKind) return content;
+        const nextLine = updater(currentLine);
+        if (nextLine === currentLine) return content;
+        let finalNext = nextLine;
+        if (historyHandle) {
+          if (currentItem?.itemKind !== 'task') {
+            historyReady = false;
+          } else {
+            const ensured = ensureDirectTaskHistoryIdentity(
+              historyService,
+              historyHandle,
+              nextLine,
+              historyContext,
+            );
+            finalNext = ensured.line;
+            historyReady = ensured.ready;
+          }
+        }
+        parts.lines[index] = finalNext;
+        committedLine = finalNext;
+        resolvedLine = index + 1;
+        mutation.outcome = 'changed';
+        return `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`;
+      });
+    } catch (error) {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+      throw error;
+    }
     if (mutation.outcome === 'stale') {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
       flowWarn('ListProperty', `${event}:stale-target`, {
         path: file.path,
         requestedLine: targetLine,
@@ -9493,7 +9801,24 @@ export class TpsListView extends BasesView {
       new Notice('The source line changed while the property picker was open.');
       return false;
     }
-    if (mutation.outcome !== 'changed') return false;
+    if (mutation.outcome !== 'changed') {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+      return false;
+    }
+    if (historyReady && committedLine) {
+      await commitDirectTaskHistory(historyService, historyHandle, {
+        ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+        after: {
+          path: file.path,
+          lineNumber: resolvedLine - 1,
+          rawLine: committedLine,
+        },
+        sourceDisposition: 'retained',
+        outcome: 'committed',
+      }, historyContext);
+    } else {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+    }
     this.clearTaskCachesForPath(file.path);
     emitFilesUpdated(this.app, [file.path], 'tps-list');
     flow('ListProperty', `${event}:done`, {

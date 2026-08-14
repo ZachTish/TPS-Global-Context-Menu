@@ -941,7 +941,11 @@ export class PersistentMenuManager {
           path: item.sourceFile.path,
           lineNumber: taskLine.lineNumber,
           rawLine: taskLine.rawLine,
-        }, requested);
+        }, requested, {
+          kind: 'user',
+          sourcePluginId: 'tps-global-context-menu',
+          surface: 'linked-context-task',
+        });
         if (!result.ok) {
           checkbox.checked = !requested;
           checkbox.disabled = false;

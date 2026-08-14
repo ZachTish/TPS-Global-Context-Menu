@@ -15,6 +15,7 @@ import { CaptureMarkdownEditor } from './home-capture-markdown-editor';
 import { formatCaptureMarkdownForWrite } from './home-capture-markdown-core';
 import { formatFileWikilink } from '../utils/list-utils';
 import {
+  parseTaskLine,
   preserveTpsInlinePropsMetadata,
   stripTaskInlinePropsMetadata,
 } from '../utils/task-line-metadata';
@@ -25,6 +26,18 @@ import {
   sha256BaseLine,
 } from './base-line-edit-protocol-core';
 import * as logger from '../logger';
+import { scanMarkdownDocumentLines } from '../utils/markdown-document-lines';
+import { ensureTaskHistoryIdentity, getTaskHistoryIdentity } from './item-history-core';
+import {
+  abortDirectTaskHistory,
+  beginDirectTaskHistory,
+  commitDirectTaskHistory,
+  ensureDirectTaskHistoryIdentity,
+  type DirectTaskHistoryAction,
+  type DirectTaskHistoryCause,
+  type DirectTaskHistoryHandle,
+  type DirectTaskHistoryLogContext,
+} from '../utils/direct-task-history';
 
 const getMoment = (): any => (window as any).moment;
 
@@ -38,6 +51,15 @@ interface HomeCaptureOptions {
   targetPath?: string;
   preserveMarkdown?: boolean;
   headingTarget?: HomeCaptureHeadingTarget;
+  historyCause?: DirectTaskHistoryCause;
+}
+
+interface HomeCaptureTaskHistoryIntent {
+  handle: DirectTaskHistoryHandle | null;
+  context: DirectTaskHistoryLogContext;
+  blockLineOffset: number;
+  rawLine: string;
+  ready: boolean;
 }
 
 interface HomeCaptureModalOptions extends HomeCaptureOptions {
@@ -61,6 +83,19 @@ interface HomeCaptureLineEditorOptions {
 type HomeCaptureSuggestion =
   | { type: 'tag'; value: string; label: string }
   | { type: 'note'; file: TFile; matchedText: string; display: string; label: string; replaceStart: number; replaceEnd: number };
+
+export function classifyHomeCaptureLineHistoryAction(
+  beforeRawLine: string,
+  nextRawLine: string,
+): DirectTaskHistoryAction | null {
+  if (beforeRawLine === nextRawLine) return null;
+  const beforeTask = parseTaskLine(beforeRawLine) !== null;
+  const nextTask = parseTaskLine(nextRawLine) !== null;
+  if (beforeTask && nextTask) return 'task.update';
+  if (beforeTask) return 'task.delete';
+  if (nextTask) return 'task.create';
+  return null;
+}
 
 export class HomeCaptureService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
@@ -276,6 +311,11 @@ export class HomeCaptureService {
       const saved = await this.capture(value, options.date ?? getMoment()(), {
         ...captureOptions,
         targetPath: options.targetPath,
+        historyCause: {
+          kind: 'user',
+          sourcePluginId: 'tps-global-context-menu',
+          surface: 'home-capture-form',
+        },
       });
       if (!saved) return;
       editor.clear();
@@ -365,14 +405,17 @@ export class HomeCaptureService {
     const block = options.preserveMarkdown === true
       ? formatCaptureMarkdownForWrite(value, timestamp)
       : formatHomeCaptureBlock(value, timestamp, { task: options.task === true });
+    const historyIntents = await this.beginCaptureTaskHistory(file, block, options.historyCause);
     let headingConflict = false;
     let resolvedHeadingLine: number | null = null;
+    let processed = '';
     try {
-      await this.plugin.app.vault.process(file, (current) => {
+      processed = await this.plugin.app.vault.process(file, (current) => {
+        const writeBlock = this.applyCaptureTaskHistoryIdentities(block, historyIntents);
         if (options.headingTarget) {
           const inserted = insertHomeCaptureBlockUnderHeading(
             current,
-            block,
+            writeBlock,
             options.headingTarget,
             this.plugin.settings.homeCaptureInsertPosition,
           );
@@ -383,12 +426,13 @@ export class HomeCaptureService {
           resolvedHeadingLine = inserted.headingLine;
           return inserted.content;
         }
-        return insertHomeCaptureBlock(current, block, {
+        return insertHomeCaptureBlock(current, writeBlock, {
           insertPosition: this.plugin.settings.homeCaptureInsertPosition,
           addHeading: false,
         });
       });
     } catch (error) {
+      await this.abortCaptureTaskHistory(historyIntents);
       logger.flowError('HomeCapture', 'capture:write-failed', error, {
         path: file.path,
         headingSelected: Boolean(options.headingTarget),
@@ -397,6 +441,7 @@ export class HomeCaptureService {
       return null;
     }
     if (headingConflict) {
+      await this.abortCaptureTaskHistory(historyIntents);
       logger.flowWarn('HomeCapture', 'capture:heading-unavailable', {
         path: file.path,
         headingLevel: options.headingTarget?.level ?? null,
@@ -405,6 +450,7 @@ export class HomeCaptureService {
       new Notice('The selected heading changed or no longer exists. Nothing was written.', 8000);
       return null;
     }
+    await this.commitCaptureTaskHistory(historyIntents, processed);
     logger.flow('HomeCapture', 'capture:written', {
       path: file.path,
       date: date.format('YYYY-MM-DD'),
@@ -419,6 +465,103 @@ export class HomeCaptureService {
     const destination = requestedPath ? file.basename : date.format('YYYY-MM-DD');
     new Notice(`${options.task === true ? 'Added task' : 'Added'} to ${destination}.`);
     return file;
+  }
+
+  private async beginCaptureTaskHistory(
+    file: TFile,
+    block: string,
+    cause: DirectTaskHistoryCause | undefined,
+  ): Promise<HomeCaptureTaskHistoryIntent[]> {
+    if (!cause || cause.kind !== 'user') return [];
+    const lines = String(block || '').replace(/\r\n?/gu, '\n').split('\n');
+    const intents: HomeCaptureTaskHistoryIntent[] = [];
+    for (let blockLineOffset = 0; blockLineOffset < lines.length; blockLineOffset += 1) {
+      const rawLine = lines[blockLineOffset] || '';
+      if (!parseTaskLine(rawLine)) continue;
+      const context: DirectTaskHistoryLogContext = {
+        action: 'task.create',
+        surface: cause.surface,
+        path: file.path,
+        lineNumber: blockLineOffset,
+      };
+      const handle = await beginDirectTaskHistory(this.plugin.itemHistoryService, {
+        action: 'task.create',
+        cause,
+        before: {
+          path: file.path,
+          lineNumber: blockLineOffset,
+          rawLine,
+        },
+      });
+      intents.push({ handle, context, blockLineOffset, rawLine, ready: true });
+    }
+    return intents;
+  }
+
+  private applyCaptureTaskHistoryIdentities(
+    block: string,
+    intents: HomeCaptureTaskHistoryIntent[],
+  ): string {
+    if (intents.length === 0) return block;
+    const lines = String(block || '').replace(/\r\n?/gu, '\n').split('\n');
+    for (const intent of intents) {
+      const ensured = ensureDirectTaskHistoryIdentity(
+        this.plugin.itemHistoryService,
+        intent.handle,
+        lines[intent.blockLineOffset] ?? intent.rawLine,
+        intent.context,
+      );
+      intent.ready = intent.ready && ensured.ready;
+      intent.rawLine = ensured.line;
+      lines[intent.blockLineOffset] = ensured.line;
+    }
+    return lines.join('\n');
+  }
+
+  private async commitCaptureTaskHistory(
+    intents: HomeCaptureTaskHistoryIntent[],
+    currentContent: string,
+  ): Promise<void> {
+    if (intents.length === 0) return;
+    const documentLines = scanMarkdownDocumentLines(currentContent);
+    for (const intent of intents) {
+      if (!intent.handle || !intent.ready) {
+        await abortDirectTaskHistory(this.plugin.itemHistoryService, intent.handle, intent.context);
+        continue;
+      }
+      const expectedIdentity = getTaskHistoryIdentity(intent.rawLine);
+      const matches = expectedIdentity
+        ? documentLines.filter((line) => {
+            if (!line.isContent || !parseTaskLine(line.text) || getTaskHistoryIdentity(line.text) !== expectedIdentity) {
+              return false;
+            }
+            try {
+              ensureTaskHistoryIdentity(line.text, expectedIdentity);
+              return true;
+            } catch {
+              return false;
+            }
+          })
+        : [];
+      if (matches.length !== 1) {
+        await abortDirectTaskHistory(this.plugin.itemHistoryService, intent.handle, intent.context);
+        continue;
+      }
+      const after = matches[0];
+      await commitDirectTaskHistory(this.plugin.itemHistoryService, intent.handle, {
+        after: {
+          path: intent.context.path,
+          lineNumber: after.index,
+          rawLine: after.text,
+        },
+        outcome: 'committed',
+      }, intent.context);
+    }
+  }
+
+  private async abortCaptureTaskHistory(intents: HomeCaptureTaskHistoryIntent[]): Promise<void> {
+    await Promise.all(intents.map((intent) =>
+      abortDirectTaskHistory(this.plugin.itemHistoryService, intent.handle, intent.context)));
   }
 
   private containsMarkdownHeading(value: string): boolean {
@@ -1192,6 +1335,11 @@ class HomeCaptureModal extends Modal {
           targetPath: this.options.targetPath,
           preserveMarkdown: true,
           headingTarget: selectedHeadingTarget,
+          historyCause: {
+            kind: 'user',
+            sourcePluginId: 'tps-global-context-menu',
+            surface: 'home-capture-modal',
+          },
         });
         if (!file) return;
         this.saved = true;
@@ -1287,7 +1435,7 @@ class HomeCaptureLineEditModal extends Modal {
     };
     const save = async () => {
       if (saveButton.disabled || saving) return;
-      const replacement = preserveTpsInlinePropsMetadata(this.snapshot.value, value.trim());
+      let replacement = preserveTpsInlinePropsMetadata(this.snapshot.value, value.trim());
       if (!replacement || /[\r\n]/.test(replacement)) {
         new Notice('Line editing supports one non-empty line.');
         return;
@@ -1331,19 +1479,108 @@ class HomeCaptureLineEditModal extends Modal {
           return;
         }
       }
+      const historyAction = classifyHomeCaptureLineHistoryAction(this.snapshot.value, replacement);
+      const historyContext: DirectTaskHistoryLogContext | null = historyAction
+        ? {
+            action: historyAction,
+            surface: 'home-line-editor',
+            path: this.file.path,
+            lineNumber: this.zeroBasedLine,
+          }
+        : null;
+      let historyHandle: DirectTaskHistoryHandle | null = null;
+      if (historyAction && historyContext) {
+        const historyBefore = historyAction === 'task.create' ? replacement : this.snapshot.value;
+        historyHandle = await beginDirectTaskHistory(this.plugin.itemHistoryService, {
+          action: historyAction,
+          cause: {
+            kind: 'user',
+            sourcePluginId: 'tps-global-context-menu',
+            surface: historyContext.surface,
+          },
+          before: {
+            path: this.file.path,
+            lineNumber: this.zeroBasedLine,
+            rawLine: historyBefore,
+          },
+        });
+        if (historyAction !== 'task.delete') {
+          const ensured = ensureDirectTaskHistoryIdentity(
+            this.plugin.itemHistoryService,
+            historyHandle,
+            replacement,
+            historyContext,
+          );
+          if (ensured.ready) {
+            replacement = ensured.line;
+          } else {
+            await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+            historyHandle = null;
+          }
+        }
+      }
       let changed = false;
-      await this.plugin.app.vault.process(this.file, (current) => {
-        const next = replaceHomeCaptureRangeIfUnchanged(current, this.snapshot, [this.snapshot.value], replacement);
-        if (next == null) return current;
-        changed = next !== current;
-        return next;
-      });
+      let processed = '';
+      try {
+        processed = await this.plugin.app.vault.process(this.file, (current) => {
+          const next = replaceHomeCaptureRangeIfUnchanged(current, this.snapshot, [this.snapshot.value], replacement);
+          if (next == null) return current;
+          changed = next !== current;
+          return next;
+        });
+      } catch (error) {
+        if (historyContext) {
+          await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+        }
+        saving = false;
+        update();
+        logger.flowError('HomeCapture', 'line-editor:write-failed', error, this.getDiagnostics());
+        new Notice('The selected line could not be saved. Nothing was changed.', 8000);
+        return;
+      }
       if (!changed) {
+        if (historyContext) {
+          await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+        }
         saving = false;
         update();
         logger.flowWarn('HomeCapture', 'line-editor:conflict', this.getDiagnostics());
         new Notice('The line changed outside the editor. Refresh the feed and try again.', 8000);
         return;
+      }
+      if (historyAction && historyContext && historyHandle) {
+        if (historyAction === 'task.delete') {
+          await commitDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, {
+            outcome: 'committed',
+          }, historyContext);
+        } else {
+          const persistedLine = String(processed || '').split(/\r?\n/u)[this.zeroBasedLine] || '';
+          const expectedIdentity = getTaskHistoryIdentity(replacement);
+          let confirmed = persistedLine === replacement
+            && parseTaskLine(persistedLine) !== null
+            && expectedIdentity.length > 0
+            && getTaskHistoryIdentity(persistedLine) === expectedIdentity;
+          if (confirmed) {
+            try {
+              ensureTaskHistoryIdentity(persistedLine, expectedIdentity);
+            } catch {
+              confirmed = false;
+            }
+          }
+          if (confirmed) {
+            await commitDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, {
+              after: {
+                path: this.file.path,
+                lineNumber: this.zeroBasedLine,
+                rawLine: persistedLine,
+              },
+              ...(historyAction === 'task.update' ? { sourceDisposition: 'retained' as const } : {}),
+              outcome: 'committed',
+            }, historyContext);
+          } else {
+            await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+          }
+        }
       }
       this.plugin.eventService.emitFilesUpdated([this.file.path]);
       this.plugin.overlayRenderingService?.invalidate({

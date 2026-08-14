@@ -16,6 +16,14 @@ import {
 } from '../utils/task-line-metadata';
 import { createSubitemForParentWithTitle, getDefaultSubitemFolderPath } from './subitem-creation-service';
 import * as logger from '../logger';
+import {
+  abortDirectTaskHistory,
+  beginDirectTaskHistory,
+  commitDirectTaskHistory,
+  ensureDirectTaskHistoryIdentity,
+  type DirectTaskHistoryLocation,
+  type DirectTaskHistoryLogContext,
+} from '../utils/direct-task-history';
 
 type LineContext = {
   file: TFile;
@@ -306,6 +314,30 @@ export class DailyInboxLineService {
   ): Promise<boolean> {
     let resolved = false;
     let changed = false;
+    let committedLine = '';
+    let historyReady = true;
+    let confirmedHistoryBefore: DirectTaskHistoryLocation | undefined;
+    const historyContext: DirectTaskHistoryLogContext = {
+      action: 'task.update',
+      surface: reason,
+      path: context.file.path,
+      lineNumber: context.lineIndex,
+    };
+    const historyHandle = parseTaskLine(context.rawLine)
+      ? await beginDirectTaskHistory(this.plugin.itemHistoryService, {
+          action: historyContext.action,
+          cause: {
+            kind: 'user',
+            sourcePluginId: 'tps-global-context-menu',
+            surface: reason,
+          },
+          before: {
+            path: context.file.path,
+            lineNumber: context.lineIndex,
+            rawLine: context.rawLine,
+          },
+        })
+      : null;
     try {
       await this.plugin.app.vault.process(context.file, (content) => {
         const newline = content.includes('\r\n') ? '\r\n' : '\n';
@@ -315,16 +347,37 @@ export class DailyInboxLineService {
         const lineIndex = this.resolveLineIndex(lines, context);
         if (lineIndex < 0) return content;
         const currentLine = lines[lineIndex] || '';
-        const nextLine = this.withModifiedTimestamp(transform(currentLine));
+        confirmedHistoryBefore = {
+          path: context.file.path,
+          lineNumber: lineIndex,
+          rawLine: currentLine,
+        };
+        let nextLine = this.withModifiedTimestamp(transform(currentLine));
         resolved = true;
         context.lineIndex = lineIndex;
-        context.rawLine = nextLine;
         if (nextLine === currentLine) return content;
+        if (historyHandle) {
+          if (!parseTaskLine(currentLine) || !parseTaskLine(nextLine)) {
+            historyReady = false;
+          } else {
+            const ensured = ensureDirectTaskHistoryIdentity(
+              this.plugin.itemHistoryService,
+              historyHandle,
+              nextLine,
+              historyContext,
+            );
+            nextLine = ensured.line;
+            historyReady = ensured.ready;
+          }
+        }
+        context.rawLine = nextLine;
+        committedLine = nextLine;
         lines[lineIndex] = nextLine;
         changed = true;
         return `${lines.join(newline)}${endsWithNewline ? newline : ''}`;
       });
     } catch (error) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       logger.flowError('DailyInboxLine', 'line-update:failed', error, {
         sourcePath: context.file.path,
         renderedLine: context.lineIndex + 1,
@@ -334,6 +387,7 @@ export class DailyInboxLineService {
       return false;
     }
     if (!resolved) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       logger.flowWarn('DailyInboxLine', 'line-update:unresolved', {
         sourcePath: context.file.path,
         renderedLine: context.lineIndex + 1,
@@ -342,7 +396,25 @@ export class DailyInboxLineService {
       new Notice('Could not update the selected line.');
       return false;
     }
-    if (changed) this.notifyChanged(context.file, reason);
+    if (changed) {
+      if (historyReady && committedLine) {
+        await commitDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, {
+          ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+          after: {
+            path: context.file.path,
+            lineNumber: context.lineIndex,
+            rawLine: committedLine,
+          },
+          sourceDisposition: 'retained',
+          outcome: 'committed',
+        }, historyContext);
+      } else {
+        await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+      }
+      this.notifyChanged(context.file, reason);
+    } else {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+    }
     if (notice) new Notice(notice);
     return true;
   }

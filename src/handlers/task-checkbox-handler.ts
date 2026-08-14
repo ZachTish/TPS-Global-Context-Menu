@@ -26,6 +26,14 @@ import {
     classifyMappedTaskCheckboxState,
     hasOpenMappedTaskLines,
 } from '../utils/task-checkbox-classification';
+import {
+    abortDirectTaskHistory,
+    beginDirectTaskHistory,
+    commitDirectTaskHistory,
+    ensureDirectTaskHistoryIdentity,
+    type DirectTaskHistoryLocation,
+    type DirectTaskHistoryLogContext,
+} from '../utils/direct-task-history';
 
 type TaskCheckboxContext = {
     file: TFile;
@@ -169,6 +177,25 @@ export class TaskCheckboxHandler {
         token: string,
         expectedMappingSignature = this.getCheckboxMutationSignature(),
     ): Promise<void> {
+        const historyContext: DirectTaskHistoryLogContext = {
+            action: 'task.checkbox',
+            surface: 'checkbox-context-menu',
+            path: context.file.path,
+            lineNumber: context.lineNumber,
+        };
+        const historyHandle = await beginDirectTaskHistory(this.plugin.itemHistoryService, {
+            action: 'task.checkbox',
+            cause: {
+                kind: 'user',
+                sourcePluginId: 'tps-global-context-menu',
+                surface: historyContext.surface,
+            },
+            before: {
+                path: context.file.path,
+                lineNumber: context.lineNumber,
+                rawLine: context.rawLine,
+            },
+        });
         let previousMarker = getCheckboxStateMarker(context.currentToken);
         const nextMarker = getCheckboxStateMarker(token);
         let updatedLines: string[] | null = null;
@@ -176,50 +203,73 @@ export class TaskCheckboxHandler {
         let didWrite = false;
         let unresolvedWrite = false;
         let mappingGuardBlocked = false;
+        let updatedRawLine = context.rawLine;
+        let historyReady = true;
+        let confirmedHistoryBefore: DirectTaskHistoryLocation | undefined;
 
-        await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(context.file, async (lines) => {
-            const lineIndex = this.resolveCurrentTaskLineIndex(lines, context);
-            if (lineIndex < 0) {
-                unresolvedWrite = true;
-                return false;
-            }
+        try {
+            await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(context.file, async (lines) => {
+                const lineIndex = this.resolveCurrentTaskLineIndex(lines, context);
+                if (lineIndex < 0) {
+                    unresolvedWrite = true;
+                    return false;
+                }
 
-            const currentLine = lines[lineIndex] || '';
-            const currentParsed = parseTaskLine(currentLine);
-            if (!currentParsed || !isTaskCheckboxWorkflowTokenCurrent(currentParsed.token, context.currentToken)) {
-                unresolvedWrite = true;
-                return false;
-            }
-            const liveMappings = this.getCheckboxMappings();
-            if (
-                this.getCheckboxMutationSignature(liveMappings) !== expectedMappingSignature
-                || !getLinkedSubitemMappingForState(liveMappings, currentParsed.token, { normalizedMappings: true })
-                || !getLinkedSubitemMappingForState(liveMappings, token, { normalizedMappings: true })
-            ) {
-                mappingGuardBlocked = true;
-                return false;
-            }
-            previousMarker = currentParsed.marker;
-            let updatedLine = this.withTaskCheckboxToken(currentLine, token);
-            updatedLine = updateTaskCompletedDateForCheckboxState(updatedLine, nextMarker, {
-                completeMarkers: this.getCompleteMarkers(liveMappings),
+                const currentLine = lines[lineIndex] || '';
+                const currentParsed = parseTaskLine(currentLine);
+                if (!currentParsed || !isTaskCheckboxWorkflowTokenCurrent(currentParsed.token, context.currentToken)) {
+                    unresolvedWrite = true;
+                    return false;
+                }
+                confirmedHistoryBefore = {
+                    path: context.file.path,
+                    lineNumber: lineIndex,
+                    rawLine: currentLine,
+                };
+                const liveMappings = this.getCheckboxMappings();
+                if (
+                    this.getCheckboxMutationSignature(liveMappings) !== expectedMappingSignature
+                    || !getLinkedSubitemMappingForState(liveMappings, currentParsed.token, { normalizedMappings: true })
+                    || !getLinkedSubitemMappingForState(liveMappings, token, { normalizedMappings: true })
+                ) {
+                    mappingGuardBlocked = true;
+                    return false;
+                }
+                previousMarker = currentParsed.marker;
+                let updatedLine = this.withTaskCheckboxToken(currentLine, token);
+                updatedLine = updateTaskCompletedDateForCheckboxState(updatedLine, nextMarker, {
+                    completeMarkers: this.getCompleteMarkers(liveMappings),
+                });
+                updatedLine = updateTaskLineTimestamps(updatedLine, {
+                    enabled: this.plugin.settings.autoSyncFileTimestamps === true,
+                    modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
+                    format: this.plugin.settings.fileTimestampFormat,
+                    markModified: true,
+                });
+                if (updatedLine === currentLine) return false;
+                const historyIdentity = ensureDirectTaskHistoryIdentity(
+                    this.plugin.itemHistoryService,
+                    historyHandle,
+                    updatedLine,
+                    historyContext,
+                );
+                updatedLine = historyIdentity.line;
+                historyReady = historyReady && historyIdentity.ready;
+
+                lines[lineIndex] = updatedLine;
+                updatedLines = [...lines];
+                updatedLineIndex = lineIndex;
+                updatedRawLine = updatedLine;
+                didWrite = true;
+                return true;
             });
-            updatedLine = updateTaskLineTimestamps(updatedLine, {
-                enabled: this.plugin.settings.autoSyncFileTimestamps === true,
-                modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
-                format: this.plugin.settings.fileTimestampFormat,
-                markModified: true,
-            });
-            if (updatedLine === currentLine) return false;
-
-            lines[lineIndex] = updatedLine;
-            updatedLines = [...lines];
-            updatedLineIndex = lineIndex;
-            didWrite = true;
-            return true;
-        });
+        } catch (error) {
+            await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+            throw error;
+        }
 
         if (mappingGuardBlocked) {
+            await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
             logger.flowWarn('TaskCheckboxMenu', 'write:mapping-changed', {
                 path: context.file.path,
                 renderedLineNumber: context.lineNumber + 1,
@@ -229,6 +279,7 @@ export class TaskCheckboxHandler {
             return;
         }
         if (unresolvedWrite) {
+            await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
             logger.flowWarn('TaskCheckboxMenu', 'write:unresolved-task', {
                 path: context.file.path,
                 renderedLineNumber: context.lineNumber + 1,
@@ -237,14 +288,51 @@ export class TaskCheckboxHandler {
             new Notice('That task changed before its checkbox could be updated. Refresh and try again.');
             return;
         }
-        if (!didWrite || !updatedLines) return;
-        await this.handleExternalChecklistStateMutation(
-            context.file,
-            previousMarker,
-            nextMarker,
-            updatedLines,
-            updatedLineIndex,
-        );
+        if (!didWrite || !updatedLines) {
+            await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+            return;
+        }
+        let historyOutcome: 'committed' | 'partial' = 'committed';
+        try {
+            await this.handleExternalChecklistStateMutation(
+                context.file,
+                previousMarker,
+                nextMarker,
+                updatedLines,
+                updatedLineIndex,
+            );
+        } catch (error) {
+            historyOutcome = 'partial';
+            if (historyReady) {
+                await commitDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, {
+                    ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+                    after: {
+                        path: context.file.path,
+                        lineNumber: updatedLineIndex,
+                        rawLine: updatedRawLine,
+                    },
+                    sourceDisposition: 'retained',
+                    outcome: historyOutcome,
+                }, historyContext);
+            } else {
+                await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+            }
+            throw error;
+        }
+        if (historyReady) {
+            await commitDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, {
+                ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+                after: {
+                    path: context.file.path,
+                    lineNumber: updatedLineIndex,
+                    rawLine: updatedRawLine,
+                },
+                sourceDisposition: 'retained',
+                outcome: historyOutcome,
+            }, historyContext);
+        } else {
+            await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+        }
         new Notice(`Set checkbox to ${token}.`);
     }
 

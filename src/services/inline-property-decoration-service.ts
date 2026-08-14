@@ -18,10 +18,19 @@ import {
 import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
 import { isLinkListProperty, mergeLinkList, mergeMixedList } from '../utils/list-utils';
 import {
+  parseTaskLine,
   readInlineFieldRanges,
   readInlineFieldValue,
   setInlineFieldValueOnLine,
 } from '../utils/task-line-metadata';
+import {
+  abortDirectTaskHistory,
+  beginDirectTaskHistory,
+  commitDirectTaskHistory,
+  ensureDirectTaskHistoryIdentity,
+  type DirectTaskHistoryHandle,
+  type DirectTaskHistoryLogContext,
+} from '../utils/direct-task-history';
 
 const HIDDEN_INLINE_METADATA_RE = /(?:\[\^\s*tps-inline:[^\]]+\](?::\s*\S+)?|<span\b[^>]*data-tps-inline-props="[^"]*"[^>]*>\s*<\/span>|<!--\s*tps-inline-props:[\s\S]*?\s*-->|\s*%%\s*tps-inline-props:[\s\S]*?\s*%%)/g;
 const HIDDEN_INLINE_METADATA_LINE_RE = /^\s*(?:\[\^\s*tps-inline:[^\]]+\]:|tps-inline:[^\s:]+)\s*/;
@@ -103,6 +112,7 @@ type InlinePropertyLineTarget =
       lineFrom: number;
       lineTo: number;
       lineText: string;
+      file?: TFile;
     }
   | { kind: 'file'; file: TFile; lineIndex: number; lineText: string };
 
@@ -327,6 +337,7 @@ export class InlinePropertyDecorationService {
         lineFrom: clickedLine.from,
         lineTo: clickedLine.to,
         lineText: clickedLine.text,
+        file: this.resolveEditorSourceFile(view) ?? undefined,
       };
     }
 
@@ -342,7 +353,21 @@ export class InlinePropertyDecorationService {
           lineFrom: line.from,
           lineTo: line.to,
           lineText: line.text,
+          file: this.resolveEditorSourceFile(view) ?? undefined,
         };
+      }
+    }
+    return null;
+  }
+
+  private resolveEditorSourceFile(view: EditorView): TFile | null {
+    for (const leaf of this.plugin.app.workspace.getLeavesOfType('markdown')) {
+      const markdownView = leaf.view as any;
+      const editorView = markdownView?.editor?.cm;
+      const containerEl = markdownView?.containerEl as HTMLElement | undefined;
+      const contentEl = markdownView?.contentEl as HTMLElement | undefined;
+      if (editorView === view || containerEl?.contains(view.dom) || contentEl?.contains(view.dom)) {
+        return markdownView.file instanceof TFile ? markdownView.file : null;
       }
     }
     return null;
@@ -439,10 +464,19 @@ export class InlinePropertyDecorationService {
           new Notice('Could not update inline property because the source line changed.');
           return;
         }
+        if (nextLine === currentLine.text) return;
         targetLine.view.dispatch({
           changes: { from: currentLine.from, to: currentLine.to, insert: nextLine },
         });
         const settledLine = targetLine.view.state.doc.line(replacement.resolvedLineIndex + 1);
+        if (settledLine.text !== nextLine) {
+          logger.flowWarn('InlineProperty', 'editor-edit:conflict', {
+            requestedLine: requestedLineNumber,
+            reason: 'dispatch-not-confirmed',
+          });
+          new Notice('Could not confirm the inline property update.');
+          return;
+        }
         targetLine.lineNumber = settledLine.number;
         targetLine.lineFrom = settledLine.from;
         targetLine.lineTo = settledLine.to;
@@ -463,17 +497,62 @@ export class InlinePropertyDecorationService {
 
     const requestedLineIndex = targetLine.lineIndex;
     let replacement: AtomicLineReplacementResult | null = null;
+    let committedLine = '';
+    let historyReady = true;
+    const historyContext: DirectTaskHistoryLogContext = {
+      action: 'task.update',
+      surface: 'inline-property',
+      path: targetLine.file.path,
+      lineNumber: requestedLineIndex,
+    };
+    const historyHandle = nextLine !== targetLine.lineText && parseTaskLine(targetLine.lineText)
+      ? await beginDirectTaskHistory(this.plugin.itemHistoryService, {
+          action: historyContext.action,
+          cause: {
+            kind: 'user',
+            sourcePluginId: 'tps-global-context-menu',
+            surface: historyContext.surface,
+          },
+          before: {
+            path: targetLine.file.path,
+            lineNumber: requestedLineIndex,
+            rawLine: targetLine.lineText,
+          },
+        })
+      : null;
+    if (nextLine === targetLine.lineText) return;
     try {
       await this.plugin.app.vault.process(targetLine.file, (content) => {
-        replacement = replaceExactLineRevision(
+        const candidate = replaceExactLineRevision(
           content,
           requestedLineIndex,
           targetLine.lineText,
           nextLine,
         );
+        if (candidate.route === 'conflict' || candidate.resolvedLineIndex === null) {
+          replacement = candidate;
+          return candidate.content;
+        }
+        const ensured = ensureDirectTaskHistoryIdentity(
+          this.plugin.itemHistoryService,
+          historyHandle,
+          nextLine,
+          historyContext,
+        );
+        historyReady = ensured.ready;
+        committedLine = ensured.line;
+        replacement = ensured.line === nextLine
+          ? candidate
+          : replaceExactLineRevision(
+              content,
+              requestedLineIndex,
+              targetLine.lineText,
+              ensured.line,
+            );
         return replacement.content;
       });
     } catch (error) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       logger.flowError('InlineProperty', 'file-edit:failed', error, {
         path: targetLine.file.path,
         requestedLine: requestedLineIndex + 1,
@@ -484,6 +563,7 @@ export class InlinePropertyDecorationService {
 
     const settled = replacement as AtomicLineReplacementResult | null;
     if (!settled || settled.route === 'conflict' || settled.resolvedLineIndex === null) {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       logger.flowWarn('InlineProperty', 'file-edit:conflict', {
         path: targetLine.file.path,
         requestedLine: requestedLineIndex + 1,
@@ -493,7 +573,27 @@ export class InlinePropertyDecorationService {
       return;
     }
 
+    if (historyReady && committedLine) {
+      await commitDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, {
+        confirmedBefore: {
+          path: targetLine.file.path,
+          lineNumber: settled.resolvedLineIndex,
+          rawLine: targetLine.lineText,
+        },
+        after: {
+          path: targetLine.file.path,
+          lineNumber: settled.resolvedLineIndex,
+          rawLine: committedLine,
+        },
+        sourceDisposition: 'retained',
+        outcome: 'committed',
+      }, historyContext);
+    } else {
+      await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+    }
+
     targetLine.lineIndex = settled.resolvedLineIndex;
+    targetLine.lineText = committedLine || nextLine;
     logger.flow('InlineProperty', 'file-edit:done', {
       path: targetLine.file.path,
       requestedLine: requestedLineIndex + 1,

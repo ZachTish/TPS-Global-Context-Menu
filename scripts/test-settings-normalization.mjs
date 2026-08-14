@@ -124,6 +124,42 @@ test('task completion metadata distinguishes absent defaults from explicit empty
   );
 });
 
+test('Daily Note move behavior and local item history have safe normalized settings', () => {
+  assert.match(typesSource, /DailyNoteTaskMoveSourceBehavior = 'mark-migrated' \| 'remove'/u);
+  assert.match(typesSource, /dailyNoteTaskMoveSourceBehavior: DailyNoteTaskMoveSourceBehavior;/u);
+  assert.match(typesSource, /enableItemHistory: boolean;/u);
+  assert.match(constantsSource, /dailyNoteTaskMoveSourceBehavior: 'mark-migrated'/u);
+  assert.match(constantsSource, /enableItemHistory: true/u);
+  assert.match(constantsSource, /itemHistoryRetentionDays: 90/u);
+  assert.match(constantsSource, /itemHistoryMaxEntries: 25000/u);
+  assert.match(mainSource, /dailyNoteTaskMoveSourceBehavior !== 'mark-migrated'/u);
+  assert.match(mainSource, /dailyNoteTaskMoveSourceBehavior !== 'remove'/u);
+  assert.match(mainSource, /this\.settings\.enableItemHistory = this\.settings\.enableItemHistory !== false/u);
+  assert.match(mainSource, /Math\.min\(365, Math\.max\(1, Math\.floor\(itemHistoryRetentionDays\)\)\)/u);
+  assert.match(mainSource, /Math\.min\(25000, Math\.max\(100, Math\.floor\(itemHistoryMaxEntries\)\)\)/u);
+  assert.match(settingsTabSource, /After moving a task from a Daily Note/u);
+  assert.match(settingsTabSource, /Keep a migrated marker/u);
+  assert.match(settingsTabSource, /Remove the source block/u);
+  assert.match(settingsTabSource, /Keep local item history/u);
+  assert.match(settingsTabSource, /first tracked change, a surviving task receives a stable tpsId/u);
+  assert.match(settingsTabSource, /Vault-relative before\/after note paths, including filenames, are stored/u);
+  assert.match(settingsTabSource, /Raw task content and note bodies are never stored/u);
+  const historyToggle = settingsTabSource.slice(
+    settingsTabSource.indexOf(".setName('Keep local item history')"),
+    settingsTabSource.indexOf(".setName('Item history retention')"),
+  );
+  assert.match(
+    historyToggle,
+    /enableItemHistory = value;[\s\S]*updateEnabled\(value\);[\s\S]*await this\.plugin\.saveSettings\(\)/u,
+    'recording lifecycle changes before persistence so in-flight work cannot cross an opt-out',
+  );
+  assert.match(
+    historyToggle,
+    /catch \(error\) \{[\s\S]*enableItemHistory = previous;[\s\S]*updateEnabled\(previous\);/u,
+    'a failed settings save restores both the setting and the item-history lifecycle',
+  );
+});
+
 test('checkbox mapping text validation keeps alternate markers but rejects ambiguous or unusable rows', async () => {
   const { parseLinkedSubitemMappingsText } = await importModule('../src/utils/linked-subitem-mapping.ts');
   const valid = [

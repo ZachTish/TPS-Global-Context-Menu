@@ -9,6 +9,22 @@ import {
   type LineItemDeleteBlockKind,
   type LineItemDeleteMode,
 } from '../utils/line-item-deletion';
+import { parseTaskLine } from '../utils/task-line-metadata';
+import {
+  abortDirectTaskHistory,
+  beginDirectTaskHistory,
+  commitDirectTaskHistory,
+  ensureDirectTaskHistoryIdentity,
+  type DirectTaskHistoryCause,
+  type DirectTaskHistoryLocation,
+  type DirectTaskHistoryLogContext,
+  type DirectTaskHistoryService,
+} from '../utils/direct-task-history';
+
+export interface LineItemDeleteTaskHistory {
+  service: DirectTaskHistoryService;
+  cause: DirectTaskHistoryCause;
+}
 
 export interface LineItemDeleteTarget {
   app: App;
@@ -19,6 +35,7 @@ export interface LineItemDeleteTarget {
   source: string;
   blockKind?: LineItemDeleteBlockKind;
   resolveLineIndex?: (lines: string[]) => number;
+  taskHistory?: LineItemDeleteTaskHistory;
   onDeleted?: (details: { mode: LineItemDeleteMode; nestedContentLineCount: number }) => void | Promise<void>;
 }
 
@@ -103,6 +120,26 @@ export async function performLineItemDelete(
 ): Promise<LineItemDeleteResult> {
   const mutationState: { outcome: LineItemDeleteResult['outcome'] } = { outcome: 'stale' };
   let nestedContentLineCount = 0;
+  let historyReady = true;
+  let confirmedHistoryBefore: DirectTaskHistoryLocation | undefined;
+  const historyService = target.taskHistory?.service;
+  const historyContext: DirectTaskHistoryLogContext = {
+    action: 'task.delete',
+    surface: target.taskHistory?.cause.surface || 'delete',
+    path: target.file.path,
+    lineNumber: target.lineIndex,
+  };
+  const historyHandle = target.taskHistory && parseTaskLine(target.rawLine)
+    ? await beginDirectTaskHistory(historyService, {
+        action: historyContext.action,
+        cause: target.taskHistory.cause,
+        before: {
+          path: target.file.path,
+          lineNumber: target.lineIndex,
+          rawLine: target.rawLine,
+        },
+      })
+    : null;
   try {
     await target.app.vault.process(target.file, (content) => {
       const lines = splitLineItemContent(content).lines;
@@ -121,6 +158,26 @@ export async function performLineItemDelete(
         mutationState.outcome = 'nested-changed';
         return content;
       }
+      if (historyHandle) {
+        const currentLine = lines[lineIndex] || '';
+        if (!parseTaskLine(currentLine)) {
+          historyReady = false;
+        } else {
+          confirmedHistoryBefore = {
+            path: target.file.path,
+            lineNumber: lineIndex,
+            rawLine: currentLine,
+          };
+          const ensured = ensureDirectTaskHistoryIdentity(
+            historyService,
+            historyHandle,
+            currentLine,
+            historyContext,
+          );
+          historyReady = ensured.ready;
+          historyContext.lineNumber = lineIndex;
+        }
+      }
       const mutation = deleteLineItemAtIndex(content, lineIndex, mode, target.blockKind);
       if (!mutation.changed) {
         mutationState.outcome = 'stale';
@@ -130,6 +187,7 @@ export async function performLineItemDelete(
       return mutation.content;
     });
   } catch (error) {
+    await abortDirectTaskHistory(historyService, historyHandle, historyContext);
     logger.flowError('LineItemDelete', 'mutation:failed', error, {
       ...targetLogContext(target),
       mode,
@@ -140,6 +198,15 @@ export async function performLineItemDelete(
 
   const outcome = mutationState.outcome;
   if (outcome === 'deleted') {
+    if (historyReady) {
+      await commitDirectTaskHistory(historyService, historyHandle, {
+        ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
+        sourceDisposition: 'removed',
+        outcome: 'committed',
+      }, historyContext);
+    } else {
+      await abortDirectTaskHistory(historyService, historyHandle, historyContext);
+    }
     try {
       await target.onDeleted?.({ mode, nestedContentLineCount });
     } catch (error) {
@@ -161,6 +228,7 @@ export async function performLineItemDelete(
         : `Deleted ${target.itemLabel}${nestedContentLineCount > 0 ? ' and nested content' : ''}.`);
     }
   } else if (outcome === 'nested-changed') {
+    await abortDirectTaskHistory(historyService, historyHandle, historyContext);
     logger.flowWarn('LineItemDelete', 'mutation:nested-content-appeared', {
       ...targetLogContext(target),
       nestedContentLineCount,
@@ -169,6 +237,7 @@ export async function performLineItemDelete(
       new Notice(`Nested content appeared under that ${target.itemLabel}. Delete it again to choose how to handle the nested content.`);
     }
   } else {
+    await abortDirectTaskHistory(historyService, historyHandle, historyContext);
     logger.flowWarn('LineItemDelete', 'mutation:stale-target', targetLogContext(target));
     if (options.showNotices !== false) {
       new Notice(`That ${target.itemLabel} changed before it could be deleted. Refresh and try again.`);

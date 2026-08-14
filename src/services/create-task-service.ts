@@ -8,6 +8,14 @@ import {
 import { buildCreatedTaskLine } from '../utils/create-task-parser';
 import { insertLineAfterFrontmatter, updateTaskLineTimestamps } from '../utils/task-line-metadata';
 import {
+  abortDirectTaskHistory,
+  beginDirectTaskHistory,
+  commitDirectTaskHistory,
+  ensureDirectTaskHistoryIdentity,
+  type DirectTaskHistoryHandle,
+  type DirectTaskHistoryLogContext,
+} from '../utils/direct-task-history';
+import {
   isLinkedSubitemSemanticCheckboxPlanCurrent,
   mapStatusToSubitemCheckboxState,
   normalizeLinkedSubitemMappings,
@@ -87,6 +95,10 @@ export class CreateTaskService {
       timeEstimate: result.timeEstimate,
     });
 
+    let historyHandle: DirectTaskHistoryHandle | null = null;
+    let historyContext: DirectTaskHistoryLogContext | null = null;
+    let historySettled = false;
+
     try {
       const targetFile = result.targetFile ?? await this.ensureTodayDailyNote();
       if (!(targetFile instanceof TFile)) {
@@ -102,7 +114,30 @@ export class CreateTaskService {
         markCreated: true,
         markModified: true,
       });
+      historyContext = {
+        action: 'task.create',
+        surface: 'create-task-modal',
+        path: targetFile.path,
+        lineNumber: 0,
+      };
+      historyHandle = await beginDirectTaskHistory(this.plugin.itemHistoryService, {
+        action: 'task.create',
+        cause: {
+          kind: 'user',
+          sourcePluginId: 'tps-global-context-menu',
+          surface: historyContext.surface,
+        },
+        before: {
+          path: targetFile.path,
+          lineNumber: 0,
+          rawLine: stampedTaskLine,
+        },
+      });
       let mappingChanged = false;
+      let writeAccepted = false;
+      let historyReady = true;
+      let insertedTaskLine = stampedTaskLine;
+      let insertedLineNumber = 0;
       await this.plugin.app.vault.process(targetFile, (content) => {
         if (!isLinkedSubitemSemanticCheckboxPlanCurrent(
           this.getConfiguredMappings(),
@@ -115,9 +150,22 @@ export class CreateTaskService {
           mappingChanged = true;
           return content;
         }
-        return insertLineAfterFrontmatter(content, stampedTaskLine);
+        writeAccepted = true;
+        const historyIdentity = ensureDirectTaskHistoryIdentity(
+          this.plugin.itemHistoryService,
+          historyHandle,
+          stampedTaskLine,
+          historyContext!,
+        );
+        insertedTaskLine = historyIdentity.line.trim();
+        historyReady = historyReady && historyIdentity.ready;
+        const trimmedContent = String(content || '').replace(/\s+$/gu, '');
+        insertedLineNumber = trimmedContent ? trimmedContent.split(/\r?\n/u).length : 0;
+        return insertLineAfterFrontmatter(content, insertedTaskLine);
       });
-      if (mappingChanged) {
+      if (mappingChanged || !writeAccepted) {
+        await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+        historySettled = true;
         logger.warn('[TPS GCM] Create task blocked because the selected checkbox mapping changed before write', {
           checkboxMarker,
           checkboxStatus: creationPlan.status,
@@ -126,10 +174,26 @@ export class CreateTaskService {
         new Notice('The selected task checkbox mapping changed. Review the task and try again.');
         return null;
       }
+      if (historyReady) {
+        await commitDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, {
+          after: {
+            path: targetFile.path,
+            lineNumber: insertedLineNumber,
+            rawLine: insertedTaskLine,
+          },
+          outcome: 'committed',
+        }, historyContext);
+      } else {
+        await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+      }
+      historySettled = true;
       new Notice(`Created task in ${targetFile.basename}`);
-      await this.focusLineBeforeInsertedTask(targetFile, stampedTaskLine);
+      await this.focusLineBeforeInsertedTask(targetFile, insertedTaskLine);
       return targetFile;
     } catch (error) {
+      if (!historySettled && historyContext) {
+        await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+      }
       logger.error('[TPS GCM] Failed to create task', error);
       new Notice('Unable to create task. Check console logs.');
       return null;

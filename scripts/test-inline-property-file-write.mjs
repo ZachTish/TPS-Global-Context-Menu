@@ -125,6 +125,9 @@ test('live editor inline property writes re-resolve the captured revision before
   assert.match(editorBranch, /replacement\.route === 'conflict'/);
   assert.match(editorBranch, /currentLine\.text !== targetLine\.lineText/);
   assert.match(editorBranch, /from: currentLine\.from, to: currentLine\.to/);
+  assert.match(editorBranch, /insert: nextLine/);
+  assert.doesNotMatch(editorBranch, /beginDirectTaskHistory|commitDirectTaskHistory|ensureDirectTaskHistoryIdentity/u);
+  assert.match(editorBranch, /dispatch-not-confirmed/u);
   assert.match(editorBranch, /editor-edit:conflict/);
   assert.match(editorBranch, /editor-edit:failed/);
   assert.match(editorBranch, /editor-edit:done/);
