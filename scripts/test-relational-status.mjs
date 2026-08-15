@@ -142,10 +142,13 @@ test('linked child rows derive status, completion, and icon presentation from th
   const rowSource = readFileSync(new URL('../src/services/linked-subitem-row-builder.ts', import.meta.url), 'utf8');
   const checkboxSource = readFileSync(new URL('../src/services/linked-subitem-checkbox-service.ts', import.meta.url), 'utf8');
   const bulkEditSource = readFileSync(new URL('../src/services/bulk-edit-service.ts', import.meta.url), 'utf8');
+  const parentHandlerSource = readFileSync(new URL('../src/handlers/parent-link-handler.ts', import.meta.url), 'utf8');
 
   assert.match(modelSource, /getLinkedSubitemMappingForState\(this\.getMappings\(\), checkboxState\)\?\.icon/u);
   assert.match(modelSource, /getLinkedSubitemCompleteMarkers\(this\.getMappings\(\), \{[\s\S]{0,260}getDoneStatuses/u);
   assert.match(modelSource, /sharedServices\.status\.normalize\(actualKey \? fm\[actualKey\] : ''\)/u);
+  assert.equal((modelSource.match(/parentLinkResolutionService\.getLogicalFrontmatter\(/gu) || []).length >= 3, true);
+  assert.match(checkboxSource, /const entries = \[\{[\s\S]{0,160}parentLinkResolutionService\.getLogicalFrontmatter\(childFile\)/u);
   assert.match(rowSource, /return model\.checkboxIcon \|\| getIconNameForState/u);
   assert.doesNotMatch(checkboxSource, /setLinkedSubitemStatus/u);
   assert.match(checkboxSource, /handleCustomCheckboxClick[\s\S]{0,1200}setLinkedSubitemCheckboxState\(parentFile, childFile, nextState\)/u);
@@ -155,7 +158,8 @@ test('linked child rows derive status, completion, and icon presentation from th
   assert.match(checkboxSource, /previousStatus = await this\.readAuthoritativeChildStatus\(childFile\)/u);
   assert.match(checkboxSource, /readAuthoritativeChild: async \(\) => \{[\s\S]{0,220}readAuthoritativeChildStatus\(childFile\)/u);
   assert.match(checkboxSource, /readAuthoritativeParent: async \(\) => \{[\s\S]{0,220}readMarkdownText\(parentFile\)/u);
-  assert.match(checkboxSource, /private async readAuthoritativeChildStatus\([\s\S]{0,220}vault\.read\(file\)/u);
+  assert.match(checkboxSource, /private async readAuthoritativeChildStatus\([\s\S]{0,260}filePropertiesService\.getFrontmatterAsync\(file\)/u);
+  assert.match(checkboxSource, /file\.extension\?\.toLowerCase\(\) !== 'md'[\s\S]{0,500}else \{[\s\S]{0,220}vault\.read\(file\)/u);
   assert.match(
     checkboxSource,
     /mutateMarkdownBody\(parentFile,[\s\S]{0,260}getStatusForCheckboxState\(normalizedToken\) !== mappedStatus[\s\S]{0,120}mappingGuardBlocked = true/u,
@@ -172,6 +176,18 @@ test('linked child rows derive status, completion, and icon presentation from th
     bulkEditSource,
     /frontmatterMutationService\.process\(file, \(fm\) => \{\s*if \(options\.writeGuard\?\.\(file\) === false\) return;/u,
   );
+  assert.match(
+    bulkEditSource,
+    /checkParentLinkStatuses[\s\S]{0,260}parentLinkResolutionService\.isRelationshipTarget\(files\[0\]\)/u,
+  );
+  assert.match(
+    bulkEditSource,
+    /checkOpenChecklistItems[\s\S]{0,260}files\[0\]\.extension\?\.toLowerCase\(\) === 'md'/u,
+  );
+  assert.match(parentHandlerSource, /getRelationshipCandidates\(\{ includeIgnored: true \}\)/u);
+  assert.match(parentHandlerSource, /getLogicalFrontmatter\(file\)/u);
+  assert.match(parentHandlerSource, /relationshipService\.isIgnoredFile\(/u);
+  assert.doesNotMatch(parentHandlerSource, /getMarkdownFiles\(\)|metadataCache\.getFileCache/u);
   assert.doesNotMatch(checkboxSource, /setStatus\(\[childFile\], mappedStatus\)\) > 0/u);
   assert.doesNotMatch(checkboxSource, /fm\[statusKey\] = nextStatus/u);
 });
@@ -537,6 +553,65 @@ test('linked child visual completion canonicalizes an authored uppercase X marke
   assert.equal(service.getVisualState('[ ]'), 'open');
 });
 
+test('linked PDF and Base rows render status, title, and pills from logical companion frontmatter', async () => {
+  const { SubitemLineModelService } = await subitemLineModelPromise;
+  const normalize = (value) => String(value ?? '').trim().toLowerCase();
+  for (const extension of ['pdf', 'base']) {
+    const child = {
+      path: `Reference/Child.${extension}`,
+      basename: 'Child',
+      extension,
+      parent: { path: 'Reference', name: 'Reference' },
+    };
+    const parent = { path: 'Parent.md', basename: 'Parent', extension: 'md' };
+    const logical = {
+      title: `Logical ${extension.toUpperCase()}`,
+      taskStatus: 'complete',
+      priority: 'high',
+    };
+    const service = new SubitemLineModelService({
+      settings: {
+        linkedSubitemCheckboxMappings: [
+          { checkboxState: '[ ]', statuses: ['todo'] },
+          { checkboxState: '[x]', statuses: ['complete'] },
+        ],
+        showCustomPropertiesInInlineUi: true,
+        properties: [{ id: 'priority', key: 'priority', label: 'Priority', type: 'selector' }],
+        ignoredSubitemTags: [],
+      },
+      app: {
+        metadataCache: {
+          getFileCache: () => ({ frontmatter: { title: 'Wrong cache', taskStatus: 'todo', priority: 'low' } }),
+        },
+      },
+      parentLinkResolutionService: {
+        getLogicalFrontmatter: (file) => file === child ? logical : {},
+      },
+      sharedServices: {
+        status: {
+          normalize,
+          getStatusPropertyKey: () => 'taskStatus',
+          getDoneStatuses: () => ['complete', 'wont-do'],
+        },
+      },
+    });
+
+    const model = service.buildModel({
+      kind: 'bullet',
+      checkboxState: null,
+      wikilink: `[[${child.path}]]`,
+      linkTarget: child.path,
+    }, child, parent);
+
+    assert.equal(model.checkboxState, '[x]');
+    assert.equal(model.visualState, 'complete');
+    assert.equal(model.displayLabel, logical.title);
+    assert.deepEqual(model.pills.map(({ kind, label }) => ({ kind, label })), [
+      { kind: 'priority', label: 'high' },
+    ]);
+  }
+});
+
 test('the reserved blank checkbox remains intrinsically open even in malformed persisted mappings', async () => {
   const { getLinkedSubitemCompleteMarkers } = await linkedSubitemMappingPromise;
   assert.deepEqual(
@@ -703,7 +778,6 @@ test('parent completion checks read the supplied workflow status instead of rela
   };
   const app = {
     vault: {
-      getMarkdownFiles: () => [parent, child],
       getAbstractFileByPath: () => null,
     },
     metadataCache: {
@@ -717,10 +791,16 @@ test('parent completion checks read the supplied workflow status instead of rela
     parentLinkFrontmatterKey: 'childOf',
     parentCompletionStatuses: ['complete', 'wont-do'],
   });
+  const relationshipService = {
+    getRelationshipCandidates: () => [parent, child],
+    getLogicalFrontmatter: (file) => file.path === child.path ? childFrontmatter : {},
+    isIgnoredFile: () => false,
+  };
 
   const workflowAware = new ParentLinkHandler(
     app,
     getSettings,
+    () => relationshipService,
     (frontmatter) => frontmatter.taskStatus,
   );
   assert.deepEqual(await workflowAware.findParentLinkIssues(parent), []);
@@ -728,12 +808,78 @@ test('parent completion checks read the supplied workflow status instead of rela
   const hardcodedRelation = new ParentLinkHandler(
     app,
     getSettings,
+    () => relationshipService,
     (frontmatter) => frontmatter.status,
   );
   assert.deepEqual(await hardcodedRelation.findParentLinkIssues(parent), [{
     path: child.path,
     status: '[[entities/statuses/blocked]]',
   }]);
+});
+
+test('parent completion finds open logical children for Markdown and non-Markdown parents', async () => {
+  const { ParentLinkHandler } = await importBundled(
+    '../src/handlers/parent-link-handler.ts',
+    [obsidianStubPlugin],
+  );
+  const createFile = (path) => ({
+    path,
+    basename: path.split('/').pop().replace(/\.[^.]+$/u, ''),
+    extension: path.split('.').pop(),
+  });
+  const markdownParent = createFile('Projects/Markdown Parent.md');
+  const pdfOpen = createFile('Reference/Open.pdf');
+  const baseComplete = createFile('Views/Complete.base');
+  const pdfIgnored = createFile('Reference/Ignored.pdf');
+  const baseParent = createFile('Views/Parent.base');
+  const markdownOpen = createFile('Projects/Open.md');
+  const pdfComplete = createFile('Reference/Complete.pdf');
+  const baseIgnored = createFile('Views/Ignored.base');
+  const frontmatter = new Map([
+    [markdownParent.path, {}],
+    [pdfOpen.path, { ChildOf: [`[[${markdownParent.path}]]`], taskStatus: 'todo' }],
+    [baseComplete.path, { childOf: `[[${markdownParent.path}]]`, taskStatus: 'complete' }],
+    [pdfIgnored.path, { childOf: `[[${markdownParent.path}]]`, taskStatus: 'todo' }],
+    [baseParent.path, {}],
+    [markdownOpen.path, { childOf: [`[[${baseParent.path}]]`], taskStatus: 'holding' }],
+    [pdfComplete.path, { childOf: `[[${baseParent.path}]]`, taskStatus: 'wont-do' }],
+    [baseIgnored.path, { childOf: `[[${baseParent.path}]]`, taskStatus: 'todo' }],
+  ]);
+  const ignoredPaths = new Set([pdfIgnored.path, baseIgnored.path]);
+  const files = [...frontmatter.keys()].map((path) => (
+    [markdownParent, pdfOpen, baseComplete, pdfIgnored, baseParent, markdownOpen, pdfComplete, baseIgnored]
+      .find((file) => file.path === path)
+  ));
+  const relationshipService = {
+    getRelationshipCandidates: (options) => {
+      assert.equal(options.includeIgnored, true);
+      return files;
+    },
+    getLogicalFrontmatter: (file) => frontmatter.get(file.path) ?? {},
+    isIgnoredFile: (file) => ignoredPaths.has(file.path),
+  };
+  const handler = new ParentLinkHandler(
+    {
+      vault: { getAbstractFileByPath: () => null },
+      metadataCache: { getFirstLinkpathDest: () => null },
+    },
+    () => ({
+      parentLinkFrontmatterKey: 'childOf',
+      parentCompletionStatuses: ['complete', 'wont-do'],
+    }),
+    () => relationshipService,
+    (value) => value.taskStatus,
+  );
+
+  assert.deepEqual(await handler.findParentLinkIssues(markdownParent), [
+    { path: pdfOpen.path, status: 'todo' },
+  ]);
+  assert.deepEqual(await handler.findParentLinkIssues(baseParent), [
+    { path: markdownOpen.path, status: 'holding' },
+  ]);
+
+  ignoredPaths.add(baseParent.path);
+  assert.deepEqual(await handler.findParentLinkIssues(baseParent), []);
 });
 
 test('task editor exposes an entity-source status relation but still hides legacy workflow status', async () => {

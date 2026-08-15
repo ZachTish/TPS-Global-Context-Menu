@@ -1309,6 +1309,7 @@ export class TimeTrackingService {
     const output: StoredSession[] = [];
 
     for (const file of this.plugin.app.vault.getMarkdownFiles()) {
+      if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
       if (this.shouldIgnoreTimeTrackingPath(file.path)) continue;
       const frontmatter = await this.readFrontmatterForTimeTrackingScan(file);
       const existingKey = frontmatter ? findKeyCaseInsensitive(frontmatter, key) : null;
@@ -1618,6 +1619,7 @@ export class TimeTrackingService {
     const wanted = String(tpsId || '').trim();
     if (!wanted) return null;
     for (const file of this.plugin.app.vault.getMarkdownFiles()) {
+      if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
       if (this.getFrontmatterTpsId(file) === wanted) return file;
     }
     return null;

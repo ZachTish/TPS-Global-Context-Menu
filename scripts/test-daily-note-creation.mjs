@@ -41,6 +41,14 @@ async function loadDailyNoteTaskSchedule() {
                 return Boolean(value && typeof value.path === 'string');
               }
             }
+            export class TFolder {
+              constructor(path = '') {
+                this.path = path;
+                this.name = String(path).split('/').pop() || '';
+                this.children = [];
+              }
+            }
+            export class Notice {}
             const momentFactory = (value, formats) => {
               const accepted = Array.isArray(formats) ? formats : [formats];
               const text = String(value || '');
@@ -59,6 +67,8 @@ async function loadDailyNoteTaskSchedule() {
             export function normalizePath(path) {
               return String(path || '').replace(/\\\\/g, '/').replace(/\\/+/g, '/').replace(/^\\//, '');
             }
+            export function parseYaml() { return {}; }
+            export function stringifyYaml(value) { return JSON.stringify(value); }
           `,
           loader: 'js',
         }));
@@ -127,6 +137,13 @@ async function loadNoteOperationService() {
               }
               static [Symbol.hasInstance](value) {
                 return Boolean(value && typeof value.path === 'string' && typeof value.basename === 'string');
+              }
+            }
+            export class TFolder {
+              constructor(path = '') {
+                this.path = path;
+                this.name = String(path).split('/').pop() || '';
+                this.children = [];
               }
             }
             export class Notice {

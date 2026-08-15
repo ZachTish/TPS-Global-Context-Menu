@@ -89,6 +89,13 @@ export function extractLinkedContextMarkdown(
   return lines.slice(excerptStartLine, range.endLine + 1).join('\n');
 }
 
+function isFilePropertiesCompanionFrontmatter(frontmatter: unknown): boolean {
+  if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) return false;
+  const record = frontmatter as Record<string, unknown>;
+  const markerKey = Object.keys(record).find((key) => key.trim().toLowerCase() === 'tpsgcmfileproperties');
+  return markerKey !== undefined && Number(record[markerKey]) === 1;
+}
+
 export class LinkedContextService {
   constructor(private readonly app: App) {}
 
@@ -97,6 +104,9 @@ export class LinkedContextService {
     sortOrder: LinkedContextSortOrder = 'source-asc',
     excludedSourcePaths: ReadonlySet<string> = new Set<string>(),
   ): Promise<LinkedContextItem[]> {
+    if (isFilePropertiesCompanionFrontmatter(this.app.metadataCache.getFileCache(targetFile)?.frontmatter)) {
+      return [];
+    }
     const resolvedLinks = this.app.metadataCache.resolvedLinks || {};
     const direction = normalizeLinkedContextSortOrder(sortOrder) === 'source-desc' ? -1 : 1;
     const sourcePaths = Object.keys(resolvedLinks)
@@ -113,6 +123,7 @@ export class LinkedContextService {
       if (!(sourceFile instanceof TFile) || sourceFile.extension !== 'md') continue;
       const cache = this.app.metadataCache.getFileCache(sourceFile);
       if (!cache) continue;
+      if (isFilePropertiesCompanionFrontmatter(cache.frontmatter)) continue;
       const matchingLinks = [...(cache.links || []), ...(cache.embeds || [])]
         .filter((link) => this.app.metadataCache.getFirstLinkpathDest(link.link, sourceFile.path)?.path === targetFile.path)
         .sort((a, b) => a.position.start.line - b.position.start.line);

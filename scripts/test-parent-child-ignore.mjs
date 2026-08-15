@@ -45,6 +45,7 @@ const obsidianStubPlugin = {
         }
         export class Setting {}
         export const getAllTags = () => ({});
+        export const setIcon = () => {};
         export class TFile {
           constructor(path) {
             this.path = path;
@@ -158,6 +159,50 @@ async function importPropertyRowService() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
+async function importSubitemMetadataService() {
+  const stubs = new Map([
+    ['../resolve-profiles', 'export const resolveCustomProperties = () => [];'],
+    ['../services/view-mode-service', 'export class ViewModeService {}'],
+    ['../logger', 'export const warn = () => {}; export const flow = () => {};'],
+    ['../services/link-target-service', 'export const parseLinksFromFrontmatterValue = () => []; export const resolveLinkTargetToFile = () => null;'],
+    ['../utils/property-option-source', 'export const propertyUsesEntityOptions = () => false;'],
+  ]);
+  const result = await build({
+    stdin: {
+      contents: `
+        export { SubitemMetadataService } from './src/menu/subitem-metadata-service.ts';
+        export { TFile } from 'obsidian';
+      `,
+      resolveDir: repoRoot,
+      sourcefile: 'nonmarkdown-subitem-metadata-entry.ts',
+      loader: 'ts',
+    },
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+    plugins: [
+      obsidianStubPlugin,
+      {
+        name: 'nonmarkdown-subitem-metadata-stubs',
+        setup(context) {
+          context.onResolve({ filter: /.*/u }, (args) => (
+            stubs.has(args.path)
+              ? { path: args.path, namespace: 'nonmarkdown-subitem-metadata-stub' }
+              : null
+          ));
+          context.onLoad({ filter: /.*/u, namespace: 'nonmarkdown-subitem-metadata-stub' }, (args) => ({
+            loader: 'js',
+            contents: stubs.get(args.path),
+          }));
+        },
+      },
+    ],
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+
 function extractMethod(source, methodName, sourcePath) {
   const sourceFile = ts.createSourceFile(sourcePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
   let method = null;
@@ -214,6 +259,72 @@ async function importTopChildResolverHarness() {
     compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
   }).outputText;
   return import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
+}
+
+async function importTagInheritanceHarness() {
+  const sourcePath = fileURLToPath(new URL('../src/services/bulk-edit-service.ts', import.meta.url));
+  const source = readFileSync(sourcePath, 'utf8');
+  const getTagsMethod = extractMethod(source, 'getInheritableParentTags', sourcePath);
+  const mergeMethod = extractMethod(source, 'mergeParentTagsIntoChildren', sourcePath);
+  const virtualSource = `
+    import { mergeNormalizedTags, normalizeTagList, parseTagInput } from './src/utils/tag-utils.ts';
+    export class TFile {
+      constructor(path) {
+        this.path = path;
+        this.name = path.split('/').pop() || path;
+        this.basename = this.name.replace(/\\.[^.]+$/u, '');
+        this.extension = this.name.includes('.') ? this.name.split('.').pop().toLowerCase() : '';
+      }
+    }
+    const runInBatches = async (items, callback) => {
+      for (const item of items) await callback(item);
+    };
+    const logger = { error: () => undefined };
+
+    export class TagInheritanceHarness {
+      constructor(plugin) {
+        this.plugin = plugin;
+        this.safeChecks = [];
+        this.serializedPaths = [];
+      }
+      findFrontmatterKeyCaseInsensitive(frontmatter, key) {
+        return Object.keys(frontmatter).find((candidate) => candidate.toLowerCase() === key.toLowerCase());
+      }
+      setFrontmatterValueCaseInsensitive(frontmatter, key, value) {
+        const existing = this.findFrontmatterKeyCaseInsensitive(frontmatter, key);
+        frontmatter[existing ?? key] = value;
+      }
+      getFrontmatterValueCaseInsensitive(frontmatter, key) {
+        const existing = this.findFrontmatterKeyCaseInsensitive(frontmatter, key);
+        return existing ? frontmatter[existing] : undefined;
+      }
+      async canMutateFrontmatterSafely(file) {
+        this.safeChecks.push(file.path);
+        return true;
+      }
+      async runSerializedFrontmatterWrite(file, action) {
+        this.serializedPaths.push(file.path);
+        await action();
+      }
+      ${getTagsMethod}
+      ${mergeMethod}
+      run(children, parent) { return this.mergeParentTagsIntoChildren(children, parent); }
+    }
+  `;
+  const result = await build({
+    stdin: {
+      contents: virtualSource,
+      resolveDir: repoRoot,
+      sourcefile: 'nonmarkdown-tag-inheritance-entry.ts',
+      loader: 'ts',
+    },
+    bundle: true,
+    write: false,
+    platform: 'node',
+    format: 'esm',
+    logLevel: 'silent',
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
 test('parent/child ignore predicate is disabled by default and matches exact key/value pairs case-insensitively', async () => {
@@ -299,6 +410,243 @@ test('ignored relationships are hidden and blocked without rewriting persisted l
   assert.deepEqual(service.getParentsForChild(child), []);
   assert.equal(service.getStoredParentsForChild(child)[0]?.file.path, parent.path);
   assert.deepEqual(service.getAllFileTargets().map((file) => file.path), [child.path]);
+});
+
+test('PDF and Base relationship writes round-trip through logical companion frontmatter', async () => {
+  const { ParentLinkResolutionService, TFile } = await importParentLinkResolutionService();
+  const parentBase = new TFile('Views/Plan.base');
+  const childPdf = new TFile('Reference/Brief.pdf');
+  const reverseParentPdf = new TFile('Reference/Source.pdf');
+  const reverseChildBase = new TFile('Views/Detail.base');
+  const note = new TFile('Notes/Visible.md');
+  const companion = new TFile('_assets/TPS File Properties/Reference/Brief.pdf.md');
+  const loaded = [parentBase, childPdf, reverseParentPdf, reverseChildBase, note, companion];
+  const files = new Map(loaded.map((file) => [file.path, file]));
+  const markdownFrontmatter = new Map([[note.path, {}], [companion.path, { tpsGcmFileProperties: 1 }]]);
+  const logicalFrontmatter = new Map([
+    [parentBase.path, {}],
+    [childPdf.path, {}],
+    [reverseParentPdf.path, {}],
+    [reverseChildBase.path, {}],
+  ]);
+  const resolvePath = (raw) => {
+    const value = String(raw || '').trim();
+    const wikiTarget = value.startsWith('[[') && value.endsWith(']]')
+      ? value.slice(2, -2)
+      : value;
+    const markdownDivider = wikiTarget.indexOf('](');
+    const markdownTarget = wikiTarget.startsWith('[') && wikiTarget.endsWith(')') && markdownDivider >= 0
+      ? wikiTarget.slice(markdownDivider + 2, -1)
+      : wikiTarget;
+    const target = markdownTarget.split('|')[0].trim();
+    return files.get(target) ?? files.get(`${target}.md`) ?? null;
+  };
+  const plugin = {
+    settings: {
+      parentLinkFrontmatterKey: 'childOf',
+      autoSelfLinkParentInParentKey: false,
+      enableParentChildIgnoreRule: true,
+      parentChildIgnoreFrontmatterKey: 'relationshipMode',
+      parentChildIgnoreFrontmatterValue: 'ignore',
+    },
+    app: {
+      vault: {
+        getAllLoadedFiles: () => loaded,
+        getAbstractFileByPath: (path) => files.get(path) ?? null,
+      },
+      metadataCache: {
+        getFileCache: (file) => ({ frontmatter: markdownFrontmatter.get(file.path) ?? {} }),
+        getFirstLinkpathDest: (target) => resolvePath(target),
+        fileToLinktext: (file) => file.path,
+      },
+      fileManager: {
+        generateMarkdownLink: (file) => `[[${file.path}]]`,
+      },
+    },
+    filePropertiesService: {
+      isCompanionFile: (file) => file.path.startsWith('_assets/TPS File Properties/'),
+      isPropertyTarget: (file) => file.extension !== 'md' && !file.path.startsWith('_assets/TPS File Properties/'),
+      read: (file) => logicalFrontmatter.get(file.path) ?? {},
+    },
+    frontmatterMutationService: {
+      process: async (file, mutator) => {
+        const target = file.extension === 'md'
+          ? (markdownFrontmatter.get(file.path) ?? {})
+          : (logicalFrontmatter.get(file.path) ?? {});
+        await mutator(target);
+        if (file.extension === 'md') markdownFrontmatter.set(file.path, target);
+        else logicalFrontmatter.set(file.path, target);
+        return true;
+      },
+    },
+  };
+  const service = new ParentLinkResolutionService(plugin);
+
+  assert.equal(await service.addParentToChild(childPdf, parentBase), true);
+  assert.deepEqual(logicalFrontmatter.get(childPdf.path)?.childOf, ['[[Views/Plan.base]]']);
+  assert.deepEqual(service.getParentsForChild(childPdf).map((entry) => [entry.file.path, entry.kind]), [
+    [parentBase.path, 'base-parent'],
+  ]);
+
+  assert.equal(await service.addParentToChild(reverseChildBase, reverseParentPdf), true);
+  assert.deepEqual(service.getParentsForChild(reverseChildBase).map((entry) => [entry.file.path, entry.kind]), [
+    [reverseParentPdf.path, 'other-parent'],
+  ]);
+
+  assert.deepEqual(service.getRelationshipCandidates().map((file) => file.path), [
+    parentBase.path,
+    childPdf.path,
+    reverseParentPdf.path,
+    reverseChildBase.path,
+    note.path,
+  ], 'the managed companion is never a logical relationship target');
+
+  logicalFrontmatter.set(childPdf.path, {
+    ...logicalFrontmatter.get(childPdf.path),
+    RelationshipMode: ' IGNORE ',
+  });
+  assert.deepEqual(service.getParentsForChild(childPdf), []);
+  assert.equal(service.getStoredParentsForChild(childPdf)[0]?.file.path, parentBase.path);
+  assert.equal(service.getRelationshipCandidates().some((file) => file.path === childPdf.path), false);
+});
+
+test('parent-tag inheritance is logical, ignored-tag filtered, and companion-aware in both directions', async () => {
+  const { TagInheritanceHarness, TFile } = await importTagInheritanceHarness();
+  const markdownParent = new TFile('Parents/Markdown.md');
+  const pdfParent = new TFile('Parents/Document.pdf');
+  const markdownChild = new TFile('Children/Note.md');
+  const pdfChild = new TFile('Children/Document.pdf');
+  const baseChild = new TFile('Children/View.base');
+  const ignoredChild = new TFile('Children/Ignored.base');
+  const companion = new TFile('_assets/TPS File Properties/Children/Document.pdf.md');
+  const logical = new Map([
+    [markdownParent.path, { Tags: ['#Shared', 'skip', 'ALPHA', 'shared'] }],
+    [pdfParent.path, { Tag: '#Remote #skip #REMOTE' }],
+    [markdownChild.path, { tags: ['existing'] }],
+    [pdfChild.path, { tags: ['existing', 'SHARED'] }],
+    [baseChild.path, { tags: ['alpha'] }],
+    [ignoredChild.path, { tags: ['preserve'] }],
+    [companion.path, { tags: ['preserve-companion'] }],
+  ]);
+  const ignored = new Set([ignoredChild.path]);
+  const isCompanion = (file) => file.path.startsWith('_assets/TPS File Properties/');
+  const plugin = {
+    settings: { ignoredSubitemTags: ['skip'] },
+    parentLinkResolutionService: {
+      getLogicalFrontmatter: (file) => logical.get(file.path) ?? {},
+      isRelationshipTarget: (file) => !isCompanion(file) && ['md', 'pdf', 'base'].includes(file.extension),
+      isIgnoredFile: (file) => ignored.has(file.path),
+    },
+    frontmatterMutationService: {
+      process: async (file, mutator) => {
+        const current = logical.get(file.path) ?? {};
+        const before = JSON.stringify(current);
+        await mutator(current);
+        logical.set(file.path, current);
+        return JSON.stringify(current) !== before;
+      },
+    },
+  };
+  const service = new TagInheritanceHarness(plugin);
+
+  assert.deepEqual(
+    (await service.run([markdownChild, ignoredChild, companion], pdfParent)).map((file) => file.path),
+    [markdownChild.path],
+  );
+  assert.deepEqual(logical.get(markdownChild.path).tags, ['existing', 'remote']);
+  assert.deepEqual(logical.get(ignoredChild.path).tags, ['preserve']);
+  assert.deepEqual(logical.get(companion.path).tags, ['preserve-companion']);
+
+  assert.deepEqual(
+    (await service.run([pdfChild, baseChild], markdownParent)).map((file) => file.path),
+    [pdfChild.path, baseChild.path],
+  );
+  assert.deepEqual(logical.get(pdfChild.path).tags, ['existing', 'shared', 'alpha']);
+  assert.deepEqual(logical.get(baseChild.path).tags, ['alpha', 'shared']);
+  assert.deepEqual(service.safeChecks, [markdownChild.path]);
+  assert.deepEqual(service.serializedPaths, [markdownChild.path]);
+});
+
+test('subitem reverse discovery merges body and companion-backed relationships exactly once', async () => {
+  const { SubitemMetadataService, TFile } = await importSubitemMetadataService();
+  const rootBase = new TFile('Views/Root.base');
+  const markdownRoot = new TFile('Notes/Root.md');
+  const pdfChild = new TFile('Reference/Child.pdf');
+  const companion = new TFile('_assets/TPS File Properties/Reference/Child.pdf.md');
+  const logical = new Map([
+    [rootBase.path, { sort: 1 }],
+    [markdownRoot.path, {}],
+    [pdfChild.path, { childOf: ['[[Views/Root.base]]'], priority: 'high' }],
+  ]);
+  let bodyScanCount = 0;
+  const plugin = {
+    app: {
+      metadataCache: { getFileCache: () => ({ frontmatter: {} }) },
+      vault: { cachedRead: async () => { throw new Error('non-Markdown files must not be read as text'); } },
+    },
+    parentLinkResolutionService: {
+      getRelationshipCandidates: () => [rootBase, markdownRoot, pdfChild],
+      getParentsForChild: (file) => file === pdfChild
+        ? [{ file: rootBase, kind: 'base-parent', source: 'child-frontmatter' }]
+        : [],
+      getLogicalFrontmatter: (file) => logical.get(file.path) ?? {},
+      isIgnoredFile: (file) => file === companion,
+    },
+    bodySubitemLinkService: {
+      scanFile: async (file) => {
+        bodyScanCount += 1;
+        return file === markdownRoot ? [{ childFile: pdfChild }] : [];
+      },
+    },
+  };
+  const service = new SubitemMetadataService(plugin, {
+    createFileEntries: (files) => files.map((file) => ({ file, frontmatter: {} })),
+  });
+  const parentIndex = service.buildParentToChildrenIndex();
+  assert.deepEqual(parentIndex.get(rootBase.path)?.map((file) => file.path), [pdfChild.path]);
+
+  const baseRelations = await service.collectDirectSubitemRelations(rootBase, parentIndex);
+  assert.equal(bodyScanCount, 0, 'a Base relationship never triggers Markdown body scanning');
+  assert.deepEqual([...baseRelations.keys()], [pdfChild.path]);
+
+  const markdownIndex = new Map([[markdownRoot.path, [pdfChild]]]);
+  const mergedRelations = await service.collectDirectSubitemRelations(markdownRoot, markdownIndex);
+  assert.equal(bodyScanCount, 1);
+  assert.deepEqual([...mergedRelations.keys()], [pdfChild.path], 'body and reverse-index discovery render one child row');
+  assert.deepEqual(service.getResolvedFrontmatter(pdfChild, { priority: 'low', fallbackOnly: true }), {
+    priority: 'high',
+    fallbackOnly: true,
+    childOf: ['[[Views/Root.base]]'],
+  });
+});
+
+test('relationship consumers share logical frontmatter and opt in to all-file picker candidates', () => {
+  const parentResolution = readFileSync(new URL('../src/services/parent-link-resolution-service.ts', import.meta.url), 'utf8');
+  const metadata = readFileSync(new URL('../src/menu/subitem-metadata-service.ts', import.meta.url), 'utf8');
+  const persistent = readFileSync(new URL('../src/menu/persistent-menu-manager.ts', import.meta.url), 'utf8');
+  const menuBuilder = readFileSync(new URL('../src/menu/menu-builder.ts', import.meta.url), 'utf8');
+  const panel = readFileSync(new URL('../src/menu/panel-builder.ts', import.meta.url), 'utf8');
+  const fileSuggest = readFileSync(new URL('../src/modals/FileSuggestModal.ts', import.meta.url), 'utf8');
+  const multiSelect = readFileSync(new URL('../src/modals/MultiFileSelectModal.ts', import.meta.url), 'utf8');
+
+  assert.match(parentResolution, /getLogicalFrontmatter[\s\S]{0,650}filePropertiesService\.read\(file\)/u);
+  assert.match(parentResolution, /getRelationshipCandidates[\s\S]{0,320}isRelationshipTarget\(file\)/u);
+  assert.match(parentResolution, /isIgnoredFile[\s\S]{0,240}getLogicalFrontmatter\(file\)/u);
+  assert.match(parentResolution, /getStoredParentsForChild[\s\S]{0,180}getLogicalFrontmatter\(childFile\)/u);
+  assert.match(metadata, /buildParentToChildrenIndex[\s\S]{0,700}getRelationshipCandidates\(\)/u);
+  assert.match(metadata, /getResolvedFrontmatter[\s\S]{0,260}getLogicalFrontmatter\(file\)/u);
+  assert.ok(
+    (persistent.match(/parentLinkResolutionService\.getRelationshipCandidates\(\)/gu) || []).length >= 2,
+    'persistent relationship paths and child rows must share logical candidate enumeration',
+  );
+  assert.match(menuBuilder, /resolveChildFilesFor[\s\S]{0,300}getRelationshipCandidates\(\)/u);
+  assert.ok(
+    (panel.match(/parentLinkResolutionService\.getLogicalFrontmatter\(/gu) || []).length >= 3,
+    'panel sorting and both archive/ignore tag reads use logical frontmatter',
+  );
+  assert.match(fileSuggest, /candidateFiles\?: readonly TFile\[\][\s\S]{0,180}includeAllExtensions\?: boolean/u);
+  assert.match(fileSuggest, /const source = this\.candidateFiles \?\? this\.app\.vault\.getAllLoadedFiles\(\)/u);
+  assert.match(multiSelect, /candidateFiles\?: readonly TFile\[\][\s\S]{0,260}this\.app\.vault\.getMarkdownFiles\(\)/u);
 });
 
 test('body-only ignored children and ignored roots never reach the top Children popover', async () => {
@@ -516,7 +864,7 @@ test('ignore guards cover relationship panels, body widgets, automation, creatio
   assert.match(sources.bulk, /unlinkFromAllParents[\s\S]{0,260}getStoredParentsForChild\(childFile\)/u);
   assert.match(sources.menu, /filter: \(candidate\) => \([\s\S]{0,180}!this\.plugin\.parentLinkResolutionService\.isIgnoredFile\(candidate\)/u);
   assert.match(sources.panel, /filter: \(candidate\) => \([\s\S]{0,180}!this\.plugin\.parentLinkResolutionService\.isIgnoredFile\(candidate\)/u);
-  assert.match(sources.panelAction, /canUseRelationshipActions[\s\S]{0,220}isIgnoredFile\(file\)/u);
+  assert.match(sources.panelAction, /canUseRelationshipActions[\s\S]{0,360}isRelationshipTarget\(file\)[\s\S]{0,120}isIgnoredFile\(file\)/u);
   assert.match(sources.fileSuggest, /fileFilter[\s\S]{0,1000}extensionFiltered\.filter\(this\.fileFilter\)/u);
   assert.match(sources.multiFileSelect, /files\.filter\(options\.filter\)/u);
   assert.match(sources.unresolved, /checkAndPromptForUnresolvedSubitems[\s\S]{0,240}isIgnoredFile\(parentFile\)/u);

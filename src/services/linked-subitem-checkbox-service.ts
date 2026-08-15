@@ -469,7 +469,10 @@ export class LinkedSubitemCheckboxService {
     );
     if (relationshipIsIgnored()) return false;
     const guardedWriteOptions = { writeGuard: () => !relationshipIsIgnored() };
-    const entries = [{ file: childFile, frontmatter: (this.plugin.app.metadataCache.getFileCache(childFile)?.frontmatter || {}) as Record<string, unknown> }];
+    const entries = [{
+      file: childFile,
+      frontmatter: this.plugin.parentLinkResolutionService.getLogicalFrontmatter(childFile),
+    }];
     const menuController = this.plugin.menuController as any;
     const propertyRowService = menuController?.propertyRowService as any;
     const configuredProperty = propertyKey
@@ -1473,15 +1476,21 @@ export class LinkedSubitemCheckboxService {
   }
 
   private async readAuthoritativeChildStatus(file: TFile): Promise<string> {
-    const raw = await this.plugin.app.vault.read(file);
-    const normalized = String(raw || '')
-      .replace(/^\uFEFF/u, '')
-      .replace(/\r\n?/gu, '\n');
-    const match = /^---[ \t]*\n([\s\S]*?)\n(?:---|\.\.\.)[ \t]*(?:\n|$)/u.exec(normalized);
-    if (!match) return '';
+    let parsed: Record<string, unknown>;
+    if (file.extension?.toLowerCase() !== 'md') {
+      parsed = await this.plugin.filePropertiesService.getFrontmatterAsync(file);
+    } else {
+      const raw = await this.plugin.app.vault.read(file);
+      const normalized = String(raw || '')
+        .replace(/^\uFEFF/u, '')
+        .replace(/\r\n?/gu, '\n');
+      const match = /^---[ \t]*\n([\s\S]*?)\n(?:---|\.\.\.)[ \t]*(?:\n|$)/u.exec(normalized);
+      if (!match) return '';
 
-    const parsed = parseYaml(match[1] || '');
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return '';
+      const frontmatter = parseYaml(match[1] || '');
+      if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) return '';
+      parsed = frontmatter as Record<string, unknown>;
+    }
     const statusKey = this.getStatusKey();
     const actualKey = Object.keys(parsed).find(
       (key) => key.trim().toLowerCase() === statusKey.trim().toLowerCase(),

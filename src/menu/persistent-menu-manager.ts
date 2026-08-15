@@ -2015,7 +2015,7 @@ export class PersistentMenuManager {
     for (const p of outgoingPaths) {
       if (p === file.path) continue; // skip self-references
       const f = app.vault.getAbstractFileByPath(p);
-      if (f instanceof TFile) outgoing.push(f);
+      if (f instanceof TFile && !this.plugin.filePropertiesService?.isCompanionFile(f)) outgoing.push(f);
     }
 
     // Incoming
@@ -2025,7 +2025,7 @@ export class PersistentMenuManager {
       if (sourcePath === file.path) continue;
       if (allLinks[sourcePath][file.path] !== undefined) {
         const f = app.vault.getAbstractFileByPath(sourcePath);
-        if (f instanceof TFile) incoming.push(f);
+        if (f instanceof TFile && !this.plugin.filePropertiesService?.isCompanionFile(f)) incoming.push(f);
       }
     }
 
@@ -5270,6 +5270,7 @@ export class PersistentMenuManager {
     const items: CalendarPopoverItem[] = [];
 
     for (const file of this.plugin.app.vault.getMarkdownFiles()) {
+      if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
       const cache = this.plugin.app.metadataCache.getFileCache(file);
       const scheduledTasks = await this.collectScheduledTasksForCalendarItem(file, date, settings);
       for (const task of scheduledTasks) {
@@ -6007,7 +6008,7 @@ export class PersistentMenuManager {
     }
 
     // Include reverse-only relationships if one direction is missing.
-    for (const candidate of this.plugin.app.vault.getMarkdownFiles()) {
+    for (const candidate of this.plugin.parentLinkResolutionService.getRelationshipCandidates()) {
       if (candidate.path === file.path) continue;
       if (this.plugin.parentLinkResolutionService.hasParent(candidate, file)) {
         relationshipPaths.add(candidate.path);
@@ -6019,7 +6020,7 @@ export class PersistentMenuManager {
 
   private resolveChildFiles(file: TFile): TFile[] {
     const childFiles = new Map<string, TFile>();
-    for (const candidate of this.plugin.app.vault.getMarkdownFiles()) {
+    for (const candidate of this.plugin.parentLinkResolutionService.getRelationshipCandidates()) {
       if (candidate.path === file.path) continue;
       if (this.plugin.parentLinkResolutionService.hasParent(candidate, file)) {
         childFiles.set(candidate.path, candidate);
@@ -6031,19 +6032,21 @@ export class PersistentMenuManager {
   private async resolveChildFilesForTopButton(file: TFile, knownChildren?: readonly TFile[]): Promise<TFile[]> {
     if (this.plugin.parentLinkResolutionService.isIgnoredFile(file)) return [];
     const childFiles = new Map<string, TFile>();
-    try {
-      const bodyLinks = await this.plugin.bodySubitemLinkService.scanFile(file);
-      for (const link of bodyLinks) {
-        if (
-          link.childFile instanceof TFile
-          && link.childFile.path !== file.path
-          && !this.plugin.parentLinkResolutionService.isIgnoredFile(link.childFile)
-        ) {
-          childFiles.set(link.childFile.path, link.childFile);
+    if (file.extension?.toLowerCase() === 'md') {
+      try {
+        const bodyLinks = await this.plugin.bodySubitemLinkService.scanFile(file);
+        for (const link of bodyLinks) {
+          if (
+            link.childFile instanceof TFile
+            && link.childFile.path !== file.path
+            && !this.plugin.parentLinkResolutionService.isIgnoredFile(link.childFile)
+          ) {
+            childFiles.set(link.childFile.path, link.childFile);
+          }
         }
+      } catch (error) {
+        logger.warn('[TPS GCM] Failed scanning body child links for top button', { file: file.path, error });
       }
-    } catch (error) {
-      logger.warn('[TPS GCM] Failed scanning body child links for top button', { file: file.path, error });
     }
 
     for (const child of knownChildren ?? this.resolveChildFiles(file)) {

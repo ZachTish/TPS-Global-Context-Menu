@@ -115,6 +115,9 @@ async function loadSortHarness(root, expectedHash = null) {
         };
         this.plugin = {
           parentLinkResolutionService: {
+            getLogicalFrontmatter: (file: TFile) =>
+              (readCache(file) as { frontmatter?: Record<string, unknown> } | null)?.frontmatter ?? {},
+            isRelationshipTarget: (file: unknown): file is TFile => file instanceof TFile,
             isIgnoredFile: (file: TFile) => this.ignoredPaths.has(file.path),
           },
         };
@@ -537,8 +540,8 @@ test('one metadata snapshot per sibling prevents repeated and incoherent compara
   assert.ok(methodSortStart >= 0);
   const comparatorSource = underTest.method.slice(methodSortStart);
   if (expectation === 'candidate') {
-    assert.equal((underTest.method.match(/metadataCache\.getFileCache\(/gu) || []).length, 1);
-    assert.doesNotMatch(comparatorSource, /metadataCache\.getFileCache\(/u);
+    assert.equal((underTest.method.match(/getLogicalFrontmatter\(/gu) || []).length, 1);
+    assert.doesNotMatch(comparatorSource, /getLogicalFrontmatter\(/u);
   } else {
     assert.equal((underTest.method.match(/metadataCache\.getFileCache\(/gu) || []).length, 2);
     assert.match(comparatorSource, /metadataCache\.getFileCache\(/u);

@@ -3,6 +3,7 @@ import type TPSGlobalContextMenuPlugin from '../main';
 import { TextInputModal } from '../modals/text-input-modal';
 import { FileSuggestModal } from '../modals/FileSuggestModal';
 import { MultiFileSelectModal } from '../modals/MultiFileSelectModal';
+import { promptFilePropertiesRelink } from '../modals/file-properties-relink-modal';
 import { normalizeTagList, normalizeTagValue } from '../utils/tag-utils';
 import {
   getWikilinkDisplayText,
@@ -92,7 +93,7 @@ export class MenuBuilder {
 
   private resolveChildFilesFor(file: TFile): TFile[] {
     const children = new Map<string, TFile>();
-    const indexed = this.plugin.app.vault.getMarkdownFiles().filter((candidate) =>
+    const indexed = this.plugin.parentLinkResolutionService.getRelationshipCandidates().filter((candidate) =>
       this.plugin.parentLinkResolutionService.hasParent(candidate, file),
     );
     for (const child of indexed) {
@@ -107,7 +108,11 @@ export class MenuBuilder {
   }
 
   private getFileIconMeta(file: TFile): { icon: string; color?: string } {
-    const frontmatter = (this.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, any>;
+    const frontmatter = (
+      file.extension?.toLowerCase() !== 'md' && this.plugin.filePropertiesService?.isPropertyTarget(file)
+        ? this.plugin.filePropertiesService.read(file)
+        : this.app.metadataCache.getFileCache(file)?.frontmatter || {}
+    ) as Record<string, any>;
     const rawIcon = typeof frontmatter.icon === 'string' ? frontmatter.icon.trim() : '';
     const rawColor = typeof frontmatter.color === 'string' ? frontmatter.color.trim() : '';
     const icon = rawIcon.replace(/^lucide:/i, '') || 'file-text';
@@ -118,8 +123,9 @@ export class MenuBuilder {
   }
 
   private isPropertyFile(file: TFile): boolean {
-    const extension = file.extension?.toLowerCase();
-    return extension === 'md' || extension === 'canvas';
+    if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
+    return file.extension?.toLowerCase() === 'md'
+      || this.plugin.filePropertiesService?.isPropertyTarget(file) === true;
   }
 
   private getPropertyFiles(entries: any[]): TFile[] {
@@ -297,7 +303,8 @@ export class MenuBuilder {
               ? `Linked to parent: ${parentFile.basename}`
               : 'The relationship is no longer available.');
           }, {
-            extensions: ['md', 'base'],
+            candidateFiles: this.plugin.parentLinkResolutionService.getRelationshipCandidates(),
+            includeAllExtensions: true,
             filter: (candidate) => (
               candidate.path !== file.path
               && !this.plugin.parentLinkResolutionService.isIgnoredFile(candidate)
@@ -343,13 +350,15 @@ export class MenuBuilder {
   private populateChildRelationSubmenu(menu: Menu, file: TFile): void {
     const childFiles = this.resolveChildFilesFor(file);
 
-    menu.addItem((sub) => {
-      sub.setTitle('Create new child...')
-        .setIcon('plus')
-        .onClick(() => {
-          void promptAndCreateSubitemForParent(this.plugin, file);
-        });
-    });
+    if (this.plugin.parentLinkResolutionService.isRelationshipTarget(file)) {
+      menu.addItem((sub) => {
+        sub.setTitle('Create new child...')
+          .setIcon('plus')
+          .onClick(() => {
+            void promptAndCreateSubitemForParent(this.plugin, file);
+          });
+      });
+    }
 
     menu.addItem((sub) => {
       sub.setTitle('Link existing child...')
@@ -361,6 +370,7 @@ export class MenuBuilder {
               new Notice(`Linked ${linked} children to this note.`);
             }
           }, {
+            candidateFiles: this.plugin.parentLinkResolutionService.getRelationshipCandidates(),
             filter: (candidate) => (
               candidate.path !== file.path
               && !this.plugin.parentLinkResolutionService.isIgnoredFile(candidate)
@@ -555,6 +565,43 @@ export class MenuBuilder {
       });
     }
 
+    if (includeSingleTargetActions && this.plugin.filePropertiesService?.isPropertyTarget(file)) {
+      const service = this.plugin.filePropertiesService;
+      const exactRelinkCandidate = service.getRelinkCandidate(file);
+      const hasActiveCompanion = !exactRelinkCandidate && service.hasCompanion(file);
+      const hasRelinkCandidates = !hasActiveCompanion && service.hasRelinkCandidates(file);
+      if (hasRelinkCandidates) {
+        menu.addItem((item) => {
+          item.setTitle('Relink file properties…')
+            .setIcon('link')
+            .setSection('tps-file-ops')
+            .onClick(() => promptFilePropertiesRelink(this.plugin, file));
+        });
+      }
+      if (!exactRelinkCandidate) {
+        menu.addItem((item) => {
+          item.setTitle(hasActiveCompanion ? 'Open file properties note' : 'Create file properties note')
+            .setIcon('database')
+            .setSection('tps-file-ops')
+            .onClick(async () => {
+              try {
+                const companion = await service.ensureCompanion(file);
+                await this.plugin.openFileInLeaf(companion, false, () => this.app.workspace.getLeaf(false), {
+                  revealLeaf: true,
+                  ignoreCanvasDragGuard: true,
+                });
+              } catch (error) {
+                logger.warn('[TPS GCM] Could not open native file properties note', {
+                  file: file.path,
+                  error,
+                });
+                new Notice(`Could not create the properties note for ${file.name}.`);
+              }
+            });
+        });
+      }
+    }
+
     // Dynamic Properties
     if (allEntriesSupportProperties && this.plugin.settings.showCustomPropertiesInContextMenu !== false) {
       const properties = resolveCustomProperties(this.plugin.settings.properties || [], propertyEntries, new ViewModeService(), 'context');
@@ -675,31 +722,41 @@ export class MenuBuilder {
       }, 'tps-props');
     }
 
-    // Relationship and tracking operations are note actions, not custom properties.
+    // Parent/child links are property relationships. They are safe for one
+    // logical Markdown or companion-backed file target; body-only note actions
+    // remain below in the Markdown guard.
+    if (
+      includeSingleTargetActions
+      && entries.length === 1
+      && this.plugin.parentLinkResolutionService.isRelationshipTarget(file)
+      && !this.plugin.parentLinkResolutionService.isIgnoredFile(file)
+    ) {
+      const parentCount = this.resolveParentFilesFor(file).length;
+      const childCount = this.resolveChildFilesFor(file).length;
+
+      menu.addItem((item) => {
+        item.setTitle(parentCount > 0 ? `Link to Parent (${parentCount})` : 'Link to Parent')
+          .setIcon('link')
+          .setSection('tps-props');
+
+        const subMenu = (item as any).setSubmenu();
+        this.populateParentRelationSubmenu(subMenu, file);
+      });
+
+      menu.addItem((item) => {
+        item.setTitle(childCount > 0 ? `Link Children (${childCount})` : 'Link Children')
+          .setIcon('network')
+          .setSection('tps-props');
+
+        const subMenu = (item as any).setSubmenu();
+        this.populateChildRelationSubmenu(subMenu, file);
+      });
+    }
+
+    // Embeds, note conversion, and time tracking mutate or interpret Markdown
+    // bodies, so they must never leak onto companion-backed file menus.
     if (allEntriesAreMarkdown) {
       if (includeSingleTargetActions) {
-        if (!this.plugin.parentLinkResolutionService.isIgnoredFile(file)) {
-          const parentCount = this.resolveParentFilesFor(file).length;
-          const childCount = this.resolveChildFilesFor(file).length;
-
-          menu.addItem((item) => {
-            item.setTitle(parentCount > 0 ? `Link to Parent (${parentCount})` : 'Link to Parent')
-              .setIcon('link')
-              .setSection('tps-props');
-
-            const subMenu = (item as any).setSubmenu();
-            this.populateParentRelationSubmenu(subMenu, file);
-          });
-
-          menu.addItem((item) => {
-            item.setTitle(childCount > 0 ? `Link Children (${childCount})` : 'Link Children')
-              .setIcon('network')
-              .setSection('tps-props');
-
-            const subMenu = (item as any).setSubmenu();
-            this.populateChildRelationSubmenu(subMenu, file);
-          });
-        }
 
         menu.addItem((item) => {
           item.setTitle('Embed Attachments')

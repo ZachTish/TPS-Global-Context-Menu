@@ -171,14 +171,18 @@ export class MenuController {
   // --- Shared utilities (used by delegates) ---
 
   createFileEntries(files: TFile[]) {
-    return files.map(f => {
-      const frontmatter = this.plugin.canvasPropertiesService?.isCanvasFile(f)
-        ? this.plugin.canvasPropertiesService.read(f)
+    return files.flatMap((candidate) => {
+      const f = this.plugin.filePropertiesService?.isCompanionFile(candidate)
+        ? this.plugin.filePropertiesService.getSourceFileForCompanion(candidate)
+        : candidate;
+      if (!(f instanceof TFile) || !this.isPropertyFile(f)) return [];
+      const frontmatter = f.extension?.toLowerCase() !== 'md' && this.plugin.filePropertiesService?.isPropertyTarget(f)
+        ? this.plugin.filePropertiesService.read(f)
         : this.app.metadataCache.getFileCache(f)?.frontmatter || {};
-      return {
+      return [{
         file: f,
         frontmatter,
-      };
+      }];
     });
   }
 
@@ -202,8 +206,9 @@ export class MenuController {
   }
 
   private isPropertyFile(file: TFile): boolean {
-    const extension = file.extension?.toLowerCase();
-    return extension === 'md' || extension === 'canvas';
+    if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
+    return file.extension?.toLowerCase() === 'md'
+      || this.plugin.filePropertiesService?.isPropertyTarget(file) === true;
   }
 
   private resolveEntryFile(candidate: unknown): TFile | null {
@@ -583,15 +588,24 @@ export class MenuController {
     if (isLinkListProperty(property)) {
       new FileSuggestModal(this.app, async (file) => {
         const files = this.filesFromEntries(entries);
-        const cache = this.app.metadataCache.getFileCache(file);
-        const title = String(cache?.frontmatter?.title || file.basename).trim();
+        const frontmatter = file.extension?.toLowerCase() !== 'md' && this.plugin.filePropertiesService?.isPropertyTarget(file)
+          ? this.plugin.filePropertiesService.read(file)
+          : this.app.metadataCache.getFileCache(file)?.frontmatter;
+        const title = String(frontmatter?.title || file.basename).trim();
         const link = formatFileWikilink(file.path, title || file.basename);
         const count = await this.plugin.bulkEditService.addListValues(files, link, key);
         if (count > 0) {
           this.plugin.bulkEditService.showNotice('added', `${label} ${link}`, '', count);
           await this.afterWholeNotePropertyEdit(files, [key]);
         }
-      }, { extensions: ['md', 'canvas'] }).open();
+      }, {
+        extensions: Array.from(new Set(
+          this.app.vault.getFiles()
+            .map((file) => String(file.extension || '').trim())
+            .filter(Boolean),
+        )),
+        filter: (file) => !this.plugin.filePropertiesService?.isCompanionFile(file),
+      }).open();
       return;
     }
     const suggestions = getEffectivePropertyOptions(this.app, property);

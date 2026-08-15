@@ -156,7 +156,7 @@ export class SubitemLineModelService {
    * Get the normalized status value from a file.
    */
   getNormalizedStatus(file: TFile): string {
-    const fm = (this.plugin.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, unknown>;
+    const fm = this.plugin.parentLinkResolutionService.getLogicalFrontmatter(file);
     const statusKey = this.getStatusKey();
     const actualKey = Object.keys(fm).find((key) => key.toLowerCase() === statusKey.toLowerCase());
     return this.plugin.sharedServices.status.normalize(actualKey ? fm[actualKey] : '');
@@ -189,7 +189,7 @@ export class SubitemLineModelService {
     if (alias) return alias;
 
     const title = this.readFrontmatterString(
-      (this.plugin.app.metadataCache.getFileCache(childFile)?.frontmatter || {}) as Record<string, unknown>,
+      this.plugin.parentLinkResolutionService.getLogicalFrontmatter(childFile),
       'title',
     );
     return title || childFile.basename;
@@ -199,8 +199,7 @@ export class SubitemLineModelService {
    * Get property pills for a subitem line.
    */
   getPropertyPills(file: TFile, lineKind?: string): PropertyPill[] {
-    const cache = this.plugin.app.metadataCache.getFileCache(file);
-    const fm = (cache?.frontmatter || {}) as Record<string, unknown>;
+    const fm = this.plugin.parentLinkResolutionService.getLogicalFrontmatter(file);
     const pills: PropertyPill[] = [];
     const showInlineProperties = this.plugin.settings.showCustomPropertiesInInlineUi !== false;
     if (!showInlineProperties) {

@@ -49,8 +49,21 @@ async function loadCreateTaskModules() {
                 this.extension = this.name.includes('.') ? this.name.split('.').pop() : '';
               }
             }
+            export class TFolder {
+              constructor(path) {
+                this.path = path;
+                this.name = path.split('/').pop() || path;
+                this.children = [];
+              }
+            }
             export function normalizePath(value) {
               return String(value ?? '').trim().replace(/\\\\/g, '/').replace(/\\/{2,}/g, '/');
+            }
+            export function parseYaml(value) {
+              return JSON.parse(String(value || '{}'));
+            }
+            export function stringifyYaml(value) {
+              return JSON.stringify(value ?? {});
             }
             export function moment() {
               return { format: () => '2026-08-02' };

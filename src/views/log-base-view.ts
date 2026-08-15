@@ -901,7 +901,8 @@ export class TpsTableView extends BasesView {
     const isCancelled = (): boolean => loadGeneration != null && loadGeneration !== this.renderGeneration;
     const filterRoots = await this.getEffectiveBaseFilterRoots();
     if (isCancelled()) return [];
-    const sourceFiles = filterRoots.length ? this.plugin.app.vault.getMarkdownFiles() : this.getSourceFiles();
+    const sourceFiles = (filterRoots.length ? this.plugin.app.vault.getMarkdownFiles() : this.getSourceFiles())
+      .filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file));
     const checkboxMappings = this.getTaskCheckboxMappings();
     let failedClosedFilterRows = 0;
     const sourceLineCache = this.getSourceLineCache();

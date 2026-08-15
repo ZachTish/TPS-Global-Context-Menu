@@ -2,6 +2,10 @@ import { App, TFile, moment, normalizePath } from 'obsidian';
 import { parseDateFromFilename } from './daily-file-date';
 import { getDailyNotePathDateCandidate } from './daily-note-creation';
 import { readInlineFieldValue } from './task-line-metadata';
+import {
+  isFilePropertiesCompanionPath,
+  isFilePropertiesCompanionRecord,
+} from '../services/file-properties-service';
 
 type FileLike = {
   path: string;
@@ -52,9 +56,10 @@ export function findExistingDailyNoteForIsoDate(app: App, settings: unknown, iso
 
   const canonicalPath = getDailyNotePathForIsoDate(app, settings, wanted);
   const canonical = app.vault.getAbstractFileByPath(canonicalPath);
-  if (canonical instanceof TFile) return canonical;
+  if (canonical instanceof TFile && !isManagedFilePropertiesCompanion(app, canonical)) return canonical;
 
   const candidates = app.vault.getMarkdownFiles()
+    .filter((file) => !isManagedFilePropertiesCompanion(app, file))
     .filter((file) => parseDailyNoteFileDate(app, settings, file) === wanted)
     .sort((a, b) => {
       const aPath = normalizePath(a.path);
@@ -63,6 +68,11 @@ export function findExistingDailyNoteForIsoDate(app: App, settings: unknown, iso
     });
 
   return candidates[0] ?? null;
+}
+
+function isManagedFilePropertiesCompanion(app: App, file: TFile): boolean {
+  return isFilePropertiesCompanionPath(file.path)
+    || isFilePropertiesCompanionRecord(app.metadataCache.getFileCache(file)?.frontmatter);
 }
 
 export function getDailyNoteScheduledValueForIsoDate(isoDate: string): string {

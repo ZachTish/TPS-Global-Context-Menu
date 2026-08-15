@@ -580,6 +580,7 @@ export class DailyInboxLineService {
     if (!wantedTitle) return { file: null, matchCount: 0 };
     const matches = this.plugin.app.vault.getMarkdownFiles().filter((candidate) => {
       if (candidate.path === sourceFile.path) return false;
+      if (this.plugin.filePropertiesService?.isCompanionFile(candidate)) return false;
       const frontmatter = (this.plugin.app.metadataCache.getFileCache(candidate)?.frontmatter || {}) as Record<string, unknown>;
       const titleKey = Object.keys(frontmatter).find((key) => key.trim().toLowerCase() === 'title');
       if (!titleKey || this.normalizeTitleIdentity(frontmatter[titleKey]) !== wantedTitle) return false;

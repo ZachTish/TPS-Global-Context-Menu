@@ -1,5 +1,6 @@
 import { MarkdownView, Notice, TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
+import { promptFilePropertiesRelink } from '../modals/file-properties-relink-modal';
 
 /**
  * Registers all plugin commands on the given plugin instance.
@@ -92,6 +93,73 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
                 return;
             }
             await plugin.noteTitleRenderService.promptRenameTitle(file);
+        },
+    });
+
+    plugin.addCommand({
+        id: 'open-file-properties-note',
+        name: 'File properties: Open properties note for current file',
+        callback: async () => {
+            const file = plugin.app.workspace.getActiveFile();
+            if (!(file instanceof TFile) || !plugin.filePropertiesService.isPropertyTarget(file)) {
+                new Notice('TPS GCM: Open a non-Markdown file first.');
+                return;
+            }
+            if (plugin.filePropertiesService.getRelinkCandidate(file)) {
+                new Notice('TPS GCM: Retained properties exist for a missing file at this path. Use “File properties: Relink retained properties to current file” first.');
+                return;
+            }
+            try {
+                const companion = await plugin.filePropertiesService.ensureCompanion(file);
+                await plugin.openFileInLeaf(companion, false, () => plugin.app.workspace.getLeaf(false), {
+                    revealLeaf: true,
+                    ignoreCanvasDragGuard: true,
+                });
+            } catch {
+                new Notice(`TPS GCM: Could not create the properties note for ${file.name}.`);
+            }
+        },
+    });
+
+    plugin.addCommand({
+        id: 'relink-file-properties-note',
+        name: 'File properties: Relink properties to current file…',
+        callback: () => {
+            const file = plugin.app.workspace.getActiveFile();
+            if (!(file instanceof TFile) || !plugin.filePropertiesService.isPropertyTarget(file)) {
+                new Notice('TPS GCM: Open the replacement non-Markdown file first.');
+                return;
+            }
+            promptFilePropertiesRelink(plugin, file);
+        },
+    });
+
+    plugin.addCommand({
+        id: 'import-legacy-canvas-properties',
+        name: 'File properties: Import legacy Canvas properties',
+        callback: async () => {
+            const canvases = plugin.app.vault.getFiles().filter((file) =>
+                file instanceof TFile
+                && file.extension?.toLowerCase() === 'canvas'
+                && !plugin.filePropertiesService.hasCompanion(file),
+            );
+            let imported = 0;
+            let failed = 0;
+            for (const canvas of canvases) {
+                try {
+                    const legacy = await plugin.filePropertiesService.getFrontmatterAsync(canvas);
+                    if (Object.keys(legacy).length === 0) continue;
+                    await plugin.filePropertiesService.ensureCompanion(canvas, { importLegacyCanvas: true });
+                    imported += 1;
+                } catch {
+                    failed += 1;
+                }
+            }
+            new Notice(
+                failed > 0
+                    ? `Imported ${imported} Canvas property record(s); ${failed} could not be imported.`
+                    : `Imported ${imported} Canvas property record(s).`,
+            );
         },
     });
 

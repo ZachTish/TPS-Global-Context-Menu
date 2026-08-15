@@ -601,6 +601,10 @@ export class TaskCheckboxHandler {
     }
 
     scheduleChecklistPropertyUpdate(file: TFile): void {
+        if (this.plugin.filePropertiesService?.isCompanionFile(file)) {
+            this.clearPendingChecklistPropertyUpdate(file.path);
+            return;
+        }
         if (!this.plugin.canRunBackgroundAutomation()) {
             this.clearPendingChecklistPropertyUpdate(file.path);
             return;
@@ -627,6 +631,7 @@ export class TaskCheckboxHandler {
         }
         const af = this.plugin.app.vault.getAbstractFileByPath(filePath);
         if (!(af instanceof TFile) || af.extension !== 'md') return;
+        if (this.plugin.filePropertiesService?.isCompanionFile(af)) return;
         await this.updateChecklistPropertyForFile(af, filePath);
     }
 
@@ -634,7 +639,8 @@ export class TaskCheckboxHandler {
         if (!this.plugin.canRunBackgroundAutomation()) return;
         if (!this.isChecklistCompletionPropertyEnabled()) return;
         const syncToken = ++this.fullVaultSyncToken;
-        const files = this.plugin.app.vault.getMarkdownFiles();
+        const files = this.plugin.app.vault.getMarkdownFiles()
+            .filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file));
         for (let index = 0; index < files.length; index += 1) {
             if (syncToken !== this.fullVaultSyncToken) return;
             if (!this.isChecklistCompletionPropertyEnabled()) return;
@@ -646,6 +652,7 @@ export class TaskCheckboxHandler {
     }
 
     private async updateChecklistPropertyForFile(file: TFile, filePath = file.path): Promise<void> {
+        if (this.plugin.filePropertiesService?.isCompanionFile(file)) return;
         const propKey = this.plugin.settings.checklistCompletionPropertyKey?.trim();
         if (!propKey) return;
 

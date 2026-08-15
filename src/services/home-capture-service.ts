@@ -971,6 +971,7 @@ class HomeCaptureEditor implements HomeCaptureEditorHandle {
     const query = this.normalizeLookupText(match[1]);
     const replaceStart = offset - match[0].length;
     return this.plugin.app.vault.getMarkdownFiles()
+      .filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file))
       .map((file) => ({ file, display: file.basename, normalized: this.normalizeLookupText(file.basename) }))
       .filter((entry) => !query || entry.normalized.includes(query))
       .sort((left, right) => {
@@ -1067,6 +1068,7 @@ class HomeCaptureEditor implements HomeCaptureEditorHandle {
     const seen = new Set<string>();
     const matches: Array<Extract<HomeCaptureSuggestion, { type: 'note' }>> = [];
     for (const file of this.plugin.app.vault.getMarkdownFiles()) {
+      if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
       const best = this.getBestNoteMatch(file, normalizedQuery);
       if (!best) continue;
       if (seen.has(file.path)) continue;

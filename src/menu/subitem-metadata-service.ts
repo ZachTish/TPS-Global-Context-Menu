@@ -55,8 +55,8 @@ export class SubitemMetadataService {
   }
 
   getResolvedFrontmatter(file: TFile, fallback: Record<string, any>): Record<string, any> {
-    const cacheFm = (this.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, any>;
-    return { ...fallback, ...cacheFm };
+    const logicalFrontmatter = this.plugin.parentLinkResolutionService.getLogicalFrontmatter(file) as Record<string, any>;
+    return { ...fallback, ...logicalFrontmatter };
   }
 
   buildParentToChildrenIndex(): Map<string, TFile[]> {
@@ -71,7 +71,7 @@ export class SubitemMetadataService {
       index.set(parentPath, bucket);
     };
 
-    for (const file of this.app.vault.getMarkdownFiles()) {
+    for (const file of this.plugin.parentLinkResolutionService.getRelationshipCandidates()) {
       for (const parent of this.plugin.parentLinkResolutionService.getParentsForChild(file)) {
         addToIndex(parent.file.path, file);
       }
@@ -105,7 +105,8 @@ export class SubitemMetadataService {
       : [];
     if (bodyLinkedChildren.length > 0) {
       bodyLinkedChildren.forEach((entry) => addRelation(entry.childFile, 'child'));
-    } else if (!relationshipRootIgnored && file.extension?.toLowerCase() === 'md') {
+    }
+    if (!relationshipRootIgnored) {
       const linkedChildren = parentIndex.get(file.path) || [];
       linkedChildren.forEach((child) => addRelation(child, 'child'));
     }
@@ -147,6 +148,7 @@ export class SubitemMetadataService {
   }
 
   async resolveInlineEmbedAttachments(file: TFile): Promise<TFile[]> {
+    if (file.extension?.toLowerCase() !== 'md') return [];
     const resolved = new Map<string, TFile>();
     const pushTarget = (rawTarget: string) => {
       const targetFile = resolveLinkTargetToFile(this.app, rawTarget, file.path);

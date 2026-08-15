@@ -353,7 +353,7 @@ test('TPS List Shift-click selects every visible row kind in one persistent DOM 
   assert.match(viewSource, /this\.renderedRowOrder = Array\.from\(/);
   assert.match(viewSource, /const selectionId = `\$\{baseId\}#\$\{occurrence\}`/);
   assert.doesNotMatch(viewSource, /this\.renderedRowOrder = \[\.\.\.new Set/);
-  assert.match(viewSource, /const selectionId = `note:\$\{displayLaneId\}:\$\{entry\.file\.path\}`/);
+  assert.match(viewSource, /const selectionId = `note:\$\{displayLaneId\}:\$\{displayFile\.path\}`/);
   assert.match(viewSource, /const selectionFingerprint = hashSelectionIdentity\(task\.text \|\| taskTitle\)/);
   assert.match(viewSource, /const selectionId = `\$\{isBullet \? 'bullet' : 'task'\}:\$\{displayLane\.id\}:\$\{file\.path\}:\$\{task\.line\}:\$\{selectionFingerprint\}`/);
   assert.match(viewSource, /void this\.applyTpsListRowSelection\(event, row\)/);
@@ -380,6 +380,83 @@ test('TPS List Shift-click selects every visible row kind in one persistent DOM 
   assert.match(viewSource, /const seen = new Set<string>\(\)/);
   assert.doesNotMatch(viewSource, /querySelectorAll<HTMLElement>\('\.tps-kanban-card\[data-path\]'\)/);
   assert.match(gcmStyles, /\.tps-list-native-row--selected\s*\{[\s\S]*color-mix\(in srgb, var\(--interactive-accent\) 10%, transparent\)/);
+});
+
+test('TPS List canonicalizes companion Base rows to one logical source without losing property values', async () => {
+  const semanticReconciliation = sourceBlock(
+    viewSource,
+    'private reconcileNativeNoteEntries(',
+    'private getNoteSemanticReconciliationKey(',
+  );
+  assert.match(
+    semanticReconciliation,
+    /for \(const file of this\.app\.vault\.getMarkdownFiles\(\)\) \{\s*if \(this\.getGcmPlugin\(\)\?\.filePropertiesService\?\.isCompanionFile\?\.\(file\)\) continue;/u,
+    'semantic note recovery must not synthesize a managed or moved companion back into the logical rows',
+  );
+  const { TpsListView } = await loadTpsListViewHarness();
+  const File = globalThis.__TpsListFormulaTestFile;
+  const createFile = (path, extension) => {
+    const file = new File();
+    const name = path.split('/').at(-1);
+    Object.assign(file, {
+      path,
+      name,
+      basename: name.slice(0, -(extension.length + 1)),
+      extension,
+      parent: { path: path.split('/').slice(0, -1).join('/') },
+    });
+    return file;
+  };
+  const source = createFile('Assets/A report.pdf', 'pdf');
+  const unrelated = createFile('Assets/Z already sorted.png', 'png');
+  const companion = createFile('_assets/TPS File Properties/_by-id/file_report.md', 'md');
+  const orphan = createFile('_assets/TPS File Properties/Assets/Missing.pdf.md', 'md');
+  const sourceEntry = {
+    file: source,
+    getValue: (property) => property === 'status' ? null : `source:${String(property)}`,
+  };
+  const companionEntry = {
+    file: companion,
+    getValue: (property) => property === 'status' ? 'review' : `companion:${String(property)}`,
+  };
+  const unrelatedEntry = { file: unrelated, getValue: (property) => `unrelated:${String(property)}` };
+  const orphanEntry = { file: orphan, getValue: () => 'orphan' };
+  const view = Object.create(TpsListView.prototype);
+  view.plugin = {
+    settings: {},
+    filePropertiesService: {
+      isCompanionFile: (file) => file === companion || file === orphan,
+      getSourceFileForCompanion: (file) => file === companion ? source : null,
+    },
+  };
+
+  const canonical = view.canonicalizeFilePropertyEntries([sourceEntry, unrelatedEntry, companionEntry, orphanEntry]);
+  assert.equal(canonical.changed, true);
+  assert.equal(canonical.entries.length, 2, 'the companion replaces the duplicate source row and an orphan fails closed');
+  assert.equal(canonical.entries[0].file, unrelated, 'the companion keeps its native sorted position');
+  assert.equal(canonical.entries[1].file, source);
+  assert.equal(canonical.entries[1].getValue('status'), 'review', 'property values remain owned by the companion row');
+  assert.equal(canonical.entries[1].getValue('file.path'), source.path);
+  assert.equal(canonical.entries[1].getValue('file.name'), source.name);
+  assert.equal(canonical.entries[1].getValue('file.folder'), 'Assets');
+  assert.equal(canonical.entries[1].getValue('file.ext'), 'pdf');
+  view.config = { sort: [{ property: 'file.path', direction: 'asc' }] };
+  assert.deepEqual(
+    view.sortEntriesForView(canonical.entries).map((entry) => entry.file.path),
+    [source.path, unrelated.path],
+    'configured file sorting is reapplied to logical source semantics after native companion canonicalization',
+  );
+
+  let mutationTarget = null;
+  view.plugin.frontmatterMutationService = {
+    process: async (file) => {
+      mutationTarget = file;
+      return true;
+    },
+  };
+  await view.processFrontmatter(companion, () => {});
+  assert.equal(mutationTarget, source, 'property edits target the logical source and delegate back to the companion store');
+  await assert.rejects(() => view.processFrontmatter(orphan, () => {}), /orphaned or ambiguous/u);
 });
 
 test('TPS List view settings own unmatched placement and task grouping reads visible task tags', async () => {
@@ -2678,6 +2755,6 @@ test('TPS List special field routing is consistent for task, bullet, heading, an
   assert.equal(scalarRoutes, 0);
 
   const noteRenderer = sourceBlock(viewSource, 'private renderListNoteProperties(', 'private createListBooleanPropertyControl(');
-  assert.match(noteRenderer, /sourceFolderProperty[\s\S]*?entry\.file\.parent\?\.path \|\| '\/'/u);
+  assert.match(noteRenderer, /sourceFolderProperty[\s\S]*?\(logicalFile \?\? entry\.file\)\.parent\?\.path \|\| '\/'/u);
   assert.match(noteRenderer, /noteRecurrenceProperty[\s\S]*?&& !noteRecurrenceProperty/u);
 });

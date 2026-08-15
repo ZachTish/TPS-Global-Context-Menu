@@ -693,7 +693,10 @@ test("source contract keeps the foreign bridge exact, task-exclusive, and lifecy
   assert.match(bridgeSource, /excludeStandardTagProperties: files\.every/);
   assert.match(bridgeSource, /includeSingleTargetActions: files\.length === 1/);
   assert.match(builderSource, /includeSingleTargetActions && file\.extension === 'pdf'/);
-  assert.match(builderSource, /if \(includeSingleTargetActions\) \{[\s\S]{0,240}parentCount/);
+  assert.match(
+    builderSource,
+    /if \(\s*includeSingleTargetActions\s*&& entries\.length === 1\s*&& this\.plugin\.parentLinkResolutionService\.isRelationshipTarget\(file\)\s*&& !this\.plugin\.parentLinkResolutionService\.isIgnoredFile\(file\)\s*\) \{\s*const parentCount/,
+  );
   assert.match(builderSource, /includeSingleTargetActions && this\.plugin\.settings\.enableTimeTracking/);
   assert.match(bridgeSource, /target\.sourceLineNumber === undefined/);
   assert.match(

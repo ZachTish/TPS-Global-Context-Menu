@@ -943,6 +943,9 @@ export class FileNamingService {
     shouldProcess(file: TFile, options: { bypassCreationGrace?: boolean; bypassProcessingLock?: boolean } = {}): boolean {
         // Only process markdown files
         if (file.extension !== 'md') return false;
+        // Companion property notes are storage records for non-Markdown files,
+        // not ordinary notes. Never add titles/timestamps or rename them.
+        if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
 
         // Grace period for newly created files to allow other plugins (TPS-Controller, Templater) to finish initialization
         const age = Date.now() - file.stat.ctime;

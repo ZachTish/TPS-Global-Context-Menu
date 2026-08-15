@@ -89,8 +89,9 @@ export class PropertyRowService {
   }
 
   private isPropertyFile(file: TFile): boolean {
-    const extension = file.extension?.toLowerCase();
-    return extension === 'md' || extension === 'canvas';
+    if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
+    return file.extension?.toLowerCase() === 'md'
+      || this.plugin.filePropertiesService?.isPropertyTarget(file) === true;
   }
 
   private resolveEntryFile(candidate: unknown): TFile | null {
@@ -128,7 +129,10 @@ export class PropertyRowService {
   private getLinkListDisplayText(value: string): string {
     const file = this.resolveLinkListValueToFile(value);
     if (file) {
-      const title = String(this.app.metadataCache.getFileCache(file)?.frontmatter?.title || '').trim();
+      const frontmatter = file.extension?.toLowerCase() !== 'md' && this.plugin.filePropertiesService?.isPropertyTarget(file)
+        ? this.plugin.filePropertiesService.read(file)
+        : this.app.metadataCache.getFileCache(file)?.frontmatter;
+      const title = String(frontmatter?.title || '').trim();
       if (title) return title;
     }
     return getWikilinkDisplayText(value);
@@ -312,8 +316,8 @@ export class PropertyRowService {
     const refreshTags = () => {
       container.innerHTML = "";
       const entryFile = this.resolveEntryFile(entries[0]?.file ?? entries[0]);
-      const freshFm = entryFile && this.plugin.canvasPropertiesService?.isCanvasFile(entryFile)
-        ? this.plugin.canvasPropertiesService.read(entryFile)
+      const freshFm = entryFile?.extension?.toLowerCase() !== 'md' && entryFile && this.plugin.filePropertiesService?.isPropertyTarget(entryFile)
+        ? this.plugin.filePropertiesService.read(entryFile)
         : this.app.metadataCache.getFileCache(entryFile ?? entries[0].file)?.frontmatter || {};
       const isTextList = isTextListProperty(prop);
       const isLinkList = isLinkListProperty(prop);

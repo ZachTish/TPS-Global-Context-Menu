@@ -83,12 +83,14 @@ export class NotebookNavigatorRuleService {
 
   canApplyToFile(file: unknown): file is TFile {
     if (!(file instanceof TFile)) return false;
-    const extension = String(file.extension || '').toLowerCase();
-    return extension === 'md' || extension === 'canvas';
+    if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
+    return String(file.extension || '').toLowerCase() === 'md'
+      || this.plugin.filePropertiesService?.isPropertyTarget(file) === true;
   }
 
   scheduleApply(file: TFile, options: ApplyOptions = {}): void {
     if (!this.canApplyToFile(file)) return;
+    if (!this.canUseExistingPropertyStorage(file)) return;
     if (this.requiresControllerAutomation(options.reason) && !this.plugin.canRunBackgroundAutomation()) return;
     const delay = options.reason === 'metadata-change'
       ? this.getMetadataDebounceMs()
@@ -129,6 +131,7 @@ export class NotebookNavigatorRuleService {
 
   async applyRulesToFile(file: TFile, options: ApplyOptions = {}): Promise<boolean> {
     if (!this.canApplyToFile(file)) return false;
+    if (!this.canUseExistingPropertyStorage(file)) return false;
     if (!this.isReady()) return false;
     if (this.requiresControllerAutomation(options.reason) && !this.plugin.canRunBackgroundAutomation()) return false;
     if (this.shouldIgnore(file, options)) return false;
@@ -169,6 +172,10 @@ export class NotebookNavigatorRuleService {
 
         this.applyHideTagMutations(ruleEngine, settings, context, frontmatter);
       }
+    }, {
+      kind: 'automation',
+      sourcePluginId: this.plugin.manifest.id,
+      surface: 'notebook-navigator-rules',
     });
     logger.perf('notebookRules:applyRulesToFile', {
       file: file.path,
@@ -178,7 +185,6 @@ export class NotebookNavigatorRuleService {
     });
 
     if (changed) {
-      this.plugin.eventService.emitFilesUpdated([file.path]);
       logger.debug('[TPS GCM] Applied Notebook Navigator rules', {
         file: file.path,
         reason: options.reason || 'gcm-rule-apply',
@@ -281,7 +287,14 @@ export class NotebookNavigatorRuleService {
   }
 
   private getRuleCandidateFiles(): TFile[] {
-    return this.plugin.app.vault.getFiles().filter((file): file is TFile => this.canApplyToFile(file));
+    return this.plugin.app.vault.getFiles().filter((file): file is TFile => (
+      this.canApplyToFile(file) && this.canUseExistingPropertyStorage(file)
+    ));
+  }
+
+  private canUseExistingPropertyStorage(file: TFile): boolean {
+    return file.extension?.toLowerCase() === 'md'
+      || this.plugin.filePropertiesService?.hasCompanion(file) === true;
   }
 
   private shouldIgnore(file: TFile, options: ApplyOptions): boolean {
@@ -396,6 +409,7 @@ export class NotebookNavigatorRuleService {
   }
 
   private async readBody(file: TFile): Promise<string> {
+    if (file.extension?.toLowerCase() !== 'md') return '';
     try {
       const content = await this.plugin.app.vault.cachedRead(file);
       const match = content.match(/^---\r?\n[\s\S]*?\r?\n---(?:\r?\n|$)/);
@@ -407,8 +421,8 @@ export class NotebookNavigatorRuleService {
   }
 
   private getFrontmatterForFile(file: TFile): Record<string, unknown> | null {
-    if (this.plugin.canvasPropertiesService?.isCanvasFile(file)) {
-      return this.toRecord(this.plugin.canvasPropertiesService.read(file));
+    if (file.extension?.toLowerCase() !== 'md' && this.plugin.filePropertiesService?.isPropertyTarget(file)) {
+      return this.toRecord(this.plugin.filePropertiesService.read(file));
     }
     return this.toRecord(this.plugin.app.metadataCache.getFileCache(file)?.frontmatter);
   }
@@ -476,7 +490,7 @@ export class NotebookNavigatorRuleService {
       if (!(parent instanceof TFile) || parent.path === currentFile.path) break;
 
       currentFile = parent;
-      currentFrontmatter = this.toRecord(this.plugin.app.metadataCache.getFileCache(parent)?.frontmatter);
+      currentFrontmatter = this.getFrontmatterForFile(parent);
       depth += 1;
     }
 
@@ -486,7 +500,7 @@ export class NotebookNavigatorRuleService {
   private resolveParentContext(file: TFile): RelationshipLineageNode | null {
     const parent = this.plugin.parentLinkResolutionService.getParentsForChild(file)[0]?.file ?? null;
     if (!(parent instanceof TFile) || parent.path === file.path) return null;
-    const frontmatter = this.toRecord(this.plugin.app.metadataCache.getFileCache(parent)?.frontmatter);
+    const frontmatter = this.getFrontmatterForFile(parent);
     return this.createRelationshipNode(parent, frontmatter);
   }
 

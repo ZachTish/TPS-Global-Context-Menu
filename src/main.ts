@@ -59,7 +59,7 @@ import { GcmEventService } from './services/gcm-event-service';
 import { TpsIdentityService } from './services/tps-identity-service';
 import { CardContentService } from './services/card-content-service';
 import { IdentityMigrationService } from './services/identity-migration-service';
-import { CanvasPropertiesService } from './services/canvas-properties-service';
+import { FilePropertiesService } from './services/file-properties-service';
 import { NoteTitleRenderService } from './services/note-title-render-service';
 import { VirtualBaseEmbedService } from './services/virtual-base-embed-service';
 import { HeadingCollapseOnOpenService } from './services/heading-collapse-on-open-service';
@@ -350,7 +350,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   identityService: TpsIdentityService;
   cardContentService: CardContentService;
   identityMigrationService: IdentityMigrationService;
-  canvasPropertiesService: CanvasPropertiesService;
+  filePropertiesService: FilePropertiesService;
+  /** @deprecated Use filePropertiesService. Kept for one compatibility release. */
+  canvasPropertiesService: FilePropertiesService;
   noteTitleRenderService: NoteTitleRenderService;
   virtualBaseEmbedService: VirtualBaseEmbedService;
   headingCollapseOnOpenService: HeadingCollapseOnOpenService;
@@ -479,6 +481,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       taskCheckboxesVersion: Number(api?.taskCheckboxes?.version) || null,
       tasksVersion: Number(api?.tasks?.version) || null,
       itemHistoryVersion: Number(api?.history?.version) || null,
+      filePropertiesVersion: Number(api?.fileProperties?.version) || null,
     });
   }
 
@@ -546,7 +549,28 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.taskApiService = new TaskApiService(this);
     this.cardContentService = new CardContentService();
     this.identityMigrationService = new IdentityMigrationService(this);
-    this.canvasPropertiesService = new CanvasPropertiesService(this);
+    this.filePropertiesService = new FilePropertiesService(this);
+    this.canvasPropertiesService = this.filePropertiesService;
+    this.registerEvent(this.app.metadataCache.on('resolved', () => {
+      void this.filePropertiesService.handleMetadataResolved().then(() => {
+        this.entityIndexService?.invalidate();
+      }).catch((error) => {
+        logger.warn('[TPS GCM] Post-metadata file-property catalog rebuild failed', { error });
+      });
+    }));
+    if ((this.app.metadataCache as any).initialized === true) {
+      void this.filePropertiesService.handleMetadataResolved().catch((error) => {
+        logger.warn('[TPS GCM] Initialized file-property catalog rebuild failed', { error });
+      });
+    }
+    this.app.workspace.onLayoutReady(() => {
+      void this.filePropertiesService.setup().then(() => {
+        this.entityIndexService?.invalidate();
+      }).catch((error) => {
+        logger.warn('[TPS GCM] Native file-property catalog setup failed', { error });
+      });
+    });
+    this.register(() => this.filePropertiesService.dispose());
     this.noteTitleRenderService = new NoteTitleRenderService(this);
     this.virtualBaseEmbedService = new VirtualBaseEmbedService(this);
     this.addChild(this.virtualBaseEmbedService);
@@ -1408,22 +1432,25 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }
 
     const direct = this.app.vault.getAbstractFileByPath(raw);
-    if (direct instanceof TFile && direct.extension.toLowerCase() === 'md') return direct;
+    if (this.isOrdinaryMarkdownFile(direct)) return direct;
 
     const withMd = raw.toLowerCase().endsWith('.md') ? raw : `${raw}.md`;
     const directMd = this.app.vault.getAbstractFileByPath(withMd);
-    if (directMd instanceof TFile && directMd.extension.toLowerCase() === 'md') return directMd;
+    if (this.isOrdinaryMarkdownFile(directMd)) return directMd;
 
     const basename = raw.replace(/\.md$/i, '');
     const basenameMatch = this.app.vault.getMarkdownFiles().find((file) => (
-      file.path === withMd ||
-      file.name.toLowerCase() === withMd.toLowerCase() ||
-      file.basename.toLowerCase() === basename.toLowerCase()
+      this.isOrdinaryMarkdownFile(file) && (
+        file.path === withMd ||
+        file.name.toLowerCase() === withMd.toLowerCase() ||
+        file.basename.toLowerCase() === basename.toLowerCase()
+      )
     ));
     if (basenameMatch) return basenameMatch;
 
     const normalizedCandidate = raw.toLowerCase().replace(/\s+/g, '');
     const cardTextPrefixMatch = this.app.vault.getMarkdownFiles().find((file) => {
+      if (!this.isOrdinaryMarkdownFile(file)) return false;
       const normalizedBasename = file.basename.toLowerCase().replace(/\s+/g, '');
       return (
         normalizedBasename.length >= 3 &&
@@ -1434,9 +1461,15 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (cardTextPrefixMatch) return cardTextPrefixMatch;
 
     const linked = this.app.metadataCache.getFirstLinkpathDest(raw.replace(/\.md$/i, ''), '');
-    return linked instanceof TFile && linked.extension.toLowerCase() === 'md'
+    return this.isOrdinaryMarkdownFile(linked)
       ? linked
       : null;
+  }
+
+  private isOrdinaryMarkdownFile(file: unknown): file is TFile {
+    return file instanceof TFile
+      && file.extension.toLowerCase() === 'md'
+      && this.filePropertiesService?.isCompanionFile(file) !== true;
   }
 
   private isBasesNonNoteControl(control: HTMLElement): boolean {
@@ -1824,14 +1857,14 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (!raw) return null;
 
     const direct = this.app.vault.getAbstractFileByPath(raw);
-    if (direct instanceof TFile && direct.extension.toLowerCase() === 'md') return direct;
+    if (this.isOrdinaryMarkdownFile(direct)) return direct;
 
     const withMd = raw.toLowerCase().endsWith('.md') ? raw : `${raw}.md`;
     const mdFile = this.app.vault.getAbstractFileByPath(withMd);
-    if (mdFile instanceof TFile && mdFile.extension.toLowerCase() === 'md') return mdFile;
+    if (this.isOrdinaryMarkdownFile(mdFile)) return mdFile;
 
     const linkTarget = this.app.metadataCache.getFirstLinkpathDest(raw.replace(/\.md$/i, ''), '');
-    return linkTarget instanceof TFile && linkTarget.extension.toLowerCase() === 'md'
+    return this.isOrdinaryMarkdownFile(linkTarget)
       ? linkTarget
       : null;
   }
@@ -1842,6 +1875,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     return this.app.vault.getMarkdownFiles()
       .filter((file) => {
+        if (!this.isOrdinaryMarkdownFile(file)) return false;
         if (file.basename.trim().toLowerCase() === normalizedTitle) return true;
         const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
         const fmTitle = String(frontmatter?.title ?? '').trim().toLowerCase();
@@ -1856,6 +1890,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     const candidates = this.app.vault.getMarkdownFiles()
       .filter((file) => {
+        if (!this.isOrdinaryMarkdownFile(file)) return false;
         const fmTitle = String(this.app.metadataCache.getFileCache(file)?.frontmatter?.title ?? '').trim().toLowerCase();
         return file.basename.trim().toLowerCase() === normalizedTitle || fmTitle === normalizedTitle;
       })

@@ -3792,6 +3792,7 @@ export class PanelBuilder {
       if (sourcePath === rootFile.path || seen.has(sourcePath)) continue;
       const sourceFile = this.app.vault.getAbstractFileByPath(sourcePath);
       if (!(sourceFile instanceof TFile) || sourceFile.extension?.toLowerCase() !== 'md') continue;
+      if (this.plugin.filePropertiesService?.isCompanionFile(sourceFile)) continue;
       seen.add(sourcePath);
       files.push(sourceFile);
     }
@@ -4006,7 +4007,8 @@ export class PanelBuilder {
     const candidateTitles = this.getMentionCandidateTitles(rootFile);
     if (candidateTitles.length === 0) return [];
 
-    const markdownFiles = this.app.vault.getMarkdownFiles();
+    const markdownFiles = this.app.vault.getMarkdownFiles()
+      .filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file));
     const groups: MentionGroup[] = [];
 
     for (const sourceFile of markdownFiles) {
@@ -4703,9 +4705,7 @@ export class PanelBuilder {
     if (sortValues) {
       const lowerSortField = sortField.toLowerCase();
       for (const entry of markedEntries) {
-        const frontmatter = this.app.metadataCache.getFileCache(entry.file)?.frontmatter as
-          | Record<string, unknown>
-          | undefined;
+        const frontmatter = this.plugin.parentLinkResolutionService.getLogicalFrontmatter(entry.file);
         let value: unknown;
         if (frontmatter) {
           if (sortField in frontmatter) {
@@ -4776,7 +4776,7 @@ export class PanelBuilder {
       const nextVisited = new Set(visited);
       nextVisited.add(targetPath);
 
-      const childNodes = entry.file.extension?.toLowerCase() === 'md'
+      const childNodes = this.plugin.parentLinkResolutionService.isRelationshipTarget(entry.file)
         ? await this.buildSubitemTreeRecursive(entry.file, parentIndex, nextVisited, depth + 1)
         : [];
 
@@ -4807,7 +4807,12 @@ export class PanelBuilder {
     const archiveTag = normalizeTagValue(this.plugin.settings.archiveTag || 'archive');
     if (archiveTag) {
       const cache = this.app.metadataCache.getFileCache(file);
-      const tags = getAllTags(cache) || [];
+      const logicalFrontmatter = this.plugin.parentLinkResolutionService.getLogicalFrontmatter(file) as Record<string, any>;
+      const tags = parseTagInput([
+        ...(getAllTags(cache) || []),
+        logicalFrontmatter.tags,
+        logicalFrontmatter.tag,
+      ]);
       // Check for exact tag or nested tag match
       if (tags.some(t => {
         const norm = normalizeTagValue(t);
@@ -4829,10 +4834,11 @@ export class PanelBuilder {
     );
     if (ignored.size === 0) return false;
     const cache = this.app.metadataCache.getFileCache(file);
+    const logicalFrontmatter = this.plugin.parentLinkResolutionService.getLogicalFrontmatter(file) as Record<string, any>;
     const normalizedTags = parseTagInput([
       ...(getAllTags(cache) || []),
-      (cache?.frontmatter as Record<string, any> | undefined)?.tags,
-      (cache?.frontmatter as Record<string, any> | undefined)?.tag,
+      logicalFrontmatter.tags,
+      logicalFrontmatter.tag,
     ])
       .map((tag) => normalizeTagValue(tag))
       .filter(Boolean);
@@ -5105,7 +5111,8 @@ export class PanelBuilder {
         onRefresh();
       }
     }, {
-      extensions: ['md', 'base'],
+      candidateFiles: this.plugin.parentLinkResolutionService.getRelationshipCandidates(),
+      includeAllExtensions: true,
       filter: (candidate) => (
         candidate.path !== file.path
         && !this.plugin.parentLinkResolutionService.isIgnoredFile(candidate)
@@ -5123,6 +5130,7 @@ export class PanelBuilder {
         onRefresh();
       }
     }, {
+      candidateFiles: this.plugin.parentLinkResolutionService.getRelationshipCandidates(),
       filter: (candidate) => (
         candidate.path !== file.path
         && !this.plugin.parentLinkResolutionService.isIgnoredFile(candidate)

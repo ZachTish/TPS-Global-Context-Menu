@@ -36,7 +36,10 @@ export class PanelActionService {
 
   private canUseRelationshipActions(files: readonly TFile[]): boolean {
     return files.length > 0
-      && files.every((file) => !this.plugin.parentLinkResolutionService.isIgnoredFile(file));
+      && files.every((file) => (
+        this.plugin.parentLinkResolutionService.isRelationshipTarget(file)
+        && !this.plugin.parentLinkResolutionService.isIgnoredFile(file)
+      ));
   }
 
   private relationshipFileFilter(sourceFiles: readonly TFile[]): (candidate: TFile) => boolean {
@@ -213,7 +216,8 @@ export class PanelActionService {
                 ? `Linked to parent: ${file.basename}`
                 : 'The relationship is no longer available.');
             }, {
-              extensions: ['md', 'base'],
+              candidateFiles: this.plugin.parentLinkResolutionService.getRelationshipCandidates(),
+              includeAllExtensions: true,
               filter: this.relationshipFileFilter(sourceFiles),
             }).open();
           });
@@ -229,35 +233,36 @@ export class PanelActionService {
                 const linked = await this.plugin.bulkEditService.linkChildren(currentFile, files);
                 new Notice(`Linked ${linked} children.`);
               }
-            }, { filter: this.relationshipFileFilter([currentFile]) }).open();
+            }, {
+              candidateFiles: this.plugin.parentLinkResolutionService.getRelationshipCandidates(),
+              filter: this.relationshipFileFilter([currentFile]),
+            }).open();
           });
       });
     }
 
-    menu.addItem(item => {
-      item.setTitle('Embed Attachments')
-        .setIcon('paperclip')
-        .onClick(() => {
-          if (!currentFile) {
-            new Notice('No source file selected.');
-            return;
-          }
-          new MultiFileSelectModal(this.app, async (files: TFile[]) => {
-            if (files.length > 0) {
-              const added = await this.plugin.bulkEditService.linkAttachments(currentFile, files);
-              new Notice(`Embedded ${added} attachment(s).`);
-            }
-          }).open();
-        });
-    });
+    if (currentFile?.extension?.toLowerCase() === 'md') {
+      menu.addItem(item => {
+        item.setTitle('Embed Attachments')
+          .setIcon('paperclip')
+          .onClick(() => {
+            new MultiFileSelectModal(this.app, async (files: TFile[]) => {
+              if (files.length > 0) {
+                const added = await this.plugin.bulkEditService.linkAttachments(currentFile, files);
+                new Notice(`Embedded ${added} attachment(s).`);
+              }
+            }).open();
+          });
+      });
 
-    menu.addItem(item => {
-      item.setTitle('Add to Board...')
-        .setIcon('layout-grid')
-        .onClick(() => {
-          void this.addFilesToBoard(sourceFiles);
-        });
-    });
+      menu.addItem(item => {
+        item.setTitle('Add to Board...')
+          .setIcon('layout-grid')
+          .onClick(() => {
+            void this.addFilesToBoard(sourceFiles);
+          });
+      });
+    }
 
     menu.showAtMouseEvent(e);
   }
@@ -267,6 +272,9 @@ export class PanelActionService {
     const file = entries[0].file;
     const isMd = file.extension === 'md';
     const currentFile = entries[0].file as TFile;
+    const sourceFiles = entries
+      .map((entry) => entry?.file)
+      .filter((entryFile): entryFile is TFile => entryFile instanceof TFile);
 
     if (isMd) {
       menu.addItem(item => {
@@ -362,29 +370,25 @@ export class PanelActionService {
       menu.addSeparator();
     }
 
-    if (isMd) {
-      const sourceFiles = entries
-        .map((entry) => entry?.file)
-        .filter((entryFile): entryFile is TFile => entryFile instanceof TFile);
-      const markdownFiles = sourceFiles.filter((entryFile) => entryFile.extension.toLowerCase() === 'md');
+    if (this.canUseRelationshipActions(sourceFiles)) {
+      menu.addItem(item => {
+        item.setTitle('Link to Parent')
+          .setIcon('link')
+          .onClick(() => {
+            new FileSuggestModal(this.app, async (parentFile: TFile) => {
+              const linked = await this.plugin.bulkEditService.linkToParent(sourceFiles, parentFile);
+              new Notice(linked > 0
+                ? `Linked to parent: ${parentFile.basename}`
+                : 'The relationship is no longer available.');
+            }, {
+              candidateFiles: this.plugin.parentLinkResolutionService.getRelationshipCandidates(),
+              includeAllExtensions: true,
+              filter: this.relationshipFileFilter(sourceFiles),
+            }).open();
+          });
+      });
 
-      if (this.canUseRelationshipActions(sourceFiles)) {
-        menu.addItem(item => {
-          item.setTitle('Link to Parent')
-            .setIcon('link')
-            .onClick(() => {
-              new FileSuggestModal(this.app, async (parentFile: TFile) => {
-                const linked = await this.plugin.bulkEditService.linkToParent(sourceFiles, parentFile);
-                new Notice(linked > 0
-                  ? `Linked to parent: ${parentFile.basename}`
-                  : 'The relationship is no longer available.');
-              }, {
-                extensions: ['md', 'base'],
-                filter: this.relationshipFileFilter(sourceFiles),
-              }).open();
-            });
-        });
-
+      if (sourceFiles.length === 1) {
         menu.addItem(item => {
           item.setTitle('Link Children')
             .setIcon('network')
@@ -394,10 +398,17 @@ export class PanelActionService {
                   const linked = await this.plugin.bulkEditService.linkChildren(currentFile, files);
                   new Notice(`Linked ${linked} children.`);
                 }
-              }, { filter: this.relationshipFileFilter([currentFile]) }).open();
+              }, {
+                candidateFiles: this.plugin.parentLinkResolutionService.getRelationshipCandidates(),
+                filter: this.relationshipFileFilter([currentFile]),
+              }).open();
             });
         });
       }
+    }
+
+    if (isMd) {
+      const markdownFiles = sourceFiles.filter((entryFile) => entryFile.extension.toLowerCase() === 'md');
 
       menu.addItem(item => {
         item.setTitle('Embed Attachments')

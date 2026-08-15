@@ -836,15 +836,126 @@ export class TpsListView extends BasesView {
     return gcm?.services || gcm?.sharedServices || null;
   }
 
+  /**
+   * Native Bases exposes a file-property companion as its Markdown row. GCM's
+   * own view presents that row as the logical non-Markdown source while still
+   * reading the row's values from Bases. Ambiguous or orphaned companions fail
+   * closed so a property action cannot mutate the companion itself.
+   */
+  private resolveLogicalFilePropertyTarget(file: TFile): TFile | null {
+    const service = this.getGcmPlugin()?.filePropertiesService;
+    if (typeof service?.isCompanionFile !== 'function' || !service.isCompanionFile(file)) return file;
+    const source = service.getSourceFileForCompanion?.(file);
+    return source instanceof TFile ? source : null;
+  }
+
+  /**
+   * A native Base exposes companion Markdown files as ordinary rows. Inside
+   * the GCM List view, keep the companion row as the property-value carrier
+   * while making every file semantic describe the logical source asset.
+   * When an unfiltered Base returns both rows, the companion wins because it
+   * is the only row that owns the user properties. Orphaned or ambiguous
+   * companions are omitted rather than exposing the physical metadata note.
+   */
+  private canonicalizeFilePropertyEntries(entries: BasesEntry[]): { entries: BasesEntry[]; changed: boolean } {
+    const service = this.getGcmPlugin()?.filePropertiesService;
+    if (typeof service?.isCompanionFile !== 'function') return { entries, changed: false };
+
+    const wrapEntry = (entry: BasesEntry, logicalFile: TFile): BasesEntry => {
+      const getValue = entry.getValue.bind(entry);
+      return new Proxy(entry, {
+        get: (target, property, receiver) => {
+          if (property === 'file') return logicalFile;
+          if (property === 'getValue') {
+            return (rawProperty: unknown) => {
+              const propertyId = String(rawProperty ?? '').trim();
+              const lower = propertyId.toLocaleLowerCase();
+              if (this.getConfiguredCustomProperty(propertyId)?.type === 'folder') {
+                return logicalFile.parent?.path || '/';
+              }
+              if (lower === 'file.path') return logicalFile.path;
+              if (lower === 'file.name' || lower === 'file.fullname') return logicalFile.name;
+              if (lower === 'file.basename') return logicalFile.basename;
+              if (lower === 'file.folder') return logicalFile.parent?.path || '/';
+              if (lower === 'file.ext' || lower === 'file.extension') return logicalFile.extension;
+              return getValue(rawProperty as any);
+            };
+          }
+          return Reflect.get(target as object, property, receiver);
+        },
+      });
+    };
+
+    // Determine companion ownership first. Native Bases may place the raw
+    // source and its companion at different sorted positions; retaining the
+    // companion's own position keeps the native ordering stable.
+    const logicalFileByCompanionPath = new Map<string, TFile>();
+    const companionPathByLogicalPath = new Map<string, string>();
+    const ambiguousLogicalPaths = new Set<string>();
+    let changed = false;
+    for (const entry of entries) {
+      if (!(entry?.file instanceof TFile) || service.isCompanionFile(entry.file) !== true) continue;
+      changed = true;
+      const logicalFile = service.getSourceFileForCompanion?.(entry.file);
+      if (!(logicalFile instanceof TFile)) continue;
+      logicalFileByCompanionPath.set(entry.file.path, logicalFile);
+      const existingCompanionPath = companionPathByLogicalPath.get(logicalFile.path);
+      if (existingCompanionPath && existingCompanionPath !== entry.file.path) {
+        ambiguousLogicalPaths.add(logicalFile.path);
+      } else {
+        companionPathByLogicalPath.set(logicalFile.path, entry.file.path);
+      }
+    }
+
+    const output: BasesEntry[] = [];
+    const seenLogicalPaths = new Set<string>();
+    const seenCompanionPaths = new Set<string>();
+    for (const entry of entries) {
+      if (!(entry?.file instanceof TFile)) {
+        changed = true;
+        continue;
+      }
+      const isCompanion = service.isCompanionFile(entry.file) === true;
+      if (isCompanion) {
+        const logicalFile = logicalFileByCompanionPath.get(entry.file.path);
+        if (!logicalFile || ambiguousLogicalPaths.has(logicalFile.path) || seenCompanionPaths.has(entry.file.path)) {
+          changed = true;
+          continue;
+        }
+        seenCompanionPaths.add(entry.file.path);
+        seenLogicalPaths.add(logicalFile.path);
+        output.push(wrapEntry(entry, logicalFile));
+        continue;
+      }
+
+      if (companionPathByLogicalPath.has(entry.file.path) || ambiguousLogicalPaths.has(entry.file.path)) {
+        changed = true;
+        continue;
+      }
+      if (seenLogicalPaths.has(entry.file.path)) {
+        changed = true;
+        continue;
+      }
+      seenLogicalPaths.add(entry.file.path);
+      output.push(entry);
+    }
+
+    return { entries: changed ? output : entries, changed };
+  }
+
   private async processFrontmatter(
     file: TFile,
     mutator: (frontmatter: Record<string, any>) => void | Promise<void>,
   ): Promise<boolean> {
+    const target = this.resolveLogicalFilePropertyTarget(file);
+    if (!(target instanceof TFile)) {
+      throw new Error(`The file-property companion ${file.path} is orphaned or ambiguous.`);
+    }
     const service = this.getGcmPlugin()?.frontmatterMutationService;
     if (typeof service?.process !== 'function') {
       throw new Error('TPS GCM frontmatter mutation service is unavailable.');
     }
-    return await service.process(file, mutator);
+    return await service.process(target, mutator);
   }
 
   private openTaskLineContextMenu(evt: MouseEvent, fallbackPath?: string | null, fallbackLine?: number | null): boolean {
@@ -2170,12 +2281,14 @@ export class TpsListView extends BasesView {
     const taskFilter = this.getTaskRootFilterFromBaseFilters();
     if (taskFilter.mode === 'tasks') return this.renderedTaskItemCount;
     const dataRows = (this.data as any)?.data;
-    if (Array.isArray(dataRows)) return dataRows.length + (taskFilter.hasTaskDirective ? this.renderedTaskItemCount : 0);
+    if (Array.isArray(dataRows)) {
+      const logicalCount = this.canonicalizeFilePropertyEntries(dataRows).entries.length;
+      return logicalCount + (taskFilter.hasTaskDirective ? this.renderedTaskItemCount : 0);
+    }
     const unique = new Set<string>();
     const groups: BasesEntryGroup[] = this.data?.groupedData ?? [];
-    for (const group of groups) {
-      for (const entry of group.entries) unique.add(entry.file.path);
-    }
+    const groupedEntries = groups.flatMap((group) => group.entries ?? []);
+    for (const entry of this.canonicalizeFilePropertyEntries(groupedEntries).entries) unique.add(entry.file.path);
     return unique.size + (taskFilter.hasTaskDirective ? this.renderedTaskItemCount : 0);
   }
 
@@ -2326,13 +2439,14 @@ export class TpsListView extends BasesView {
     const groups: BasesEntryGroup[] = this.data?.groupedData ?? [];
     for (const group of groups) {
       for (const entry of group.entries) {
-        if (entry.file.path === path) return true;
+        if (entry.file.path === path || this.resolveLogicalFilePropertyTarget(entry.file)?.path === path) return true;
       }
     }
     return false;
   }
 
   private getAllTasksForFile(file: TFile): OpenTaskSubitem[] {
+    if (String(file.extension || 'md').toLocaleLowerCase() !== 'md' || this.plugin?.filePropertiesService?.isCompanionFile(file)) return [];
     const cached = this.allTasksByPath.get(file.path);
     if (cached) return cached;
     this.loadOpenTasksForFile(file);
@@ -2350,6 +2464,7 @@ export class TpsListView extends BasesView {
   }
 
   private loadOpenTasksForFile(file: TFile): void {
+    if (String(file.extension || 'md').toLocaleLowerCase() !== 'md' || this.plugin?.filePropertiesService?.isCompanionFile(file)) return;
     const sourcePath = file.path;
     if (this.openTasksLoading.has(sourcePath)) return;
     const generation = this.renderGeneration;
@@ -2641,14 +2756,16 @@ export class TpsListView extends BasesView {
 
     const groupedEntries = nativeGroups.flatMap((group) => group.entries ?? []);
     const nativeEntries: BasesEntry[] = groupedEntries.length ? groupedEntries : (this.data?.data ?? []);
-    const reconciledEntries = this.reconcileNativeNoteEntries(nativeEntries);
-    if (reconciledEntries !== nativeEntries) {
+    const canonicalized = this.canonicalizeFilePropertyEntries(nativeEntries);
+    const reconciledEntries = this.reconcileNativeNoteEntries(canonicalized.entries);
+    if (canonicalized.changed || reconciledEntries !== canonicalized.entries) {
+      const sortedEntries = this.sortEntriesForView(reconciledEntries);
       if (propId && (isSourceNoteGroupProperty(propId) || this.getConfiguredCustomProperty(propId)?.type === 'folder')) {
-        return this.groupEntriesBySourceNote(reconciledEntries, propId);
+        return this.groupEntriesBySourceNote(sortedEntries, propId);
       }
       return propId
-        ? this.groupEntriesByProperty(reconciledEntries, propId)
-        : [{ key: null, entries: reconciledEntries, hasKey: () => false } as unknown as BasesEntryGroup];
+        ? this.groupEntriesByProperty(sortedEntries, propId)
+        : [{ key: null, entries: sortedEntries, hasKey: () => false } as unknown as BasesEntryGroup];
     }
     if (propId && (isSourceNoteGroupProperty(propId) || this.getConfiguredCustomProperty(propId)?.type === 'folder')) {
       return nativeEntries.length
@@ -2695,6 +2812,7 @@ export class TpsListView extends BasesView {
     let recovered = 0;
     let removed = 0;
     for (const file of this.app.vault.getMarkdownFiles()) {
+      if (this.getGcmPlugin()?.filePropertiesService?.isCompanionFile?.(file)) continue;
       const nativeEntry = entriesByPath.get(file.path);
       const frontmatter = this.getNoteFilterFrontmatter(file);
       const context = this.createNoteFilterContext(file, frontmatter);
@@ -2909,9 +3027,12 @@ export class TpsListView extends BasesView {
   private groupEntriesBySourceNote(entries: BasesEntry[], propId: string): BasesEntryGroup[] {
     return this.groupEntriesByValue(
       entries,
-      (entry) => this.getConfiguredCustomProperty(propId)?.type === 'folder'
-        ? entry.file.parent?.path || '/'
-        : getSourceNoteGroupValue(entry.file, propId),
+      (entry) => {
+        const file = this.resolveLogicalFilePropertyTarget(entry.file) ?? entry.file;
+        return this.getConfiguredCustomProperty(propId)?.type === 'folder'
+          ? file.parent?.path || '/'
+          : getSourceNoteGroupValue(file, propId);
+      },
       this.getOrderingSemantics(propId),
       this.getMultiValueGroupingMode(),
     );
@@ -3040,9 +3161,10 @@ export class TpsListView extends BasesView {
 
   private getNativeSortValue(entry: BasesEntry, propId: string): unknown {
     const lower = String(propId || '').trim().toLowerCase();
-    if (lower === 'file.name' || lower === 'name' || lower === 'title') return entry.file?.basename || entry.file?.name || '';
-    if (lower === 'file.path' || lower === 'path') return entry.file?.path || '';
-    if (this.getConfiguredCustomProperty(propId)?.type === 'folder') return entry.file?.parent?.path || '/';
+    const file = this.resolveLogicalFilePropertyTarget(entry.file) ?? entry.file;
+    if (lower === 'file.name' || lower === 'name' || lower === 'title') return file?.basename || file?.name || '';
+    if (lower === 'file.path' || lower === 'path') return file?.path || '';
+    if (this.getConfiguredCustomProperty(propId)?.type === 'folder') return file?.parent?.path || '/';
     const normalized = this.normalizeTaskPropertyId(propId);
     const authored = this.getEntryValue(entry, propId.includes('.') ? propId : `note.${propId}`);
     if (normalized === 'kind') return getTpsBaseAdditiveKindValues('note', authored);
@@ -3696,12 +3818,17 @@ export class TpsListView extends BasesView {
   private getVisibleNotePaths(groups: BasesEntryGroup[]): Set<string> {
     const visible = new Set<string>();
     for (const group of groups) {
-      for (const entry of group.entries) visible.add(entry.file.path);
+      for (const entry of group.entries) {
+        visible.add(entry.file.path);
+        const logicalFile = this.resolveLogicalFilePropertyTarget(entry.file);
+        if (logicalFile) visible.add(logicalFile.path);
+      }
     }
     return visible;
   }
 
   private getAllLineItemsForFile(file: TFile, filter: KanbanTaskRootFilter): OpenTaskSubitem[] {
+    if (String(file.extension || 'md').toLocaleLowerCase() !== 'md' || this.plugin?.filePropertiesService?.isCompanionFile(file)) return [];
     if (!filter.includeBullets && !filter.includeHeadings) return this.getAllTasksForFile(file);
     const cacheSuffix = filter.includeBullets && filter.includeHeadings
       ? 'bullets+headings'
@@ -8712,19 +8839,24 @@ export class TpsListView extends BasesView {
     displayLaneId: string,
   ): void {
     const entry = item.entry;
+    const logicalFile = this.resolveLogicalFilePropertyTarget(entry.file);
+    const displayFile = logicalFile ?? entry.file;
     const row = parent.createEl('li', { cls: 'tps-list-native-row tps-list-native-row--note' });
-    const selectionId = `note:${displayLaneId}:${entry.file.path}`;
-    row.dataset.path = entry.file.path;
+    const selectionId = `note:${displayLaneId}:${displayFile.path}`;
+    row.dataset.path = displayFile.path;
     row.dataset.tpsListSelectionId = selectionId;
-    row.dataset.href = entry.file.path;
-    row.dataset.linkpath = entry.file.path;
-    row.dataset.file = entry.file.path;
+    row.dataset.href = displayFile.path;
+    row.dataset.linkpath = displayFile.path;
+    row.dataset.file = displayFile.path;
     row.dataset.tpsGcmContext = 'kanban-card';
-    row.dataset.tpsKanbanPath = entry.file.path;
+    row.dataset.tpsKanbanPath = displayFile.path;
+    if (!logicalFile && this.getGcmPlugin()?.filePropertiesService?.isCompanionFile?.(entry.file)) {
+      row.dataset.tpsGcmUnresolvedFileProperties = 'true';
+    }
     this.registerListRowModifierSelection(row);
     row.setAttribute('aria-selected', this.selectedRowIds.has(selectionId) ? 'true' : 'false');
     if (this.selectedRowIds.has(selectionId)) row.addClass('tps-list-native-row--selected');
-    if (this.activeNotePath && entry.file.path === this.activeNotePath) row.addClass('tps-list-native-row--open-note');
+    if (this.activeNotePath && displayFile.path === this.activeNotePath) row.addClass('tps-list-native-row--open-note');
 
     const marker = row.createSpan({
       cls: 'tps-list-native-leading tps-list-native-file-marker',
@@ -8734,26 +8866,26 @@ export class TpsListView extends BasesView {
     const body = row.createDiv({ cls: 'tps-list-native-row-body' });
 
     const link = body.createEl('a', {
-      text: entry.file.basename,
+      text: displayFile.basename,
       cls: 'tps-list-native-title internal-link',
       attr: {
-        href: entry.file.path,
-        'data-href': entry.file.path,
-        'data-linkpath': entry.file.path,
-        'aria-label': entry.file.path,
+        href: displayFile.path,
+        'data-href': displayFile.path,
+        'data-linkpath': displayFile.path,
+        'aria-label': displayFile.path,
         draggable: 'false',
       },
     });
     link.addEventListener('click', (event: MouseEvent) => {
       void this.applyTpsListRowSelection(event, row);
-      if (this.openBaseNotePreview(event, entry.file, link)) return;
+      if (this.openBaseNotePreview(event, displayFile, link)) return;
       event.preventDefault();
       event.stopPropagation();
       if (event.shiftKey || event.metaKey || event.ctrlKey) return;
-      void this.openOrFocusFile(entry.file);
+      void this.openOrFocusFile(displayFile);
     });
     row.addEventListener('contextmenu', (event: MouseEvent) => this.openListNoteContextMenu(event, entry, row));
-    this.renderListNoteProperties(body, entry, selectedProps);
+    this.renderListNoteProperties(body, entry, selectedProps, logicalFile);
   }
 
   private openListNoteContextMenu(event: MouseEvent, entry: BasesEntry, row: HTMLElement): void {
@@ -8763,19 +8895,26 @@ export class TpsListView extends BasesView {
 
     const selectedFiles = this.getSelectedFiles();
     const menu = new Menu();
-    const targets = selectedFiles.length > 0 ? selectedFiles : [entry.file];
+    const logicalFile = this.resolveLogicalFilePropertyTarget(entry.file);
+    const fallbackFile = logicalFile ?? entry.file;
+    const targets = selectedFiles.length > 0 ? selectedFiles : [fallbackFile];
     const menuController = this.getGcmPlugin()?.menuController || this.getGcmApi()?.menuController;
     menuController?.addToNativeMenu?.(menu, targets, { includeTags: true });
     if (selectedFiles.length > 1) {
       this.app.workspace.trigger('files-menu', menu as any, selectedFiles as any);
     } else {
-      const target = selectedFiles[0] ?? entry.file;
+      const target = selectedFiles[0] ?? fallbackFile;
       this.app.workspace.trigger('file-menu', menu as any, target as any);
     }
     menu.showAtPosition({ x: event.clientX, y: event.clientY });
   }
 
-  private renderListNoteProperties(parent: HTMLElement, entry: BasesEntry, selectedProps: string[]): void {
+  private renderListNoteProperties(
+    parent: HTMLElement,
+    entry: BasesEntry,
+    selectedProps: string[],
+    logicalFile: TFile | null,
+  ): void {
     for (const propId of selectedProps) {
       const rawValue = this.getEntryValue(entry, propId);
       const propName = this.getFrontmatterPropNameFromId(propId) ?? propId;
@@ -8788,7 +8927,8 @@ export class TpsListView extends BasesView {
       const entityReference = !sourceFolderProperty
         && !noteRecurrenceProperty
         && isEntityReferenceProperty(configuredProperty);
-      const editable = this.isWritableNotePropertyId(propId)
+      const editable = logicalFile instanceof TFile
+        && this.isWritableNotePropertyId(propId)
         && !sourceFolderProperty
         && !noteRecurrenceProperty;
       const formulaBoolean = /^formula\./iu.test(String(propId || '').trim())
@@ -8805,16 +8945,16 @@ export class TpsListView extends BasesView {
           rawValue,
           async (next) => {
             try {
-              await this.processFrontmatter(entry.file, (fm) => {
+              await this.processFrontmatter(logicalFile!, (fm) => {
                 const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, propName) || propName;
                 fm[actualKey] = next;
               });
-              emitFilesUpdated(this.app, [entry.file.path], 'tps-list');
+              emitFilesUpdated(this.app, [logicalFile!.path], 'tps-list');
               this.render(false);
               return true;
             } catch (error) {
               flowError('ListProperty', 'boolean-note-update:failed', error, {
-                path: entry.file.path,
+                path: logicalFile!.path,
                 property: propName,
               });
               new Notice(`Could not update ${configuredProperty?.label || propName}.`);
@@ -8823,16 +8963,16 @@ export class TpsListView extends BasesView {
           },
           async () => {
             try {
-              await this.processFrontmatter(entry.file, (fm) => {
+              await this.processFrontmatter(logicalFile!, (fm) => {
                 const actualKey = this.findFrontmatterKeyCaseInsensitive(fm, propName) || propName;
                 delete fm[actualKey];
               });
-              emitFilesUpdated(this.app, [entry.file.path], 'tps-list');
+              emitFilesUpdated(this.app, [logicalFile!.path], 'tps-list');
               this.render(false);
               return true;
             } catch (error) {
               flowError('ListProperty', 'boolean-note-clear:failed', error, {
-                path: entry.file.path,
+                path: logicalFile!.path,
                 property: propName,
               });
               new Notice(`Could not clear ${configuredProperty?.label || propName}.`);
@@ -8843,7 +8983,7 @@ export class TpsListView extends BasesView {
         continue;
       }
       const typedEmptyTarget = Boolean(configuredProperty) || editable;
-      const effectiveRawValue = sourceFolderProperty ? entry.file.parent?.path || '/' : rawValue;
+      const effectiveRawValue = sourceFolderProperty ? (logicalFile ?? entry.file).parent?.path || '/' : rawValue;
       const value = entityReference
         ? this.formatEntityPropertyValue(effectiveRawValue, configuredProperty!)
         : this.formatCardPropertyValue(effectiveRawValue);
@@ -8870,13 +9010,13 @@ export class TpsListView extends BasesView {
       span.addEventListener('click', (event: MouseEvent) => {
         event.preventDefault();
         event.stopPropagation();
-        this.startListNotePropertyEdit(span, entry.file, propName, rawValue);
+        this.startListNotePropertyEdit(span, logicalFile!, propName, rawValue);
       });
       span.addEventListener('keydown', (event: KeyboardEvent) => {
         if (event.key !== 'Enter' && event.key !== ' ') return;
         event.preventDefault();
         event.stopPropagation();
-        this.startListNotePropertyEdit(span, entry.file, propName, rawValue);
+        this.startListNotePropertyEdit(span, logicalFile!, propName, rawValue);
       });
     }
   }

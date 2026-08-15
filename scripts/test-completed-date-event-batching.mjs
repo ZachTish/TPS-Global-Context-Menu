@@ -42,6 +42,15 @@ async function loadRegisterEvents() {
                       this.frontmatter = frontmatter;
                     }
                   }
+                  export class TFolder {
+                    constructor(path) {
+                      this.path = path;
+                      this.name = path.split('/').pop() || '';
+                    }
+                  }
+                  export class Notice {
+                    constructor() {}
+                  }
                   globalThis.__GcmEventBatchingTestTFile = TFile;
                   export class MarkdownView {}
                   export class WorkspaceLeaf {}
@@ -245,6 +254,23 @@ function createHarness({
     },
     frontmatterMutationService: {
       process: (file, mutator) => mutate('service', file, mutator),
+    },
+    filePropertiesService: {
+      isCompanionFile: () => false,
+      isCompanionRename: () => false,
+      isPropertyTarget: () => false,
+      captureSourceRenameCompanion: () => null,
+      handlePendingMarkdownTargetRename: async () => {},
+      handleCompanionRename: async () => {},
+      handleSourceRename: async () => null,
+      handleSourceFolderRename: async () => ({ matched: 0, moved: 0, updated: 0, orphaned: 0, conflicts: [] }),
+      handleSourceFolderDelete: async () => ({ matched: 0, moved: 0, updated: 0, orphaned: 0, conflicts: [] }),
+      handleSourceCreate: async () => {},
+      handleSourceDelete: async () => {},
+      handleCompanionDelete: async () => {},
+      handleCompanionMetadataChanged: async () => null,
+      invalidatePendingMarkdownTarget: () => {},
+      invalidateLegacyCanvas: () => {},
     },
     overlayRenderingService: {
       scheduleMenus: noop,

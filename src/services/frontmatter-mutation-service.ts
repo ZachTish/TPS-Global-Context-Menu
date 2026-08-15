@@ -5,6 +5,7 @@ import { casefold, deleteValueCaseInsensitive, findKeyCaseInsensitive, setValueC
 import { getCompatibleMarkdownViewFromLeaf, getViewMode, pickBestMarkdownLeaf } from './leaf-resolver';
 import { normalizeTagList } from '../utils/tag-utils';
 import { normalizeCompletedDateValue } from '../utils/completed-date-utils';
+import type { FilePropertiesMutationCause } from './file-properties-service';
 
 type FrontmatterRecord = Record<string, unknown>;
 type FrontmatterMutator = (frontmatter: FrontmatterRecord) => void | Promise<void>;
@@ -23,11 +24,18 @@ export class FrontmatterMutationService {
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
-  async process(file: TFile, mutator: FrontmatterMutator): Promise<boolean> {
-    if (this.plugin.canvasPropertiesService?.isCanvasFile(file)) {
-      return this.plugin.canvasPropertiesService.process(file, mutator);
+  async process(
+    file: TFile,
+    mutator: FrontmatterMutator,
+    cause: FilePropertiesMutationCause = { kind: 'user' },
+  ): Promise<boolean> {
+    if (!(file instanceof TFile)) return false;
+    if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
+    if (file.extension.toLowerCase() !== 'md') {
+      return this.plugin.filePropertiesService?.isPropertyTarget(file)
+        ? this.plugin.filePropertiesService.process(file, mutator, cause)
+        : false;
     }
-    if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'md') return false;
 
     let changed = false;
     let nextTitle: string | null = null;
@@ -84,7 +92,14 @@ export class FrontmatterMutationService {
           return;
         }
         await this.writeContent(file, nextContent);
-        this.plugin.eventService.emitExplicitAction([file.path], { source: 'frontmatter' });
+        const sourcePluginId = String(cause.sourcePluginId || this.plugin.manifest.id);
+        this.plugin.eventService.emitFilesUpdated([file.path], { sourcePluginId });
+        if (cause.kind !== 'automation') {
+          this.plugin.eventService.emitExplicitAction([file.path], {
+            sourcePluginId,
+            source: String(cause.surface || 'frontmatter'),
+          });
+        }
         indexedFrontmatter = { ...sorted };
         changed = true;
       }
@@ -111,10 +126,14 @@ export class FrontmatterMutationService {
     return changed;
   }
 
-  async updateValues(files: TFile[], updates: Record<string, unknown>): Promise<TFile[]> {
-    const { markdownFiles, canvasFiles } = this.partitionByStorageType(files);
+  async updateValues(
+    files: TFile[],
+    updates: Record<string, unknown>,
+    cause: FilePropertiesMutationCause = { kind: 'user' },
+  ): Promise<TFile[]> {
+    const { markdownFiles, nonMarkdownFiles } = this.partitionByStorageType(files);
     await this.warnIfSchedulingMultiDateTaskContainer(markdownFiles, updates);
-    const updatedCanvases = await this.plugin.canvasPropertiesService?.updateValues(canvasFiles, updates) ?? [];
+    const updatedNonMarkdown = await this.plugin.filePropertiesService?.updateValues(nonMarkdownFiles, updates, cause) ?? [];
     const updatedMarkdown = await this.applyToFiles(markdownFiles, async (frontmatter) => {
       for (const [key, value] of Object.entries(updates)) {
         if (value === undefined || value === null) {
@@ -123,13 +142,13 @@ export class FrontmatterMutationService {
         }
         setValueCaseInsensitive(frontmatter, key, value);
       }
-    });
-    return [...updatedMarkdown, ...updatedCanvases];
+    }, cause);
+    return [...updatedMarkdown, ...updatedNonMarkdown];
   }
 
-  async setListValues(files: TFile[], key: string, values: unknown[]): Promise<TFile[]> {
-    const { markdownFiles, canvasFiles } = this.partitionByStorageType(files);
-    const updatedCanvases = await this.plugin.canvasPropertiesService?.setListValues(canvasFiles, key, values) ?? [];
+  async setListValues(files: TFile[], key: string, values: unknown[], cause: FilePropertiesMutationCause = { kind: 'user' }): Promise<TFile[]> {
+    const { markdownFiles, nonMarkdownFiles } = this.partitionByStorageType(files);
+    const updatedNonMarkdown = await this.plugin.filePropertiesService?.setListValues(nonMarkdownFiles, key, values, cause) ?? [];
     const updatedMarkdown = await this.applyToFiles(markdownFiles, async (frontmatter) => {
       const normalized = this.normalizeList(values);
       if (normalized.length === 0) {
@@ -137,15 +156,15 @@ export class FrontmatterMutationService {
       } else {
         setValueCaseInsensitive(frontmatter, key, normalized);
       }
-    });
-    return [...updatedMarkdown, ...updatedCanvases];
+    }, cause);
+    return [...updatedMarkdown, ...updatedNonMarkdown];
   }
 
-  async addValuesToList(files: TFile[], key: string, values: unknown[]): Promise<TFile[]> {
+  async addValuesToList(files: TFile[], key: string, values: unknown[], cause: FilePropertiesMutationCause = { kind: 'user' }): Promise<TFile[]> {
     const additions = this.normalizeList(values);
     if (additions.length === 0) return [];
-    const { markdownFiles, canvasFiles } = this.partitionByStorageType(files);
-    const updatedCanvases = await this.plugin.canvasPropertiesService?.addValuesToList(canvasFiles, key, additions) ?? [];
+    const { markdownFiles, nonMarkdownFiles } = this.partitionByStorageType(files);
+    const updatedNonMarkdown = await this.plugin.filePropertiesService?.addValuesToList(nonMarkdownFiles, key, additions, cause) ?? [];
     const updatedMarkdown = await this.applyToFiles(markdownFiles, async (frontmatter) => {
       const existingKey = findKeyCaseInsensitive(frontmatter, key) || key;
       const current = this.normalizeList(frontmatter[existingKey]);
@@ -158,15 +177,15 @@ export class FrontmatterMutationService {
         merged.push(value);
       }
       setValueCaseInsensitive(frontmatter, existingKey, merged);
-    });
-    return [...updatedMarkdown, ...updatedCanvases];
+    }, cause);
+    return [...updatedMarkdown, ...updatedNonMarkdown];
   }
 
-  async removeValuesFromList(files: TFile[], key: string, values: unknown[]): Promise<TFile[]> {
+  async removeValuesFromList(files: TFile[], key: string, values: unknown[], cause: FilePropertiesMutationCause = { kind: 'user' }): Promise<TFile[]> {
     const removals = new Set(this.normalizeList(values).map((value) => casefold(String(value))));
     if (removals.size === 0) return [];
-    const { markdownFiles, canvasFiles } = this.partitionByStorageType(files);
-    const updatedCanvases = await this.plugin.canvasPropertiesService?.removeValuesFromList(canvasFiles, key, values) ?? [];
+    const { markdownFiles, nonMarkdownFiles } = this.partitionByStorageType(files);
+    const updatedNonMarkdown = await this.plugin.filePropertiesService?.removeValuesFromList(nonMarkdownFiles, key, values, cause) ?? [];
     const updatedMarkdown = await this.applyToFiles(markdownFiles, async (frontmatter) => {
       const existingKey = findKeyCaseInsensitive(frontmatter, key);
       if (!existingKey) return;
@@ -177,55 +196,59 @@ export class FrontmatterMutationService {
       } else {
         setValueCaseInsensitive(frontmatter, existingKey, filtered);
       }
-    });
-    return [...updatedMarkdown, ...updatedCanvases];
+    }, cause);
+    return [...updatedMarkdown, ...updatedNonMarkdown];
   }
 
-  async setDateValue(files: TFile[], key: string, value: string | null): Promise<TFile[]> {
-    const { markdownFiles, canvasFiles } = this.partitionByStorageType(files);
+  async setDateValue(files: TFile[], key: string, value: string | null, cause: FilePropertiesMutationCause = { kind: 'user' }): Promise<TFile[]> {
+    const { markdownFiles, nonMarkdownFiles } = this.partitionByStorageType(files);
     const normalized = normalizeObsidianDateTimeValue(value);
     await this.warnIfSchedulingMultiDateTaskContainer(markdownFiles, { [key]: normalized || null });
-    const updatedCanvases = await this.plugin.canvasPropertiesService?.updateValues(canvasFiles, {
+    const updatedNonMarkdown = await this.plugin.filePropertiesService?.updateValues(nonMarkdownFiles, {
       [key]: normalized || null,
-    }) ?? [];
+    }, cause) ?? [];
     const updatedMarkdown = await this.applyToFiles(markdownFiles, async (frontmatter) => {
       if (!normalized) {
         deleteValueCaseInsensitive(frontmatter, key);
       } else {
         setValueCaseInsensitive(frontmatter, key, normalized);
       }
-    });
-    return [...updatedMarkdown, ...updatedCanvases];
+    }, cause);
+    return [...updatedMarkdown, ...updatedNonMarkdown];
   }
 
-  async deleteKeys(files: TFile[], keys: string[]): Promise<TFile[]> {
+  async deleteKeys(files: TFile[], keys: string[], cause: FilePropertiesMutationCause = { kind: 'user' }): Promise<TFile[]> {
     const normalizedKeys = keys.map((key) => String(key || '').trim()).filter(Boolean);
     if (normalizedKeys.length === 0) return [];
-    const { markdownFiles, canvasFiles } = this.partitionByStorageType(files);
-    const updatedCanvases = await this.plugin.canvasPropertiesService?.deleteKeys(canvasFiles, normalizedKeys) ?? [];
+    const { markdownFiles, nonMarkdownFiles } = this.partitionByStorageType(files);
+    const updatedNonMarkdown = await this.plugin.filePropertiesService?.deleteKeys(nonMarkdownFiles, normalizedKeys, cause) ?? [];
     const updatedMarkdown = await this.applyToFiles(markdownFiles, async (frontmatter) => {
       for (const key of normalizedKeys) {
         deleteValueCaseInsensitive(frontmatter, key);
       }
-    });
-    return [...updatedMarkdown, ...updatedCanvases];
+    }, cause);
+    return [...updatedMarkdown, ...updatedNonMarkdown];
   }
 
-  private partitionByStorageType(files: TFile[]): { markdownFiles: TFile[]; canvasFiles: TFile[] } {
+  private partitionByStorageType(files: TFile[]): { markdownFiles: TFile[]; nonMarkdownFiles: TFile[] } {
     const markdownFiles: TFile[] = [];
-    const canvasFiles: TFile[] = [];
+    const nonMarkdownFiles: TFile[] = [];
     for (const file of files || []) {
-      if (this.plugin.canvasPropertiesService?.isCanvasFile(file)) canvasFiles.push(file);
-      else markdownFiles.push(file);
+      if (!(file instanceof TFile) || this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
+      if (file.extension.toLowerCase() === 'md') {
+        markdownFiles.push(file);
+      } else if (this.plugin.filePropertiesService?.isPropertyTarget(file)) {
+        nonMarkdownFiles.push(file);
+      }
     }
-    return { markdownFiles, canvasFiles };
+    return { markdownFiles, nonMarkdownFiles };
   }
 
-  private async applyToFiles(files: TFile[], mutator: FrontmatterMutator): Promise<TFile[]> {
+  private async applyToFiles(files: TFile[], mutator: FrontmatterMutator, cause: FilePropertiesMutationCause): Promise<TFile[]> {
     const updated: TFile[] = [];
     for (const file of files) {
       try {
-        if (await this.process(file, mutator)) {
+        if (await this.process(file, mutator, cause)) {
           updated.push(file);
         }
       } catch (error) {

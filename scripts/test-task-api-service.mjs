@@ -612,7 +612,7 @@ test('task API canonicalizes public file inputs without constructor identity che
   assert.match(taskApiSource, /const file = this\.resolveMarkdownFile\(ref\.path\)/);
   assert.match(taskApiSource, /\.map\(\(entry\) => this\.resolveMarkdownFile\(entry\)\)/);
   assert.match(taskApiSource, /const rawPrefix = String\(filter\.pathPrefix \|\| ''\)\.trim\(\)/);
-  assert.match(taskApiSource, /if \(!rawPrefix\) return files/);
+  assert.match(taskApiSource, /if \(!rawPrefix\) return ordinaryFiles/);
   assert.doesNotMatch(taskApiSource, /normalizePath\(String\(filter\.pathPrefix \|\| ''\)\.trim\(\)\)/);
   assert.match(taskApiSource, /const file = this\.resolveMarkdownFile\(task\.path\)/);
 

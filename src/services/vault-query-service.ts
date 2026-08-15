@@ -5,8 +5,9 @@
  * exposed via GCM's inter-plugin API so that Controller / Notifier / Companion
  * can delegate their vault-scanning loops here instead of reimplementing them.
  *
- * Sync queries use the metadata cache only. Async queries may read markdown body
- * text or `.canvas` JSON when a content filter is requested.
+ * Sync queries use the metadata cache and GCM's non-Markdown property records.
+ * Async queries may also read markdown body text or `.canvas` JSON when a
+ * content filter is requested.
  */
 import { App, TFile, CachedMetadata } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
@@ -122,8 +123,10 @@ export interface ContentQueryFilter {
  * All specified filters must match (AND logic).
  */
 export interface VaultQueryCriteria {
-    /** Include `.canvas` files. Async queries read canvas properties through Advanced Canvas metadata compatibility. */
+    /** Include `.canvas` files. Retained for backward compatibility. */
     includeCanvasFiles?: boolean;
+    /** Include all non-Markdown property targets (`.canvas`, `.base`, PDFs, media, and other files). */
+    includeNonMarkdownFiles?: boolean;
     folders?: FolderQueryFilter;
     statuses?: StatusQueryFilter;
     tags?: TagQueryFilter;
@@ -236,16 +239,16 @@ export class VaultQueryService {
      * Returns null if the file is not found.
      */
     getFile(path: string): QueryResult | null {
-        const file = this.getCandidateFiles({ includeCanvasFiles: true }).find((f) => f.path === path);
-        if (!file) return null;
+        const file = this.app.vault.getAbstractFileByPath(path);
+        if (!(file instanceof TFile) || !this.isQueryableFile(file)) return null;
         const metadata = this.app.metadataCache.getFileCache(file);
-        const frontmatter = (metadata?.frontmatter as Record<string, unknown>) ?? {};
+        const frontmatter = this.getFrontmatter(file, metadata);
         return { file, frontmatter, metadata };
     }
 
     async getFileAsync(path: string): Promise<QueryResult | null> {
-        const file = this.getCandidateFiles({ includeCanvasFiles: true }).find((f) => f.path === path);
-        if (!file) return null;
+        const file = this.app.vault.getAbstractFileByPath(path);
+        if (!(file instanceof TFile) || !this.isQueryableFile(file)) return null;
         const metadata = this.app.metadataCache.getFileCache(file);
         const frontmatter = await this.getFrontmatterAsync(file, metadata);
         return { file, frontmatter, metadata };
@@ -253,11 +256,19 @@ export class VaultQueryService {
 
     // ── Core evaluator ───────────────────────────────────────────────────────
 
-    private getCandidateFiles(criteria: Pick<VaultQueryCriteria, 'includeCanvasFiles'>): TFile[] {
-        if (criteria.includeCanvasFiles !== true) return this.app.vault.getMarkdownFiles();
-        return this.app.vault.getFiles().filter((file) => {
+    private getCandidateFiles(
+        criteria: Pick<VaultQueryCriteria, 'includeCanvasFiles' | 'includeNonMarkdownFiles'>,
+    ): TFile[] {
+        const includeAllNonMarkdown = criteria.includeNonMarkdownFiles === true;
+        const includeCanvas = includeAllNonMarkdown || criteria.includeCanvasFiles === true;
+        const candidates = includeCanvas ? this.app.vault.getFiles() : this.app.vault.getMarkdownFiles();
+        return candidates.filter((file) => {
+            if (this.plugin?.filePropertiesService?.isCompanionFile(file)) return false;
             const extension = file.extension?.toLowerCase();
-            return extension === 'md' || extension === 'canvas';
+            if (extension === 'md') return true;
+            if (!includeCanvas) return false;
+            if (!includeAllNonMarkdown) return extension === 'canvas';
+            return this.plugin?.filePropertiesService?.isPropertyTarget(file) ?? true;
         });
     }
 
@@ -272,8 +283,7 @@ export class VaultQueryService {
 
     private evaluate(file: TFile, criteria: VaultQueryCriteria): QueryResult | null {
         const metadata = this.app.metadataCache.getFileCache(file);
-        const fm: Record<string, unknown> =
-            (metadata?.frontmatter as Record<string, unknown>) ?? {};
+        const fm = this.getFrontmatter(file, metadata);
         return this.evaluateWithFrontmatter(file, metadata, fm, criteria, { allowContentRead: false });
     }
 
@@ -286,7 +296,8 @@ export class VaultQueryService {
     ): QueryResult | null {
         if (criteria.folders && !this.matchesFolderFilter(file.path, criteria.folders)) return null;
         if (criteria.statuses && !this.matchesStatusFilter(fm, criteria.statuses)) return null;
-        if (criteria.tags && !this.matchesTagFilter(fm, metadata, criteria.tags)) return null;
+        const tagMetadata = file.extension?.toLowerCase() === 'md' ? metadata : null;
+        if (criteria.tags && !this.matchesTagFilter(fm, tagMetadata, criteria.tags)) return null;
 
         if (criteria.properties) {
             for (const pf of criteria.properties) {
@@ -301,10 +312,23 @@ export class VaultQueryService {
     }
 
     private async getFrontmatterAsync(file: TFile, metadata: CachedMetadata | null): Promise<Record<string, unknown>> {
-        if (file.extension?.toLowerCase() === 'canvas' && this.plugin?.canvasPropertiesService) {
-            return this.plugin.canvasPropertiesService.read(file);
+        if (file.extension?.toLowerCase() !== 'md' && this.plugin?.filePropertiesService?.isPropertyTarget(file)) {
+            return await this.plugin.filePropertiesService.getFrontmatterAsync(file);
+        }
+        return this.getFrontmatter(file, metadata);
+    }
+
+    private getFrontmatter(file: TFile, metadata: CachedMetadata | null): Record<string, unknown> {
+        if (file.extension?.toLowerCase() !== 'md' && this.plugin?.filePropertiesService?.isPropertyTarget(file)) {
+            return this.plugin.filePropertiesService.read(file);
         }
         return (metadata?.frontmatter as Record<string, unknown>) ?? {};
+    }
+
+    private isQueryableFile(file: TFile): boolean {
+        if (this.plugin?.filePropertiesService?.isCompanionFile(file)) return false;
+        if (file.extension?.toLowerCase() === 'md') return true;
+        return this.plugin?.filePropertiesService?.isPropertyTarget(file) ?? true;
     }
 
     private async matchesContentFilterAsync(file: TFile, filter: ContentQueryFilter): Promise<boolean> {

@@ -21,10 +21,37 @@ export class ParentLinkResolutionService {
     return 'other-parent';
   }
 
-  getAllFileTargets(): TFile[] {
+  /**
+   * Resolve the frontmatter that belongs to the logical vault item. Markdown
+   * reads its own cache; every supported non-Markdown item reads its GCM
+   * companion without exposing the companion as a relationship candidate.
+   */
+  getLogicalFrontmatter(file: TFile): Record<string, unknown> {
+    if (!(file instanceof TFile)) return {};
+    if (this.plugin.filePropertiesService?.isCompanionFile(file)) return {};
+    if (this.plugin.filePropertiesService?.isPropertyTarget(file)) {
+      return this.plugin.filePropertiesService.read(file) as Record<string, unknown>;
+    }
+    return (this.plugin.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, unknown>;
+  }
+
+  isRelationshipTarget(file: unknown): file is TFile {
+    if (!(file instanceof TFile)) return false;
+    if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
+    return String(file.extension || '').trim().toLowerCase() === 'md'
+      || this.plugin.filePropertiesService?.isPropertyTarget(file) === true;
+  }
+
+  /** Enumerate logical relationship targets; managed companion notes stay hidden. */
+  getRelationshipCandidates(options: { includeIgnored?: boolean } = {}): TFile[] {
     return this.plugin.app.vault.getAllLoadedFiles().filter(
-      (file): file is TFile => file instanceof TFile && !this.isIgnoredFile(file),
+      (file): file is TFile => this.isRelationshipTarget(file)
+        && (options.includeIgnored === true || !this.isIgnoredFile(file)),
     );
+  }
+
+  getAllFileTargets(): TFile[] {
+    return this.getRelationshipCandidates();
   }
 
   isIgnoredFrontmatter(frontmatter: Record<string, unknown> | null | undefined): boolean {
@@ -36,10 +63,8 @@ export class ParentLinkResolutionService {
 
   isIgnoredFile(file: TFile): boolean {
     if (!(file instanceof TFile)) return false;
-    const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as
-      | Record<string, unknown>
-      | undefined;
-    return this.isIgnoredFrontmatter(frontmatter);
+    if (this.plugin.filePropertiesService?.isCompanionFile(file)) return true;
+    return this.isIgnoredFrontmatter(this.getLogicalFrontmatter(file));
   }
 
   getParentsForChild(childFile: TFile): ResolvedParentLink[] {
@@ -50,7 +75,7 @@ export class ParentLinkResolutionService {
 
   /** Read persisted relationships without applying the display/automation ignore rule. */
   getStoredParentsForChild(childFile: TFile): ResolvedParentLink[] {
-    const frontmatter = (this.plugin.app.metadataCache.getFileCache(childFile)?.frontmatter || {}) as Record<string, unknown>;
+    const frontmatter = this.getLogicalFrontmatter(childFile);
     const values = this.getParentValuesFromFrontmatter(frontmatter);
     const results = new Map<string, ResolvedParentLink>();
     for (const file of this.resolveFilesFromFrontmatterValue(values, childFile.path)) {

@@ -1552,11 +1552,13 @@ export class TaskApiService {
       ? explicit
           .map((entry) => this.resolveMarkdownFile(entry))
           .filter((file): file is TFile => file !== null)
-      : this.plugin.app.vault.getMarkdownFiles();
+      : this.plugin.app.vault.getMarkdownFiles()
+          .filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file));
+    const ordinaryFiles = files.filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file));
     const rawPrefix = String(filter.pathPrefix || '').trim();
-    if (!rawPrefix) return files;
+    if (!rawPrefix) return ordinaryFiles;
     const prefix = normalizePath(rawPrefix);
-    return files.filter((file) => file.path.startsWith(prefix));
+    return ordinaryFiles.filter((file) => file.path.startsWith(prefix));
   }
 
   private matchesFilter(record: GcmTaskRecord, filter: GcmTaskListFilter): boolean {

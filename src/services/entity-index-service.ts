@@ -52,6 +52,7 @@ export type {
 
 export interface EntityIndexPluginHost {
   readonly app: App;
+  readonly filePropertiesService?: { isCompanionFile(file: TFile): boolean };
   registerEvent(eventRef: EventRef): void;
 }
 
@@ -96,6 +97,10 @@ export class EntityIndexService {
 
   constructor(private readonly plugin: EntityIndexPluginHost) {}
 
+  private isIndexableMarkdownFile(file: TAbstractFile | null | undefined): file is TFile {
+    return isMarkdownFile(file) && this.plugin.filePropertiesService?.isCompanionFile(file) !== true;
+  }
+
   setup(): void {
     if (this.isSetup) return;
     this.isSetup = true;
@@ -103,7 +108,7 @@ export class EntityIndexService {
 
     this.plugin.registerEvent(
       metadataCache.on('changed', (file, data, cache) => {
-        if (!this.isBuilt || !isMarkdownFile(file)) return;
+        if (!this.isBuilt || !this.isIndexableMarkdownFile(file)) return;
         this.upsertFile(file, cache?.frontmatter);
         if (this.isLineTrackingActive()) {
           this.scheduleLineRefresh(file, typeof data === 'string' ? data : undefined);
@@ -133,7 +138,7 @@ export class EntityIndexService {
     );
     this.plugin.registerEvent(
       vault.on('create', (file) => {
-        if (this.isBuilt && isMarkdownFile(file)) {
+        if (this.isBuilt && this.isIndexableMarkdownFile(file)) {
           this.upsertFile(file);
           if (this.isLineTrackingActive()) this.scheduleLineRefresh(file);
         }
@@ -141,7 +146,7 @@ export class EntityIndexService {
     );
     this.plugin.registerEvent(
       vault.on('modify', (file) => {
-        if (this.isBuilt && isMarkdownFile(file)) {
+        if (this.isBuilt && this.isIndexableMarkdownFile(file)) {
           this.upsertFile(file);
           if (this.isLineTrackingActive()) this.scheduleLineRefresh(file);
         }
@@ -157,7 +162,7 @@ export class EntityIndexService {
         if (!this.isBuilt) return;
         this.core.removeByPath(oldPath);
         this.removeLineSource(oldPath);
-        if (isMarkdownFile(file)) {
+        if (this.isIndexableMarkdownFile(file)) {
           this.upsertFile(file);
           if (this.isLineTrackingActive()) this.scheduleLineRefresh(file);
         }
@@ -219,7 +224,7 @@ export class EntityIndexService {
     if (paths && paths.length > 0 && this.isBuilt) {
       for (const path of paths) {
         const file = this.plugin.app.vault.getAbstractFileByPath(path);
-        if (isMarkdownFile(file)) {
+        if (this.isIndexableMarkdownFile(file)) {
           this.upsertFile(file);
           if (this.isLineTrackingActive()) this.scheduleLineRefresh(file);
         } else {
@@ -239,7 +244,9 @@ export class EntityIndexService {
     frontmatterOverrides?: ReadonlyMap<string, Readonly<Record<string, unknown>> | null>,
   ): void {
     this.resetLineIndexState();
-    const sources = this.plugin.app.vault.getMarkdownFiles().map(
+    const sources = this.plugin.app.vault.getMarkdownFiles()
+      .filter((file) => this.isIndexableMarkdownFile(file))
+      .map(
       (file): EntityIndexSource => {
         const frontmatter = frontmatterOverrides?.has(file.path)
           ? frontmatterOverrides.get(file.path)
@@ -266,7 +273,7 @@ export class EntityIndexService {
     file: TFile,
     frontmatter?: Readonly<Record<string, unknown>> | null,
   ): EntityIndexRecord | null {
-    if (!isMarkdownFile(file)) return null;
+    if (!this.isIndexableMarkdownFile(file)) return null;
     if (!this.isBuilt) {
       const overrides = frontmatter !== undefined
         ? new Map([[file.path, frontmatter]])
@@ -317,6 +324,7 @@ export class EntityIndexService {
       if (!this.isLineIndexReady && !this.lineBuildPromise) {
         const filesByPath = new Map(
           this.plugin.app.vault.getMarkdownFiles()
+            .filter((file) => this.isIndexableMarkdownFile(file))
             .map((file) => [normalizePath(file.path), file]),
         );
         const files = this.failedLineScanPaths.size > 0
@@ -384,7 +392,7 @@ export class EntityIndexService {
     if (record.entityType === 'note') return record;
 
     const file = this.plugin.app.vault.getAbstractFileByPath(record.sourcePath);
-    if (!isMarkdownFile(file)) return null;
+    if (!this.isIndexableMarkdownFile(file)) return null;
     try {
       const result = await this.lineSourceProvider.materialize(
         file,

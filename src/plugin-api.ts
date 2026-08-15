@@ -32,6 +32,7 @@ import type {
     ItemHistoryQueryOptions,
     ItemHistoryTaskReference,
 } from './services/item-history-service';
+import type { FilePropertiesMutationCause } from './services/file-properties-service';
 
 type ChecklistTaskState = string;
 
@@ -578,6 +579,17 @@ export async function promoteChecklistItemToChild(
  */
 export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
     const services = plugin.sharedServices;
+    const publicMutationCause = (
+        cause?: FilePropertiesMutationCause,
+    ): FilePropertiesMutationCause => (
+        cause?.kind === 'user' || cause?.kind === 'automation'
+            ? cause
+            : {
+                kind: 'automation',
+                sourcePluginId: plugin.manifest.id,
+                surface: 'plugin-api',
+            }
+    );
     const normalizeTaskCheckboxStatus = (value: unknown): string => services.status.normalize(value);
     const taskCheckboxesApi = createLinkedSubitemCheckboxContract(
         () => plugin.settings.linkedSubitemCheckboxMappings || [],
@@ -610,65 +622,107 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         process: (
             file: TFile,
             mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>,
-        ) => plugin.frontmatterMutationService.process(file, mutator),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.frontmatterMutationService.process(file, mutator, publicMutationCause(cause)),
         setValues: (
             files: TFile[],
             updates: Record<string, unknown>,
-        ) => plugin.frontmatterMutationService.updateValues(files, updates),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.frontmatterMutationService.updateValues(files, updates, publicMutationCause(cause)),
         setListValues: (
             files: TFile[],
             key: string,
             values: unknown[],
-        ) => plugin.frontmatterMutationService.setListValues(files, key, values),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.frontmatterMutationService.setListValues(files, key, values, publicMutationCause(cause)),
         addListValues: (
             files: TFile[],
             key: string,
             values: unknown[],
-        ) => plugin.frontmatterMutationService.addValuesToList(files, key, values),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.frontmatterMutationService.addValuesToList(files, key, values, publicMutationCause(cause)),
         removeListValues: (
             files: TFile[],
             key: string,
             values: unknown[],
-        ) => plugin.frontmatterMutationService.removeValuesFromList(files, key, values),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.frontmatterMutationService.removeValuesFromList(files, key, values, publicMutationCause(cause)),
         setDateValue: (
             files: TFile[],
             key: string,
             value: string | null,
-        ) => plugin.frontmatterMutationService.setDateValue(files, key, value),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.frontmatterMutationService.setDateValue(files, key, value, publicMutationCause(cause)),
         deleteKeys: (
             files: TFile[],
             keys: string[],
-        ) => plugin.frontmatterMutationService.deleteKeys(files, keys),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.frontmatterMutationService.deleteKeys(files, keys, publicMutationCause(cause)),
     };
-    const canvasPropertiesApi = {
-        read: (file: TFile) => plugin.canvasPropertiesService.read(file),
+    const filePropertiesApi = {
+        version: 1,
+        isTarget: (file: TFile) => plugin.filePropertiesService.isPropertyTarget(file),
+        isCompanion: (file: TFile) => plugin.filePropertiesService.isCompanionFile(file),
+        readCached: (file: TFile) => plugin.filePropertiesService.read(file),
+        read: (file: TFile) => plugin.filePropertiesService.getFrontmatterAsync(file),
         process: (
             file: TFile,
             mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>,
-        ) => plugin.canvasPropertiesService.process(file, mutator),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.filePropertiesService.process(file, mutator, publicMutationCause(cause)),
+        processMany: (
+            files: TFile[],
+            mutator: (frontmatter: Record<string, unknown>) => void | Promise<void>,
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.filePropertiesService.processMany(files, mutator, publicMutationCause(cause)),
         setValues: (
             files: TFile[],
             updates: Record<string, unknown>,
-        ) => plugin.canvasPropertiesService.updateValues(files, updates),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.filePropertiesService.updateValues(files, updates, publicMutationCause(cause)),
         setListValues: (
             files: TFile[],
             key: string,
             values: unknown[],
-        ) => plugin.canvasPropertiesService.setListValues(files, key, values),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.filePropertiesService.setListValues(files, key, values, publicMutationCause(cause)),
         addListValues: (
             files: TFile[],
             key: string,
             values: unknown[],
-        ) => plugin.canvasPropertiesService.addValuesToList(files, key, values),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.filePropertiesService.addValuesToList(files, key, values, publicMutationCause(cause)),
         removeListValues: (
             files: TFile[],
             key: string,
             values: unknown[],
-        ) => plugin.canvasPropertiesService.removeValuesFromList(files, key, values),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.filePropertiesService.removeValuesFromList(files, key, values, publicMutationCause(cause)),
         deleteKeys: (
             files: TFile[],
             keys: string[],
-        ) => plugin.canvasPropertiesService.deleteKeys(files, keys),
+            cause?: FilePropertiesMutationCause,
+        ) => plugin.filePropertiesService.deleteKeys(files, keys, publicMutationCause(cause)),
+        getCompanion: (file: TFile) => plugin.filePropertiesService.getCompanionFile(file),
+        getRelinkCandidate: (file: TFile) => plugin.filePropertiesService.getRelinkCandidate(file),
+        getTarget: (companion: TFile) => plugin.filePropertiesService.getSourceFileForCompanion(companion),
+        ensure: (file: TFile, cause?: FilePropertiesMutationCause) => (
+            plugin.filePropertiesService.ensureCompanion(file, {}, publicMutationCause(cause))
+        ),
+        relink: (companion: TFile, file: TFile, cause?: FilePropertiesMutationCause) => (
+            plugin.filePropertiesService.relinkCompanion(companion, file, publicMutationCause(cause))
+        ),
+        reconcile: () => plugin.filePropertiesService.reconcileCompanions(),
+        listKnownPropertyNames: () => plugin.filePropertiesService.listKnownPropertyNames(),
+    };
+    const canvasPropertiesApi = {
+        read: (file: TFile) => plugin.filePropertiesService.readCanvasCompatibility(file),
+        process: filePropertiesApi.process,
+        setValues: filePropertiesApi.setValues,
+        setListValues: filePropertiesApi.setListValues,
+        addListValues: filePropertiesApi.addListValues,
+        removeListValues: filePropertiesApi.removeListValues,
+        deleteKeys: filePropertiesApi.deleteKeys,
     };
 
     (plugin as any).api = {
@@ -928,7 +982,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         /** Resolve a single file by vault path with pre-fetched frontmatter. */
         getFile: (path: string) =>
             plugin.vaultQueryService.getFile(path),
-        /** Async file lookup. Reads canvas properties through Advanced Canvas metadata compatibility. */
+        /** Async file lookup. Reads non-Markdown properties through GCM's native companion store. */
         getFileAsync: (path: string) =>
             plugin.vaultQueryService.getFileAsync(path),
 
@@ -944,8 +998,9 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         cycleFileStatus: async (file: TFile) => {
             if (!plugin.notebookNavigatorRuleService.canApplyToFile(file)) return false;
             const statusKey = services.status.getStatusPropertyKey();
-            const cache = plugin.app.metadataCache.getFileCache(file);
-            const fm = (cache?.frontmatter || {}) as Record<string, unknown>;
+            const fm = file.extension?.toLowerCase() === 'md'
+                ? (plugin.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, unknown>
+                : plugin.filePropertiesService.read(file);
             const raw = services.frontmatter.findKey(fm, statusKey)
                 ? fm[services.frontmatter.findKey(fm, statusKey)!]
                 : undefined;
@@ -986,9 +1041,11 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         deleteFrontmatterKeys: frontmatterApi.deleteKeys,
         /** Structured frontmatter API for other TPS plugins. */
         frontmatter: frontmatterApi,
-        /** Canvas properties bridge backed by Advanced Canvas metadata compatibility. */
+        /** Native property storage for Canvas, Base, PDF, media, and other non-Markdown files. */
+        fileProperties: filePropertiesApi,
+        /** @deprecated Compatibility alias backed by GCM's native file-property store. */
         canvasProperties: canvasPropertiesApi,
-        /** Create `.canvas` files from markdown notes, preserving source notes and copying note frontmatter into canvas metadata. */
+        /** Create `.canvas` files from markdown notes and copy properties into a native companion note. */
         convertNotesToCanvases: (files: TFile[], options?: { outputFolder?: string; openCreated?: boolean }) =>
             plugin.noteOperationService.convertNotesToCanvases(files, options),
         /** Create a single `.canvas` file from a markdown note. */

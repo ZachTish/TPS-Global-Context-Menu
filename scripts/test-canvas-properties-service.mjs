@@ -4,105 +4,63 @@ import { readFileSync } from 'node:fs';
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
-test('canvas properties bridge delegates to Advanced Canvas metadata compatibility', () => {
-  const service = read('src/services/canvas-properties-service.ts');
+test('Advanced Canvas property storage is removed in favor of the native companion store', () => {
+  const service = read('src/services/file-properties-service.ts');
   const main = read('src/main.ts');
-  assert.match(service, /Bridges GCM canvas property reads\/writes to Advanced Canvas/);
-  assert.match(service, /getFileCache\(file\)\?\.frontmatter/);
-  assert.match(service, /resolveFrontmatterWriter/);
-  assert.match(service, /current\.call\(fileManager, file, mutator\)/);
-  assert.match(service, /canvasMetadataCompatibilityEnabled/);
-  assert.doesNotMatch(service, /readCanvasDocument/);
-  assert.match(service, /Advanced Canvas bridge did not persist canvas metadata; applying compatibility fallback/);
-  assert.match(service, /writeCanvasMetadataCompatibilityFallback/);
-  assert.match(service, /metadata\.frontmatter = \{ \.\.\.frontmatter \}/);
-  assert.match(service, /if \(!\(await this\.waitForCanvasMetadata\(file, sorted\)\)\)/);
-  assert.doesNotMatch(main, /nativeProcessFrontmatterDelegate/);
-  assert.doesNotMatch(main, /__tpsGcmFrontmatterPatch/);
-  assert.doesNotMatch(main, /installProcessFrontmatterPatch/);
-  assert.match(service, /tps:gcm-canvas-properties-updated/);
-});
-
-test('frontmatter mutation service routes canvas files through canvas properties', () => {
-  const service = read('src/services/frontmatter-mutation-service.ts');
-  const bulkEdit = read('src/services/bulk-edit-service.ts');
-  assert.match(service, /canvasPropertiesService\?\.isCanvasFile\(file\)/);
-  assert.match(service, /canvasPropertiesService\?\.updateValues\(canvasFiles, updates\)/);
-  assert.match(service, /canvasPropertiesService\?\.setListValues\(canvasFiles, key, values\)/);
-  assert.match(service, /canvasPropertiesService\?\.deleteKeys\(canvasFiles, normalizedKeys\)/);
-  assert.match(bulkEdit, /extension !== 'md' && !this\.plugin\.canvasPropertiesService\?\.isCanvasFile\(file\)/);
-  assert.match(bulkEdit, /extension === 'md' && !\(await this\.canMutateFrontmatterSafely\(file\)\)/);
-});
-
-test('notebook navigator rules can write icon properties to canvas files', () => {
-  const service = read('src/services/notebook-navigator-rule-service.ts');
   const events = read('src/events/register-events.ts');
-  const main = read('src/main.ts');
-  const api = read('src/plugin-api.ts');
+  const menuPatch = read('src/menu/menu-patcher.ts');
 
-  assert.match(service, /canApplyToFile\(file: unknown\): file is TFile/);
-  assert.match(service, /extension === 'md' \|\| extension === 'canvas'/);
-  assert.match(service, /this\.plugin\.app\.vault\.getFiles\(\)\.filter\(\(file\): file is TFile => this\.canApplyToFile\(file\)\)/);
-  assert.match(service, /this\.plugin\.frontmatterMutationService\.process\(file, \(frontmatter\) =>/);
-  assert.match(service, /canvasPropertiesService\.read\(file\)/);
-  assert.doesNotMatch(service, /applyRulesToFile\(file: TFile[\s\S]{0,120}file\.extension !== 'md'/);
-  assert.match(events, /notebookNavigatorRuleService\.scheduleApply\(file,\s*\{\s*reason: 'create'/);
-  assert.match(events, /notebookNavigatorRuleService\.scheduleApply\(liveFile,\s*\{\s*reason: 'rename'/);
-  assert.match(main, /No active markdown or canvas file/);
-  assert.match(api, /notebookNavigatorRuleService\.canApplyToFile\(file\)/);
+  assert.match(service, /_assets\/TPS File Properties/u);
+  assert.match(service, /class FilePropertiesService/u);
+  assert.doesNotMatch(service, /advanced-canvas|canvasMetadataCompatibilityEnabled/u);
+  assert.doesNotMatch(main, /CanvasPropertiesService/u);
+  assert.doesNotMatch(events, /canvas:node-menu/u);
+  assert.match(menuPatch, /injectNativeCanvasTarget/u);
+  assert.match(menuPatch, /resolveCanvasTarget\(event\)/u);
 });
 
-test('vault query API can opt into canvas files asynchronously', () => {
-  const service = read('src/services/vault-query-service.ts');
+test('generic file properties keep the Canvas API and query options backward compatible', () => {
   const api = read('src/plugin-api.ts');
-  assert.match(service, /includeCanvasFiles\?: boolean/);
-  assert.match(service, /extension === 'md' \|\| extension === 'canvas'/);
-  assert.match(service, /count\(criteria: VaultQueryCriteria = \{\}\): number \{\s*const files = this\.getCandidateFiles\(criteria\);/);
-  assert.match(service, /canvasPropertiesService\.read\(file\)/);
-  assert.match(api, /canvasProperties: canvasPropertiesApi/);
-  assert.match(api, /getFileAsync/);
+  const query = read('src/services/vault-query-service.ts');
+  const contracts = read('src/tps-contracts.ts');
+
+  assert.match(api, /fileProperties:\s*filePropertiesApi/u);
+  assert.match(api, /canvasProperties:\s*canvasPropertiesApi/u);
+  assert.match(api, /const canvasPropertiesApi = \{[\s\S]*plugin\.filePropertiesService\.readCanvasCompatibility/u);
+  assert.match(query, /includeCanvasFiles\?: boolean/u);
+  assert.match(query, /includeNonMarkdownFiles\?: boolean/u);
+  assert.match(contracts, /GCM_FILE_PROPERTIES_UPDATED:\s*["']tps:gcm-file-properties-updated["']/u);
 });
 
-test('native GCM property menus include canvas files but keep note conversion markdown-only', () => {
+test('legacy Canvas JSON is read only and imported into the companion on first write', () => {
+  const service = read('src/services/file-properties-service.ts');
+
+  assert.match(service, /readLegacyCanvasFrontmatter/u);
+  assert.match(service, /metadata[\s\S]*frontmatter/u);
+  assert.match(service, /mergeMissingProperties/u);
+  assert.match(service, /tpsGcmImportedCanvasAt/u);
+  assert.doesNotMatch(service, /vault\.modify\(file|vault\.process\(file/u);
+});
+
+test('note-to-Canvas conversion stores copied properties in a companion, not Canvas JSON', () => {
+  const operations = read('src/services/note-operation-service.ts');
+  const api = read('src/plugin-api.ts');
+
+  assert.match(operations, /const document = this\.buildCanvasDocument\(nodeText\)/u);
+  assert.match(operations, /filePropertiesService\.initializeForConversion\(created, frontmatter\)/u);
+  assert.doesNotMatch(operations, /metadata:\s*\{\s*version:[\s\S]*frontmatter/u);
+  assert.match(api, /convertNotesToCanvases/u);
+  assert.match(api, /copy properties into a native companion note/u);
+});
+
+test('all non-Markdown file types can use native property menus while note-only actions stay scoped', () => {
   const menu = read('src/menu/menu-builder.ts');
-  const controller = read('src/menu/menu-controller.ts');
-  const contextTargets = read('src/services/context-target-service.ts');
-  assert.match(menu, /extension === 'md' \|\| extension === 'canvas'/);
-  assert.match(menu, /const propertyEntries = entries\.filter\(\(entry\) => this\.isPropertyFile\(entry\.file\)\)/);
-  assert.match(menu, /resolveCustomProperties\(this\.plugin\.settings\.properties \|\| \[\], propertyEntries/);
-  assert.match(menu, /convertNotesToCanvases\(markdownFiles\)/);
-  assert.match(controller, /extension === 'md' \|\| extension === 'canvas'/);
-  assert.match(contextTargets, /extension === 'md' \|\| extension === 'canvas'/);
-  assert.match(contextTargets, /\$\{raw\}\.canvas/);
-});
+  const context = read('src/services/context-target-service.ts');
+  const rules = read('src/services/notebook-navigator-rule-service.ts');
 
-test('async vault queries can filter canvas files by node content', () => {
-  const service = read('src/services/vault-query-service.ts');
-  assert.match(service, /export interface ContentQueryFilter/);
-  assert.match(service, /content\?: ContentQueryFilter/);
-  assert.match(service, /matchesContentFilterAsync\(file, criteria\.content\)/);
-  assert.match(service, /JSON\.parse\(content \|\| '\{\}'\)/);
-  assert.match(service, /getCanvasNodeSearchText\(parsed, filter\.canvasNodeTypes\)/);
-  assert.match(service, /type === 'text'[\s\S]*record\.text/);
-  assert.match(service, /type === 'file'[\s\S]*record\.file[\s\S]*record\.subpath/);
-  assert.match(service, /type === 'group'[\s\S]*record\.label/);
-  assert.match(service, /type === 'link'[\s\S]*record\.url/);
-  assert.match(service, /if \(criteria\.content && !options\.allowContentRead\) return null/);
-});
-
-test('note to canvas conversion copies frontmatter into Advanced Canvas metadata', () => {
-  const service = read('src/services/note-operation-service.ts');
-  const api = read('src/plugin-api.ts');
-  const menu = read('src/menu/menu-builder.ts');
-  assert.match(service, /async convertNotesToCanvases\(files: TFile\[\], options: NoteToCanvasOptions = \{\}\): Promise<TFile\[\]>/);
-  assert.match(service, /async createCanvasFromNote\(file: TFile, options: NoteToCanvasOptions = \{\}\): Promise<TFile \| null>/);
-  assert.match(service, /const frontmatter = this\.cloneFrontmatterObject\(parts\.frontmatter \|\| \{\}\)/);
-  assert.match(service, /metadata:\s*\{\s*version: "1\.0-1\.0",\s*frontmatter,/);
-  assert.match(service, /type: "text"[\s\S]*text,/);
-  assert.match(service, /this\.app\.vault\.create\(targetPath, `\$\{JSON\.stringify\(document, null, 2\)\}\\n`\)/);
-  assert.doesNotMatch(service, /archiveSourceNotes\(createdFiles/);
-  assert.match(api, /convertNotesToCanvases/);
-  assert.match(api, /createCanvasFromNote/);
-  assert.match(menu, /Convert to canvas/);
-  assert.match(menu, /convertNotesToCanvases\(markdownFiles\)/);
+  assert.match(menu, /filePropertiesService\?\.isPropertyTarget\(file\)/u);
+  assert.match(menu, /Create file properties note/u);
+  assert.match(context, /getSourceFileForCompanion/u);
+  assert.match(rules, /canUseExistingPropertyStorage/u);
+  assert.match(rules, /file\.extension\?\.toLowerCase\(\) !== 'md'\) return ''/u);
 });

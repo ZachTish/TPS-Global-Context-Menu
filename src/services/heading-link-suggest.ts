@@ -92,6 +92,7 @@ export class HeadingLinkSuggest extends Component {
     const suggestions: HeadingLinkSuggestion[] = [];
     for (const file of this.plugin.app.vault.getMarkdownFiles()) {
       if (file.path === currentFile.path) continue;
+      if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
       const candidate = this.buildSuggestion(file, normalizedQuery);
       if (candidate) suggestions.push(candidate);
     }

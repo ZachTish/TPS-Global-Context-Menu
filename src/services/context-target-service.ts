@@ -254,8 +254,25 @@ export class ContextTargetService {
     }
 
     private isPropertyFile(file: TFile): boolean {
-        const extension = file.extension?.toLowerCase();
-        return extension === 'md' || extension === 'canvas';
+        if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
+        return file.extension?.toLowerCase() === 'md'
+            || this.plugin.filePropertiesService?.isPropertyTarget(file) === true;
+    }
+
+    private resolveLogicalPropertyFile(file: TFile): TFile | null {
+        if (!this.plugin.filePropertiesService?.isCompanionFile(file)) return file;
+        const source = this.plugin.filePropertiesService.getSourceFileForCompanion(file);
+        return source instanceof TFile && this.isPropertyFile(source) ? source : null;
+    }
+
+    private resolveLogicalPropertyFiles(files: TFile[]): TFile[] {
+        const resolved: TFile[] = [];
+        for (const file of files) {
+            if (!(file instanceof TFile)) continue;
+            const logicalFile = this.resolveLogicalPropertyFile(file);
+            if (logicalFile) resolved.push(logicalFile);
+        }
+        return this.mergeFileLists([resolved]);
     }
 
     private summarizeFiles(files: TFile[], limit = 5): string[] {
@@ -282,9 +299,9 @@ export class ContextTargetService {
 
         const explorerPath = this.resolveExplorerPath(linkEl);
         const byExplorerPath = explorerPath ? this.app.vault.getAbstractFileByPath(explorerPath) : null;
-        return byExplorerPath instanceof TFile && this.isPropertyFile(byExplorerPath)
-            ? byExplorerPath
-            : null;
+        if (!(byExplorerPath instanceof TFile)) return null;
+        const logicalFile = this.resolveLogicalPropertyFile(byExplorerPath);
+        return logicalFile && this.isPropertyFile(logicalFile) ? logicalFile : null;
     }
 
     private getClosestMarkdownNoteLinkElement(target: HTMLElement): HTMLElement | null {
@@ -353,7 +370,10 @@ export class ContextTargetService {
         if (!raw) return null;
 
         const direct = this.app.vault.getAbstractFileByPath(raw);
-        if (direct instanceof TFile && this.isPropertyFile(direct)) return direct;
+        if (direct instanceof TFile) {
+            const logicalDirect = this.resolveLogicalPropertyFile(direct);
+            if (logicalDirect && this.isPropertyFile(logicalDirect)) return logicalDirect;
+        }
 
         const withCanvas = raw.toLowerCase().endsWith('.canvas') ? raw : `${raw}.canvas`;
         const directCanvas = this.app.vault.getAbstractFileByPath(withCanvas);
@@ -361,12 +381,15 @@ export class ContextTargetService {
 
         const withMd = raw.toLowerCase().endsWith('.md') ? raw : `${raw}.md`;
         const directMd = this.app.vault.getAbstractFileByPath(withMd);
-        if (directMd instanceof TFile && directMd.extension.toLowerCase() === 'md') return directMd;
+        if (directMd instanceof TFile && directMd.extension.toLowerCase() === 'md') {
+            const logicalDirectMd = this.resolveLogicalPropertyFile(directMd);
+            if (logicalDirectMd && this.isPropertyFile(logicalDirectMd)) return logicalDirectMd;
+        }
 
         const linked = this.app.metadataCache.getFirstLinkpathDest(raw.replace(/\.(md|canvas)$/i, ''), '');
-        return linked instanceof TFile && this.isPropertyFile(linked)
-            ? linked
-            : null;
+        if (!(linked instanceof TFile)) return null;
+        const logicalLinked = this.resolveLogicalPropertyFile(linked);
+        return logicalLinked && this.isPropertyFile(logicalLinked) ? logicalLinked : null;
     }
 
     /**
@@ -386,18 +409,24 @@ export class ContextTargetService {
         const allowActiveFileFallback = options?.allowActiveFileFallback !== false;
         const contextInNotebookNavigator = this.isNotebookNavigatorContextTarget(contextEl);
         const kanbanTarget = this.resolveKanbanTarget(contextEl);
-        const normalizedExplicitFiles = (explicitFiles || []).filter(
+        const explicitCandidates = (explicitFiles || []).filter(
             (file): file is TFile => file instanceof TFile,
         );
+        const hasUnresolvedExplicitCompanion = explicitCandidates.some((file) => (
+            this.plugin.filePropertiesService?.isCompanionFile(file)
+            && this.resolveLogicalPropertyFile(file) === null
+        ));
+        const normalizedExplicitFiles = this.resolveLogicalPropertyFiles(explicitCandidates);
         const finish = (
             source: string,
             files: TFile[],
             data: Record<string, unknown> = {},
         ): TFile[] => {
+            const logicalFiles = this.resolveLogicalPropertyFiles(files);
             logger.flow('ContextTarget', 'resolve:done', {
                 source,
-                count: files.length,
-                paths: this.summarizeFiles(files),
+                count: logicalFiles.length,
+                paths: this.summarizeFiles(logicalFiles),
                 explicitCount: normalizedExplicitFiles.length,
                 hasEvent: !!evt,
                 hasContextElement: !!contextEl,
@@ -405,7 +434,7 @@ export class ContextTargetService {
                 allowActiveFileFallback,
                 ...data,
             });
-            return files;
+            return logicalFiles;
         };
 
         // 0. Canvas Node Selection (Priority over explicit file if clicking a node)
@@ -419,6 +448,11 @@ export class ContextTargetService {
         }
 
         // 1. Explicit files from native menu event
+        if (hasUnresolvedExplicitCompanion) {
+            return finish('explicit-unresolved-companion', [], {
+                ignoredExplicitPaths: this.summarizeFiles(explicitCandidates),
+            });
+        }
         if (normalizedExplicitFiles.length > 0) {
             if (contextInNotebookNavigator && !this.isNotebookNavigatorFileContextTarget(contextEl)) {
                 return finish('notebook-navigator-non-file', [], {
@@ -949,6 +983,7 @@ export class ContextTargetService {
         if (!tag || tag === '__untagged__' || tag === 'tags') return [];
 
         const files = this.app.vault.getMarkdownFiles().filter((file) => {
+            if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
             const cache = this.app.metadataCache.getFileCache(file);
             const tags = new Set<string>();
             for (const raw of cache?.tags || []) {
@@ -977,6 +1012,7 @@ export class ContextTargetService {
 
         const propertyValue = this.extractNotebookNavigatorPropertyValueLike(node, propertyKey);
         const files = this.app.vault.getMarkdownFiles().filter((file) => {
+            if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
             const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
             const actualKey = Object.keys(frontmatter).find((key) => key.toLowerCase() === propertyKey);
             if (!actualKey) return false;

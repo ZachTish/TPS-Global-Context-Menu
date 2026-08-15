@@ -3,25 +3,25 @@ import { ParentLinkPromptModal, ParentLinkIssue } from '../modals/parent-link-pr
 import * as logger from '../logger';
 import { extractLinkTarget, normalizeParentLinkFormat, resolveLinkValueToFile } from './parent-link-format';
 import type { ParentLinkFormat } from '../types';
-import {
-  matchesParentChildIgnoreRule,
-  type ParentChildIgnoreSettings,
-} from '../services/parent-child-ignore-service';
+import type { ParentLinkResolutionService } from '../services/parent-link-resolution-service';
 
 export class ParentLinkHandler {
   private app: App;
   private getSettings: () => any;
+  private getParentLinkResolutionService: () => ParentLinkResolutionService;
   private getWorkflowStatusValue: (frontmatter: Record<string, unknown>) => unknown;
 
   constructor(
     app: App,
     getSettings: () => any,
+    getParentLinkResolutionService: () => ParentLinkResolutionService,
     getWorkflowStatusValue: (frontmatter: Record<string, unknown>) => unknown = (
       frontmatter,
     ) => frontmatter.status,
   ) {
     this.app = app;
     this.getSettings = getSettings;
+    this.getParentLinkResolutionService = getParentLinkResolutionService;
     this.getWorkflowStatusValue = getWorkflowStatusValue;
   }
 
@@ -50,13 +50,6 @@ export class ParentLinkHandler {
     return String(value || '').trim().toLowerCase();
   }
 
-  private isIgnoredFrontmatter(frontmatter: Record<string, unknown> | null | undefined): boolean {
-    return matchesParentChildIgnoreRule(
-      frontmatter,
-      this.getSettings() as ParentChildIgnoreSettings,
-    );
-  }
-
   private resolveParentValueToPath(value: any, sourcePath: string): string | null {
     const resolved = resolveLinkValueToFile(this.app, value, sourcePath);
     if (resolved) return resolved.path;
@@ -77,10 +70,8 @@ export class ParentLinkHandler {
   }
 
   async findParentLinkIssues(target: TFile): Promise<ParentLinkIssue[]> {
-    const targetFrontmatter = this.app.metadataCache.getFileCache(target)?.frontmatter as
-      | Record<string, unknown>
-      | undefined;
-    if (this.isIgnoredFrontmatter(targetFrontmatter)) return [];
+    const relationshipService = this.getParentLinkResolutionService();
+    if (relationshipService.isIgnoredFile(target)) return [];
     const key = this.normalizeParentKey();
     const configuredCompletionStatuses = this.getSettings().parentCompletionStatuses;
     const completionStatuses = Array.isArray(configuredCompletionStatuses)
@@ -89,14 +80,14 @@ export class ParentLinkHandler {
     const completionSet = new Set(completionStatuses.map((s: string) => this.normalizeStatusValue(s)));
 
     const issues: ParentLinkIssue[] = [];
-    const files = this.app.vault.getMarkdownFiles();
+    const files = relationshipService.getRelationshipCandidates({ includeIgnored: true });
     for (const file of files) {
       if (file.path === target.path) continue;
-      const cache = this.app.metadataCache.getFileCache(file);
-      const fm = (cache?.frontmatter || {}) as Record<string, unknown>;
-      if (this.isIgnoredFrontmatter(fm)) continue;
-      if (!(key in fm)) continue;
-      const raw = fm[key];
+      if (relationshipService.isIgnoredFile(file)) continue;
+      const fm = relationshipService.getLogicalFrontmatter(file);
+      const actualKey = Object.keys(fm).find((candidate) => candidate.toLowerCase() === key.toLowerCase());
+      if (!actualKey) continue;
+      const raw = fm[actualKey];
       const values = Array.isArray(raw) ? raw : [raw];
       const matches = values.some((val: any) => this.parentValueMatchesTarget(val, file.path, target));
       if (!matches) continue;

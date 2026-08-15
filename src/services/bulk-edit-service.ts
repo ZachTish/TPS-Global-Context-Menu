@@ -67,6 +67,7 @@ export class BulkEditService {
         this.parentLinkHandler = new ParentLinkHandler(
             plugin.app,
             () => plugin.settings,
+            () => plugin.parentLinkResolutionService,
             (frontmatter) => this.getWorkflowStatusValue(frontmatter),
         );
     }
@@ -958,7 +959,10 @@ export class BulkEditService {
             try {
                 if (options.writeGuard?.(file) === false) return;
                 const extension = file.extension?.toLowerCase();
-                if (extension !== 'md' && !this.plugin.canvasPropertiesService?.isCanvasFile(file)) {
+                if (
+                    this.plugin.filePropertiesService?.isCompanionFile(file)
+                    || (extension !== 'md' && !this.plugin.filePropertiesService?.isPropertyTarget(file))
+                ) {
                     skippedUnsupported++;
                     return;
                 }
@@ -1038,7 +1042,8 @@ export class BulkEditService {
             this.plugin.settings.checkOpenChecklistItems &&
             hasStatusUpdate &&
             this.isChecklistCompletionStatus(statusUpdateValue) &&
-            files.length === 1
+            files.length === 1 &&
+            files[0].extension?.toLowerCase() === 'md'
         ) {
             const canProceed = await this.checklistHandler.handleChecklistCompletion(
                 files[0],
@@ -1191,7 +1196,8 @@ export class BulkEditService {
         if (
             this.plugin.settings.checkParentLinkStatuses &&
             this.parentLinkHandler.isCompletionStatus(status) &&
-            files.length === 1
+            files.length === 1 &&
+            this.plugin.parentLinkResolutionService.isRelationshipTarget(files[0])
         ) {
             const canProceed = await this.parentLinkHandler.handleParentLinkCompletion(
                 files[0],
@@ -1206,7 +1212,8 @@ export class BulkEditService {
         if (
             this.plugin.settings.checkOpenChecklistItems &&
             this.isChecklistCompletionStatus(status) &&
-            files.length === 1
+            files.length === 1 &&
+            files[0].extension?.toLowerCase() === 'md'
         ) {
             const canProceed = await this.checklistHandler.handleChecklistCompletion(
                 files[0],
@@ -1416,8 +1423,12 @@ export class BulkEditService {
 
         await runInBatches(files, async (file) => {
             try {
-                if (file.extension?.toLowerCase() !== 'md') return;
-                if (!(await this.canMutateFrontmatterSafely(file))) return;
+                const isMarkdown = file.extension?.toLowerCase() === 'md';
+                if (
+                    this.plugin.filePropertiesService?.isCompanionFile(file)
+                    || (!isMarkdown && !this.plugin.filePropertiesService?.isPropertyTarget(file))
+                ) return;
+                if (isMarkdown && !(await this.canMutateFrontmatterSafely(file))) return;
 
                 this.plugin.recurrenceService?.markFileAsModified(file.path);
 
@@ -1459,14 +1470,16 @@ export class BulkEditService {
                 });
 
                 let bodyChanged = false;
-                await this.runSerializedFrontmatterWrite(file, async () => {
-                    const content = await this.plugin.app.vault.read(file);
-                    const nextContent = removeInlineTagsSafely(content, normalizedTags);
-                    if (nextContent !== content) {
-                        await this.plugin.app.vault.modify(file, nextContent);
-                        bodyChanged = true;
-                    }
-                });
+                if (isMarkdown) {
+                    await this.runSerializedFrontmatterWrite(file, async () => {
+                        const content = await this.plugin.app.vault.read(file);
+                        const nextContent = removeInlineTagsSafely(content, normalizedTags);
+                        if (nextContent !== content) {
+                            await this.plugin.app.vault.modify(file, nextContent);
+                            bodyChanged = true;
+                        }
+                    });
+                }
 
                 if (frontmatterChanged || bodyChanged) {
                     updatedFiles.push(file);
@@ -1491,6 +1504,7 @@ export class BulkEditService {
     }
 
     async setRecurrence(files: TFile[], rule: string | null, endsOn?: string | null): Promise<number> {
+        files = files.filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file));
         const normalizedRule = this.normalizeRecurrenceRuleValue(rule);
         const hasTemplateFolder = !!(this.plugin.settings.recurringTemplateFolder || '').trim();
 
@@ -1551,6 +1565,7 @@ export class BulkEditService {
     }
 
     private async applyRecurrenceDirectly(file: TFile, rule: string, endsOn: string | null): Promise<boolean> {
+        if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
         if (!(await this.canMutateFrontmatterSafely(file))) return false;
         await this.runSerializedFrontmatterWrite(file, async () => {
             await this.plugin.frontmatterMutationService.process(file, (fmw) => {
@@ -1570,6 +1585,7 @@ export class BulkEditService {
 
     private async setRecurrenceUsingSeriesTemplate(file: TFile, rule: string, endsOn: string | null): Promise<boolean> {
         if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return false;
+        if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
 
         const cache = this.plugin.app.metadataCache.getFileCache(file);
         const fm = cache?.frontmatter || {};
@@ -1627,6 +1643,7 @@ export class BulkEditService {
         rule: string,
         endsOn: string | null,
     ): Promise<TFile | null> {
+        if (this.plugin.filePropertiesService?.isCompanionFile(file)) return null;
         const templateFolder = normalizePath((this.plugin.settings.recurringTemplateFolder || '').trim());
         if (!templateFolder) return null;
 
@@ -1688,6 +1705,7 @@ export class BulkEditService {
         if (!templateFolder) return;
 
         for (const file of files) {
+            if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
             try {
                 const cache = this.plugin.app.metadataCache.getFileCache(file);
                 const fm = cache?.frontmatter;
@@ -1878,6 +1896,7 @@ export class BulkEditService {
     }
 
     private async bootstrapTemplateInstanceFromToday(templateFile: TFile, frontmatter: any): Promise<boolean> {
+        if (this.plugin.filePropertiesService?.isCompanionFile(templateFile)) return false;
         const recurrenceRule = frontmatter?.recurrenceRule || frontmatter?.recurrence;
         if (!recurrenceRule) return false;
 
@@ -1886,6 +1905,7 @@ export class BulkEditService {
 
         const existingInstances = this.plugin.app.vault.getMarkdownFiles().filter((candidate) => {
             if (candidate.path === templateFile.path) return false;
+            if (this.plugin.filePropertiesService?.isCompanionFile(candidate)) return false;
             const cache = this.plugin.app.metadataCache.getFileCache(candidate);
             const fm = cache?.frontmatter;
             if (!fm || this.isRecurrenceTemplateFrontmatter(fm)) return false;
@@ -1956,6 +1976,7 @@ export class BulkEditService {
     }
 
     async createNextRecurrenceInstance(file: TFile, frontmatter: any, carryStatus?: string | null): Promise<boolean> {
+        if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
         if (this.recurrenceCreationInProgress.has(file.path)) {
             logger.warn('[TPS GCM] Recurrence creation already in progress:', file.path);
             return true;
@@ -2171,6 +2192,7 @@ export class BulkEditService {
      * color, dateCreated, dateModified, and the template meta-fields are never touched.
      */
     async applyTemplateToOpenInstances(templateFile: TFile): Promise<number> {
+        if (this.plugin.filePropertiesService?.isCompanionFile(templateFile)) return 0;
         const templateCache = this.plugin.app.metadataCache.getFileCache(templateFile);
         const templateFm = templateCache?.frontmatter;
         if (!templateFm) return 0;
@@ -2209,6 +2231,7 @@ export class BulkEditService {
         const openInstances: TFile[] = [];
         for (const file of this.plugin.app.vault.getMarkdownFiles()) {
             if (file.path === templateFile.path) continue;
+            if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
 
             const cache = this.plugin.app.metadataCache.getFileCache(file);
             const fm = cache?.frontmatter;
@@ -2243,7 +2266,8 @@ export class BulkEditService {
 
         this.checkMissingRecurrencesRunning = true;
         try {
-            const files = this.plugin.app.vault.getMarkdownFiles();
+            const files = this.plugin.app.vault.getMarkdownFiles()
+                .filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file));
             let createdCount = 0;
 
             const recurrenceStatuses = (Array.isArray(this.plugin.settings.recurrenceCompletionStatuses)
@@ -2436,9 +2460,11 @@ export class BulkEditService {
     }
 
     private getInheritableParentTags(parentFile: TFile): string[] {
-        const cache = this.plugin.app.metadataCache.getFileCache(parentFile);
-        const frontmatter = (cache?.frontmatter || {}) as Record<string, any>;
-        const parentTags = parseTagInput([frontmatter.tags, frontmatter.tag]);
+        const frontmatter = this.plugin.parentLinkResolutionService.getLogicalFrontmatter(parentFile);
+        const parentTags = parseTagInput([
+            this.getFrontmatterValueCaseInsensitive(frontmatter, 'tags'),
+            this.getFrontmatterValueCaseInsensitive(frontmatter, 'tag'),
+        ]);
         const ignored = new Set(
             (this.plugin.settings.ignoredSubitemTags || [])
                 .map((tag) => String(tag || '').trim().replace(/^#/, '').toLowerCase())
@@ -2455,17 +2481,21 @@ export class BulkEditService {
         const uniqueChildren = Array.from(
             new Map(
                 childFiles
-                    .filter((file): file is TFile => file instanceof TFile && file.extension?.toLowerCase() === 'md')
+                    .filter((file): file is TFile => (
+                        this.plugin.parentLinkResolutionService.isRelationshipTarget(file)
+                        && !this.plugin.parentLinkResolutionService.isIgnoredFile(file)
+                    ))
                     .map((file) => [file.path, file]),
             ).values(),
         );
 
         await runInBatches(uniqueChildren, async (childFile) => {
             try {
-                if (!(await this.canMutateFrontmatterSafely(childFile))) return;
+                const isMarkdown = childFile.extension?.toLowerCase() === 'md';
+                if (isMarkdown && !(await this.canMutateFrontmatterSafely(childFile))) return;
 
                 let didChange = false;
-                await this.runSerializedFrontmatterWrite(childFile, async () => {
+                const mergeTags = async () => {
                     await this.plugin.frontmatterMutationService.process(childFile, (fm) => {
                         if (!fm || typeof fm !== 'object') return;
 
@@ -2482,7 +2512,12 @@ export class BulkEditService {
                         this.setFrontmatterValueCaseInsensitive(fm, 'tags', mergedTags);
                         didChange = true;
                     });
-                });
+                };
+                if (isMarkdown) {
+                    await this.runSerializedFrontmatterWrite(childFile, mergeTags);
+                } else {
+                    await mergeTags();
+                }
 
                 if (didChange) updatedFiles.push(childFile);
             } catch (error) {
@@ -2837,8 +2872,9 @@ export class BulkEditService {
     }
 
     /**
-     * Scans all vault markdown files and removes stale parent/child/attachment links
-     * that pointed to the given deleted file. Called from the vault delete handler.
+     * Scans every logical property target and removes stale
+     * parent/child/attachment links that pointed to the deleted file. Markdown
+     * body links remain a Markdown-only cleanup surface.
      */
     async cleanupLinksForDeletedFile(deletedPath: string): Promise<{
         scannedFiles: number;
@@ -2869,8 +2905,15 @@ export class BulkEditService {
         preservedAmbiguousReferences: number;
     }> {
         const parentKey = String(this.plugin.settings.parentLinkFrontmatterKey || 'childOf').trim() || 'childOf';
+        const parentKeys = Array.from(new Set([parentKey, 'parents', 'parent', 'childOf'].map((key) => key.toLowerCase())));
         const attachmentsKey = 'attachments';
-        const files = this.plugin.app.vault.getMarkdownFiles();
+        const normalizedDeletedPath = normalizePath(deletedPath).toLowerCase();
+        const files = this.plugin.parentLinkResolutionService
+            .getRelationshipCandidates({ includeIgnored: true })
+            .filter((file) => (
+                normalizePath(file.path).toLowerCase() !== normalizedDeletedPath
+                && !this.plugin.filePropertiesService?.isCompanionFile(file)
+            ));
         const matchContext = createDeletedMarkdownLinkContext(deletedPath, files.map((file) => file.path));
         const emptyResult = {
             scannedFiles: files.length,
@@ -2887,7 +2930,15 @@ export class BulkEditService {
 
         const isMatch = (linkValue: unknown, sourcePath: string, pendingRemovedReferences: Set<string>): boolean => {
             const resolvedFile = resolveLinkValueToFile(this.plugin.app, linkValue, sourcePath);
-            if (resolvedFile && this.plugin.app.vault.getAbstractFileByPath(resolvedFile.path) instanceof TFile) return false;
+            const liveResolvedFile = resolvedFile
+                ? this.plugin.app.vault.getAbstractFileByPath(resolvedFile.path)
+                : null;
+            if (
+                liveResolvedFile instanceof TFile
+                && normalizePath(resolvedFile.path).toLowerCase() !== normalizedDeletedPath
+            ) {
+                return false;
+            }
             const decision = classifyDeletedMarkdownLink(linkValue, sourcePath, matchContext);
             const referenceKey = `${sourcePath}\n${String(linkValue ?? '')}`;
             if (decision === 'ambiguous') {
@@ -2908,9 +2959,8 @@ export class BulkEditService {
         });
         const touchedFiles: TFile[] = [];
         for (const file of files) {
-            const cache = this.plugin.app.metadataCache.getFileCache(file);
-            const fm = cache?.frontmatter;
-            const hasPk = !!fm && Object.keys(fm).some(k => k.toLowerCase() === parentKey.toLowerCase());
+            const fm = this.plugin.parentLinkResolutionService.getLogicalFrontmatter(file);
+            const hasPk = Object.keys(fm).some((key) => parentKeys.includes(key.toLowerCase()));
             const hasAk = !!fm && Object.keys(fm).some(k => k.toLowerCase() === attachmentsKey.toLowerCase());
             let frontmatterChanged = false;
             const frontmatterRemovedReferences = new Set<string>();
@@ -2918,11 +2968,18 @@ export class BulkEditService {
             if (hasPk || hasAk) {
                 try {
                     await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
-                        // Clean childOf (single parent ref)
-                        const pk = Object.keys(frontmatter).find(k => k.toLowerCase() === parentKey.toLowerCase());
-                        if (pk && isMatch(frontmatter[pk], file.path, frontmatterRemovedReferences)) {
-                            delete frontmatter[pk];
+                        // Parent fields may be scalar or arrays. Remove only the
+                        // deleted member and preserve unrelated parents.
+                        for (const configuredParentKey of parentKeys) {
+                            const pk = Object.keys(frontmatter).find((key) => key.toLowerCase() === configuredParentKey);
+                            if (!pk) continue;
+                            const raw = frontmatter[pk];
+                            const values = Array.isArray(raw) ? raw : (raw != null ? [raw] : []);
+                            const filtered = values.filter((value) => !isMatch(value, file.path, frontmatterRemovedReferences));
+                            if (filtered.length === values.length) continue;
                             frontmatterChanged = true;
+                            if (filtered.length === 0) delete frontmatter[pk];
+                            else frontmatter[pk] = Array.isArray(raw) ? filtered : filtered[0];
                         }
 
                         // Clean attachments array
@@ -2945,6 +3002,10 @@ export class BulkEditService {
             }
 
             let bodyChanged = false;
+            if (file.extension?.toLowerCase() !== 'md') {
+                if (frontmatterChanged) touchedFiles.push(file);
+                continue;
+            }
             try {
                 const raw = await this.plugin.app.vault.cachedRead(file);
                 const lines = raw.split('\n');

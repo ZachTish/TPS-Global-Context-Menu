@@ -23,6 +23,7 @@ export class IdentityMigrationService {
 
     for (const file of this.plugin.app.vault.getMarkdownFiles()) {
       if (!(file instanceof TFile) || file.extension !== 'md') continue;
+      if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
       if (this.shouldSkipFile(file)) continue;
       scanned += 1;
 

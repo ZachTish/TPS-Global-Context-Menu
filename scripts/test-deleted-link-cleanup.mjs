@@ -4,6 +4,23 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import * as esbuild from "esbuild";
+import ts from "typescript";
+
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+
+function extractMethod(source, methodName, sourcePath) {
+  const sourceFile = ts.createSourceFile(sourcePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let method = null;
+  const visit = (node) => {
+    if (ts.isMethodDeclaration(node) && node.name?.getText(sourceFile) === methodName) {
+      method = node.getText(sourceFile);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  assert.ok(method, `Missing ${methodName} in ${sourcePath}`);
+  return method;
+}
 
 async function importMatcher() {
   const build = await esbuild.build({
@@ -14,6 +31,162 @@ async function importMatcher() {
     write: false,
   });
   return import(`data:text/javascript;base64,${Buffer.from(build.outputFiles[0].text).toString("base64")}`);
+}
+
+async function importCleanupHarness() {
+  const sourcePath = fileURLToPath(new URL("../src/services/bulk-edit-service.ts", import.meta.url));
+  const source = readFileSync(sourcePath, "utf8");
+  const cleanupMethod = extractMethod(source, "cleanupLinksForDeletedFile", sourcePath);
+  const runMethod = extractMethod(source, "runDeletedLinkCleanup", sourcePath);
+  const virtualSource = `
+    import {
+      classifyDeletedMarkdownLink,
+      createDeletedMarkdownLinkContext,
+    } from './src/utils/deleted-link-cleanup.ts';
+
+    export class TFile {
+      constructor(path) {
+        this.path = path;
+        this.name = path.split('/').pop() || path;
+        this.basename = this.name.replace(/\\.[^.]+$/u, '');
+        this.extension = this.name.includes('.') ? this.name.split('.').pop().toLowerCase() : '';
+        this.stat = { ctime: 1, mtime: 1, size: 0 };
+      }
+    }
+
+    function extractTarget(value) {
+      const raw = String(value ?? '').trim();
+      const wiki = raw.match(/^!?\\[\\[([^\\]]+)\\]\\]$/u);
+      const markdown = raw.match(/^!?\\[[^\\]]*\\]\\(([^)]+)\\)$/u);
+      return String(wiki?.[1] ?? markdown?.[1] ?? raw).split('|')[0].split('#')[0].trim();
+    }
+
+    function resolveLinkValueToFile(app, value) {
+      const target = extractTarget(value);
+      return app.metadataCache?.getFirstLinkpathDest?.(target)
+        ?? app.vault.getAbstractFileByPath(target)
+        ?? app.vault.getAbstractFileByPath(target.endsWith('.md') ? target : \`\${target}.md\`)
+        ?? null;
+    }
+
+    const logger = {
+      flow: () => undefined,
+      flowWarn: () => undefined,
+      warn: () => undefined,
+    };
+    const normalizePath = (value) => String(value ?? '').replace(/\\\\/gu, '/').replace(/^\\/+|\\/+$/gu, '');
+    const setTimeout = (callback) => { callback(); return 0; };
+
+    export class DeletedLinkCleanupHarness {
+      plugin;
+      deletedLinkCleanupChain = Promise.resolve();
+      deletedLinkCleanupPending = 0;
+      notifiedPaths = [];
+
+      constructor(plugin) { this.plugin = plugin; }
+      notifyFilesChanged(files) { this.notifiedPaths.push(...files.map((file) => file.path)); }
+      ${cleanupMethod}
+      ${runMethod}
+    }
+  `;
+  const result = await esbuild.build({
+    stdin: {
+      contents: virtualSource,
+      resolveDir: repoRoot,
+      sourcefile: "deleted-link-cleanup-harness.ts",
+      loader: "ts",
+    },
+    bundle: true,
+    format: "esm",
+    platform: "node",
+    write: false,
+    logLevel: "silent",
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString("base64")}`);
+}
+
+function createFixture(TFile, definitions, options = {}) {
+  const files = definitions.map(({ path }) => new TFile(path));
+  const byPath = new Map(files.map((file) => [file.path, file]));
+  const logicalFrontmatter = new Map(definitions.map(({ path, frontmatter = {} }) => [path, structuredClone(frontmatter)]));
+  const bodies = new Map(definitions.map(({ path, body = "" }) => [path, body]));
+  const relationshipCandidates = definitions
+    .filter(({ relationshipTarget = true }) => relationshipTarget)
+    .map(({ path }) => byPath.get(path));
+  const includeIgnoredCalls = [];
+  const mutatedPaths = [];
+  const readPaths = [];
+  const processedBodyPaths = [];
+  const refreshedPaths = [];
+
+  const plugin = {
+    settings: { parentLinkFrontmatterKey: "childOf" },
+    app: {
+      vault: {
+        getAbstractFileByPath: (path) => byPath.get(path) ?? null,
+        cachedRead: async (file) => {
+          readPaths.push(file.path);
+          if (file.extension !== "md") throw new Error(`Tried to read binary body: ${file.path}`);
+          return bodies.get(file.path) ?? "";
+        },
+        process: async (file, mutator) => {
+          processedBodyPaths.push(file.path);
+          const current = bodies.get(file.path) ?? "";
+          const next = await mutator(current);
+          bodies.set(file.path, next);
+        },
+      },
+      metadataCache: {
+        getFirstLinkpathDest: (target) => {
+          const destination = options.linkDestinations?.[target];
+          return destination ? byPath.get(destination) ?? null : null;
+        },
+      },
+    },
+    parentLinkResolutionService: {
+      getRelationshipCandidates: (options) => {
+        includeIgnoredCalls.push(options?.includeIgnored === true);
+        return relationshipCandidates;
+      },
+      getLogicalFrontmatter: (file) => logicalFrontmatter.get(file.path) ?? {},
+    },
+    filePropertiesService: {
+      isCompanionFile: (file) => file.path.startsWith("_assets/TPS File Properties/"),
+    },
+    frontmatterMutationService: {
+      process: async (file, mutator) => {
+        const current = logicalFrontmatter.get(file.path) ?? {};
+        const before = JSON.stringify(current);
+        await mutator(current);
+        logicalFrontmatter.set(file.path, current);
+        const changed = JSON.stringify(current) !== before;
+        if (changed) mutatedPaths.push(file.path);
+        return changed;
+      },
+    },
+    bodySubitemLinkService: {
+      parseLine: (line) => {
+        const match = line.match(/\[\[([^\]]+)\]\]/u);
+        if (!match) return null;
+        return { linkTarget: `[[${match[1]}]]`, wikilink: `[[${match[1]}]]` };
+      },
+    },
+    persistentMenuManager: {
+      refreshMenusForFile: (file) => refreshedPaths.push(file.path),
+    },
+  };
+
+  return {
+    plugin,
+    byPath,
+    logicalFrontmatter,
+    bodies,
+    includeIgnoredCalls,
+    mutatedPaths,
+    readPaths,
+    processedBodyPaths,
+    refreshedPaths,
+  };
 }
 
 test("deleted-link cleanup matches canonical full paths with optional extensions", async () => {
@@ -41,18 +214,121 @@ test("deleted-link cleanup preserves ambiguous basename-only links", async () =>
   assert.equal(classifyDeletedMarkdownLink("[[Projects/B/Report]]", "Parents/Index.md", ambiguous), "different");
 });
 
-test("GCM deletion cleanup is serialized and atomically removes body links", () => {
+test("GCM deletion cleanup is serialized, logical-target aware, and atomically removes Markdown body links", () => {
   const eventSource = readFileSync(new URL("../src/events/register-events.ts", import.meta.url), "utf8");
   const bulkSource = readFileSync(new URL("../src/services/bulk-edit-service.ts", import.meta.url), "utf8");
-  assert.match(eventSource, /cleanupLinksForDeletedFile\(file\.path\)\.catch/);
+  const runSource = extractMethod(bulkSource, "runDeletedLinkCleanup", "bulk-edit-service.ts");
+  assert.match(eventSource, /if \(!deletedCompanion && file instanceof TFile\) \{[\s\S]{0,300}cleanupLinksForDeletedFile\(file\.path\)\.catch/u);
   assert.match(bulkSource, /private deletedLinkCleanupChain: Promise<void> = Promise\.resolve\(\)/);
   assert.match(bulkSource, /\.then\(\(\) => this\.runDeletedLinkCleanup\(deletedPath\)\)/);
   assert.match(bulkSource, /logger\.flow\('DeletedLinkCleanup', 'queued', \{ deletedPath, queuedBehind \}\)/);
-  assert.match(bulkSource, /classifyDeletedMarkdownLink\(linkValue, sourcePath, matchContext\)/);
-  assert.match(bulkSource, /resolveLinkValueToFile\(this\.plugin\.app, linkValue, sourcePath\)/);
-  assert.match(bulkSource, /if \(preflight\.length !== lines\.length\) \{[\s\S]*?vault\.process\(file, \(current\) =>/);
-  assert.doesNotMatch(bulkSource, /vault\.modify\(file, filtered\.join\('\\n'\)\)/);
+  assert.match(runSource, /getRelationshipCandidates\(\{ includeIgnored: true \}\)/u);
+  assert.match(runSource, /normalizePath\(file\.path\)\.toLowerCase\(\) !== normalizedDeletedPath[\s\S]{0,120}!this\.plugin\.filePropertiesService\?\.isCompanionFile\(file\)/u);
+  assert.match(runSource, /getLogicalFrontmatter\(file\)/u);
+  assert.match(runSource, /frontmatterMutationService\.process\(file,/u);
+  assert.match(runSource, /const values = Array\.isArray\(raw\) \? raw : \(raw != null \? \[raw\] : \[\]\)/u);
+  assert.match(runSource, /if \(file\.extension\?\.toLowerCase\(\) !== 'md'\)/u);
+  assert.doesNotMatch(runSource, /getMarkdownFiles\(\)/u);
+  assert.match(runSource, /classifyDeletedMarkdownLink\(linkValue, sourcePath, matchContext\)/);
+  assert.match(runSource, /if \(preflight\.length !== lines\.length\) \{[\s\S]*?vault\.process\(file, \(current\) =>/);
+  assert.doesNotMatch(runSource, /vault\.modify\(file, filtered\.join\('\\n'\)\)/);
   assert.match(bulkSource, /logger\.flow\('DeletedLinkCleanup', 'done'/);
   assert.match(bulkSource, /preservedAmbiguousReferences/);
   assert.doesNotMatch(bulkSource, /target === deletedBasename/);
+});
+
+test("deleting a Markdown parent unlinks a PDF child even after an unrelated same-path recreation", async () => {
+  const { DeletedLinkCleanupHarness, TFile } = await importCleanupHarness();
+  const fixture = createFixture(TFile, [
+    { path: "Parents/Archive.md", frontmatter: { title: "Unrelated replacement" } },
+    { path: "Parents/Keep.md" },
+    {
+      path: "Reference/Child.pdf",
+      frontmatter: {
+        relationshipMode: "ignore",
+        childOf: ["[[Parents/Archive]]", "[[Parents/Keep]]"],
+      },
+    },
+    {
+      path: "_assets/TPS File Properties/Reference/Child.pdf.md",
+      frontmatter: { childOf: ["[[Parents/Archive]]"] },
+    },
+  ]);
+  const service = new DeletedLinkCleanupHarness(fixture.plugin);
+
+  const result = await service.cleanupLinksForDeletedFile("Parents/Archive.md");
+
+  assert.deepEqual(fixture.includeIgnoredCalls, [true]);
+  assert.deepEqual(fixture.logicalFrontmatter.get("Reference/Child.pdf"), {
+    relationshipMode: "ignore",
+    childOf: ["[[Parents/Keep]]"],
+  });
+  assert.deepEqual(fixture.logicalFrontmatter.get("Parents/Archive.md"), { title: "Unrelated replacement" });
+  assert.equal(fixture.mutatedPaths.includes("Parents/Archive.md"), false, "the same-path replacement is excluded from cleanup");
+  assert.equal(fixture.mutatedPaths.some((path) => path.startsWith("_assets/TPS File Properties/")), false);
+  assert.equal(fixture.readPaths.includes("Reference/Child.pdf"), false, "PDF bodies are never scanned");
+  assert.deepEqual(service.notifiedPaths, ["Reference/Child.pdf"]);
+  assert.equal(result.touchedFiles, 1);
+});
+
+test("deleting a PDF parent unlinks Markdown and PDF children while preserving other array members", async () => {
+  const { DeletedLinkCleanupHarness, TFile } = await importCleanupHarness();
+  const fixture = createFixture(TFile, [
+    { path: "Assets/Keep.pdf" },
+    {
+      path: "Notes/Markdown Child.md",
+      frontmatter: { parents: ["[[Assets/Source.pdf]]", "[[Assets/Keep.pdf]]"] },
+      body: "- [ ] [[Assets/Source.pdf]]\n- [ ] [[Assets/Keep.pdf]]",
+    },
+    {
+      path: "Documents/PDF Child.pdf",
+      frontmatter: { childOf: ["[[Assets/Source.pdf]]", "[[Assets/Keep.pdf]]"] },
+    },
+    {
+      path: "_assets/TPS File Properties/Documents/PDF Child.pdf.md",
+      frontmatter: { childOf: ["[[Assets/Source.pdf]]"] },
+    },
+  ]);
+  const service = new DeletedLinkCleanupHarness(fixture.plugin);
+
+  const result = await service.cleanupLinksForDeletedFile("Assets/Source.pdf");
+
+  assert.deepEqual(fixture.includeIgnoredCalls, [true]);
+  assert.deepEqual(fixture.logicalFrontmatter.get("Notes/Markdown Child.md"), {
+    parents: ["[[Assets/Keep.pdf]]"],
+  });
+  assert.deepEqual(fixture.logicalFrontmatter.get("Documents/PDF Child.pdf"), {
+    childOf: ["[[Assets/Keep.pdf]]"],
+  });
+  assert.equal(fixture.bodies.get("Notes/Markdown Child.md"), "- [ ] [[Assets/Keep.pdf]]");
+  assert.deepEqual(fixture.readPaths, ["Notes/Markdown Child.md"]);
+  assert.deepEqual(fixture.processedBodyPaths, ["Notes/Markdown Child.md"]);
+  assert.equal(fixture.readPaths.includes("Documents/PDF Child.pdf"), false);
+  assert.equal(fixture.mutatedPaths.some((path) => path.startsWith("_assets/TPS File Properties/")), false);
+  assert.deepEqual(new Set(service.notifiedPaths), new Set(["Notes/Markdown Child.md", "Documents/PDF Child.pdf"]));
+  assert.equal(result.touchedFiles, 2);
+});
+
+test("cleanup preserves an explicit suffix link that resolves to a different live logical target", async () => {
+  const { DeletedLinkCleanupHarness, TFile } = await importCleanupHarness();
+  const fixture = createFixture(TFile, [
+    { path: "Archive/A/Report.pdf" },
+    {
+      path: "Reference/Child.pdf",
+      frontmatter: { childOf: ["[[A/Report.pdf]]"] },
+    },
+  ], {
+    linkDestinations: { "A/Report.pdf": "Archive/A/Report.pdf" },
+  });
+  const service = new DeletedLinkCleanupHarness(fixture.plugin);
+
+  const result = await service.cleanupLinksForDeletedFile("Projects/A/Report.pdf");
+
+  assert.deepEqual(fixture.logicalFrontmatter.get("Reference/Child.pdf"), {
+    childOf: ["[[A/Report.pdf]]"],
+  });
+  assert.deepEqual(fixture.mutatedPaths, []);
+  assert.deepEqual(service.notifiedPaths, []);
+  assert.equal(result.touchedFiles, 0);
+  assert.equal(result.removedReferences, 0);
 });

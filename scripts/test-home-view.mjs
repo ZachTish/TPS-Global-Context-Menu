@@ -75,7 +75,21 @@ async function loadFileSuggestModal() {
             export class TFile {
               constructor(path, extension) { this.path = path; this.extension = extension; }
             }
+            export class TFolder {
+              constructor(path = '') {
+                this.path = path;
+                this.name = String(path).split('/').pop() || '';
+                this.children = [];
+              }
+            }
             export class Notice {}
+            export function normalizePath(value) {
+              return String(value ?? '').replace(/\\\\/g, '/').replace(/^\\/+|\\/+$/g, '');
+            }
+            export function parseYaml(value) {
+              try { return JSON.parse(String(value || '{}')); } catch { return {}; }
+            }
+            export function stringifyYaml(value) { return JSON.stringify(value ?? {}); }
             globalThis.__homeFileSuggestTestTFile = TFile;
           `,
         }));
@@ -638,7 +652,10 @@ test('Home Base selection uses the exact lowercase extension supported by Calend
     new TestTFile('Unsupported.BASE', 'BASE'),
     new TestTFile('Note.md', 'md'),
   ];
-  const app = { vault: { getAllLoadedFiles: () => files } };
+  const app = {
+    vault: { getAllLoadedFiles: () => files },
+    metadataCache: { getFileCache: () => null },
+  };
 
   const legacy = new FileSuggestModal(app, () => {}, { extensions: ['base'] });
   assert.deepEqual(legacy.getItems().map((file) => file.path), ['Supported.base', 'Unsupported.BASE']);

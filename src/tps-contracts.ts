@@ -9,6 +9,7 @@ export const TPS_EVENTS = {
   GCM_API_REQUEST: "tps:gcm-api-request",
   GCM_API_CHANGED: "tps:gcm-api-changed",
   GCM_EXPLICIT_ACTION: "tps:gcm-explicit-action",
+  GCM_FILE_PROPERTIES_UPDATED: "tps:gcm-file-properties-updated",
   CALENDAR_EXPLICIT_REFRESH: "tps:calendar-explicit-refresh",
 } as const;
 
@@ -43,6 +44,7 @@ export interface TPSGcmApiChangedPayload extends TPSEventPayload {
   taskCheckboxesVersion: number | null;
   tasksVersion: number | null;
   itemHistoryVersion: number | null;
+  filePropertiesVersion: number | null;
   api: unknown | null;
 }
 

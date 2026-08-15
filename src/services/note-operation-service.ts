@@ -68,6 +68,7 @@ export class NoteOperationService {
         const scheduledFiles: TFile[] = [];
         for (const file of this.app.vault.getMarkdownFiles()) {
             if (file.path === dailyNote.path) continue;
+            if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
             const cache = this.app.metadataCache.getFileCache(file);
             const fm = cache?.frontmatter;
             if (!fm) continue;
@@ -118,6 +119,8 @@ export class NoteOperationService {
             }
 
             // Fuzzy Picker to choose target note
+            const isCompanionFile = (file: TFile): boolean =>
+                this.plugin.filePropertiesService?.isCompanionFile(file) === true;
             const picker = await new Promise<TFile | null>((resolve) => {
                 let settled = false;
                 const finish = (val: TFile | null) => {
@@ -133,7 +136,7 @@ export class NoteOperationService {
                     }
 
                     getItems(): TFile[] {
-                        return this.app.vault.getMarkdownFiles();
+                        return this.app.vault.getMarkdownFiles().filter((file) => !isCompanionFile(file));
                     }
 
                     getItemText(file: TFile): string {
@@ -316,7 +319,9 @@ export class NoteOperationService {
 
     async convertNotesToCanvases(files: TFile[], options: NoteToCanvasOptions = {}): Promise<TFile[]> {
         const sourceFiles = files.filter((file): file is TFile =>
-            file instanceof TFile && file.extension?.toLowerCase() === "md",
+            file instanceof TFile
+            && file.extension?.toLowerCase() === "md"
+            && this.plugin.filePropertiesService?.isCompanionFile(file) !== true,
         );
         if (!sourceFiles.length) {
             new Notice("Select a markdown note first");
@@ -351,6 +356,7 @@ export class NoteOperationService {
 
     async createCanvasFromNote(file: TFile, options: NoteToCanvasOptions = {}): Promise<TFile | null> {
         if (!(file instanceof TFile) || file.extension?.toLowerCase() !== "md") return null;
+        if (this.plugin.filePropertiesService?.isCompanionFile(file)) return null;
 
         const parts = await this.extractNoteParts(file);
         const frontmatter = this.cloneFrontmatterObject(parts.frontmatter || {});
@@ -358,8 +364,20 @@ export class NoteOperationService {
         const body = String(parts.body || "").trim();
         const nodeText = body ? `# ${title}\n\n${body}` : `# ${title}`;
         const targetPath = await this.getUniqueCanvasPathForNote(file, options.outputFolder);
-        const document = this.buildCanvasDocument(frontmatter, nodeText);
+        const document = this.buildCanvasDocument(nodeText);
         const created = await this.app.vault.create(targetPath, `${JSON.stringify(document, null, 2)}\n`);
+        if (Object.keys(frontmatter).length > 0) {
+            try {
+                await this.plugin.filePropertiesService.initializeForConversion(created, frontmatter);
+            } catch (error) {
+                logger.error('[NoteOperationService] Canvas created, but its native property companion could not be initialized', {
+                    canvas: created.path,
+                    source: file.path,
+                    error,
+                });
+                new Notice(`Created ${created.name}, but could not copy its properties.`);
+            }
+        }
         this.plugin.eventService?.emitExplicitAction?.([created.path], { source: "note-to-canvas" });
         this.plugin.eventService?.emitFilesUpdated?.([created.path], { sourcePluginId: this.plugin.manifest.id });
         return created;
@@ -592,7 +610,7 @@ export class NoteOperationService {
         return output.join("\n");
     }
 
-    private buildCanvasDocument(frontmatter: Record<string, unknown>, text: string): Record<string, unknown> {
+    private buildCanvasDocument(text: string): Record<string, unknown> {
         const nodeHeight = Math.max(180, Math.min(520, 120 + Math.ceil(String(text || "").length / 4)));
         return {
             nodes: [
@@ -607,10 +625,6 @@ export class NoteOperationService {
                 },
             ],
             edges: [],
-            metadata: {
-                version: "1.0-1.0",
-                frontmatter,
-            },
         };
     }
 
@@ -715,7 +729,12 @@ export class NoteOperationService {
     private promptTargetNote(sourceFiles: TFile[]): Promise<TFile | null> {
         return new Promise<TFile | null>((resolve) => {
             const excludedPaths = new Set(sourceFiles.map((file) => file.path));
-            new TargetNoteModal(this.app, excludedPaths, resolve).open();
+            new TargetNoteModal(
+                this.app,
+                excludedPaths,
+                (candidate) => this.plugin.filePropertiesService?.isCompanionFile(candidate) === true,
+                resolve,
+            ).open();
         });
     }
 
@@ -866,6 +885,7 @@ export class NoteOperationService {
 
         const exactExisting = this.app.vault.getAbstractFileByPath(path);
         const existingDailyNote = exactExisting instanceof TFile
+            && !this.plugin.filePropertiesService?.isCompanionFile(exactExisting)
             ? exactExisting
             : isoDate
             ? findExistingDailyNoteForIsoDate(this.app, this.plugin.settings, isoDate)
@@ -885,7 +905,7 @@ export class NoteOperationService {
 
         if (await adapter.exists(path)) {
             const existing = this.app.vault.getAbstractFileByPath(path);
-            if (existing instanceof TFile) {
+            if (existing instanceof TFile && !this.plugin.filePropertiesService?.isCompanionFile(existing)) {
                 if (!(await this.finishPendingTemplaterTemplate(existing))) {
                     return null;
                 }
@@ -1487,6 +1507,7 @@ export class NoteOperationService {
         }
 
         const filesToArchive = this.app.vault.getMarkdownFiles().filter((file) => {
+            if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
             if (file.path.startsWith(`${archiveRoot}/`)) return false;
             return this.fileHasArchiveTag(file, archiveTag);
         });
@@ -1546,6 +1567,7 @@ export class NoteOperationService {
             if (excludePaths.has(liveFile.path) || liveFile.extension?.toLowerCase() !== "md") {
                 continue;
             }
+            if (this.plugin.filePropertiesService?.isCompanionFile(liveFile)) continue;
 
             try {
                 await this.plugin.frontmatterMutationService.process(liveFile, (frontmatter: any) => {
@@ -1568,6 +1590,7 @@ class TargetNoteModal extends FuzzySuggestModal<TFile> {
     constructor(
         app: App,
         private readonly excludedPaths: Set<string>,
+        private readonly isExcludedFile: (file: TFile) => boolean,
         private readonly onResolve: (file: TFile | null) => void,
     ) {
         super(app);
@@ -1577,7 +1600,7 @@ class TargetNoteModal extends FuzzySuggestModal<TFile> {
     getItems(): TFile[] {
         return this.app.vault
             .getMarkdownFiles()
-            .filter((file) => !this.excludedPaths.has(file.path));
+            .filter((file) => !this.excludedPaths.has(file.path) && !this.isExcludedFile(file));
     }
 
     getItemText(file: TFile): string {

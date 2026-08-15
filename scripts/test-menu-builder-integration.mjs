@@ -8,13 +8,14 @@ async function loadMenuBuilderModule() {
   const stubs = new Map([
     ["../main", "export default class TPSGlobalContextMenuPlugin {}"],
     ["../modals/text-input-modal", "export class TextInputModal { open() {} }"],
-    ["../modals/FileSuggestModal", "export class FileSuggestModal { open() {} }"],
-    ["../modals/MultiFileSelectModal", "export class MultiFileSelectModal { open() {} }"],
+    ["../modals/FileSuggestModal", "export class FileSuggestModal { constructor(_app, _choose, options) { globalThis.__tpsLatestFileSuggestOptions = options; } open() {} }"],
+    ["../modals/MultiFileSelectModal", "export class MultiFileSelectModal { constructor(_app, _choose, options) { globalThis.__tpsLatestMultiFileOptions = options; } open() {} }"],
+    ["../modals/file-properties-relink-modal", "export const promptFilePropertiesRelink = () => {};"],
     ["../logger", "export const warn = () => {};"],
     ["../resolve-profiles", "export const resolveCustomProperties = (properties) => properties.filter((property) => !property.hidden);"],
     ["../services/view-mode-service", "export class ViewModeService {}"],
     ["../services/link-target-service", "export const parseLinksFromFrontmatterValue = () => [];"],
-    ["../services/subitem-creation-service", "export const promptAndCreateSubitemForParent = async () => {};"],
+    ["../services/subitem-creation-service", "export const promptAndCreateSubitemForParent = async (_plugin, file) => { globalThis.__tpsLatestCreatedChildParentPath = file.path; };"],
     ["../utils/display-title", "export const getPlainDisplayTitle = (value, fallback) => value || fallback;"],
     ["../utils/entity-property", "export const isEntityReferenceProperty = () => false;"],
     ["./property-value-choice-menu", "export const addPropertyValueChoiceMenuItems = () => {};"],
@@ -137,8 +138,24 @@ function createBuilderHarness(MenuBuilder, TFile) {
       getParentsForChild: () => [],
       hasParent: () => false,
       isIgnoredFile: () => false,
+      isRelationshipTarget: (file) => !file.path.startsWith("_assets/TPS File Properties/"),
+      getRelationshipCandidates: () => [...files.values()].filter((file) => (
+        file.extension === "md"
+          ? !file.path.startsWith("_assets/TPS File Properties/")
+          : true
+      )),
     },
     noteTitleRenderService: { getDisplayTitle: (file) => file.basename },
+    filePropertiesService: {
+      isCompanionFile: (file) => file.path.startsWith("_assets/TPS File Properties/"),
+      isPropertyTarget: (file) => file.extension !== "md" && !file.path.startsWith("_assets/TPS File Properties/"),
+      read: (file) => frontmatter.get(file.path) ?? {},
+      hasCompanion: () => false,
+      getRelinkCandidate: () => null,
+      hasRelinkCandidates: () => false,
+      listRelinkCandidates: () => { throw new Error('context-menu construction must not enumerate relink candidates'); },
+      ensureCompanion: async () => null,
+    },
     fieldInitializationService: {
       isFieldDefinedForEntries: () => false,
       checkAndInitialize: async () => false,
@@ -219,18 +236,56 @@ test("note time tracking exposes one inferred-target start action instead of tas
   assert.equal(titles.some((title) => /Track with task|Track with note/u.test(title)), false);
 });
 
-test("the real menu builder keeps non-Markdown single-file capabilities", async () => {
+test("the real menu builder exposes native properties for every non-Markdown file type", async () => {
   const { MenuBuilder, TFile } = await loadMenuBuilderModule();
   const { builder, addFile } = createBuilderHarness(MenuBuilder, TFile);
-  const pdf = addFile("Reference/Guide.pdf", 20);
-  const canvas = addFile("Maps/System.canvas", 30);
+  const targets = [
+    addFile("Reference/Guide.pdf", 20),
+    addFile("Maps/System.canvas", 30),
+    addFile("Views/Projects.base", 31),
+    addFile("Media/Preview.png", 32),
+    addFile("Data/Export.bin", 33),
+  ];
 
-  assert.deepEqual(buildTitles(builder, [pdf], bridgeOptions([pdf])), ["Write on PDF", "Archive"]);
-  const canvasTitles = buildTitles(builder, [canvas], bridgeOptions([canvas]));
-  assert.equal(canvasTitles.some((title) => title.startsWith("Tags")), true);
-  assert.equal(canvasTitles.some((title) => title.startsWith("Categories")), true);
-  assert.equal(canvasTitles.some((title) => title.startsWith("Priority")), true);
-  assert.equal(canvasTitles.includes("Archive"), true);
+  for (const target of targets) {
+    const titles = buildTitles(builder, [target], bridgeOptions([target]));
+    assert.equal(titles.some((title) => title.startsWith("Tags")), true, target.path);
+    assert.equal(titles.some((title) => title.startsWith("Categories")), true, target.path);
+    assert.equal(titles.some((title) => title.startsWith("Priority")), true, target.path);
+    assert.equal(titles.includes("Create file properties note"), true, target.path);
+    assert.equal(titles.includes("Link to Parent"), true, target.path);
+    assert.equal(titles.includes("Link Children"), true, target.path);
+    assert.equal(titles.includes("Embed Attachments"), false, target.path);
+    assert.equal(titles.some((title) => title.startsWith("Convert to ")), false, target.path);
+    assert.equal(titles.includes("Time Tracking"), false, target.path);
+    assert.equal(titles.includes("Archive"), true, target.path);
+  }
+
+  const note = addFile("Notes/Logical parent.md", 33.5);
+  const companion = addFile("_assets/TPS File Properties/Media/Preview.png.md", 34);
+  const companionTitles = buildTitles(builder, [companion], bridgeOptions([companion]));
+  assert.equal(companionTitles.some((title) => title.startsWith("Tags")), false);
+  assert.equal(companionTitles.some((title) => title.startsWith("Priority")), false);
+  assert.equal(companionTitles.includes("Link to Parent"), false);
+
+  const pdfMenu = buildMenu(builder, [targets[0]], bridgeOptions([targets[0]]));
+  const parentMenu = pdfMenu.items.find((item) => item.title === "Link to Parent")?.submenu;
+  assert.ok(parentMenu);
+  parentMenu.items.find((item) => item.title === "Link existing parent...")?.click?.();
+  assert.equal(globalThis.__tpsLatestFileSuggestOptions.includeAllExtensions, true);
+  assert.equal(globalThis.__tpsLatestFileSuggestOptions.candidateFiles.includes(note), true);
+  assert.equal(globalThis.__tpsLatestFileSuggestOptions.candidateFiles.includes(targets[2]), true);
+  assert.equal(globalThis.__tpsLatestFileSuggestOptions.candidateFiles.includes(companion), false);
+
+  const childMenu = pdfMenu.items.find((item) => item.title === "Link Children")?.submenu;
+  assert.ok(childMenu);
+  assert.equal(childMenu.items.some((item) => item.title === "Create new child..."), true);
+  childMenu.items.find((item) => item.title === "Create new child...")?.click?.();
+  assert.equal(globalThis.__tpsLatestCreatedChildParentPath, targets[0].path);
+  childMenu.items.find((item) => item.title === "Link existing child...")?.click?.();
+  assert.equal(globalThis.__tpsLatestMultiFileOptions.candidateFiles.includes(note), true);
+  assert.equal(globalThis.__tpsLatestMultiFileOptions.candidateFiles.includes(targets[1]), true);
+  assert.equal(globalThis.__tpsLatestMultiFileOptions.candidateFiles.includes(companion), false);
 });
 
 test("mixed selections are order-independent and expose only actions valid for every file", async () => {
@@ -241,7 +296,12 @@ test("mixed selections are order-independent and expose only actions valid for e
 
   const forward = buildTitles(builder, [note, pdf], bridgeOptions([note, pdf]));
   const reverse = buildTitles(builder, [pdf, note], bridgeOptions([pdf, note]));
-  assert.deepEqual(forward, ["Archive (2 items)"]);
+  assert.equal(forward.some((title) => title.startsWith("Tags")), true);
+  assert.equal(forward.some((title) => title.startsWith("Categories")), true);
+  assert.equal(forward.some((title) => title.startsWith("Priority")), true);
+  assert.equal(forward.includes("Archive (2 items)"), true);
+  assert.equal(forward.includes("Convert to canvases (2)"), false);
+  assert.equal(forward.includes("Time Tracking"), false);
   assert.deepEqual(reverse, forward);
 });
 

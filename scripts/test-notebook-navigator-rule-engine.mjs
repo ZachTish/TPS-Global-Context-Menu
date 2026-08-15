@@ -52,11 +52,14 @@ async function importBundled(relativePath) {
                 return Boolean(value && typeof value.path === 'string');
               }
             }
+            export class TFolder {}
             export class Notice {}
             export function normalizePath(path) {
               return String(path || '').replace(/\\\\/gu, '/').replace(/\\/+/gu, '/');
             }
             export function setIcon() {}
+            export const parseYaml = (value) => JSON.parse(String(value || '{}'));
+            export const stringifyYaml = (value) => JSON.stringify(value);
             export function moment(value) {
               return globalThis.__ruleTestMoment(value);
             }
@@ -281,6 +284,7 @@ test('note-open visual rules run locally without taking controller-owned sort an
   assert.match(applyBlock, /if \(options\.reason !== 'file-open'\) \{[\s\S]*computeSortKey[\s\S]*applyHideTagMutations/u);
   assert.match(applyBlock, /applyScalarMutation\(frontmatter, iconField/u);
   assert.match(applyBlock, /applyScalarMutation\(frontmatter, colorField/u);
+  assert.match(applyBlock, /kind:\s*'automation'[\s\S]{0,160}surface:\s*'notebook-navigator-rules'/u);
 });
 
 test('zero enabled buckets produce no synthetic sort key', () => {

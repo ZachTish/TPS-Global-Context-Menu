@@ -83,8 +83,9 @@ export class BadgeRenderer {
   }
 
   private isPropertyFile(file: TFile): boolean {
-    const extension = file.extension?.toLowerCase();
-    return extension === 'md' || extension === 'canvas';
+    if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
+    return file.extension?.toLowerCase() === 'md'
+      || this.plugin.filePropertiesService?.isPropertyTarget(file) === true;
   }
 
   private resolveEntryFile(candidate: unknown): TFile | null {

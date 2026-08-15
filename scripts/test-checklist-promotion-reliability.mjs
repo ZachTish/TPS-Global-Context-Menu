@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import { build } from 'esbuild';
@@ -11,6 +12,7 @@ async function importServices() {
     stdin: {
       contents: `
         export { promoteChecklistItemToChild } from './src/plugin-api.ts';
+        export { createSubitemForParentWithTitle } from './src/services/subitem-creation-service.ts';
         export { LinkedSubitemCheckboxService } from './src/services/linked-subitem-checkbox-service.ts';
         export { SubitemRelationshipSyncService } from './src/services/subitem-relationship-sync-service.ts';
         export { Notice, TFile } from 'obsidian';
@@ -162,6 +164,8 @@ function createPromotionHarness(TFile, options = {}) {
     },
     parentLinkResolutionService: {
       getParentKey: () => 'childOf',
+      getLogicalFrontmatter: () => ({}),
+      isRelationshipTarget: () => true,
       isIgnoredFile: () => false,
       isIgnoredFrontmatter: () => false,
     },
@@ -691,6 +695,195 @@ test('checklist promotion authoritatively restores its mapped child status befor
   assert.match(harness.getChildContent('Restore mapped status.md'), /\nstatus: "todo"\n/u);
   assert.equal(harness.counts.statusWrites, 1);
   assert.equal(harness.counts.childDeletes, 0);
+});
+
+test('Markdown-parent linked checkbox commits and verifies PDF and Base child companion status', async () => {
+  const { LinkedSubitemCheckboxService, TFile } = await servicesPromise;
+  const normalize = (value) => String(value ?? '').trim().toLowerCase();
+  for (const extension of ['pdf', 'base']) {
+    const parentFile = new TFile('Parent.md');
+    const childFile = new TFile(`Child.${extension}`);
+    let parentContent = `- [ ] [[${childFile.path}]]`;
+    const childFrontmatter = { taskStatus: 'todo', title: `Child ${extension}` };
+    let authoritativeReads = 0;
+    let sourceReads = 0;
+    const service = Object.create(LinkedSubitemCheckboxService.prototype);
+    service.plugin = {
+      settings: {
+        linkedSubitemCheckboxMappings: [
+          { checkboxState: '[ ]', statuses: ['todo'] },
+          { checkboxState: '[x]', statuses: ['complete'] },
+        ],
+      },
+      app: {
+        vault: {
+          read: async () => {
+            sourceReads += 1;
+            throw new Error('non-Markdown child bytes must not be parsed as YAML');
+          },
+        },
+      },
+      sharedServices: {
+        status: {
+          normalize,
+        },
+      },
+      parentLinkResolutionService: {
+        isIgnoredFile: () => false,
+      },
+      filePropertiesService: {
+        getFrontmatterAsync: async (file) => {
+          assert.equal(file, childFile);
+          authoritativeReads += 1;
+          return structuredClone(childFrontmatter);
+        },
+      },
+      bodySubitemLinkService: {
+        parseLine: (line) => line.includes(childFile.path)
+          ? { linkTarget: childFile.path, wikilink: `[[${childFile.path}]]`, checkboxState: line.includes('[x]') ? '[x]' : '[ ]' }
+          : null,
+      },
+      subitemRelationshipSyncService: {
+        mutateMarkdownBody: async (file, mutator) => {
+          assert.equal(file, parentFile);
+          const lines = parentContent.split('\n');
+          const changed = await mutator(lines, parentContent);
+          if (changed) parentContent = lines.join('\n');
+          return changed;
+        },
+        readMarkdownText: async (file) => {
+          assert.equal(file, parentFile);
+          return parentContent;
+        },
+      },
+      bulkEditService: {
+        setStatus: async (files, status, options) => {
+          assert.deepEqual(files, [childFile]);
+          assert.equal(options.writeGuard(), true);
+          childFrontmatter.taskStatus = status;
+          return 1;
+        },
+      },
+    };
+    service.subitemLineModelService = {
+      getMappings: () => service.plugin.settings.linkedSubitemCheckboxMappings,
+      getStatusKey: () => 'taskStatus',
+    };
+    service.resolveLinkedFile = () => childFile;
+    service.refreshReferencesForChild = async () => undefined;
+    service.scheduleRefreshForParentFile = () => undefined;
+    service.scheduleDecorateForActiveView = () => undefined;
+    service.refreshLivePreviewEditors = () => undefined;
+
+    const changed = await service.setLinkedSubitemCheckboxState(
+      parentFile,
+      childFile,
+      '[x]',
+      { file: parentFile, lineNumber: 0, rawLine: parentContent },
+    );
+
+    assert.equal(changed, true);
+    assert.equal(parentContent, `- [x] [[${childFile.path}]]`);
+    assert.equal(childFrontmatter.taskStatus, 'complete');
+    assert.equal(authoritativeReads, 2, 'preflight and post-write verification both use the companion');
+    assert.equal(sourceReads, 0);
+  }
+});
+
+test('non-Markdown parents create Markdown children from logical tags and temporal metadata without a body write', async () => {
+  globalThis.window = { moment: null };
+  const { createSubitemForParentWithTitle, TFile } = await servicesPromise;
+  const creationSource = readFileSync(new URL('../src/services/subitem-creation-service.ts', import.meta.url), 'utf8');
+  const promptBlock = creationSource.slice(
+    creationSource.indexOf('export async function promptAndCreateSubitemForParent'),
+    creationSource.indexOf('export async function createSubitemForParentWithTitle'),
+  );
+  assert.match(promptBlock, /parentLinkResolutionService\.isRelationshipTarget\(parentFile\)/u);
+  assert.doesNotMatch(promptBlock, /parentFile\.extension\?\.toLowerCase\(\) !== 'md'/u);
+
+  for (const extension of ['pdf', 'base']) {
+    const parentFile = new TFile(`Reference/Parent.${extension}`);
+    const files = new Map([[parentFile.path, parentFile]]);
+    const logicalParent = {
+      Tags: ['project', 'skip', '#PROJECT'],
+      scheduled: '2026-08-15 09:30:00',
+      due: '2026-08-16',
+      allDay: true,
+    };
+    let createdContent = '';
+    let bodyLinkCalls = 0;
+    const plugin = {
+      settings: {
+        autoSaveFolderPath: false,
+        applyNotebookNavigatorRulesOnSubitemCreate: false,
+        ignoredSubitemTags: ['skip'],
+      },
+      app: {
+        vault: {
+          getAbstractFileByPath: (path) => files.get(path) ?? null,
+          create: async (path, content) => {
+            const file = new TFile(path);
+            files.set(path, file);
+            createdContent = content;
+            return file;
+          },
+          createFolder: async () => undefined,
+          getMarkdownFiles: () => [],
+        },
+        metadataCache: {
+          getFileCache: () => ({ frontmatter: { tags: ['project'] } }),
+          fileToLinktext: (file) => file.path,
+        },
+        fileManager: {
+          generateMarkdownLink: (file) => `[[${file.path}]]`,
+        },
+      },
+      parentLinkResolutionService: {
+        isRelationshipTarget: (file) => file === parentFile || file.extension === 'md',
+        isIgnoredFile: () => false,
+        isIgnoredFrontmatter: () => false,
+        getParentKey: () => 'childOf',
+        getLogicalFrontmatter: (file) => file === parentFile ? logicalParent : {},
+      },
+      fileNamingService: {
+        isDateOnlyBasename: () => false,
+        getDailyNoteDateFormat: () => 'YYYY-MM-DD',
+      },
+      sharedServices: {
+        status: {
+          getStatusPropertyKey: () => 'taskStatus',
+          normalize: (value) => String(value ?? '').trim().toLowerCase(),
+          isDoneStatus: () => false,
+        },
+      },
+      subitemRelationshipSyncService: {
+        insertBodyLinkForChildWorkflow: async () => {
+          bodyLinkCalls += 1;
+          throw new Error('non-Markdown parent body must not be written');
+        },
+      },
+      frontmatterMutationService: {
+        process: async () => false,
+      },
+    };
+
+    const created = await createSubitemForParentWithTitle(
+      plugin,
+      parentFile,
+      `Created for ${extension}`,
+      '/',
+      { targetPath: `Created ${extension}.md`, suppressCreatedNotice: true },
+    );
+
+    assert.equal(created?.path, `Created ${extension}.md`);
+    assert.match(createdContent, new RegExp(`childOf:\\n  - "\\[\\[Reference/Parent\\.${extension}\\]\\]"`, 'u'));
+    assert.match(createdContent, /scheduled: 2026-08-15 09:30:00/u);
+    assert.match(createdContent, /due: 2026-08-16/u);
+    assert.match(createdContent, /allDay: true/u);
+    assert.match(createdContent, /tags: \["project"\]/u);
+    assert.doesNotMatch(createdContent, /skip/u);
+    assert.equal(bodyLinkCalls, 0);
+  }
 });
 
 test('derived child status fails closed for an unmapped checkbox and clears only with no checkbox reference', async () => {

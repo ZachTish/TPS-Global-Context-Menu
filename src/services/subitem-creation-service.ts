@@ -5,6 +5,10 @@ import { CreateSubitemModal } from '../modals/create-subitem-modal';
 import { mergeNormalizedTags, parseTagInput } from '../utils/tag-utils';
 import { currentCompletedDateStamp } from '../utils/completed-date-utils';
 import * as logger from '../logger';
+import {
+  isFilePropertiesCompanionPath,
+  isFilePropertiesCompanionRecord,
+} from './file-properties-service';
 
 export interface CreateSubitemOptions {
   seedParentTags?: boolean;
@@ -29,8 +33,8 @@ export async function promptAndCreateSubitemForParent(
   parentFile: TFile,
   options?: CreateSubitemOptions,
 ): Promise<TFile | null> {
-  if (parentFile.extension?.toLowerCase() !== 'md') {
-    new Notice('Subitems can only be created under markdown notes.');
+  if (!plugin.parentLinkResolutionService.isRelationshipTarget(parentFile)) {
+    new Notice('Subitems can only be created under supported relationship items.');
     return null;
   }
   if (plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) {
@@ -55,6 +59,10 @@ export async function createSubitemForParentWithTitle(
   folderPathSelection?: string,
   options?: CreateSubitemOptions,
 ): Promise<TFile | null> {
+  if (!plugin.parentLinkResolutionService.isRelationshipTarget(parentFile)) {
+    new Notice('Subitems can only be created under supported relationship items.');
+    return null;
+  }
   if (plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) {
     new Notice('This note is excluded from parent/child relationships.');
     return null;
@@ -158,8 +166,7 @@ export async function createSubitemForParentWithTitle(
     }
   }
 
-  const parentCache = plugin.app.metadataCache.getFileCache(parentFile);
-  const parentFrontmatter = (parentCache?.frontmatter || {}) as Record<string, any>;
+  const parentFrontmatter = plugin.parentLinkResolutionService.getLogicalFrontmatter(parentFile);
   
   const beforeInheritedKeys = new Set(
     frontmatterLines
@@ -171,7 +178,10 @@ export async function createSubitemForParentWithTitle(
     frontmatterLines.push(...inheritedLines);
   }
   const parentTags = seedParentTags
-    ? filterIgnoredSubitemTags(plugin, parseTagInput([parentFrontmatter.tags, parentFrontmatter.tag]))
+    ? filterIgnoredSubitemTags(plugin, parseTagInput([
+      getFrontmatterValueCaseInsensitive(parentFrontmatter, 'tags'),
+      getFrontmatterValueCaseInsensitive(parentFrontmatter, 'tag'),
+    ]))
     : [];
   const initialTags = filterIgnoredSubitemTags(plugin, parseTagInput(options?.initialTags || []));
   const seededTags = mergeNormalizedTags(parentTags, initialTags);
@@ -216,7 +226,7 @@ export async function createSubitemForParentWithTitle(
   }
 
   try {
-    if (options?.insertParentBodyLink !== false) {
+    if (options?.insertParentBodyLink !== false && parentFile.extension?.toLowerCase() === 'md') {
       const linkResult = await plugin.subitemRelationshipSyncService.insertBodyLinkForChildWorkflow(
         parentFile,
         created,
@@ -371,7 +381,12 @@ function resolveIconDefaultsFromFile(app: App, file: TFile): { icon: string; ico
 
 function resolveIconDefaultsFromFolder(app: App, folderPath: string): { icon: string; iconColor: string } {
   const normalizedFolder = normalizePath((folderPath || '').trim());
-  const folderFiles = app.vault.getMarkdownFiles().filter((file) => (file.parent?.path || '') === normalizedFolder);
+  const folderFiles = app.vault.getMarkdownFiles().filter((file) => {
+    if ((file.parent?.path || '') !== normalizedFolder) return false;
+    const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
+    return !isFilePropertiesCompanionPath(file.path)
+      && !isFilePropertiesCompanionRecord(frontmatter);
+  });
   const iconCounts = new Map<string, number>();
   const colorCounts = new Map<string, number>();
 

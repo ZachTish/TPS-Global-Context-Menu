@@ -1,4 +1,8 @@
 import { App, Modal, Setting, TFile, TextComponent, ButtonComponent } from "obsidian";
+import {
+    isFilePropertiesCompanionPath,
+    isFilePropertiesCompanionRecord,
+} from '../services/file-properties-service';
 
 export class MultiFileSelectModal extends Modal {
     private onChoose: (files: TFile[]) => void;
@@ -11,11 +15,22 @@ export class MultiFileSelectModal extends Modal {
     constructor(
         app: App,
         onChoose: (files: TFile[]) => void,
-        options?: { filter?: (file: TFile) => boolean },
+        options?: {
+            filter?: (file: TFile) => boolean;
+            /** Opt-in source for callers that intentionally support non-Markdown files. */
+            candidateFiles?: readonly TFile[];
+        },
     ) {
         super(app);
         this.onChoose = onChoose;
-        const files = this.app.vault.getMarkdownFiles();
+        const source = Array.isArray(options?.candidateFiles)
+            ? options.candidateFiles
+            : this.app.vault.getMarkdownFiles();
+        const files = source.filter((file): file is TFile => {
+            if (!(file instanceof TFile)) return false;
+            if (isFilePropertiesCompanionPath(file.path)) return false;
+            return !isFilePropertiesCompanionRecord(this.app.metadataCache.getFileCache(file)?.frontmatter);
+        });
         this.allFiles = (typeof options?.filter === 'function' ? files.filter(options.filter) : files)
             .sort((a, b) => b.stat.mtime - a.stat.mtime);
         this.filteredFiles = [...this.allFiles];

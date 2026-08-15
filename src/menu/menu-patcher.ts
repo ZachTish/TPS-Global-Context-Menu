@@ -14,6 +14,20 @@ export function setupMenuPatch(plugin: TPSGlobalContextMenuPlugin): () => void {
     const originalShowAtPosition = Menu.prototype.showAtPosition;
     const originalShowAtMouseEvent = Menu.prototype.showAtMouseEvent;
 
+    const injectNativeCanvasTarget = (
+        menu: Menu,
+        targetEl: HTMLElement | null,
+        event?: MouseEvent,
+    ): void => {
+        if (plugin.settings.inlineMenuOnly || (menu as any)._tpsHandled) return;
+        if (!targetEl?.closest('.canvas-wrapper, .canvas-node')) return;
+        // Embedded Base/calendar rows own their exact logical target. Do not
+        // replace those rows with the containing Canvas file.
+        if (targetEl.closest('.tps-calendar-entry, .bases-feed-entry')) return;
+        const canvasFile = plugin.contextTargetService.resolveCanvasTarget(event);
+        if (canvasFile) plugin.menuController.addToNativeMenu(menu, [canvasFile]);
+    };
+
     const reorderItems = (menu: Menu) => {
         if (!(menu as any)._tpsHandled) return;
         const items = (menu as any).items as any[] | undefined;
@@ -204,6 +218,7 @@ export function setupMenuPatch(plugin: TPSGlobalContextMenuPlugin): () => void {
 
     Menu.prototype.showAtPosition = function (pos) {
         const targetEl = plugin.contextTargetService.peekRecentContextTarget(1200);
+        injectNativeCanvasTarget(this, targetEl);
         if (!plugin.contextTargetService.isNotebookNavigatorContextTarget(targetEl)) {
             reorderItems(this);
         }
@@ -216,6 +231,7 @@ export function setupMenuPatch(plugin: TPSGlobalContextMenuPlugin): () => void {
 
     Menu.prototype.showAtMouseEvent = function (evt) {
         const targetEl = evt?.target instanceof HTMLElement ? evt.target : null;
+        injectNativeCanvasTarget(this, targetEl, evt);
         if (!plugin.contextTargetService.isNotebookNavigatorContextTarget(targetEl)) {
             plugin.foldExpansionContextMenuService?.addMenuItemForTarget(this, targetEl, evt ?? null);
             reorderItems(this);
