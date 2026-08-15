@@ -306,6 +306,7 @@ export class TpsTableView extends BasesView {
   private activeContextRow: HTMLElement | null = null;
   private selectedEntryIds = new Set<string>();
   private selectionAnchorId: string | null = null;
+  private suppressEntryClickUntil = 0;
   private renderedTaskEntryOrder: string[] = [];
   private columnWidths: Record<string, number> = {};
   private compiledFormulaSet: TpsCompiledFormulaSet = tpsBaseFormulaService.compile({}, 'tps-table:unresolved');
@@ -1742,6 +1743,13 @@ export class TpsTableView extends BasesView {
       row.dataset.taskLine = String(entry.lineNumber + 1);
       row.dataset.taskText = getTaskDisplayTitle(entry.line);
       row.dataset.taskLineIdentity = getTaskLineIdentity(entry.line);
+      (row as HTMLElement & { __tpsGcmItemPropertyRef?: { path: string; lineNumber: number; rawLine: string } })
+        .__tpsGcmItemPropertyRef = {
+          path: entry.file.path,
+          lineNumber: entry.lineNumber,
+          rawLine: entry.line,
+        };
+      row.addEventListener('pointerdown', (event: PointerEvent) => this.beginExternalTaskPointerDrag(event, row));
     }
     (row as any).__tpsTableView = this;
     row.addEventListener('click', (evt: MouseEvent) => this.handleEntryModifierClick(evt, entry), { capture: true });
@@ -2728,6 +2736,11 @@ export class TpsTableView extends BasesView {
   }
 
   private handleEntryClick(evt: MouseEvent, entry: LogLineEntry): void {
+    if (Date.now() < this.suppressEntryClickUntil) {
+      evt.preventDefault();
+      evt.stopPropagation();
+      return;
+    }
     if (evt.defaultPrevented) return;
     const target = evt.target instanceof HTMLElement ? evt.target : null;
     if (target?.closest('[data-tps-table-cell-intent="property"]')) {
@@ -2751,6 +2764,66 @@ export class TpsTableView extends BasesView {
     this.selectOnlyEntry(entry.selectionId);
     if (!taskSelectable) this.plugin.taskLineContextMenuService?.releaseTpsTableSelection?.(this.containerEl);
     void this.openEntry(entry);
+  }
+
+  private beginExternalTaskPointerDrag(event: PointerEvent, row: HTMLElement): void {
+    if (event.button !== 0 || event.pointerType === 'touch') return;
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.closest('button, input, a, [role="button"], [data-tps-table-cell-intent="property"]')) return;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    let moved = false;
+    const ownerDocument = row.ownerDocument;
+    const cleanup = () => {
+      ownerDocument.removeEventListener('pointermove', onMove, true);
+      ownerDocument.removeEventListener('pointerup', onUp, true);
+      ownerDocument.removeEventListener('pointercancel', onCancel, true);
+      row.removeClass('tps-log-base-row--dragging');
+    };
+    const onMove = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== event.pointerId) return;
+      if (!moved && Math.max(Math.abs(moveEvent.clientX - startX), Math.abs(moveEvent.clientY - startY)) >= 8) {
+        moved = true;
+        row.addClass('tps-log-base-row--dragging');
+      }
+      if (moved) {
+        moveEvent.preventDefault();
+        moveEvent.stopPropagation();
+      }
+    };
+    const onUp = (upEvent: PointerEvent) => {
+      if (upEvent.pointerId !== event.pointerId) return;
+      cleanup();
+      if (!moved) return;
+      upEvent.preventDefault();
+      upEvent.stopPropagation();
+      this.suppressEntryClickUntil = Date.now() + 400;
+      const rowRef = (row as HTMLElement & { __tpsGcmItemPropertyRef?: { path: string; lineNumber: number; rawLine: string } })
+        .__tpsGcmItemPropertyRef;
+      if (!rowRef) return;
+      const entryId = row.dataset.entryId;
+      const selectedRefs = Array.from(this.containerEl.querySelectorAll<HTMLElement>(
+        '.tps-log-base-row--selected[data-tps-table-batch-selectable="true"]',
+      )).map((selectedRow) => (
+        selectedRow as HTMLElement & { __tpsGcmItemPropertyRef?: typeof rowRef }
+      ).__tpsGcmItemPropertyRef).filter((ref): ref is typeof rowRef => !!ref);
+      const items = entryId && this.selectedEntryIds.has(entryId) && selectedRefs.length > 0 ? selectedRefs : [rowRef];
+      ownerDocument.dispatchEvent(new CustomEvent('tps-task-line-pointer-drop', {
+        bubbles: true,
+        cancelable: true,
+        detail: {
+          items,
+          x: upEvent.clientX,
+          y: upEvent.clientY,
+        },
+      }));
+    };
+    const onCancel = (cancelEvent: PointerEvent) => {
+      if (cancelEvent.pointerId === event.pointerId) cleanup();
+    };
+    ownerDocument.addEventListener('pointermove', onMove, true);
+    ownerDocument.addEventListener('pointerup', onUp, true);
+    ownerDocument.addEventListener('pointercancel', onCancel, true);
   }
 
   private handleEntryModifierClick(evt: MouseEvent, entry: LogLineEntry): void {

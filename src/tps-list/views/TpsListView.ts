@@ -5504,7 +5504,6 @@ export class TpsListView extends BasesView {
   ): void {
     if (event.button !== 0) return;
     if (task.itemKind === 'heading') return;
-    if (!this.isWritableTaskGroupingProperty(propName)) return;
     const expectedRawLine = String(task.rawLine || '');
     if (!expectedRawLine) {
       flowWarn('TaskDrop', 'blocked', {
@@ -5598,11 +5597,25 @@ export class TpsListView extends BasesView {
     const releaseTarget = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
     const targetDisplayLane = this.getRenderedDisplayLaneFromElement(releaseTarget);
     if (!targetDisplayLane) {
+      const draggedRef = {
+        path: active.path,
+        lineNumber: Math.max(0, active.line - 1),
+        rawLine: active.rawLine,
+      };
+      const selectedRefs = this.getSelectedRows()
+        .filter((row) => row.dataset.tpsGcmContext === 'kanban-task')
+        .map((row) => (row as HTMLElement & { __tpsGcmItemPropertyRef?: typeof draggedRef }).__tpsGcmItemPropertyRef)
+        .filter((ref): ref is typeof draggedRef => !!ref);
+      const draggedSelectionId = active.cardEl.dataset.tpsListSelectionId;
+      const items = draggedSelectionId && this.selectedRowIds.has(draggedSelectionId) && selectedRefs.length > 0
+        ? selectedRefs
+        : [draggedRef];
       const dropEvent = new CustomEvent(TPS_TASK_LINE_POINTER_DROP_EVENT, {
         bubbles: true,
         cancelable: true,
         detail: {
           payload: this.buildPointerTaskDropPayload(active),
+          items,
           x: event.clientX,
           y: event.clientY,
         },
@@ -9327,6 +9340,12 @@ export class TpsListView extends BasesView {
       row.dataset.tpsKanbanPath = file.path;
       row.dataset.tpsKanbanLine = String(task.line);
       row.dataset.tpsKanbanCheckboxState = mappedCheckboxState;
+      (row as HTMLElement & { __tpsGcmItemPropertyRef?: { path: string; lineNumber: number; rawLine: string } })
+        .__tpsGcmItemPropertyRef = {
+          path: file.path,
+          lineNumber: Math.max(0, task.line - 1),
+          rawLine: String(task.rawLine || ''),
+        };
     }
 
     if (isBullet) {

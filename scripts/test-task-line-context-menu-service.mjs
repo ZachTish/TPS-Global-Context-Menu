@@ -71,7 +71,8 @@ test('direct task UI writes journal only confirmed user mutations with atomic id
   assert.match(updateSource, /commitDirectTaskHistory\([\s\S]{0,180}confirmedBefore: confirmedHistoryBefore/u);
   assert.match(updateSource, /sourceDisposition: 'retained'/u);
   assert.match(updateSource, /sourceDisposition: 'removed'/u);
-  assert.match(updateSource, /surface: context\.isCalendarTask \? 'calendar-task-context-menu' : 'task-line-context-menu'/u);
+  assert.match(updateSource, /surface: options\.historySurface[\s\S]{0,120}calendar-task-context-menu/u);
+  assert.match(updateSource, /sourcePluginId: options\.historySourcePluginId \|\| 'tps-global-context-menu'/u);
   assert.match(taskCheckboxHandlerSource, /action: 'task\.checkbox'/u);
   assert.match(taskCheckboxHandlerSource, /surface: 'checkbox-context-menu'/u);
   assert.match(taskCheckboxHandlerSource, /ensureDirectTaskHistoryIdentity\([\s\S]{0,420}lines\[lineIndex\] = updatedLine/u);
@@ -102,6 +103,18 @@ test('TPS Table task ranges synchronize into the canonical batch task menu befor
   assert.match(serviceSource, /mode: 'tps-table-sync'/);
   assert.match(serviceSource, /releaseTpsTableSelection\(owner: HTMLElement\)/);
   assert.doesNotMatch(mainSource, /tableView\?\.applyEntryContextSelection\?\.\(evt, row\)/);
+});
+
+test('TPS List and Table selections expose typed batch properties and cross-plugin multi-drag refs', () => {
+  assert.match(serviceSource, /setTitle\('Change property'\)/u);
+  assert.match(serviceSource, /private addSelectedTaskPropertyMenus\(/u);
+  assert.match(serviceSource, /applyTaskItemPropertyMutation\(line, property/u);
+  assert.match(serviceSource, /setTitle\('Remove tag'\)/u);
+  assert.match(serviceSource, /async applyItemPropertyMutation\(/u);
+  assert.match(serviceSource, /error: 'stale-item'/u);
+  assert.match(logBaseViewSource, /__tpsGcmItemPropertyRef/u);
+  assert.match(logBaseViewSource, /new CustomEvent\('tps-task-line-pointer-drop'/u);
+  assert.match(logBaseViewSource, /\.tps-log-base-row--selected\[data-tps-table-batch-selectable="true"\]/u);
 });
 
 test('Home Daily Note tasks use standard task interactions while the capture editor stays isolated', () => {

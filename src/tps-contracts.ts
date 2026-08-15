@@ -45,6 +45,7 @@ export interface TPSGcmApiChangedPayload extends TPSEventPayload {
   tasksVersion: number | null;
   itemHistoryVersion: number | null;
   filePropertiesVersion: number | null;
+  itemPropertiesVersion: number | null;
   api: unknown | null;
 }
 

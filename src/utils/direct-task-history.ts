@@ -10,7 +10,7 @@ export type DirectTaskHistoryAction =
 
 export interface DirectTaskHistoryCause {
   kind: 'user';
-  sourcePluginId: 'tps-global-context-menu';
+  sourcePluginId: string;
   surface: string;
   commandId?: string;
 }

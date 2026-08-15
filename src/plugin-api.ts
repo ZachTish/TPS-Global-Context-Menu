@@ -900,6 +900,41 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
                 autoSelfLink: plugin.settings.autoSelfLinkParentInParentKey === true,
             }),
         },
+        itemProperties: {
+            version: 1,
+            listDefinitions: () => Object.freeze((plugin.settings.properties || [])
+                .filter((property) => !property.disabled && !property.hidden)
+                .map((property) => Object.freeze({
+                    id: String(property.id || ''),
+                    key: String(property.key || ''),
+                    label: String(property.label || property.key || ''),
+                    type: property.type,
+                    listItemType: property.listItemType,
+                    allowInlineSet: property.allowInlineSet !== false,
+                }))),
+            resolveDefinition: (keyOrId: unknown) => {
+                const normalized = String(keyOrId ?? '').trim().toLowerCase();
+                if (!normalized) return null;
+                const property = (plugin.settings.properties || []).find((candidate) => (
+                    String(candidate.key || '').trim().toLowerCase() === normalized
+                    || String(candidate.id || '').trim().toLowerCase() === normalized
+                ));
+                if (!property || property.disabled || property.hidden) return null;
+                return Object.freeze({
+                    id: String(property.id || ''),
+                    key: String(property.key || ''),
+                    label: String(property.label || property.key || ''),
+                    type: property.type,
+                    listItemType: property.listItemType,
+                    allowInlineSet: property.allowInlineSet !== false,
+                });
+            },
+            applyToTaskLines: (
+                refs: Parameters<typeof plugin.taskLineContextMenuService.applyItemPropertyMutation>[0],
+                mutation: Parameters<typeof plugin.taskLineContextMenuService.applyItemPropertyMutation>[1],
+                cause?: Parameters<typeof plugin.taskLineContextMenuService.applyItemPropertyMutation>[2],
+            ) => plugin.taskLineContextMenuService.applyItemPropertyMutation(refs, mutation, cause),
+        },
         openFileInLeaf: (
             file: TFile,
             context: 'tab' | 'split' | 'window' | false,

@@ -109,6 +109,10 @@ import {
   type DirectTaskHistoryLocation,
   type DirectTaskHistoryLogContext,
 } from '../utils/direct-task-history';
+import {
+  applyTaskItemPropertyMutation,
+  type ItemPropertyMutation,
+} from '../utils/item-property-mutation';
 
 export type TaskLineContext = {
   file: TFile;
@@ -122,6 +126,24 @@ export type TaskLineContext = {
   calendarAllDay: boolean;
 };
 
+export type GcmItemPropertyRef = {
+  path: string;
+  /** Zero-based line index. */
+  lineNumber: number;
+  /** Transient exact revision used to fail closed when the row changed during a drag. */
+  rawLine?: string;
+};
+
+export type GcmItemPropertyMutation = ItemPropertyMutation;
+
+export type GcmItemPropertyMutationResult = {
+  ok: boolean;
+  requested: number;
+  updated: number;
+  skipped: number;
+  error?: string;
+};
+
 type TaskLineHighlightKind = 'active' | 'selected';
 
 type TaskLineUpdateOptions = {
@@ -129,6 +151,8 @@ type TaskLineUpdateOptions = {
   expectedMappingSignature?: string;
   expectedCheckboxToken?: string;
   historyTerminalDelete?: boolean;
+  historySurface?: string;
+  historySourcePluginId?: string;
 };
 
 type TaskEditorPropertyDraft = {
@@ -1858,6 +1882,24 @@ export class TaskLineContextMenuService {
         });
       });
 
+      const selectedTags = Array.from(new Set(contexts.flatMap((context) => readTaskLineTags(context.rawLine))))
+        .sort((a, b) => a.localeCompare(b));
+      if (selectedTags.length > 0) {
+        subMenu.addItem((sub: any) => {
+          sub.setTitle('Remove tag').setIcon('tag');
+          const removeMenu = this.createTaskSubmenu(sub);
+          for (const tag of selectedTags) {
+            removeMenu.addItem((tagItem: any) => {
+              tagItem.setTitle(`#${tag}`).setIcon('x').onClick(() => {
+                void this.updateTaskLines(contexts, (line) => removeInlineTagFromTaskLine(line, tag));
+              });
+            });
+          }
+        });
+      }
+
+      this.addSelectedTaskPropertyMenus(subMenu, contexts);
+
       subMenu.addSeparator();
       subMenu.addItem((sub: any) => {
         sub.setTitle('Move selected to note...').setIcon('file-input').onClick(() => {
@@ -1876,6 +1918,175 @@ export class TaskLineContextMenuService {
       });
     });
   }
+
+  private addSelectedTaskPropertyMenus(menu: Menu, contexts: TaskLineContext[]): void {
+    if (this.plugin.settings.showCustomPropertiesInContextMenu === false) return;
+    const statusKey = this.getStatusKey().toLowerCase();
+    const candidates = contexts.map((context) => {
+      const frontmatter: Record<string, unknown> = readTaskInlineFieldRecord(context.rawLine);
+      const tags = readTaskLineTags(context.rawLine);
+      if (tags.length > 0) frontmatter.tags = tags;
+      return { file: context.file, frontmatter };
+    });
+    const properties = resolveCustomProperties(
+      this.plugin.settings.properties || [],
+      candidates,
+      new ViewModeService(),
+      'context',
+    ).filter((property) => this.isTaskMenuProperty(property, statusKey));
+    if (properties.length === 0) return;
+
+    menu.addItem((item) => {
+      item.setTitle('Change property').setIcon('list-plus');
+      const propertyMenu = this.createTaskSubmenu(item);
+      for (const property of properties) {
+        this.addSelectedTaskPropertyMenuItem(propertyMenu, contexts, property);
+      }
+    });
+  }
+
+  private addSelectedTaskPropertyMenuItem(menu: Menu, contexts: TaskLineContext[], property: CustomProperty): void {
+    const label = property.label || property.key;
+    menu.addItem((item) => {
+      item.setTitle(label).setIcon(property.icon || 'list-plus');
+      const valueMenu = this.createTaskSubmenu(item);
+      const apply = (action: GcmItemPropertyMutation['action'], values: unknown[] = []): Promise<number> => (
+        this.updateTaskLines(contexts, (line) => applyTaskItemPropertyMutation(line, property, { key: property.key, action, values }))
+      );
+
+      if (property.type === 'checkbox') {
+        for (const [choiceLabel, value] of [['Yes', true], ['No', false]] as const) {
+          valueMenu.addItem((choice: any) => choice.setTitle(choiceLabel).onClick(() => void apply('set', [value])));
+        }
+        valueMenu.addItem((choice: any) => choice.setTitle('Clear').setIcon('x').onClick(() => void apply('clear')));
+        return;
+      }
+
+      if (property.type === 'datetime') {
+        valueMenu.addItem((choice: any) => choice.setTitle(`Set ${label}...`).setIcon('calendar').onClick(() => {
+          new ScheduledModal(this.plugin.app, '', 0, false, async (result) => {
+            await apply(result.date ? 'set' : 'clear', result.date ? [result.date] : []);
+          }, {
+            title: `Set ${label} on ${contexts.length} tasks`,
+            fieldLabel: label,
+            showTimeDetails: false,
+          }).open();
+        }));
+        valueMenu.addItem((choice: any) => choice.setTitle('Clear').setIcon('x').onClick(() => void apply('clear')));
+        return;
+      }
+
+      if (property.type === 'text' || property.type === 'number' || property.type === 'recurrence') {
+        valueMenu.addItem((choice: any) => choice.setTitle(`Set ${label}...`).setIcon('pencil').onClick(() => {
+          new TextInputModal(this.plugin.app, label, '', async (value) => {
+            const normalized = String(value ?? '').trim();
+            if (!normalized) return;
+            if (property.type === 'number' && !Number.isFinite(Number(normalized))) {
+              new Notice(`${label} must be a number.`);
+              return;
+            }
+            await apply('set', [normalized]);
+          }).open();
+        }));
+        valueMenu.addItem((choice: any) => choice.setTitle('Clear').setIcon('x').onClick(() => void apply('clear')));
+        return;
+      }
+
+      const isList = property.type === 'list';
+      addPropertyValueChoiceMenuItems({
+        app: this.plugin.app,
+        source: this.plugin,
+        menu: valueMenu,
+        property,
+        currentValue: '',
+        onClear: () => apply('clear').then((count) => count > 0),
+        onChooseLiteral: (value) => apply(isList ? 'add' : 'set', [value]).then((count) => count > 0),
+        onChooseEntity: (choice) => apply(isList ? 'add' : 'set', [choice.wikilink]).then((count) => count > 0),
+      });
+      if (isList) {
+        const currentValues = Array.from(new Set(contexts.flatMap((context) => {
+          const raw = readInlineFieldValue(context.rawLine, property.key);
+          return isLinkListProperty(property) ? parseLinkListInput(raw) : parseStringListInput(raw);
+        }))).sort((a, b) => a.localeCompare(b));
+        if (currentValues.length > 0) {
+          valueMenu.addSeparator();
+          valueMenu.addItem((removeItem: any) => {
+            removeItem.setTitle('Remove value').setIcon('list-x');
+            const removeMenu = this.createTaskSubmenu(removeItem);
+            for (const value of currentValues) {
+              removeMenu.addItem((choice: any) => choice
+                .setTitle(/^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value)
+                .setIcon('x')
+                .onClick(() => void apply('remove', [value])));
+            }
+          });
+        }
+      }
+    });
+  }
+
+  async applyItemPropertyMutation(
+    refs: readonly GcmItemPropertyRef[],
+    mutation: GcmItemPropertyMutation,
+    cause?: { sourcePluginId?: string; surface?: string },
+  ): Promise<GcmItemPropertyMutationResult> {
+    const requested = refs.length;
+    if (requested === 0) return { ok: false, requested: 0, updated: 0, skipped: 0, error: 'no-items' };
+    const property = (this.plugin.settings.properties || []).find((candidate) => (
+      String(candidate.key || '').trim().toLowerCase() === String(mutation.key || '').trim().toLowerCase()
+      || String(candidate.id || '').trim().toLowerCase() === String(mutation.key || '').trim().toLowerCase()
+    ));
+    if (!property || property.disabled || property.hidden || property.allowInlineSet === false || property.type === 'kind') {
+      return { ok: false, requested, updated: 0, skipped: requested, error: 'unsupported-property' };
+    }
+    const contexts: TaskLineContext[] = [];
+    for (const ref of refs) {
+      const context = await this.resolveItemPropertyRef(ref);
+      if (!context) {
+        return { ok: false, requested, updated: 0, skipped: requested, error: 'stale-item' };
+      }
+      contexts.push(context);
+    }
+    const updated = await this.updateTaskLines(
+      contexts,
+      (line) => applyTaskItemPropertyMutation(line, property, mutation),
+      {
+        historySurface: String(cause?.surface || 'item-properties-api').trim() || 'item-properties-api',
+        historySourcePluginId: String(cause?.sourcePluginId || 'tps-global-context-menu').trim()
+          || 'tps-global-context-menu',
+      },
+    );
+    return { ok: true, requested, updated, skipped: requested - updated };
+  }
+
+  private async resolveItemPropertyRef(ref: GcmItemPropertyRef): Promise<TaskLineContext | null> {
+    const file = this.plugin.app.vault.getFileByPath(String(ref.path || '').trim());
+    if (!(file instanceof TFile) || file.extension !== 'md') return null;
+    const content = await this.plugin.app.vault.read(file);
+    const lines = content.split(/\r?\n/u);
+    const requestedIndex = Math.max(0, Math.floor(Number(ref.lineNumber) || 0));
+    const expected = typeof ref.rawLine === 'string' ? ref.rawLine : '';
+    let lineIndex = requestedIndex;
+    if (expected && lines[lineIndex] !== expected) {
+      const matches = lines.map((line, index) => line === expected ? index : -1).filter((index) => index >= 0);
+      if (matches.length !== 1) return null;
+      lineIndex = matches[0];
+    }
+    const rawLine = lines[lineIndex] || '';
+    const parsed = parseTaskLine(rawLine);
+    if (!parsed) return null;
+    return {
+      file,
+      lineNumber: lineIndex + 1,
+      lineIndex,
+      rawLine,
+      title: getTaskDisplayTitle(rawLine),
+      checkboxToken: parsed.token,
+      isCalendarTask: false,
+      calendarAllDay: false,
+    };
+  }
+
 
   addTaskLineMenuItems(
     menu: Menu,
@@ -2685,7 +2896,8 @@ export class TaskLineContextMenuService {
         : options.checkboxMutation === true
           ? 'task.checkbox'
           : 'task.update',
-      surface: context.isCalendarTask ? 'calendar-task-context-menu' : 'task-line-context-menu',
+      surface: options.historySurface
+        || (context.isCalendarTask ? 'calendar-task-context-menu' : 'task-line-context-menu'),
       path: context.file.path,
       lineNumber: context.lineIndex,
     };
@@ -2693,7 +2905,7 @@ export class TaskLineContextMenuService {
       action: historyContext.action,
       cause: {
         kind: 'user',
-        sourcePluginId: 'tps-global-context-menu',
+        sourcePluginId: options.historySourcePluginId || 'tps-global-context-menu',
         surface: historyContext.surface,
       },
       before: {

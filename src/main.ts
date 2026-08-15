@@ -482,6 +482,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       tasksVersion: Number(api?.tasks?.version) || null,
       itemHistoryVersion: Number(api?.history?.version) || null,
       filePropertiesVersion: Number(api?.fileProperties?.version) || null,
+      itemPropertiesVersion: Number(api?.itemProperties?.version) || null,
     });
   }
 
