@@ -2031,14 +2031,34 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         );
     }
     new Setting(taskAutomation)
-      .setName('Hide completed checkbox lines')
-      .setDesc('Hide checked task lines and cancelled task lines like - [x] and - [-] in reading view and live preview. Source mode stays unchanged, and live preview includes a temporary reveal button.')
+      .setName('Hide completed task lines')
+      .setDesc('Hide completed, won’t-do, and migrated task lines. Source mode always stays unchanged, and linked context follows the same visibility rule.')
       .addToggle((toggle) =>
         toggle
           .setValue(this.plugin.settings.hideCompletedCheckboxes === true)
           .onChange(async (value) => {
             this.plugin.settings.hideCompletedCheckboxes = value;
             await this.plugin.saveSettings();
+            this.plugin.hideCompletedCheckboxesService?.applyBodyClass();
+            this.plugin.hideCompletedCheckboxesService?.refreshAllEditors();
+            this.plugin.persistentMenuManager.ensureMenus();
+            this.redisplayPreservingRouteFocus('tasks');
+          })
+      );
+    new Setting(taskAutomation)
+      .setName('Hide completed tasks in')
+      .setDesc('Reading view only leaves Live Preview untouched. The combined option preserves the earlier behavior and includes a temporary reveal button in Live Preview.')
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('reading-only', 'Reading view only')
+          .addOption('reading-and-live-preview', 'Reading view and Live Preview')
+          .setValue(this.plugin.settings.completedTaskHidingScope || 'reading-and-live-preview')
+          .onChange(async (value: 'reading-only' | 'reading-and-live-preview') => {
+            this.plugin.settings.completedTaskHidingScope = value;
+            await this.plugin.saveSettings();
+            this.plugin.hideCompletedCheckboxesService?.applyBodyClass();
+            this.plugin.hideCompletedCheckboxesService?.refreshAllEditors();
+            this.plugin.persistentMenuManager.ensureMenus();
           })
       );
     new Setting(taskAutomation)
@@ -2126,6 +2146,50 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       });
     new Setting(relationshipAutomation).setName('Child parent property key').setDesc('Frontmatter key used on child notes to store parent links. Multiple parents are stored as an array under this key. Legacy parent/parents/childOf values are still read and migrated on write.').addText(t => t.setValue(this.plugin.settings.parentLinkFrontmatterKey || 'parent').onChange(async v => { this.plugin.settings.parentLinkFrontmatterKey = v.trim() || 'parent'; await this.plugin.saveSettings(); }));
     new Setting(relationshipAutomation)
+      .setName('Ignore matching parent/child notes')
+      .setDesc('When enabled, notes matching the exact property key and value below are excluded from parent/child discovery, panels, and automation. Existing links and frontmatter are preserved.')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.enableParentChildIgnoreRule === true)
+          .onChange(async (value) => {
+            this.plugin.settings.enableParentChildIgnoreRule = value;
+            await this.plugin.saveSettings();
+            this.plugin.linkedSubitemCheckboxService.ensureForAllMarkdownViews();
+            this.plugin.linkedSubitemCheckboxService.refreshLivePreviewEditors();
+            this.plugin.persistentMenuManager.ensureMenus();
+            this.redisplayPreservingRouteFocus('child-notes');
+          })
+      );
+    new Setting(relationshipAutomation)
+      .setName('Parent/child ignore pair')
+      .setDesc('Both fields must match. Keys and scalar/list values are compared case-insensitively; an incomplete pair disables the rule.')
+      .addText((text) => {
+        text
+          .setPlaceholder('gcmParentChild')
+          .setValue(this.plugin.settings.parentChildIgnoreFrontmatterKey || '')
+          .onChange(async (value) => {
+            this.plugin.settings.parentChildIgnoreFrontmatterKey = value.trim();
+            await this.plugin.saveSettings();
+            this.plugin.linkedSubitemCheckboxService.ensureForAllMarkdownViews();
+            this.plugin.linkedSubitemCheckboxService.refreshLivePreviewEditors();
+            this.plugin.persistentMenuManager.ensureMenus();
+          });
+        text.inputEl.setAttribute('aria-label', 'Parent child ignore property key');
+      })
+      .addText((text) => {
+        text
+          .setPlaceholder('ignore')
+          .setValue(this.plugin.settings.parentChildIgnoreFrontmatterValue || '')
+          .onChange(async (value) => {
+            this.plugin.settings.parentChildIgnoreFrontmatterValue = value.trim();
+            await this.plugin.saveSettings();
+            this.plugin.linkedSubitemCheckboxService.ensureForAllMarkdownViews();
+            this.plugin.linkedSubitemCheckboxService.refreshLivePreviewEditors();
+            this.plugin.persistentMenuManager.ensureMenus();
+          });
+        text.inputEl.setAttribute('aria-label', 'Parent child ignore property value');
+      });
+    new Setting(relationshipAutomation)
       .setName('Body link format')
       .setDesc('Controls parent-note body links. Child frontmatter is always stored as wikilinks so Bases can compare it with file links.')
       .addDropdown((dropdown) =>
@@ -2158,6 +2222,20 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           this.plugin.persistentMenuManager.ensureMenus();
           this.display();
         })
+      );
+    new Setting(relationshipAutomation)
+      .setName('Linked context order')
+      .setDesc('Sort source paths alphabetically while keeping excerpts from each source in document order. The chosen order remains stable while you interact with a card.')
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('source-asc', 'Source path A → Z')
+          .addOption('source-desc', 'Source path Z → A')
+          .setValue(this.plugin.settings.linkedContextSortOrder || 'source-asc')
+          .onChange(async (value: 'source-asc' | 'source-desc') => {
+            this.plugin.settings.linkedContextSortOrder = value;
+            await this.plugin.saveSettings();
+            this.plugin.persistentMenuManager.ensureMenus();
+          })
       );
     if (this.plugin.settings.enableLinkedContextPanel === true) {
       new Setting(relationshipAutomation)

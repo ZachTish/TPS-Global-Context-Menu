@@ -484,6 +484,20 @@ export function addInlineTagToTaskLine(line: string, tag: string): string {
   return blockId ? appendLineBlockId(updated, blockId) : updated;
 }
 
+/**
+ * Add a comma/whitespace-delimited tag entry in one caller-owned line update.
+ * Parsing first makes the operation atomic and case-insensitively deduplicated.
+ */
+export function addInlineTagsToTaskLine(line: string, rawTags: unknown): string {
+  const existing = new Set(readTaskLineTags(line).map((tag) => tag.toLowerCase()));
+  return parseTaskTagValues(rawTags).reduce((nextLine, tag) => {
+    const normalized = tag.toLowerCase();
+    if (existing.has(normalized)) return nextLine;
+    existing.add(normalized);
+    return addInlineTagToTaskLine(nextLine, tag);
+  }, String(line || ''));
+}
+
 export function removeInlineTagFromTaskLine(line: string, tag: string): string {
   const normalized = normalizeInlineTag(tag).toLowerCase();
   if (!normalized) return line;

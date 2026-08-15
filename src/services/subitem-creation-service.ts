@@ -1,4 +1,4 @@
-import { App, Notice, TFile, TFolder, normalizePath } from 'obsidian';
+import { App, Notice, TFile, TFolder, normalizePath, parseYaml } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { buildParentFrontmatterLinkValue } from '../handlers/parent-link-format';
 import { CreateSubitemModal } from '../modals/create-subitem-modal';
@@ -33,6 +33,10 @@ export async function promptAndCreateSubitemForParent(
     new Notice('Subitems can only be created under markdown notes.');
     return null;
   }
+  if (plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) {
+    new Notice('This note is excluded from parent/child relationships.');
+    return null;
+  }
 
   const defaultFolderPath = getDefaultSubitemFolderPath(plugin, parentFile);
   const selection = await new Promise<{ title: string; folderPath: string } | null>((resolve) => {
@@ -51,6 +55,10 @@ export async function createSubitemForParentWithTitle(
   folderPathSelection?: string,
   options?: CreateSubitemOptions,
 ): Promise<TFile | null> {
+  if (plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) {
+    new Notice('This note is excluded from parent/child relationships.');
+    return null;
+  }
   const cleanedTitle = sanitizeSubitemTitle(title);
   if (!cleanedTitle) {
     new Notice('Subitem title cannot be empty.');
@@ -75,7 +83,13 @@ export async function createSubitemForParentWithTitle(
 
   const targetPath = requestedTargetPath || getUniqueMarkdownPath(plugin.app, folderPath, cleanedTitle);
   const existingTarget = plugin.app.vault.getAbstractFileByPath(targetPath);
-  if (existingTarget instanceof TFile) return options?.requireNewFile === true ? null : existingTarget;
+  if (existingTarget instanceof TFile) {
+    if (plugin.parentLinkResolutionService.isIgnoredFile(existingTarget)) {
+      new Notice('That note is excluded from parent/child relationships.');
+      return null;
+    }
+    return options?.requireNewFile === true ? null : existingTarget;
+  }
   if (existingTarget) {
     new Notice('A non-note item already uses the requested task note path.');
     return null;
@@ -146,9 +160,6 @@ export async function createSubitemForParentWithTitle(
 
   const parentCache = plugin.app.metadataCache.getFileCache(parentFile);
   const parentFrontmatter = (parentCache?.frontmatter || {}) as Record<string, any>;
-  const childWorkflowFrontmatter: Record<string, unknown> = initialWorkflowStatus
-    ? { [workflowStatusKey]: initialWorkflowStatus }
-    : {};
   
   const beforeInheritedKeys = new Set(
     frontmatterLines
@@ -170,6 +181,19 @@ export async function createSubitemForParentWithTitle(
   }
 
   const finalFrontmatterLines = dedupeFrontmatterLines(frontmatterLines);
+  let childWorkflowFrontmatter: Record<string, unknown> = {};
+  try {
+    const parsed = parseYaml(finalFrontmatterLines.slice(1).join('\n'));
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      childWorkflowFrontmatter = parsed as Record<string, unknown>;
+    }
+  } catch {
+    // Vault creation remains authoritative if Obsidian cannot pre-parse a draft.
+  }
+  if (plugin.parentLinkResolutionService.isIgnoredFrontmatter(childWorkflowFrontmatter)) {
+    new Notice('This child would be excluded from parent/child relationships.');
+    return null;
+  }
   const initialBody = String(options?.initialBody || '').trim();
   const initialContent = `${[...finalFrontmatterLines, '---', ''].join('\n')}\n${initialBody ? `${initialBody}\n` : ''}`;
 
@@ -183,6 +207,7 @@ export async function createSubitemForParentWithTitle(
         parentPath: parentFile.path,
         targetPath,
       });
+      if (plugin.parentLinkResolutionService.isIgnoredFile(racedTarget)) return null;
       return options?.requireNewFile === true ? null : racedTarget;
     }
     logger.error('[TPS GCM] Failed creating subitem:', error);

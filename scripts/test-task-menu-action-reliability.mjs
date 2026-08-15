@@ -98,7 +98,7 @@ test('TPS List and TPS Table task menus expose Tags independently of custom prop
   assert.match(menuSource, /if \(options\.includeTags === true\) \{\s*this\.addInlineTagsMenu\(menu, context\)/);
   assert.match(menuSource, /setTitle\(current\.length > 0 \? `Tags \(\$\{current\.length\}\)` : 'Tags'\)/);
   assert.match(menuSource, /setTitle\('Add tag\.\.\.'\)/);
-  assert.match(menuSource, /addInlineTagToTaskLine\(line, tag\)/);
+  assert.match(menuSource, /addInlineTagsToTaskLine\(line, value\)/);
   assert.match(menuSource, /removeInlineTagFromTaskLine\(line, tag\)/);
   assert.match(menuSource, /addConfiguredPropertyMenus\(menu, context, options\.includeTags === true\)/);
   assert.match(menuSource, /excludeTags[\s\S]{0,180}property\.listItemType === 'tag'/);

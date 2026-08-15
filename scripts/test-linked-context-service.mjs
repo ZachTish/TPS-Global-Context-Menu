@@ -10,7 +10,10 @@ async function loadService() {
     bundle: true, format: 'esm', platform: 'node', write: false, logLevel: 'silent',
     plugins: [{ name: 'obsidian-stub', setup(builder) {
       builder.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian', namespace: 'stub' }));
-      builder.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ loader: 'js', contents: 'export class TFile {}' }));
+      builder.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({
+        loader: 'js',
+        contents: 'export class TFile { static [Symbol.hasInstance](value) { return value?.__tfile === true; } }',
+      }));
     } }],
   });
   return import(`data:text/javascript;base64,${Buffer.from(build.outputFiles[0].text).toString('base64')}`);
@@ -41,4 +44,120 @@ test('ordinary links show only their source line', async () => {
   assert.deepEqual(resolveLinkedContextRange(7, 20, { headings: [] }), {
     kind: 'line', startLine: 7, endLine: 7,
   });
+});
+
+function createCollectionHarness() {
+  const target = { __tfile: true, path: 'Target.md', extension: 'md', basename: 'Target', stat: { mtime: 1 } };
+  const files = new Map([
+    ['Zeta.md', { __tfile: true, path: 'Zeta.md', extension: 'md', basename: 'Zeta', stat: { mtime: 10 } }],
+    ['alpha.md', { __tfile: true, path: 'alpha.md', extension: 'md', basename: 'alpha', stat: { mtime: 20 } }],
+  ]);
+  const contents = new Map([
+    ['Zeta.md', '- [ ] Zeta first [[Target]]\nplain\n- [ ] Zeta second [[Target]]'],
+    ['alpha.md', '- [ ] Alpha first [[Target]]\nplain\n- [ ] Alpha second [[Target]]'],
+  ]);
+  const link = (line) => ({
+    link: 'Target',
+    position: { start: { line }, end: { line } },
+  });
+  const caches = new Map([
+    ['Zeta.md', { links: [link(2), link(0)], embeds: [], headings: [] }],
+    ['alpha.md', { links: [link(2), link(0)], embeds: [], headings: [] }],
+  ]);
+  const app = {
+    metadataCache: {
+      resolvedLinks: {
+        'Zeta.md': { 'Target.md': 2 },
+        'alpha.md': { 'Target.md': 2 },
+      },
+      getFileCache: (file) => caches.get(file.path),
+      getFirstLinkpathDest: (raw) => raw === 'Target' ? target : null,
+    },
+    vault: {
+      getAbstractFileByPath: (path) => files.get(path) || null,
+      cachedRead: async (file) => contents.get(file.path) || '',
+    },
+  };
+  return { app, target, files, contents };
+}
+
+test('linked context source order is configurable while excerpts keep document order', async () => {
+  const { LinkedContextService } = await loadService();
+  const { app, target } = createCollectionHarness();
+  const service = new LinkedContextService(app);
+
+  const ascending = await service.collect(target, 'source-asc');
+  assert.deepEqual(ascending.map((item) => [item.sourceFile.path, item.startLine]), [
+    ['alpha.md', 0],
+    ['alpha.md', 2],
+    ['Zeta.md', 0],
+    ['Zeta.md', 2],
+  ]);
+
+  const descending = await service.collect(target, 'source-desc');
+  assert.deepEqual(descending.map((item) => [item.sourceFile.path, item.startLine]), [
+    ['Zeta.md', 0],
+    ['Zeta.md', 2],
+    ['alpha.md', 0],
+    ['alpha.md', 2],
+  ]);
+});
+
+test('linked context ordering and ids do not change after an in-card task mutation', async () => {
+  const { LinkedContextService } = await loadService();
+  const { app, target, files, contents } = createCollectionHarness();
+  const service = new LinkedContextService(app);
+  const before = await service.collect(target, 'source-desc');
+
+  files.get('Zeta.md').stat.mtime = 999;
+  contents.set('Zeta.md', '- [x] Zeta first [[Target]]\nplain\n- [ ] Zeta second [[Target]]');
+  const after = await service.collect(target, 'source-desc');
+
+  assert.deepEqual(after.map((item) => item.id), before.map((item) => item.id));
+  assert.deepEqual(after.map((item) => item.sourceFile.path), before.map((item) => item.sourceFile.path));
+  assert.match(after[0].markdown, /^- \[x\]/);
+});
+
+test('an explicitly removed source stays absent while resolved links and file lookup are stale', async () => {
+  const { LinkedContextService } = await loadService();
+  const { app, target } = createCollectionHarness();
+  const service = new LinkedContextService(app);
+
+  // Simulate the vault delete/rename callback arriving before metadataCache
+  // drops the old edge and before the old file lookup has settled.
+  const items = await service.collect(target, 'source-asc', new Set(['alpha.md']));
+  assert.deepEqual(items.map((item) => item.sourceFile.path), ['Zeta.md', 'Zeta.md']);
+});
+
+test('linked context recovery and source invalidation predicates fail closed', async () => {
+  const {
+    isLinkedContextSourceChangeRelevant,
+    normalizeLinkedContextSortOrder,
+    shouldRecoverLinkedContextPanel,
+  } = await loadService();
+
+  assert.equal(normalizeLinkedContextSortOrder('source-desc'), 'source-desc');
+  assert.equal(normalizeLinkedContextSortOrder('modified-desc'), 'source-asc');
+  assert.equal(shouldRecoverLinkedContextPanel({
+    enabled: true,
+    panelConnected: false,
+    activeFilePath: 'Target.md',
+    mountedFilePath: 'Target.md',
+  }), true);
+  assert.equal(shouldRecoverLinkedContextPanel({
+    enabled: true,
+    panelConnected: false,
+    activeFilePath: 'Other.md',
+    mountedFilePath: 'Target.md',
+  }), false);
+  assert.equal(shouldRecoverLinkedContextPanel({
+    enabled: false,
+    panelConnected: false,
+    activeFilePath: 'Target.md',
+    mountedFilePath: 'Target.md',
+  }), false);
+
+  assert.equal(isLinkedContextSourceChangeRelevant('Old source.md', 'Target.md', new Set(['Old source.md']), 0), true);
+  assert.equal(isLinkedContextSourceChangeRelevant('New source.md', 'Target.md', new Set(), 1), true);
+  assert.equal(isLinkedContextSourceChangeRelevant('Unrelated.md', 'Target.md', new Set(), 0), false);
 });

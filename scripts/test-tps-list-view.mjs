@@ -1544,7 +1544,7 @@ test('TPS List and TPS Table row menus expose built-in tag actions', async () =>
   assert.match(viewSource, /this\.addBulletLineTagsMenu\(menu, file, lineIndex, rawLine\)/);
   assert.match(viewSource, /`Line tags \(\$\{current\.length\}\)` : 'Line tags'/);
   assert.match(viewSource, /setTitle\('Add tag\.\.\.'\)/);
-  assert.match(viewSource, /addInlineTagToTaskLine\(line, tag\)/);
+  assert.match(viewSource, /addInlineTagsToTaskLine\(line, value\)/);
   assert.match(logLineUtilsSource, /collapseEmptiedInlineFieldComments\(source, matchingFields\)/);
   assert.match(viewSource, /removeInlineTagFromTaskLine\(line, tag\)/);
   assert.match(viewSource, /resolveExactLineRevisionIndex\(parts\.lines, lineIndex, rawLine\)/);
@@ -1553,16 +1553,21 @@ test('TPS List and TPS Table row menus expose built-in tag actions', async () =>
   assert.match(menuBuilderSource, /label: 'Tags',[\s\S]{0,100}key: 'tags',[\s\S]{0,100}listItemType: 'tag'/);
   assert.match(logBaseSource, /this\.addEntryTagsMenu\(menu, entry\)/);
   assert.match(logBaseSource, /setTitle\(current\.length > 0 \? `Tags \(\$\{current\.length\}\)` : 'Tags'\)/);
-  assert.match(logBaseSource, /toggleLogLineSemanticTag\(line, 'tags', tag, false\)/);
+  assert.match(logBaseSource, /addLogLineSemanticTags\(line, 'tags', tags\)/);
   assert.match(logBaseSource, /toggleLogLineSemanticTag\(line, 'tags', tag, true\)/);
   assert.match(logBaseSource, /column\.normalized !== 'linenumber'[\s\S]{0,120}column\.normalized !== 'tags'/);
   assert.doesNotMatch(logBaseSource, /column\.normalized !== 'tag'/);
 
-  const { addLogLineTag, readLogLineTags, removeLogLineTag } = await loadLogLineUtils();
+  const { addLogLineSemanticTags, addLogLineTag, readLogLineTags, removeLogLineTag } = await loadLogLineUtils();
   assert.deepEqual(readLogLineTags('#Alpha, beta, #alpha'), ['alpha', 'beta']);
   assert.equal(addLogLineTag('#alpha', 'QA/Base'), '#alpha, #qa/base');
   assert.equal(removeLogLineTag('#alpha, #qa/base', '#alpha'), '#qa/base');
   assert.equal(removeLogLineTag('#alpha', 'alpha'), null);
+  const tableLine = '- [ ] Table row #existing <!-- [tpsId:: row-tags] --> ^row-tags';
+  const taggedTableLine = addLogLineSemanticTags(tableLine, 'tags', 'One, two, #ONE');
+  assert.match(taggedTableLine, /\[tags:: #existing, #one, #two\]/u);
+  assert.match(taggedTableLine, /\[tpsId:: row-tags\]/u);
+  assert.match(taggedTableLine, /\^row-tags$/u);
 });
 
 test('TPS List and TPS Table group synthesized rows by their containing source note', async () => {

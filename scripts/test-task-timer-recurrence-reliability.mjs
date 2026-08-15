@@ -520,23 +520,34 @@ test('timer task creation performs zero markdown writes when Todo mapping change
   assert.equal(sourceContent, '# Timers\n');
 });
 
-test('note- and task-linked sessions create Daily Note notes without scheduling the Daily Note', async () => {
+async function createTimeTrackingNotesHarness() {
   const { Notice, TFile, TimeTrackingService } = await importMappedTaskCreationServices();
   Notice.messages.length = 0;
   const sourceFile = new TFile('Projects/Alpha.md');
+  const scheduledFile = new TFile('Projects/Beta.md');
   const dailyFile = new TFile('Daily/2026-08-03.md');
   const files = new Map([
     [sourceFile.path, sourceFile],
+    [scheduledFile.path, scheduledFile],
     [dailyFile.path, dailyFile],
   ]);
   const bodies = new Map([
     [sourceFile.path, '---\ntitle: Alpha\ntpsId: project-alpha\n---\n\n# Alpha\n- [ ] Ship release [tpsId:: task-one]\n'],
+    [scheduledFile.path, '---\ntitle: Beta\ntpsId: project-beta\nscheduled: 2026-09-01 09:00:00\ntimeEstimate: 75\nend: 2026-09-01 10:15:00\n---\n\n# Beta\n'],
     [dailyFile.path, '---\ntitle: Today\nscheduled: 2026-08-03 00:00:00\n---\n\n# Existing\n'],
   ]);
   const frontmatter = new Map([
     [sourceFile.path, { title: 'Alpha', tpsId: 'project-alpha' }],
+    [scheduledFile.path, {
+      title: 'Beta',
+      tpsId: 'project-beta',
+      scheduled: '2026-09-01 09:00:00',
+      timeEstimate: 75,
+      end: '2026-09-01 10:15:00',
+    }],
     [dailyFile.path, { title: 'Today', scheduled: '2026-08-03 00:00:00' }],
   ]);
+  const timingMutationAttempts = [];
   const plugin = {
     settings: {
       enableTimeTracking: true,
@@ -576,7 +587,21 @@ test('note- and task-linked sessions create Daily Note notes without scheduling 
     frontmatterMutationService: {
       async process(file, mutate) {
         const value = frontmatter.get(file.path) ?? {};
-        mutate(value);
+        const guarded = new Proxy(value, {
+          set(target, key, next) {
+            if (['scheduled', 'timeestimate', 'end', 'enddate', 'ends'].includes(String(key).toLowerCase())) {
+              timingMutationAttempts.push({ operation: 'set', path: file.path, key: String(key) });
+            }
+            return Reflect.set(target, key, next);
+          },
+          deleteProperty(target, key) {
+            if (['scheduled', 'timeestimate', 'end', 'enddate', 'ends'].includes(String(key).toLowerCase())) {
+              timingMutationAttempts.push({ operation: 'delete', path: file.path, key: String(key) });
+            }
+            return Reflect.deleteProperty(target, key);
+          },
+        });
+        mutate(guarded);
         frontmatter.set(file.path, value);
       },
     },
@@ -588,13 +613,49 @@ test('note- and task-linked sessions create Daily Note notes without scheduling 
     async persistRuntimeSettingsState() {},
     getArchiveFolderPath: () => '_archive',
   };
+  return {
+    Notice,
+    bodies,
+    dailyFile,
+    files,
+    frontmatter,
+    plugin,
+    scheduledFile,
+    service: new TimeTrackingService(plugin),
+    sourceFile,
+    timingMutationAttempts,
+  };
+}
+
+function readTimingMetadata(frontmatter, file) {
+  const value = frontmatter.get(file.path) ?? {};
+  return {
+    scheduled: value.scheduled,
+    timeEstimate: value.timeEstimate,
+    end: value.end,
+  };
+}
+
+test('ordinary note sessions create Daily Note notes without scheduling the note or Daily Note', async () => {
+  const {
+    bodies,
+    dailyFile,
+    frontmatter,
+    service,
+    sourceFile,
+    timingMutationAttempts,
+  } = await createTimeTrackingNotesHarness();
   const originalDailyScheduled = frontmatter.get(dailyFile.path).scheduled;
-  const service = new TimeTrackingService(plugin);
   const session = await service.startTimer({ file: sourceFile, type: 'note' });
 
   assert.ok(session);
   assert.equal(session.targetPath, sourceFile.path);
   assert.equal(session.notesPath, dailyFile.path);
+  assert.deepEqual(readTimingMetadata(frontmatter, sourceFile), {
+    scheduled: undefined,
+    timeEstimate: undefined,
+    end: undefined,
+  });
   assert.equal(frontmatter.get(dailyFile.path).scheduled, originalDailyScheduled);
   assert.equal(frontmatter.get(dailyFile.path).timeEstimate, undefined);
   assert.match(bodies.get(dailyFile.path), /^---\ntitle: Today\nscheduled: 2026-08-03 00:00:00\n---\n## Time Tracking\n\n### /u);
@@ -622,6 +683,80 @@ test('note- and task-linked sessions create Daily Note notes without scheduling 
   assert.match(bodies.get(sourceFile.path), /Ship release[\s\S]*\[scheduled::/u);
   assert.equal(frontmatter.get(sourceFile.path).timeTracking.length, 2);
   assert.equal((bodies.get(dailyFile.path).match(/\^tps-time-tt[_-]/gu) || []).length, 2);
+  assert.deepEqual(timingMutationAttempts, []);
+});
+
+test('authored note timing survives running, manual, stopped, and periodic session synchronization', async () => {
+  const {
+    dailyFile,
+    frontmatter,
+    scheduledFile,
+    service,
+    timingMutationAttempts,
+  } = await createTimeTrackingNotesHarness();
+  const authoredTiming = {
+    scheduled: '2026-09-01 09:00:00',
+    timeEstimate: 75,
+    end: '2026-09-01 10:15:00',
+  };
+
+  const running = await service.startTimer({ file: scheduledFile, type: 'note' });
+  assert.ok(running);
+  assert.deepEqual(readTimingMetadata(frontmatter, scheduledFile), authoredTiming);
+
+  await service.syncRunningScheduledMetadata();
+  assert.deepEqual(readTimingMetadata(frontmatter, scheduledFile), authoredTiming);
+
+  const manual = await service.addManualSession(
+    { file: scheduledFile, type: 'note' },
+    '2026-08-03 13:00:00',
+    '2026-08-03 13:45:00',
+  );
+  assert.ok(manual);
+  assert.deepEqual(readTimingMetadata(frontmatter, scheduledFile), authoredTiming);
+
+  const stopped = await service.stopActiveTimerForFile(
+    scheduledFile,
+    new Date(Date.now() + 60_000),
+  );
+  assert.ok(stopped);
+  assert.deepEqual(readTimingMetadata(frontmatter, scheduledFile), authoredTiming);
+  assert.equal(frontmatter.get(scheduledFile.path).timeTracking.length, 2);
+  assert.equal(frontmatter.get(dailyFile.path).scheduled, '2026-08-03 00:00:00');
+  assert.equal(frontmatter.get(dailyFile.path).timeEstimate, undefined);
+  assert.deepEqual(timingMutationAttempts, []);
+});
+
+test('tracking the Daily Note itself preserves its canonical schedule while adding its session workspace', async () => {
+  const {
+    bodies,
+    dailyFile,
+    frontmatter,
+    service,
+    timingMutationAttempts,
+  } = await createTimeTrackingNotesHarness();
+  const canonicalSchedule = frontmatter.get(dailyFile.path).scheduled;
+
+  const session = await service.startTimer({ file: dailyFile, type: 'note' });
+  assert.ok(session);
+  assert.equal(session.targetPath, dailyFile.path);
+  assert.equal(session.notesPath, dailyFile.path);
+  assert.deepEqual(readTimingMetadata(frontmatter, dailyFile), {
+    scheduled: canonicalSchedule,
+    timeEstimate: undefined,
+    end: undefined,
+  });
+  assert.equal(frontmatter.get(dailyFile.path).timeTracking.length, 1);
+  assert.match(bodies.get(dailyFile.path), /^---\ntitle: Today\nscheduled: 2026-08-03 00:00:00\n---\n## Time Tracking\n\n### /u);
+  assert.equal((bodies.get(dailyFile.path).match(/^## Time Tracking$/gmu) || []).length, 1);
+
+  await service.syncRunningScheduledMetadata();
+  assert.deepEqual(readTimingMetadata(frontmatter, dailyFile), {
+    scheduled: canonicalSchedule,
+    timeEstimate: undefined,
+    end: undefined,
+  });
+  assert.deepEqual(timingMutationAttempts, []);
 });
 
 test('timer duplicate resolves todo before vault.process and clears stale status metadata', () => {

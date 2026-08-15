@@ -23,7 +23,7 @@ export type ChildWorkflowCheckboxResolution = {
 
 export type ChildWorkflowBodyLinkResult = {
   changed: boolean;
-  blockedReason: 'unmapped-status' | 'workflow-changed' | null;
+  blockedReason: 'ignored' | 'unmapped-status' | 'workflow-changed' | null;
   resolution: ChildWorkflowCheckboxResolution;
 };
 
@@ -194,6 +194,12 @@ export class SubitemRelationshipSyncService {
   }
 
   async linkExistingChildToParent(childFile: TFile, parentFile: TFile, options?: { insertBodyLink?: boolean; checkboxState?: string | null }): Promise<boolean> {
+    if (
+      this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)
+      || this.plugin.parentLinkResolutionService.isIgnoredFile(parentFile)
+    ) {
+      return false;
+    }
     let changed = false;
     if (parentFile.extension?.toLowerCase() === 'md' && options?.insertBodyLink === true) {
       const checkboxState = options?.checkboxState !== undefined ? options.checkboxState : this.resolveCheckboxStateForChild(childFile);
@@ -305,7 +311,22 @@ export class SubitemRelationshipSyncService {
     const resolveCurrent = () => options.frontmatter
       ? this.resolveChildWorkflowCheckbox(options.frontmatter, { statuslessMode: options.statuslessMode })
       : this.resolveChildWorkflowCheckboxForFile(childFile, { statuslessMode: options.statuslessMode });
+    const isIgnored = () => (
+      this.plugin.parentLinkResolutionService.isIgnoredFile(parentFile)
+      || this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)
+      || (
+        options.frontmatter !== undefined
+        && this.plugin.parentLinkResolutionService.isIgnoredFrontmatter(options.frontmatter)
+      )
+    );
     const planned = resolveCurrent();
+    if (isIgnored()) {
+      logger.flow('SubitemRelationship', 'body-link:ignored', {
+        parentPath: parentFile.path,
+        childPath: childFile.path,
+      });
+      return { changed: false, blockedReason: 'ignored', resolution: planned };
+    }
     if (planned.outcome === 'unmapped') {
       logger.flowWarn('SubitemRelationship', 'body-link:unmapped-child-status', {
         parentPath: parentFile.path,
@@ -316,16 +337,20 @@ export class SubitemRelationshipSyncService {
       return { changed: false, blockedReason: 'unmapped-status', resolution: planned };
     }
 
-    let guardBlocked = false;
+    let guardBlocked: 'ignored' | 'workflow-changed' | null = null;
     const changed = await this.mutateMarkdownBody(parentFile, async (lines, raw) => {
+      if (isIgnored()) {
+        guardBlocked = 'ignored';
+        return false;
+      }
       const live = resolveCurrent();
       if (!sameChildWorkflowCheckboxResolution(planned, live)) {
-        guardBlocked = true;
+        guardBlocked = 'workflow-changed';
         return false;
       }
       return this.insertBodyLinkIntoLines(parentFile, childFile, live.checkboxState, lines, raw);
     });
-    if (guardBlocked) {
+    if (guardBlocked === 'workflow-changed') {
       logger.flowWarn('SubitemRelationship', 'body-link:child-workflow-changed', {
         parentPath: parentFile.path,
         childPath: childFile.path,
@@ -335,7 +360,7 @@ export class SubitemRelationshipSyncService {
     }
     return {
       changed,
-      blockedReason: guardBlocked ? 'workflow-changed' : null,
+      blockedReason: guardBlocked,
       resolution: planned,
     };
   }
@@ -350,8 +375,17 @@ export class SubitemRelationshipSyncService {
   }
 
   public async insertBodyLink(parentFile: TFile, childFile: TFile, checkboxState?: string | null): Promise<boolean> {
+    if (
+      this.plugin.parentLinkResolutionService.isIgnoredFile(parentFile)
+      || this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)
+    ) {
+      return false;
+    }
     return await this.mutateMarkdownBody(parentFile, async (lines, raw) => (
-      this.insertBodyLinkIntoLines(parentFile, childFile, checkboxState, lines, raw)
+      this.plugin.parentLinkResolutionService.isIgnoredFile(parentFile)
+      || this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)
+        ? false
+        : this.insertBodyLinkIntoLines(parentFile, childFile, checkboxState, lines, raw)
     ));
   }
 

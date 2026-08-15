@@ -8813,44 +8813,66 @@ export const PLUGIN_STYLES = `
       }
 
       body.tps-gcm-hide-completed-checkboxes .markdown-preview-view li.task-list-item.tps-gcm-mapped-completed-task,
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered li.task-list-item.tps-gcm-mapped-completed-task,
       body.tps-gcm-hide-completed-checkboxes .markdown-reading-view li.task-list-item.tps-gcm-mapped-completed-task {
+        display: none !important;
+      }
+
+      body.tps-gcm-hide-completed-checkboxes .tps-gcm-linked-context-panel--reading .tps-gcm-linked-context-card--terminal-task,
+      body.tps-gcm-hide-completed-checkboxes:not(.tps-gcm-hide-completed-checkboxes-reading-only) .tps-gcm-linked-context-panel--live-preview .tps-gcm-linked-context-card--terminal-task,
+      body.tps-gcm-hide-all-task-lines-reading-mode .tps-gcm-linked-context-panel--reading .tps-gcm-linked-context-card--task-line {
+        display: none !important;
+      }
+
+      body.tps-gcm-hide-completed-checkboxes:not(.tps-gcm-hide-completed-checkboxes-reading-only) .tps-gcm-linked-context-panel--live-preview li.task-list-item.tps-gcm-mapped-completed-task {
         display: none !important;
       }
 
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-preview-view li.task-list-item[data-task],
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-preview-view li.task-list-item,
-      body.tps-gcm-hide-all-task-lines-reading-mode .markdown-rendered li.task-list-item[data-task],
-      body.tps-gcm-hide-all-task-lines-reading-mode .markdown-rendered li.task-list-item,
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-reading-view li.task-list-item[data-task],
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-reading-view li.task-list-item {
         display: none !important;
       }
 
       body.tps-gcm-hide-completed-checkboxes .markdown-preview-view.tps-gcm-task-hiding-excluded li.task-list-item.tps-gcm-mapped-completed-task,
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered.tps-gcm-task-hiding-excluded li.task-list-item.tps-gcm-mapped-completed-task,
       body.tps-gcm-hide-completed-checkboxes .markdown-reading-view.tps-gcm-task-hiding-excluded li.task-list-item.tps-gcm-mapped-completed-task,
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-preview-view.tps-gcm-task-hiding-excluded li.task-list-item[data-task],
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-preview-view.tps-gcm-task-hiding-excluded li.task-list-item,
-      body.tps-gcm-hide-all-task-lines-reading-mode .markdown-rendered.tps-gcm-task-hiding-excluded li.task-list-item[data-task],
-      body.tps-gcm-hide-all-task-lines-reading-mode .markdown-rendered.tps-gcm-task-hiding-excluded li.task-list-item,
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-reading-view.tps-gcm-task-hiding-excluded li.task-list-item[data-task],
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-reading-view.tps-gcm-task-hiding-excluded li.task-list-item {
         display: list-item !important;
       }
 
+      body.tps-gcm-hide-completed-checkboxes .tps-gcm-task-hiding-excluded .tps-gcm-linked-context-panel--reading .tps-gcm-linked-context-card--terminal-task,
+      body.tps-gcm-hide-completed-checkboxes .tps-gcm-task-hiding-excluded .tps-gcm-linked-context-panel--live-preview .tps-gcm-linked-context-card--terminal-task,
+      body.tps-gcm-hide-all-task-lines-reading-mode .tps-gcm-task-hiding-excluded .tps-gcm-linked-context-panel--reading .tps-gcm-linked-context-card--task-line {
+        display: block !important;
+      }
+
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-preview-view.tps-gcm-completed-checkboxes-revealed li.task-list-item[data-task],
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-preview-view.tps-gcm-completed-checkboxes-revealed li.task-list-item,
-      body.tps-gcm-hide-all-task-lines-reading-mode .markdown-rendered.tps-gcm-completed-checkboxes-revealed li.task-list-item[data-task],
-      body.tps-gcm-hide-all-task-lines-reading-mode .markdown-rendered.tps-gcm-completed-checkboxes-revealed li.task-list-item,
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-reading-view.tps-gcm-completed-checkboxes-revealed li.task-list-item[data-task],
       body.tps-gcm-hide-all-task-lines-reading-mode .markdown-reading-view.tps-gcm-completed-checkboxes-revealed li.task-list-item {
         display: list-item !important;
       }
 
       body.tps-gcm-hide-completed-checkboxes .markdown-preview-view.tps-gcm-completed-checkboxes-revealed li.task-list-item.tps-gcm-mapped-completed-task,
-      body.tps-gcm-hide-completed-checkboxes .markdown-rendered.tps-gcm-completed-checkboxes-revealed li.task-list-item.tps-gcm-mapped-completed-task,
       body.tps-gcm-hide-completed-checkboxes .markdown-reading-view.tps-gcm-completed-checkboxes-revealed li.task-list-item.tps-gcm-mapped-completed-task {
+        display: list-item !important;
+      }
+
+      body.tps-gcm-hide-completed-checkboxes .tps-gcm-completed-checkboxes-revealed .tps-gcm-linked-context-panel--reading .tps-gcm-linked-context-card--terminal-task,
+      body.tps-gcm-hide-completed-checkboxes .tps-gcm-completed-checkboxes-revealed .tps-gcm-linked-context-panel--live-preview .tps-gcm-linked-context-card--terminal-task,
+      body.tps-gcm-hide-all-task-lines-reading-mode .tps-gcm-completed-checkboxes-revealed .tps-gcm-linked-context-panel--reading .tps-gcm-linked-context-card--task-line {
+        display: block !important;
+      }
+
+      body.tps-gcm-hide-completed-checkboxes.tps-gcm-hide-completed-checkboxes-reading-only .tps-gcm-linked-context-panel--live-preview li.task-list-item.tps-gcm-mapped-completed-task,
+      body.tps-gcm-hide-completed-checkboxes .tps-gcm-linked-context-panel--source li.task-list-item.tps-gcm-mapped-completed-task,
+      body.tps-gcm-hide-all-task-lines-reading-mode .tps-gcm-linked-context-panel--live-preview li.task-list-item,
+      body.tps-gcm-hide-all-task-lines-reading-mode .tps-gcm-linked-context-panel--source li.task-list-item,
+      body.tps-gcm-hide-completed-checkboxes .tps-gcm-task-hiding-excluded .tps-gcm-linked-context-panel--live-preview li.task-list-item.tps-gcm-mapped-completed-task,
+      body.tps-gcm-hide-completed-checkboxes .tps-gcm-completed-checkboxes-revealed .tps-gcm-linked-context-panel--live-preview li.task-list-item.tps-gcm-mapped-completed-task {
         display: list-item !important;
       }
 

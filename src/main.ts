@@ -2018,7 +2018,13 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (!['same-tab', 'new-tab', 'hover-preview'].includes(this.settings.linkedContextOpenBehavior)) {
       this.settings.linkedContextOpenBehavior = DEFAULT_SETTINGS.linkedContextOpenBehavior;
     }
+    this.settings.linkedContextSortOrder = this.settings.linkedContextSortOrder === 'source-desc'
+      ? 'source-desc'
+      : 'source-asc';
     this.settings.parentLinkFormat = normalizeParentLinkFormat(this.settings.parentLinkFormat);
+    this.settings.enableParentChildIgnoreRule = this.settings.enableParentChildIgnoreRule === true;
+    this.settings.parentChildIgnoreFrontmatterKey = String(this.settings.parentChildIgnoreFrontmatterKey ?? '').trim();
+    this.settings.parentChildIgnoreFrontmatterValue = String(this.settings.parentChildIgnoreFrontmatterValue ?? '').trim();
     this.settings.enableBasesForcedLinkPreview = this.settings.enableBasesForcedLinkPreview === true;
     this.settings.collapseHeadingsOnOpen = this.settings.collapseHeadingsOnOpen === true;
     this.settings.enableDailyNoteHome = this.settings.enableDailyNoteHome !== false;
@@ -2046,6 +2052,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.homeCaptureInsertPosition =
       this.settings.homeCaptureInsertPosition === 'top' ? 'top' : 'bottom';
     this.settings.hideCompletedCheckboxes = this.settings.hideCompletedCheckboxes === true;
+    this.settings.completedTaskHidingScope = this.settings.completedTaskHidingScope === 'reading-only'
+      ? 'reading-only'
+      : 'reading-and-live-preview';
     this.settings.hideAllTaskLinesInReadingMode = this.settings.hideAllTaskLinesInReadingMode === true;
     this.settings.taskHidingExclusionPatterns = String(this.settings.taskHidingExclusionPatterns ?? '').trim();
     this.settings.persistTaskVisibilityStateToFrontmatter = this.settings.persistTaskVisibilityStateToFrontmatter === true;

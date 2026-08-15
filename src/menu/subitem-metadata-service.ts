@@ -89,6 +89,7 @@ export class SubitemMetadataService {
     const addRelation = (target: TFile, relation: SubitemRelationKind) => {
       if (!(target instanceof TFile)) return;
       if (target.path === file.path) return;
+      if (relation === 'child' && this.plugin.parentLinkResolutionService.isIgnoredFile(target)) return;
       const key = target.path;
       const current = map.get(key);
       if (current) {
@@ -98,12 +99,13 @@ export class SubitemMetadataService {
       map.set(key, { file: target, relations: new Set([relation]) });
     };
 
-    const bodyLinkedChildren = file.extension?.toLowerCase() === 'md'
+    const relationshipRootIgnored = this.plugin.parentLinkResolutionService.isIgnoredFile(file);
+    const bodyLinkedChildren = !relationshipRootIgnored && file.extension?.toLowerCase() === 'md'
       ? await this.plugin.bodySubitemLinkService.scanFile(file)
       : [];
     if (bodyLinkedChildren.length > 0) {
       bodyLinkedChildren.forEach((entry) => addRelation(entry.childFile, 'child'));
-    } else if (file.extension?.toLowerCase() === 'md') {
+    } else if (!relationshipRootIgnored && file.extension?.toLowerCase() === 'md') {
       const linkedChildren = parentIndex.get(file.path) || [];
       linkedChildren.forEach((child) => addRelation(child, 'child'));
     }

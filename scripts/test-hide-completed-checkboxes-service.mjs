@@ -101,10 +101,13 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(source, /root\.contains\(active\)/);
   assert.match(source, /MAPPED_COMPLETED_TASK_CLASS = 'tps-gcm-mapped-completed-task'/);
   assert.match(source, /getLinkedSubitemCompleteMarkers/);
-  assert.match(source, /completionStatuses: this\.plugin\.sharedServices\.status\.getDoneStatuses\(\)/);
+  assert.match(source, /completionStatuses: \['complete', 'wont-do'\]/);
+  assert.doesNotMatch(source, /completionStatuses: this\.plugin\.sharedServices\.status\.getDoneStatuses\(\)/);
   assert.match(source, /const migratedMarker = MIGRATED_TASK_CHECKBOX\.slice\(1, -1\)/);
   assert.match(source, /if \(migratedMarker\) markers\.add\(migratedMarker\)/);
-  assert.match(source, /private isCompletedTaskSourceLine\(source: unknown, completeMarkers: ReadonlySet<string>\): boolean/);
+  assert.match(source, /isCompletedTaskSourceLine\(source: unknown\): boolean/);
+  assert.match(source, /private isCompletedTaskSourceLineWithMarkers\(source: unknown, completeMarkers: ReadonlySet<string>\): boolean/);
+  assert.match(source, /classifyRenderedTaskRows\(container: ParentNode\): number/);
   assert.match(source, /normalizeLinkedSubitemCheckboxMarker/);
   assert.match(source, /normalizeLinkedSubitemCheckboxMarker\([\s\S]{0,160}TASK_LINE_STATE_RE/u);
   assert.match(source, /normalizeLinkedSubitemCheckboxMarker\(task\?\.getAttribute\('data-task'\)\)/u);
@@ -126,7 +129,7 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(styles, /\.markdown-preview-view\.tps-gcm-completed-checkboxes-revealed li\.task-list-item\.tps-gcm-mapped-completed-task/);
   assert.match(styles, /hide-all-task-lines-reading-mode \.markdown-reading-view li\.task-list-item \{/);
   assert.match(styles, /hide-all-task-lines-reading-mode \.markdown-reading-view\.tps-gcm-completed-checkboxes-revealed li\.task-list-item \{/);
-  assert.match(styles, /\.markdown-rendered\.tps-gcm-completed-checkboxes-revealed li\.task-list-item\.tps-gcm-mapped-completed-task/);
+  assert.doesNotMatch(styles, /hide-completed-checkboxes \.markdown-rendered li\.task-list-item\.tps-gcm-mapped-completed-task/);
   assert.doesNotMatch(styles, /li\.task-list-item\[data-task=">"\]/);
   assert.match(styles, /\.markdown-preview-view \.tps-gcm-completed-checkbox-reveal/);
   assert.match(styles, /\.markdown-reading-view \.tps-gcm-completed-checkbox-reveal/);
@@ -159,6 +162,28 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.doesNotMatch(liveRevealStyles, /height: 0;/);
   assert.doesNotMatch(renderedRevealStyles, /height: 0;/);
   assert.doesNotMatch(styles, /is-live-preview:not\(\.tps-gcm-completed-checkboxes-editing\):not\(\.tps-gcm-completed-checkboxes-revealed\)/);
+});
+
+test('reading-only completed-task scope clears Live Preview while retaining rendered and linked-context hiding', () => {
+  assert.match(typesSource, /CompletedTaskHidingScope = 'reading-and-live-preview' \| 'reading-only'/);
+  assert.match(typesSource, /completedTaskHidingScope: CompletedTaskHidingScope/);
+  assert.match(constantsSource, /completedTaskHidingScope: 'reading-and-live-preview'/);
+  assert.match(mainSource, /completedTaskHidingScope === 'reading-only'/);
+  assert.match(settingsSource, /Hide completed tasks in/);
+  assert.match(settingsSource, /Reading view only/);
+  assert.match(source, /READING_ONLY_BODY_CLASS = 'tps-gcm-hide-completed-checkboxes-reading-only'/);
+  assert.match(source, /shouldHideCompletedTasksInLivePreview\(\): boolean/);
+  assert.match(source, /completedTaskHidingScope !== 'reading-only'/);
+  assert.match(source, /const enabled = this\.shouldHideCompletedTasksInLivePreview\(\)/);
+  assert.match(source, /if \(!this\.shouldHideCompletedTasksInLivePreview\(\)\) return Decoration\.none/);
+  assert.match(source, /this\.clearLivePreviewRoot\(root\)/);
+  assert.match(source, /hasCompletedTasks = completedLines\.length > 0 \|\| root\.querySelector\(/);
+  assert.match(source, /tps-gcm-linked-context-panel--live-preview \.tps-gcm-linked-context-card--terminal-task/);
+  assert.match(styles, /tps-gcm-linked-context-panel--reading \.tps-gcm-linked-context-card--terminal-task/);
+  assert.match(styles, /not\(\.tps-gcm-hide-completed-checkboxes-reading-only\) \.tps-gcm-linked-context-panel--live-preview/);
+  assert.match(styles, /tps-gcm-hide-completed-checkboxes-reading-only \.tps-gcm-linked-context-panel--live-preview li\.task-list-item\.tps-gcm-mapped-completed-task/);
+  assert.match(styles, /tps-gcm-linked-context-panel--source li\.task-list-item\.tps-gcm-mapped-completed-task/);
+  assert.doesNotMatch(styles, /\.markdown-rendered \.tps-gcm-linked-context-card--terminal-task/);
 });
 
 test('task reveal state can optionally persist to one frontmatter property', () => {

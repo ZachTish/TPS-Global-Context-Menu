@@ -2,6 +2,10 @@ import { TFile, normalizePath } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { buildParentFrontmatterLinkValue, resolveLinkValueToFile } from '../handlers/parent-link-format';
 import type { ParentLinkKind, ResolvedParentLink } from './subitem-types';
+import {
+  matchesParentChildIgnoreRule,
+  type ParentChildIgnoreSettings,
+} from './parent-child-ignore-service';
 
 export class ParentLinkResolutionService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
@@ -18,10 +22,34 @@ export class ParentLinkResolutionService {
   }
 
   getAllFileTargets(): TFile[] {
-    return this.plugin.app.vault.getAllLoadedFiles().filter((file): file is TFile => file instanceof TFile);
+    return this.plugin.app.vault.getAllLoadedFiles().filter(
+      (file): file is TFile => file instanceof TFile && !this.isIgnoredFile(file),
+    );
+  }
+
+  isIgnoredFrontmatter(frontmatter: Record<string, unknown> | null | undefined): boolean {
+    return matchesParentChildIgnoreRule(
+      frontmatter,
+      this.plugin.settings as unknown as ParentChildIgnoreSettings,
+    );
+  }
+
+  isIgnoredFile(file: TFile): boolean {
+    if (!(file instanceof TFile)) return false;
+    const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as
+      | Record<string, unknown>
+      | undefined;
+    return this.isIgnoredFrontmatter(frontmatter);
   }
 
   getParentsForChild(childFile: TFile): ResolvedParentLink[] {
+    if (this.isIgnoredFile(childFile)) return [];
+    return this.getStoredParentsForChild(childFile)
+      .filter((entry) => !this.isIgnoredFile(entry.file));
+  }
+
+  /** Read persisted relationships without applying the display/automation ignore rule. */
+  getStoredParentsForChild(childFile: TFile): ResolvedParentLink[] {
     const frontmatter = (this.plugin.app.metadataCache.getFileCache(childFile)?.frontmatter || {}) as Record<string, unknown>;
     const values = this.getParentValuesFromFrontmatter(frontmatter);
     const results = new Map<string, ResolvedParentLink>();
@@ -41,11 +69,13 @@ export class ParentLinkResolutionService {
   }
 
   async addParentToChild(childFile: TFile, parentFile: TFile): Promise<boolean> {
+    if (this.isIgnoredFile(childFile) || this.isIgnoredFile(parentFile)) return false;
     const key = this.getParentKey();
     const linkValue = buildParentFrontmatterLinkValue(this.plugin.app, parentFile, childFile.path);
     let changed = false;
 
     await this.plugin.frontmatterMutationService.process(childFile, (fm) => {
+      if (this.isIgnoredFrontmatter(fm as Record<string, unknown>) || this.isIgnoredFile(parentFile)) return;
       const values = this.getParentValuesFromFrontmatter(fm as Record<string, unknown>);
       const existingFiles = this.resolveFilesFromFrontmatterValue(values, childFile.path);
       const alreadyLinked = existingFiles.some((file) => file.path === parentFile.path);
@@ -86,12 +116,14 @@ export class ParentLinkResolutionService {
   async ensureSelfLinkForParent(parentFile: TFile): Promise<boolean> {
     if (!this.plugin.settings.autoSelfLinkParentInParentKey) return false;
     if (!(parentFile instanceof TFile) || parentFile.extension?.toLowerCase() !== 'md') return false;
+    if (this.isIgnoredFile(parentFile)) return false;
 
     const key = this.getParentKey();
     const selfLink = buildParentFrontmatterLinkValue(this.plugin.app, parentFile, parentFile.path);
     let changed = false;
 
     await this.plugin.frontmatterMutationService.process(parentFile, (fm) => {
+      if (this.isIgnoredFrontmatter(fm as Record<string, unknown>)) return;
       const values = this.getParentValuesFromFrontmatter(fm as Record<string, unknown>);
       const normalizedValues = values.map((value) => {
         const resolved = resolveLinkValueToFile(this.plugin.app, value, parentFile.path);

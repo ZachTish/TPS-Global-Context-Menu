@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 const manager = readFileSync(new URL('../src/menu/persistent-menu-manager.ts', import.meta.url), 'utf8');
 const panelBuilder = readFileSync(new URL('../src/menu/panel-builder.ts', import.meta.url), 'utf8');
 const styles = readFileSync(new URL('../src/plugin-styles.ts', import.meta.url), 'utf8');
+const events = readFileSync(new URL('../src/events/register-events.ts', import.meta.url), 'utf8');
 
 function methodSource(start, end) {
   const startIndex = manager.indexOf(start);
@@ -168,6 +169,24 @@ test('repeated note-open ensures share one same-key linked-context render', () =
   assert.match(ensureSource, /await inFlight\.promise/);
 });
 
+test('a detached same-key panel is moved intact before any collection or render starts', () => {
+  const ensureSource = methodSource(
+    'private async ensureLinkedContextPanel',
+    'private async renderLinkedContextPanel',
+  );
+  const sameKeyStart = ensureSource.indexOf('if (mounted?.requestKey === requestKey)');
+  const inFlightStart = ensureSource.indexOf('const inFlight = this.linkedContextRenders.get(view)');
+  const reattachSource = ensureSource.slice(sameKeyStart, inFlightStart);
+
+  assert.ok(sameKeyStart >= 0, 'same-key mount recovery must have a dedicated fast path');
+  assert.ok(inFlightStart > sameKeyStart, 'reattachment must happen before render coalescing starts');
+  assert.match(reattachSource, /const parent = this\.resolveLinkedContextMount\(view, placement\)/);
+  assert.match(reattachSource, /parent\.appendChild\(mounted\.el\)/);
+  assert.match(reattachSource, /if \(this\.isLinkedContextPanelMounted\(view\)\) \{/);
+  assert.doesNotMatch(reattachSource, /getLinkedContextItems|renderLinkedContextPanel|unmountLinkedContextPanel/);
+  assert.match(reattachSource, /return;\s*\}/);
+});
+
 test('opening another note removes stale linked context before its replacement scan starts', () => {
   const ensureSource = methodSource(
     'private async ensureLinkedContextPanel',
@@ -216,6 +235,131 @@ test('canceling a linked-context render clears same-key coalescing for reactivat
 
   assert.match(cancelSource, /linkedContextRequestIds\.set/);
   assert.match(cancelSource, /linkedContextRenders\.delete\(view\)/);
+});
+
+test('linked context request identity and rendered DOM retain the configured stable order', () => {
+  const keySource = methodSource(
+    'private getLinkedContextRequestKey',
+    'private isLinkedContextRenderCurrent',
+  );
+  const collectionSource = methodSource(
+    'private getLinkedContextItems',
+    'private async ensureLinkedContextPanel',
+  );
+  const renderSource = methodSource(
+    'private async renderLinkedContextPanel',
+    'private disposeLinkedContextCandidate',
+  );
+
+  assert.match(keySource, /normalizeLinkedContextSortOrder\(this\.plugin\.settings\.linkedContextSortOrder\)/);
+  assert.match(keySource, /:\$\{sortOrder\}:/);
+  assert.match(keySource, /linkedContextInvalidationVersions\.get\(view\)/);
+  assert.match(keySource, /!this\.linkedContextRemovedSourcePaths\.has\(sourcePath\)/);
+  assert.match(collectionSource, /this\.linkedContextService\.collect\(file, sortOrder, removedSourcePaths\)/);
+  assert.match(renderSource, /candidatePanel\.dataset\.sortOrder/);
+  assert.match(renderSource, /sourcePaths: new Set\(items\.map\(\(item\) => item\.sourceFile\.path\)\)/);
+  assert.match(manager, /card\.dataset\.tpsGcmLinkedContextId = item\.id/);
+});
+
+test('linked context recovers a detached managed mount with coalesced bounded retries', () => {
+  const observeSource = methodSource(
+    'private ensureLinkedContextHostObserver',
+    'private scheduleLinkedContextMountRecovery',
+  );
+  const recoverySource = methodSource(
+    'private scheduleLinkedContextMountRecovery',
+    'private releaseLinkedContextHostObserver',
+  );
+  const releaseSource = methodSource(
+    'private releaseLinkedContextHostObserver',
+    'private unmountLinkedContextPanel',
+  );
+
+  assert.match(manager, /linkedContextHostObservers: Map<MarkdownView/);
+  assert.match(manager, /linkedContextRecoveryTimers: Map<MarkdownView, number>/);
+  assert.match(observeSource, /new MutationObserver/);
+  assert.match(observeSource, /observer\.observe\(view\.contentEl, \{ childList: true, subtree: true \}\)/);
+  assert.match(observeSource, /this\.isLinkedContextPanelMounted\(view\)/);
+  assert.match(observeSource, /this\.scheduleLinkedContextMountRecovery\(view\)/);
+  assert.match(recoverySource, /const delays = \[40, 120, 300, 700, 1200\]/);
+  assert.match(recoverySource, /this\.linkedContextRecoveryTimers\.has\(view\)/);
+  assert.match(recoverySource, /shouldRecoverLinkedContextPanel/);
+  assert.match(recoverySource, /this\.ensureLinkedContextPanel\(view\)\.finally/);
+  assert.match(recoverySource, /attempt \+ 1 >= delays\.length/);
+  assert.match(recoverySource, /this\.scheduleLinkedContextMountRecovery\(view, attempt \+ 1\)/);
+  assert.match(releaseSource, /observer\.disconnect\(\)/);
+  assert.match(releaseSource, /window\.clearTimeout\(timer\)/);
+  assert.match(manager, /this\.releaseLinkedContextHostObserver\(view\)/);
+});
+
+test('source-file changes invalidate visible linked context without depending on the target view path', () => {
+  const refreshSource = methodSource(
+    'public invalidateLinkedContextSourcePaths',
+    'private refreshLinkedContextForChangedFile',
+  );
+  const delegateSource = methodSource(
+    'private refreshLinkedContextForChangedFile',
+    'private shouldDeferStructuralRefreshForTyping',
+  );
+  const publicRefreshSource = methodSource(
+    'refreshMenusForFile(',
+    'private refreshLinkedContextForChangedFile',
+  );
+
+  assert.match(publicRefreshSource, /this\.refreshLinkedContextForChangedFile\(file\)/);
+  assert.match(delegateSource, /this\.invalidateLinkedContextSourcePaths\(\[file\.path\]\)/);
+  assert.match(refreshSource, /linkedContextHostObservers\.keys\(\)/);
+  assert.match(refreshSource, /priorSourcePaths/);
+  assert.match(refreshSource, /resolvedLinks\[changedPath\]\?\.\[targetFile\.path\]/);
+  assert.match(refreshSource, /isLinkedContextSourceChangeRelevant/);
+  assert.match(refreshSource, /linkedContextInvalidationVersions\.set/);
+  assert.match(refreshSource, /linkedContextRemovedSourcePaths\.add/);
+  assert.match(refreshSource, /card\.dataset\.tpsGcmSourcePath/);
+  assert.match(refreshSource, /void this\.ensureLinkedContextPanel\(view\)/);
+});
+
+test('rename and delete invalidate prior linked-context source identities promptly', () => {
+  const renameStart = events.indexOf("plugin.app.vault.on('rename'");
+  const deleteStart = events.indexOf("plugin.app.vault.on('delete'");
+  assert.ok(renameStart >= 0 && deleteStart > renameStart, 'vault rename/delete handlers must exist');
+
+  const renameSource = events.slice(renameStart, deleteStart);
+  const deleteSource = events.slice(deleteStart);
+  assert.match(
+    renameSource,
+    /file\.extension === 'md' \|\| oldPath\.toLocaleLowerCase\(\)\.endsWith\('\.md'\)/,
+    'renaming Markdown to a non-Markdown extension must still invalidate its old identity',
+  );
+  assert.match(
+    renameSource,
+    /invalidateLinkedContextSourcePaths\([\s\S]*?\[oldPath, file\.path\],[\s\S]*?\{ removedPaths: \[oldPath\] \}/,
+    'rename must invalidate the old source path as well as its new identity',
+  );
+  assert.match(
+    deleteSource,
+    /invalidateLinkedContextSourcePaths\([\s\S]*?\[file\.path\],[\s\S]*?\{ removedPaths: \[file\.path\] \}/,
+    'delete must invalidate the remembered source path without requiring a live TFile refresh',
+  );
+});
+
+test('linked context uses central terminal-task semantics and explicit view-surface classes', () => {
+  const itemSource = methodSource(
+    'private async renderLinkedContextItem',
+    'private enableLinkedContextTaskCheckboxes',
+  );
+  const renderSource = methodSource(
+    'private async renderLinkedContextPanel',
+    'private disposeLinkedContextCandidate',
+  );
+
+  assert.match(renderSource, /tps-gcm-linked-context-panel--\$\{surface\}/);
+  assert.match(renderSource, /mode === 'preview'/);
+  assert.match(renderSource, /!isStrictSourceMode\(view\)/);
+  assert.match(itemSource, /isCompletedTaskSourceLine\(item\.markdown\)/);
+  assert.match(itemSource, /tps-gcm-linked-context-card--terminal-task/);
+  assert.match(itemSource, /classifyRenderedTaskRows\(body\)/);
+  assert.match(manager, /taskRow\.setAttribute\('data-task', result\.task\.marker\)/);
+  assert.match(manager, /checkbox\.disabled = false;\s*this\.ensureMenus\(\)/);
 });
 
 test('opening Mentions schedules one deferred full reference scan', () => {

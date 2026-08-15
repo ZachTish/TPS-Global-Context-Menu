@@ -269,6 +269,7 @@ test('task line metadata helpers edit task text without destroying inline task p
     setInlineFieldValueOnTaskLine,
     setInlineFieldValueOnLine,
     addInlineTagToTaskLine,
+    addInlineTagsToTaskLine,
     removeInlineTagFromTaskLine,
     readInlineFieldValue,
     readTaskInlineFieldRecord,
@@ -333,10 +334,26 @@ test('task line metadata helpers edit task text without destroying inline task p
   );
   assert.equal(addInlineTagToTaskLine(line, '#topic/home'), line);
   assert.equal(addInlineTagToTaskLine(line, 'errand'), `${line} #errand`);
+  const taskWithBlockId = `${line} ^task-tags`;
+  assert.equal(
+    addInlineTagsToTaskLine(taskWithBlockId, 'One, two, #ONE'),
+    `${line} #one #two ^task-tags`,
+  );
+  assert.equal(readInlineFieldValue(addInlineTagsToTaskLine(taskWithBlockId, 'one, two'), 'priority'), 'high');
+  const semanticCarrierLine = '- [ ] semantic tags <!-- [tags:: #one] [tpsId:: semantic-tags] --> ^semantic-tags';
+  const semanticCarrierUpdated = addInlineTagsToTaskLine(semanticCarrierLine, 'ONE, two, two');
+  assert.deepEqual(readTaskLineTags(semanticCarrierUpdated).sort(), ['one', 'two']);
+  assert.doesNotMatch(semanticCarrierUpdated, /(?:^|\s)#one(?:$|\s)/u);
+  assert.match(semanticCarrierUpdated, /\[tpsId:: semantic-tags\]/u);
+  assert.match(semanticCarrierUpdated, /\^semantic-tags$/u);
   assert.equal(removeInlineTagFromTaskLine(`${line} #errand`, 'topic/home'), '- [ ] bathroom window [priority:: high] [scheduled:: 2026-05-31 09:00:00] #errand');
   const bulletLine = '- Alpha release [status:: active] #existing';
   assert.deepEqual(readInlineTags(bulletLine), ['existing']);
   assert.equal(addInlineTagToTaskLine(bulletLine, '#qa/base'), `${bulletLine} #qa/base`);
+  assert.equal(
+    addInlineTagsToTaskLine(`${bulletLine} ^bullet-tags`, 'One, two, one'),
+    `${bulletLine} #one #two ^bullet-tags`,
+  );
   assert.equal(removeInlineTagFromTaskLine(bulletLine, 'existing'), '- Alpha release [status:: active]');
   assert.equal(
     insertLineAfterFrontmatter('---\ntitle: Target\n---\n\nExisting body\n', '- [ ] moved task'),
@@ -1484,14 +1501,13 @@ test('task time tracking targets task lines and does not fall back to note front
   assert.doesNotMatch(timeTrackingSource, /record\.targetType === 'task'[\s\S]{0,500}setValueCaseInsensitive\(frontmatter, 'scheduled'/);
 });
 
-test('time tracking does not schedule process run notes such as workouts', () => {
-  assert.match(timeTrackingSource, /isProcessRunFrontmatter\(frontmatter\)/);
-  assert.match(timeTrackingSource, /deleteValueCaseInsensitive\(frontmatter, 'scheduled'\)/);
-  assert.match(timeTrackingSource, /runKind === 'run'/);
-  assert.match(timeTrackingSource, /workflowKind === 'workflow'/);
-  assert.match(timeTrackingSource, /kind === 'workout'/);
-  assert.match(timeTrackingSource, /Boolean\(runType\)/);
-  assert.match(timeTrackingSource, /Boolean\(workflowType\)/);
+test('time tracking never schedules note targets, including process runs and workouts', () => {
+  assert.match(
+    timeTrackingSource,
+    /if \(record\.targetType !== 'task'\) return;[\s\S]*?syncTaskLineScheduledMetadata/u,
+  );
+  assert.doesNotMatch(timeTrackingSource, /setValueCaseInsensitive\(frontmatter, 'scheduled'/u);
+  assert.doesNotMatch(timeTrackingSource, /deleteValueCaseInsensitive\(frontmatter, 'scheduled'/u);
 });
 
 test('time tracking ignores archived running sessions by default', () => {

@@ -171,7 +171,12 @@ export class LinkedSubitemCheckboxService {
 
   ensureForView(view: MarkdownView): void {
     const file = view.file;
-    if (!(file instanceof TFile) || file.extension !== 'md' || !this.plugin.settings.enableLinkedSubitemCheckboxes) {
+    if (
+      !(file instanceof TFile)
+      || file.extension !== 'md'
+      || !this.plugin.settings.enableLinkedSubitemCheckboxes
+      || this.plugin.parentLinkResolutionService.isIgnoredFile(file)
+    ) {
       this.removeForView(view);
       return;
     }
@@ -366,6 +371,10 @@ export class LinkedSubitemCheckboxService {
       const childFile = this.plugin.app.vault.getFileByPath(childPath);
       const parentFile = this.plugin.app.vault.getFileByPath(parentPath);
       if (!(childFile instanceof TFile) || !(parentFile instanceof TFile)) return null;
+      if (
+        this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)
+        || this.plugin.parentLinkResolutionService.isIgnoredFile(parentFile)
+      ) return null;
       return { childFile, parentFile };
     }
 
@@ -381,6 +390,10 @@ export class LinkedSubitemCheckboxService {
 
     const childFile = this.resolveLinkedFile(parsed.linkTarget, view.file.path);
     if (!(childFile instanceof TFile)) return null;
+    if (
+      this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)
+      || this.plugin.parentLinkResolutionService.isIgnoredFile(view.file)
+    ) return null;
     return { childFile, parentFile: view.file, sourceLine };
   }
 
@@ -449,6 +462,13 @@ export class LinkedSubitemCheckboxService {
 
     const childFile = this.plugin.app.vault.getFileByPath(childPath);
     if (!(childFile instanceof TFile)) return false;
+    const sourceFile = this.resolveMarkdownViewForElement(pillEl)?.file;
+    const relationshipIsIgnored = () => (
+      this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)
+      || (sourceFile instanceof TFile && this.plugin.parentLinkResolutionService.isIgnoredFile(sourceFile))
+    );
+    if (relationshipIsIgnored()) return false;
+    const guardedWriteOptions = { writeGuard: () => !relationshipIsIgnored() };
     const entries = [{ file: childFile, frontmatter: (this.plugin.app.metadataCache.getFileCache(childFile)?.frontmatter || {}) as Record<string, unknown> }];
     const menuController = this.plugin.menuController as any;
     const propertyRowService = menuController?.propertyRowService as any;
@@ -467,21 +487,30 @@ export class LinkedSubitemCheckboxService {
         configuredProperty,
         String((entries[0]?.frontmatter || {})[configuredProperty.key] || ''),
         async (choice) => {
+        if (relationshipIsIgnored()) return;
+        let changedCount = 0;
         if (choice.kind === 'clear') {
-          await this.plugin.bulkEditService.removeFrontmatterKey([childFile], configuredProperty.key);
+          changedCount = await this.plugin.bulkEditService.removeFrontmatterKey(
+            [childFile],
+            configuredProperty.key,
+            guardedWriteOptions,
+          );
         } else if (configuredProperty.type === 'list') {
-          await this.plugin.bulkEditService.addListValues(
+          changedCount = await this.plugin.bulkEditService.addListValues(
             [childFile],
             choice.value,
             configuredProperty.key,
             choice.kind === 'entity',
+            guardedWriteOptions,
           );
         } else {
-          await this.plugin.bulkEditService.updateFrontmatter(
+          changedCount = await this.plugin.bulkEditService.updateFrontmatter(
             [childFile],
             { [configuredProperty.key]: choice.value },
+            guardedWriteOptions,
           );
         }
+        if (changedCount <= 0) return;
         await this.refreshReferencesForChild(childFile);
         this.scheduleDecorateForActiveView();
         this.refreshLivePreviewEditors();
@@ -492,16 +521,34 @@ export class LinkedSubitemCheckboxService {
 
     if ((kind === 'status' || (propertyType === 'selector' && propertyKey === 'status')) && propertyRowService?.openStatusSubmenu) {
       const statusProp = this.resolveCustomProperty(entries, 'status', 'status');
-      propertyRowService.openStatusSubmenu(pillEl, entries, undefined, statusProp?.options);
+      propertyRowService.openStatusSubmenu(
+        pillEl,
+        entries,
+        undefined,
+        statusProp?.options,
+        undefined,
+        () => !relationshipIsIgnored(),
+      );
       return true;
     }
     if ((kind === 'priority' || (propertyType === 'selector' && propertyKey === 'priority')) && propertyRowService?.openPrioritySubmenu) {
       const priorityProp = this.resolveCustomProperty(entries, 'priority', 'priority');
-      propertyRowService.openPrioritySubmenu(pillEl, entries, undefined, getEffectivePropertyOptions(this.plugin.app, priorityProp));
+      propertyRowService.openPrioritySubmenu(
+        pillEl,
+        entries,
+        undefined,
+        getEffectivePropertyOptions(this.plugin.app, priorityProp),
+        'priority',
+        () => !relationshipIsIgnored(),
+      );
       return true;
     }
     if (kind === 'scheduled' || propertyType === 'datetime') {
-      menuController?.openScheduledModal?.(entries, propertyKey || 'scheduled');
+      menuController?.openScheduledModal?.(
+        entries,
+        propertyKey || 'scheduled',
+        () => !relationshipIsIgnored(),
+      );
       return true;
     }
     if (kind === 'recurrence' || propertyType === 'recurrence') {
@@ -509,11 +556,11 @@ export class LinkedSubitemCheckboxService {
       return true;
     }
     if (kind === 'folder' && propertyRowService?.openTypeSubmenu) {
-      propertyRowService.openTypeSubmenu(pillEl, entries);
+      propertyRowService.openTypeSubmenu(pillEl, entries, () => !relationshipIsIgnored());
       return true;
     }
     if (kind === 'action') {
-      menuController?.openAddTagModal?.(entries, 'tags');
+      menuController?.openAddTagModal?.(entries, 'tags', () => !relationshipIsIgnored());
       return true;
     }
     if (kind === 'tag') {
@@ -531,7 +578,13 @@ export class LinkedSubitemCheckboxService {
             item.setTitle(option);
             if (currentValue === option) item.setChecked(true);
             item.onClick(async () => {
-              await this.plugin.bulkEditService.updateFrontmatter([childFile], { [propertyKey]: option });
+              if (relationshipIsIgnored()) return;
+              const changedCount = await this.plugin.bulkEditService.updateFrontmatter(
+                [childFile],
+                { [propertyKey]: option },
+                guardedWriteOptions,
+              );
+              if (changedCount <= 0) return;
               await this.refreshReferencesForChild(childFile);
               this.scheduleDecorateForActiveView();
               this.refreshLivePreviewEditors();
@@ -557,12 +610,26 @@ export class LinkedSubitemCheckboxService {
   }
 
   async syncDerivedStatusForChild(childFile: TFile): Promise<boolean> {
+    if (this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)) return false;
     const references = await this.plugin.subitemReferenceIndexService.getReferencesForChild(childFile);
     return await this.syncDerivedStatusForChildFromReferences(childFile, references);
   }
 
   async syncDerivedStatusForChildFromReferences(childFile: TFile, references: BodySubitemLink[]): Promise<boolean> {
-    const checkboxReference = references.find((reference) => reference.kind === 'checkbox');
+    if (this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)) return false;
+    const visibleReferences = references.filter((reference) => {
+      const parentFile = this.plugin.app.vault.getFileByPath(reference.parentPath);
+      return !(parentFile instanceof TFile)
+        || !this.plugin.parentLinkResolutionService.isIgnoredFile(parentFile);
+    });
+    if (
+      visibleReferences.length === 0
+      && (
+        references.length > 0
+        || await this.plugin.subitemReferenceIndexService.hasIgnoredReferenceForChild?.(childFile)
+      )
+    ) return false;
+    const checkboxReference = visibleReferences.find((reference) => reference.kind === 'checkbox');
     const targetStatus = checkboxReference
       ? this.getStatusForCheckboxState(checkboxReference.checkboxState)
       : '';
@@ -596,6 +663,7 @@ export class LinkedSubitemCheckboxService {
   }
 
   async refreshReferencesForChild(childFile: TFile): Promise<void> {
+    if (this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)) return;
     const references = await this.plugin.subitemReferenceIndexService.getReferencesForChild(childFile);
     const parentPaths = new Set<string>();
     for (const reference of references) {
@@ -683,6 +751,10 @@ export class LinkedSubitemCheckboxService {
     try {
       const file = view.file;
       if (!(file instanceof TFile)) return;
+      if (this.plugin.parentLinkResolutionService.isIgnoredFile(file)) {
+        this.clearDecorations(view);
+        return;
+      }
       
       const editorAny = view.editor as any;
       const source = typeof editorAny?.getValue === 'function'
@@ -698,6 +770,7 @@ export class LinkedSubitemCheckboxService {
         if (!parsed) continue;
         const childFile = this.resolveLinkedFile(parsed.linkTarget, file.path);
         if (!(childFile instanceof TFile)) continue;
+        if (this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)) continue;
         const model = this.subitemLineModelService.buildModel(parsed, childFile, file);
         logger.log('[TPS GCM] [DIAG] reading-mode model', {
           parentFile: file.path,
@@ -1200,6 +1273,11 @@ export class LinkedSubitemCheckboxService {
     checkboxToken: string,
     sourceLine?: { file: TFile; lineNumber: number; rawLine: string },
   ): Promise<boolean> {
+    const relationshipIsIgnored = () => (
+      this.plugin.parentLinkResolutionService.isIgnoredFile(parentFile)
+      || this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)
+    );
+    if (relationshipIsIgnored()) return false;
     const normalizedToken = normalizeLinkedSubitemCheckboxState(checkboxToken);
     if (!normalizedToken) return false;
     const mappedStatus = this.getStatusForCheckboxState(normalizedToken);
@@ -1234,10 +1312,16 @@ export class LinkedSubitemCheckboxService {
     let previousLine = '';
     let updatedLine = '';
     let mappingGuardBlocked = false;
+    let relationshipGuardBlocked = false;
     const mutation = await runGuardedLinkedSubitemMutation({
       needsChildWrite: needsStatusWrite,
       writeParent: async () => {
+        if (relationshipIsIgnored()) return 'blocked';
         const didWriteLine = await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(parentFile, async (lines) => {
+          if (relationshipIsIgnored()) {
+            relationshipGuardBlocked = true;
+            return false;
+          }
           if (this.getStatusForCheckboxState(normalizedToken) !== mappedStatus) {
             mappingGuardBlocked = true;
             return false;
@@ -1254,16 +1338,22 @@ export class LinkedSubitemCheckboxService {
           lines[lineIndex] = updatedLine;
           return true;
         });
-        if (mappingGuardBlocked) return 'blocked';
+        if (mappingGuardBlocked || relationshipGuardBlocked) return 'blocked';
         if (!didResolveLine || (lineNeededUpdate && !didWriteLine)) return 'blocked';
         return didWriteLine ? 'changed' : 'unchanged';
       },
       writeChild: async () => {
+        if (relationshipIsIgnored()) {
+          throw new Error('Parent/child relationship became ignored before the child status write.');
+        }
         if (this.getStatusForCheckboxState(normalizedToken) !== mappedStatus) {
           throw new Error('Linked-subitem checkbox mapping changed before the child status write.');
         }
         await this.plugin.bulkEditService.setStatus([childFile], mappedStatus, {
-          writeGuard: () => this.getStatusForCheckboxState(normalizedToken) === mappedStatus,
+          writeGuard: () => (
+            !relationshipIsIgnored()
+            && this.getStatusForCheckboxState(normalizedToken) === mappedStatus
+          ),
         });
       },
       readAuthoritativeChild: async () => {
@@ -1520,6 +1610,9 @@ export class LinkedSubitemCheckboxService {
     if (!(markdownView instanceof MarkdownView) || !(parentFile instanceof TFile)) {
       return { decorations: Decoration.none, matchCount: 0, potentialCount: 0, filePath: parentFile instanceof TFile ? parentFile.path : null };
     }
+    if (this.plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) {
+      return { decorations: Decoration.none, matchCount: 0, potentialCount: 0, filePath: parentFile.path };
+    }
 
     const builder = new RangeSetBuilder<Decoration>();
     let matchCount = 0;
@@ -1533,7 +1626,7 @@ export class LinkedSubitemCheckboxService {
         if (parsed) {
           potentialCount++;
           const childFile = this.resolveLinkedFile(parsed.linkTarget, parentFile.path);
-          if (childFile instanceof TFile) {
+          if (childFile instanceof TFile && !this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)) {
             const model = this.subitemLineModelService.buildModel(parsed, childFile, parentFile);
             matchCount++;
             logger.log('[TPS GCM] [DIAG] live-preview model', {

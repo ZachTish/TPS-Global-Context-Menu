@@ -292,9 +292,17 @@ export class MenuBuilder {
         .setIcon('plus')
         .onClick(() => {
           new FileSuggestModal(this.app, async (parentFile: TFile) => {
-            await this.plugin.bulkEditService.linkToParent([file], parentFile);
-            new Notice(`Linked to parent: ${parentFile.basename}`);
-          }, { extensions: ['md', 'base'] }).open();
+            const linked = await this.plugin.bulkEditService.linkToParent([file], parentFile);
+            new Notice(linked > 0
+              ? `Linked to parent: ${parentFile.basename}`
+              : 'The relationship is no longer available.');
+          }, {
+            extensions: ['md', 'base'],
+            filter: (candidate) => (
+              candidate.path !== file.path
+              && !this.plugin.parentLinkResolutionService.isIgnoredFile(candidate)
+            ),
+          }).open();
         });
     });
 
@@ -349,9 +357,14 @@ export class MenuBuilder {
         .onClick(() => {
           new MultiFileSelectModal(this.app, async (childFilesToAdd: TFile[]) => {
             if (childFilesToAdd.length > 0) {
-              await this.plugin.bulkEditService.linkChildren(file, childFilesToAdd);
-              new Notice(`Linked ${childFilesToAdd.length} children to this note.`);
+              const linked = await this.plugin.bulkEditService.linkChildren(file, childFilesToAdd);
+              new Notice(`Linked ${linked} children to this note.`);
             }
+          }, {
+            filter: (candidate) => (
+              candidate.path !== file.path
+              && !this.plugin.parentLinkResolutionService.isIgnoredFile(candidate)
+            ),
           }).open();
         });
     });
@@ -665,26 +678,28 @@ export class MenuBuilder {
     // Relationship and tracking operations are note actions, not custom properties.
     if (allEntriesAreMarkdown) {
       if (includeSingleTargetActions) {
-        const parentCount = this.resolveParentFilesFor(file).length;
-        const childCount = this.resolveChildFilesFor(file).length;
+        if (!this.plugin.parentLinkResolutionService.isIgnoredFile(file)) {
+          const parentCount = this.resolveParentFilesFor(file).length;
+          const childCount = this.resolveChildFilesFor(file).length;
 
-        menu.addItem((item) => {
-          item.setTitle(parentCount > 0 ? `Link to Parent (${parentCount})` : 'Link to Parent')
-            .setIcon('link')
-            .setSection('tps-props');
+          menu.addItem((item) => {
+            item.setTitle(parentCount > 0 ? `Link to Parent (${parentCount})` : 'Link to Parent')
+              .setIcon('link')
+              .setSection('tps-props');
 
-          const subMenu = (item as any).setSubmenu();
-          this.populateParentRelationSubmenu(subMenu, file);
-        });
+            const subMenu = (item as any).setSubmenu();
+            this.populateParentRelationSubmenu(subMenu, file);
+          });
 
-        menu.addItem((item) => {
-          item.setTitle(childCount > 0 ? `Link Children (${childCount})` : 'Link Children')
-            .setIcon('network')
-            .setSection('tps-props');
+          menu.addItem((item) => {
+            item.setTitle(childCount > 0 ? `Link Children (${childCount})` : 'Link Children')
+              .setIcon('network')
+              .setSection('tps-props');
 
-          const subMenu = (item as any).setSubmenu();
-          this.populateChildRelationSubmenu(subMenu, file);
-        });
+            const subMenu = (item as any).setSubmenu();
+            this.populateChildRelationSubmenu(subMenu, file);
+          });
+        }
 
         menu.addItem((item) => {
           item.setTitle('Embed Attachments')

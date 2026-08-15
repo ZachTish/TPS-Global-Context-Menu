@@ -82,7 +82,7 @@ import {
   type MarkdownDocumentLine,
 } from '../../utils/markdown-document-lines';
 import {
-  addInlineTagToTaskLine,
+  addInlineTagsToTaskLine,
   parseTaskTagValues,
   readInlineFieldRanges,
   readInlineFieldValue,
@@ -1168,10 +1168,9 @@ export class TpsListView extends BasesView {
       subMenu.addItem((sub: any) => {
         sub.setTitle('Add tag...').setIcon('plus').onClick(() => {
           new TextInputModal(this.app, 'Tag', '', async (value) => {
-            const tag = String(value || '').trim();
-            if (!tag) return;
+            if (!String(value || '').trim()) return;
             await this.updateBulletLineTags(file, lineIndex, rawLine, 'add', (line) => (
-              addInlineTagToTaskLine(line, tag)
+              addInlineTagsToTaskLine(line, value)
             ));
           }, { suggestions: collectKnownVaultTags(this.app) }).open();
         });

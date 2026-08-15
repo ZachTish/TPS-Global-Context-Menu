@@ -38,6 +38,13 @@ const contextTargetSource = readFileSync(
   'utf8',
 );
 
+test('manual configured tag-list input uses the shared comma-aware semantic tag writer', () => {
+  assert.match(
+    source,
+    /if \(isTags\) \{\s*return addLogLineSemanticTags\(line, property\.key, value\);\s*\}/u,
+  );
+});
+
 async function loadHarness() {
   const result = await build({
     entryPoints: [
@@ -63,7 +70,7 @@ async function loadHarness() {
         builder.onLoad({ filter: /.*/u, namespace: 'line-entity-menu-test' }, () => ({
           contents: `
             class Dummy {
-              constructor() {}
+              constructor() { globalThis.__tpsLineEntityLatestModal = this; }
               open() {}
             }
             class Notice extends Dummy {}
@@ -483,6 +490,47 @@ test('line text-list menus merge manual and vault choices instead of replacing t
   assert.equal(harness.readInlineFieldValue(line, 'labels'), 'manual-first, vault-beta, vault-alpha');
   assert.equal(harness.readInlineFieldValue(line, 'priority'), 'high');
   assert.match(line, /\^vault-list$/u);
+});
+
+test('configured semantic tag free text adds a comma-separated entry atomically and deduplicates it', async () => {
+  const harness = await loadHarness();
+  const property = {
+    id: 'tags',
+    key: 'tags',
+    label: 'Tags',
+    type: 'list',
+    listItemType: 'tag',
+    optionSources: ['manual'],
+    showInContextMenu: true,
+  };
+  const file = { path: 'Examples/Bullet Tags.md' };
+  let line = '- Bullet row <!-- [tags:: #one] [tpsId:: bullet-tags] --> [priority:: high] ^bullet-tags';
+  const menu = new FakeMenu();
+  harness.addLineEntityPropertyMenus({
+    app: createOptionApp([]),
+    plugin: createPlugin([property]),
+    menu,
+    file,
+    rawLine: line,
+    mutateLine: async (updater) => {
+      line = updater(line);
+      return true;
+    },
+  });
+
+  const addItem = menu.items[0].submenu.items.find((item) => item.title === 'Add new list item…');
+  assert.equal(typeof addItem?.click, 'function');
+  globalThis.__tpsLineEntityLatestModal = null;
+  addItem.click();
+  const modal = globalThis.__tpsLineEntityLatestModal;
+  assert.equal(typeof modal?.onSubmit, 'function');
+  await modal.onSubmit('one, two, #ONE');
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.deepEqual(harness.readTaskLineTags(line).sort(), ['one', 'two']);
+  assert.match(line, /\[priority:: high\]/u);
+  assert.match(line, /\[tpsId:: bullet-tags\]/u);
+  assert.match(line, /\^bullet-tags$/u);
 });
 
 test('entity-enabled tag lists keep literals and relational wikilinks in mixed inline storage', async () => {

@@ -752,6 +752,19 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.registerEvent(
         plugin.app.vault.on('rename', (file, oldPath) => {
+            const renamedMarkdownIdentity =
+                file instanceof TFile
+                && (file.extension === 'md' || oldPath.toLocaleLowerCase().endsWith('.md'));
+            if (renamedMarkdownIdentity) {
+                // Rename can remove the old source path from resolvedLinks before
+                // the metadata-change event for the new path arrives. Invalidate
+                // both identities so an already-mounted source card cannot linger,
+                // including when Markdown is renamed to a non-Markdown extension.
+                plugin.persistentMenuManager.invalidateLinkedContextSourcePaths(
+                    [oldPath, file.path],
+                    { removedPaths: [oldPath] },
+                );
+            }
             if (file instanceof TFile && pendingCompletedDateSyncFiles.delete(oldPath)) {
                 scheduleCompletedDateSync(file);
             }
@@ -791,6 +804,12 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     plugin.registerEvent(
         plugin.app.vault.on('delete', (file) => {
             if (file instanceof TFile && file.extension === 'md') {
+                // Deleted TFiles cannot be sent through scheduleFileRefresh, but
+                // mounted linked context still remembers their former source path.
+                plugin.persistentMenuManager.invalidateLinkedContextSourcePaths(
+                    [file.path],
+                    { removedPaths: [file.path] },
+                );
                 pendingCompletedDateSyncFiles.delete(file.path);
                 void plugin.bulkEditService.cleanupLinksForDeletedFile(file.path).catch((error) => {
                     logger.flowError('DeletedLinkCleanup', 'failed', error, { deletedPath: file.path });

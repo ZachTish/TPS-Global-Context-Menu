@@ -55,9 +55,15 @@ export class ChecklistHandler {
   /**
    * Update checklist items in a file based on action
    */
-  async updateChecklistItems(file: TFile, action: 'complete' | 'canceled'): Promise<void> {
+  async updateChecklistItems(
+    file: TFile,
+    action: 'complete' | 'canceled',
+    writeGuard?: () => boolean,
+  ): Promise<void> {
     try {
+      if (writeGuard?.() === false) return;
       let content = await this.app.vault.read(file);
+      if (writeGuard?.() === false) return;
 
       if (action === 'complete') {
         content = content.replace(/^(\s*[-*+]\s*)\[ \]/gm, '$1[x]');
@@ -65,6 +71,7 @@ export class ChecklistHandler {
         content = content.replace(/^(\s*[-*+]\s*)\[ \]/gm, '$1[-]');
       }
 
+      if (writeGuard?.() === false) return;
       await this.app.vault.modify(file, content);
     } catch (error) {
       logger.error(`[TPS GCM] Failed to update checklist items for ${file.path}:`, error);
@@ -75,9 +82,11 @@ export class ChecklistHandler {
    * Prompt user about incomplete checklist items before completing a task.
    * Returns true if the status change should proceed, false to abort.
    */
-  async handleChecklistCompletion(file: TFile): Promise<boolean> {
+  async handleChecklistCompletion(file: TFile, writeGuard?: () => boolean): Promise<boolean> {
+    if (writeGuard?.() === false) return false;
     markChecklistCompletionPromptHandled(file);
     const incompleteItems = await this.scanChecklistItems(file);
+    if (writeGuard?.() === false) return false;
 
     if (incompleteItems.length === 0) {
       return true;
@@ -88,6 +97,8 @@ export class ChecklistHandler {
         resolve(result);
       }).open();
     });
+
+    if (writeGuard?.() === false) return false;
 
     if (userAction === 'cancel') {
       return false;
@@ -102,10 +113,11 @@ export class ChecklistHandler {
     }
 
     if (userAction === 'complete') {
-      await this.updateChecklistItems(file, 'complete');
+      await this.updateChecklistItems(file, 'complete', writeGuard);
     } else if (userAction === 'canceled') {
-      await this.updateChecklistItems(file, 'canceled');
+      await this.updateChecklistItems(file, 'canceled', writeGuard);
     }
+    if (writeGuard?.() === false) return false;
     // 'ignore' falls through to set status
     return true;
   }

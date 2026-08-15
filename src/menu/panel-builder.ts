@@ -4673,6 +4673,7 @@ export class PanelBuilder {
     depth: number
   ): Promise<SubitemNode[]> {
     if (depth >= MAX_SUBITEM_DEPTH) return [];
+    if (this.plugin.parentLinkResolutionService.isIgnoredFile(file)) return [];
 
     const relationMap = await this.collectDirectSubitemRelations(file, parentIndex);
     const identityCache = new Map<string, ReturnType<SubitemMetadataService['getTaskIdentityForFile']>>();
@@ -4820,6 +4821,7 @@ export class PanelBuilder {
   }
 
   private shouldIgnoreSubitemFile(file: TFile): boolean {
+    if (this.plugin.parentLinkResolutionService.isIgnoredFile(file)) return true;
     const ignored = new Set(
       (this.plugin.settings.ignoredSubitemTags || [])
         .map((tag) => normalizeTagValue(tag))
@@ -5097,19 +5099,34 @@ export class PanelBuilder {
 
   private async promptLinkToParent(file: TFile, onRefresh: () => void): Promise<void> {
     new FileSuggestModal(this.app, async (parentFile: TFile) => {
-      await this.plugin.bulkEditService.linkToParent([file], parentFile);
-      new Notice(`Linked ${file.basename} to parent: ${parentFile.basename}`);
-      onRefresh();
-    }, { extensions: ['md', 'base'] }).open();
+      const linked = await this.plugin.bulkEditService.linkToParent([file], parentFile);
+      if (linked > 0) {
+        new Notice(`Linked ${file.basename} to parent: ${parentFile.basename}`);
+        onRefresh();
+      }
+    }, {
+      extensions: ['md', 'base'],
+      filter: (candidate) => (
+        candidate.path !== file.path
+        && !this.plugin.parentLinkResolutionService.isIgnoredFile(candidate)
+      ),
+    }).open();
   }
 
   private async promptLinkChildren(file: TFile, onRefresh: () => void): Promise<void> {
     new MultiFileSelectModal(this.app, async (childFiles: TFile[]) => {
       const unique = childFiles.filter((candidate) => candidate.path !== file.path);
       if (!unique.length) return;
-      await this.plugin.bulkEditService.linkChildren(file, unique);
-      new Notice(`Linked ${unique.length} child item(s) to ${file.basename}.`);
-      onRefresh();
+      const linked = await this.plugin.bulkEditService.linkChildren(file, unique);
+      if (linked > 0) {
+        new Notice(`Linked ${linked} child item(s) to ${file.basename}.`);
+        onRefresh();
+      }
+    }, {
+      filter: (candidate) => (
+        candidate.path !== file.path
+        && !this.plugin.parentLinkResolutionService.isIgnoredFile(candidate)
+      ),
     }).open();
   }
 

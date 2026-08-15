@@ -96,6 +96,7 @@ async function loadSortHarness(root, expectedHash = null) {
     export class SortHarness {
       private readonly rootPath = '__subitem_sort_root__.canvas';
       private readonly app: any;
+      private readonly plugin: any;
       private readonly subitemMetadataService: SubitemMetadataService;
 
       constructor(
@@ -110,6 +111,11 @@ async function loadSortHarness(root, expectedHash = null) {
         this.app = {
           metadataCache: {
             getFileCache: readCache,
+          },
+        };
+        this.plugin = {
+          parentLinkResolutionService: {
+            isIgnoredFile: (file: TFile) => this.ignoredPaths.has(file.path),
           },
         };
         this.subitemMetadataService = {

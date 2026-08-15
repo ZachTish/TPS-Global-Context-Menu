@@ -8,10 +8,16 @@ export class MultiFileSelectModal extends Modal {
     private searchInput: TextComponent | null = null;
     private listContainer: HTMLElement | null = null;
 
-    constructor(app: App, onChoose: (files: TFile[]) => void) {
+    constructor(
+        app: App,
+        onChoose: (files: TFile[]) => void,
+        options?: { filter?: (file: TFile) => boolean },
+    ) {
         super(app);
         this.onChoose = onChoose;
-        this.allFiles = this.app.vault.getMarkdownFiles().sort((a, b) => b.stat.mtime - a.stat.mtime);
+        const files = this.app.vault.getMarkdownFiles();
+        this.allFiles = (typeof options?.filter === 'function' ? files.filter(options.filter) : files)
+            .sort((a, b) => b.stat.mtime - a.stat.mtime);
         this.filteredFiles = [...this.allFiles];
     }
 

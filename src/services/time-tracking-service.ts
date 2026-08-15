@@ -799,6 +799,12 @@ export class TimeTrackingService {
     record: TimeTrackingSessionRecord,
     options: { mode: 'running' | 'stopped'; end?: Date },
   ): Promise<void> {
+    // A work session may target a note, but note-level scheduling remains an
+    // explicit user action. Session records and their Daily Note workspace are
+    // sufficient to represent note-linked time without mutating the target's
+    // scheduled, duration, or end metadata.
+    if (record.targetType !== 'task') return;
+
     const start = this.normalizeDateInput(record.start);
     if (!start) return;
 
@@ -816,36 +822,16 @@ export class TimeTrackingService {
     const endValue = this.formatDateTime(end);
     const file = target instanceof TFile ? target : target.file;
 
-    if (record.targetType === 'task') {
-      if (!(target instanceof TFile) && target.type === 'task' && typeof target.lineNumber === 'number') {
-        await this.syncTaskLineScheduledMetadata(file, target.lineNumber, record.targetId, scheduledValue, durationMinutes, endValue);
-      } else {
-        logger.warn('[TimeTracking] Skipped task schedule sync because the task line could not be resolved.', {
-          id: record.id,
-          targetId: record.targetId,
-          sourcePath: record.sourcePath,
-          lineNumber: record.lineNumber,
-        });
-      }
-      return;
+    if (!(target instanceof TFile) && target.type === 'task' && typeof target.lineNumber === 'number') {
+      await this.syncTaskLineScheduledMetadata(file, target.lineNumber, record.targetId, scheduledValue, durationMinutes, endValue);
+    } else {
+      logger.warn('[TimeTracking] Skipped task schedule sync because the task line could not be resolved.', {
+        id: record.id,
+        targetId: record.targetId,
+        sourcePath: record.sourcePath,
+        lineNumber: record.lineNumber,
+      });
     }
-
-    await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
-      if (isProcessRunFrontmatter(frontmatter)) {
-        deleteValueCaseInsensitive(frontmatter, 'scheduled');
-      } else {
-        setValueCaseInsensitive(frontmatter, 'scheduled', scheduledValue);
-      }
-      setValueCaseInsensitive(frontmatter, 'timeEstimate', durationMinutes);
-
-      const endKey =
-        findKeyCaseInsensitive(frontmatter, 'end')
-        || findKeyCaseInsensitive(frontmatter, 'endDate')
-        || findKeyCaseInsensitive(frontmatter, 'ends');
-      if (endKey) {
-        setValueCaseInsensitive(frontmatter, endKey, endValue);
-      }
-    });
   }
 
   private async syncTaskLineScheduledMetadata(
@@ -1739,23 +1725,4 @@ export class TimeTrackingService {
         : Math.random().toString(36).slice(2, 10);
     return `${prefix}_${Date.now().toString(36)}_${random}`;
   }
-}
-
-function isProcessRunFrontmatter(frontmatter: Record<string, unknown>): boolean {
-  const runKind = frontmatterValue(frontmatter, 'runKind');
-  const workflowKind = frontmatterValue(frontmatter, 'workflowKind');
-  const kind = frontmatterValue(frontmatter, 'kind');
-  const runType = frontmatterValue(frontmatter, 'runType');
-  const workflowType = frontmatterValue(frontmatter, 'workflowType');
-  return runKind === 'run'
-    || workflowKind === 'workflow'
-    || kind === 'workout'
-    || kind === 'workout-plan'
-    || Boolean(runType)
-    || Boolean(workflowType);
-}
-
-function frontmatterValue(frontmatter: Record<string, unknown>, key: string): string {
-  const actualKey = findKeyCaseInsensitive(frontmatter, key);
-  return actualKey ? String(frontmatter[actualKey] ?? '').trim().toLowerCase() : '';
 }

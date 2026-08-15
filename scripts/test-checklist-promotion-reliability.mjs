@@ -160,7 +160,11 @@ function createPromotionHarness(TFile, options = {}) {
         generateMarkdownLink: (file) => `[[${file.path.replace(/\.md$/u, '')}|${file.basename}]]`,
       },
     },
-    parentLinkResolutionService: { getParentKey: () => 'childOf' },
+    parentLinkResolutionService: {
+      getParentKey: () => 'childOf',
+      isIgnoredFile: () => false,
+      isIgnoredFrontmatter: () => false,
+    },
     fileNamingService: {
       isDateOnlyBasename: () => false,
       getDailyNoteDateFormat: () => 'YYYY-MM-DD',
@@ -260,6 +264,13 @@ function createChildWorkflowLinkHarness(SubitemRelationshipSyncService, TFile, o
     bodySubitemLinkService: {
       scanText: () => [],
     },
+    parentLinkResolutionService: {
+      isIgnoredFile: (file) => (
+        (file === parentFile && options.ignoreParent === true)
+        || (file === childFile && options.ignoreChild === true)
+      ),
+      isIgnoredFrontmatter: () => options.ignoreFrontmatter === true,
+    },
   };
   const service = new SubitemRelationshipSyncService(plugin);
   service.mutateMarkdownBody = async (_file, mutator) => {
@@ -309,6 +320,29 @@ test('child workflow body links honor a custom workflow key and mapped checkbox 
   assert.equal(result.resolution.checkboxState, '[w]');
   assert.equal(harness.getParentContent(), '- [w] [[Child|Child]]\n');
   assert.deepEqual(harness.counts, { mutations: 1, writes: 1 });
+});
+
+test('child workflow body links reject ignored parents, children, and supplied child frontmatter before mutation', async () => {
+  const { SubitemRelationshipSyncService, TFile } = await servicesPromise;
+  for (const options of [
+    { ignoreParent: true },
+    { ignoreChild: true },
+    { ignoreFrontmatter: true },
+  ]) {
+    const harness = createChildWorkflowLinkHarness(SubitemRelationshipSyncService, TFile, {
+      ...options,
+      frontmatter: { status: 'todo' },
+    });
+    const result = await harness.service.insertBodyLinkForChildWorkflow(
+      harness.parentFile,
+      harness.childFile,
+      options.ignoreFrontmatter ? { frontmatter: { relationshipMode: 'ignore' } } : {},
+    );
+    assert.equal(result.changed, false);
+    assert.equal(result.blockedReason, 'ignored');
+    assert.equal(harness.getParentContent(), '');
+    assert.deepEqual(harness.counts, { mutations: 0, writes: 0 });
+  }
 });
 
 test('child workflow body links preserve statusless notes as bullets by default', async () => {
@@ -665,7 +699,10 @@ test('derived child status fails closed for an unmapped checkbox and clears only
   const calls = { delete: 0, update: 0, refresh: 0 };
   const service = Object.create(LinkedSubitemCheckboxService.prototype);
   service.plugin = {
+    app: { vault: { getFileByPath: () => null } },
     sharedServices: { status: { normalize: (value) => String(value ?? '').trim().toLowerCase() } },
+    parentLinkResolutionService: { isIgnoredFile: () => false },
+    subitemReferenceIndexService: { hasIgnoredReferenceForChild: async () => false },
     frontmatterMutationService: {
       deleteKeys: async () => { calls.delete += 1; },
       updateValues: async () => { calls.update += 1; },

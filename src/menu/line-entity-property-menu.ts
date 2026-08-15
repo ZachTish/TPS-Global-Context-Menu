@@ -30,6 +30,7 @@ import {
   readTaskInlineFieldRecord,
 } from '../utils/task-line-metadata';
 import {
+  addLogLineSemanticTags,
   setLogInlineFieldValue,
   toggleLogLineSemanticTag,
 } from '../views/log-line-utils';
@@ -200,7 +201,7 @@ function addLineConfiguredPropertyMenu(
       runLineMutation(options, property, 'set', (line) => {
         if (!isList) return setLogInlineFieldValue(line, property.key, value);
         if (isTags) {
-          return toggleLogLineSemanticTag(line, property.key, value, false);
+          return addLogLineSemanticTags(line, property.key, value);
         }
         const existing = readInlineFieldValue(line, property.key);
         const nextValue = entity

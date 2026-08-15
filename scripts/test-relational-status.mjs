@@ -164,7 +164,14 @@ test('linked child rows derive status, completion, and icon presentation from th
     checkboxSource,
     /writeChild: async \(\) => \{[\s\S]{0,420}setStatus\(\[childFile\], mappedStatus, \{[\s\S]{0,180}writeGuard:/u,
   );
-  assert.match(bulkEditSource, /applyToFiles\(files, \(fm, file\) => \{\s*if \(options\.writeGuard\?\.\(file\) === false\) return;/u);
+  assert.match(
+    bulkEditSource,
+    /runInBatches\(files, async \(file\) => \{[\s\S]{0,180}if \(options\.writeGuard\?\.\(file\) === false\) return;/u,
+  );
+  assert.match(
+    bulkEditSource,
+    /frontmatterMutationService\.process\(file, \(fm\) => \{\s*if \(options\.writeGuard\?\.\(file\) === false\) return;/u,
+  );
   assert.doesNotMatch(checkboxSource, /setStatus\(\[childFile\], mappedStatus\)\) > 0/u);
   assert.doesNotMatch(checkboxSource, /fm\[statusKey\] = nextStatus/u);
 });

@@ -24,7 +24,7 @@ type Delegates = {
   triggerTagSearch: (tag: string) => void;
   openScheduledModal: (entries: any[], key?: string) => void;
   openRecurrenceModalNative: (entries: any[]) => void;
-  moveFiles: (entries: any[], folderPath: string) => Promise<void>;
+  moveFiles: (entries: any[], folderPath: string, writeGuard?: () => boolean) => Promise<void>;
   getTypeFolderOptions: () => { path: string; label: string }[];
   getRecurrenceValue: (fm: any) => string;
   formatDatetimeDisplay: (value: string | null | undefined) => string;
@@ -604,7 +604,14 @@ export class PropertyRowService {
   /**
    * Opens a submenu for status selection (used by chips)
    */
-  openStatusSubmenu(anchor: HTMLElement, entries: any[], onUpdate?: (newVal: string) => void, overrideOptions?: string[], onAfterUpdate?: (files: any[]) => Promise<void>): void {
+  openStatusSubmenu(
+    anchor: HTMLElement,
+    entries: any[],
+    onUpdate?: (newVal: string) => void,
+    overrideOptions?: string[],
+    onAfterUpdate?: (files: any[]) => Promise<void>,
+    writeGuard?: () => boolean,
+  ): void {
     const menu = new Menu();
     const key = 'status';
     const fm = entries[0].frontmatter;
@@ -628,11 +635,13 @@ export class PropertyRowService {
         .setTitle('(none)')
         .setChecked(allWithoutKey)
         .onClick(async () => {
+          if (writeGuard?.() === false) return;
+          const updatedCount = await this.plugin.bulkEditService.removeFrontmatterKey(files, key, { writeGuard });
+          if (writeGuard && updatedCount <= 0) return;
           setCheckedStatus('');
           this.removeEntryFrontmatterValue(entries, key);
           if (onUpdate) onUpdate('');
-          const updatedCount = await this.plugin.bulkEditService.removeFrontmatterKey(files, key);
-          if (updatedCount >= 0) await this.afterWholeNotePropertyEdit(files, [key, 'completedDate']);
+          if (updatedCount > 0) await this.afterWholeNotePropertyEdit(files, [key, 'completedDate']);
           if (onAfterUpdate) await onAfterUpdate(files);
         });
     });
@@ -643,10 +652,12 @@ export class PropertyRowService {
         .setChecked(allEmpty)
         .onClick(() => {
           this.promptForCustomPropertyValue('Status', currentStatus, async (next) => {
+            if (writeGuard?.() === false) return;
+            const updatedCount = await this.plugin.bulkEditService.setStatus(files, next, { writeGuard });
+            if (writeGuard && updatedCount <= 0) return;
             this.setEntryFrontmatterValue(entries, key, next);
             if (onUpdate) onUpdate(next);
-            const updatedCount = await this.plugin.bulkEditService.setStatus(files, next);
-            if (updatedCount >= 0) await this.afterWholeNotePropertyEdit(files, [key, 'completedDate']);
+            if (updatedCount > 0) await this.afterWholeNotePropertyEdit(files, [key, 'completedDate']);
             if (onAfterUpdate) await onAfterUpdate(files);
           });
         });
@@ -661,10 +672,12 @@ export class PropertyRowService {
           .setTitle(status)
           .setChecked(currentStatus === status)
           .onClick(async () => {
+            if (writeGuard?.() === false) return;
+            const updatedCount = await this.plugin.bulkEditService.setStatus(files, status, { writeGuard });
+            if (writeGuard && updatedCount <= 0) return;
             setCheckedStatus(status);
             this.setEntryFrontmatterValue(entries, key, status);
             if (onUpdate) onUpdate(status);
-            const updatedCount = await this.plugin.bulkEditService.setStatus(files, status);
             if (updatedCount > 0) await this.afterWholeNotePropertyEdit(files, [key, 'completedDate']);
             if (onAfterUpdate) await onAfterUpdate(files);
           });
@@ -677,7 +690,14 @@ export class PropertyRowService {
   /**
    * Opens a submenu for priority selection (used by chips)
    */
-  openPrioritySubmenu(anchor: HTMLElement, entries: any[], onUpdate?: (newVal: string) => void, overrideOptions?: string[], propertyKey = 'priority'): void {
+  openPrioritySubmenu(
+    anchor: HTMLElement,
+    entries: any[],
+    onUpdate?: (newVal: string) => void,
+    overrideOptions?: string[],
+    propertyKey = 'priority',
+    writeGuard?: () => boolean,
+  ): void {
     const menu = new Menu();
     const key = String(propertyKey || 'priority').trim() || 'priority';
     const fm = entries[0].frontmatter;
@@ -701,11 +721,13 @@ export class PropertyRowService {
         .setTitle('(none)')
         .setChecked(allWithoutKey)
         .onClick(async () => {
+          if (writeGuard?.() === false) return;
+          const updatedCount = await this.plugin.bulkEditService.removeFrontmatterKey(files, key, { writeGuard });
+          if (writeGuard && updatedCount <= 0) return;
           setCheckedPriority('');
           this.removeEntryFrontmatterValue(entries, key);
           if (onUpdate) onUpdate('');
-          await this.plugin.bulkEditService.removeFrontmatterKey(files, key);
-          await this.afterWholeNotePropertyEdit(files, [key]);
+          if (updatedCount > 0) await this.afterWholeNotePropertyEdit(files, [key]);
         });
     });
     menu.addItem(item => {
@@ -715,10 +737,16 @@ export class PropertyRowService {
         .setChecked(allEmpty)
         .onClick(() => {
           this.promptForCustomPropertyValue('Priority', currentPrio, async (next) => {
+            if (writeGuard?.() === false) return;
+            const updatedCount = await this.plugin.bulkEditService.updateFrontmatter(
+              files,
+              { [key]: next },
+              { writeGuard },
+            );
+            if (writeGuard && updatedCount <= 0) return;
             this.setEntryFrontmatterValue(entries, key, next);
             if (onUpdate) onUpdate(next);
-            await this.plugin.bulkEditService.updateFrontmatter(files, { [key]: next });
-            await this.afterWholeNotePropertyEdit(files, [key]);
+            if (updatedCount > 0) await this.afterWholeNotePropertyEdit(files, [key]);
           });
         });
     });
@@ -732,11 +760,17 @@ export class PropertyRowService {
           .setTitle(priority)
           .setChecked(currentPrio === priority)
           .onClick(async () => {
+            if (writeGuard?.() === false) return;
+            const updatedCount = await this.plugin.bulkEditService.updateFrontmatter(
+              files,
+              { [key]: priority },
+              { writeGuard },
+            );
+            if (writeGuard && updatedCount <= 0) return;
             setCheckedPriority(priority);
             this.setEntryFrontmatterValue(entries, key, priority);
             if (onUpdate) onUpdate(priority);
-            await this.plugin.bulkEditService.updateFrontmatter(files, { [key]: priority });
-            await this.afterWholeNotePropertyEdit(files, [key]);
+            if (updatedCount > 0) await this.afterWholeNotePropertyEdit(files, [key]);
           });
       });
     });
@@ -747,7 +781,7 @@ export class PropertyRowService {
   /**
    * Opens a submenu for folder/type selection (used by chips)
    */
-  openTypeSubmenu(anchor: HTMLElement, entries: any[]): void {
+  openTypeSubmenu(anchor: HTMLElement, entries: any[], writeGuard?: () => boolean): void {
     const menu = new Menu();
     const currentPath = entries[0].file.parent?.path || '/';
     const options = this.d.getTypeFolderOptions();
@@ -758,7 +792,8 @@ export class PropertyRowService {
           .setTitle(label)
           .setChecked(currentPath === path)
           .onClick(async () => {
-            await this.d.moveFiles(entries, path);
+            if (writeGuard?.() === false) return;
+            await this.d.moveFiles(entries, path, writeGuard);
           });
       });
     });

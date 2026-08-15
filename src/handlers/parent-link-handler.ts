@@ -3,6 +3,10 @@ import { ParentLinkPromptModal, ParentLinkIssue } from '../modals/parent-link-pr
 import * as logger from '../logger';
 import { extractLinkTarget, normalizeParentLinkFormat, resolveLinkValueToFile } from './parent-link-format';
 import type { ParentLinkFormat } from '../types';
+import {
+  matchesParentChildIgnoreRule,
+  type ParentChildIgnoreSettings,
+} from '../services/parent-child-ignore-service';
 
 export class ParentLinkHandler {
   private app: App;
@@ -46,6 +50,13 @@ export class ParentLinkHandler {
     return String(value || '').trim().toLowerCase();
   }
 
+  private isIgnoredFrontmatter(frontmatter: Record<string, unknown> | null | undefined): boolean {
+    return matchesParentChildIgnoreRule(
+      frontmatter,
+      this.getSettings() as ParentChildIgnoreSettings,
+    );
+  }
+
   private resolveParentValueToPath(value: any, sourcePath: string): string | null {
     const resolved = resolveLinkValueToFile(this.app, value, sourcePath);
     if (resolved) return resolved.path;
@@ -66,6 +77,10 @@ export class ParentLinkHandler {
   }
 
   async findParentLinkIssues(target: TFile): Promise<ParentLinkIssue[]> {
+    const targetFrontmatter = this.app.metadataCache.getFileCache(target)?.frontmatter as
+      | Record<string, unknown>
+      | undefined;
+    if (this.isIgnoredFrontmatter(targetFrontmatter)) return [];
     const key = this.normalizeParentKey();
     const configuredCompletionStatuses = this.getSettings().parentCompletionStatuses;
     const completionStatuses = Array.isArray(configuredCompletionStatuses)
@@ -78,7 +93,8 @@ export class ParentLinkHandler {
     for (const file of files) {
       if (file.path === target.path) continue;
       const cache = this.app.metadataCache.getFileCache(file);
-      const fm = cache?.frontmatter || {};
+      const fm = (cache?.frontmatter || {}) as Record<string, unknown>;
+      if (this.isIgnoredFrontmatter(fm)) continue;
       if (!(key in fm)) continue;
       const raw = fm[key];
       const values = Array.isArray(raw) ? raw : [raw];

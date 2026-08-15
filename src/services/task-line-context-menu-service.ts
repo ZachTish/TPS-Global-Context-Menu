@@ -12,7 +12,7 @@ import {
 } from '../utils/task-block-move';
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import {
-  addInlineTagToTaskLine,
+  addInlineTagsToTaskLine,
   convertTaskLineToBullet,
   getTaskDisplayTitle,
   getPlainTaskTitle,
@@ -1776,9 +1776,8 @@ export class TaskLineContextMenuService {
       subMenu.addItem((sub: any) => {
         sub.setTitle('Add tag...').setIcon('tag').onClick(() => {
           new TextInputModal(this.plugin.app, 'Tag', '', async (value) => {
-            const tag = String(value || '').trim();
-            if (!tag) return;
-            await this.updateTaskLines(contexts, (line) => addInlineTagToTaskLine(line, tag));
+            if (!String(value || '').trim()) return;
+            await this.updateTaskLines(contexts, (line) => addInlineTagsToTaskLine(line, value));
           }, { suggestions: collectKnownVaultTags(this.plugin.app) }).open();
         });
       });
@@ -1911,9 +1910,8 @@ export class TaskLineContextMenuService {
       subMenu.addItem((sub: any) => {
         sub.setTitle('Add tag...').setIcon('plus').onClick(() => {
           new TextInputModal(this.plugin.app, 'Tag', '', async (value) => {
-            const tag = String(value || '').trim();
-            if (!tag) return;
-            await this.updateTaskLine(context, (line) => addInlineTagToTaskLine(line, tag));
+            if (!String(value || '').trim()) return;
+            await this.updateTaskLine(context, (line) => addInlineTagsToTaskLine(line, value));
           }, { suggestions: collectKnownVaultTags(this.plugin.app) }).open();
         });
       });
@@ -2223,7 +2221,7 @@ export class TaskLineContextMenuService {
         .setIcon(property.icon || 'tag');
       const subMenu = (item as any).setSubmenu();
       const addChoice = (value: string): Promise<boolean> => this.updateTaskLine(context, (line) => {
-        if (isTags) return addInlineTagToTaskLine(line, value);
+        if (isTags) return addInlineTagsToTaskLine(line, value);
         const existing = readInlineFieldValue(line, property.key);
         const nextValues = isLinks
           ? mergeLinkList(existing, value)

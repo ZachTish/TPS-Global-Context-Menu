@@ -34,6 +34,19 @@ export class PanelActionService {
     return this.plugin.app;
   }
 
+  private canUseRelationshipActions(files: readonly TFile[]): boolean {
+    return files.length > 0
+      && files.every((file) => !this.plugin.parentLinkResolutionService.isIgnoredFile(file));
+  }
+
+  private relationshipFileFilter(sourceFiles: readonly TFile[]): (candidate: TFile) => boolean {
+    const sourcePaths = new Set(sourceFiles.map((file) => file.path));
+    return (candidate) => (
+      !sourcePaths.has(candidate.path)
+      && !this.plugin.parentLinkResolutionService.isIgnoredFile(candidate)
+    );
+  }
+
   async setViewModeForFile(file: TFile, mode: ViewMode): Promise<void> {
     let targetLeaf = this.app.workspace.getLeavesOfType('markdown')
       .find((leaf: any) => leaf?.view?.file?.path === file.path) || null;
@@ -103,6 +116,7 @@ export class PanelActionService {
   }
 
   async changeRelationToChild(rootFile: TFile, targetFile: TFile): Promise<void> {
+    if (!this.canUseRelationshipActions([rootFile, targetFile])) return;
     await this.plugin.bulkEditService.unlinkAttachment(rootFile, targetFile);
     await this.plugin.bulkEditService.linkToParent([targetFile], rootFile);
   }
@@ -188,33 +202,37 @@ export class PanelActionService {
       .filter((file): file is TFile => file instanceof TFile);
     const currentFile = sourceFiles[0];
 
-    menu.addItem(item => {
-      item.setTitle('Link to Parent')
-        .setIcon('link')
-        .onClick(() => {
-          new FileSuggestModal(this.app, async (file: TFile) => {
-            await this.plugin.bulkEditService.linkToParent(entries.map(e => e.file), file);
-            new Notice(`Linked to parent: ${file.basename}`);
-          }, { extensions: ['md', 'base'] }).open();
-        });
-    });
+    if (this.canUseRelationshipActions(sourceFiles)) {
+      menu.addItem(item => {
+        item.setTitle('Link to Parent')
+          .setIcon('link')
+          .onClick(() => {
+            new FileSuggestModal(this.app, async (file: TFile) => {
+              const linked = await this.plugin.bulkEditService.linkToParent(sourceFiles, file);
+              new Notice(linked > 0
+                ? `Linked to parent: ${file.basename}`
+                : 'The relationship is no longer available.');
+            }, {
+              extensions: ['md', 'base'],
+              filter: this.relationshipFileFilter(sourceFiles),
+            }).open();
+          });
+      });
 
-    menu.addItem(item => {
-      item.setTitle('Link Children')
-        .setIcon('network')
-        .onClick(() => {
-          if (!currentFile) {
-            new Notice('No source file selected.');
-            return;
-          }
-          new MultiFileSelectModal(this.app, async (files: TFile[]) => {
-            if (files.length > 0) {
-              await this.plugin.bulkEditService.linkChildren(currentFile, files);
-              new Notice(`Linked ${files.length} children.`);
-            }
-          }).open();
-        });
-    });
+      menu.addItem(item => {
+        item.setTitle('Link Children')
+          .setIcon('network')
+          .onClick(() => {
+            if (!currentFile) return;
+            new MultiFileSelectModal(this.app, async (files: TFile[]) => {
+              if (files.length > 0) {
+                const linked = await this.plugin.bulkEditService.linkChildren(currentFile, files);
+                new Notice(`Linked ${linked} children.`);
+              }
+            }, { filter: this.relationshipFileFilter([currentFile]) }).open();
+          });
+      });
+    }
 
     menu.addItem(item => {
       item.setTitle('Embed Attachments')
@@ -350,33 +368,36 @@ export class PanelActionService {
         .filter((entryFile): entryFile is TFile => entryFile instanceof TFile);
       const markdownFiles = sourceFiles.filter((entryFile) => entryFile.extension.toLowerCase() === 'md');
 
-      menu.addItem(item => {
-        item.setTitle('Link to Parent')
-          .setIcon('link')
-          .onClick(() => {
-            new FileSuggestModal(this.app, async (parentFile: TFile) => {
-              await this.plugin.bulkEditService.linkToParent(entries.map(entry => entry.file), parentFile);
-              new Notice(`Linked to parent: ${parentFile.basename}`);
-            }, { extensions: ['md', 'base'] }).open();
-          });
-      });
+      if (this.canUseRelationshipActions(sourceFiles)) {
+        menu.addItem(item => {
+          item.setTitle('Link to Parent')
+            .setIcon('link')
+            .onClick(() => {
+              new FileSuggestModal(this.app, async (parentFile: TFile) => {
+                const linked = await this.plugin.bulkEditService.linkToParent(sourceFiles, parentFile);
+                new Notice(linked > 0
+                  ? `Linked to parent: ${parentFile.basename}`
+                  : 'The relationship is no longer available.');
+              }, {
+                extensions: ['md', 'base'],
+                filter: this.relationshipFileFilter(sourceFiles),
+              }).open();
+            });
+        });
 
-      menu.addItem(item => {
-        item.setTitle('Link Children')
-          .setIcon('network')
-          .onClick(() => {
-            if (!currentFile) {
-              new Notice('No source file selected.');
-              return;
-            }
-            new MultiFileSelectModal(this.app, async (files: TFile[]) => {
-              if (files.length > 0) {
-                await this.plugin.bulkEditService.linkChildren(currentFile, files);
-                new Notice(`Linked ${files.length} children.`);
-              }
-            }).open();
-          });
-      });
+        menu.addItem(item => {
+          item.setTitle('Link Children')
+            .setIcon('network')
+            .onClick(() => {
+              new MultiFileSelectModal(this.app, async (files: TFile[]) => {
+                if (files.length > 0) {
+                  const linked = await this.plugin.bulkEditService.linkChildren(currentFile, files);
+                  new Notice(`Linked ${linked} children.`);
+                }
+              }, { filter: this.relationshipFileFilter([currentFile]) }).open();
+            });
+        });
+      }
 
       menu.addItem(item => {
         item.setTitle('Embed Attachments')

@@ -136,6 +136,18 @@ export function toggleLogLineSemanticTag(
   );
 }
 
+/** Add a normalized multi-tag entry while emitting one final line value. */
+export function addLogLineSemanticTags(
+  line: string,
+  key: string,
+  rawTags: unknown,
+): string {
+  return parseTaskTagValues(rawTags).reduce(
+    (nextLine, tag) => toggleLogLineSemanticTag(nextLine, key, tag, false),
+    String(line || ''),
+  );
+}
+
 export function setLogInlineFieldValue(
   line: string,
   key: string,

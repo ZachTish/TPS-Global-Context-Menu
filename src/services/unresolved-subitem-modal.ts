@@ -117,7 +117,9 @@ export async function checkAndPromptForUnresolvedSubitems(
   plugin: TPSGlobalContextMenuPlugin,
   parentFile: TFile,
 ): Promise<boolean> {
+  if (plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) return false;
   const raw = await plugin.subitemRelationshipSyncService.readMarkdownText(parentFile);
+  if (plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) return false;
   const links = plugin.bodySubitemLinkService.scanText(parentFile, raw);
 
   const unresolved: UnresolvedSubitem[] = [];
@@ -146,6 +148,10 @@ export async function checkAndPromptForUnresolvedSubitems(
       parentFile,
       unresolved,
       async (linesToRemove) => {
+        if (plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) {
+          resolve(true);
+          return;
+        }
         if (linesToRemove.length === 0) {
           resolve(true);
           return;
@@ -154,6 +160,7 @@ export async function checkAndPromptForUnresolvedSubitems(
         // Remove the lines (in reverse order to preserve line numbers)
         const sortedLines = [...linesToRemove].sort((a, b) => b - a);
         await plugin.subitemRelationshipSyncService.mutateMarkdownBody(parentFile, async (lines) => {
+          if (plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) return false;
           let changed = false;
           for (const lineNum of sortedLines) {
             if (lineNum >= 0 && lineNum < lines.length) {

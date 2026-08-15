@@ -827,6 +827,18 @@ test('TPS Table semantic tag toggle removes raw hashtags and persists add/remove
   assert.equal(metadata.readInlineFieldValue(restored.content, 'tpsId'), 'qa-table-tags');
 });
 
+test('TPS Table comma-tag creation is atomic, deduped, and preserves protected metadata', async () => {
+  const metadata = await importBundled('../src/utils/task-line-metadata.ts');
+  const logLines = await importBundled('../src/views/log-line-utils.ts');
+  const original = '- [ ] QA Table multi-tags #existing <!-- [tpsId:: qa-table-multi] --> ^qa-table-multi';
+  const updated = logLines.addLogLineSemanticTags(original, 'tags', 'One, two, #ONE');
+
+  assert.deepEqual(metadata.readTaskLineTags(updated), ['existing', 'one', 'two']);
+  assert.equal(metadata.readInlineFieldValue(updated, 'tpsId'), 'qa-table-multi');
+  assert.match(updated, /\^qa-table-multi$/u);
+  assert.equal(logLines.addLogLineSemanticTags(updated, 'tags', 'TWO, one'), updated);
+});
+
 test('TPS List semantic tag toggle preserves nested layout while removing raw and hidden tags', async () => {
   const metadata = await importBundled('../src/utils/task-line-metadata.ts');
   const logLines = await importBundled('../src/views/log-line-utils.ts');

@@ -1,4 +1,5 @@
 import { App, CachedMetadata, TFile } from 'obsidian';
+import type { LinkedContextSortOrder } from '../types';
 
 export type LinkedContextKind = 'line' | 'heading' | 'note';
 
@@ -13,6 +14,45 @@ export interface LinkedContextItem {
 }
 
 type LinePosition = { start: { line: number }; end: { line: number } };
+
+export interface LinkedContextRecoveryState {
+  enabled: boolean;
+  panelConnected: boolean;
+  activeFilePath: string;
+  mountedFilePath: string;
+}
+
+function compareSourcePaths(left: string, right: string): number {
+  const foldedLeft = left.toLowerCase();
+  const foldedRight = right.toLowerCase();
+  if (foldedLeft < foldedRight) return -1;
+  if (foldedLeft > foldedRight) return 1;
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+export function normalizeLinkedContextSortOrder(value: unknown): LinkedContextSortOrder {
+  return value === 'source-desc' ? 'source-desc' : 'source-asc';
+}
+
+export function shouldRecoverLinkedContextPanel(state: LinkedContextRecoveryState): boolean {
+  return state.enabled
+    && !state.panelConnected
+    && state.activeFilePath.length > 0
+    && state.activeFilePath === state.mountedFilePath;
+}
+
+export function isLinkedContextSourceChangeRelevant(
+  changedPath: string,
+  targetPath: string,
+  priorSourcePaths: ReadonlySet<string>,
+  currentLinkCount: number,
+): boolean {
+  return changedPath === targetPath
+    || priorSourcePaths.has(changedPath)
+    || currentLinkCount > 0;
+}
 
 function containsLine(position: LinePosition | undefined, line: number): boolean {
   return Boolean(position && line >= position.start.line && line <= position.end.line);
@@ -52,11 +92,20 @@ export function extractLinkedContextMarkdown(
 export class LinkedContextService {
   constructor(private readonly app: App) {}
 
-  async collect(targetFile: TFile): Promise<LinkedContextItem[]> {
+  async collect(
+    targetFile: TFile,
+    sortOrder: LinkedContextSortOrder = 'source-asc',
+    excludedSourcePaths: ReadonlySet<string> = new Set<string>(),
+  ): Promise<LinkedContextItem[]> {
     const resolvedLinks = this.app.metadataCache.resolvedLinks || {};
+    const direction = normalizeLinkedContextSortOrder(sortOrder) === 'source-desc' ? -1 : 1;
     const sourcePaths = Object.keys(resolvedLinks)
-      .filter((sourcePath) => sourcePath !== targetFile.path && resolvedLinks[sourcePath]?.[targetFile.path] > 0)
-      .sort((a, b) => a.localeCompare(b));
+      .filter((sourcePath) =>
+        sourcePath !== targetFile.path
+        && !excludedSourcePaths.has(sourcePath)
+        && resolvedLinks[sourcePath]?.[targetFile.path] > 0
+      )
+      .sort((a, b) => direction * compareSourcePaths(a, b));
     const items: LinkedContextItem[] = [];
 
     for (const sourcePath of sourcePaths) {

@@ -27,7 +27,13 @@ import { getTaskDisplayTitle, parseTaskLine, readInlineFieldValue } from '../uti
 import { resolveTaskScheduledValue } from '../utils/daily-note-task-schedule';
 import * as logger from '../logger';
 import { KeyboardAwareOverlay } from '../utils/mobile-overlay';
-import { LinkedContextItem, LinkedContextService } from '../services/linked-context-service';
+import {
+  isLinkedContextSourceChangeRelevant,
+  LinkedContextItem,
+  LinkedContextService,
+  normalizeLinkedContextSortOrder,
+  shouldRecoverLinkedContextPanel,
+} from '../services/linked-context-service';
 // scroll-direction hide/reveal is handled inline â€” no gesture-handler import needed.
 
 // Get the LIVE mode constant if available
@@ -103,10 +109,15 @@ export class PersistentMenuManager {
     signature: string;
     requestKey: string;
     filePath: string;
+    sourcePaths: ReadonlySet<string>;
   }> = new Map();
   private linkedContextRequestIds: WeakMap<MarkdownView, number> = new WeakMap();
   private linkedContextCollections: Map<string, Promise<LinkedContextItem[]>> = new Map();
   private linkedContextRenders: Map<MarkdownView, { requestKey: string; promise: Promise<void> }> = new Map();
+  private linkedContextHostObservers: Map<MarkdownView, { root: HTMLElement; observer: MutationObserver }> = new Map();
+  private linkedContextRecoveryTimers: Map<MarkdownView, number> = new Map();
+  private linkedContextInvalidationVersions: WeakMap<MarkdownView, number> = new WeakMap();
+  private linkedContextRemovedSourcePaths: Set<string> = new Set();
   private readonly linkedContextService: LinkedContextService;
   private nativePropertyInitializationInFlight: Set<string> = new Set();
   private nativePropertyObservers: Map<MarkdownView, MutationObserver> = new Map();
@@ -580,6 +591,7 @@ export class PersistentMenuManager {
       const linkedContextViews = new Set([
         ...this.linkedContextPanels.keys(),
         ...this.linkedContextRenders.keys(),
+        ...this.linkedContextHostObservers.keys(),
       ]);
       for (const view of linkedContextViews) {
         this.removeLinkedContextPanel(view);
@@ -671,6 +683,7 @@ export class PersistentMenuManager {
     const linkedContextViews = new Set([
       ...this.linkedContextPanels.keys(),
       ...this.linkedContextRenders.keys(),
+      ...this.linkedContextHostObservers.keys(),
     ]);
     for (const view of linkedContextViews) {
       if (!activeViews.has(view)) this.removeLinkedContextPanel(view);
@@ -688,6 +701,63 @@ export class PersistentMenuManager {
     this.linkedContextRenders.delete(view);
   }
 
+  private isLinkedContextPanelMounted(view: MarkdownView): boolean {
+    const mounted = this.linkedContextPanels.get(view);
+    return Boolean(mounted?.el.isConnected && view.contentEl?.contains(mounted.el));
+  }
+
+  private ensureLinkedContextHostObserver(view: MarkdownView): void {
+    if (typeof MutationObserver === 'undefined' || !view.contentEl) return;
+    const current = this.linkedContextHostObservers.get(view);
+    if (current?.root === view.contentEl) return;
+    current?.observer.disconnect();
+
+    const observer = new MutationObserver(() => {
+      if (this.isLinkedContextPanelMounted(view)) return;
+      if (!this.linkedContextPanels.has(view)) return;
+      this.scheduleLinkedContextMountRecovery(view);
+    });
+    observer.observe(view.contentEl, { childList: true, subtree: true });
+    this.linkedContextHostObservers.set(view, { root: view.contentEl, observer });
+  }
+
+  private scheduleLinkedContextMountRecovery(view: MarkdownView, attempt: number = 0): void {
+    if (this.linkedContextRecoveryTimers.has(view)) return;
+    const delays = [40, 120, 300, 700, 1200];
+    const delay = delays[Math.min(attempt, delays.length - 1)];
+    const timer = window.setTimeout(() => {
+      this.linkedContextRecoveryTimers.delete(view);
+      if (!this.linkedContextHostObservers.has(view)) return;
+      const mounted = this.linkedContextPanels.get(view);
+      const activeFilePath = view.file?.path || '';
+      if (!mounted || !shouldRecoverLinkedContextPanel({
+        enabled: this.plugin.settings.enableInlinePersistentMenus === true
+          && this.plugin.settings.enableLinkedContextPanel === true,
+        panelConnected: this.isLinkedContextPanelMounted(view),
+        activeFilePath,
+        mountedFilePath: mounted.filePath,
+      })) return;
+      if (resolvePrimaryMarkdownView(this.plugin.app) !== view) return;
+      if (attempt === 0) {
+        logger.debug('[TPS GCM] Recovering detached linked context panel', { file: activeFilePath });
+      }
+      void this.ensureLinkedContextPanel(view).finally(() => {
+        if (this.isLinkedContextPanelMounted(view)) return;
+        if (!this.linkedContextPanels.has(view) || attempt + 1 >= delays.length) return;
+        this.scheduleLinkedContextMountRecovery(view, attempt + 1);
+      });
+    }, delay);
+    this.linkedContextRecoveryTimers.set(view, timer);
+  }
+
+  private releaseLinkedContextHostObserver(view: MarkdownView): void {
+    this.linkedContextHostObservers.get(view)?.observer.disconnect();
+    this.linkedContextHostObservers.delete(view);
+    const timer = this.linkedContextRecoveryTimers.get(view);
+    if (timer !== undefined) window.clearTimeout(timer);
+    this.linkedContextRecoveryTimers.delete(view);
+  }
+
   private unmountLinkedContextPanel(view: MarkdownView, options: { preserveMountHosts?: boolean } = {}): void {
     const mounted = this.linkedContextPanels.get(view);
     mounted?.component.unload();
@@ -703,12 +773,17 @@ export class PersistentMenuManager {
   private removeLinkedContextPanel(view: MarkdownView): void {
     this.cancelLinkedContextRender(view);
     this.unmountLinkedContextPanel(view);
+    this.releaseLinkedContextHostObserver(view);
   }
 
   private getLinkedContextRequestKey(view: MarkdownView, file: TFile): string {
     const resolvedLinks = this.plugin.app.metadataCache.resolvedLinks || {};
     const sourceVersions = Object.keys(resolvedLinks)
-      .filter((sourcePath) => sourcePath !== file.path && resolvedLinks[sourcePath]?.[file.path] > 0)
+      .filter((sourcePath) =>
+        sourcePath !== file.path
+        && !this.linkedContextRemovedSourcePaths.has(sourcePath)
+        && resolvedLinks[sourcePath]?.[file.path] > 0
+      )
       .sort((a, b) => a.localeCompare(b))
       .map((sourcePath) => {
         const sourceFile = this.plugin.app.vault.getAbstractFileByPath(sourcePath);
@@ -718,7 +793,9 @@ export class PersistentMenuManager {
       .join('|');
     const placement = this.plugin.settings.linkedContextPlacement === 'top' ? 'top' : 'bottom';
     const behavior = String(this.plugin.settings.linkedContextOpenBehavior || 'same-tab');
-    return `${file.path}:${this.getViewModeSignature(view)}:${placement}:${behavior}:${sourceVersions}`;
+    const sortOrder = normalizeLinkedContextSortOrder(this.plugin.settings.linkedContextSortOrder);
+    const invalidationVersion = this.linkedContextInvalidationVersions.get(view) || 0;
+    return `${file.path}:${this.getViewModeSignature(view)}:${placement}:${behavior}:${sortOrder}:${invalidationVersion}:${sourceVersions}`;
   }
 
   private isLinkedContextRenderCurrent(
@@ -746,7 +823,9 @@ export class PersistentMenuManager {
     const current = this.linkedContextCollections.get(requestKey);
     if (current) return current;
 
-    const collection = this.linkedContextService.collect(file).finally(() => {
+    const sortOrder = normalizeLinkedContextSortOrder(this.plugin.settings.linkedContextSortOrder);
+    const removedSourcePaths = new Set(this.linkedContextRemovedSourcePaths);
+    const collection = this.linkedContextService.collect(file, sortOrder, removedSourcePaths).finally(() => {
       if (this.linkedContextCollections.get(requestKey) === collection) {
         this.linkedContextCollections.delete(requestKey);
       }
@@ -765,6 +844,7 @@ export class PersistentMenuManager {
       this.removeLinkedContextPanel(view);
       return;
     }
+    this.ensureLinkedContextHostObserver(view);
     const mounted = this.linkedContextPanels.get(view);
     if (mounted && mounted.filePath !== file.path) {
       // A MarkdownView is reused when the user opens another note. Remove the
@@ -774,7 +854,28 @@ export class PersistentMenuManager {
     }
 
     const requestKey = this.getLinkedContextRequestKey(view, file);
-    if (mounted?.requestKey === requestKey && mounted.el.isConnected) return;
+    if (mounted?.requestKey === requestKey) {
+      if (this.isLinkedContextPanelMounted(view)) return;
+
+      // Obsidian can replace a preview/CodeMirror sizer while scrolling. The
+      // already-rendered panel remains valid when its request key is unchanged,
+      // so move that exact DOM/component into the replacement host instead of
+      // rescanning sources and rebuilding every card.
+      const placement = this.plugin.settings.linkedContextPlacement === 'top' ? 'top' : 'bottom';
+      const parent = this.resolveLinkedContextMount(view, placement);
+      if (parent?.isConnected) {
+        parent.appendChild(mounted.el);
+        if (this.isLinkedContextPanelMounted(view)) {
+          if (placement === 'bottom') this.removeEmptyTopSurfaceHost(view);
+          else this.removeEmptyNoteFooterHosts(view);
+          return;
+        }
+      }
+
+      // A replacement host may not exist during the middle of an Obsidian
+      // rerender. The observer/retry loop will call us again after it settles.
+      return;
+    }
 
     const inFlight = this.linkedContextRenders.get(view);
     if (inFlight?.requestKey === requestKey) {
@@ -813,18 +914,29 @@ export class PersistentMenuManager {
       }
       const signature = `${requestKey}:${items.map((item) => `${item.id}:${item.sourceFile.stat.mtime}`).join('|')}`;
       const current = this.linkedContextPanels.get(view);
-      if (current?.signature === signature && current.el.isConnected) {
+      if (current?.signature === signature && this.isLinkedContextPanelMounted(view)) {
         current.requestKey = requestKey;
         return;
       }
 
       const placement = this.plugin.settings.linkedContextPlacement === 'top' ? 'top' : 'bottom';
+      const mode = getViewMode(view);
+      const surface = mode === 'preview'
+        ? 'reading'
+        : mode === 'source' && !isStrictSourceMode(view)
+          ? 'live-preview'
+          : 'source';
       candidateComponent = new Component();
       candidateComponent.load();
       candidatePanel = document.createElement('section');
-      candidatePanel.className = `tps-gcm-linked-context-panel tps-gcm-linked-context-panel--${placement}`;
+      candidatePanel.className = [
+        'tps-gcm-linked-context-panel',
+        `tps-gcm-linked-context-panel--${placement}`,
+        `tps-gcm-linked-context-panel--${surface}`,
+      ].join(' ');
       candidatePanel.contentEditable = 'false';
       candidatePanel.setAttribute('aria-label', 'Linked context');
+      candidatePanel.dataset.sortOrder = normalizeLinkedContextSortOrder(this.plugin.settings.linkedContextSortOrder);
       candidatePanel.createEl('h4', { text: 'Linked context', cls: 'tps-gcm-linked-context-heading' });
       for (const item of items) {
         await this.renderLinkedContextItem(candidatePanel, candidateComponent, item, file);
@@ -848,6 +960,7 @@ export class PersistentMenuManager {
         signature,
         requestKey,
         filePath: file.path,
+        sourcePaths: new Set(items.map((item) => item.sourceFile.path)),
       });
       committed = true;
       if (placement === 'bottom') this.removeEmptyTopSurfaceHost(view);
@@ -875,6 +988,13 @@ export class PersistentMenuManager {
     targetFile: TFile,
   ): Promise<void> {
     const card = panel.createDiv({ cls: `tps-gcm-linked-context-card tps-gcm-linked-context-card--${item.kind}` });
+    const isTaskLineCard = item.kind === 'line' && parseTaskLine(item.markdown) !== null;
+    const isTerminalTaskCard = isTaskLineCard
+      && this.plugin.hideCompletedCheckboxesService.isCompletedTaskSourceLine(item.markdown);
+    card.classList.toggle('tps-gcm-linked-context-card--task-line', isTaskLineCard);
+    card.classList.toggle('tps-gcm-linked-context-card--terminal-task', isTerminalTaskCard);
+    card.dataset.tpsGcmLinkedContextId = item.id;
+    card.dataset.tpsGcmSourcePath = item.sourceFile.path;
     card.tabIndex = 0;
     card.setAttribute('role', 'button');
     card.setAttribute('aria-label', `Open source ${item.sourceFile.basename}, line ${item.startLine + 1}`);
@@ -884,6 +1004,7 @@ export class PersistentMenuManager {
     const body = card.createDiv({ cls: 'tps-gcm-linked-context-body' });
     await MarkdownRenderer.render(this.plugin.app, item.markdown || '\n', body, item.sourceFile.path, component);
     this.enableLinkedContextTaskCheckboxes(body, card, item);
+    this.plugin.hideCompletedCheckboxesService.classifyRenderedTaskRows(body);
 
     const activate = (event: MouseEvent | KeyboardEvent) => {
       event.preventDefault();
@@ -952,7 +1073,26 @@ export class PersistentMenuManager {
           new Notice(result.error || 'The linked task could not be updated.');
           return;
         }
+        if (result.task) {
+          taskLine.rawLine = result.task.rawLine;
+          taskLine.lineNumber = result.task.lineNumber;
+          taskLine.parsed = parseTaskLine(result.task.rawLine);
+          checkbox.checked = result.task.isComplete;
+          if (taskRow) {
+            taskRow.setAttribute('data-task', result.task.marker);
+            taskRow.dataset.taskLine = String(result.task.lineNumber + 1);
+            taskRow.dataset.tpsCalendarTaskText = taskLine.parsed?.body || result.task.rawLine;
+          }
+          if (item.kind === 'line') {
+            card.classList.toggle(
+              'tps-gcm-linked-context-card--terminal-task',
+              this.plugin.hideCompletedCheckboxesService.isCompletedTaskSourceLine(result.task.rawLine),
+            );
+          }
+        }
         card.classList.toggle('is-completed', result.task?.isComplete === true);
+        this.plugin.hideCompletedCheckboxesService.classifyRenderedTaskRows(body);
+        checkbox.disabled = false;
         this.ensureMenus();
       });
     });
@@ -5889,11 +6029,16 @@ export class PersistentMenuManager {
   }
 
   private async resolveChildFilesForTopButton(file: TFile, knownChildren?: readonly TFile[]): Promise<TFile[]> {
+    if (this.plugin.parentLinkResolutionService.isIgnoredFile(file)) return [];
     const childFiles = new Map<string, TFile>();
     try {
       const bodyLinks = await this.plugin.bodySubitemLinkService.scanFile(file);
       for (const link of bodyLinks) {
-        if (link.childFile instanceof TFile && link.childFile.path !== file.path) {
+        if (
+          link.childFile instanceof TFile
+          && link.childFile.path !== file.path
+          && !this.plugin.parentLinkResolutionService.isIgnoredFile(link.childFile)
+        ) {
           childFiles.set(link.childFile.path, link.childFile);
         }
       }
@@ -5902,6 +6047,7 @@ export class PersistentMenuManager {
     }
 
     for (const child of knownChildren ?? this.resolveChildFiles(file)) {
+      if (this.plugin.parentLinkResolutionService.isIgnoredFile(child)) continue;
       childFiles.set(child.path, child);
     }
 
@@ -6890,6 +7036,7 @@ export class PersistentMenuManager {
     force: boolean = false,
     options: { rebuildInlineSubitems?: boolean } = {}
   ): void {
+    this.refreshLinkedContextForChangedFile(file);
     if (force && this.swipeCollapsed) {
       this.setSwipeCollapsed(false);
     }
@@ -6951,6 +7098,64 @@ export class PersistentMenuManager {
         this.ensureTopParentNav(view, { force });
       }
     }
+  }
+
+  public invalidateLinkedContextSourcePaths(
+    changedPaths: readonly string[],
+    options: { removedPaths?: readonly string[] } = {},
+  ): void {
+    const paths = Array.from(new Set(changedPaths.map((path) => String(path || '').trim()).filter(Boolean)));
+    if (paths.length === 0) return;
+    const removedPaths = new Set(
+      (options.removedPaths || []).map((path) => String(path || '').trim()).filter(Boolean),
+    );
+    for (const path of removedPaths) this.linkedContextRemovedSourcePaths.add(path);
+    for (const path of paths) {
+      if (removedPaths.has(path)) continue;
+      const liveFile = this.plugin.app.vault.getAbstractFileByPath(path);
+      if (liveFile instanceof TFile) this.linkedContextRemovedSourcePaths.delete(path);
+    }
+    const resolvedLinks = this.plugin.app.metadataCache.resolvedLinks || {};
+    const trackedViews = new Set([
+      ...this.linkedContextPanels.keys(),
+      ...this.linkedContextRenders.keys(),
+      ...this.linkedContextHostObservers.keys(),
+    ]);
+    for (const view of trackedViews) {
+      if (resolvePrimaryMarkdownView(this.plugin.app) !== view) continue;
+      const targetFile = view.file;
+      if (!(targetFile instanceof TFile)) continue;
+      const mounted = this.linkedContextPanels.get(view);
+      const priorSourcePaths = mounted?.sourcePaths || new Set<string>();
+      const relevant = paths.some((changedPath) => isLinkedContextSourceChangeRelevant(
+        changedPath,
+        targetFile.path,
+        priorSourcePaths,
+        Number(resolvedLinks[changedPath]?.[targetFile.path] || 0),
+      ));
+      if (!relevant) continue;
+      if (removedPaths.has(targetFile.path)) {
+        this.removeLinkedContextPanel(view);
+        continue;
+      }
+      if (mounted && removedPaths.size > 0) {
+        mounted.el.querySelectorAll<HTMLElement>('.tps-gcm-linked-context-card').forEach((card) => {
+          if (removedPaths.has(card.dataset.tpsGcmSourcePath || '')) card.remove();
+        });
+        mounted.sourcePaths = new Set(
+          Array.from(mounted.sourcePaths).filter((sourcePath) => !removedPaths.has(sourcePath)),
+        );
+      }
+      this.linkedContextInvalidationVersions.set(
+        view,
+        (this.linkedContextInvalidationVersions.get(view) || 0) + 1,
+      );
+      void this.ensureLinkedContextPanel(view);
+    }
+  }
+
+  private refreshLinkedContextForChangedFile(file: TFile): void {
+    this.invalidateLinkedContextSourcePaths([file.path]);
   }
 
   private shouldDeferStructuralRefreshForTyping(view: MarkdownView, file: TFile): boolean {
@@ -7060,6 +7265,7 @@ export class PersistentMenuManager {
     const linkedContextViews = new Set([
       ...this.linkedContextPanels.keys(),
       ...this.linkedContextRenders.keys(),
+      ...this.linkedContextHostObservers.keys(),
     ]);
     for (const view of linkedContextViews) {
       this.removeLinkedContextPanel(view);
@@ -7072,6 +7278,7 @@ export class PersistentMenuManager {
     for (const host of this.topSurfaceHosts.values()) host.remove();
     this.topSurfaceHosts.clear();
     this.linkedContextCollections.clear();
+    this.linkedContextRemovedSourcePaths.clear();
     for (const [view, state] of this.scrollHideListeners.entries()) {
       state.scroller.removeEventListener('scroll', state.listener);
       this.scrollHideListeners.delete(view);

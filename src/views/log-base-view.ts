@@ -7,6 +7,7 @@ import { TagSuggestModal } from '../modals/TagSuggestModal';
 import { FileSuggestModal } from '../modals/FileSuggestModal';
 import * as logger from '../logger';
 import {
+  addLogLineSemanticTags,
   addLogLineTag,
   getLogEntryStableIdentity,
   normalizeInlineKey,
@@ -3411,13 +3412,13 @@ export class TpsTableView extends BasesView {
       subMenu.addItem((sub: any) => {
         sub.setTitle('Create tag...').setIcon('plus').onClick(() => {
           new TextInputModal(this.plugin.app, 'Tag', '', async (value) => {
-            const tag = normalizeTagValue(String(value || ''));
-            if (!tag) {
+            const tags = parseTaskTagValues(value);
+            if (tags.length === 0) {
               new Notice('Enter a valid tag.');
               return;
             }
             await this.updateEntryLine(entry, (line) => (
-              toggleLogLineSemanticTag(line, 'tags', tag, false)
+              addLogLineSemanticTags(line, 'tags', tags)
             ));
           }, { suggestions: collectKnownVaultTags(this.plugin.app) }).open();
         });

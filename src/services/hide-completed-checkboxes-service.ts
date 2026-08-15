@@ -9,6 +9,7 @@ import {
 import { MIGRATED_TASK_CHECKBOX } from '../constants/task-migration';
 
 const BODY_CLASS = 'tps-gcm-hide-completed-checkboxes';
+const READING_ONLY_BODY_CLASS = 'tps-gcm-hide-completed-checkboxes-reading-only';
 const HIDDEN_LINE_CLASS = 'tps-gcm-hidden-completed-checkbox-line';
 const REVEAL_WIDGET_CLASS = 'tps-gcm-completed-checkbox-reveal';
 const REVEALED_ROOT_CLASS = 'tps-gcm-completed-checkboxes-revealed';
@@ -83,12 +84,18 @@ export class HideCompletedCheckboxesService {
 
   applyBodyClass(): void {
     document.body?.classList?.toggle(BODY_CLASS, this.plugin.settings.hideCompletedCheckboxes === true);
+    document.body?.classList?.toggle(
+      READING_ONLY_BODY_CLASS,
+      this.plugin.settings.hideCompletedCheckboxes === true
+        && this.plugin.settings.completedTaskHidingScope === 'reading-only',
+    );
     document.body?.classList?.toggle(HIDE_ALL_TASK_LINES_BODY_CLASS, this.plugin.settings.hideAllTaskLinesInReadingMode === true);
     this.scheduleRefresh();
   }
 
   detach(): void {
     document.body?.classList?.remove(BODY_CLASS);
+    document.body?.classList?.remove(READING_ONLY_BODY_CLASS);
     document.body?.classList?.remove(HIDE_ALL_TASK_LINES_BODY_CLASS);
     if (this.refreshTimer !== null) {
       window.clearTimeout(this.refreshTimer);
@@ -132,6 +139,27 @@ export class HideCompletedCheckboxesService {
     this.discoverRenderedRoots();
     this.scheduleRefresh();
     this.plugin.app.workspace.updateOptions();
+  }
+
+  shouldHideCompletedTasksInLivePreview(): boolean {
+    return this.plugin.settings.hideCompletedCheckboxes === true
+      && this.plugin.settings.completedTaskHidingScope !== 'reading-only';
+  }
+
+  isCompletedTaskSourceLine(source: unknown): boolean {
+    return this.isCompletedTaskSourceLineWithMarkers(source, this.getCompleteTaskMarkers());
+  }
+
+  classifyRenderedTaskRows(container: ParentNode): number {
+    const completeMarkers = this.getCompleteTaskMarkers();
+    let completedCount = 0;
+    container.querySelectorAll<HTMLElement>('li.task-list-item').forEach((task) => {
+      const marker = normalizeLinkedSubitemCheckboxMarker(task.getAttribute('data-task'));
+      const completed = marker != null && completeMarkers.has(marker);
+      task.classList.toggle(MAPPED_COMPLETED_TASK_CLASS, completed);
+      if (completed) completedCount += 1;
+    });
+    return completedCount;
   }
 
   revealCompletedForFile(filePath: string, lineNumber?: number): void {
@@ -279,14 +307,11 @@ export class HideCompletedCheckboxesService {
   }
 
   private refreshLivePreviewEditors(): void {
-    const enabled = this.plugin.settings.hideCompletedCheckboxes === true;
+    const enabled = this.shouldHideCompletedTasksInLivePreview();
     if (!enabled) {
-      document.querySelectorAll<HTMLElement>(`.${HIDDEN_LINE_CLASS}`).forEach((line) => {
-        line.classList.remove(HIDDEN_LINE_CLASS);
-      });
-      document.querySelectorAll<HTMLElement>(`.${REVEAL_WIDGET_CLASS}`).forEach((button) => button.remove());
-      document.querySelectorAll<HTMLElement>(`.${TASK_HIDING_EXCLUDED_ROOT_CLASS}`).forEach((root) => {
-        root.classList.remove(TASK_HIDING_EXCLUDED_ROOT_CLASS);
+      this.pendingRoots.clear();
+      document.querySelectorAll<HTMLElement>('.markdown-source-view.mod-cm6').forEach((root) => {
+        this.clearLivePreviewRoot(root);
       });
       return;
     }
@@ -321,7 +346,10 @@ export class HideCompletedCheckboxesService {
     const lines = Array.from(root.querySelectorAll<HTMLElement>('.cm-line'));
     const completeMarkers = this.getCompleteTaskMarkers();
     const completedLines = lines.filter((line) => this.isCompletedTaskLine(line, completeMarkers));
-    const hasCompletedTasks = completedLines.length > 0;
+    const hasCompletedTasks = completedLines.length > 0 || root.querySelector(
+      '.tps-gcm-linked-context-panel--live-preview .tps-gcm-linked-context-card--terminal-task, '
+      + '.tps-gcm-linked-context-panel--live-preview li.task-list-item.tps-gcm-mapped-completed-task',
+    ) !== null;
     const revealed = this.getEffectiveRevealState(root, false);
     root.classList.toggle(REVEALED_ROOT_CLASS, revealed);
 
@@ -562,7 +590,7 @@ export class HideCompletedCheckboxesService {
     const markers = new Set(getLinkedSubitemCompleteMarkers(
       this.plugin.settings.linkedSubitemCheckboxMappings || [],
       {
-        completionStatuses: this.plugin.sharedServices.status.getDoneStatuses(),
+        completionStatuses: ['complete', 'wont-do'],
         normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
       },
     ));
@@ -571,7 +599,7 @@ export class HideCompletedCheckboxesService {
     return markers;
   }
 
-  private isCompletedTaskSourceLine(source: unknown, completeMarkers: ReadonlySet<string>): boolean {
+  private isCompletedTaskSourceLineWithMarkers(source: unknown, completeMarkers: ReadonlySet<string>): boolean {
     const marker = normalizeLinkedSubitemCheckboxMarker(
       String(source ?? '').match(TASK_LINE_STATE_RE)?.[1],
     );
@@ -579,18 +607,14 @@ export class HideCompletedCheckboxesService {
   }
 
   private isCompletedTaskLine(line: HTMLElement, completeMarkers: ReadonlySet<string>): boolean {
-    if (this.isCompletedTaskSourceLine(line.textContent, completeMarkers)) return true;
+    if (this.isCompletedTaskSourceLineWithMarkers(line.textContent, completeMarkers)) return true;
     const task = line.matches('[data-task]') ? line : line.querySelector<HTMLElement>('[data-task]');
     const marker = normalizeLinkedSubitemCheckboxMarker(task?.getAttribute('data-task'));
     return marker != null && completeMarkers.has(marker);
   }
 
   private syncRenderedCompletedTasks(root: HTMLElement): void {
-    const completeMarkers = this.getCompleteTaskMarkers();
-    root.querySelectorAll<HTMLElement>('li.task-list-item').forEach((task) => {
-      const marker = normalizeLinkedSubitemCheckboxMarker(task.getAttribute('data-task'));
-      task.classList.toggle(MAPPED_COMPLETED_TASK_CLASS, marker != null && completeMarkers.has(marker));
-    });
+    this.classifyRenderedTaskRows(root);
   }
 
   private getMarkdownRootsForFile(filePath: string): HTMLElement[] {
@@ -757,7 +781,7 @@ export class HideCompletedCheckboxesService {
   }
 
   private buildCompletedLineDecorations(view: EditorView): DecorationSet {
-    if (this.plugin.settings.hideCompletedCheckboxes !== true) return Decoration.none;
+    if (!this.shouldHideCompletedTasksInLivePreview()) return Decoration.none;
     const root = view.dom.closest('.markdown-source-view.mod-cm6') as HTMLElement | null;
     if (root && this.isRootTaskHidingExcluded(root)) return Decoration.none;
     if (root && !this.isLivePreviewRoot(root)) return Decoration.none;
@@ -776,7 +800,7 @@ export class HideCompletedCheckboxesService {
     const completeMarkers = this.getCompleteTaskMarkers();
     for (let lineNumber = 1; lineNumber <= doc.lines; lineNumber += 1) {
       const line = doc.line(lineNumber);
-      if (!this.isCompletedTaskSourceLine(line.text, completeMarkers)) continue;
+      if (!this.isCompletedTaskSourceLineWithMarkers(line.text, completeMarkers)) continue;
       this.collectCompletedTaskBlockLines(view, lineNumber, seen, hidden);
     }
     return hidden;

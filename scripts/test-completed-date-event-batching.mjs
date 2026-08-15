@@ -264,7 +264,10 @@ function createHarness({
       hideMenu: noop,
     },
     noteTitleRenderService: { clearTitleCache: noop },
-    persistentMenuManager: { detach: noop },
+    persistentMenuManager: {
+      detach: noop,
+      invalidateLinkedContextSourcePaths: noop,
+    },
     notebookNavigatorRuleService: {
       shouldAutoApplyOnMetadataChange: () => false,
       shouldAutoApplyOnFileOpen: () => false,

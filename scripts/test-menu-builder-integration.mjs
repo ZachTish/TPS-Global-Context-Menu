@@ -136,6 +136,7 @@ function createBuilderHarness(MenuBuilder, TFile) {
     parentLinkResolutionService: {
       getParentsForChild: () => [],
       hasParent: () => false,
+      isIgnoredFile: () => false,
     },
     noteTitleRenderService: { getDisplayTitle: (file) => file.basename },
     fieldInitializationService: {

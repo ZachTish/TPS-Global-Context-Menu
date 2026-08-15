@@ -942,7 +942,11 @@ export class BulkEditService {
             .some((line) => /^[A-Za-z0-9_"'.-]+\s*:/.test(line));
     }
 
-    async applyToFiles(files: TFile[], callback: (fm: any, file: TFile) => void): Promise<number> {
+    async applyToFiles(
+        files: TFile[],
+        callback: (fm: any, file: TFile) => void,
+        options: { writeGuard?: (file: TFile) => boolean } = {},
+    ): Promise<number> {
         let count = 0;
         const updatedFiles: TFile[] = [];
         let skippedUnsupported = 0;
@@ -952,6 +956,7 @@ export class BulkEditService {
 
         await runInBatches(files, async (file) => {
             try {
+                if (options.writeGuard?.(file) === false) return;
                 const extension = file.extension?.toLowerCase();
                 if (extension !== 'md' && !this.plugin.canvasPropertiesService?.isCanvasFile(file)) {
                     skippedUnsupported++;
@@ -963,6 +968,7 @@ export class BulkEditService {
                 }
                 this.plugin.recurrenceService?.markFileAsModified(file.path);
                 const changed = await this.plugin.frontmatterMutationService.process(file, (fm) => {
+                    if (options.writeGuard?.(file) === false) return;
                     callback(fm, file);
                 });
                 if (!changed) return;
@@ -999,6 +1005,7 @@ export class BulkEditService {
         updates: Record<string, any>,
         options: { writeGuard?: (file: TFile) => boolean } = {},
     ): Promise<number> {
+        if (options.writeGuard && files.some((file) => options.writeGuard?.(file) === false)) return 0;
         const workflowStatusKey = this.getWorkflowStatusKey();
         const workflowStatusUpdate = Object.entries(updates || {}).find(
             ([key]) => key.trim().toLowerCase() === workflowStatusKey.toLowerCase(),
@@ -1033,7 +1040,10 @@ export class BulkEditService {
             this.isChecklistCompletionStatus(statusUpdateValue) &&
             files.length === 1
         ) {
-            const canProceed = await this.checklistHandler.handleChecklistCompletion(files[0]);
+            const canProceed = await this.checklistHandler.handleChecklistCompletion(
+                files[0],
+                options.writeGuard ? () => options.writeGuard?.(files[0]) !== false : undefined,
+            );
             if (!canProceed) {
                 logger.flow('BulkEdit', 'frontmatter:update-canceled', {
                     files: files.length,
@@ -1114,8 +1124,7 @@ export class BulkEditService {
             }
         }
 
-        const count = await this.applyToFiles(files, (fm, file) => {
-            if (options.writeGuard?.(file) === false) return;
+        const count = await this.applyToFiles(files, (fm) => {
             for (const [key, value] of Object.entries(updates)) {
                 if (value === null || value === undefined) {
                     this.deleteFrontmatterValueCaseInsensitive(fm, key);
@@ -1142,7 +1151,7 @@ export class BulkEditService {
                     this.deleteFrontmatterValueCaseInsensitive(fm, 'completedDate');
                 }
             }
-        });
+        }, options);
 
         if (count > 0 && recurrenceCandidates.length > 0) {
             for (const candidate of recurrenceCandidates) {
@@ -1177,6 +1186,7 @@ export class BulkEditService {
         status: string,
         options: { writeGuard?: (file: TFile) => boolean } = {},
     ): Promise<number> {
+        if (options.writeGuard && files.some((file) => options.writeGuard?.(file) === false)) return 0;
         // Parent link prompt (single file to avoid spam)
         if (
             this.plugin.settings.checkParentLinkStatuses &&
@@ -1198,7 +1208,10 @@ export class BulkEditService {
             this.isChecklistCompletionStatus(status) &&
             files.length === 1
         ) {
-            const canProceed = await this.checklistHandler.handleChecklistCompletion(files[0]);
+            const canProceed = await this.checklistHandler.handleChecklistCompletion(
+                files[0],
+                options.writeGuard ? () => options.writeGuard?.(files[0]) !== false : undefined,
+            );
             if (!canProceed) {
                 return 0;
             }
@@ -1215,7 +1228,12 @@ export class BulkEditService {
         return this.updateFrontmatter(files, { priority });
     }
 
-    async addTag(files: TFile[], tag: string, key: string = 'tags'): Promise<number> {
+    async addTag(
+        files: TFile[],
+        tag: string,
+        key: string = 'tags',
+        options: { writeGuard?: (file: TFile) => boolean } = {},
+    ): Promise<number> {
         if (this.isProtectedIdentityKey(key)) {
             new Notice(`Blocked protected key edit: ${key}`);
             logger.warn('[TPS GCM] Blocked protected identity key edit in addTag', { key });
@@ -1248,7 +1266,7 @@ export class BulkEditService {
             if (targetKey !== key && key in fm) {
                 delete fm[key];
             }
-        });
+        }, options);
     }
 
     async addListValues(
@@ -1256,6 +1274,7 @@ export class BulkEditService {
         value: string,
         key: string,
         entityReference = false,
+        options: { writeGuard?: (file: TFile) => boolean } = {},
     ): Promise<number> {
         if (this.isProtectedIdentityKey(key)) {
             new Notice(`Blocked protected key edit: ${key}`);
@@ -1304,7 +1323,7 @@ export class BulkEditService {
             if (targetKey !== key && key in fm) {
                 delete fm[key];
             }
-        });
+        }, options);
     }
 
     async removeListValues(files: TFile[], value: string, key: string): Promise<number> {
@@ -1771,7 +1790,14 @@ export class BulkEditService {
         });
     }
 
-    async updateScheduledDetails(files: TFile[], scheduled: string | null, timeEstimate: number | null, allDay: boolean, key: string = 'scheduled'): Promise<number> {
+    async updateScheduledDetails(
+        files: TFile[],
+        scheduled: string | null,
+        timeEstimate: number | null,
+        allDay: boolean,
+        key: string = 'scheduled',
+        options: { writeGuard?: (file: TFile) => boolean } = {},
+    ): Promise<number> {
         return this.applyToFiles(files, (fm) => {
             const normalizedScheduled = normalizeObsidianDateTimeValue(scheduled);
             if (normalizedScheduled) {
@@ -1791,7 +1817,7 @@ export class BulkEditService {
             } else {
                 this.deleteFrontmatterValueCaseInsensitive(fm, 'allDay');
             }
-        });
+        }, options);
     }
 
     showNotice(action: string, detail: string, suffix: string, count: number): void {
@@ -2468,9 +2494,11 @@ export class BulkEditService {
     }
 
     async linkToParent(files: TFile[], parentFile: TFile): Promise<number> {
+        if (this.plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) return 0;
         let count = 0;
         const changedFiles = new Map<string, TFile>();
         for (const file of files) {
+            if (this.plugin.parentLinkResolutionService.isIgnoredFile(file)) continue;
             const changed = await this.plugin.subitemRelationshipSyncService.linkExistingChildToParent(file, parentFile, {
                 insertBodyLink: false,
             });
@@ -2519,6 +2547,7 @@ export class BulkEditService {
         if (!(parentFile instanceof TFile) || parentFile.extension?.toLowerCase() !== 'md') {
             return false;
         }
+        if (this.plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) return false;
         const parentKey = this.parentLinkHandler.normalizeParentKey();
         const changed = await this.ensureParentSelfLink(parentFile, parentKey);
         if (!changed) {
@@ -2543,6 +2572,7 @@ export class BulkEditService {
         let changed = false;
         await this.runSerializedFrontmatterWrite(parentFile, async () => {
             await this.plugin.frontmatterMutationService.process(parentFile, (fm) => {
+                if (this.plugin.parentLinkResolutionService.isIgnoredFrontmatter(fm as Record<string, unknown>)) return;
                 const existingKey = this.findFrontmatterKeyCaseInsensitive(fm, parentKey);
                 const existingRaw = existingKey ? fm[existingKey] : undefined;
                 const currentValues: string[] = [];
@@ -2689,12 +2719,18 @@ export class BulkEditService {
      * Removes a frontmatter key+value from each of the given files.
      * The key match is case-insensitive so it works regardless of casing variation.
      */
-    async removeFrontmatterKey(files: TFile[], key: string): Promise<number> {
+    async removeFrontmatterKey(
+        files: TFile[],
+        key: string,
+        options: { writeGuard?: (file: TFile) => boolean } = {},
+    ): Promise<number> {
         let count = 0;
         const updatedFiles: TFile[] = [];
         for (const file of files) {
             try {
+                if (options.writeGuard?.(file) === false) continue;
                 const changed = await this.plugin.frontmatterMutationService.process(file, (fm) => {
+                    if (options.writeGuard?.(file) === false) return;
                     const actualKey = Object.keys(fm).find(k => k.toLowerCase() === key.toLowerCase()) ?? key;
                     if (actualKey in fm) {
                         delete fm[actualKey];
@@ -2732,7 +2768,7 @@ export class BulkEditService {
 
     async unlinkFromAllParents(childFile: TFile): Promise<number> {
         const parentKey = String(this.plugin.settings.parentLinkFrontmatterKey || 'childOf').trim() || 'childOf';
-        const parents = this.plugin.parentLinkResolutionService.getParentsForChild(childFile).map((entry) => entry.file);
+        const parents = this.plugin.parentLinkResolutionService.getStoredParentsForChild(childFile).map((entry) => entry.file);
         if (!parents.length) {
             return 0;
         }

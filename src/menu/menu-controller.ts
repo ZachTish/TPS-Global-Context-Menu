@@ -277,11 +277,12 @@ export class MenuController {
     });
   }
 
-  async moveFiles(entries: any[], folderPath: string) {
+  async moveFiles(entries: any[], folderPath: string, writeGuard?: () => boolean) {
     const files = this.filesFromEntries(entries);
 
     await this.plugin.runQueuedMove(files, async () => {
       for (const entry of entries) {
+        if (writeGuard?.() === false) return;
         const newPath = `${folderPath === '/' ? '' : folderPath}/${entry.file.name}`;
         if (newPath !== entry.file.path) {
           try {
@@ -537,14 +538,15 @@ export class MenuController {
 
   // --- Modal openers ---
 
-  openAddTagModal(entries: any[], key = 'tags') {
+  openAddTagModal(entries: any[], key = 'tags', writeGuard?: () => boolean) {
     logger.log(`[TPS GCM] openAddTagModal called with ${entries.length} entries`);
     new AddTagModal(this.app, this.getAllKnownTags(), async (tag) => {
+      if (writeGuard?.() === false) return;
       const files = this.filesFromEntries(entries);
       logger.log(`[TPS GCM] Adding tag '${tag}' to ${files.length} files`);
       const current = parseTagInput(entries[0]?.frontmatter?.[key]);
       const nextTags = Array.from(new Set([...current, ...parseTagInput(tag)]));
-      const count = await this.plugin.bulkEditService.addTag(files, tag, key);
+      const count = await this.plugin.bulkEditService.addTag(files, tag, key, { writeGuard });
       if (count > 0) {
         const normalized = parseTagInput(tag);
         const display = normalized.length ? normalized.map((value) => `#${value}`).join(' ') : `#${tag}`;
@@ -615,7 +617,7 @@ export class MenuController {
     new Notice('Recurrence is read-only in GCM. Edit the frontmatter property directly if needed.');
   }
 
-  openScheduledModal(entries: any[], key = 'scheduled') {
+  openScheduledModal(entries: any[], key = 'scheduled', writeGuard?: () => boolean) {
     const fm = entries[0].frontmatter;
     new ScheduledModal(
       this.app,
@@ -623,15 +625,18 @@ export class MenuController {
       fm.timeEstimate || 0,
       fm.allDay || false,
       async (result) => {
+        if (writeGuard?.() === false) return;
         const files = this.filesFromEntries(entries);
         const clearing = !String(result.date || '').trim();
-        await this.plugin.bulkEditService.updateScheduledDetails(
+        const count = await this.plugin.bulkEditService.updateScheduledDetails(
           files,
           result.date,
           clearing ? null : result.timeEstimate,
           clearing ? false : result.allDay,
-          key
+          key,
+          { writeGuard },
         );
+        if (writeGuard && count <= 0) return;
         entries.forEach((entry: any) => {
           if (!entry.frontmatter || typeof entry.frontmatter !== 'object') entry.frontmatter = {};
           if (clearing) {

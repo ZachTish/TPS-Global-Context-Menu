@@ -160,6 +160,43 @@ test('Daily Note move behavior and local item history have safe normalized setti
   );
 });
 
+test('linked context, parent-child ignore, and completed-task scope settings normalize safely', () => {
+  assert.match(typesSource, /CompletedTaskHidingScope = 'reading-and-live-preview' \| 'reading-only'/u);
+  assert.match(typesSource, /LinkedContextSortOrder = 'source-asc' \| 'source-desc'/u);
+  assert.match(constantsSource, /completedTaskHidingScope: 'reading-and-live-preview'/u);
+  assert.match(constantsSource, /linkedContextSortOrder: 'source-asc'/u);
+  assert.match(constantsSource, /enableParentChildIgnoreRule: false/u);
+  assert.match(constantsSource, /parentChildIgnoreFrontmatterKey: ''/u);
+  assert.match(constantsSource, /parentChildIgnoreFrontmatterValue: ''/u);
+  assert.match(mainSource, /linkedContextSortOrder === 'source-desc'[\s\S]{0,100}\? 'source-desc'[\s\S]{0,80}: 'source-asc'/u);
+  assert.match(mainSource, /completedTaskHidingScope === 'reading-only'[\s\S]{0,100}\? 'reading-only'[\s\S]{0,100}: 'reading-and-live-preview'/u);
+  assert.match(mainSource, /enableParentChildIgnoreRule = this\.settings\.enableParentChildIgnoreRule === true/u);
+  assert.match(mainSource, /parentChildIgnoreFrontmatterKey = String\([^)]*\)\.trim\(\)/u);
+  assert.match(mainSource, /parentChildIgnoreFrontmatterValue = String\([^)]*\)\.trim\(\)/u);
+  assert.match(settingsTabSource, /setName\('Hide completed tasks in'\)/u);
+  assert.match(settingsTabSource, /addOption\('reading-only', 'Reading view only'\)/u);
+  assert.match(settingsTabSource, /setName\('Linked context order'\)/u);
+  assert.match(settingsTabSource, /addOption\('source-desc', 'Source path Z → A'\)/u);
+  assert.match(settingsTabSource, /setName\('Ignore matching parent\/child notes'\)/u);
+  assert.match(settingsTabSource, /Existing links and frontmatter are preserved/u);
+  assert.match(settingsTabSource, /linkedSubitemCheckboxService\.ensureForAllMarkdownViews\(\)/u);
+  assert.match(settingsTabSource, /linkedSubitemCheckboxService\.refreshLivePreviewEditors\(\)/u);
+  assert.ok(
+    settingsTabSource.indexOf("setName('Linked context order')")
+      < settingsTabSource.indexOf("if (this.plugin.settings.enableLinkedContextPanel === true)"),
+    'linked-context order remains configurable while the panel evaluator is off',
+  );
+  assert.ok(
+    settingsTabSource.indexOf("setName('Parent/child ignore pair')")
+      > settingsTabSource.indexOf("setName('Ignore matching parent/child notes')"),
+  );
+  assert.ok(
+    settingsTabSource.indexOf("setName('Parent/child ignore pair')")
+      < settingsTabSource.indexOf("setName('Body link format')"),
+    'the exact ignore pair remains editable while its evaluator is disabled',
+  );
+});
+
 test('checkbox mapping text validation keeps alternate markers but rejects ambiguous or unusable rows', async () => {
   const { parseLinkedSubitemMappingsText } = await importModule('../src/utils/linked-subitem-mapping.ts');
   const valid = [

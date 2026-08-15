@@ -56,6 +56,8 @@ export type LinkedSubitemCheckboxStyle = 'native' | 'soft-link' | 'accent';
 export type TimeTrackingStorageMode = 'daily-note' | 'source-note' | 'dedicated-note';
 export type TimeTrackingDailyNotePlacement = 'top' | 'bottom';
 export type TpsBaseWriteFallbackMode = 'filter-required' | 'today-daily-note' | 'specific-note';
+export type CompletedTaskHidingScope = 'reading-and-live-preview' | 'reading-only';
+export type LinkedContextSortOrder = 'source-asc' | 'source-desc';
 type ExtensibleLiteral<T extends string> = T | (string & Record<never, never>);
 
 export type TpsRecordKind = ExtensibleLiteral<'note' | 'task' | 'project' | 'food' | 'log' | 'workflow' | 'run' | 'workout' | 'workout-plan'>;
@@ -465,6 +467,7 @@ export interface TPSGlobalContextMenuSettings {
   homeOpenTasksBasePath: string;
   homeCaptureInsertPosition: HomeCaptureInsertPosition;
   hideCompletedCheckboxes: boolean;
+  completedTaskHidingScope: CompletedTaskHidingScope;
   hideAllTaskLinesInReadingMode: boolean;
   taskHidingExclusionPatterns: string;
   persistTaskVisibilityStateToFrontmatter: boolean;
@@ -518,6 +521,9 @@ export interface TPSGlobalContextMenuSettings {
   checkOpenChecklistItems: boolean;
   checkParentLinkStatuses: boolean;
   parentLinkFrontmatterKey: string;
+  enableParentChildIgnoreRule: boolean;
+  parentChildIgnoreFrontmatterKey: string;
+  parentChildIgnoreFrontmatterValue: string;
   /** @deprecated Parent-side reverse links are no longer canonical. */
   childLinkFrontmatterKey?: string;
   autoSelfLinkParentInParentKey: boolean;
@@ -575,6 +581,7 @@ export interface TPSGlobalContextMenuSettings {
   enableLinkedContextPanel: boolean;
   linkedContextPlacement: 'top' | 'bottom';
   linkedContextOpenBehavior: 'same-tab' | 'new-tab' | 'hover-preview';
+  linkedContextSortOrder: LinkedContextSortOrder;
   dailyNavShowToday: boolean;
   enableAutoPopulateDailyNotes: boolean;
   inheritUnscheduledTasksFromDailyNotes: boolean;
