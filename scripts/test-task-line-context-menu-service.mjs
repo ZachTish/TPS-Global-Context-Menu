@@ -602,6 +602,11 @@ test('normal task clicks open the exact-line quick editor across task surfaces',
   assert.match(serviceSource, /window\.setTimeout\(\(\) => \{[\s\S]*?\}, 500\)/);
   assert.match(serviceSource, /Bullet — No status/);
   assert.match(serviceSource, /convertTaskLineToBullet/);
+  assert.match(serviceSource, /private convertTaskToBullet\([\s\S]{0,650}historyTerminalDelete: true/);
+  assert.match(serviceSource, /private addTaskStatusMenu\([\s\S]{0,2600}setTitle\('Bullet — No status'\)[\s\S]{0,350}convertTaskToBullet/);
+  assert.match(serviceSource, /private addSelectedTaskMenuItems\([\s\S]{0,1700}setTitle\('Bullet — No status'\)[\s\S]{0,450}historyTerminalDelete: true/);
+  assert.match(serviceSource, /private constrainTaskMenu<[\s\S]{0,1400}tps-gcm-task-line-menu/);
+  assert.match(pluginStylesSource, /\.tps-gcm-task-line-menu \.menu-item-title\s*\{[\s\S]{0,180}max-inline-size: 25ch;[\s\S]{0,180}text-overflow: ellipsis;/);
   assert.match(serviceSource, /nextMarker = nextParsed\?\.marker \?\? null/);
   assert.match(serviceSource, /event\.key === 'Enter' && \(event\.metaKey \|\| event\.ctrlKey\)/);
   assert.match(pluginStylesSource, /\.tps-gcm-task-editor-card\s*\{/);

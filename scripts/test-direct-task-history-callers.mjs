@@ -127,6 +127,93 @@ test('direct task history callers declare task-only surfaces and atomic identity
   );
 });
 
+test('task context Status menu exposes the shared task-to-bullet action', async () => {
+  const { TaskLineContextMenuService, truncateTaskMenuLabel } = await loadBundledModule(
+    '../src/services/task-line-context-menu-service.ts',
+    'direct-history-task-status-bullet-menu',
+  );
+  class TestMenuItem {
+    constructor() {
+      this.title = '';
+      this.submenu = null;
+      this.click = null;
+    }
+    setTitle(title) { this.title = String(title); return this; }
+    setIcon() { return this; }
+    setChecked() { return this; }
+    setSection() { return this; }
+    onClick(callback) { this.click = callback; return this; }
+    setSubmenu() { this.submenu = new TestMenu(); return this.submenu; }
+  }
+  class TestMenu {
+    constructor() {
+      this.items = [];
+      this.classes = new Set();
+      this.dom = { classList: { add: (value) => this.classes.add(value) } };
+    }
+    addItem(callback) {
+      const item = new TestMenuItem();
+      callback(item);
+      this.items.push(item);
+      return this;
+    }
+    addSeparator() { return this; }
+  }
+
+  const plugin = {
+    settings: {
+      properties: [],
+      showCustomPropertiesInContextMenu: false,
+      enableTimeTracking: false,
+    },
+    noteTitleRenderService: { getDisplayTitle: () => 'Source note' },
+  };
+  const service = new TaskLineContextMenuService(plugin);
+  service.getCheckboxMappings = () => [{
+    checkboxState: '[ ]',
+    statuses: ['todo'],
+    label: 'Todo',
+    icon: 'square',
+  }];
+  service.getCheckboxMutationSignature = () => 'status-menu-signature';
+  service.getStatusForCheckboxToken = () => 'todo';
+  service.getContextTaskTitle = () => 'A task title that is deliberately much longer than the menu limit';
+  const conversions = [];
+  service.convertTaskToBullet = async (context, signature) => {
+    conversions.push({ context, signature });
+    return true;
+  };
+  const context = {
+    file: { path: 'Inbox/Status bullet.md', basename: 'Status bullet' },
+    lineIndex: 0,
+    lineNumber: 1,
+    rawLine: '- [ ] A task title that is deliberately much longer than the menu limit',
+    title: 'A task title that is deliberately much longer than the menu limit',
+    checkboxToken: '[ ]',
+    isCalendarTask: false,
+    calendarAllDay: false,
+  };
+  const menu = new TestMenu();
+
+  service.addTaskLineMenuItems(menu, context, { includeNoteActions: false });
+
+  const titleItem = menu.items.find((item) => item.title.startsWith('Title:'));
+  assert.equal(titleItem.title, truncateTaskMenuLabel(`Title: ${context.title}`));
+  assert.equal(Array.from(titleItem.title).length, 25);
+  assert.equal(titleItem.title.endsWith('…'), true);
+  assert.equal(menu.items.every((item) => Array.from(item.title).length <= 25), true);
+  const statusItem = menu.items.find((item) => item.title === 'Status: todo');
+  assert.ok(statusItem?.submenu, 'the task Status row should own a submenu');
+  const bulletItem = statusItem.submenu.items.find((item) => item.title === 'Bullet — No status');
+  assert.ok(bulletItem?.click, 'the Status submenu should expose task-to-bullet conversion');
+  assert.equal(menu.classes.has('tps-gcm-task-line-menu'), true);
+  assert.equal(statusItem.submenu.classes.has('tps-gcm-task-line-menu'), true);
+
+  bulletItem.click();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(conversions, [{ context, signature: 'status-menu-signature' }]);
+});
+
 test('task-menu timer duplication adopts and commits its history identity in the atomic create write', async () => {
   const { TaskLineContextMenuService } = await loadBundledModule(
     '../src/services/task-line-context-menu-service.ts',

@@ -4664,6 +4664,13 @@ export const PLUGIN_STYLES = `
         border-radius: 3px;
       }
 
+      .tps-gcm-task-line-menu .menu-item-title {
+        max-inline-size: 25ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .cm-line.tps-gcm-task-line-active,
       li.tps-gcm-task-line-active,
       .task-list-item.tps-gcm-task-line-active,

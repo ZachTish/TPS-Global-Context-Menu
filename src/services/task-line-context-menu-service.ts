@@ -151,6 +151,14 @@ const KANBAN_TASK_SELECTOR = [
   'input.task-list-item-checkbox',
 ].join(', ');
 
+export const TASK_MENU_LABEL_MAX_CHARACTERS = 25;
+
+export function truncateTaskMenuLabel(value: string): string {
+  const characters = Array.from(String(value || ''));
+  if (characters.length <= TASK_MENU_LABEL_MAX_CHARACTERS) return characters.join('');
+  return `${characters.slice(0, TASK_MENU_LABEL_MAX_CHARACTERS - 1).join('')}…`;
+}
+
 function taskElSurface(element: HTMLElement): string {
   if (element.closest('.tps-log-base')) return 'tps-table';
   if (element.closest('.tps-list-native')) return 'tps-list';
@@ -176,6 +184,39 @@ export class TaskLineContextMenuService {
   private taskEditorOverlay: KeyboardAwareOverlay | null = null;
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
+
+  private constrainTaskMenu<T>(menu: T): T {
+    const candidate = menu as any;
+    if (candidate?.addItem && candidate.__tpsGcmTaskLabelConstraint !== true) {
+      const addItem = candidate.addItem.bind(candidate);
+      candidate.__tpsGcmTaskLabelConstraint = true;
+      candidate.addItem = (callback: (item: any) => unknown) => addItem((item: any) => {
+        const setTitle = item.setTitle.bind(item);
+        item.setTitle = (title: string | DocumentFragment) => {
+          if (typeof title !== 'string') return setTitle(title);
+          const displayTitle = truncateTaskMenuLabel(title);
+          const result = setTitle(displayTitle);
+          const applyFullLabel = () => {
+            const itemEl = item?.dom?.el || item?.dom || item?.el;
+            const titleEl = item?.titleEl || itemEl?.querySelector?.('.menu-item-title') || itemEl;
+            titleEl?.setAttribute?.('title', title);
+            titleEl?.setAttribute?.('aria-label', title);
+          };
+          applyFullLabel();
+          globalThis.setTimeout(applyFullLabel, 0);
+          return result;
+        };
+        return callback(item);
+      });
+    }
+    const menuEl = candidate?.dom?.el || candidate?.dom || candidate?.menuEl;
+    menuEl?.classList?.add?.('tps-gcm-task-line-menu');
+    return menu;
+  }
+
+  private createTaskSubmenu(item: any): any {
+    return this.constrainTaskMenu(item.setSubmenu());
+  }
 
   dispose(): void {
     this.closeTaskEditor();
@@ -993,7 +1034,7 @@ export class TaskLineContextMenuService {
     onChanged: () => void = () => {},
   ): void {
     if (!anchor.isConnected) return;
-    const menu = new Menu();
+    const menu = this.constrainTaskMenu(new Menu());
     const mappings = this.getCheckboxMappings();
     const expectedMappingSignature = this.getCheckboxMutationSignature(mappings);
     for (const mapping of mappings) {
@@ -1025,6 +1066,22 @@ export class TaskLineContextMenuService {
           });
       });
     }
+    menu.addSeparator();
+    menu.addItem((item) => {
+      item
+        .setTitle('Bullet — No status')
+        .setIcon('list')
+        .onClick(() => {
+          void this.convertTaskToBullet(context, expectedMappingSignature).then((updated) => {
+            if (!updated) return;
+            logger.flow('TaskLineContextMenu', 'status-picker:bullet', {
+              path: context.file.path,
+              lineNumber: context.lineNumber,
+            });
+            onChanged();
+          });
+        });
+    });
     const positionedMenu = menu as Menu & { showAtElement?: (element: HTMLElement) => void };
     if (typeof positionedMenu.showAtElement === 'function') {
       positionedMenu.showAtElement(anchor);
@@ -1040,6 +1097,19 @@ export class TaskLineContextMenuService {
       checkboxState,
       this.getTaskWorkflowFieldOwnership(),
     );
+  }
+
+  private convertTaskToBullet(
+    context: TaskLineContext,
+    expectedMappingSignature: string = this.getCheckboxMutationSignature(),
+  ): Promise<boolean> {
+    return this.updateTaskLine(context, (line) => convertTaskLineToBullet(
+      clearTaskCheckboxOwnedWorkflowFields(line, this.getTaskWorkflowFieldOwnership()),
+    ), {
+      checkboxMutation: true,
+      expectedMappingSignature,
+      historyTerminalDelete: true,
+    });
   }
 
   private updateTaskStatus(
@@ -1082,7 +1152,7 @@ export class TaskLineContextMenuService {
     onChanged: () => void,
   ): void {
     if (!button.isConnected) return;
-    const menu = new Menu();
+    const menu = this.constrainTaskMenu(new Menu());
     const mappings = this.getCheckboxMappings();
     const expectedMappingSignature = this.getCheckboxMutationSignature(mappings);
     for (const mapping of mappings) {
@@ -1120,13 +1190,7 @@ export class TaskLineContextMenuService {
         .setTitle('Bullet — No status')
         .setIcon('list')
         .onClick(() => {
-          void this.updateTaskLine(context, (line) => convertTaskLineToBullet(
-            clearTaskCheckboxOwnedWorkflowFields(line, this.getTaskWorkflowFieldOwnership()),
-          ), {
-            checkboxMutation: true,
-            expectedMappingSignature,
-            historyTerminalDelete: true,
-          }).then((updated) => {
+          void this.convertTaskToBullet(context, expectedMappingSignature).then((updated) => {
             if (!updated) return;
             logger.flow('TaskQuickEditor', 'status:bullet', {
               path: context.file.path,
@@ -1722,7 +1786,7 @@ export class TaskLineContextMenuService {
   }
 
   private showMenu(context: TaskLineContext, taskEl: HTMLElement, x: number, y: number): void {
-    const menu = new Menu();
+    const menu = this.constrainTaskMenu(new Menu());
     const surface = taskElSurface(taskEl);
     const selectedContexts = this.getMenuSelection(context);
     this.setActiveTaskHighlight(selectedContexts, taskEl);
@@ -1752,11 +1816,11 @@ export class TaskLineContextMenuService {
       item
         .setTitle(`Selected tasks (${count})`)
         .setIcon('list-checks');
-      const subMenu = (item as any).setSubmenu();
+      const subMenu = this.createTaskSubmenu(item);
 
       subMenu.addItem((sub: any) => {
         sub.setTitle('Set status').setIcon('circle-check');
-        const statusMenu = sub.setSubmenu();
+        const statusMenu = this.createTaskSubmenu(sub);
         const mappings = this.getCheckboxMappings();
         const expectedMappingSignature = this.getCheckboxMutationSignature(mappings);
         for (const mapping of mappings) {
@@ -1771,6 +1835,18 @@ export class TaskLineContextMenuService {
             });
           });
         }
+        statusMenu.addSeparator();
+        statusMenu.addItem((statusItem: any) => {
+          statusItem.setTitle('Bullet — No status').setIcon('list').onClick(() => {
+            void this.updateTaskLines(contexts, (line) => convertTaskLineToBullet(
+              clearTaskCheckboxOwnedWorkflowFields(line, this.getTaskWorkflowFieldOwnership()),
+            ), {
+              checkboxMutation: true,
+              expectedMappingSignature,
+              historyTerminalDelete: true,
+            });
+          });
+        });
       });
 
       subMenu.addItem((sub: any) => {
@@ -1806,6 +1882,7 @@ export class TaskLineContextMenuService {
     context: TaskLineContext,
     options: { includeTitle?: boolean; includeStatus?: boolean; includeNoteActions?: boolean; includeTags?: boolean } = {},
   ): void {
+    this.constrainTaskMenu(menu);
     const includeTitle = options.includeTitle !== false;
     const includeStatus = options.includeStatus !== false;
     const includeNoteActions = options.includeNoteActions !== false;
@@ -1906,7 +1983,7 @@ export class TaskLineContextMenuService {
       item
         .setTitle(current.length > 0 ? `Tags (${current.length})` : 'Tags')
         .setIcon('tag');
-      const subMenu = (item as any).setSubmenu();
+      const subMenu = this.createTaskSubmenu(item);
       subMenu.addItem((sub: any) => {
         sub.setTitle('Add tag...').setIcon('plus').onClick(() => {
           new TextInputModal(this.plugin.app, 'Tag', '', async (value) => {
@@ -1935,7 +2012,7 @@ export class TaskLineContextMenuService {
       item
         .setTitle(current ? `${statusLabel}: ${current}` : statusLabel)
         .setIcon('circle-check');
-      const subMenu = (item as any).setSubmenu();
+      const subMenu = this.createTaskSubmenu(item);
       const statusItems: Array<{ item: any; mapping: LinkedSubitemCheckboxMapping; label: string }> = [];
       const mappings = this.getCheckboxMappings();
       const expectedMappingSignature = this.getCheckboxMutationSignature(mappings);
@@ -1975,6 +2052,21 @@ export class TaskLineContextMenuService {
         });
       }
 
+      subMenu.addSeparator();
+      subMenu.addItem((sub: any) => {
+        sub
+          .setTitle('Bullet — No status')
+          .setIcon('list')
+          .onClick(() => {
+            void this.convertTaskToBullet(context, expectedMappingSignature).then((updated) => {
+              if (!updated) return;
+              logger.flow('TaskLineContextMenu', 'status:bullet', {
+                path: context.file.path,
+                lineNumber: context.lineNumber,
+              });
+            });
+          });
+      });
       subMenu.addSeparator();
       subMenu.addItem((sub: any) => {
         sub
@@ -2063,7 +2155,7 @@ export class TaskLineContextMenuService {
             )).join(', ')}`
           : `${property.label} (create field)`)
         .setIcon(property.icon || 'file-search');
-      const subMenu = (item as any).setSubmenu();
+      const subMenu = this.createTaskSubmenu(item);
       const setChoice = (value: string, entity: boolean): Promise<boolean> => (
         this.updateTaskLine(context, (line) => {
           if (!isList) return setInlineFieldValueOnTaskLine(line, property.key, value);
@@ -2120,7 +2212,7 @@ export class TaskLineContextMenuService {
       item
         .setTitle(current ? `${property.label}: ${current}` : `${property.label} (create field)`)
         .setIcon(property.icon || 'list');
-      const subMenu = (item as any).setSubmenu();
+      const subMenu = this.createTaskSubmenu(item);
       const setChoice = (value: string): Promise<boolean> => this.updateTaskLine(
         context,
         (line) => setInlineFieldValueOnTaskLine(line, property.key, value),
@@ -2219,7 +2311,7 @@ export class TaskLineContextMenuService {
       item
         .setTitle(current.length > 0 ? `${property.label} (${current.length})` : `${property.label} (create field)`)
         .setIcon(property.icon || 'tag');
-      const subMenu = (item as any).setSubmenu();
+      const subMenu = this.createTaskSubmenu(item);
       const addChoice = (value: string): Promise<boolean> => this.updateTaskLine(context, (line) => {
         if (isTags) return addInlineTagsToTaskLine(line, value);
         const existing = readInlineFieldValue(line, property.key);
@@ -2279,7 +2371,7 @@ export class TaskLineContextMenuService {
           ? `${property.label}: ${normalizedCurrent === 'true' ? 'Yes' : 'No'}`
           : `${property.label} (create field)`)
         .setIcon(property.icon || 'square-check-big');
-      const subMenu = (item as any).setSubmenu();
+      const subMenu = this.createTaskSubmenu(item);
       const choices: Array<[string, string | null]> = [
         ['(none)', null],
         ['Yes', 'true'],
@@ -2332,7 +2424,7 @@ export class TaskLineContextMenuService {
       item
         .setTitle('Time Tracking')
         .setIcon('timer');
-      const subMenu = (item as any).setSubmenu();
+      const subMenu = this.createTaskSubmenu(item);
       subMenu.addItem((sub: any) => {
         sub.setTitle('Start timer').setIcon('play').onClick(() => {
           this.runTaskMenuAction(context, 'start-timer', () => this.startTaskTimer(context));
