@@ -35,6 +35,7 @@ import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { FileSuggestModal } from './modals/FileSuggestModal';
 import * as logger from './logger';
 import { runDailyNoteHomeSettingTransaction } from './services/daily-note-home-setting-transaction';
+import { importHealthPropertyCatalog } from './integrations/health-property-import';
 import {
   BASE_QUERY_GUIDE_GOTCHAS,
   BASE_QUERY_GUIDE_SECTIONS,
@@ -2512,6 +2513,40 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     if (!this.plugin.settings.properties) {
       this.plugin.settings.properties = [];
     }
+
+    const healthPlugin = (this.app as any)?.plugins?.getPlugin?.('tps-health')
+      || (this.app as any)?.plugins?.plugins?.['tps-health'];
+    const healthApi = healthPlugin?.api || healthPlugin;
+    const canImportHealthProperties = typeof healthApi?.getPropertyCatalog === 'function';
+    new Setting(container)
+      .setName('Import TPS Health properties')
+      .setDesc(canImportHealthProperties
+        ? 'Add or refresh Health-owned food fields and Daily Note rollups. Food fields follow TPS Health’s current tag, folder, or frontmatter identification mode; rollups appear only when Health wrote that rollup key.'
+        : 'Enable or update TPS Health, then reopen settings to import its scoped food and Daily Note rollup fields.')
+      .addButton((button) => {
+        button
+          .setButtonText('Import / refresh')
+          .setDisabled(!canImportHealthProperties)
+          .onClick(async () => {
+            try {
+              const catalog = await Promise.resolve(healthApi.getPropertyCatalog());
+              const result = importHealthPropertyCatalog(this.plugin.settings.properties || [], catalog);
+              this.plugin.settings.properties = result.properties as CustomProperty[];
+              await this.plugin.saveSettings();
+              logger.flow('Settings', 'health-properties:imported', {
+                added: result.added,
+                updated: result.updated,
+                removed: result.removed,
+                total: result.properties.length,
+              });
+              new Notice(`TPS Health properties imported: ${result.added} added, ${result.updated} refreshed${result.removed ? `, ${result.removed} retired` : ''}.`);
+              this.display();
+            } catch (error) {
+              logger.flowError('Settings', 'health-properties:import-failed', error);
+              new Notice('Could not import TPS Health properties. Update TPS Health and try again.');
+            }
+          });
+      });
 
     this.plugin.settings.properties.forEach((prop, index) => {
       const stateKey = `Custom Property::${prop.id || prop.key || index}`;
