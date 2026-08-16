@@ -175,6 +175,7 @@ test('TPS Table filter matrix covers scalar, list, tag, number, date, boolean, f
     'due >= date("2026-08-12")',
     'enabled == true',
     'file.size > 1000',
+    'folder == "Projects/Launch"',
     'file.ctime >= date("2026-08-01")',
     'file.mtime < date("2026-08-13")',
     'file.hasTag(project)',
@@ -197,6 +198,7 @@ test('TPS Table filter matrix covers scalar, list, tag, number, date, boolean, f
   assert.equal(evaluateLogBaseFilterRoots(['note.approved == false'], matrixContext), false);
   assert.equal(evaluateLogBaseFilterRoots(['task.tags.contains(daily)'], matrixContext), false);
   assert.equal(evaluateLogBaseFilterRoots(['file.inFolder("Archive")'], matrixContext), false);
+  assert.equal(evaluateLogBaseFilterRoots(['folder == "_archive"'], matrixContext), false);
   assert.equal(evaluateLogBaseFilterRoots(['note.missing.isEmpty()'], matrixContext), true);
   assert.equal(evaluateLogBaseFilterRoots(['note.missing == "value"'], matrixContext), false);
 });
@@ -1382,10 +1384,10 @@ test('TPS Table resolves and switches the active persisted view within its ownin
   visibleName = '07 All tasks again';
   assert.deepEqual(
     await view.getEffectiveBaseFilterRoots(),
-    [wholeRoot],
-    'switching to a view without its own filter drops the prior active-view root',
+    [activeRoot, wholeRoot],
+    'stable controller/config identity wins over a contradictory DOM label',
   );
-  assert.equal(view.getViewName(), '07 All tasks again');
+  assert.equal(view.getViewName(), '01 All tasks');
 
   configuredName = 'TPS Table';
   assert.deepEqual(
@@ -1572,8 +1574,8 @@ test('TPS Table formulas drive synthesized-row filters, columns, sorting, groupi
 test('TPS Table uses native two-axis scrolling and restores both axes after a rerender', () => {
   const render = sourceBlock(
     logBaseViewSource,
-    'private async render(): Promise<void>',
-    'private async loadEntries()',
+    'private renderEntries(',
+    'private async loadEntries(',
   );
   const scrollRegistration = sourceBlock(
     logBaseViewSource,

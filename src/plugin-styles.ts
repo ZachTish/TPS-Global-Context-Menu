@@ -626,6 +626,16 @@ export const PLUGIN_STYLES = `
         border-radius: 6px;
       }
 
+      .tps-log-base-index-progress {
+        margin: 6px 0;
+        padding: 6px 10px;
+        color: var(--text-muted);
+        font-size: var(--font-ui-smaller);
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 6px;
+        background: var(--background-secondary);
+      }
+
       .tps-gcm-virtual-base-embed .internal-embed:is([src$=".base"], [data-src$=".base"], [alt$=".base"]) > .markdown-embed-content {
         display: block;
         max-height: none;

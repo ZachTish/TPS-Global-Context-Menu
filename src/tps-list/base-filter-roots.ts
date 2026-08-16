@@ -134,7 +134,20 @@ function collectFilterRootCandidates(root: unknown, roots: unknown[]): void {
 
 function isDirectFilterRoot(root: unknown): boolean {
   if (!root) return false;
-  if (typeof root === 'string') return !!root.trim();
+  if (typeof root === 'string') {
+    const value = root.trim();
+    // Obsidian 1.13 exposes queryController.queryState as serialized UI state.
+    // It is not an executable filter expression and must never become a root.
+    if ((value.startsWith('{') && value.endsWith('}')) || (value.startsWith('[') && value.endsWith(']'))) {
+      try {
+        JSON.parse(value);
+        return false;
+      } catch {
+        // A normal expression may begin with a bracket; only valid JSON is UI state.
+      }
+    }
+    return !!value;
+  }
   if (Array.isArray(root)) return root.some((item) => isDirectFilterRoot(item));
   if (typeof root !== 'object') return false;
   const record = root as Record<string, unknown>;

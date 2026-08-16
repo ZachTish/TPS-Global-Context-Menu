@@ -1,7 +1,7 @@
 import { BasesView, QueryController, type ViewOption } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
 import * as logger from '../logger';
-import { TpsListView } from '../tps-list/views/TpsListView';
+import { TpsListView, type TpsListHost } from '../tps-list/views/TpsListView';
 import { DEFAULT_SETTINGS } from '../tps-list/settings';
 import { getCurrentBaseEmbedRenderContext, takePendingBaseEmbedRenderContext } from './base-embed-context';
 
@@ -68,14 +68,14 @@ function inheritBaseEmbedContext(containerEl: HTMLElement): void {
   if (host.dataset.tpsContextPath) containerEl.dataset.tpsContextPath = host.dataset.tpsContextPath;
 }
 
-function createTpsListPluginShim(plugin: TPSGlobalContextMenuPlugin): Record<string, unknown> {
+export function createTpsListPluginShim(plugin: TPSGlobalContextMenuPlugin): TpsListHost {
   logger.flow('TpsListBridgeView', 'using-local-renderer', { owner: 'gcm' });
   return {
     app: plugin.app,
     gcmPlugin: plugin,
     openBaseNotePreviewFromClick: (event: MouseEvent, file: any, anchorEl: HTMLElement) =>
       plugin.openBaseNotePreviewFromClick(event, file, anchorEl, true),
-    settings: DEFAULT_SETTINGS,
+    listSettings: DEFAULT_SETTINGS,
     saveSettings: async () => {},
   };
 }

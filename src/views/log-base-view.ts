@@ -138,6 +138,7 @@ import {
 } from '../utils/boolean-property';
 import { parseLineEntityMetadata } from '../services/line-entity-source-provider';
 import { MarkdownDocumentLineCache } from '../utils/markdown-document-line-cache';
+import { compileTpsBaseQueryPlan, type TpsBaseQueryPlan } from './tps-base-query-plan';
 import {
   constrainTpsTableTaskSelection,
   getTpsTableTaskSelectionOrder,
@@ -192,6 +193,7 @@ interface LogLineEntry {
   fieldValues?: Record<string, string[]>;
   queryFields?: Record<string, string>;
   formulaSession?: TpsFormulaRowSession;
+  entityKind?: 'line' | 'note';
 }
 
 interface RenderedLogLineRevision {
@@ -209,6 +211,13 @@ function getLogEntrySelectionId(
   const stable = getLogEntryStableIdentity({ fields });
   if (stable) return `${filePath}:stable:${stable.key}:${hashSelectionIdentity(stable.value)}`;
   return `${filePath}:line:${lineNumber}:${hashSelectionIdentity(line)}`;
+}
+
+function compareStableEntries(left: LogLineEntry, right: LogLineEntry): number {
+  return left.file.path.localeCompare(right.file.path)
+    || left.lineNumber - right.lineNumber
+    || String(left.entityKind || 'line').localeCompare(String(right.entityKind || 'line'))
+    || left.selectionId.localeCompare(right.selectionId);
 }
 
 function getTpsTableLineDisplayTitle(line: string): string {
@@ -303,6 +312,7 @@ export class TpsTableView extends BasesView {
   private refreshTimer: number | null = null;
   private renderGeneration = 0;
   private renderedResultCount = 0;
+  private tableIndexProgress: { completedFiles: number; totalFiles: number; complete: boolean } | null = null;
   private activeContextRow: HTMLElement | null = null;
   private selectedEntryIds = new Set<string>();
   private selectionAnchorId: string | null = null;
@@ -314,6 +324,7 @@ export class TpsTableView extends BasesView {
   private filterDiagnostics = new Map<string, LogBaseFilterFailure>();
   private formulaNow: Date | undefined;
   private sourceLineCache: MarkdownDocumentLineCache<TFile> | undefined;
+  private activeQueryPlan: TpsBaseQueryPlan | null = null;
   private resolvedBaseViewName = '';
   constructor(controller: QueryController, containerEl: HTMLElement, private plugin: TPSGlobalContextMenuPlugin) {
     super(controller);
@@ -399,6 +410,20 @@ export class TpsTableView extends BasesView {
         error: logger.errorSummary(error),
       });
       new Notice('Could not read the Base filters, so TPS Table did not create anything.');
+      return true;
+    }
+    const queryPlan = compileTpsBaseQueryPlan({
+      roots: filterRoots,
+      viewName: this.getViewName(),
+      configuredProperties: this.plugin.settings?.properties || [],
+    });
+    if (!queryPlan.valid) {
+      const first = queryPlan.diagnostics[0];
+      logger.flowWarn('TpsTableView', 'create-line:blocked', {
+        reason: first?.code || 'invalid-filter',
+        viewName: queryPlan.viewName,
+      });
+      new Notice(`Could not create an item because a Base filter is unsupported. ${first?.message || ''}`.trim());
       return true;
     }
     const statusService = this.plugin.sharedServices?.status;
@@ -786,7 +811,23 @@ export class TpsTableView extends BasesView {
     this.formulaDiagnostics.clear();
     this.filterDiagnostics.clear();
     this.formulaNow = new Date();
-    const entries = await this.loadEntries();
+    const entries = await this.loadEntries((partialEntries, progress) => {
+      if (generation !== this.renderGeneration) return;
+      this.renderEntries(partialEntries, generation, start, progress);
+    });
+    this.renderEntries(entries, generation, start, {
+      completedFiles: 0,
+      totalFiles: 0,
+      complete: true,
+    });
+  }
+
+  private renderEntries(
+    entries: LogLineEntry[],
+    generation: number,
+    start: number,
+    progress: { completedFiles: number; totalFiles: number; complete: boolean },
+  ): void {
     if (generation !== this.renderGeneration) {
       logger.flow('TpsTableView', 'render:stale', { generation });
       return;
@@ -811,6 +852,7 @@ export class TpsTableView extends BasesView {
     const renderedEntries = entryGroups.flatMap((group) => group.rows);
     const totalsPosition = normalizeTotalsRowPosition(this.getConfigValue('totalsRow'));
     this.renderedResultCount = entries.length;
+    this.tableIndexProgress = progress.totalFiles > 0 ? progress : null;
     this.renderedTaskEntryOrder = getTpsTableTaskSelectionOrder(renderedEntries);
     const visibleEntryIds = new Set(renderedEntries.map((entry) => entry.selectionId));
     this.selectedEntryIds = new Set([...this.selectedEntryIds].filter((id) => visibleEntryIds.has(id)));
@@ -821,6 +863,14 @@ export class TpsTableView extends BasesView {
     this.containerEl.empty();
 
     this.syncNativeResultsCountSoon();
+
+    if (!progress.complete && progress.totalFiles > 0) {
+      this.containerEl.createDiv({
+        cls: 'tps-log-base-index-progress',
+        attr: { role: 'status', 'aria-live': 'polite' },
+        text: `Indexing… ${progress.completedFiles}/${progress.totalFiles} files. Results are incomplete.`,
+      });
+    }
 
     if (this.filterDiagnostics.size > 0) {
       const diagnostics = Array.from(this.filterDiagnostics.values());
@@ -896,25 +946,57 @@ export class TpsTableView extends BasesView {
     });
   }
 
-  private async loadEntries(): Promise<LogLineEntry[]> {
+  private async loadEntries(
+    onProgress?: (
+      entries: LogLineEntry[],
+      progress: { completedFiles: number; totalFiles: number; complete: boolean },
+    ) => void,
+  ): Promise<LogLineEntry[]> {
     const entries: LogLineEntry[] = [];
     const loadGeneration = typeof this.renderGeneration === 'number' ? this.renderGeneration : null;
     const isCancelled = (): boolean => loadGeneration != null && loadGeneration !== this.renderGeneration;
     const filterRoots = await this.getEffectiveBaseFilterRoots();
     if (isCancelled()) return [];
+    const queryPlan = compileTpsBaseQueryPlan({
+      roots: filterRoots,
+      viewName: this.getViewName(),
+      configuredProperties: this.plugin.settings?.properties || [],
+    });
+    this.activeQueryPlan = queryPlan;
+    if (!queryPlan.valid) {
+      for (const failure of queryPlan.diagnostics) {
+        const key = `${failure.code}:${failure.expression || failure.property || ''}:${failure.operator || ''}`;
+        this.filterDiagnostics.set(key, failure);
+      }
+      logger.flowWarn('TpsTableView', 'filters:query-blocked', {
+        viewName: queryPlan.viewName,
+        code: queryPlan.diagnostics[0]?.code || 'invalid-filter',
+      });
+      return [];
+    }
     const sourceFiles = (filterRoots.length ? this.plugin.app.vault.getMarkdownFiles() : this.getSourceFiles())
       .filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file));
+    const nonMarkdownNoteFiles = queryPlan.rowFamilies.has('note')
+      ? (typeof this.plugin.app.vault.getFiles === 'function' ? this.plugin.app.vault.getFiles() : [])
+        .filter((file) => file.extension.toLocaleLowerCase() !== 'md')
+        .filter((file) => this.plugin.filePropertiesService?.isPropertyTarget(file)
+          && this.plugin.filePropertiesService.hasCompanion(file))
+        .sort((left, right) => left.path.localeCompare(right.path))
+      : [];
     const checkboxMappings = this.getTaskCheckboxMappings();
     let failedClosedFilterRows = 0;
-    const sourceLineCache = this.getSourceLineCache();
+    const sourceLineCache = this.plugin.baseRowIndexService || this.getSourceLineCache();
     sourceLineCache.prune(sourceFiles);
-    const sourceBatch = await sourceLineCache.readMany(sourceFiles, { isCancelled });
-    if (sourceBatch.cancelled || isCancelled()) return [];
-    for (const sourceResult of sourceBatch.results) {
+    const processSourceResults = (sourceResults: readonly any[]): boolean => {
+      for (const sourceResult of sourceResults) {
       const file = sourceResult.file;
       if (sourceResult.ok === false) {
         logger.flowWarn('TpsTableView', 'source-read:failed', { path: file.path, error: logger.errorSummary(sourceResult.error) });
         continue;
+      }
+      if (queryPlan.rowFamilies.has('note')) {
+        const noteEntry = this.createNoteProjection(file, filterRoots);
+        if (noteEntry) entries.push(noteEntry);
       }
       for (const documentLine of sourceResult.lines) {
         if (!documentLine.isContent) continue;
@@ -924,6 +1006,10 @@ export class TpsTableView extends BasesView {
         const heading = parseTpsListHeadingLine(line);
         const markdownKind = getTpsTableMarkdownLineKind(line);
         const rowKind = heading ? `h${heading.headingLevel}` : markdownKind;
+        if (markdownKind === 'task' && !queryPlan.rowFamilies.has('task')) continue;
+        if (markdownKind === 'bullet' && !queryPlan.rowFamilies.has('bullet')) continue;
+        if (heading && !queryPlan.rowFamilies.has('heading')) continue;
+        if (!markdownKind && !heading && !queryPlan.rowFamilies.has('line')) continue;
         const explicitKinds = getTpsBaseAdditiveKindValues(null, fieldValues.kind ?? fields.kind);
         const explicitKind = explicitKinds.join(', ');
         let queryFields = { ...fields };
@@ -984,7 +1070,10 @@ export class TpsTableView extends BasesView {
         const filterResult = evaluateLogBaseFilterRoots(filterRoots, filterContext);
         if (filterContext.filterFailed) failedClosedFilterRows += 1;
         if (filterResult === false) continue;
-        if (filterResult == null && filterRoots.length) failedClosedFilterRows += 1;
+        if (filterResult == null && filterRoots.length) {
+          failedClosedFilterRows += 1;
+          continue;
+        }
         if (!this.lineMatchesHomeDateContext(fields, file)) continue;
         entries.push({
           id: `${file.path}:${index}`,
@@ -997,9 +1086,43 @@ export class TpsTableView extends BasesView {
           fieldValues,
           queryFields,
           formulaSession: filterContext.formulaSession,
+          entityKind: 'line',
         });
       }
+        if (isCancelled()) return false;
+      }
+      return true;
+    };
+    if (typeof (sourceLineCache as any).readProgressive === 'function') {
+      const progressive = await (sourceLineCache as any).readProgressive(sourceFiles, {
+        batchSize: 64,
+        isCancelled,
+        onProgress: (progress: {
+          completedFiles: number;
+          totalFiles: number;
+          complete: boolean;
+          results: readonly any[];
+        }) => {
+          if (!processSourceResults(progress.results) || isCancelled()) return;
+          if (!progress.complete) {
+            onProgress?.(this.sortEntries([...entries]), {
+              completedFiles: progress.completedFiles,
+              totalFiles: progress.totalFiles,
+              complete: false,
+            });
+          }
+        },
+      });
+      if (progressive.cancelled || isCancelled()) return [];
+    } else {
+      const sourceBatch = await sourceLineCache.readMany(sourceFiles, { isCancelled });
+      if (sourceBatch.cancelled || isCancelled()) return [];
+      if (!processSourceResults(sourceBatch.results)) return [];
+    }
+    for (const file of nonMarkdownNoteFiles) {
       if (isCancelled()) return [];
+      const noteEntry = this.createNoteProjection(file, filterRoots);
+      if (noteEntry) entries.push(noteEntry);
     }
     if (failedClosedFilterRows) {
       logger.flowWarn('TpsTableView', 'filters:rows-failed-closed', {
@@ -1009,6 +1132,41 @@ export class TpsTableView extends BasesView {
       });
     }
     return this.sortEntries(entries);
+  }
+
+  private createNoteProjection(file: TFile, filterRoots: readonly unknown[]): LogLineEntry | null {
+    const logicalFrontmatter = file.extension.toLocaleLowerCase() === 'md'
+      ? (this.plugin.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, unknown>
+      : this.plugin.filePropertiesService?.read(file) || {};
+    const frontmatter = this.applyConfiguredSourceFileFrontmatter(logicalFrontmatter, file);
+    const noteFields = Object.fromEntries(Object.entries(frontmatter).map(([key, value]) => [
+      normalizePropertyKeyIdentity(key),
+      Array.isArray(value) ? value.map((entry) => String(entry ?? '')).join(', ') : String(value ?? ''),
+    ]));
+    const kindKey = findPropertyKeyCaseInsensitive(frontmatter, 'kind');
+    const authoredKinds = kindKey == null
+      ? []
+      : (Array.isArray(frontmatter[kindKey]) ? frontmatter[kindKey] : [frontmatter[kindKey]])
+        .map((value) => String(value ?? '').trim()).filter(Boolean);
+    noteFields.kind = 'note';
+    noteFields.itemkind = 'note';
+    noteFields.itemtype = 'note';
+    if (authoredKinds.length) noteFields.explicitkind = authoredKinds.join(', ');
+    const noteContext = this.createFilterContext(noteFields, file, '', 'note', 0);
+    if (evaluateLogBaseFilterRoots([...filterRoots], noteContext) !== true) return null;
+    const titleKey = findPropertyKeyCaseInsensitive(frontmatter, 'title');
+    return {
+      id: `${file.path}:note`,
+      selectionId: `${file.path}:note`,
+      file,
+      lineNumber: -1,
+      line: '',
+      title: String(titleKey == null ? file.basename : frontmatter[titleKey] || file.basename),
+      fields: noteFields,
+      queryFields: noteFields,
+      formulaSession: noteContext.formulaSession,
+      entityKind: 'note',
+    };
   }
 
   private applyConfiguredSourceFileFields(fields: Record<string, string>, file: TFile): Record<string, string> {
@@ -1639,7 +1797,7 @@ export class TpsTableView extends BasesView {
 
   private sortEntries(entries: LogLineEntry[]): LogLineEntry[] {
     const descriptors = this.getSortDescriptors();
-    if (!descriptors.length) return entries;
+    if (!descriptors.length) return [...entries].sort(compareStableEntries);
     return entries.map((entry, index) => ({ entry, index })).sort((a, b) => {
       for (const descriptor of descriptors) {
         const semantics = this.getOrderingSemantics(descriptor.key);
@@ -1651,7 +1809,7 @@ export class TpsTableView extends BasesView {
         );
         if (result !== 0) return result;
       }
-      return a.index - b.index;
+      return compareStableEntries(a.entry, b.entry) || a.index - b.index;
     }).map(({ entry }) => entry);
   }
 
@@ -1678,7 +1836,10 @@ export class TpsTableView extends BasesView {
     const normalized = normalizeTpsTableVirtualKey(key);
     const rowKind = this.getEntryStructuralKind(entry);
     if (normalized === 'kind') {
-      return getTpsBaseAdditiveKindValues(rowKind, entry.fieldValues?.kind ?? entry.fields.kind);
+      return getTpsBaseAdditiveKindValues(
+        rowKind,
+        entry.fields.explicitkind ?? entry.fieldValues?.kind ?? entry.fields.kind,
+      );
     }
     if (normalized === 'itemkind' || normalized === 'itemtype') return rowKind;
     if (normalized === 'explicitkind' || normalized === 'entitykind') {
@@ -1702,7 +1863,8 @@ export class TpsTableView extends BasesView {
     return entry.fields[normalized] ?? entry.queryFields?.[normalized] ?? '';
   }
 
-  private getEntryStructuralKind(entry: Pick<LogLineEntry, 'line'>): string {
+  private getEntryStructuralKind(entry: Pick<LogLineEntry, 'line' | 'entityKind'>): string {
+    if (entry.entityKind === 'note') return 'note';
     const heading = parseTpsListHeadingLine(entry.line);
     return heading ? `h${heading.headingLevel}` : getTpsTableMarkdownLineKind(entry.line) || '';
   }
@@ -1730,12 +1892,14 @@ export class TpsTableView extends BasesView {
     });
     row.dataset.entryId = entry.selectionId;
     row.dataset.path = entry.file.path;
-    row.dataset.line = String(entry.lineNumber + 1);
-    (row as any).__tpsTableEntryRevision = {
-      path: entry.file.path,
-      lineNumber: entry.lineNumber,
-      rawLine: entry.line,
-    } satisfies RenderedLogLineRevision;
+    if (entry.entityKind !== 'note') {
+      row.dataset.line = String(entry.lineNumber + 1);
+      (row as any).__tpsTableEntryRevision = {
+        path: entry.file.path,
+        lineNumber: entry.lineNumber,
+        rawLine: entry.line,
+      } satisfies RenderedLogLineRevision;
+    }
     if (isTpsTableTaskSelectionEntry(entry)) {
       row.dataset.tpsGcmContext = 'table-task';
       row.dataset.tpsTableBatchSelectable = 'true';
@@ -1754,7 +1918,9 @@ export class TpsTableView extends BasesView {
     (row as any).__tpsTableView = this;
     row.addEventListener('click', (evt: MouseEvent) => this.handleEntryModifierClick(evt, entry), { capture: true });
     row.addEventListener('click', (evt: MouseEvent) => this.handleEntryClick(evt, entry));
-    row.addEventListener('contextmenu', (evt) => this.openEntryContextMenu(evt, entry, row, columns), { capture: true });
+    row.addEventListener('contextmenu', (evt) => entry.entityKind === 'note'
+      ? this.openNoteEntryContextMenu(evt, entry)
+      : this.openEntryContextMenu(evt, entry, row, columns), { capture: true });
     for (const column of columns) {
       const cell = row.createEl('td', { cls: `bases-table-cell tps-log-base-cell tps-log-base-cell--${normalizeInlineKey(column.key)}` });
       cell.dataset.key = column.key;
@@ -1790,6 +1956,9 @@ export class TpsTableView extends BasesView {
           event.stopPropagation();
           void this.openEntry(entry);
         });
+      } else if (entry.entityKind === 'note') {
+        cell.dataset.tpsTableCellIntent = 'note-property';
+        cell.setText(this.getEntryValue(entry, column.key));
       } else {
         const configuredProperty = this.isExplicitTaskWorkflowStatusColumn(column.key)
           ? this.createTaskWorkflowStatusProperty(column)
@@ -3217,9 +3386,9 @@ export class TpsTableView extends BasesView {
   }
 
   private resolveCurrentBaseViewName(knownViewNames: ReadonlySet<string>): string {
-    const visible = this.getVisibleBaseViewName(knownViewNames);
-    if (visible) return visible;
-    return this.getConfiguredBaseViewName(knownViewNames);
+    const configured = this.getConfiguredBaseViewName(knownViewNames);
+    if (configured) return configured;
+    return this.getVisibleBaseViewName(knownViewNames);
   }
 
   private getConfiguredBaseViewName(knownViewNames?: ReadonlySet<string>): string {
@@ -3445,6 +3614,17 @@ export class TpsTableView extends BasesView {
       selectedCount: this.selectedEntryIds.size,
     });
     menu.showAtPosition({ x: evt.pageX, y: evt.pageY });
+  }
+
+  private openNoteEntryContextMenu(evt: MouseEvent, entry: LogLineEntry): void {
+    evt.preventDefault();
+    evt.stopPropagation();
+    const menu = new Menu();
+    menu.addItem((item) => item
+      .setTitle('Open note')
+      .setIcon('file-text')
+      .onClick(() => void this.openEntry(entry)));
+    menu.showAtMouseEvent(evt);
   }
 
   private setActiveContextRow(row: HTMLElement | null): void {
@@ -3682,7 +3862,11 @@ export class TpsTableView extends BasesView {
   private syncNativeResultsCount(): void {
     const header = this.getNearestBasesHeader();
     if (!header) return;
-    const text = `${this.renderedResultCount} result${this.renderedResultCount === 1 ? '' : 's'}`;
+    const baseText = `${this.renderedResultCount} result${this.renderedResultCount === 1 ? '' : 's'}`;
+    const progress = this.tableIndexProgress;
+    const text = progress && !progress.complete
+      ? `${baseText} · indexing ${progress.completedFiles}/${progress.totalFiles}`
+      : baseText;
     const countEl =
       header.querySelector<HTMLElement>('.view-header-count') ??
       header.querySelector<HTMLElement>('.bases-view-results-count') ??

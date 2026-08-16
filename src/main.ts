@@ -75,6 +75,7 @@ import { normalizeHomeComponentActions } from './services/home-component-action-
 import { TPS_HOME_VIEW_TYPE, TpsHomeView } from './views/home-view';
 import { TPS_TABLE_VIEW_TYPE, TpsTableView } from './views/log-base-view';
 import { TPS_LIST_VIEW_TYPE, createTpsListView, createTpsListViewOptions } from './views/tps-list-bridge-view';
+import { BaseRowIndexService } from './services/base-row-index-service';
 import {
   getTpsBaseNativeCreateEventTarget,
   isTpsBaseNativeCreateTarget,
@@ -323,6 +324,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   commandQueueService: CommandQueueService;
   vaultQueryService: VaultQueryService;
   entityIndexService: EntityIndexService;
+  baseRowIndexService: BaseRowIndexService;
   taskIdentityService: TaskIdentityService;
   workspaceRibbonService: WorkspaceRibbonService;
   linkedSubitemCheckboxService: LinkedSubitemCheckboxService;
@@ -519,6 +521,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.fieldInitializationService = new FieldInitializationService(this);
     this.commandQueueService = new CommandQueueService();
     this.vaultQueryService = new VaultQueryService(this);
+    this.baseRowIndexService = new BaseRowIndexService(this);
+    this.baseRowIndexService.setup();
     this.entityIndexService = new EntityIndexService(this);
     this.configureEntityIndexDimensions();
     this.entityIndexService.setup();

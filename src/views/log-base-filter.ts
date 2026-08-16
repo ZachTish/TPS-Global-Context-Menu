@@ -38,6 +38,11 @@ export type LogBaseFilterFailure = {
   operator?: string;
 };
 
+export type LogBaseFilterValidation = {
+  valid: boolean;
+  diagnostics: LogBaseFilterFailure[];
+};
+
 export type LogBaseFilterContext = {
   fields: Record<string, unknown>;
   configuredProperties?: readonly CustomProperty[];
@@ -67,6 +72,136 @@ export function evaluateLogBaseFilterNode(node: unknown, context: LogBaseFilterC
   context.filterFailed = false;
   const result = evaluateLogBaseFilterNodeInternal(node, context);
   return context.formulaFailed || context.filterFailed ? false : result;
+}
+
+/** Validate a persisted/runtime filter tree without evaluating vault data. */
+export function validateLogBaseFilterRoots(
+  roots: readonly unknown[],
+  configuredProperties: readonly CustomProperty[] = [],
+): LogBaseFilterValidation {
+  const diagnostics: LogBaseFilterFailure[] = [];
+  const report = (failure: LogBaseFilterFailure) => diagnostics.push(failure);
+  for (const root of roots) validateFilterNode(root, configuredProperties, report);
+  return { valid: diagnostics.length === 0, diagnostics };
+}
+
+function validateFilterNode(
+  node: unknown,
+  configuredProperties: readonly CustomProperty[],
+  report: (failure: LogBaseFilterFailure) => void,
+): void {
+  if (!node) {
+    report({ code: 'invalid-filter-node', message: 'Filter node is empty' });
+    return;
+  }
+  if (typeof node === 'string') {
+    validateFilterExpression(node, configuredProperties, report);
+    return;
+  }
+  if (Array.isArray(node)) {
+    if (!node.length) report({ code: 'empty-filter-group', message: 'Filter group has no children' });
+    for (const child of node) validateFilterNode(child, configuredProperties, report);
+    return;
+  }
+  if (typeof node !== 'object') {
+    report({ code: 'invalid-filter-node', message: `Unsupported filter node type: ${typeof node}` });
+    return;
+  }
+  const record = node as Record<string, unknown>;
+  const logicalKeys = ['and', 'all', 'or', 'any', 'not'].filter((key) => Object.prototype.hasOwnProperty.call(record, key));
+  if (logicalKeys.length > 1) {
+    report({ code: 'ambiguous-filter-group', message: `Filter node contains multiple logical operators: ${logicalKeys.join(', ')}` });
+    return;
+  }
+  if (logicalKeys.length === 1) {
+    const key = logicalKeys[0];
+    const children = key === 'not' ? [record[key]] : asArray(record[key]);
+    if (!children.length || children.every((child) => child == null)) {
+      report({ code: 'empty-filter-group', message: `${key} filter has no children` });
+      return;
+    }
+    for (const child of children) validateFilterNode(child, configuredProperties, report);
+    return;
+  }
+  const property = String(record.property ?? record.field ?? record.key ?? record.left ?? record.lhs ?? '').trim();
+  const inline = record.expression ?? record.expr ?? record.text ?? record.raw;
+  if (!property) {
+    if (typeof inline === 'string') validateFilterExpression(inline, configuredProperties, report);
+    else report({ code: 'invalid-filter-object', message: 'Filter object has no property or expression' });
+    return;
+  }
+  if (parsePropertyPath(property) == null) {
+    report({ code: 'invalid-filter-property', message: 'Filter property path contains invalid bracket syntax', property });
+    return;
+  }
+  const operator = String(record.operator ?? record.op ?? record.comparison ?? record.condition ?? 'equals').trim();
+  if (!isSupportedValueOperator(operator)) {
+    report({ code: 'unsupported-filter-operator', message: `Unsupported filter operator: ${operator || '(empty)'}`, property, operator });
+    return;
+  }
+  validateConfiguredOperator(property, operator, configuredProperties, report);
+}
+
+function validateFilterExpression(
+  rawExpression: string,
+  configuredProperties: readonly CustomProperty[],
+  report: (failure: LogBaseFilterFailure) => void,
+): void {
+  const raw = String(rawExpression || '').trim();
+  if (!raw) {
+    report({ code: 'empty-filter-expression', message: 'Filter expression is empty' });
+    return;
+  }
+  const expression = (raw.startsWith('!') ? raw.slice(1) : raw).trim();
+  const call = parseMethodCall(expression);
+  if (call) {
+    if (!isSupportedFilterMethod(call.method)) {
+      report({ code: 'unsupported-filter-operator', message: `Unsupported filter method: ${call.method}()`, expression: raw, property: call.property, operator: call.method });
+      return;
+    }
+    const args = splitArguments(call.arguments);
+    if (args == null) {
+      report({ code: 'invalid-filter-arguments', message: 'Filter arguments contain an unclosed quote or bracket', expression: raw, property: call.property, operator: call.method });
+      return;
+    }
+    if (!hasValidMethodArity(call.method, args.length)) {
+      report({ code: 'invalid-filter-arity', message: `Filter method ${call.method}() received ${args.length} argument(s)`, expression: raw, property: call.property, operator: call.method });
+      return;
+    }
+    if (parsePropertyPath(call.property) == null) {
+      report({ code: 'invalid-filter-property', message: 'Filter property path contains invalid bracket syntax', expression: raw, property: call.property });
+      return;
+    }
+    validateConfiguredOperator(call.property, call.method, configuredProperties, report);
+    return;
+  }
+  const comparison = parseComparison(expression);
+  if (comparison) {
+    if (parsePropertyPath(comparison.property) == null) {
+      report({ code: 'invalid-filter-property', message: 'Filter property path contains invalid bracket syntax', expression: raw, property: comparison.property });
+    }
+    return;
+  }
+  if (hasTpsFormulaReference(expression)) return;
+  report({ code: 'unsupported-filter-syntax', message: 'Filter expression uses unsupported or invalid syntax', expression: raw });
+}
+
+function validateConfiguredOperator(
+  property: string,
+  operator: string,
+  configuredProperties: readonly CustomProperty[],
+  report: (failure: LogBaseFilterFailure) => void,
+): void {
+  const configured = resolveConfiguredProperty(configuredProperties, property);
+  if (!configured || configured.type === 'list') return;
+  const normalized = normalizeOperator(operator);
+  if (!['containsall'].includes(normalized)) return;
+  report({
+    code: 'property-type-operator-mismatch',
+    message: `${configured.key || property} is not a list property, so ${operator} is not supported`,
+    property,
+    operator,
+  });
 }
 
 function evaluateLogBaseFilterNodeInternal(node: unknown, context: LogBaseFilterContext): boolean | null {
@@ -234,9 +369,13 @@ function readComparableValues(rawProperty: string, context: LogBaseFilterContext
   );
   if (['kind', 'itemkind', 'itemtype'].includes(semanticProperty) && context.rowKind) {
     if (semanticProperty === 'kind') {
+      const structuralKind = normalizeKey(context.rowKind);
+      const additiveKinds = structuralKind === 'task' || structuralKind === 'note'
+        ? getExplicitKindValues(context)
+        : [];
       return Array.from(new Set([
         ...getStructuralKindValues(context.rowKind),
-        ...getExplicitKindValues(context),
+        ...additiveKinds,
       ]));
     }
     return getStructuralKindValues(context.rowKind);
@@ -252,6 +391,13 @@ function readComparableValues(rawProperty: string, context: LogBaseFilterContext
     return match ? [Number(match[1])] : [];
   }
   if (/^line\.raw$/iu.test(property)) return context.rawLine != null ? [context.rawLine] : [];
+  // Obsidian's Base filter UI presents the source directory as bare
+  // `folder`. Synthesized TPS rows keep file metadata outside the authored
+  // line/frontmatter maps, so resolve this native alias before generic field
+  // lookup instead of treating it as a missing user property.
+  if (semanticProperty === 'folder' || semanticProperty === 'folderpath') {
+    return [context.file.folder];
+  }
   if (isTaskTagProperty(property, context)) return readTaskTagValues(context);
   if (/^task\.tags?$/iu.test(property)) return [];
   if (normalizedNamespace === 'file') {
@@ -380,6 +526,15 @@ function parseMethodCall(expression: string): ParsedMethodCall | null {
 
 function isSupportedFilterMethod(method: string): boolean {
   return SUPPORTED_FILTER_METHODS.has(normalizeOperator(method));
+}
+
+function isSupportedValueOperator(operator: string): boolean {
+  return [
+    'isempty', 'empty', 'isnotempty', 'exists',
+    'contains', 'containsany', 'containsall', 'startswith', 'endswith',
+    '!=', '!==', 'isnot', 'notequal', 'notequals', 'doesnotequal',
+    '=', '==', 'is', 'equal', 'equals', '>', '>=', '<', '<=',
+  ].includes(normalizeOperator(operator));
 }
 
 function hasValidMethodArity(method: string, count: number): boolean {

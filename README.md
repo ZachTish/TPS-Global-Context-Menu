@@ -1,5 +1,16 @@
 # TPS Global Context Menu
 
+## 1.33.0
+
+- TPS List now receives live GCM settings, checkbox mappings, property definitions, and services through a typed host. Its own presentation defaults remain separate, fixing production task queries that previously saw native project notes but lost every synthesized task row.
+- TPS List and TPS Table compile the effective whole-Base plus active-view filters into one validated query plan. Nested `and`/`or`/`not` structure and authored ordering are preserved; serialized controller state is ignored; unsupported syntax, operators, type combinations, or ambiguous nodes render zero rows with an actionable diagnostic instead of silently skipping clauses.
+- Bare `kind` is additive and deterministic: structural task rows match `task`; authored note/task/generic-record identities can also match values such as `project`. Use `itemKind` for structural task/bullet/heading matching, `note.kind` for note frontmatter, and `task.status` for mapped checkbox workflow status. On note rows, unqualified `status` reads note frontmatter. Migrated tasks remain visible unless the authored filter excludes them or uses strict `task.open` semantics.
+- One plugin-level incremental row index now serves both custom Base views. Markdown files are parsed once per source revision, cold reads are limited to eight at a time, create/modify/delete/rename invalidates only the affected path, compiled plans are bounded and revision-keyed, and stable path/line/entity/ID tie-breakers make repeated List/Table results identical. The native bare `folder` alias resolves from the live source path, so archive exclusions do not depend on stale or missing frontmatter.
+- Large scans publish canonical-path batches with an explicit `Indexing… X/Y files` incomplete state. Each partial snapshot is sorted, selection and scroll anchors remain stable, and a filter/view/schema/source generation change cancels stale work. Warm filter or view rerenders perform no source reads.
+- Project-note projections and mapped open tasks now share the same effective filters in TPS Table; TPS List applies the same evaluator to synthesized rows while retaining native note projections. Companion-backed non-Markdown property records participate as logical note rows without reading or changing their source bytes.
+- GCM-owned creation validates the compiled query before writing. Hand-edited/native unsupported Base queries cannot be intercepted, so TPS List/Table fail closed with zero rows and identify the invalid clause.
+- This is a backward-compatible internal-engine release with no persisted Base, setting, note, or public API migration. Native Obsidian Table/List views are unchanged. The first cold custom-view load still indexes candidate Markdown sources; progress is explicit and subsequent unchanged renders are cache-backed. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.33.0.md`.
+
 ## 1.32.0
 
 - Multi-selected task rows in TPS List and TPS Table now expose one guarded **Change property** menu. Scalar fields replace, list/link/tag fields add and deduplicate, list values can be removed individually, and checkbox/date/text/number/recurrence fields retain their typed input. Parent link-list properties therefore add parents instead of replacing existing relationships.

@@ -37,6 +37,7 @@ import { getTpsListHeadingDisplayTitle, parseTpsListHeadingLine, setTpsListHeadi
 import {
   composeEffectiveFilterRoots,
   evaluateOrderedFilterChildren,
+  extractFilterRootCandidates,
   extractPersistedFilterRoots,
   isPersistedFilterCacheMatch,
 } from '../base-filter-roots';
@@ -176,6 +177,7 @@ import {
   evaluateLogBaseFilterRoots,
   type LogBaseFilterContext,
 } from '../../views/log-base-filter';
+import { compileTpsBaseQueryPlan, type TpsBaseQueryPlan } from '../../views/tps-base-query-plan';
 
 export const TPS_LIST_VIEW_TYPE = 'tps-list';
 
@@ -563,9 +565,17 @@ class TaskTitleModal extends Modal {
   }
 }
 
+export interface TpsListHost {
+  app: any;
+  gcmPlugin: any;
+  listSettings: Record<string, any>;
+  openBaseNotePreviewFromClick?: (event: MouseEvent, file: TFile, anchorEl: HTMLElement) => boolean;
+  saveSettings?: () => Promise<void>;
+}
+
 export class TpsListView extends BasesView {
   type = TPS_LIST_VIEW_TYPE;
-  private plugin: any;
+  private plugin: TpsListHost;
   private scrollEl: HTMLElement;
   private containerEl: HTMLElement;
   private refreshDebounced: () => void;
@@ -582,6 +592,10 @@ export class TpsListView extends BasesView {
   private openTaskOverflowByPath = new Map<string, number>();
   private openTasksLoading = new Set<string>();
   private taskCacheEpochByPath = new Map<string, number>();
+  private taskIndexLoadKey = '';
+  private taskIndexLoadPromise: Promise<unknown> | null = null;
+  private taskIndexLoadGeneration = 0;
+  private taskIndexProgress: { completedFiles: number; totalFiles: number; complete: boolean } | null = null;
   private baseFileFilterCache: TpsBaseDefinitionCache | null = null;
   private baseFileFiltersLoadingKey: string | null = null;
   private baseFileFiltersLoadingPromise: Promise<boolean> | null = null;
@@ -610,12 +624,14 @@ export class TpsListView extends BasesView {
   private formulaFileContexts = new Map<string, NonNullable<TpsFormulaRecordContext['file']>>();
   private formulaThisValue: Record<string, unknown> | null | undefined;
   private formulaDiagnostics = new Set<string>();
+  private filterDiagnostics = new Map<string, { code: string; message: string }>();
+  private activeQueryPlan: TpsBaseQueryPlan | null = null;
   private formulaFilterFailureSequence = 0;
   private formulaNow: Date | undefined;
   private noteSemanticReconciliationRevision = 0;
   private noteSemanticReconciliationCache: { key: string; entries: BasesEntry[] } | null = null;
 
-  constructor(controller: QueryController, scrollEl: HTMLElement, plugin: any) {
+  constructor(controller: QueryController, scrollEl: HTMLElement, plugin: TpsListHost) {
     super(controller);
     this.plugin = plugin;
     this.scrollEl = scrollEl;
@@ -642,6 +658,20 @@ export class TpsListView extends BasesView {
         viewName: this.getConfiguredBaseViewName(),
       });
       new Notice('Could not read the Base filters, so TPS List did not create anything.');
+      return;
+    }
+    const queryPlan = compileTpsBaseQueryPlan({
+      roots: creationFilterRoots,
+      viewName: this.getConfiguredBaseViewName(),
+      configuredProperties: this.getGcmSettings()?.properties || [],
+    });
+    if (!queryPlan.valid) {
+      const first = queryPlan.diagnostics[0];
+      flowWarn('CreateFile', 'blocked', {
+        reason: first?.code || 'invalid-filter',
+        viewName: queryPlan.viewName,
+      });
+      new Notice(`Could not create an item because a Base filter is unsupported. ${first?.message || ''}`.trim());
       return;
     }
     const taskFilter = this.getTaskRootFilterFromBaseFilters(creationFilterRoots);
@@ -824,11 +854,15 @@ export class TpsListView extends BasesView {
   }
 
   private getGcmApi(): any {
-    return this.plugin?.api ?? null;
+    return this.getGcmPlugin()?.api ?? null;
   }
 
   private getGcmPlugin(): any {
-    return this.plugin ?? null;
+    return this.plugin?.gcmPlugin ?? this.plugin ?? null;
+  }
+
+  private getListSettings(): Record<string, any> {
+    return this.plugin?.listSettings ?? (this.plugin as any)?.settings ?? {};
   }
 
   private getGcmServices(): any {
@@ -1947,9 +1981,9 @@ export class TpsListView extends BasesView {
   }
 
   private getCurrentBaseViewName(knownViewNames?: Set<string>): string {
-    const visible = this.getVisibleBaseViewName(knownViewNames);
-    if (visible) return visible;
-    return this.getConfiguredBaseViewName();
+    const configured = this.getConfiguredBaseViewName();
+    if (configured && (!knownViewNames?.size || knownViewNames.has(configured))) return configured;
+    return this.getVisibleBaseViewName(knownViewNames);
   }
 
   private getConfiguredBaseViewName(): string {
@@ -2251,7 +2285,10 @@ export class TpsListView extends BasesView {
     if (!header) return;
     this.syncEmbeddedHeaderChrome(header);
     const resultCount = this.getDisplayedResultCount();
-    const text = `${resultCount} result${resultCount === 1 ? '' : 's'}`;
+    const progress = this.taskIndexProgress;
+    const text = progress && !progress.complete
+      ? `${resultCount} result${resultCount === 1 ? '' : 's'} · indexing ${progress.completedFiles}/${progress.totalFiles}`
+      : `${resultCount} result${resultCount === 1 ? '' : 's'}`;
     const countEl =
       header.querySelector<HTMLElement>('.view-header-count') ??
       header.querySelector<HTMLElement>('.bases-view-results-count') ??
@@ -2446,14 +2483,30 @@ export class TpsListView extends BasesView {
   }
 
   private getAllTasksForFile(file: TFile): OpenTaskSubitem[] {
-    if (String(file.extension || 'md').toLocaleLowerCase() !== 'md' || this.plugin?.filePropertiesService?.isCompanionFile(file)) return [];
+    if (String(file.extension || 'md').toLocaleLowerCase() !== 'md' || this.getGcmPlugin()?.filePropertiesService?.isCompanionFile(file)) return [];
     const cached = this.allTasksByPath.get(file.path);
     if (cached) return cached;
+    const documentLines = this.getGcmPlugin()?.baseRowIndexService?.peek?.(file) as readonly MarkdownDocumentLine[] | null;
+    if (documentLines) {
+      return this.cacheLineItemsFromDocumentLines(file, documentLines, {
+        ...this.getTaskRootFilterFromBaseFilters(),
+        includeBullets: false,
+        includeHeadings: false,
+      });
+    }
+    if (this.getGcmPlugin()?.baseRowIndexService) return [];
     this.loadOpenTasksForFile(file);
     return [];
   }
 
   private clearTaskCachesForPath(path: string): void {
+    // Cancel any progressive batch before clearing the projected rows. A read
+    // that began before this source revision must not repopulate the List's
+    // derived cache after the shared index has invalidated it.
+    this.taskIndexLoadGeneration += 1;
+    this.taskIndexLoadPromise = null;
+    this.taskIndexLoadKey = '';
+    this.taskIndexProgress = null;
     this.taskCacheEpochByPath.set(path, (this.taskCacheEpochByPath.get(path) ?? 0) + 1);
     this.openTasksByPath.delete(path);
     this.allTasksByPath.delete(path);
@@ -2464,7 +2517,7 @@ export class TpsListView extends BasesView {
   }
 
   private loadOpenTasksForFile(file: TFile): void {
-    if (String(file.extension || 'md').toLocaleLowerCase() !== 'md' || this.plugin?.filePropertiesService?.isCompanionFile(file)) return;
+    if (String(file.extension || 'md').toLocaleLowerCase() !== 'md' || this.getGcmPlugin()?.filePropertiesService?.isCompanionFile(file)) return;
     const sourcePath = file.path;
     if (this.openTasksLoading.has(sourcePath)) return;
     const generation = this.renderGeneration;
@@ -2650,7 +2703,7 @@ export class TpsListView extends BasesView {
   }
 
   private getOpenTaskPreviewLimit(): number {
-    const value = Number(this.plugin.settings?.openTaskPreviewLimit ?? 5);
+    const value = Number(this.getListSettings().openTaskPreviewLimit ?? 5);
     return Number.isFinite(value) ? Math.max(0, Math.min(20, Math.floor(value))) : 5;
   }
 
@@ -3118,8 +3171,8 @@ export class TpsListView extends BasesView {
       'name',
       'title',
       this.normalizeInlinePropertyKey(groupPropName || ''),
-      this.normalizeInlinePropertyKey(this.plugin.settings?.iconKey || 'icon'),
-      this.normalizeInlinePropertyKey(this.plugin.settings?.colorKey || 'color'),
+      this.normalizeInlinePropertyKey(this.getListSettings().iconKey || 'icon'),
+      this.normalizeInlinePropertyKey(this.getListSettings().colorKey || 'color'),
       'icon',
       'color',
       'sort',
@@ -3209,7 +3262,7 @@ export class TpsListView extends BasesView {
 
   private getLaneLabelAlias(laneId: string): string | null {
     const viewId = this.getLaneOrderViewId();
-    const all = this.plugin.settings?.laneLabelAliasesByView as Record<string, Record<string, string>> | undefined;
+    const all = this.getListSettings().laneLabelAliasesByView as Record<string, Record<string, string>> | undefined;
     const aliases = all?.[viewId] ?? all?.[this.getLegacyUnknownBaseViewId()];
     if (!aliases || typeof aliases !== 'object') return null;
     const alias = String(aliases[laneId] ?? '').trim();
@@ -3650,6 +3703,8 @@ export class TpsListView extends BasesView {
       }
     }
 
+    this.scheduleTaskIndexLoad(Array.from(sourceFiles.values()), taskFilter);
+
     for (const file of sourceFiles.values()) {
       if (
         taskFilter.mode !== 'tasks'
@@ -3828,7 +3883,7 @@ export class TpsListView extends BasesView {
   }
 
   private getAllLineItemsForFile(file: TFile, filter: KanbanTaskRootFilter): OpenTaskSubitem[] {
-    if (String(file.extension || 'md').toLocaleLowerCase() !== 'md' || this.plugin?.filePropertiesService?.isCompanionFile(file)) return [];
+    if (String(file.extension || 'md').toLocaleLowerCase() !== 'md' || this.getGcmPlugin()?.filePropertiesService?.isCompanionFile(file)) return [];
     if (!filter.includeBullets && !filter.includeHeadings) return this.getAllTasksForFile(file);
     const cacheSuffix = filter.includeBullets && filter.includeHeadings
       ? 'bullets+headings'
@@ -3836,25 +3891,95 @@ export class TpsListView extends BasesView {
     const cacheKey = `${file.path}:${cacheSuffix}`;
     const cached = this.allTasksByPath.get(cacheKey);
     if (cached) return cached;
-    let items: OpenTaskSubitem[] = [];
-    void this.app.vault.cachedRead(file).then((content) => {
-      items = this.parseOpenTasks(
-        content,
-        file.path,
-        Number.MAX_SAFE_INTEGER,
-        true,
-        filter.includeBullets,
-        filter.includeHeadings,
-      ).openTasks;
-      this.allTasksByPath.set(cacheKey, items);
+    const documentLines = this.getGcmPlugin()?.baseRowIndexService?.peek?.(file) as readonly MarkdownDocumentLine[] | null;
+    if (!documentLines) return [];
+    return this.cacheLineItemsFromDocumentLines(file, documentLines, filter);
+  }
+
+  private cacheLineItemsFromDocumentLines(
+    file: TFile,
+    documentLines: readonly MarkdownDocumentLine[],
+    filter: KanbanTaskRootFilter,
+  ): OpenTaskSubitem[] {
+    const cacheSuffix = filter.includeBullets && filter.includeHeadings
+      ? 'bullets+headings'
+      : filter.includeBullets ? 'bullets' : filter.includeHeadings ? 'headings' : '';
+    const cacheKey = cacheSuffix ? `${file.path}:${cacheSuffix}` : file.path;
+    const cached = this.allTasksByPath.get(cacheKey);
+    if (cached) return cached;
+    const items = this.parseOpenTasks(
+      '',
+      file.path,
+      Number.MAX_SAFE_INTEGER,
+      true,
+      filter.includeBullets,
+      filter.includeHeadings,
+      documentLines,
+    ).openTasks.map((task) => ({ ...task, displayText: this.getTaskVisibleTitle(task) }));
+    this.allTasksByPath.set(cacheKey, items);
+    if (!cacheSuffix) this.allTasksByPath.set(file.path, items);
+    return items;
+  }
+
+  private scheduleTaskIndexLoad(files: TFile[], filter: KanbanTaskRootFilter): void {
+    const indexService = this.getGcmPlugin()?.baseRowIndexService;
+    if (typeof indexService?.readProgressive !== 'function') {
+      // Lightweight test/compatibility hosts can provide already-parsed rows
+      // without exposing a Vault reader. In that case there is nothing for the
+      // fallback loader to warm, and attempting it would manufacture state the
+      // host deliberately does not own.
+      if (typeof this.app?.vault?.cachedRead !== 'function') return;
+      for (const file of files) this.loadOpenTasksForFile(file);
+      return;
+    }
+    const normalizedFiles = files
+      .filter((file) => file.extension.toLocaleLowerCase() === 'md' && !this.getGcmPlugin()?.filePropertiesService?.isCompanionFile(file))
+      .sort((left, right) => left.path.localeCompare(right.path));
+    const missing = normalizedFiles.filter((file) => !indexService.peek(file));
+    if (!missing.length) {
+      this.taskIndexProgress = normalizedFiles.length
+        ? { completedFiles: normalizedFiles.length, totalFiles: normalizedFiles.length, complete: true }
+        : null;
+      return;
+    }
+    const familyKey = `${filter.includeBullets ? 'b' : ''}${filter.includeHeadings ? 'h' : ''}`;
+    const key = `${familyKey}:${normalizedFiles.map((file) => file.path).join('\u001f')}`;
+    if (this.taskIndexLoadPromise && this.taskIndexLoadKey === key) return;
+    const generation = ++this.taskIndexLoadGeneration;
+    this.taskIndexLoadKey = key;
+    this.taskIndexProgress = {
+      completedFiles: normalizedFiles.length - missing.length,
+      totalFiles: normalizedFiles.length,
+      complete: false,
+    };
+    this.taskIndexLoadPromise = indexService.readProgressive(normalizedFiles, {
+      batchSize: 64,
+      isCancelled: () => generation !== this.taskIndexLoadGeneration,
+      onProgress: (progress: { completedFiles: number; totalFiles: number; complete: boolean; results: any[] }) => {
+        if (generation !== this.taskIndexLoadGeneration) return;
+        for (const result of progress.results) {
+          if (!result?.ok) continue;
+          this.cacheLineItemsFromDocumentLines(result.file, result.lines, filter);
+        }
+        this.taskIndexProgress = {
+          completedFiles: progress.completedFiles,
+          totalFiles: progress.totalFiles,
+          complete: progress.complete,
+        };
+        this.refreshDebounced();
+      },
+    }).finally(() => {
+      if (generation !== this.taskIndexLoadGeneration) return;
+      this.taskIndexLoadPromise = null;
+      if (this.taskIndexProgress) this.taskIndexProgress.complete = true;
       this.refreshDebounced();
     });
-    return items;
   }
 
   private taskMatchesRootFilter(task: OpenTaskSubitem, filter: KanbanTaskRootFilter, file: TFile | null = null): boolean {
     const structuredMatch = this.taskMatchesStructuredBaseFilters(task, file);
     if (structuredMatch === false) return false;
+    if (structuredMatch === true) return true;
     if (structuredMatch == null && this.isEmbeddedScheduledDailyTaskBoard()) {
       if (!this.taskMatchesEmbeddedScheduledDailyBoard(task)) return false;
     }
@@ -3993,14 +4118,102 @@ export class TpsListView extends BasesView {
   }
 
   private taskMatchesStructuredBaseFilters(task: OpenTaskSubitem, file: TFile | null = null): boolean | null {
-    let hasStructuredTaskFilter = false;
-    for (const root of this.getBaseFilterRoots()) {
-      const result = this.evaluateTaskFilterRootFailClosed(root, task, file);
-      if (result == null) continue;
-      hasStructuredTaskFilter = true;
-      if (!result) return false;
+    const roots = this.getBaseFilterRoots();
+    if (!roots.length) return null;
+    if (!(file instanceof TFile)) {
+      let hasStructuredTaskFilter = false;
+      for (const root of roots) {
+        const result = this.evaluateTaskFilterRootFailClosed(root, task, file);
+        if (result == null) continue;
+        hasStructuredTaskFilter = true;
+        if (!result) return false;
+      }
+      return hasStructuredTaskFilter ? true : null;
     }
-    return hasStructuredTaskFilter ? true : null;
+    return evaluateLogBaseFilterRoots(roots, this.createTaskFilterContext(file, task)) === true;
+  }
+
+  private createTaskFilterContext(file: TFile, task: OpenTaskSubitem): LogBaseFilterContext {
+    const cache = this.app.metadataCache.getFileCache(file) as any;
+    const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
+    const fields: Record<string, unknown> = {};
+    const groups = new Map<string, { aliases: Set<string>; values: string[] }>();
+    for (const field of task.inlineFields ?? []) {
+      const key = String(field.key || '').trim();
+      const normalized = normalizePropertyKeyIdentity(key);
+      if (!key || !normalized) continue;
+      const group = groups.get(normalized) ?? { aliases: new Set<string>(), values: [] };
+      group.aliases.add(key);
+      group.values.push(String(field.value ?? '').trim());
+      groups.set(normalized, group);
+    }
+    for (const [normalized, group] of groups) {
+      const configured = Array.from(group.aliases)
+        .map((alias) => resolveConfiguredProperty(this.getGcmSettings()?.properties || [], alias))
+        .find(Boolean);
+      const values = configured?.type === 'list'
+        ? this.getTaskInlineValues(task, configured.key)
+        : group.values;
+      const aggregate: unknown = values.length > 1 ? values : values[0] ?? '';
+      fields[normalized] = aggregate;
+      for (const alias of group.aliases) fields[alias] = aggregate;
+    }
+    const itemKind = task.itemKind === 'heading' ? `h${task.headingLevel || 1}` : task.itemKind || 'task';
+    fields.kind = itemKind;
+    fields.itemkind = itemKind;
+    fields.itemtype = itemKind;
+    const explicitKinds = this.getTaskExplicitKindValues(task);
+    if (explicitKinds.length) {
+      fields.explicitkind = explicitKinds;
+      fields.entitykind = explicitKinds;
+    }
+    const mapped = this.resolveMappedTaskCheckbox(task);
+    if (mapped) {
+      fields['task.status'] = mapped.status;
+      fields.taskstatus = mapped.status;
+      fields.checkboxstatus = mapped.status;
+      fields['task.checkboxStatus'] = mapped.status;
+      const done = this.classifyDoneStatus(mapped.status);
+      if (done != null) {
+        fields.open = !done;
+        fields.isopen = !done;
+        fields.done = done;
+        fields.isdone = done;
+        fields.completed = done;
+        fields.complete = done;
+      }
+      if (!findRelationalStatusProperty(this.getGcmSettings()?.properties)) fields.status = mapped.status;
+    }
+    const fileContext = this.createFormulaFileContext(file);
+    return {
+      fields: fields as Record<string, string>,
+      configuredProperties: this.getGcmSettings()?.properties || [],
+      file: {
+        path: file.path,
+        name: file.name,
+        basename: file.basename,
+        extension: file.extension,
+        folder: file.parent?.path || '/',
+        size: Number(file.stat?.size || 0),
+        ctime: Number(file.stat?.ctime || 0),
+        mtime: Number(file.stat?.mtime || 0),
+        tags: (fileContext.tags || []).map((tag) => String(tag || '')).filter(Boolean),
+        links: fileContext.links || [],
+        frontmatter,
+      },
+      contextDate: this.getBaseContextFrontmatterValue('scheduled'),
+      rowKind: itemKind,
+      title: this.getTaskVisibleTitle(task),
+      rawLine: task.rawLine ?? task.text,
+      lineNumber: task.line,
+      taskTags: this.getTaskInlineValues(task, 'tags'),
+      formulaSession: this.getTaskFormulaSession(file, task),
+      onFormulaFailure: (failure) => this.reportFormulaFailure(failure, file, task),
+      onFilterFailure: (failure) => {
+        const key = `${failure.code}:${failure.expression || failure.property || ''}:${failure.operator || ''}`;
+        this.filterDiagnostics.set(key, { code: failure.code, message: failure.message });
+      },
+    };
   }
 
   private evaluateTaskFilterRootFailClosed(
@@ -4740,7 +4953,7 @@ export class TpsListView extends BasesView {
   private getUngroupedPosition(): 'first' | 'last' {
     const configured = String(this.getConfigValue('ungroupedPosition') || '').trim().toLowerCase();
     if (configured === 'first' || configured === 'last') return configured;
-    return this.plugin.settings.ungroupedPosition === 'first' ? 'first' : 'last';
+    return this.getListSettings().ungroupedPosition === 'first' ? 'first' : 'last';
   }
 
   private getMultiValueGroupingMode(): TpsBaseMultiValueGroupingMode {
@@ -5309,7 +5522,7 @@ export class TpsListView extends BasesView {
     let committedLine = '';
     let historyReady = true;
     let confirmedHistoryBefore: DirectTaskHistoryLocation | undefined;
-    const historyService = this.plugin?.itemHistoryService;
+    const historyService = this.getGcmPlugin()?.itemHistoryService;
     const historyContext: DirectTaskHistoryLogContext = {
       action: 'task.update',
       surface: 'tps-list',
@@ -5749,7 +5962,7 @@ export class TpsListView extends BasesView {
     let committedLine = '';
     let historyReady = true;
     let confirmedHistoryBefore: DirectTaskHistoryLocation | undefined;
-    const historyService = this.plugin?.itemHistoryService;
+    const historyService = this.getGcmPlugin()?.itemHistoryService;
     const historyContext: DirectTaskHistoryLogContext = {
       action: 'task.checkbox',
       surface: 'tps-list',
@@ -5889,7 +6102,7 @@ export class TpsListView extends BasesView {
     };
 
     // Local plugin settings (if present in this build variant).
-    pushIfObject((this.plugin as any)?.settings);
+    pushIfObject(this.getGcmSettings());
 
     const plugins = (this.app as any)?.plugins?.plugins;
     if (plugins && typeof plugins === 'object') {
@@ -6245,7 +6458,7 @@ export class TpsListView extends BasesView {
   }
 
   private getSavedLaneFallbackGroups(): BasesEntryGroup[] {
-    const map = (this.plugin.settings?.laneOrderByView || {}) as Record<string, string[]>;
+    const map = (this.getListSettings().laneOrderByView || {}) as Record<string, string[]>;
     const viewId = this.getLaneOrderViewId();
     const legacyViewId = this.getLegacyUnknownBaseViewId();
     const saved = Array.isArray(map[viewId]) ? map[viewId] : Array.isArray(map[legacyViewId]) ? map[legacyViewId] : [];
@@ -6334,7 +6547,7 @@ export class TpsListView extends BasesView {
   }
 
   private getRuntimeBaseFilterRoots(): unknown[] {
-    return this.extractFilterRootCandidates([
+    return extractFilterRootCandidates([
       this.config?.get?.('filters'),
       (this.config as any)?.filters,
       (this as any)?.filters,
@@ -6342,7 +6555,6 @@ export class TpsListView extends BasesView {
       (this as any)?.controller?.viewConfig?.filters,
       (this as any)?.controller?.config?.filters,
       (this as any)?.queryController?.query?.filters,
-      (this as any)?.queryController?.queryState,
     ]);
   }
 
@@ -6916,6 +7128,13 @@ export class TpsListView extends BasesView {
       }
       this.collectTaskRootFilterNode(root, filter);
     }
+    const queryPlan = compileTpsBaseQueryPlan({
+      roots,
+      viewName: this.getConfiguredBaseViewName(),
+      configuredProperties: this.getGcmSettings()?.properties || [],
+    });
+    if (!queryPlan.rowFamilies.has('bullet')) filter.includeBullets = false;
+    if (!queryPlan.rowFamilies.has('heading')) filter.includeHeadings = false;
     // A task-aware Base query owns completion visibility. Feed every task status
     // into its effective all-views + active-view predicates instead of applying
     // the legacy open-task preview gate first.
@@ -7346,7 +7565,7 @@ export class TpsListView extends BasesView {
 
   private shouldShowCompletedTasks(): boolean {
     const viewId = this.getLaneOrderViewId();
-    const map = (this.plugin.settings?.showCompletedTasksByView || {}) as Record<string, boolean>;
+    const map = (this.getListSettings().showCompletedTasksByView || {}) as Record<string, boolean>;
     const legacyViewId = this.getLegacyUnknownBaseViewId();
     return (map[viewId] ?? map[legacyViewId]) === true;
   }
@@ -7354,7 +7573,7 @@ export class TpsListView extends BasesView {
   private applyManualLaneOrder(groups: BasesEntryGroup[]): BasesEntryGroup[] {
     const ungrouped = groups.filter((group) => this.getLaneId(group) === 'ungrouped');
     const keyed = groups.filter((group) => this.getLaneId(group) !== 'ungrouped');
-    const settings = this.plugin.settings;
+    const settings = this.getListSettings();
     const map = (settings?.laneOrderByView || {}) as Record<string, string[]>;
     const viewId = this.getLaneOrderViewId();
     const legacyViewId = this.getLegacyUnknownBaseViewId();
@@ -7824,7 +8043,7 @@ export class TpsListView extends BasesView {
         lane: displayLane.label,
         itemKind,
         defaultTargetPath: defaults.targetPath || '',
-        configuredDefaultRootTaskPath: this.plugin.settings?.defaultRootTaskPath || '',
+        configuredDefaultRootTaskPath: this.getListSettings().defaultRootTaskPath || '',
       });
       new Notice('Could not resolve a note to write the task into.');
       return;
@@ -7839,11 +8058,11 @@ export class TpsListView extends BasesView {
       status: defaults.status || '',
       tags: Array.from(defaults.tags || []),
       inlineKeys: Array.from(defaults.inlineFields?.keys?.() || []),
-      openAfterCreate: this.plugin.settings.openTaskDestinationAfterCreate !== false,
+      openAfterCreate: this.getListSettings().openTaskDestinationAfterCreate !== false,
     });
     this.formulaNow = new Date();
     this.taskFormulaSessions = new WeakMap<OpenTaskSubitem, TpsFormulaRowSession>();
-    const historyService = this.plugin?.itemHistoryService;
+    const historyService = this.getGcmPlugin()?.itemHistoryService;
     const historyContext: DirectTaskHistoryLogContext = {
       action: 'task.create',
       surface: 'tps-list',
@@ -8020,7 +8239,7 @@ export class TpsListView extends BasesView {
     emitFilesUpdated(this.app, [targetFile.path], 'tps-list');
     this.queuePostCreateRefresh();
     flow('CreateRootTask', 'done', { path: targetFile.path, itemKind });
-    if (this.plugin.settings.openTaskDestinationAfterCreate !== false) {
+    if (this.getListSettings().openTaskDestinationAfterCreate !== false) {
       await this.openOrFocusFile(targetFile);
     }
   }
@@ -8484,7 +8703,7 @@ export class TpsListView extends BasesView {
       return null;
     }
 
-    const targetPath = resolveKanbanRootTaskTargetPath(defaults.targetPath, this.plugin.settings?.defaultRootTaskPath || '');
+    const targetPath = resolveKanbanRootTaskTargetPath(defaults.targetPath, this.getListSettings().defaultRootTaskPath || '');
     if (targetPath) {
       const existing = this.app.vault.getFileByPath(targetPath);
       if (existing instanceof TFile) {
@@ -8500,7 +8719,7 @@ export class TpsListView extends BasesView {
 
     flowWarn('CreateRootTaskTarget', 'unresolved', {
       defaultTargetPath: defaults.targetPath || '',
-      configuredDefaultRootTaskPath: this.plugin.settings?.defaultRootTaskPath || '',
+      configuredDefaultRootTaskPath: this.getListSettings().defaultRootTaskPath || '',
     });
     return null;
   }
@@ -8551,12 +8770,40 @@ export class TpsListView extends BasesView {
     this.formulaFileContexts?.clear();
     this.formulaThisValue = undefined;
     this.formulaDiagnostics.clear();
+    this.filterDiagnostics.clear();
     this.formulaNow = new Date();
-    this.getBaseFilterRoots();
+    const filterRoots = this.getBaseFilterRoots();
+    this.activeQueryPlan = compileTpsBaseQueryPlan({
+      roots: filterRoots,
+      viewName: this.getConfiguredBaseViewName(),
+      configuredProperties: this.getGcmSettings()?.properties || [],
+    });
     const scrollState = preserveScroll ? this.captureRenderScrollState() : null;
     this.applyLayoutSettings();
     this.ensureContainer();
     this.containerEl.empty();
+
+    if (!this.activeQueryPlan.valid) {
+      for (const failure of this.activeQueryPlan.diagnostics) {
+        const key = `${failure.code}:${failure.expression || failure.property || ''}:${failure.operator || ''}`;
+        this.filterDiagnostics.set(key, failure);
+      }
+      const first = this.activeQueryPlan.diagnostics[0];
+      this.renderedTaskItemCount = 0;
+      this.renderedResultCount = 0;
+      this.hasRenderedResultCount = true;
+      this.containerEl.createDiv({
+        cls: 'tps-list-native-empty tps-list-filter-error',
+        attr: { role: 'alert' },
+        text: `TPS List did not run this query. ${first?.message || 'Review the Base filters.'}`,
+      });
+      this.syncNativeResultsCountSoon();
+      flowWarn('TpsListView', 'filters:query-blocked', {
+        viewName: this.activeQueryPlan.viewName,
+        code: first?.code || 'invalid-filter',
+      });
+      return;
+    }
 
     const propName = this.getGroupByPropName();
     const propId = this.getGroupByPropId(propName);
@@ -8692,6 +8939,14 @@ export class TpsListView extends BasesView {
     propName: string | null,
   ): void {
     const list = this.containerEl.createDiv({ cls: 'tps-list-native' });
+    const progress = this.taskIndexProgress;
+    if (progress && !progress.complete) {
+      list.createDiv({
+        cls: 'tps-list-index-progress',
+        attr: { role: 'status', 'aria-live': 'polite' },
+        text: `Indexing… ${progress.completedFiles}/${progress.totalFiles} files. Results are incomplete.`,
+      });
+    }
     const selectedProps = this.getCardPropertyIds(propName);
     let renderedRows = 0;
 
@@ -8769,7 +9024,7 @@ export class TpsListView extends BasesView {
     const sortDescriptors = this.getSortDescriptors();
     return orderTpsListHierarchy(rows, (a, b) => sortDescriptors.length
       ? this.compareListRows(a, b, sortDescriptors)
-      : a.nativeIndex - b.nativeIndex);
+      : this.compareStableListRows(a, b));
   }
 
   private compareListRows(a: TpsListRowItem, b: TpsListRowItem, sortDescriptors: TpsSortDescriptor[]): number {
@@ -8784,7 +9039,30 @@ export class TpsListView extends BasesView {
       );
       if (result !== 0) return result;
     }
-    return a.nativeIndex - b.nativeIndex;
+    return this.compareStableListRows(a, b);
+  }
+
+  private compareStableListRows(a: TpsListRowItem, b: TpsListRowItem): number {
+    const aFile = a.kind === 'note'
+      ? this.resolveLogicalFilePropertyTarget(a.item.entry.file) ?? a.item.entry.file
+      : a.item.file;
+    const bFile = b.kind === 'note'
+      ? this.resolveLogicalFilePropertyTarget(b.item.entry.file) ?? b.item.entry.file
+      : b.item.file;
+    const pathResult = String(aFile?.path || '').localeCompare(String(bFile?.path || ''));
+    if (pathResult !== 0) return pathResult;
+    const aLine = a.kind === 'note' ? -1 : Math.max(0, Number(a.item.task.line || 1) - 1);
+    const bLine = b.kind === 'note' ? -1 : Math.max(0, Number(b.item.task.line || 1) - 1);
+    if (aLine !== bLine) return aLine - bLine;
+    const kindResult = (a.kind === 'note' ? 'note' : 'line').localeCompare(b.kind === 'note' ? 'note' : 'line');
+    if (kindResult !== 0) return kindResult;
+    const aStableId = a.kind === 'note'
+      ? `note:${String(aFile?.path || '')}`
+      : `${a.kind}:${String(aFile?.path || '')}:${aLine}:${getTaskLineIdentity(a.item.task.rawLine || a.item.task.text || '')}`;
+    const bStableId = b.kind === 'note'
+      ? `note:${String(bFile?.path || '')}`
+      : `${b.kind}:${String(bFile?.path || '')}:${bLine}:${getTaskLineIdentity(b.item.task.rawLine || b.item.task.text || '')}`;
+    return aStableId.localeCompare(bStableId) || a.nativeIndex - b.nativeIndex;
   }
 
   private getListSortValue(row: TpsListRowItem, propId: string): unknown {
@@ -9880,7 +10158,7 @@ export class TpsListView extends BasesView {
     let committedLine = '';
     let historyReady = true;
     let confirmedHistoryBefore: DirectTaskHistoryLocation | undefined;
-    const historyService = this.plugin?.itemHistoryService;
+    const historyService = this.getGcmPlugin()?.itemHistoryService;
     const historyContext: DirectTaskHistoryLogContext = {
       action: 'task.update',
       surface: 'tps-list',

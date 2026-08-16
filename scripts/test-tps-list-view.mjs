@@ -291,6 +291,28 @@ test('GCM is the sole TPS List source and runtime owner', () => {
   assert.doesNotMatch(kanbanStyles, /\.tps-list/);
 });
 
+test('TPS List host bridge exposes live GCM mappings without confusing them with List defaults', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const mappings = [{ checkboxState: '[!]', statuses: ['urgent'] }];
+  const gcmPlugin = {
+    settings: { linkedSubitemCheckboxMappings: mappings, properties: [{ id: 'priority', key: 'priority' }] },
+    sharedServices: { status: { normalize: (value) => String(value || '').trim().toLowerCase() } },
+  };
+  view.plugin = {
+    gcmPlugin,
+    listSettings: { defaultView: 'cards', defaultRootTaskPath: 'Inbox/Tasks.md' },
+    settings: { linkedSubitemCheckboxMappings: [{ checkboxState: '[x]', statuses: ['wrong-owner'] }] },
+  };
+  assert.equal(view.getGcmPlugin(), gcmPlugin);
+  assert.equal(view.getGcmSettings(), gcmPlugin.settings);
+  assert.equal(view.getListSettings().defaultView, 'cards');
+  assert.deepEqual(view.getGcmCheckboxMappings().map(({ checkboxState, statuses }) => ({ checkboxState, statuses })), mappings);
+  assert.match(bridgeSource, /gcmPlugin:\s*plugin/u);
+  assert.match(bridgeSource, /listSettings:\s*DEFAULT_SETTINGS/u);
+  assert.doesNotMatch(bridgeSource, /settings:\s*DEFAULT_SETTINGS/u);
+});
+
 test('TPS List aligns note, task, bullet, and heading rows through one semantic leading slot', () => {
   const listRenderer = sourceBlock(
     viewSource,
@@ -506,6 +528,50 @@ test('TPS List view settings own unmatched placement and task grouping reads vis
   config.delete('ungroupedPosition');
   assert.equal(view.getUngroupedPosition(), 'last');
   assert.match(bridgeSource, /key: 'ungroupedPosition'[\s\S]{0,220}first: 'Top'[\s\S]{0,80}last: 'Bottom'/u);
+});
+
+test('TPS List applies the same cross-family stable path and line ordering as TPS Table', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const File = globalThis.__TpsListFormulaTestFile;
+  const makeFile = (path) => {
+    const file = new File();
+    const name = path.split('/').at(-1);
+    Object.assign(file, {
+      path,
+      name,
+      basename: name.replace(/\.md$/u, ''),
+      extension: 'md',
+      parent: { path: path.split('/').slice(0, -1).join('/') },
+    });
+    return file;
+  };
+  const taskFile = makeFile('Inbox/QA/Open Tasks.md');
+  const projectFile = makeFile('Inbox/QA/Project Note.md');
+  const view = Object.create(TpsListView.prototype);
+  view.config = {};
+  view.plugin = { settings: {} };
+  const noteItems = [{
+    entry: { file: projectFile, getValue: () => null },
+    depth: 0,
+    hasChildren: false,
+    childCount: 0,
+    children: [],
+  }];
+  const taskItems = [
+    { file: taskFile, task: { line: 8, itemKind: 'task', rawLine: '- [/] Working' }, laneId: 'ungrouped' },
+    { file: taskFile, task: { line: 7, itemKind: 'task', rawLine: '- [ ] Todo' }, laneId: 'ungrouped' },
+  ];
+
+  assert.deepEqual(
+    view.getSortedListRows(noteItems, taskItems).map(({ row }) => row.kind === 'note'
+      ? `note:${row.item.entry.file.path}`
+      : `task:${row.item.file.path}:${row.item.task.line}`),
+    [
+      'task:Inbox/QA/Open Tasks.md:7',
+      'task:Inbox/QA/Open Tasks.md:8',
+      'note:Inbox/QA/Project Note.md',
+    ],
+  );
 });
 
 test('ordered selection helper handles ranges and clears a toggled-off anchor', async () => {
@@ -2329,8 +2395,8 @@ test('TPS List formulas power synthesized task display, filtering, grouping, sor
   const additiveKindFilter = view.getTaskRootFilterFromBaseFilters(['kind == project']);
   assert.equal(additiveKindFilter.mode, 'mixed');
   assert.equal(additiveKindFilter.hasTaskDirective, true);
-  assert.equal(additiveKindFilter.includeBullets, true);
-  assert.equal(additiveKindFilter.includeHeadings, true);
+  assert.equal(additiveKindFilter.includeBullets, false);
+  assert.equal(additiveKindFilter.includeHeadings, false);
   view.getBaseFilterRoots = () => ['kind == project'];
   assert.equal(view.taskMatchesRootFilter(task, additiveKindFilter, file), true);
   const bulletIdentity = {
@@ -2340,7 +2406,7 @@ test('TPS List formulas power synthesized task display, filtering, grouping, sor
     text: 'Project record [kind:: project]',
     inlineFields: [{ key: 'kind', value: 'project' }],
   };
-  assert.equal(view.taskMatchesRootFilter(bulletIdentity, additiveKindFilter, file), true);
+  assert.equal(view.taskMatchesRootFilter(bulletIdentity, additiveKindFilter, file), false);
   assert.equal(view.getTaskFormulaSession(file, task).get('task_identity').value, true);
   assert.equal(view.getTaskFormulaSession(file, task).get('project_identity').value, true);
   assert.equal(view.getTaskFormulaSession(file, task).get('canonical_kinds').value, true);
@@ -2667,9 +2733,17 @@ test('TPS List invalidates synthesized task-only rows for delete and rename even
   view.openTaskOverflowByPath = new Map();
   view.openTasksLoading = new Set();
   view.taskCacheEpochByPath = new Map();
+  view.taskIndexLoadGeneration = 4;
+  view.taskIndexLoadPromise = Promise.resolve();
+  view.taskIndexLoadKey = 'stale-load';
+  view.taskIndexProgress = { completedFiles: 1, totalFiles: 2, complete: false };
 
   view.loadOpenTasksForFile(file);
   view.clearTaskCachesForPath(file.path);
+  assert.equal(view.taskIndexLoadGeneration, 5);
+  assert.equal(view.taskIndexLoadPromise, null);
+  assert.equal(view.taskIndexLoadKey, '');
+  assert.equal(view.taskIndexProgress, null);
   resolveRead('- [ ] stale deleted task');
   await new Promise((resolve) => setImmediate(resolve));
   assert.equal(view.allTasksByPath.has(file.path), false, 'an invalidated async read cannot restore stale rows');

@@ -75,6 +75,14 @@ export class MarkdownDocumentLineCache<TFile extends MarkdownDocumentLineCacheFi
     return this.cachedByPath.size;
   }
 
+  peek(file: TFile): readonly MarkdownDocumentLine[] | null {
+    const cached = this.cachedByPath.get(file.path);
+    if (!cached) return null;
+    const revision = this.getRevision(file.path);
+    if (cached.fingerprint !== getFileFingerprint(file) || cached.revision !== revision) return null;
+    return cached.lines;
+  }
+
   async readMany(
     files: readonly TFile[],
     options: {
