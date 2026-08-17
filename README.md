@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.34.0
+
+- **Rules & fields → Custom fields** now includes an explicit **Import TPS Health properties** action when TPS Health exposes its property catalog. The import adds or refreshes Health-owned food fields and configured Daily Note nutrition rollups without bundling those definitions into GCM or changing notes.
+- Imported food fields inherit Health's active tag-only, folder-only, frontmatter-only, or combined identification scope. Imported rollups require both Health's `healthUpdatedAt` marker and the individual populated rollup key, so they stay off unrelated notes.
+- Reimporting is idempotent: matching Health keys are refreshed rather than duplicated, retired imported definitions are removed, and unrelated user-defined fields remain untouched. Run **Import / refresh** again after changing Health identification settings, folder/tag values, or rollup goals.
+- This is a backward-compatible opt-in integration with no automatic settings or note migration. TPS Health 0.10.0 or later is required for the import action; minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.34.0.md`.
+
 ## 1.33.0
 
 - TPS List now receives live GCM settings, checkbox mappings, property definitions, and services through a typed host. Its own presentation defaults remain separate, fixing production task queries that previously saw native project notes but lost every synthesized task row.
