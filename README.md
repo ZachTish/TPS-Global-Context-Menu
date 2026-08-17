@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.34.1
+
+- Reading View inline-property decoration is now scoped to the exact rendered line that owns the text. Parent list items no longer reparse nested child rows, and already-rendered Dataview/Properties widgets are never treated as raw Markdown again.
+- Inline fields split across adjacent rendered text nodes use deterministic start/end boundary ownership, preventing orphaned timestamp fragments, duplicated chips, and raw `key:: value` remnants after Obsidian or another plugin divides a line into multiple elements.
+- Health food/workout chip grouping uses the same line ownership rule, so it cannot collect or move chips from nested list items.
+- Completed-task reconciliation collapses repeated `completedDate` fields to the first existing nonempty value. This repairs duplicate completion metadata on the next normal task reconciliation without inventing a new timestamp.
+- This backward-compatible patch changes no settings, public APIs, or note schema. Rendering never rewrites note content; source cleanup occurs only through an existing task reconciliation mutation. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.34.1.md`.
+
 ## 1.34.0
 
 - **Rules & fields → Custom fields** now includes an explicit **Import TPS Health properties** action when TPS Health exposes its property catalog. The import adds or refreshes Health-owned food fields and configured Daily Note nutrition rollups without bundling those definitions into GCM or changing notes.

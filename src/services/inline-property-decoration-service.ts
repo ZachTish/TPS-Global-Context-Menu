@@ -24,6 +24,12 @@ import {
   setInlineFieldValueOnLine,
 } from '../utils/task-line-metadata';
 import {
+  isOwnedRenderedInlineElement,
+  isOwnedRenderedInlineTextNode,
+  RENDERED_INLINE_LINE_HOST_SELECTOR,
+  resolveRenderedTextPosition,
+} from '../utils/rendered-inline-property-dom';
+import {
   abortDirectTaskHistory,
   beginDirectTaskHistory,
   commitDirectTaskHistory,
@@ -907,11 +913,13 @@ export class InlinePropertyDecorationService {
   }
 
   private hideRenderedHiddenInlineMetadata(root: HTMLElement): void {
-    const blocks = Array.from(root.querySelectorAll<HTMLElement>('li, p, div.task-list-item, div.HyperMD-list-line'));
+    const blocks = Array.from(root.querySelectorAll<HTMLElement>(RENDERED_INLINE_LINE_HOST_SELECTOR));
     for (const block of blocks) {
-      const text = block.textContent || "";
-      if (!text.includes('tps-inline-props') && !text.includes('tps-inline:') && !block.querySelector('[data-tps-inline-props]')) continue;
-      if (!/(?:\[\^tps-inline:|data-tps-inline-props=|<!--\s*tps-inline-props:|%%\s*tps-inline-props:)/.test(text) && !block.querySelector('[data-tps-inline-props]')) continue;
+      const text = this.getOwnedRenderedText(block);
+      const hasOwnedMetadataElement = Array.from(block.querySelectorAll<HTMLElement>('[data-tps-inline-props]'))
+        .some((element) => isOwnedRenderedInlineElement(block, element));
+      if (!text.includes('tps-inline-props') && !text.includes('tps-inline:') && !hasOwnedMetadataElement) continue;
+      if (!/(?:\[\^tps-inline:|data-tps-inline-props=|<!--\s*tps-inline-props:|%%\s*tps-inline-props:)/.test(text) && !hasOwnedMetadataElement) continue;
       block.classList.add('tps-gcm-hidden-inline-metadata-host');
       this.wrapRenderedTextPattern(block, HIDDEN_INLINE_METADATA_RE, 'tps-gcm-hidden-inline-property-rendered');
     }
@@ -923,10 +931,9 @@ export class InlinePropertyDecorationService {
       acceptNode(node) {
         const parent = node.parentElement;
         if (!parent) return NodeFilter.FILTER_REJECT;
-        if (parent.closest('pre, code, .tps-gcm-rendered-inline-property-chip, .tps-gcm-hidden-inline-property-rendered')) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        return NodeFilter.FILTER_ACCEPT;
+        return isOwnedRenderedInlineTextNode(block, parent)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
       },
     });
 
@@ -951,8 +958,8 @@ export class InlinePropertyDecorationService {
     pattern.lastIndex = 0;
 
     for (const item of matches.reverse()) {
-      const start = this.findRenderedTextPosition(ranges, item.from);
-      const end = this.findRenderedTextPosition(ranges, item.to);
+      const start = resolveRenderedTextPosition(ranges, item.from, 'start');
+      const end = resolveRenderedTextPosition(ranges, item.to, 'end');
       if (!start || !end) continue;
       const range = document.createRange();
       range.setStart(start.node, start.offset);
@@ -968,10 +975,10 @@ export class InlinePropertyDecorationService {
   }
 
   private processRawRenderedInlineFields(root: HTMLElement, visibleKeys: Set<string>): void {
-    const blocks = Array.from(root.querySelectorAll<HTMLElement>('li, p, div.task-list-item, div.HyperMD-list-line'));
+    const blocks = Array.from(root.querySelectorAll<HTMLElement>(RENDERED_INLINE_LINE_HOST_SELECTOR));
     for (const block of blocks) {
       if (block.closest('pre, code, .tps-gcm-rendered-inline-property-chip, .tps-gcm-hidden-inline-property-rendered')) continue;
-      if (!block.textContent?.includes('::')) continue;
+      if (!this.getOwnedRenderedText(block).includes('::')) continue;
       this.wrapRawInlineFieldsInBlock(block, visibleKeys);
     }
   }
@@ -982,10 +989,9 @@ export class InlinePropertyDecorationService {
       acceptNode(node) {
         const parent = node.parentElement;
         if (!parent) return NodeFilter.FILTER_REJECT;
-        if (parent.closest('pre, code, .tps-gcm-rendered-inline-property-chip, .tps-gcm-hidden-inline-property-rendered')) {
-          return NodeFilter.FILTER_REJECT;
-        }
-        return NodeFilter.FILTER_ACCEPT;
+        return isOwnedRenderedInlineTextNode(block, parent)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
       },
     });
 
@@ -1011,8 +1017,8 @@ export class InlinePropertyDecorationService {
     if (matches.length === 0) return;
 
     for (const item of matches.reverse()) {
-      const start = this.findRenderedTextPosition(ranges, item.from);
-      const end = this.findRenderedTextPosition(ranges, item.to);
+      const start = resolveRenderedTextPosition(ranges, item.from, 'start');
+      const end = resolveRenderedTextPosition(ranges, item.to, 'end');
       if (!start || !end) continue;
 
       const range = document.createRange();
@@ -1055,7 +1061,7 @@ export class InlinePropertyDecorationService {
   }
 
   private groupRenderedHealthFoodChips(root: HTMLElement): void {
-    const blocks = Array.from(root.querySelectorAll<HTMLElement>('li, p, div.task-list-item, div.HyperMD-list-line'));
+    const blocks = Array.from(root.querySelectorAll<HTMLElement>(RENDERED_INLINE_LINE_HOST_SELECTOR));
     for (const block of blocks) {
       if (!this.isRenderedHealthFoodLogBlock(block)) continue;
 
@@ -1070,6 +1076,7 @@ export class InlinePropertyDecorationService {
       this.ensureRenderedHealthFoodLabel(block, bucket);
 
       const chips = Array.from(block.querySelectorAll<HTMLElement>('.tps-gcm-rendered-inline-property-chip'))
+        .filter((chip) => isOwnedRenderedInlineElement(block, chip))
         .filter((chip) => this.isVisibleHealthFoodInlineKey(this.readInlinePropertyElementKey(chip).toLowerCase()));
       for (const chip of chips) {
         if (chip.parentElement !== bucket) bucket.appendChild(chip);
@@ -1109,12 +1116,13 @@ export class InlinePropertyDecorationService {
   }
 
   private isRenderedHealthFoodLogBlock(block: HTMLElement): boolean {
-    const text = block.textContent || '';
+    const text = this.getOwnedRenderedText(block);
     if (this.isHealthFoodInlineLine(text)) return true;
 
     const keys = new Set<string>();
     const fields = Array.from(block.querySelectorAll<HTMLElement>('.dataview.inline-field, .metadata-property, .tps-gcm-rendered-inline-property-chip'));
     for (const field of fields) {
+      if (!isOwnedRenderedInlineElement(block, field)) continue;
       const key = this.readInlinePropertyElementKey(field);
       if (key) keys.add(key.toLowerCase());
     }
@@ -1126,12 +1134,13 @@ export class InlinePropertyDecorationService {
   }
 
   private isRenderedHealthWorkoutSetBlock(block: HTMLElement): boolean {
-    const text = block.textContent || '';
+    const text = this.getOwnedRenderedText(block);
     if (this.isHealthWorkoutSetInlineLine(text)) return true;
 
     const keys = new Set<string>();
     const fields = Array.from(block.querySelectorAll<HTMLElement>('.dataview.inline-field, .metadata-property, .tps-gcm-rendered-inline-property-chip'));
     for (const field of fields) {
+      if (!isOwnedRenderedInlineElement(block, field)) continue;
       const key = this.readInlinePropertyElementKey(field);
       if (key) keys.add(key.toLowerCase());
     }
@@ -1162,17 +1171,19 @@ export class InlinePropertyDecorationService {
     return readInlineFieldValue(rawText, key);
   }
 
-  private findRenderedTextPosition(
-    ranges: Array<{ node: Text; start: number; end: number }>,
-    offset: number,
-  ): { node: Text; offset: number } | null {
-    for (const range of ranges) {
-      if (offset >= range.start && offset <= range.end) {
-        return { node: range.node, offset: offset - range.start };
-      }
-    }
-    const last = ranges[ranges.length - 1];
-    return last ? { node: last.node, offset: last.node.length } : null;
+  private getOwnedRenderedText(block: HTMLElement): string {
+    const values: string[] = [];
+    const walker = document.createTreeWalker(block, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        const parent = node.parentElement;
+        return isOwnedRenderedInlineTextNode(block, parent)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
+      },
+    });
+    let current: Node | null;
+    while ((current = walker.nextNode())) values.push(current.nodeValue || '');
+    return values.join('');
   }
 
   private readRenderedInlineFieldKey(field: HTMLElement): string {

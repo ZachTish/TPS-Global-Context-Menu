@@ -251,15 +251,18 @@ export function updateTaskCompletedDateForCheckboxState(
   if (!parsed) return line;
   const marker = normalizeCheckboxMarker(checkboxState ?? parsed.token);
   const completeMarkers = normalizeCompleteMarkers(options.completeMarkers);
+  const completedDateFields = readSemanticInlineFieldRanges(parsed.body)
+    .filter((field) => field.key.toLowerCase() === TASK_COMPLETED_DATE_FIELD.toLowerCase());
   if (completeMarkers.has(marker)) {
-    if (readInlineFieldValue(line, TASK_COMPLETED_DATE_FIELD)) return line;
+    const existingValue = completedDateFields.find((field) => field.value.trim())?.value.trim() || '';
+    if (completedDateFields.length === 1 && existingValue) return line;
     return setInlineFieldValueOnTaskLine(
       line,
       TASK_COMPLETED_DATE_FIELD,
-      formatTaskLineDate(options.completedAt ?? new Date()),
+      existingValue || formatTaskLineDate(options.completedAt ?? new Date()),
     );
   }
-  if (!readInlineFieldValue(line, TASK_COMPLETED_DATE_FIELD)) return line;
+  if (completedDateFields.length === 0) return line;
   return setInlineFieldValueOnTaskLine(line, TASK_COMPLETED_DATE_FIELD, null);
 }
 

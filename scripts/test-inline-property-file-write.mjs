@@ -16,6 +16,17 @@ async function importAtomicLineReplacement() {
   return import(`data:text/javascript;base64,${Buffer.from(build.outputFiles[0].text).toString('base64')}`);
 }
 
+async function importRenderedInlineDom() {
+  const build = await esbuild.build({
+    entryPoints: [fileURLToPath(new URL('../src/utils/rendered-inline-property-dom.ts', import.meta.url))],
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    write: false,
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(build.outputFiles[0].text).toString('base64')}`);
+}
+
 test('inline property file edits preserve concurrent unrelated changes and line endings', async () => {
   const { replaceExactLineRevision } = await importAtomicLineReplacement();
   const originalLine = '- [ ] Task [priority:: low]';
@@ -135,4 +146,65 @@ test('live editor inline property writes re-resolve the captured revision before
     editorBranch,
     /changes:\s*\{\s*from:\s*targetLine\.lineFrom,\s*to:\s*targetLine\.lineTo/u,
   );
+});
+
+test('rendered inline fields stay owned by one line and exclude existing property widgets', async () => {
+  const {
+    isOwnedRenderedInlineTextNode,
+    RENDERED_INLINE_EXCLUDED_TEXT_SELECTOR,
+    RENDERED_INLINE_LINE_HOST_SELECTOR,
+  } = await importRenderedInlineDom();
+  const parentLine = {};
+  const childLine = {};
+  const ownedParent = {
+    closest(selector) {
+      if (selector === RENDERED_INLINE_EXCLUDED_TEXT_SELECTOR) return null;
+      if (selector === RENDERED_INLINE_LINE_HOST_SELECTOR) return parentLine;
+      return null;
+    },
+  };
+  const nestedChild = {
+    closest(selector) {
+      if (selector === RENDERED_INLINE_EXCLUDED_TEXT_SELECTOR) return null;
+      if (selector === RENDERED_INLINE_LINE_HOST_SELECTOR) return childLine;
+      return null;
+    },
+  };
+  const existingProperty = {
+    closest(selector) {
+      if (selector === RENDERED_INLINE_EXCLUDED_TEXT_SELECTOR) return {};
+      if (selector === RENDERED_INLINE_LINE_HOST_SELECTOR) return parentLine;
+      return null;
+    },
+  };
+
+  assert.equal(isOwnedRenderedInlineTextNode(parentLine, ownedParent), true);
+  assert.equal(isOwnedRenderedInlineTextNode(parentLine, nestedChild), false);
+  assert.equal(isOwnedRenderedInlineTextNode(parentLine, existingProperty), false);
+  assert.equal(isOwnedRenderedInlineTextNode(parentLine, null), false);
+});
+
+test('rendered inline ranges use following-node starts and preceding-node ends at seams', async () => {
+  const { resolveRenderedTextPosition } = await importRenderedInlineDom();
+  const left = { length: 5, id: 'left' };
+  const right = { length: 7, id: 'right' };
+  const ranges = [
+    { node: left, start: 0, end: 5 },
+    { node: right, start: 5, end: 12 },
+  ];
+
+  assert.deepEqual(resolveRenderedTextPosition(ranges, 5, 'start'), { node: right, offset: 0 });
+  assert.deepEqual(resolveRenderedTextPosition(ranges, 5, 'end'), { node: left, offset: 5 });
+  assert.deepEqual(resolveRenderedTextPosition(ranges, 12, 'end'), { node: right, offset: 7 });
+  assert.equal(resolveRenderedTextPosition(ranges, 12, 'start'), null);
+});
+
+test('rendered fallback uses row-owned text and native-property exclusion throughout', () => {
+  const source = readFileSync(new URL('../src/services/inline-property-decoration-service.ts', import.meta.url), 'utf8');
+  assert.match(source, /isOwnedRenderedInlineTextNode\(block, parent\)/u);
+  assert.match(source, /isOwnedRenderedInlineElement\(block, chip\)/u);
+  assert.match(source, /getOwnedRenderedText\(block\)\.includes\('::'\)/u);
+  assert.match(source, /resolveRenderedTextPosition\(ranges, item\.from, 'start'\)/u);
+  assert.match(source, /resolveRenderedTextPosition\(ranges, item\.to, 'end'\)/u);
+  assert.doesNotMatch(source, /offset >= range\.start && offset <= range\.end/u);
 });

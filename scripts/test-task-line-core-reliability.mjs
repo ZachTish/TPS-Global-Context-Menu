@@ -101,6 +101,20 @@ test('inline-field scanning preserves balanced wikilinks inside bracket and pare
   );
 });
 
+test('completed task reconciliation collapses duplicate completedDate fields', async () => {
+  const { readTaskInlineFields, updateTaskCompletedDateForCheckboxState } = await metadataPromise;
+  const source = '- [x] Finished [completedDate:: 2026-08-17 12:09:23] [completedDate:: 2026-08-17 12:09:23]';
+  const updated = updateTaskCompletedDateForCheckboxState(source, '[x]');
+  const completedDates = readTaskInlineFields(updated)
+    .filter((field) => field.key.toLowerCase() === 'completeddate');
+
+  assert.deepEqual(completedDates, [{ key: 'completedDate', value: '2026-08-17 12:09:23' }]);
+  assert.equal(
+    updated,
+    '- [x] Finished [completedDate:: 2026-08-17 12:09:23]',
+  );
+});
+
 test('title and full-body edits normalize leading links and retain their local association', async () => {
   const {
     getTaskDisplayTitle,
