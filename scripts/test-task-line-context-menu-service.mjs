@@ -536,7 +536,11 @@ test('task note associations use a hidden direct path while keeping the visible 
 });
 
 test('task quick editor can replace the editable body without changing task structure', async () => {
-  const { getTaskEditableBody, setTaskEditableBody } = await importUtility();
+  const {
+    flattenTaskEditableBodyLineBreaks,
+    getTaskEditableBody,
+    setTaskEditableBody,
+  } = await importUtility();
   const line = '  - [/] Draft *proposal* #work [priority:: high]';
   assert.equal(getTaskEditableBody(line), 'Draft *proposal* #work');
   assert.equal(
@@ -586,6 +590,18 @@ test('task quick editor can replace the editable body without changing task stru
     'edited saves must preserve duplicate and substring-overlapping inline fields in source order',
   );
   assert.equal(setTaskEditableBody(line, '   '), line);
+  assert.equal(
+    flattenTaskEditableBodyLineBreaks('Retro #hca\r\n- test\ncontinued'),
+    'Retro #hca - test continued',
+  );
+  assert.equal(
+    setTaskEditableBody(
+      '- [x] Retro #hca [scheduled:: 2026-08-17 09:30:00] [tpsId:: item_123]',
+      'Retro #hca\n- test',
+    ),
+    '- [x] Retro #hca - test [scheduled:: 2026-08-17 09:30:00] [tpsId:: item_123]',
+    'multiline text beside an inline tag must remain one resolvable task record',
+  );
 });
 
 test('normal task clicks open the exact-line quick editor across task surfaces', () => {
@@ -594,7 +610,11 @@ test('normal task clicks open the exact-line quick editor across task surfaces',
   assert.match(serviceSource, /async openQuickEditorForElement\(taskEl: HTMLElement, sourceEl: HTMLElement \| null = taskEl\)/);
   assert.match(serviceSource, /getTaskEditableBody\(context\.rawLine\)/);
   assert.match(serviceSource, /setTaskEditableBody\(line, nextBody\)/);
-  assert.match(serviceSource, /existing properties\. Hidden TPS metadata stays attached/);
+  assert.match(serviceSource, /Line breaks become spaces; hidden TPS metadata stays attached/);
+  assert.match(serviceSource, /input\.addEventListener\('input', \(\) => \{/);
+  assert.match(serviceSource, /flattenTaskEditableBodyLineBreaks\(source\.slice\(0, selectionStart\)\)\.length/);
+  assert.match(serviceSource, /this\.refreshTaskEditorAnchorIdentity\(anchorEl, context\)/);
+  assert.match(serviceSource, /anchorEl\.dataset\.taskLineIdentity = getTaskLineIdentity\(context\.rawLine\)/);
   assert.match(serviceSource, /if \(!bodyChanged && propertyChanges\.length === 0\)/);
   assert.match(serviceSource, /this\.updateTaskLine\(context/);
   assert.match(serviceSource, /TaskQuickEditor', 'open'/);
@@ -674,7 +694,12 @@ test('task highlight metadata keeps TPS task lines one-based and native lines ze
 });
 
 test('TPS Table property cells resolve through the row task identity and exact one-based source line', async () => {
-  const { buildTaskLineCandidateIndexes, getTaskLineIdentity, resolveTaskLineIndex } = await importTaskLineResolutionUtility();
+  const {
+    buildTaskLineCandidateIndexes,
+    buildTaskResolutionTextVariants,
+    getTaskLineIdentity,
+    resolveTaskLineIndex,
+  } = await importTaskLineResolutionUtility();
   const lines = [
     '# Tasks',
     '- [ ] Draft Base filter examples [area:: work] [priority:: medium]',
@@ -823,6 +848,20 @@ test('TPS Table property cells resolve through the row task identity and exact o
     getTaskLineIdentity('- [ ] CRLF task\r'),
     getTaskLineIdentity('- [ ] CRLF task'),
     'source-line fingerprints are stable across LF and CRLF splitting',
+  );
+  const inlineTagRenderedText = 'Retro GCP Application Support #hca - test [scheduled:: 2026-08-17 09:30:00] [tpsId:: qa-task-editor-1342]';
+  assert.ok(
+    buildTaskResolutionTextVariants(inlineTagRenderedText).includes('Retro GCP Application Support - test'),
+    'rendered hashtag anchors and hidden inline fields must yield the canonical source title',
+  );
+  assert.equal(
+    resolveTaskLineIndex({
+      lines: ['- [ ] Retro GCP Application Support #hca - test [scheduled:: 2026-08-17 09:30:00] [tpsId:: qa-task-editor-1342]'],
+      candidateIndexes: [0],
+      targetTexts: buildTaskResolutionTextVariants(inlineTagRenderedText),
+    }),
+    0,
+    'a rendered task split around an inline hashtag remains resolvable',
   );
   assert.match(logBaseViewSource, /row\.dataset\.taskText = getTaskDisplayTitle\(entry\.line\)/);
   assert.match(logBaseViewSource, /row\.dataset\.taskLineIdentity = getTaskLineIdentity\(entry\.line\)/);
@@ -1269,8 +1308,9 @@ test('GCM intercepts Kanban and Calendar task rows before the note file menu', (
     /\.\.\.directTargetTexts,[\s\S]*?\.\.\.this\.getTaskElementSearchTexts\(taskEl\)/u,
     'a clicked tag/property fragment must retain the full task-row text as a resolution fallback',
   );
-  assert.match(serviceSource, /getTaskSearchTextVariants/);
-  assert.match(serviceSource, /all day:\\s\*\(\?:true\|false\)/);
+  assert.match(serviceSource, /buildTaskResolutionTextVariants/);
+  assert.match(taskLineResolutionSource, /const semanticTitle = getTaskDisplayTitle\(`- \[ \] \$\{withoutCheckbox\}`\)/);
+  assert.match(taskLineResolutionSource, /all day:\\s\*\(\?:true\|false\)/);
   assert.match(taskLineResolutionSource, /targetTexts\.some/);
   assert.match(mainSource, /new TaskLineContextMenuService\(this\)/);
   assert.match(mainSource, /taskLineContextMenuService\.handleContextMenu\(evt\)/);

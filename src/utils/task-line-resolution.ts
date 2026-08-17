@@ -34,6 +34,37 @@ export function buildTaskLineCandidateIndexes(metadata: TaskLineCandidateMetadat
   return candidates;
 }
 
+/**
+ * Build comparable text from either source Markdown or rendered task DOM.
+ * Rendered rows keep hashtag anchors and can retain hidden inline-property
+ * carrier text in textContent, while the canonical task title excludes both.
+ */
+export function buildTaskResolutionTextVariants(value: string): string[] {
+  const raw = String(value || '').trim();
+  if (!raw) return [];
+  const taskTitle = getTaskDisplayTitle(raw);
+  const withoutCheckbox = raw
+    .replace(/^toggle task:\s*/iu, '')
+    .replace(/^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]*\]\s+/u, '')
+    .replace(/^\s*[☐☑✓✔]\s*/u, '')
+    .trim();
+  const semanticTitle = getTaskDisplayTitle(`- [ ] ${withoutCheckbox}`);
+  const withoutInlineFields = withoutCheckbox
+    .replace(/\[[^\]\n]+::[^\]\n]*\]/gu, ' ')
+    .replace(/\b(?:todo|complete|wont-do|working|all day:\s*(?:true|false)|allDay:\s*(?:true|false))\b/giu, ' ')
+    .replace(/\b\d{1,2}:\d{2}\s*(?:AM|PM)?\b/giu, ' ')
+    .replace(/\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+\w+\s+\d{1,2}\s+\d{4}\b/giu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+  return Array.from(new Set([
+    raw,
+    taskTitle,
+    withoutCheckbox,
+    semanticTitle,
+    withoutInlineFields,
+  ].filter(Boolean)));
+}
+
 export function resolveTaskLineIndex(input: TaskLineResolutionInput): number {
   const hasExactTaskText = input.exactTaskText !== undefined;
   const exactTaskText = normalizeTaskResolutionText(input.exactTaskText || '');

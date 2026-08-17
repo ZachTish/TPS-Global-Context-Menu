@@ -14,6 +14,7 @@ import { getEffectivePropertyOptions } from '../utils/property-options';
 import {
   addInlineTagsToTaskLine,
   convertTaskLineToBullet,
+  flattenTaskEditableBodyLineBreaks,
   getTaskDisplayTitle,
   getPlainTaskTitle,
   getTaskSourceTitle,
@@ -56,7 +57,12 @@ import * as logger from '../logger';
 import { KeyboardAwareOverlay } from '../utils/mobile-overlay';
 import { getOrderedSelectionRange } from '../utils/ordered-selection';
 import { matchTaskHighlightMetadata } from '../utils/task-highlight-metadata';
-import { buildTaskLineCandidateIndexes, resolveTaskLineIndex } from '../utils/task-line-resolution';
+import {
+  buildTaskLineCandidateIndexes,
+  buildTaskResolutionTextVariants,
+  getTaskLineIdentity,
+  resolveTaskLineIndex,
+} from '../utils/task-line-resolution';
 import {
   inspectLineItemDeleteTarget,
   performLineItemDelete,
@@ -452,6 +458,18 @@ export class TaskLineContextMenuService {
     });
     const initialBody = getTaskEditableBody(context.rawLine);
     input.value = initialBody;
+    input.addEventListener('input', () => {
+      const source = input.value;
+      const flattened = flattenTaskEditableBodyLineBreaks(source);
+      if (flattened === source) return;
+      const selectionStart = input.selectionStart ?? source.length;
+      const selectionEnd = input.selectionEnd ?? selectionStart;
+      input.value = flattened;
+      input.setSelectionRange(
+        flattenTaskEditableBodyLineBreaks(source.slice(0, selectionStart)).length,
+        flattenTaskEditableBodyLineBreaks(source.slice(0, selectionEnd)).length,
+      );
+    });
     this.renderTaskEditorCheckbox(checkboxButton, context);
 
     let childModalCount = 0;
@@ -873,8 +891,8 @@ export class TaskLineContextMenuService {
     const hint = card.createDiv({
       cls: 'tps-gcm-task-editor-hint',
       text: propertyDrafts.length > 0
-        ? 'Edit task text, tags, and existing properties. Hidden TPS metadata stays attached. ⌘↵ saves.'
-        : 'Edit task text and tags. Hidden TPS metadata stays attached. ⌘↵ saves.',
+        ? 'Edit one task line, tags, and existing properties. Line breaks become spaces; hidden TPS metadata stays attached. ⌘↵ saves.'
+        : 'Edit one task line and tags. Line breaks become spaces; hidden TPS metadata stays attached. ⌘↵ saves.',
     });
     const actions = card.createDiv({ cls: 'tps-gcm-task-editor-actions' });
     const openButton = actions.createEl('button', { text: 'Open in note', attr: { type: 'button' } });
@@ -958,6 +976,7 @@ export class TaskLineContextMenuService {
           bodyChanged,
           changedPropertyKeys: propertyChanges.map((change) => change.key),
         });
+        this.refreshTaskEditorAnchorIdentity(anchorEl, context);
         this.closeTaskEditor();
         const scheduledChange = propertyChanges.find((change) => change.key.toLowerCase() === 'scheduled');
         if (scheduledChange) {
@@ -1403,7 +1422,7 @@ export class TaskLineContextMenuService {
     ];
     const seen = new Set<string>();
     return candidates
-      .flatMap((value) => this.getTaskSearchTextVariants(String(value || '').trim()))
+      .flatMap((value) => buildTaskResolutionTextVariants(String(value || '').trim()))
       .filter((value) => {
         const key = this.normalizeTaskText(value);
         if (!key || seen.has(key)) return false;
@@ -1425,7 +1444,7 @@ export class TaskLineContextMenuService {
     ];
     const seen = new Set<string>();
     return candidates
-      .flatMap((value) => this.getTaskSearchTextVariants(String(value || '').trim()))
+      .flatMap((value) => buildTaskResolutionTextVariants(String(value || '').trim()))
       .filter((value) => {
         const key = this.normalizeTaskText(value);
         if (!key || seen.has(key)) return false;
@@ -1436,7 +1455,8 @@ export class TaskLineContextMenuService {
 
   private getRenderedTaskIdentity(taskEl: HTMLElement): { taskText: string; lineIdentity: string } | null {
     const surface = taskElSurface(taskEl);
-    if (surface !== 'tps-table' && surface !== 'tps-list') return null;
+    const lineIdentity = String(taskEl.dataset.taskLineIdentity || '').trim();
+    if (surface !== 'tps-table' && surface !== 'tps-list' && !lineIdentity) return null;
     return {
       taskText: String(
         taskEl.dataset.taskText
@@ -1444,8 +1464,16 @@ export class TaskLineContextMenuService {
         ?? taskEl.querySelector<HTMLElement>('.tps-log-base-cell[data-key="title"], [data-key="title"]')?.textContent
         ?? '',
       ).trim(),
-      lineIdentity: String(taskEl.dataset.taskLineIdentity || '').trim(),
+      lineIdentity,
     };
+  }
+
+  /** Keep the confirmed row actionable while Obsidian rebuilds its rendered DOM. */
+  private refreshTaskEditorAnchorIdentity(anchorEl: HTMLElement, context: TaskLineContext): void {
+    anchorEl.dataset.taskPath = context.file.path;
+    anchorEl.dataset.taskLine = String(context.lineNumber);
+    anchorEl.dataset.taskText = context.title;
+    anchorEl.dataset.taskLineIdentity = getTaskLineIdentity(context.rawLine);
   }
 
   private resolveMarkdownTaskFile(taskEl: HTMLElement): TFile | null {
@@ -3504,25 +3532,6 @@ export class TaskLineContextMenuService {
     if (/^\[[^\]\r\n]?\]$/.test(raw)) return raw;
     if (raw.length <= 1) return `[${raw || ' '}]`;
     return '';
-  }
-
-  private getTaskSearchTextVariants(value: string): string[] {
-    const raw = String(value || '').trim();
-    if (!raw) return [];
-    const taskTitle = getTaskDisplayTitle(raw);
-    const withoutCheckbox = raw
-      .replace(/^toggle task:\s*/i, '')
-      .replace(/^\s*(?:[-*+]|\d+[.)])\s+\[[^\]]*\]\s+/, '')
-      .replace(/^\s*[☐☑✓✔]\s*/, '')
-      .trim();
-    const withoutInlineFields = withoutCheckbox
-      .replace(/\[[^\]\n]+::[^\]\n]*\]/g, ' ')
-      .replace(/\b(?:todo|complete|wont-do|working|all day:\s*(?:true|false)|allDay:\s*(?:true|false))\b/gi, ' ')
-      .replace(/\b\d{1,2}:\d{2}\s*(?:AM|PM)?\b/gi, ' ')
-      .replace(/\b(?:Mon|Tue|Wed|Thu|Fri|Sat|Sun),?\s+\w+\s+\d{1,2}\s+\d{4}\b/gi, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-    return [raw, taskTitle, withoutCheckbox, withoutInlineFields].filter(Boolean);
   }
 
   private normalizeTaskText(value: string): string {

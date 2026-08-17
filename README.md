@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.34.2
+
+- The task quick editor now enforces one logical Markdown task line. Typed or pasted line breaks become spaces immediately, while the textarea still wraps long text visually.
+- Inline hashtags, punctuation, custom properties, hidden TPS identity metadata, and native block IDs remain attached when a multiline draft is flattened.
+- Task resolution now normalizes rendered hashtag links and inline-property widgets with the same metadata-aware title rules used for the source Markdown. After a confirmed save, the current row also receives the new source fingerprint immediately, so it remains actionable both during and after Obsidian's rerender.
+- This backward-compatible patch adds no setting or schema change. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.34.2.md`.
+
 ## 1.34.1
 
 - Reading View inline-property decoration is now scoped to the exact rendered line that owns the text. Parent list items no longer reparse nested child rows, and already-rendered Dataview/Properties widgets are never treated as raw Markdown again.

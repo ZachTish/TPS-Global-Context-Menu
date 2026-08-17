@@ -205,11 +205,20 @@ export function getTaskEditableBody(line: string): string {
   return parsed ? stripTaskEditorMetadata(parsed.body) : '';
 }
 
+/**
+ * A task editor may wrap visually, but one Markdown task record cannot contain
+ * hard line breaks. Flatten typed or pasted line breaks without otherwise
+ * rewriting the user's spacing, tags, or punctuation.
+ */
+export function flattenTaskEditableBodyLineBreaks(value: string): string {
+  return String(value || '').replace(/\r\n?|\n/gu, ' ');
+}
+
 export function setTaskEditableBody(line: string, body: string): string {
   const parsed = parseTaskLine(line);
   if (!parsed) return line;
   const cleanBody = stripTaskEditorMetadata(
-    String(body || '').replace(/\r?\n/g, ' '),
+    flattenTaskEditableBodyLineBreaks(body),
   );
   if (!cleanBody) return line;
   if (cleanBody === stripTaskEditorMetadata(parsed.body)) return line;
