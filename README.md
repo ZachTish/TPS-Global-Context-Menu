@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.34.3
+
+- Strict Source mode now shows the literal Markdown for TPS-managed content. Inline-property chips, hidden TPS metadata replacements, completed-task line hiding, virtual Base overlays, and the rendered Linked context panel are absent unless Obsidian explicitly marks the editor as Live Preview or renders Reading View.
+- Source mode no longer runs GCM's scheduled-task continuation shortcut or automatic inline datetime normalization while the user is editing literal Markdown.
+- Switching among Source, Live Preview, and Reading mode rebuilds editor decorations, task visibility, menus, and virtual Base surfaces from the current Markdown view state instead of relying on the optional `is-source-mode` DOM class.
+- This backward-compatible patch changes no settings, APIs, or note schema. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.34.3.md`.
+
 ## 1.34.2
 
 - The task quick editor now enforces one logical Markdown task line. Typed or pasted line breaks become spaces immediately, while the textarea still wraps long text visually.

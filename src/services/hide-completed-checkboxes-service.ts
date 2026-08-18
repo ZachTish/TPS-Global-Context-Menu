@@ -7,6 +7,7 @@ import {
   normalizeLinkedSubitemCheckboxMarker,
 } from '../utils/linked-subitem-mapping';
 import { MIGRATED_TASK_CHECKBOX } from '../constants/task-migration';
+import { isLivePreviewEditorRoot } from '../utils/markdown-editor-mode';
 
 const BODY_CLASS = 'tps-gcm-hide-completed-checkboxes';
 const READING_ONLY_BODY_CLASS = 'tps-gcm-hide-completed-checkboxes-reading-only';
@@ -660,8 +661,7 @@ export class HideCompletedCheckboxesService {
   }
 
   private isLivePreviewRoot(root: HTMLElement): boolean {
-    if (root.classList.contains('is-live-preview')) return true;
-    return !root.classList.contains('is-source-mode');
+    return isLivePreviewEditorRoot(root);
   }
 
   private isRootTaskHidingExcluded(root: HTMLElement): boolean {

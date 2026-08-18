@@ -2,6 +2,7 @@ import { Component, MarkdownRenderer, MarkdownView, TFile, normalizePath } from 
 import type TPSGlobalContextMenuPlugin from '../main';
 import type { VirtualBaseEmbedPlacement, VirtualBaseEmbedProperty } from '../types';
 import * as logger from '../logger';
+import { isLivePreviewEditorRoot } from '../utils/markdown-editor-mode';
 
 type MountedEmbed = {
   component: Component;
@@ -152,8 +153,7 @@ export class VirtualBaseEmbedService extends Component {
   }
 
   private isLivePreviewRoot(root: HTMLElement): boolean {
-    if (root.classList.contains('is-source-mode')) return false;
-    return root.classList.contains('is-live-preview') || root.matches('.markdown-source-view');
+    return isLivePreviewEditorRoot(root);
   }
 
   private isVisibleRenderRoot(root: HTMLElement): boolean {

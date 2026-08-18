@@ -343,6 +343,10 @@ test('rename and delete invalidate prior linked-context source identities prompt
 });
 
 test('linked context uses central terminal-task semantics and explicit view-surface classes', () => {
+  const ensureSource = methodSource(
+    'private async ensureLinkedContextPanel',
+    'private async renderLinkedContextPanel',
+  );
   const itemSource = methodSource(
     'private async renderLinkedContextItem',
     'private enableLinkedContextTaskCheckboxes',
@@ -352,6 +356,8 @@ test('linked context uses central terminal-task semantics and explicit view-surf
     'private disposeLinkedContextCandidate',
   );
 
+  assert.match(ensureSource, /\|\| isStrictSourceMode\(view\)/);
+  assert.match(ensureSource, /this\.removeLinkedContextPanel\(view\)/);
   assert.match(renderSource, /tps-gcm-linked-context-panel--\$\{surface\}/);
   assert.match(renderSource, /mode === 'preview'/);
   assert.match(renderSource, /!isStrictSourceMode\(view\)/);

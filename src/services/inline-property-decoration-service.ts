@@ -17,6 +17,7 @@ import {
 } from '../utils/entity-property';
 import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
 import { isLinkListProperty, mergeLinkList, mergeMixedList } from '../utils/list-utils';
+import { isStrictSourceEditorRoot } from '../utils/markdown-editor-mode';
 import {
   parseTaskLine,
   readInlineFieldRanges,
@@ -660,6 +661,8 @@ export class InlinePropertyDecorationService {
   }
 
   private handleScheduledTaskContinuationKeydown(event: KeyboardEvent, view: EditorView): boolean {
+    const root = view.dom.closest('.markdown-source-view.mod-cm6') as HTMLElement | null;
+    if (isStrictSourceEditorRoot(root)) return false;
     if (event.defaultPrevented || event.isComposing) return false;
     if (event.altKey || event.ctrlKey || event.metaKey) return false;
     if (view.state.selection.ranges.length !== 1) return false;
@@ -705,7 +708,7 @@ export class InlinePropertyDecorationService {
 
   private buildDecorations(view: EditorView): DecorationSet {
     const root = view.dom.closest('.markdown-source-view.mod-cm6') as HTMLElement | null;
-    if (root && root.classList.contains('is-source-mode')) return Decoration.none;
+    if (isStrictSourceEditorRoot(root)) return Decoration.none;
 
     const inlineKeys = this.getInlinePropertyKeys();
 
@@ -729,6 +732,8 @@ export class InlinePropertyDecorationService {
   }
 
   private normalizeInlineDateTimeValues(view: EditorView): void {
+    const root = view.dom.closest('.markdown-source-view.mod-cm6') as HTMLElement | null;
+    if (isStrictSourceEditorRoot(root)) return;
     const dateTimeKeys = this.getInlineDateTimePropertyKeys();
     if (dateTimeKeys.size === 0) return;
 

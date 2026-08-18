@@ -15,7 +15,7 @@ test('strict source mode is detected separately from live preview', () => {
   assert.match(leafResolverSource, /state\?\.mode === 'source'/);
   assert.match(leafResolverSource, /state\.source === true/);
   assert.match(leafResolverSource, /\.markdown-source-view/);
-  assert.match(leafResolverSource, /!sourceView\.classList\.contains\('is-live-preview'\)/);
+  assert.match(leafResolverSource, /isStrictSourceEditorRoot\(sourceView\)/);
 });
 
 test('frontmatter title rendering restores filename in strict source mode', () => {

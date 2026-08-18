@@ -115,7 +115,8 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(source, /private syncRenderedCompletedTasks\(root: HTMLElement\): void/);
   assert.doesNotMatch(source, /HIDDEN_TASK_DATA_SELECTOR|COMPLETED_TASK_RE|aria-checked="true"/);
   assert.match(source, /private isLivePreviewRoot\(root: HTMLElement\): boolean/);
-  assert.match(source, /root\.classList\.contains\('is-source-mode'\)/);
+  assert.match(source, /return isLivePreviewEditorRoot\(root\)/);
+  assert.doesNotMatch(source, /root\.classList\.contains\('is-source-mode'\)/);
   assert.match(source, /EDITING_QUIET_WINDOW_MS - \(Date\.now\(\) - this\.lastEditorInputAt\)/);
   assert.match(source, /Date\.now\(\) - this\.lastEditorInputAt < EDITING_QUIET_WINDOW_MS/);
   assert.doesNotMatch(observeLiveRootSource, /attributes: true/);
@@ -124,8 +125,9 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.doesNotMatch(refreshRootSource, /classList\.toggle\(HIDDEN_LINE_CLASS/);
   assert.doesNotMatch(styles, /\.cm-line:has/);
   assert.doesNotMatch(styles, /\.cm-line\[data-task=/);
-  assert.match(styles, /\.markdown-source-view\.mod-cm6:not\(\.is-source-mode\) \.cm-line\.tps-gcm-hidden-completed-checkbox-line/);
-  assert.match(styles, /not\(\.is-source-mode\)\.tps-gcm-completed-checkboxes-revealed \.cm-line\.tps-gcm-hidden-completed-checkbox-line/);
+  assert.match(styles, /\.markdown-source-view\.mod-cm6\.is-live-preview \.cm-line\.tps-gcm-hidden-completed-checkbox-line/);
+  assert.match(styles, /\.is-live-preview\.tps-gcm-completed-checkboxes-revealed \.cm-line\.tps-gcm-hidden-completed-checkbox-line/);
+  assert.doesNotMatch(styles, /not\(\.is-source-mode\)/);
   assert.match(styles, /\.markdown-preview-view\.tps-gcm-completed-checkboxes-revealed li\.task-list-item\.tps-gcm-mapped-completed-task/);
   assert.match(styles, /hide-all-task-lines-reading-mode \.markdown-reading-view li\.task-list-item \{/);
   assert.match(styles, /hide-all-task-lines-reading-mode \.markdown-reading-view\.tps-gcm-completed-checkboxes-revealed li\.task-list-item \{/);

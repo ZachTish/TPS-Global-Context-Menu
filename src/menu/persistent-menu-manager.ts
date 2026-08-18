@@ -732,7 +732,8 @@ export class PersistentMenuManager {
       const activeFilePath = view.file?.path || '';
       if (!mounted || !shouldRecoverLinkedContextPanel({
         enabled: this.plugin.settings.enableInlinePersistentMenus === true
-          && this.plugin.settings.enableLinkedContextPanel === true,
+          && this.plugin.settings.enableLinkedContextPanel === true
+          && !isStrictSourceMode(view),
         panelConnected: this.isLinkedContextPanelMounted(view),
         activeFilePath,
         mountedFilePath: mounted.filePath,
@@ -816,7 +817,8 @@ export class PersistentMenuManager {
     return this.linkedContextRequestIds.get(view) === requestId
       && view.file?.path === file.path
       && this.plugin.settings.enableInlinePersistentMenus === true
-      && this.plugin.settings.enableLinkedContextPanel === true;
+      && this.plugin.settings.enableLinkedContextPanel === true
+      && !isStrictSourceMode(view);
   }
 
   private getLinkedContextItems(requestKey: string, file: TFile): Promise<LinkedContextItem[]> {
@@ -839,6 +841,7 @@ export class PersistentMenuManager {
     if (
       this.plugin.settings.enableInlinePersistentMenus !== true
       || this.plugin.settings.enableLinkedContextPanel !== true
+      || isStrictSourceMode(view)
       || !(file instanceof TFile)
     ) {
       this.removeLinkedContextPanel(view);

@@ -12,6 +12,7 @@ import {
     markChecklistCompletionPromptHandled,
     wasChecklistCompletionPromptRecentlyHandled,
 } from '../handlers/checklist-handler';
+import { getViewMode, isStrictSourceMode } from '../services/leaf-resolver';
 
 /**
  * Registers all workspace and vault event listeners on the given plugin instance.
@@ -205,10 +206,15 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             lastActiveModeSignature = '';
             return;
         }
-        const signature = plugin.persistentMenuManager?.getViewModeSignature?.(view) || '';
+        const filePath = view.file instanceof TFile ? view.file.path : '';
+        const mode = getViewMode(view) || 'unknown';
+        const signature = `${filePath}\u0000${mode}\u0000${isStrictSourceMode(view) ? 'strict-source' : 'rendered'}`;
         if (!signature || signature === lastActiveModeSignature) return;
         lastActiveModeSignature = signature;
-        plugin.persistentMenuManager?.handleViewModeMaybeChanged?.(view);
+        throttledEnsureMenus();
+        plugin.app.workspace.updateOptions();
+        plugin.hideCompletedCheckboxesService?.refreshAllEditors();
+        plugin.virtualBaseEmbedService?.scheduleRefresh(0);
         overlayRendering.invalidate({
             reason: 'active-view-mode-transition',
             file: view.file instanceof TFile ? view.file : undefined,

@@ -8893,7 +8893,7 @@ export const PLUGIN_STYLES = `
         display: list-item !important;
       }
 
-      body.tps-gcm-hide-completed-checkboxes .markdown-source-view.mod-cm6:not(.is-source-mode) .cm-line.tps-gcm-hidden-completed-checkbox-line {
+      body.tps-gcm-hide-completed-checkboxes .markdown-source-view.mod-cm6.is-live-preview .cm-line.tps-gcm-hidden-completed-checkbox-line {
         min-height: 0 !important;
         height: 0 !important;
         max-height: 0 !important;
@@ -8906,7 +8906,7 @@ export const PLUGIN_STYLES = `
         pointer-events: none !important;
       }
 
-      .markdown-source-view.mod-cm6:not(.is-source-mode) .cm-line.tps-gcm-hidden-completed-checkbox-line {
+      .markdown-source-view.mod-cm6.is-live-preview .cm-line.tps-gcm-hidden-completed-checkbox-line {
         min-height: 0 !important;
         height: 0 !important;
         max-height: 0 !important;
@@ -8919,7 +8919,7 @@ export const PLUGIN_STYLES = `
         pointer-events: none !important;
       }
 
-      body.tps-gcm-hide-completed-checkboxes .markdown-source-view.mod-cm6:not(.is-source-mode).tps-gcm-completed-checkboxes-revealed .cm-line.tps-gcm-hidden-completed-checkbox-line {
+      body.tps-gcm-hide-completed-checkboxes .markdown-source-view.mod-cm6.is-live-preview.tps-gcm-completed-checkboxes-revealed .cm-line.tps-gcm-hidden-completed-checkbox-line {
         min-height: revert !important;
         height: revert !important;
         max-height: revert !important;

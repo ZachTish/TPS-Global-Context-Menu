@@ -3,6 +3,7 @@
  * Extracted from PersistentMenuManager to keep that class focused on menu lifecycle.
  */
 import { App, MarkdownView, WorkspaceLeaf } from 'obsidian';
+import { isStrictSourceEditorRoot } from '../utils/markdown-editor-mode';
 
 export function isCompatibleMarkdownView(view: unknown): view is MarkdownView {
   if (!view || typeof view !== 'object') return false;
@@ -71,7 +72,7 @@ export function isStrictSourceMode(view: MarkdownView): boolean {
 
   const sourceView = anyView.contentEl?.querySelector?.('.markdown-source-view') as HTMLElement | null | undefined;
   if (!sourceView) return false;
-  return !sourceView.classList.contains('is-live-preview');
+  return isStrictSourceEditorRoot(sourceView);
 }
 
 export function getCompatibleMarkdownViewFromLeaf(leaf: WorkspaceLeaf | null | undefined): MarkdownView | null {
