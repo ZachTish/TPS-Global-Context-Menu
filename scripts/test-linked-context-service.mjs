@@ -131,10 +131,16 @@ test('an explicitly removed source stays absent while resolved links and file lo
 
 test('linked context recovery and source invalidation predicates fail closed', async () => {
   const {
+    getLinkedContextRecoveryIdleDelay,
     isLinkedContextSourceChangeRelevant,
     normalizeLinkedContextSortOrder,
     shouldRecoverLinkedContextPanel,
   } = await loadService();
+
+  assert.equal(getLinkedContextRecoveryIdleDelay(1_000, 1_100, 240), 140);
+  assert.equal(getLinkedContextRecoveryIdleDelay(1_000, 1_240, 240), 0);
+  assert.equal(getLinkedContextRecoveryIdleDelay(0, 1_100, 240), 0);
+  assert.equal(getLinkedContextRecoveryIdleDelay(1_000, 900, 240), 240);
 
   assert.equal(normalizeLinkedContextSortOrder('source-desc'), 'source-desc');
   assert.equal(normalizeLinkedContextSortOrder('modified-desc'), 'source-asc');

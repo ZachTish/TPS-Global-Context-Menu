@@ -43,6 +43,17 @@ export function shouldRecoverLinkedContextPanel(state: LinkedContextRecoveryStat
     && state.activeFilePath === state.mountedFilePath;
 }
 
+export function getLinkedContextRecoveryIdleDelay(
+  lastScrollAt: number,
+  now: number,
+  idleMs: number,
+): number {
+  if (!Number.isFinite(lastScrollAt) || lastScrollAt <= 0) return 0;
+  if (!Number.isFinite(now) || !Number.isFinite(idleMs) || idleMs <= 0) return 0;
+  const elapsed = Math.max(0, now - lastScrollAt);
+  return Math.max(0, Math.ceil(idleMs - elapsed));
+}
+
 export function isLinkedContextSourceChangeRelevant(
   changedPath: string,
   targetPath: string,

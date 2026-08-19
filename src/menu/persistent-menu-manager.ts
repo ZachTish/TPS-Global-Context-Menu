@@ -28,6 +28,7 @@ import { resolveTaskScheduledValue } from '../utils/daily-note-task-schedule';
 import * as logger from '../logger';
 import { KeyboardAwareOverlay } from '../utils/mobile-overlay';
 import {
+  getLinkedContextRecoveryIdleDelay,
   isLinkedContextSourceChangeRelevant,
   LinkedContextItem,
   LinkedContextService,
@@ -116,6 +117,11 @@ export class PersistentMenuManager {
   private linkedContextRenders: Map<MarkdownView, { requestKey: string; promise: Promise<void> }> = new Map();
   private linkedContextHostObservers: Map<MarkdownView, { root: HTMLElement; observer: MutationObserver }> = new Map();
   private linkedContextRecoveryTimers: Map<MarkdownView, number> = new Map();
+  private linkedContextRecoveryScrollStates: Map<MarkdownView, {
+    scroller: HTMLElement;
+    listener: () => void;
+    lastScrollAt: number;
+  }> = new Map();
   private linkedContextInvalidationVersions: WeakMap<MarkdownView, number> = new WeakMap();
   private linkedContextRemovedSourcePaths: Set<string> = new Set();
   private readonly linkedContextService: LinkedContextService;
@@ -707,7 +713,9 @@ export class PersistentMenuManager {
   }
 
   private ensureLinkedContextHostObserver(view: MarkdownView): void {
-    if (typeof MutationObserver === 'undefined' || !view.contentEl) return;
+    if (!view.contentEl) return;
+    this.ensureLinkedContextRecoveryScrollTracking(view);
+    if (typeof MutationObserver === 'undefined') return;
     const current = this.linkedContextHostObservers.get(view);
     if (current?.root === view.contentEl) return;
     current?.observer.disconnect();
@@ -721,13 +729,49 @@ export class PersistentMenuManager {
     this.linkedContextHostObservers.set(view, { root: view.contentEl, observer });
   }
 
-  private scheduleLinkedContextMountRecovery(view: MarkdownView, attempt: number = 0): void {
+  private ensureLinkedContextRecoveryScrollTracking(view: MarkdownView): void {
+    const scroller = this.resolveScrollContainer(view);
+    const current = this.linkedContextRecoveryScrollStates.get(view);
+    if (current?.scroller === scroller) return;
+    if (current) current.scroller.removeEventListener('scroll', current.listener);
+    this.linkedContextRecoveryScrollStates.delete(view);
+    if (!scroller) return;
+
+    const state = {
+      scroller,
+      lastScrollAt: 0,
+      listener: () => {
+        state.lastScrollAt = Date.now();
+        if (scroller.scrollTop <= 24 && !this.isLinkedContextPanelMounted(view)) {
+          this.scheduleLinkedContextMountRecovery(view);
+        }
+      },
+    };
+    scroller.addEventListener('scroll', state.listener, { passive: true });
+    this.linkedContextRecoveryScrollStates.set(view, state);
+  }
+
+  private scheduleLinkedContextMountRecovery(
+    view: MarkdownView,
+    attempt: number = 0,
+    overrideDelay?: number,
+  ): void {
     if (this.linkedContextRecoveryTimers.has(view)) return;
     const delays = [40, 120, 300, 700, 1200];
-    const delay = delays[Math.min(attempt, delays.length - 1)];
+    const delay = overrideDelay ?? delays[Math.min(attempt, delays.length - 1)];
     const timer = window.setTimeout(() => {
       this.linkedContextRecoveryTimers.delete(view);
       if (!this.linkedContextHostObservers.has(view)) return;
+      const scrollState = this.linkedContextRecoveryScrollStates.get(view);
+      const idleDelay = getLinkedContextRecoveryIdleDelay(
+        scrollState?.lastScrollAt || 0,
+        Date.now(),
+        240,
+      );
+      if (idleDelay > 0) {
+        this.scheduleLinkedContextMountRecovery(view, attempt, idleDelay);
+        return;
+      }
       const mounted = this.linkedContextPanels.get(view);
       const activeFilePath = view.file?.path || '';
       if (!mounted || !shouldRecoverLinkedContextPanel({
@@ -757,6 +801,25 @@ export class PersistentMenuManager {
     const timer = this.linkedContextRecoveryTimers.get(view);
     if (timer !== undefined) window.clearTimeout(timer);
     this.linkedContextRecoveryTimers.delete(view);
+    const scrollState = this.linkedContextRecoveryScrollStates.get(view);
+    if (scrollState) scrollState.scroller.removeEventListener('scroll', scrollState.listener);
+    this.linkedContextRecoveryScrollStates.delete(view);
+  }
+
+  private captureLinkedContextScrollPosition(
+    view: MarkdownView,
+  ): { scroller: HTMLElement; scrollTop: number } | null {
+    const scroller = this.resolveScrollContainer(view);
+    return scroller ? { scroller, scrollTop: scroller.scrollTop } : null;
+  }
+
+  private restoreLinkedContextScrollPosition(
+    snapshot: { scroller: HTMLElement; scrollTop: number } | null,
+  ): void {
+    if (!snapshot?.scroller.isConnected) return;
+    if (snapshot.scroller.scrollTop !== snapshot.scrollTop) {
+      snapshot.scroller.scrollTop = snapshot.scrollTop;
+    }
   }
 
   private unmountLinkedContextPanel(view: MarkdownView, options: { preserveMountHosts?: boolean } = {}): void {
@@ -865,9 +928,11 @@ export class PersistentMenuManager {
       // so move that exact DOM/component into the replacement host instead of
       // rescanning sources and rebuilding every card.
       const placement = this.plugin.settings.linkedContextPlacement === 'top' ? 'top' : 'bottom';
+      const scrollSnapshot = this.captureLinkedContextScrollPosition(view);
       const parent = this.resolveLinkedContextMount(view, placement);
       if (parent?.isConnected) {
         parent.appendChild(mounted.el);
+        this.restoreLinkedContextScrollPosition(scrollSnapshot);
         if (this.isLinkedContextPanelMounted(view)) {
           if (placement === 'bottom') this.removeEmptyTopSurfaceHost(view);
           else this.removeEmptyNoteFooterHosts(view);
@@ -951,12 +1016,14 @@ export class PersistentMenuManager {
       }
 
       if (!this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
+      const scrollSnapshot = this.captureLinkedContextScrollPosition(view);
       const parent = this.resolveLinkedContextMount(view, placement);
       if (!parent || !this.isLinkedContextRenderActive(view, file, requestId)) return;
 
       this.unmountLinkedContextPanel(view, { preserveMountHosts: true });
       if (!parent.isConnected || !this.isLinkedContextRenderActive(view, file, requestId)) return;
       parent.appendChild(candidatePanel);
+      this.restoreLinkedContextScrollPosition(scrollSnapshot);
       this.linkedContextPanels.set(view, {
         el: candidatePanel,
         component: candidateComponent,
@@ -1447,6 +1514,14 @@ export class PersistentMenuManager {
   }
 
   private resolveLinkedContextTopHost(view: MarkdownView): HTMLElement | null {
+    const titleEl = this.resolveInlineTitleElement(view);
+    const scroller = this.resolveScrollContainer(view);
+    if (!titleEl && (scroller?.scrollTop || 0) > 24) {
+      // Reading View virtualizes its title and early sections while scrolled.
+      // Treat the missing title as a temporarily unavailable top mount instead
+      // of inserting before the first currently materialized mid-note section.
+      return null;
+    }
     const host = this.ensureTopSurfaceHost(view);
     if (!host) return null;
 

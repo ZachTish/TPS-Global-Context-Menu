@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.34.4
+
+- Linked context no longer fights Obsidian's Reading View virtualizer while a note is scrolling. A detached panel waits until scrolling has settled before GCM attempts to recover its mount.
+- Reattaching an unchanged panel or committing a freshly rendered replacement preserves the note's exact vertical scroll offset.
+- When Reading View has virtualized the note title away, GCM no longer creates a top linked-context mount beside the first currently materialized mid-note section. Recovery resumes when the title/top mount is available again.
+- Recovery remains bounded and removes its scroll listener, observer, and timer when the view or feature is closed. Linked-context content, ordering, placement settings, and note data are unchanged.
+- This backward-compatible patch changes no settings, APIs, or note schema. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.34.4.md`.
+
 ## 1.34.3
 
 - Strict Source mode now shows the literal Markdown for TPS-managed content. Inline-property chips, hidden TPS metadata replacements, completed-task line hiding, virtual Base overlays, and the rendered Linked context panel are absent unless Obsidian explicitly marks the editor as Live Preview or renders Reading View.

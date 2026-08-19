@@ -182,6 +182,8 @@ test('a detached same-key panel is moved intact before any collection or render 
   assert.ok(inFlightStart > sameKeyStart, 'reattachment must happen before render coalescing starts');
   assert.match(reattachSource, /const parent = this\.resolveLinkedContextMount\(view, placement\)/);
   assert.match(reattachSource, /parent\.appendChild\(mounted\.el\)/);
+  assert.match(reattachSource, /captureLinkedContextScrollPosition\(view\)/);
+  assert.match(reattachSource, /restoreLinkedContextScrollPosition\(scrollSnapshot\)/);
   assert.match(reattachSource, /if \(this\.isLinkedContextPanelMounted\(view\)\) \{/);
   assert.doesNotMatch(reattachSource, /getLinkedContextItems|renderLinkedContextPanel|unmountLinkedContextPanel/);
   assert.match(reattachSource, /return;\s*\}/);
@@ -277,11 +279,14 @@ test('linked context recovers a detached managed mount with coalesced bounded re
 
   assert.match(manager, /linkedContextHostObservers: Map<MarkdownView/);
   assert.match(manager, /linkedContextRecoveryTimers: Map<MarkdownView, number>/);
+  assert.match(manager, /linkedContextRecoveryScrollStates: Map<MarkdownView/);
   assert.match(observeSource, /new MutationObserver/);
   assert.match(observeSource, /observer\.observe\(view\.contentEl, \{ childList: true, subtree: true \}\)/);
   assert.match(observeSource, /this\.isLinkedContextPanelMounted\(view\)/);
   assert.match(observeSource, /this\.scheduleLinkedContextMountRecovery\(view\)/);
   assert.match(recoverySource, /const delays = \[40, 120, 300, 700, 1200\]/);
+  assert.match(recoverySource, /getLinkedContextRecoveryIdleDelay/);
+  assert.match(recoverySource, /this\.scheduleLinkedContextMountRecovery\(view, attempt, idleDelay\)/);
   assert.match(recoverySource, /this\.linkedContextRecoveryTimers\.has\(view\)/);
   assert.match(recoverySource, /shouldRecoverLinkedContextPanel/);
   assert.match(recoverySource, /this\.ensureLinkedContextPanel\(view\)\.finally/);
@@ -289,7 +294,23 @@ test('linked context recovers a detached managed mount with coalesced bounded re
   assert.match(recoverySource, /this\.scheduleLinkedContextMountRecovery\(view, attempt \+ 1\)/);
   assert.match(releaseSource, /observer\.disconnect\(\)/);
   assert.match(releaseSource, /window\.clearTimeout\(timer\)/);
+  assert.match(releaseSource, /removeEventListener\('scroll', scrollState\.listener\)/);
   assert.match(manager, /this\.releaseLinkedContextHostObserver\(view\)/);
+});
+
+test('linked context recovery does not create a virtualized top mount or change the scroll offset', () => {
+  const mountSource = methodSource(
+    'private resolveLinkedContextTopHost',
+    'private ensureTopSurfaceHost',
+  );
+  const renderSource = methodSource(
+    'private async renderLinkedContextPanel',
+    'private disposeLinkedContextCandidate',
+  );
+
+  assert.match(mountSource, /!titleEl && \(scroller\?\.scrollTop \|\| 0\) > 24/);
+  assert.match(renderSource, /captureLinkedContextScrollPosition\(view\)/);
+  assert.match(renderSource, /restoreLinkedContextScrollPosition\(scrollSnapshot\)/);
 });
 
 test('source-file changes invalidate visible linked context without depending on the target view path', () => {
