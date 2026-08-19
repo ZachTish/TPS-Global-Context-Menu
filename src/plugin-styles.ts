@@ -8937,6 +8937,11 @@ export const PLUGIN_STYLES = `
       }
 
       .markdown-source-view.mod-cm6.is-live-preview.tps-gcm-completed-checkboxes-has-reveal .inline-title,
+      .markdown-rendered.tps-gcm-completed-checkboxes-has-reveal,
+      .markdown-reading-view.tps-gcm-completed-checkboxes-has-reveal {
+        position: relative;
+      }
+
       .markdown-source-view.mod-cm6.is-live-preview.tps-gcm-completed-checkboxes-has-reveal .cm-line.inline-title {
         box-sizing: border-box;
         padding-right: 128px;
@@ -8966,19 +8971,21 @@ export const PLUGIN_STYLES = `
         pointer-events: none;
       }
 
-      .markdown-preview-view .tps-gcm-completed-checkbox-reveal,
-      .markdown-rendered .tps-gcm-completed-checkbox-reveal,
-      .markdown-reading-view .tps-gcm-completed-checkbox-reveal {
+      .markdown-preview-view > .tps-gcm-completed-checkbox-reveal,
+      .markdown-rendered > .tps-gcm-completed-checkbox-reveal,
+      .markdown-reading-view > .tps-gcm-completed-checkbox-reveal {
         display: flex;
         align-items: center;
         justify-content: flex-end;
-        position: sticky;
-        top: 8px;
+        position: absolute;
+        top: 14px;
+        right: max(12px, calc((100% - var(--file-line-width, 700px)) / 2));
         z-index: 80;
-        width: 100%;
+        width: auto;
+        min-width: max-content;
         min-height: 24px;
-        margin: 0 0 8px;
-        padding: 0 4px;
+        margin: 0;
+        padding: 0;
         pointer-events: none;
       }
 

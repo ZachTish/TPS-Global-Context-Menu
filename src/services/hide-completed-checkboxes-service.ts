@@ -426,7 +426,9 @@ export class HideCompletedCheckboxesService {
   }
 
   private syncRevealButton(root: HTMLElement, hasRevealableTasks: boolean, revealed: boolean, revealAllTasks: boolean): void {
-    const existing = root.querySelector<HTMLElement>(`.${REVEAL_WIDGET_CLASS}`);
+    const revealWidgets = Array.from(root.querySelectorAll<HTMLElement>(`.${REVEAL_WIDGET_CLASS}`));
+    const existing = revealWidgets.shift() ?? null;
+    for (const duplicate of revealWidgets) duplicate.remove();
     if (!hasRevealableTasks) {
       existing?.remove();
       root.classList.remove(HAS_REVEAL_WIDGET_CLASS);
@@ -469,15 +471,14 @@ export class HideCompletedCheckboxesService {
       button.addEventListener('touchend', toggleReveal, { passive: false });
     }
 
-    button.textContent = revealAllTasks
+    const buttonLabel = revealAllTasks
       ? (revealed ? 'Hide tasks' : 'Show tasks')
       : (revealed ? 'Hide completed' : 'Show completed');
-    button.setAttribute(
-      'aria-label',
-      revealAllTasks
-        ? (revealed ? 'Hide task lines again' : 'Show all task lines temporarily')
-        : (revealed ? 'Hide completed checkbox lines again' : 'Show completed checkbox lines temporarily'),
-    );
+    if (button.textContent !== buttonLabel) button.textContent = buttonLabel;
+    const ariaLabel = revealAllTasks
+      ? (revealed ? 'Hide task lines again' : 'Show all task lines temporarily')
+      : (revealed ? 'Hide completed checkbox lines again' : 'Show completed checkbox lines temporarily');
+    if (button.getAttribute('aria-label') !== ariaLabel) button.setAttribute('aria-label', ariaLabel);
 
     const mount = this.getRevealButtonMount(root);
     if (this.isRootRecentlyEdited(root) && wrap.parentElement === mount) return;
@@ -654,9 +655,10 @@ export class HideCompletedCheckboxesService {
   }
 
   private getRevealButtonMount(root: HTMLElement): HTMLElement {
-    if (root.matches('.markdown-preview-view, .markdown-rendered, .markdown-reading-view')) {
-      return root.querySelector<HTMLElement>('.markdown-preview-sizer') ?? root;
-    }
+    // Obsidian owns every child of `.markdown-preview-sizer` for Reading View
+    // virtualization. Adding our control there changes its section geometry and
+    // can leave a large phantom gap after Properties. Mount on the view root as
+    // a zero-layout overlay instead.
     return root;
   }
 

@@ -27,10 +27,10 @@ const syncRevealButtonSource = source.slice(
 );
 const liveRevealStyles = styles.slice(
   styles.indexOf('.markdown-source-view.mod-cm6.is-live-preview > .tps-gcm-completed-checkbox-reveal'),
-  styles.indexOf('.markdown-preview-view .tps-gcm-completed-checkbox-reveal'),
+  styles.indexOf('.markdown-preview-view > .tps-gcm-completed-checkbox-reveal'),
 );
 const renderedRevealStyles = styles.slice(
-  styles.indexOf('.markdown-preview-view .tps-gcm-completed-checkbox-reveal'),
+  styles.indexOf('.markdown-preview-view > .tps-gcm-completed-checkbox-reveal'),
   styles.indexOf('.markdown-source-view.mod-cm6.is-live-preview .tps-gcm-completed-checkbox-reveal button'),
 );
 const mobileRevealStyles = styles.slice(
@@ -68,6 +68,11 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(source, /getRenderedRoots\(\): HTMLElement\[\]/);
   assert.match(source, /\.markdown-preview-view, \.markdown-rendered, \.markdown-reading-view/);
   assert.match(source, /getRevealButtonMount\(root: HTMLElement\): HTMLElement/);
+  assert.match(source, /Obsidian owns every child of `\.markdown-preview-sizer`/);
+  assert.doesNotMatch(
+    source.slice(source.indexOf('private getRevealButtonMount'), source.indexOf('private isLivePreviewRoot')),
+    /querySelector<HTMLElement>\('\.markdown-preview-sizer'\)/,
+  );
   assert.match(source, /wrap\.className = `\$\{REVEAL_WIDGET_CLASS\} tps-gcm-hover-element`/);
   assert.match(source, /wrap\.dataset\.tpsHoverElement = 'true'/);
   assert.match(source, /lastEditorInputAt/);
@@ -84,6 +89,10 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.doesNotMatch(observeRootSource, /isRootActivelyBeingEdited/);
   assert.match(syncRevealButtonSource, /if \(this\.isRootRecentlyEdited\(root\) && wrap\.parentElement === mount\) return;/);
   assert.match(syncRevealButtonSource, /if \(wrap\.parentElement !== mount\) mount\.prepend\(wrap\)/);
+  assert.match(syncRevealButtonSource, /const revealWidgets = Array\.from\(root\.querySelectorAll<HTMLElement>/);
+  assert.match(syncRevealButtonSource, /for \(const duplicate of revealWidgets\) duplicate\.remove\(\)/);
+  assert.match(syncRevealButtonSource, /if \(button\.textContent !== buttonLabel\) button\.textContent = buttonLabel/);
+  assert.match(syncRevealButtonSource, /if \(button\.getAttribute\('aria-label'\) !== ariaLabel\) button\.setAttribute\('aria-label', ariaLabel\)/);
   assert.match(syncRevealButtonSource, /button\.addEventListener\('pointerdown', suppressPress\)/);
   assert.match(syncRevealButtonSource, /button\.addEventListener\('touchstart', suppressPress, \{ passive: false \}\)/);
   assert.match(syncRevealButtonSource, /button\.addEventListener\('touchend', toggleReveal, \{ passive: false \}\)/);
@@ -133,8 +142,8 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(styles, /hide-all-task-lines-reading-mode \.markdown-reading-view\.tps-gcm-completed-checkboxes-revealed li\.task-list-item \{/);
   assert.doesNotMatch(styles, /hide-completed-checkboxes \.markdown-rendered li\.task-list-item\.tps-gcm-mapped-completed-task/);
   assert.doesNotMatch(styles, /li\.task-list-item\[data-task=">"\]/);
-  assert.match(styles, /\.markdown-preview-view \.tps-gcm-completed-checkbox-reveal/);
-  assert.match(styles, /\.markdown-reading-view \.tps-gcm-completed-checkbox-reveal/);
+  assert.match(styles, /\.markdown-preview-view > \.tps-gcm-completed-checkbox-reveal/);
+  assert.match(styles, /\.markdown-reading-view > \.tps-gcm-completed-checkbox-reveal/);
   assert.match(styles, /\.markdown-source-view\.mod-cm6\.is-live-preview \{/);
   assert.match(styles, /\.markdown-source-view\.mod-cm6\.is-live-preview\.tps-gcm-completed-checkboxes-has-reveal \.inline-title/);
   assert.match(styles, /\.markdown-source-view\.mod-cm6\.is-live-preview > \.tps-gcm-completed-checkbox-reveal/);
@@ -145,7 +154,11 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.doesNotMatch(liveRevealStyles, /width: 100%;/);
   assert.doesNotMatch(liveRevealStyles, /position: sticky;/);
   assert.doesNotMatch(styles, /\.cm-contentContainer > \.tps-gcm-completed-checkbox-reveal/);
-  assert.match(renderedRevealStyles, /position: sticky;/);
+  assert.match(renderedRevealStyles, /position: absolute;/);
+  assert.match(renderedRevealStyles, /width: auto;/);
+  assert.match(renderedRevealStyles, /min-width: max-content;/);
+  assert.doesNotMatch(renderedRevealStyles, /position: sticky;/);
+  assert.doesNotMatch(renderedRevealStyles, /width: 100%;/);
   assert.match(mobileRevealStyles, /body\.is-mobile \.markdown-source-view\.mod-cm6\.is-live-preview > \.tps-gcm-completed-checkbox-reveal/);
   assert.match(mobileRevealStyles, /body\.is-mobile \.markdown-reading-view \.tps-gcm-completed-checkbox-reveal/);
   assert.match(mobileRevealStyles, /position: fixed;/);

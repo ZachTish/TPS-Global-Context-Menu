@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.34.6
+
+- Completed-task reveal controls in Reading View now mount on the Markdown view root instead of inside Obsidian's virtualized `.markdown-preview-sizer`. The control is an absolute, zero-flow overlay, so it cannot add document height, leave a blank gap below Properties, or change the virtualizer's scroll geometry.
+- Reveal-control refreshes remove accidental duplicates and update text/accessibility labels only when their values actually change. This prevents the completed-task observer from feeding its own mutations back into repeated refreshes and visible button flicker.
+- The fix is verified together with top-placed Linked context: repeated scrolling and a linked-source refresh retain the current section while completed-task hiding remains enabled.
+- This backward-compatible patch changes no settings, APIs, note content, or defaults. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.34.6.md`.
+
 ## 1.34.5
 
 - Top-placed Linked context no longer rebuilds or reattaches its top-of-note host while the note is scrolled away from the beginning, even when Obsidian keeps the inline title mounted. This closes the remaining Reading View and Live Preview path that could reset the note to the top.
