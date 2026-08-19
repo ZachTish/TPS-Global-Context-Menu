@@ -308,9 +308,41 @@ test('linked context recovery does not create a virtualized top mount or change 
     'private disposeLinkedContextCandidate',
   );
 
-  assert.match(mountSource, /!titleEl && \(scroller\?\.scrollTop \|\| 0\) > 24/);
+  assert.match(
+    mountSource,
+    /shouldDeferLinkedContextMountForScroll\('top', scroller\?\.scrollTop \|\| 0\)/,
+  );
+  assert.doesNotMatch(
+    mountSource,
+    /!titleEl\s*&&/,
+    'top mount recovery must not depend on Obsidian virtualizing the title away',
+  );
   assert.match(renderSource, /captureLinkedContextScrollPosition\(view\)/);
   assert.match(renderSource, /restoreLinkedContextScrollPosition\(scrollSnapshot\)/);
+});
+
+test('a deferred top mount resumes only after returning to the top threshold', () => {
+  const trackingSource = methodSource(
+    'private ensureLinkedContextRecoveryScrollTracking',
+    'private scheduleLinkedContextMountRecovery',
+  );
+  const recoverySource = methodSource(
+    'private scheduleLinkedContextMountRecovery',
+    'private releaseLinkedContextHostObserver',
+  );
+  const ensureSource = methodSource(
+    'private async ensureLinkedContextPanel',
+    'private async renderLinkedContextPanel',
+  );
+
+  assert.match(manager, /linkedContextDeferredTopMounts: Set<MarkdownView>/);
+  assert.match(trackingSource, /if \(scroller\.scrollTop <= 24\)/);
+  assert.match(trackingSource, /linkedContextDeferredTopMounts\.delete\(view\)/);
+  assert.match(trackingSource, /void this\.ensureLinkedContextPanel\(view\)/);
+  assert.match(recoverySource, /shouldDeferLinkedContextMountForScroll\(placement,/);
+  assert.match(recoverySource, /linkedContextDeferredTopMounts\.add\(view\)/);
+  assert.match(ensureSource, /shouldDeferLinkedContextMountForScroll\(placement,/);
+  assert.match(ensureSource, /linkedContextDeferredTopMounts\.add\(view\)/);
 });
 
 test('source-file changes invalidate visible linked context without depending on the target view path', () => {

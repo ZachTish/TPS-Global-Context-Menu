@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.34.5
+
+- Top-placed Linked context no longer rebuilds or reattaches its top-of-note host while the note is scrolled away from the beginning, even when Obsidian keeps the inline title mounted. This closes the remaining Reading View and Live Preview path that could reset the note to the top.
+- A deferred panel or source refresh resumes when the same note returns to the top threshold. Bottom placement keeps its existing idle recovery behavior.
+- This backward-compatible patch changes no settings, APIs, note content, or placement defaults. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.34.5.md`.
+
 ## 1.34.4
 
 - Linked context no longer fights Obsidian's Reading View virtualizer while a note is scrolling. A detached panel waits until scrolling has settled before GCM attempts to recover its mount.

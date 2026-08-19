@@ -134,6 +134,7 @@ test('linked context recovery and source invalidation predicates fail closed', a
     getLinkedContextRecoveryIdleDelay,
     isLinkedContextSourceChangeRelevant,
     normalizeLinkedContextSortOrder,
+    shouldDeferLinkedContextMountForScroll,
     shouldRecoverLinkedContextPanel,
   } = await loadService();
 
@@ -141,6 +142,12 @@ test('linked context recovery and source invalidation predicates fail closed', a
   assert.equal(getLinkedContextRecoveryIdleDelay(1_000, 1_240, 240), 0);
   assert.equal(getLinkedContextRecoveryIdleDelay(0, 1_100, 240), 0);
   assert.equal(getLinkedContextRecoveryIdleDelay(1_000, 900, 240), 240);
+
+  assert.equal(shouldDeferLinkedContextMountForScroll('top', 25), true);
+  assert.equal(shouldDeferLinkedContextMountForScroll('top', 24), false);
+  assert.equal(shouldDeferLinkedContextMountForScroll('top', 600), true);
+  assert.equal(shouldDeferLinkedContextMountForScroll('bottom', 600), false);
+  assert.equal(shouldDeferLinkedContextMountForScroll('top', Number.NaN), true);
 
   assert.equal(normalizeLinkedContextSortOrder('source-desc'), 'source-desc');
   assert.equal(normalizeLinkedContextSortOrder('modified-desc'), 'source-asc');

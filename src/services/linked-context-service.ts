@@ -54,6 +54,16 @@ export function getLinkedContextRecoveryIdleDelay(
   return Math.max(0, Math.ceil(idleMs - elapsed));
 }
 
+export function shouldDeferLinkedContextMountForScroll(
+  placement: 'top' | 'bottom',
+  scrollTop: number,
+  topThreshold: number = 24,
+): boolean {
+  if (placement !== 'top') return false;
+  if (!Number.isFinite(scrollTop) || !Number.isFinite(topThreshold)) return true;
+  return scrollTop > Math.max(0, topThreshold);
+}
+
 export function isLinkedContextSourceChangeRelevant(
   changedPath: string,
   targetPath: string,

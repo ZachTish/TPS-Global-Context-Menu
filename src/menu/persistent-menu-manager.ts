@@ -33,6 +33,7 @@ import {
   LinkedContextItem,
   LinkedContextService,
   normalizeLinkedContextSortOrder,
+  shouldDeferLinkedContextMountForScroll,
   shouldRecoverLinkedContextPanel,
 } from '../services/linked-context-service';
 // scroll-direction hide/reveal is handled inline â€” no gesture-handler import needed.
@@ -122,6 +123,7 @@ export class PersistentMenuManager {
     listener: () => void;
     lastScrollAt: number;
   }> = new Map();
+  private linkedContextDeferredTopMounts: Set<MarkdownView> = new Set();
   private linkedContextInvalidationVersions: WeakMap<MarkdownView, number> = new WeakMap();
   private linkedContextRemovedSourcePaths: Set<string> = new Set();
   private readonly linkedContextService: LinkedContextService;
@@ -742,8 +744,12 @@ export class PersistentMenuManager {
       lastScrollAt: 0,
       listener: () => {
         state.lastScrollAt = Date.now();
-        if (scroller.scrollTop <= 24 && !this.isLinkedContextPanelMounted(view)) {
-          this.scheduleLinkedContextMountRecovery(view);
+        if (scroller.scrollTop <= 24) {
+          if (this.linkedContextDeferredTopMounts.delete(view)) {
+            void this.ensureLinkedContextPanel(view);
+          } else if (!this.isLinkedContextPanelMounted(view)) {
+            this.scheduleLinkedContextMountRecovery(view);
+          }
         }
       },
     };
@@ -770,6 +776,11 @@ export class PersistentMenuManager {
       );
       if (idleDelay > 0) {
         this.scheduleLinkedContextMountRecovery(view, attempt, idleDelay);
+        return;
+      }
+      const placement = this.plugin.settings.linkedContextPlacement === 'top' ? 'top' : 'bottom';
+      if (shouldDeferLinkedContextMountForScroll(placement, scrollState?.scroller.scrollTop || 0)) {
+        this.linkedContextDeferredTopMounts.add(view);
         return;
       }
       const mounted = this.linkedContextPanels.get(view);
@@ -804,6 +815,7 @@ export class PersistentMenuManager {
     const scrollState = this.linkedContextRecoveryScrollStates.get(view);
     if (scrollState) scrollState.scroller.removeEventListener('scroll', scrollState.listener);
     this.linkedContextRecoveryScrollStates.delete(view);
+    this.linkedContextDeferredTopMounts.delete(view);
   }
 
   private captureLinkedContextScrollPosition(
@@ -928,6 +940,11 @@ export class PersistentMenuManager {
       // so move that exact DOM/component into the replacement host instead of
       // rescanning sources and rebuilding every card.
       const placement = this.plugin.settings.linkedContextPlacement === 'top' ? 'top' : 'bottom';
+      const scroller = this.resolveScrollContainer(view);
+      if (shouldDeferLinkedContextMountForScroll(placement, scroller?.scrollTop || 0)) {
+        this.linkedContextDeferredTopMounts.add(view);
+        return;
+      }
       const scrollSnapshot = this.captureLinkedContextScrollPosition(view);
       const parent = this.resolveLinkedContextMount(view, placement);
       if (parent?.isConnected) {
@@ -936,6 +953,7 @@ export class PersistentMenuManager {
         if (this.isLinkedContextPanelMounted(view)) {
           if (placement === 'bottom') this.removeEmptyTopSurfaceHost(view);
           else this.removeEmptyNoteFooterHosts(view);
+          this.linkedContextDeferredTopMounts.delete(view);
           return;
         }
       }
@@ -1016,6 +1034,11 @@ export class PersistentMenuManager {
       }
 
       if (!this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
+      const scroller = this.resolveScrollContainer(view);
+      if (shouldDeferLinkedContextMountForScroll(placement, scroller?.scrollTop || 0)) {
+        this.linkedContextDeferredTopMounts.add(view);
+        return;
+      }
       const scrollSnapshot = this.captureLinkedContextScrollPosition(view);
       const parent = this.resolveLinkedContextMount(view, placement);
       if (!parent || !this.isLinkedContextRenderActive(view, file, requestId)) return;
@@ -1033,6 +1056,7 @@ export class PersistentMenuManager {
         sourcePaths: new Set(items.map((item) => item.sourceFile.path)),
       });
       committed = true;
+      this.linkedContextDeferredTopMounts.delete(view);
       if (placement === 'bottom') this.removeEmptyTopSurfaceHost(view);
       else this.removeEmptyNoteFooterHosts(view);
     } catch (error) {
@@ -1514,12 +1538,11 @@ export class PersistentMenuManager {
   }
 
   private resolveLinkedContextTopHost(view: MarkdownView): HTMLElement | null {
-    const titleEl = this.resolveInlineTitleElement(view);
     const scroller = this.resolveScrollContainer(view);
-    if (!titleEl && (scroller?.scrollTop || 0) > 24) {
-      // Reading View virtualizes its title and early sections while scrolled.
-      // Treat the missing title as a temporarily unavailable top mount instead
-      // of inserting before the first currently materialized mid-note section.
+    if (shouldDeferLinkedContextMountForScroll('top', scroller?.scrollTop || 0)) {
+      // Never add or move a top-of-note host while the note is scrolled. Even
+      // when Obsidian keeps the title mounted, changing that early layout can
+      // make its virtualizer reset the scroll position to the beginning.
       return null;
     }
     const host = this.ensureTopSurfaceHost(view);
