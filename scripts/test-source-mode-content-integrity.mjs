@@ -65,6 +65,8 @@ test('every TPS editor substitution fails closed in strict Source mode', () => {
   const inlineSource = readFileSync(new URL('../src/services/inline-property-decoration-service.ts', import.meta.url), 'utf8');
   const hidingSource = readFileSync(new URL('../src/services/hide-completed-checkboxes-service.ts', import.meta.url), 'utf8');
   const embedsSource = readFileSync(new URL('../src/services/virtual-base-embed-service.ts', import.meta.url), 'utf8');
+  const linkedSubitemsSource = readFileSync(new URL('../src/services/linked-subitem-checkbox-service.ts', import.meta.url), 'utf8');
+  const dailyNavSource = readFileSync(new URL('../src/handlers/daily-note-nav-manager.ts', import.meta.url), 'utf8');
   const persistentMenuSource = readFileSync(new URL('../src/menu/persistent-menu-manager.ts', import.meta.url), 'utf8');
 
   assert.match(inlineSource, /isStrictSourceEditorRoot\(root\).*?return Decoration\.none/s);
@@ -72,6 +74,22 @@ test('every TPS editor substitution fails closed in strict Source mode', () => {
   assert.match(inlineSource, /normalizeInlineDateTimeValues[\s\S]*?isStrictSourceEditorRoot\(root\).*?return;/);
   assert.match(hidingSource, /return isLivePreviewEditorRoot\(root\);/);
   assert.match(embedsSource, /return isLivePreviewEditorRoot\(root\);/);
+  assert.match(
+    linkedSubitemsSource,
+    /buildEditorDecorations[\s\S]*?isStrictSourceMode\(markdownView\)[\s\S]*?Decoration\.none/,
+  );
+  assert.match(
+    linkedSubitemsSource,
+    /getLinkedSubitemRenderMode[\s\S]*?if \(isStrictSourceMode\(view\)\) return null/,
+  );
+  assert.match(
+    persistentMenuSource,
+    /ensureTopParentNav[\s\S]*?if \(this\.isStrictSourceMode\(view\)\)[\s\S]*?removeTopParentNav\(view\)[\s\S]*?removeBottomParentNav\(view\)/,
+  );
+  assert.match(
+    dailyNavSource,
+    /target\.leaf\.view instanceof MarkdownView && isStrictSourceMode\(target\.leaf\.view\)[\s\S]*?this\.detachNav\(\)/,
+  );
   assert.match(
     persistentMenuSource,
     /private async ensureLinkedContextPanel[\s\S]*?\|\| isStrictSourceMode\(view\)[\s\S]*?this\.removeLinkedContextPanel\(view\);/,
@@ -81,7 +99,7 @@ test('every TPS editor substitution fails closed in strict Source mode', () => {
     /private isLinkedContextRenderActive[\s\S]*?&& !isStrictSourceMode\(view\);/,
   );
 
-  for (const source of [inlineSource, hidingSource, embedsSource]) {
+  for (const source of [inlineSource, hidingSource, embedsSource, linkedSubitemsSource]) {
     assert.doesNotMatch(source, /classList\.contains\(['"]is-source-mode['"]\)/);
   }
 });

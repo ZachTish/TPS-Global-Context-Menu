@@ -1,6 +1,7 @@
-import { App, Component, Modal, TFile, WorkspaceLeaf, setIcon, normalizePath, Notice, Platform } from "obsidian";
+import { App, Component, MarkdownView, Modal, TFile, WorkspaceLeaf, setIcon, normalizePath, Notice, Platform } from "obsidian";
 import TPSGlobalContextMenuPlugin from "../main";
 import * as logger from "../logger";
+import { isStrictSourceMode } from "../services/leaf-resolver";
 
 type DailyNavTarget = {
     leaf: WorkspaceLeaf;
@@ -113,6 +114,10 @@ export class DailyNoteNavManager extends Component {
         const target = this.getTargetLeaf();
         this.removeStrayMobileNavs();
         if (!target) {
+            this.detachNav();
+            return;
+        }
+        if (target.leaf.view instanceof MarkdownView && isStrictSourceMode(target.leaf.view)) {
             this.detachNav();
             return;
         }

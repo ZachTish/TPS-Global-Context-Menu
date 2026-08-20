@@ -294,7 +294,8 @@ test('linked context recovers a detached managed mount with coalesced bounded re
   assert.match(recoverySource, /this\.scheduleLinkedContextMountRecovery\(view, attempt \+ 1\)/);
   assert.match(releaseSource, /observer\.disconnect\(\)/);
   assert.match(releaseSource, /window\.clearTimeout\(timer\)/);
-  assert.match(releaseSource, /removeEventListener\('scroll', scrollState\.listener\)/);
+  assert.match(releaseSource, /removeEventListener\('scroll', scrollState\.scrollListener, true\)/);
+  assert.match(releaseSource, /removeEventListener\('wheel', scrollState\.wheelListener, true\)/);
   assert.match(manager, /this\.releaseLinkedContextHostObserver\(view\)/);
 });
 
@@ -310,7 +311,7 @@ test('linked context recovery does not create a virtualized top mount or change 
 
   assert.match(
     mountSource,
-    /shouldDeferLinkedContextMountForScroll\('top', scroller\?\.scrollTop \|\| 0\)/,
+    /shouldDeferLinkedContextMountForScroll\('top', this\.getLinkedContextRecoveryScrollTop\(view\)\)/,
   );
   assert.doesNotMatch(
     mountSource,
@@ -336,7 +337,12 @@ test('a deferred top mount resumes only after returning to the top threshold', (
   );
 
   assert.match(manager, /linkedContextDeferredTopMounts: Set<MarkdownView>/);
-  assert.match(trackingSource, /if \(scroller\.scrollTop <= 24\)/);
+  assert.match(trackingSource, /root\.addEventListener\('scroll', state\.scrollListener, \{ capture: true, passive: true \}\)/);
+  assert.match(trackingSource, /root\.addEventListener\('wheel', state\.wheelListener, \{ capture: true, passive: true \}\)/);
+  assert.match(trackingSource, /state\.scroller = target/);
+  assert.match(trackingSource, /state\.wheelAwayFromTop = true/);
+  assert.match(trackingSource, /const scrollTop = this\.getLinkedContextRecoveryScrollTop\(view\)/);
+  assert.match(trackingSource, /if \(scrollTop <= 24\)/);
   assert.match(trackingSource, /linkedContextDeferredTopMounts\.delete\(view\)/);
   assert.match(trackingSource, /void this\.ensureLinkedContextPanel\(view\)/);
   assert.match(recoverySource, /shouldDeferLinkedContextMountForScroll\(placement,/);

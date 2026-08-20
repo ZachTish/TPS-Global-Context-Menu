@@ -4,7 +4,7 @@ import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate
 import type TPSGlobalContextMenuPlugin from '../main';
 import * as logger from '../logger';
 import { resolveCustomProperties } from '../resolve-profiles';
-import { getViewMode } from './leaf-resolver';
+import { getViewMode, isStrictSourceMode } from './leaf-resolver';
 import { resolveLinkTargetToFile } from './link-target-service';
 import { ViewModeService } from './view-mode-service';
 import type { BodySubitemLink } from './subitem-types';
@@ -1619,6 +1619,9 @@ export class LinkedSubitemCheckboxService {
     if (!(markdownView instanceof MarkdownView) || !(parentFile instanceof TFile)) {
       return { decorations: Decoration.none, matchCount: 0, potentialCount: 0, filePath: parentFile instanceof TFile ? parentFile.path : null };
     }
+    if (isStrictSourceMode(markdownView)) {
+      return { decorations: Decoration.none, matchCount: 0, potentialCount: 0, filePath: parentFile.path };
+    }
     if (this.plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) {
       return { decorations: Decoration.none, matchCount: 0, potentialCount: 0, filePath: parentFile.path };
     }
@@ -1786,6 +1789,7 @@ export class LinkedSubitemCheckboxService {
   }
 
   private getLinkedSubitemRenderMode(view: MarkdownView): 'preview' | 'source' | null {
+    if (isStrictSourceMode(view)) return null;
     const previewContainer = this.getVisiblePreviewContainer(view);
     if (previewContainer) return 'preview';
 

@@ -857,7 +857,7 @@ test('ignore guards cover relationship panels, body widgets, automation, creatio
   assert.match(sources.metadata, /relationshipRootIgnored[\s\S]{0,320}bodySubitemLinkService\.scanFile/u);
   assert.match(sources.checkbox, /ensureForView[\s\S]{0,420}isIgnoredFile\(file\)/u);
   assert.match(sources.checkbox, /syncDerivedStatusForChildFromReferences[\s\S]{0,220}isIgnoredFile\(childFile\)/u);
-  assert.match(sources.checkbox, /buildEditorDecorations[\s\S]{0,850}isIgnoredFile\(parentFile\)/u);
+  assert.match(sources.checkbox, /buildEditorDecorations[\s\S]{0,1100}isIgnoredFile\(parentFile\)/u);
   assert.match(sources.sync, /linkExistingChildToParent[\s\S]{0,300}isIgnoredFile\(childFile\)[\s\S]{0,120}isIgnoredFile\(parentFile\)/u);
   assert.match(sources.creation, /parseYaml\(finalFrontmatterLines\.slice\(1\)\.join\('\\n'\)\)/u);
   assert.match(sources.creation, /isIgnoredFrontmatter\(childWorkflowFrontmatter\)/u);

@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.34.7
+
+- Reading View Linked context recovery now learns the actual scrolling descendant from capture-phase scroll events instead of relying on one guessed Obsidian container. Downward wheel intent is recorded before the browser scrolls, so a detached top panel cannot be reattached in that frame and reset the note to the beginning.
+- The tracked scroll state follows the current note and actual scroller, defers top-placement recovery while away from the top, and releases its capture listeners with the Markdown view.
+- Strict Source mode is now literal for the remaining TPS surfaces: linked-subitem checkbox/status widgets, Calendar/Tasks/Mentions top navigation, and Daily Note navigation do not render until Live Preview or Reading View is active.
+- This backward-compatible patch changes no settings, APIs, note content, or defaults. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.34.7.md`.
+
 ## 1.34.6
 
 - Completed-task reveal controls in Reading View now mount on the Markdown view root instead of inside Obsidian's virtualized `.markdown-preview-sizer`. The control is an absolute, zero-flow overlay, so it cannot add document height, leave a blank gap below Properties, or change the virtualizer's scroll geometry.

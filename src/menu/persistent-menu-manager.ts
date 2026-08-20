@@ -119,9 +119,14 @@ export class PersistentMenuManager {
   private linkedContextHostObservers: Map<MarkdownView, { root: HTMLElement; observer: MutationObserver }> = new Map();
   private linkedContextRecoveryTimers: Map<MarkdownView, number> = new Map();
   private linkedContextRecoveryScrollStates: Map<MarkdownView, {
-    scroller: HTMLElement;
-    listener: () => void;
+    root: HTMLElement;
+    filePath: string;
+    scroller: HTMLElement | null;
+    scrollListener: (event: Event) => void;
+    wheelListener: (event: WheelEvent) => void;
     lastScrollAt: number;
+    lastKnownScrollTop: number;
+    wheelAwayFromTop: boolean;
   }> = new Map();
   private linkedContextDeferredTopMounts: Set<MarkdownView> = new Set();
   private linkedContextInvalidationVersions: WeakMap<MarkdownView, number> = new WeakMap();
@@ -732,29 +737,85 @@ export class PersistentMenuManager {
   }
 
   private ensureLinkedContextRecoveryScrollTracking(view: MarkdownView): void {
-    const scroller = this.resolveScrollContainer(view);
+    const root = view.contentEl;
+    if (!root) return;
     const current = this.linkedContextRecoveryScrollStates.get(view);
-    if (current?.scroller === scroller) return;
-    if (current) current.scroller.removeEventListener('scroll', current.listener);
+    if (current?.root === root) {
+      const filePath = view.file?.path || '';
+      if (current.filePath !== filePath) {
+        current.filePath = filePath;
+        current.scroller = this.resolveScrollContainer(view);
+        current.lastKnownScrollTop = Math.max(0, current.scroller?.scrollTop || 0);
+        current.wheelAwayFromTop = false;
+      } else if (!current.scroller?.isConnected) {
+        current.scroller = this.resolveScrollContainer(view);
+      }
+      return;
+    }
+    if (current) {
+      current.root.removeEventListener('scroll', current.scrollListener, true);
+      current.root.removeEventListener('wheel', current.wheelListener, true);
+    }
     this.linkedContextRecoveryScrollStates.delete(view);
-    if (!scroller) return;
 
     const state = {
-      scroller,
+      root,
+      filePath: view.file?.path || '',
+      scroller: this.resolveScrollContainer(view),
       lastScrollAt: 0,
-      listener: () => {
-        state.lastScrollAt = Date.now();
-        if (scroller.scrollTop <= 24) {
-          if (this.linkedContextDeferredTopMounts.delete(view)) {
-            void this.ensureLinkedContextPanel(view);
-          } else if (!this.isLinkedContextPanelMounted(view)) {
-            this.scheduleLinkedContextMountRecovery(view);
-          }
-        }
-      },
+      lastKnownScrollTop: 0,
+      wheelAwayFromTop: false,
+      scrollListener: (_event: Event) => {},
+      wheelListener: (_event: WheelEvent) => {},
     };
-    scroller.addEventListener('scroll', state.listener, { passive: true });
+    state.scrollListener = (event: Event) => {
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (target && root.contains(target) && this.isLinkedContextScrollContainerCandidate(target)) {
+        state.scroller = target;
+        state.lastKnownScrollTop = Math.max(0, target.scrollTop || 0);
+        if (state.lastKnownScrollTop <= 1) state.wheelAwayFromTop = false;
+      }
+      state.lastScrollAt = Date.now();
+      const scrollTop = this.getLinkedContextRecoveryScrollTop(view);
+      if (scrollTop <= 24) {
+        if (this.linkedContextDeferredTopMounts.delete(view)) {
+          void this.ensureLinkedContextPanel(view);
+        } else if (!this.isLinkedContextPanelMounted(view)) {
+          this.scheduleLinkedContextMountRecovery(view);
+        }
+      }
+    };
+    state.wheelListener = (event: WheelEvent) => {
+      if (!Number.isFinite(event.deltaY) || event.deltaY === 0) return;
+      state.lastScrollAt = Date.now();
+      if (event.deltaY > 0) {
+        // The wheel event precedes the browser's scroll event. Block top-host
+        // recovery in that first frame so Reading View cannot snap to the top.
+        state.wheelAwayFromTop = true;
+      }
+    };
+    root.addEventListener('scroll', state.scrollListener, { capture: true, passive: true });
+    root.addEventListener('wheel', state.wheelListener, { capture: true, passive: true });
     this.linkedContextRecoveryScrollStates.set(view, state);
+  }
+
+  private isLinkedContextScrollContainerCandidate(target: HTMLElement): boolean {
+    if (target.matches(
+      '.markdown-preview-view, .markdown-reading-view, .view-content, .cm-scroller, .markdown-source-view'
+    )) return true;
+    return target.scrollHeight > target.clientHeight + 1;
+  }
+
+  private getLinkedContextRecoveryScrollTop(view: MarkdownView): number {
+    const state = this.linkedContextRecoveryScrollStates.get(view);
+    if (state?.wheelAwayFromTop) return Number.POSITIVE_INFINITY;
+    if (state?.scroller?.isConnected) {
+      const current = Math.max(0, state.scroller.scrollTop || 0);
+      state.lastKnownScrollTop = current;
+      return current;
+    }
+    if (state && state.lastKnownScrollTop > 0) return state.lastKnownScrollTop;
+    return Math.max(0, this.resolveScrollContainer(view)?.scrollTop || 0);
   }
 
   private scheduleLinkedContextMountRecovery(
@@ -779,7 +840,7 @@ export class PersistentMenuManager {
         return;
       }
       const placement = this.plugin.settings.linkedContextPlacement === 'top' ? 'top' : 'bottom';
-      if (shouldDeferLinkedContextMountForScroll(placement, scrollState?.scroller.scrollTop || 0)) {
+      if (shouldDeferLinkedContextMountForScroll(placement, this.getLinkedContextRecoveryScrollTop(view))) {
         this.linkedContextDeferredTopMounts.add(view);
         return;
       }
@@ -813,7 +874,10 @@ export class PersistentMenuManager {
     if (timer !== undefined) window.clearTimeout(timer);
     this.linkedContextRecoveryTimers.delete(view);
     const scrollState = this.linkedContextRecoveryScrollStates.get(view);
-    if (scrollState) scrollState.scroller.removeEventListener('scroll', scrollState.listener);
+    if (scrollState) {
+      scrollState.root.removeEventListener('scroll', scrollState.scrollListener, true);
+      scrollState.root.removeEventListener('wheel', scrollState.wheelListener, true);
+    }
     this.linkedContextRecoveryScrollStates.delete(view);
     this.linkedContextDeferredTopMounts.delete(view);
   }
@@ -821,7 +885,8 @@ export class PersistentMenuManager {
   private captureLinkedContextScrollPosition(
     view: MarkdownView,
   ): { scroller: HTMLElement; scrollTop: number } | null {
-    const scroller = this.resolveScrollContainer(view);
+    const tracked = this.linkedContextRecoveryScrollStates.get(view)?.scroller;
+    const scroller = tracked?.isConnected ? tracked : this.resolveScrollContainer(view);
     return scroller ? { scroller, scrollTop: scroller.scrollTop } : null;
   }
 
@@ -940,8 +1005,7 @@ export class PersistentMenuManager {
       // so move that exact DOM/component into the replacement host instead of
       // rescanning sources and rebuilding every card.
       const placement = this.plugin.settings.linkedContextPlacement === 'top' ? 'top' : 'bottom';
-      const scroller = this.resolveScrollContainer(view);
-      if (shouldDeferLinkedContextMountForScroll(placement, scroller?.scrollTop || 0)) {
+      if (shouldDeferLinkedContextMountForScroll(placement, this.getLinkedContextRecoveryScrollTop(view))) {
         this.linkedContextDeferredTopMounts.add(view);
         return;
       }
@@ -1034,8 +1098,7 @@ export class PersistentMenuManager {
       }
 
       if (!this.isLinkedContextRenderCurrent(view, file, requestId, requestKey)) return;
-      const scroller = this.resolveScrollContainer(view);
-      if (shouldDeferLinkedContextMountForScroll(placement, scroller?.scrollTop || 0)) {
+      if (shouldDeferLinkedContextMountForScroll(placement, this.getLinkedContextRecoveryScrollTop(view))) {
         this.linkedContextDeferredTopMounts.add(view);
         return;
       }
@@ -1538,8 +1601,7 @@ export class PersistentMenuManager {
   }
 
   private resolveLinkedContextTopHost(view: MarkdownView): HTMLElement | null {
-    const scroller = this.resolveScrollContainer(view);
-    if (shouldDeferLinkedContextMountForScroll('top', scroller?.scrollTop || 0)) {
+    if (shouldDeferLinkedContextMountForScroll('top', this.getLinkedContextRecoveryScrollTop(view))) {
       // Never add or move a top-of-note host while the note is scrolled. Even
       // when Obsidian keeps the title mounted, changing that early layout can
       // make its virtualizer reset the scroll position to the beginning.
@@ -4018,6 +4080,12 @@ export class PersistentMenuManager {
   }
 
   public ensureTopParentNav(view: MarkdownView, options: { force?: boolean } = {}): void {
+    if (this.isStrictSourceMode(view)) {
+      this.clearNativePropertyVisibility(view);
+      this.removeTopParentNav(view);
+      this.removeBottomParentNav(view);
+      return;
+    }
     const wantsTopProperties = this.plugin.settings.showCustomPropertiesUnderTitle === true
       && this.plugin.settings.showCustomPropertiesInInlineUi !== false;
     const showStackedProperties = wantsTopProperties && !this.isStrictSourceMode(view);
