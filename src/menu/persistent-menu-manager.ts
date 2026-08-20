@@ -1718,7 +1718,24 @@ export class PersistentMenuManager {
 
     const mode = getViewMode(view);
     if (mode === 'preview') {
-      return contentRoot.querySelector<HTMLElement>('.markdown-preview-view .markdown-preview-sizer');
+      const previewRoot = contentRoot.querySelector<HTMLElement>('.markdown-preview-view');
+      if (!previewRoot) return null;
+
+      // Reading View virtualizes and replaces children of .markdown-preview-sizer
+      // while scrolling. Mount the footer beside that owned subtree so the same
+      // panel/component remains connected instead of disappearing until recovery.
+      const discovered = Array.from(
+        previewRoot.querySelectorAll<HTMLElement>(':scope > .tps-gcm-note-footer-host'),
+      );
+      let footerHost = discovered[0] || null;
+      for (const duplicate of discovered.slice(1)) duplicate.remove();
+      if (!footerHost) {
+        footerHost = document.createElement('div');
+        footerHost.className = 'tps-gcm-note-footer-host tps-gcm-note-footer-host--reading';
+        footerHost.contentEditable = 'false';
+        previewRoot.appendChild(footerHost);
+      }
+      return footerHost;
     }
 
     if (mode === 'source') {

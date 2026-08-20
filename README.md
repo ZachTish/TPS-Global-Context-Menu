@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.34.9
+
+- Bottom-placed Linked context in Reading View now mounts as a stable child of the Markdown view instead of inside Obsidian's virtualized preview sizer. Scrolling can no longer detach the panel and make it disappear until a delayed recovery reattaches it.
+- The same Linked-context DOM and component remain connected through routine Reading View virtualization. Recovery remains available for actual note, mode, or view-root replacement.
+- This backward-compatible patch changes no settings, APIs, note content, ordering, or placement defaults. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.34.9.md`.
+
 ## 1.34.8
 
 - Linked context no longer renders a heading card when the linked heading has no meaningful content beneath it. Whitespace, HTML comments, and a standalone block ID do not keep an empty excerpt alive; nested headings and visible content still do.

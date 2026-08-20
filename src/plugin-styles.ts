@@ -4585,11 +4585,18 @@ export const PLUGIN_STYLES = `
         box-sizing: border-box;
       }
 
-      /* Reading mode footer host (inside markdown-preview-sizer) */
-      .markdown-preview-sizer > .tps-gcm-note-footer-host {
+      /* Reading mode footer host stays outside Obsidian's virtualized preview sizer. */
+      .markdown-preview-view > .tps-gcm-note-footer-host--reading {
         display: block;
         width: 100%;
-        margin-top: 50px;
+        margin: 50px auto 0;
+        padding: 0 var(--file-margins, 24px) 56px;
+        box-sizing: border-box;
+        flex: 0 0 auto;
+      }
+
+      .markdown-preview-view.is-readable-line-width > .tps-gcm-note-footer-host--reading {
+        width: min(100%, var(--file-line-width, 700px));
       }
 
       .cm-sizer .tps-gcm-note-references,

@@ -127,6 +127,30 @@ test('linked context live-preview mounts stay outside CodeMirror content', () =>
   assert.match(mountSource, /if \(!alreadyPositioned\) parent\.insertBefore\(host, reference\)/);
 });
 
+test('Reading View linked context uses a stable footer outside the virtualized preview sizer', () => {
+  const mountSource = methodSource(
+    'private resolveNoteFooterParent',
+    'private resolveNoteGraphHost',
+  );
+  const readingFooterStyles = styles.slice(
+    styles.indexOf('.markdown-preview-view > .tps-gcm-note-footer-host--reading'),
+    styles.indexOf('.markdown-preview-view.is-readable-line-width > .tps-gcm-note-footer-host--reading') + 180,
+  );
+
+  assert.match(mountSource, /const previewRoot = contentRoot\.querySelector<HTMLElement>\('\.markdown-preview-view'\)/);
+  assert.match(mountSource, /previewRoot\.querySelectorAll<HTMLElement>\(':scope > \.tps-gcm-note-footer-host'\)/);
+  assert.match(mountSource, /previewRoot\.appendChild\(footerHost\)/);
+  assert.match(mountSource, /tps-gcm-note-footer-host--reading/);
+  assert.doesNotMatch(
+    mountSource.slice(0, mountSource.indexOf("if (mode === 'source')")),
+    /querySelector<HTMLElement>\([^)]*markdown-preview-sizer/,
+    'Reading View must never place the persistent footer inside the virtualized preview sizer',
+  );
+  assert.match(readingFooterStyles, /width: 100%/);
+  assert.match(readingFooterStyles, /flex: 0 0 auto/);
+  assert.match(readingFooterStyles, /padding: 0 var\(--file-margins, 24px\) 56px/);
+});
+
 test('initial and forced Tasks/Mentions rebuilds preserve their shared mount host', () => {
   const ensureNavSource = methodSource(
     'public ensureTopParentNav',
