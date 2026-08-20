@@ -34,8 +34,8 @@ export class RulesSectionRenderer {
 
   render(container: HTMLElement): void {
     const { plugin, refresh, persistRuleChange } = this.context;
-    const section = container.createDiv({ cls: "tps-nn-section" });
-    section.id = "tps-nn-icon-color-rules";
+    const section = container.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-section" });
+    section.id = "tps-gcm-settings-frontmatter-rules-icon-color-rules";
 
     section.createEl("h3", { text: "Icon + Color Rules" });
     section.createEl("p", {
@@ -43,7 +43,7 @@ export class RulesSectionRenderer {
       text: "Set the icon and color outputs. The first matching rule with an icon wins for icon, and the first matching rule with a color wins for color."
     });
 
-    const toolbar = section.createDiv({ cls: "tps-nn-toolbar" });
+    const toolbar = section.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-toolbar" });
     this.createActionButton(toolbar, "+ Add rule", async () => {
       const rule = plugin.createDefaultRule();
       plugin.settings.notebookNavigatorRules.rules.push(rule);
@@ -75,13 +75,13 @@ export class RulesSectionRenderer {
       return;
     }
 
-    const shell = section.createDiv({ cls: "tps-nn-split" });
-    const listPane = shell.createDiv({ cls: "tps-nn-list-pane" });
-    const editorPane = shell.createDiv({ cls: "tps-nn-editor-pane" });
+    const shell = section.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-split" });
+    const listPane = shell.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-list-pane" });
+    const editorPane = shell.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-editor-pane" });
 
-    const filterRow = listPane.createDiv({ cls: "tps-nn-toolbar" });
+    const filterRow = listPane.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-toolbar" });
     const filterInput = filterRow.createEl("input", {
-      cls: "tps-nn-filter-input",
+      cls: "tps-gcm-settings-frontmatter-rules-filter-input",
       attr: {
         type: "search",
         placeholder: "Filter rules..."
@@ -112,7 +112,7 @@ export class RulesSectionRenderer {
   }
 
   private renderRuleListItem(listPane: HTMLElement, rule: IconColorRule, index: number, activeId: string): void {
-    const row = listPane.createEl("button", { cls: "tps-nn-list-item" });
+    const row = listPane.createEl("button", { cls: "tps-gcm-settings-frontmatter-rules-list-item" });
     row.type = "button";
     if (rule.id === activeId) {
       row.addClass("is-active");
@@ -122,12 +122,12 @@ export class RulesSectionRenderer {
       this.context.refresh();
     });
 
-    const titleRow = row.createDiv({ cls: "tps-nn-list-item-title-row" });
+    const titleRow = row.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-list-item-title-row" });
 
     // Render icon preview in the pill with configured color (or gray fallback)
     const iconValue = String(rule.icon || "").trim();
     if (iconValue) {
-      const iconSpan = titleRow.createSpan({ cls: "tps-nn-list-item-icon" });
+      const iconSpan = titleRow.createSpan({ cls: "tps-gcm-settings-frontmatter-rules-list-item-icon" });
       const iconId = normalizeIconIdForPreview(iconValue);
       if (iconId) {
         try {
@@ -141,17 +141,17 @@ export class RulesSectionRenderer {
     }
 
     const displayName = String(rule.name || "").trim() || `Rule ${index + 1}`;
-    const title = titleRow.createSpan({ cls: "tps-nn-list-item-title", text: displayName });
+    const title = titleRow.createSpan({ cls: "tps-gcm-settings-frontmatter-rules-list-item-title", text: displayName });
     if (!rule.enabled) {
       title.addClass("is-muted");
     }
 
     row.createDiv({
-      cls: "tps-nn-list-item-summary",
+      cls: "tps-gcm-settings-frontmatter-rules-list-item-summary",
       text: this.getRuleSummary(rule)
     });
 
-    const meta = row.createDiv({ cls: "tps-nn-list-item-meta" });
+    const meta = row.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-list-item-meta" });
     this.renderMiniChip(meta, rule.enabled ? "Enabled" : "Disabled");
     if (rule.icon) this.renderMiniChip(meta, normalizeIconIdForPreview(rule.icon) || rule.icon, rule.icon);
     if (rule.color) this.renderColorChip(meta, rule.color);
@@ -165,7 +165,7 @@ export class RulesSectionRenderer {
     const displayName = String(rule.name || "").trim() || `Rule ${index + 1}`;
     editorPane.createEl("h4", { text: `Editing: ${displayName}` });
 
-    const topBar = editorPane.createDiv({ cls: "tps-nn-toolbar" });
+    const topBar = editorPane.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-toolbar" });
     this.createActionButton(topBar, "Previous", async () => {
       const previousIndex = Math.max(0, index - 1);
       const previous = plugin.settings.notebookNavigatorRules.rules[previousIndex];
@@ -206,7 +206,7 @@ export class RulesSectionRenderer {
         ? " An earlier matching rule supplies any winning output."
         : "";
     editorPane.createEl("div", {
-      cls: "tps-nn-callout",
+      cls: "tps-gcm-settings-frontmatter-rules-callout",
       text:
         matchesActive == null
           ? "Active note preview unavailable."
@@ -269,9 +269,9 @@ export class RulesSectionRenderer {
           });
       });
 
-    const criteriaPanel = editorPane.createDiv({ cls: "tps-nn-sub-collapsible" });
+    const criteriaPanel = editorPane.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-sub-collapsible" });
     criteriaPanel.createEl("h5", { text: "Match Criteria" });
-    const criteriaContent = criteriaPanel.createDiv({ cls: "tps-nn-sub-body" });
+    const criteriaContent = criteriaPanel.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-sub-body" });
 
     if (usesConditionEditor) {
       this.renderConditionCriteria(criteriaContent, ruleId, rule);
@@ -279,9 +279,9 @@ export class RulesSectionRenderer {
       this.renderSimpleCriteria(criteriaContent, ruleId, rule);
     }
 
-    const outputsPanel = editorPane.createDiv({ cls: "tps-nn-sub-collapsible" });
+    const outputsPanel = editorPane.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-sub-collapsible" });
     outputsPanel.createEl("h5", { text: "Outputs" });
-    const outputsContent = outputsPanel.createDiv({ cls: "tps-nn-sub-body" });
+    const outputsContent = outputsPanel.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-sub-body" });
 
     const iconPreviewRow = outputsContent.createDiv({ cls: "setting-item-description" });
     iconPreviewRow.style.display = "flex";
@@ -517,10 +517,10 @@ export class RulesSectionRenderer {
     }
 
     conditions.forEach((condition, conditionIndex) => {
-      const conditionCard = card.createDiv({ cls: "tps-nn-condition-card" });
-      const grid = conditionCard.createDiv({ cls: "tps-nn-condition-grid" });
+      const conditionCard = card.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-card" });
+      const grid = conditionCard.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-grid" });
 
-      const sourceWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+      const sourceWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
       sourceWrap.createEl("label", { text: "Source" });
       const sourceSelect = sourceWrap.createEl("select");
       for (const source of CONDITION_SOURCE_OPTIONS) {
@@ -543,7 +543,7 @@ export class RulesSectionRenderer {
         void persistRuleChange(false).then(() => refresh());
       });
 
-      const operatorWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+      const operatorWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
       operatorWrap.createEl("label", { text: "Operator" });
       const operatorSelect = operatorWrap.createEl("select");
       for (const operator of getValidOperators(condition.source)) {
@@ -579,7 +579,7 @@ export class RulesSectionRenderer {
       });
 
       if (conditionSourceHasField(condition.source)) {
-        const fieldWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+        const fieldWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
         fieldWrap.createEl("label", { text: "Field (Key)" });
         const fieldInput = fieldWrap.createEl("input", {
           attr: {
@@ -603,7 +603,7 @@ export class RulesSectionRenderer {
       }
 
       if (smartOperatorNeedsValue(condition.operator)) {
-        const valueWrap = grid.createDiv({ cls: "tps-nn-condition-field tps-nn-condition-field-value" });
+        const valueWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field tps-gcm-settings-frontmatter-rules-condition-field-value" });
         valueWrap.createEl("label", { text: "Value" });
         const valueInput = valueWrap.createEl("input", {
           attr: {
@@ -626,8 +626,8 @@ export class RulesSectionRenderer {
         });
       }
 
-      const deleteWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
-      const deleteButton = deleteWrap.createEl("button", { text: "✕", cls: "tps-nn-compact-btn mod-warning" });
+      const deleteWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
+      const deleteButton = deleteWrap.createEl("button", { text: "✕", cls: "tps-gcm-settings-frontmatter-rules-compact-btn mod-warning" });
       deleteButton.type = "button";
       deleteButton.style.minHeight = "30px";
       deleteButton.style.padding = "0 8px";
@@ -884,13 +884,13 @@ export class RulesSectionRenderer {
 
   private createBadge(container: HTMLElement, text: string): void {
     container.createSpan({
-      cls: "tps-nn-badge",
+      cls: "tps-gcm-settings-frontmatter-rules-badge",
       text
     });
   }
 
   private renderMiniChip(container: HTMLElement, label: string, icon?: string): void {
-    const chip = container.createSpan({ cls: "tps-nn-mini-chip" });
+    const chip = container.createSpan({ cls: "tps-gcm-settings-frontmatter-rules-mini-chip" });
     if (icon) {
       const iconId = normalizeIconIdForPreview(icon);
       if (iconId) {
@@ -902,8 +902,8 @@ export class RulesSectionRenderer {
   }
 
   private renderColorChip(container: HTMLElement, color: string): void {
-    const chip = container.createSpan({ cls: "tps-nn-mini-chip" });
-    const dot = chip.createSpan({ cls: "tps-nn-color-dot" });
+    const chip = container.createSpan({ cls: "tps-gcm-settings-frontmatter-rules-mini-chip" });
+    const dot = chip.createSpan({ cls: "tps-gcm-settings-frontmatter-rules-color-dot" });
     if (isValidCssColor(color)) dot.style.backgroundColor = color;
     chip.createSpan({ text: color });
   }

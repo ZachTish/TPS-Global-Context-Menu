@@ -45,7 +45,11 @@ import {
 } from './base-query-guide';
 
 const NN_TEXT_COMMIT_DEBOUNCE_MS = 300;
-const NN_SETTINGS_STYLE_ID = 'tps-gcm-notebook-navigator-rule-settings-style';
+export const LEGACY_GCM_NOTEBOOK_NAVIGATOR_RULE_SETTINGS_STYLE_ID = 'tps-gcm-notebook-navigator-rule-settings-style';
+
+export function removeLegacyNotebookNavigatorRuleSettingsStyle(ownerDocument: Document = document): void {
+  ownerDocument.getElementById(LEGACY_GCM_NOTEBOOK_NAVIGATOR_RULE_SETTINGS_STYLE_ID)?.remove();
+}
 
 function formatAcceptedKindConstraint(value: unknown): string {
   const kinds = normalizeAcceptsKind(value);
@@ -457,7 +461,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   }
 
   private renderNotebookNavigatorRules(container: HTMLElement): void {
-    this.ensureNotebookNavigatorSettingsStyles();
     const settings = this.plugin.settings.notebookNavigatorRules;
     const root = container.createDiv({ cls: 'tps-gcm-settings-editor-page' });
     root.dataset.tpsSettingsRoute = 'frontmatter-rules';
@@ -478,7 +481,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       });
     }
 
-    const overview = root.createDiv({ cls: 'tps-nn-overview-grid' });
+    const overview = root.createDiv({ cls: 'tps-gcm-settings-frontmatter-rules-overview-grid' });
     this.renderRuleOverviewCard(overview, 'Sort', `${settings.smartSort.buckets.length} buckets`, settings.smartSort.enabled ? 'Writes ordered sort keys.' : 'Disabled');
     this.renderRuleOverviewCard(overview, 'Tags', `${settings.hideRules.length} rules`, settings.autoRemoveHiddenWhenNoMatch ? 'Managed tags auto-clean.' : 'Manual tags preserved.');
     this.renderRuleOverviewCard(overview, 'Icon + Color', `${settings.rules.length} rules`, 'First matching icon and color win.');
@@ -577,7 +580,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       ].join('\n')
       : 'Active file preview unavailable. Open a markdown note to inspect rule outputs.';
     const previewBox = advanced.createEl('pre', {
-      cls: 'tps-nn-preview',
+      cls: 'tps-gcm-settings-frontmatter-rules-preview',
       text: previewText,
     });
     previewBox.setAttr('aria-label', 'Active file rule output preview');
@@ -691,243 +694,12 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         }));
   }
 
-  private ensureNotebookNavigatorSettingsStyles(): void {
-    if (document.getElementById(NN_SETTINGS_STYLE_ID)) return;
-    const style = document.createElement('style');
-    style.id = NN_SETTINGS_STYLE_ID;
-    style.textContent = `
-      .tps-nn-section {
-        margin: 18px 0;
-        padding: 14px;
-        border: 1px solid var(--background-modifier-border);
-        border-radius: 8px;
-        background: color-mix(in srgb, var(--background-secondary) 60%, transparent);
-      }
-      .tps-nn-section > h3 { margin: 0 0 6px; scroll-margin-top: 18px; }
-      .tps-nn-rule-jumpbar {
-        position: sticky;
-        top: 0;
-        z-index: 2;
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-        margin: 12px 0;
-        padding: 8px;
-        border: 1px solid var(--background-modifier-border);
-        border-radius: 8px;
-        background: var(--background-primary);
-      }
-      .tps-nn-jump-button {
-        min-height: 30px;
-        border-radius: 8px;
-        white-space: nowrap;
-      }
-      .tps-nn-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 14px; align-items: center; }
-      .tps-nn-preview {
-        margin: 10px 0 14px;
-        padding: 10px 12px;
-        border: 1px solid var(--background-modifier-border);
-        border-radius: 8px;
-        background: var(--background-primary);
-        color: var(--text-muted);
-        white-space: pre-wrap;
-        font-size: 12px;
-      }
-      .tps-nn-overview-grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 10px;
-        margin: 10px 0 16px;
-      }
-      .tps-nn-overview-card {
-        padding: 10px 12px;
-        border: 1px solid var(--background-modifier-border);
-        border-radius: 8px;
-        background: var(--background-primary);
-      }
-      .tps-nn-overview-title {
-        display: flex;
-        justify-content: space-between;
-        gap: 8px;
-        font-weight: 700;
-      }
-      .tps-nn-overview-count {
-        color: var(--text-accent);
-        white-space: nowrap;
-      }
-      .tps-nn-overview-desc {
-        margin-top: 4px;
-        color: var(--text-muted);
-        font-size: 12px;
-      }
-      .tps-nn-split { display: grid; grid-template-columns: minmax(250px, 340px) minmax(0, 1fr); gap: 12px; align-items: start; }
-      .tps-nn-list-pane { display: flex; flex-direction: column; gap: 8px; max-height: min(72vh, 760px); overflow: auto; padding-right: 2px; }
-      .tps-nn-filter-input, .tps-nn-condition-field input, .tps-nn-condition-field select {
-        width: 100%;
-        min-height: 30px;
-        border-radius: 8px;
-        border: 1px solid var(--background-modifier-border);
-        background: var(--background-primary);
-        color: var(--text-normal);
-        padding: 0 8px;
-      }
-      .tps-nn-editor-pane, .tps-nn-list-item, .tps-nn-condition-card {
-        border: 1px solid var(--background-modifier-border);
-        border-radius: 8px;
-        background: var(--background-primary);
-      }
-      .tps-nn-editor-pane { padding: 12px; max-height: min(72vh, 760px); overflow: auto; }
-      .tps-nn-list-item { width: 100%; padding: 9px 10px; text-align: left; cursor: pointer; }
-      .tps-nn-list-item:hover { border-color: var(--background-modifier-border-hover); background: var(--background-secondary); }
-      .tps-nn-list-item.is-active { border-color: var(--interactive-accent); box-shadow: inset 0 0 0 1px var(--interactive-accent); }
-      .tps-nn-list-item-title-row, .tps-nn-inline-actions, .tps-nn-badge-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
-      .tps-nn-list-item-icon { display: inline-flex; width: 18px; height: 18px; align-items: center; justify-content: center; flex-shrink: 0; }
-      .tps-nn-list-item-icon svg { width: 16px; height: 16px; }
-      .tps-nn-list-item-title { font-weight: 700; color: var(--text-accent); }
-      .tps-nn-list-item-title.is-muted, .tps-nn-list-item-summary, .tps-nn-summary { color: var(--text-muted); }
-      .tps-nn-list-item-summary { margin-top: 3px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-      .tps-nn-list-item-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
-      .tps-nn-mini-chip {
-        display: inline-flex;
-        align-items: center;
-        gap: 4px;
-        max-width: 100%;
-        padding: 1px 6px;
-        border: 1px solid var(--background-modifier-border);
-        border-radius: 999px;
-        color: var(--text-muted);
-        font-size: 11px;
-        line-height: 1.5;
-      }
-      .tps-nn-mini-chip svg { width: 12px; height: 12px; }
-      .tps-nn-color-dot {
-        width: 10px;
-        height: 10px;
-        border-radius: 50%;
-        border: 1px solid var(--background-modifier-border);
-        flex: 0 0 auto;
-      }
-      .tps-nn-badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--background-modifier-border-hover); color: var(--text-muted); }
-      .tps-nn-condition-card { padding: 6px; margin: 8px 0; background: color-mix(in srgb, var(--background-secondary) 55%, transparent); }
-      .tps-nn-condition-grid { display: grid; grid-template-columns: minmax(110px, 1fr) minmax(110px, 1fr) minmax(120px, 1.3fr) minmax(160px, 2fr) auto; gap: 8px; align-items: center; }
-      .tps-nn-condition-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
-      .tps-nn-condition-field label { display: block; font-size: 11px; color: var(--text-muted); }
-      .tps-nn-sub-collapsible { margin: 10px 0; border: 1px dashed var(--background-modifier-border); border-radius: 8px; }
-      .tps-nn-sub-collapsible > h5, .tps-nn-sub-collapsible > summary { margin: 0; padding: 8px; color: var(--text-muted); font-weight: 600; }
-      .tps-nn-sub-body { padding: 0 8px 8px; }
-      .tps-nn-callout { margin: 10px 0; padding: 8px 10px; border-left: 3px solid var(--interactive-accent); background: color-mix(in srgb, var(--interactive-accent) 10%, transparent); border-radius: 6px; font-size: 12px; color: var(--text-muted); }
-      .tps-gcm-property-options-preview {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-        margin: 6px 0 0;
-      }
-      .tps-gcm-property-option-chip {
-        padding: 2px 8px;
-        border-radius: 999px;
-        background: var(--background-modifier-border-hover);
-        color: var(--text-muted);
-        font-size: 12px;
-      }
-      @media (max-width: 900px) {
-        .tps-nn-split, .tps-nn-condition-grid, .tps-nn-overview-grid { grid-template-columns: 1fr; }
-        .tps-nn-list-pane, .tps-nn-editor-pane { max-height: none; }
-      }
-      .tps-base-query-callout {
-        margin: 8px 0 14px;
-        padding: 12px 14px;
-        border: 1px solid var(--background-modifier-border);
-        border-left: 3px solid var(--interactive-accent);
-        border-radius: 8px;
-        background: var(--background-secondary);
-      }
-      .tps-base-query-callout strong {
-        display: block;
-        margin-bottom: 4px;
-      }
-      .tps-base-query-code {
-        margin: 8px 0 14px;
-        padding: 12px 14px;
-        overflow-x: auto;
-        border: 1px solid var(--background-modifier-border);
-        border-radius: 8px;
-        background: var(--background-primary-alt);
-        font-size: var(--font-ui-smaller);
-        line-height: 1.45;
-        white-space: pre;
-      }
-      .tps-base-query-reference {
-        width: 100%;
-        margin-top: 8px;
-        border-collapse: collapse;
-        font-size: var(--font-ui-smaller);
-      }
-      .tps-base-query-reference th,
-      .tps-base-query-reference td {
-        padding: 8px 10px;
-        border-bottom: 1px solid var(--background-modifier-border);
-        text-align: left;
-        vertical-align: top;
-      }
-      .tps-base-query-reference th {
-        color: var(--text-muted);
-        font-weight: var(--font-semibold);
-      }
-      .tps-base-query-reference th:first-child,
-      .tps-base-query-reference td:first-child {
-        width: 24%;
-        min-width: 142px;
-      }
-      .tps-base-query-reference th:nth-child(2),
-      .tps-base-query-reference td:nth-child(2) {
-        width: 22%;
-        min-width: 134px;
-      }
-      .tps-base-query-reference code {
-        white-space: normal;
-        overflow-wrap: normal;
-        word-break: normal;
-      }
-      .tps-base-query-scope {
-        color: var(--text-muted);
-        white-space: nowrap;
-      }
-      .tps-base-query-gotchas {
-        margin: 8px 0 14px;
-        padding-left: 22px;
-      }
-      .tps-base-query-gotchas li + li {
-        margin-top: 6px;
-      }
-      .tps-base-query-links {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px 16px;
-        margin-top: 12px;
-      }
-      @media (max-width: 700px) {
-        .tps-base-query-reference thead { display: none; }
-        .tps-base-query-reference,
-        .tps-base-query-reference tbody,
-        .tps-base-query-reference tr,
-        .tps-base-query-reference td { display: block; width: 100%; }
-        .tps-base-query-reference tr {
-          padding: 8px 0;
-          border-bottom: 1px solid var(--background-modifier-border);
-        }
-        .tps-base-query-reference td { min-width: 0; padding: 3px 0; border: 0; }
-        .tps-base-query-scope { white-space: normal; }
-      }
-    `;
-    document.head.appendChild(style);
-  }
-
   private renderRuleOverviewCard(container: HTMLElement, title: string, count: string, description: string): void {
-    const card = container.createDiv({ cls: 'tps-nn-overview-card' });
-    const titleRow = card.createDiv({ cls: 'tps-nn-overview-title' });
+    const card = container.createDiv({ cls: 'tps-gcm-settings-frontmatter-rules-overview-card' });
+    const titleRow = card.createDiv({ cls: 'tps-gcm-settings-frontmatter-rules-overview-title' });
     titleRow.createSpan({ text: title });
-    titleRow.createSpan({ cls: 'tps-nn-overview-count', text: count });
-    card.createDiv({ cls: 'tps-nn-overview-desc', text: description });
+    titleRow.createSpan({ cls: 'tps-gcm-settings-frontmatter-rules-overview-count', text: count });
+    card.createDiv({ cls: 'tps-gcm-settings-frontmatter-rules-overview-desc', text: description });
   }
 
   private getWorkspaceNames(): string[] {
@@ -3011,16 +2783,16 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       false,
     );
 
-    const dailyNoteCallout = guide.createDiv({ cls: 'tps-base-query-callout' });
+    const dailyNoteCallout = guide.createDiv({ cls: 'tps-gcm-settings-base-query-callout' });
     dailyNoteCallout.createEl('strong', { text: 'Current Daily Note in the Daily Note Feed' });
     dailyNoteCallout.createSpan({
       text: 'Use both path filters, then select GCM row kinds in the active TPS List view: task, bullet, header/heading, or an exact h1–h6. In Home, this.file.path is replaced with the selected Daily Note path.',
     });
-    guide.createEl('pre', { cls: 'tps-base-query-code' })
+    guide.createEl('pre', { cls: 'tps-gcm-settings-base-query-code' })
       .createEl('code', { text: CURRENT_DAILY_NOTE_FEED_QUERY });
 
     guide.createEl('h4', { text: 'Daily Note Feed targeting notes' });
-    const gotchaList = guide.createEl('ul', { cls: 'tps-base-query-gotchas' });
+    const gotchaList = guide.createEl('ul', { cls: 'tps-gcm-settings-base-query-gotchas' });
     BASE_QUERY_GUIDE_GOTCHAS.forEach((note) => gotchaList.createEl('li', { text: note }));
 
     const selectedSection = BASE_QUERY_GUIDE_SECTIONS.find(
@@ -3031,7 +2803,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       .setName('Reference category')
       .setDesc('Show one query namespace at a time.')
       .addDropdown((dropdown) => {
-        dropdown.selectEl.dataset.tpsBaseQueryCategory = 'true';
+        dropdown.selectEl.dataset.tpsGcmSettingsBaseQueryCategory = 'true';
         BASE_QUERY_GUIDE_SECTIONS.forEach((section) => {
           dropdown.addOption(section.title, section.title);
         });
@@ -3043,7 +2815,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             this.display();
             this.containerEl.scrollTop = scrollTop;
             this.containerEl
-              .querySelector<HTMLSelectElement>('[data-tps-base-query-category="true"]')
+              .querySelector<HTMLSelectElement>('[data-tps-gcm-settings-base-query-category="true"]')
               ?.focus({ preventScroll: true });
           });
       });
@@ -3054,7 +2826,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         text: selectedSection.description,
         cls: 'setting-item-description',
       });
-      const table = guide.createEl('table', { cls: 'tps-base-query-reference' });
+      const table = guide.createEl('table', { cls: 'tps-gcm-settings-base-query-reference' });
       const headRow = table.createEl('thead').createEl('tr');
       headRow.createEl('th', { text: 'Variable / expression' });
       headRow.createEl('th', { text: 'Available in' });
@@ -3063,12 +2835,12 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       selectedSection.entries.forEach((entry) => {
         const row = body.createEl('tr');
         row.createEl('td').createEl('code', { text: entry.expression });
-        row.createEl('td', { cls: 'tps-base-query-scope', text: entry.appliesTo });
+        row.createEl('td', { cls: 'tps-gcm-settings-base-query-scope', text: entry.appliesTo });
         row.createEl('td', { text: entry.description });
       });
     }
 
-    const links = guide.createDiv({ cls: 'tps-base-query-links' });
+    const links = guide.createDiv({ cls: 'tps-gcm-settings-base-query-links' });
     links.createEl('a', {
       text: 'Obsidian Bases syntax reference',
       href: OBSIDIAN_BASES_SYNTAX_URL,

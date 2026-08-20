@@ -900,7 +900,7 @@ test('settings use shallow routed pages with responsive, accessible selectors', 
   assert.doesNotMatch(displaySource, /containerEl\.createEl\('details'/);
 
   const frontmatterStart = settingsTabSource.indexOf('private renderNotebookNavigatorRules');
-  const frontmatterEnd = settingsTabSource.indexOf('private ensureNotebookNavigatorSettingsStyles', frontmatterStart);
+  const frontmatterEnd = settingsTabSource.indexOf('private renderRuleOverviewCard', frontmatterStart);
   const frontmatterSource = settingsTabSource.slice(frontmatterStart, frontmatterEnd);
   assert.match(frontmatterSource, /id: 'sort', label: 'Sort buckets'/);
   assert.match(frontmatterSource, /id: 'tags', label: 'Tag rules'/);
@@ -998,4 +998,54 @@ test('create-time title sync does not inject titles into blank new notes', () =>
   assert.match(fileNamingServiceSource, /isBlankGeneratedUntitledNote\(liveFile, rawBasename\)/);
   assert.match(fileNamingServiceSource, /\^Untitled/);
   assert.match(fileNamingServiceSource, /body\.trim\(\)\.length === 0/);
+});
+
+test('frontmatter-rule settings CSS stays GCM-owned and cannot style Notebook Navigator', () => {
+  const frontmatterRuleSources = [
+    settingsTabSource,
+    notebookRulesSectionSource,
+    notebookBucketSectionSource,
+    notebookHideSectionSource,
+  ];
+
+  for (const source of frontmatterRuleSources) {
+    assert.doesNotMatch(source, /tps-nn-/u);
+  }
+  assert.doesNotMatch(settingsTabSource, /tps-base-query-/u);
+  assert.doesNotMatch(stylesSource, /tps-nn-|tps-base-query-/u);
+  assert.doesNotMatch(settingsTabSource, /ensureNotebookNavigatorSettingsStyles|document\.head\.appendChild\(style\)/u);
+
+  assert.match(settingsTabSource, /tps-gcm-settings-frontmatter-rules-overview-grid/u);
+  assert.match(notebookRulesSectionSource, /tps-gcm-settings-frontmatter-rules-list-pane/u);
+  assert.match(notebookBucketSectionSource, /tps-gcm-settings-frontmatter-rules-sort-buckets/u);
+  assert.match(notebookHideSectionSource, /tps-gcm-settings-frontmatter-rules-tag-rules/u);
+  assert.match(settingsTabSource, /tps-gcm-settings-base-query-reference/u);
+  assert.match(settingsTabSource, /dataset\.tpsGcmSettingsBaseQueryCategory = 'true'/u);
+  assert.match(settingsTabSource, /\[data-tps-gcm-settings-base-query-category="true"\]/u);
+
+  assert.match(
+    stylesSource,
+    /\.tps-gcm-settings-editor-page \.tps-gcm-settings-frontmatter-rules-list-pane\s*\{/u,
+  );
+  assert.match(
+    stylesSource,
+    /@media \(max-width: 900px\)[\s\S]*\.tps-gcm-settings-editor-page \.tps-gcm-settings-frontmatter-rules-list-pane/u,
+  );
+  assert.match(
+    stylesSource,
+    /\.tps-gcm-settings-page \.tps-gcm-settings-base-query-reference/u,
+  );
+
+  assert.match(
+    mainSource,
+    /removeLegacyNotebookNavigatorRuleSettingsStyles\(\);[\s\S]*workspace\.on\('window-open', \(_workspaceWindow, targetWindow\)/u,
+  );
+  assert.match(
+    mainSource,
+    /iterateAllLeaves\(\(leaf\) => \{\s*ownerDocuments\.add\(leaf\.getContainer\(\)\.doc\);/u,
+  );
+  assert.match(
+    settingsTabSource,
+    /LEGACY_GCM_NOTEBOOK_NAVIGATOR_RULE_SETTINGS_STYLE_ID/u,
+  );
 });

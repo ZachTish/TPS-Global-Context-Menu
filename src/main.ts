@@ -14,7 +14,7 @@ import { PLUGIN_STYLES } from './plugin-styles';
 import { MenuController } from './menu/menu-controller';
 import { PersistentMenuManager } from './menu/persistent-menu-manager';
 import { setupMenuPatch } from './menu/menu-patcher';
-import { TPSGlobalContextMenuSettingTab } from './settings-tab';
+import { removeLegacyNotebookNavigatorRuleSettingsStyle, TPSGlobalContextMenuSettingTab } from './settings-tab';
 import { BulkEditService } from './services/bulk-edit-service';
 import { RecurrenceService } from './services/recurrence-service';
 import { FileNamingService } from './services/file-naming-service';
@@ -490,6 +490,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   async onload(): Promise<void> {
     this.ignoreNextContext = false;
+    this.removeLegacyNotebookNavigatorRuleSettingsStyles();
+    this.registerEvent(this.app.workspace.on('window-open', (_workspaceWindow, targetWindow) => {
+      removeLegacyNotebookNavigatorRuleSettingsStyle(targetWindow.document);
+    }));
 
     await this.loadSettings();
     logger.setLoggingEnabled(this.settings.enableLogging);
@@ -1930,6 +1934,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }
     this.menuController?.detach();
     this.removeStyles();
+    this.removeLegacyNotebookNavigatorRuleSettingsStyles();
     this.persistentMenuManager?.detach();
     this.recurrenceService?.cleanup();
     this.timeTrackingStatusBarService?.detach();
@@ -3150,6 +3155,16 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (this.styleEl) {
       this.styleEl.remove();
       this.styleEl = null;
+    }
+  }
+
+  private removeLegacyNotebookNavigatorRuleSettingsStyles(): void {
+    const ownerDocuments = new Set<Document>([document]);
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      ownerDocuments.add(leaf.getContainer().doc);
+    });
+    for (const ownerDocument of ownerDocuments) {
+      removeLegacyNotebookNavigatorRuleSettingsStyle(ownerDocument);
     }
   }
 

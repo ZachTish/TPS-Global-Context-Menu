@@ -26,8 +26,8 @@ export class HideSectionRenderer {
 
     render(container: HTMLElement): void {
         const { plugin, refresh, persistRuleChange } = this.context;
-        const section = container.createDiv({ cls: "tps-nn-section" });
-        section.id = "tps-nn-tag-rules";
+        const section = container.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-section" });
+        section.id = "tps-gcm-settings-frontmatter-rules-tag-rules";
 
         section.createEl("h3", { text: "Tag Rules" });
         section.createEl("p", {
@@ -51,7 +51,7 @@ export class HideSectionRenderer {
                     })
             );
 
-        const toolbar = section.createDiv({ cls: "tps-nn-toolbar" });
+        const toolbar = section.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-toolbar" });
         this.createActionButton(toolbar, "+ Add tag rule", async () => {
             const rule = plugin.createDefaultHideRule();
             plugin.settings.notebookNavigatorRules.hideRules.push(rule);
@@ -76,13 +76,13 @@ export class HideSectionRenderer {
             return;
         }
 
-        const shell = section.createDiv({ cls: "tps-nn-split" });
-        const listPane = shell.createDiv({ cls: "tps-nn-list-pane" });
-        const editorPane = shell.createDiv({ cls: "tps-nn-editor-pane" });
+        const shell = section.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-split" });
+        const listPane = shell.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-list-pane" });
+        const editorPane = shell.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-editor-pane" });
 
-        const filterRow = listPane.createDiv({ cls: "tps-nn-toolbar" });
+        const filterRow = listPane.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-toolbar" });
         const filterInput = filterRow.createEl("input", {
-            cls: "tps-nn-filter-input",
+            cls: "tps-gcm-settings-frontmatter-rules-filter-input",
             attr: {
                 type: "search",
                 placeholder: "Filter rules..."
@@ -113,7 +113,7 @@ export class HideSectionRenderer {
     }
 
     private renderRuleListItem(listPane: HTMLElement, rule: HideRule, index: number, activeId: string): void {
-        const row = listPane.createEl("button", { cls: "tps-nn-list-item" });
+        const row = listPane.createEl("button", { cls: "tps-gcm-settings-frontmatter-rules-list-item" });
         row.type = "button";
         if (rule.id === activeId) {
             row.addClass("is-active");
@@ -123,7 +123,7 @@ export class HideSectionRenderer {
             this.context.refresh();
         });
 
-        const title = row.createDiv({ cls: "tps-nn-list-item-title", text: `${index + 1}. ${rule.name || "Untitled Rule"}` });
+        const title = row.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-list-item-title", text: `${index + 1}. ${rule.name || "Untitled Rule"}` });
         if (!rule.enabled) {
             title.addClass("is-muted");
         }
@@ -132,11 +132,11 @@ export class HideSectionRenderer {
         const tagText = rule.tagName ? (rule.tagName.startsWith("#") ? rule.tagName : `#${rule.tagName}`) : "#???";
 
         row.createDiv({
-            cls: "tps-nn-list-item-summary",
+            cls: "tps-gcm-settings-frontmatter-rules-list-item-summary",
             text: `${actionText} ${tagText}`
         });
 
-        const meta = row.createDiv({ cls: "tps-nn-list-item-meta" });
+        const meta = row.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-list-item-meta" });
         this.renderMiniChip(meta, rule.enabled ? "Enabled" : "Disabled");
         this.renderMiniChip(meta, rule.mode === "add" ? "Add" : "Remove");
         this.renderMiniChip(meta, `${rule.conditions?.length ?? 0} conditions`);
@@ -148,7 +148,7 @@ export class HideSectionRenderer {
 
         editorPane.createEl("h4", { text: `Editing Rule ${index + 1}` });
 
-        const topBar = editorPane.createDiv({ cls: "tps-nn-toolbar" });
+        const topBar = editorPane.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-toolbar" });
         this.createActionButton(topBar, "Previous", async () => {
             const previousIndex = Math.max(0, index - 1);
             const previous = plugin.settings.notebookNavigatorRules.hideRules[previousIndex];
@@ -236,9 +236,9 @@ export class HideSectionRenderer {
                 }, false, true);
             });
 
-        const criteriaPanel = editorPane.createDiv({ cls: "tps-nn-sub-collapsible" });
+        const criteriaPanel = editorPane.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-sub-collapsible" });
         criteriaPanel.createEl("h5", { text: "Match Criteria" });
-        const criteriaContent = criteriaPanel.createDiv({ cls: "tps-nn-sub-body" });
+        const criteriaContent = criteriaPanel.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-sub-body" });
 
         this.renderConditionCriteria(criteriaContent, ruleId, rule);
     }
@@ -273,11 +273,11 @@ export class HideSectionRenderer {
         }
 
         conditions.forEach((condition, conditionIndex) => {
-            const conditionCard = card.createDiv({ cls: "tps-nn-condition-card" });
+            const conditionCard = card.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-card" });
 
-            const grid = conditionCard.createDiv({ cls: "tps-nn-condition-grid" });
+            const grid = conditionCard.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-grid" });
 
-            const sourceWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+            const sourceWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
             sourceWrap.createEl("label", { text: "Source" });
             const sourceSelect = sourceWrap.createEl("select");
             for (const source of CONDITION_SOURCE_OPTIONS) {
@@ -300,7 +300,7 @@ export class HideSectionRenderer {
                 void persistRuleChange(false).then(() => refresh());
             });
 
-            const operatorWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+            const operatorWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
             operatorWrap.createEl("label", { text: "Operator" });
             const operatorSelect = operatorWrap.createEl("select");
             for (const operator of getValidOperators(condition.source)) {
@@ -336,7 +336,7 @@ export class HideSectionRenderer {
             });
 
             if (conditionSourceHasField(condition.source)) {
-                const fieldWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+                const fieldWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
                 fieldWrap.createEl("label", { text: "Field" });
                 const fieldInput = fieldWrap.createEl("input", {
                     attr: {
@@ -360,7 +360,7 @@ export class HideSectionRenderer {
             }
 
             if (smartOperatorNeedsValue(condition.operator)) {
-                const valueWrap = grid.createDiv({ cls: "tps-nn-condition-field tps-nn-condition-field-value" });
+                const valueWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field tps-gcm-settings-frontmatter-rules-condition-field-value" });
                 valueWrap.createEl("label", { text: "Value" });
                 const valueInput = valueWrap.createEl("input", {
                     attr: {
@@ -383,8 +383,8 @@ export class HideSectionRenderer {
                 });
             }
 
-            const deleteWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
-            const deleteButton = deleteWrap.createEl("button", { text: "✕", cls: "tps-nn-compact-btn mod-warning" });
+            const deleteWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
+            const deleteButton = deleteWrap.createEl("button", { text: "✕", cls: "tps-gcm-settings-frontmatter-rules-compact-btn mod-warning" });
             deleteButton.type = "button";
             deleteButton.style.minHeight = "30px";
             deleteButton.style.padding = "0 8px";
@@ -553,7 +553,7 @@ export class HideSectionRenderer {
     }
 
     private renderMiniChip(container: HTMLElement, label: string): void {
-        container.createSpan({ cls: "tps-nn-mini-chip", text: label });
+        container.createSpan({ cls: "tps-gcm-settings-frontmatter-rules-mini-chip", text: label });
     }
 
     private createMenuButton(

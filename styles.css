@@ -476,3 +476,227 @@
     border-bottom: 1px solid var(--background-modifier-border);
   }
 }
+
+/* Frontmatter rule editors and Base-query reference. Kept static and GCM-scoped so settings cannot style another plugin. */
+.tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-section {
+        margin: 18px 0;
+        padding: 14px;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--background-secondary) 60%, transparent);
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-section > h3 { margin: 0 0 6px; scroll-margin-top: 18px; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-rule-jumpbar {
+        position: sticky;
+        top: 0;
+        z-index: 2;
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin: 12px 0;
+        padding: 8px;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 8px;
+        background: var(--background-primary);
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-jump-button {
+        min-height: 30px;
+        border-radius: 8px;
+        white-space: nowrap;
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-toolbar { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 14px; align-items: center; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-preview {
+        margin: 10px 0 14px;
+        padding: 10px 12px;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 8px;
+        background: var(--background-primary);
+        color: var(--text-muted);
+        white-space: pre-wrap;
+        font-size: 12px;
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-overview-grid {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin: 10px 0 16px;
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-overview-card {
+        padding: 10px 12px;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 8px;
+        background: var(--background-primary);
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-overview-title {
+        display: flex;
+        justify-content: space-between;
+        gap: 8px;
+        font-weight: 700;
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-overview-count {
+        color: var(--text-accent);
+        white-space: nowrap;
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-overview-desc {
+        margin-top: 4px;
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-split { display: grid; grid-template-columns: minmax(250px, 340px) minmax(0, 1fr); gap: 12px; align-items: start; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-pane { display: flex; flex-direction: column; gap: 8px; max-height: min(72vh, 760px); overflow: auto; padding-right: 2px; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-filter-input, .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-condition-field input, .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-condition-field select {
+        width: 100%;
+        min-height: 30px;
+        border-radius: 8px;
+        border: 1px solid var(--background-modifier-border);
+        background: var(--background-primary);
+        color: var(--text-normal);
+        padding: 0 8px;
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-editor-pane, .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-item, .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-condition-card {
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 8px;
+        background: var(--background-primary);
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-editor-pane { padding: 12px; max-height: min(72vh, 760px); overflow: auto; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-item { width: 100%; padding: 9px 10px; text-align: left; cursor: pointer; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-item:hover { border-color: var(--background-modifier-border-hover); background: var(--background-secondary); }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-item.is-active { border-color: var(--interactive-accent); box-shadow: inset 0 0 0 1px var(--interactive-accent); }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-item-title-row, .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-inline-actions, .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-badge-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-item-icon { display: inline-flex; width: 18px; height: 18px; align-items: center; justify-content: center; flex-shrink: 0; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-item-icon svg { width: 16px; height: 16px; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-item-title { font-weight: 700; color: var(--text-accent); }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-item-title.is-muted, .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-item-summary, .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-summary { color: var(--text-muted); }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-item-summary { margin-top: 3px; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-item-meta { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-mini-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        max-width: 100%;
+        padding: 1px 6px;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 999px;
+        color: var(--text-muted);
+        font-size: 11px;
+        line-height: 1.5;
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-mini-chip svg { width: 12px; height: 12px; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-color-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        border: 1px solid var(--background-modifier-border);
+        flex: 0 0 auto;
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-badge { padding: 2px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--background-modifier-border-hover); color: var(--text-muted); }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-condition-card { padding: 6px; margin: 8px 0; background: color-mix(in srgb, var(--background-secondary) 55%, transparent); }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-condition-grid { display: grid; grid-template-columns: minmax(110px, 1fr) minmax(110px, 1fr) minmax(120px, 1.3fr) minmax(160px, 2fr) auto; gap: 8px; align-items: center; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-condition-field { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-condition-field label { display: block; font-size: 11px; color: var(--text-muted); }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-sub-collapsible { margin: 10px 0; border: 1px dashed var(--background-modifier-border); border-radius: 8px; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-sub-collapsible > h5, .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-sub-collapsible > summary { margin: 0; padding: 8px; color: var(--text-muted); font-weight: 600; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-sub-body { padding: 0 8px 8px; }
+      .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-callout { margin: 10px 0; padding: 8px 10px; border-left: 3px solid var(--interactive-accent); background: color-mix(in srgb, var(--interactive-accent) 10%, transparent); border-radius: 6px; font-size: 12px; color: var(--text-muted); }
+      .tps-gcm-settings-editor-page .tps-gcm-property-options-preview {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        margin: 6px 0 0;
+      }
+      .tps-gcm-settings-editor-page .tps-gcm-property-option-chip {
+        padding: 2px 8px;
+        border-radius: 999px;
+        background: var(--background-modifier-border-hover);
+        color: var(--text-muted);
+        font-size: 12px;
+      }
+      @media (max-width: 900px) {
+        .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-split, .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-condition-grid, .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-overview-grid { grid-template-columns: 1fr; }
+        .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-list-pane, .tps-gcm-settings-editor-page .tps-gcm-settings-frontmatter-rules-editor-pane { max-height: none; }
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-callout {
+        margin: 8px 0 14px;
+        padding: 12px 14px;
+        border: 1px solid var(--background-modifier-border);
+        border-left: 3px solid var(--interactive-accent);
+        border-radius: 8px;
+        background: var(--background-secondary);
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-callout strong {
+        display: block;
+        margin-bottom: 4px;
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-code {
+        margin: 8px 0 14px;
+        padding: 12px 14px;
+        overflow-x: auto;
+        border: 1px solid var(--background-modifier-border);
+        border-radius: 8px;
+        background: var(--background-primary-alt);
+        font-size: var(--font-ui-smaller);
+        line-height: 1.45;
+        white-space: pre;
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-reference {
+        width: 100%;
+        margin-top: 8px;
+        border-collapse: collapse;
+        font-size: var(--font-ui-smaller);
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-reference th,
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-reference td {
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--background-modifier-border);
+        text-align: left;
+        vertical-align: top;
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-reference th {
+        color: var(--text-muted);
+        font-weight: var(--font-semibold);
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-reference th:first-child,
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-reference td:first-child {
+        width: 24%;
+        min-width: 142px;
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-reference th:nth-child(2),
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-reference td:nth-child(2) {
+        width: 22%;
+        min-width: 134px;
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-reference code {
+        white-space: normal;
+        overflow-wrap: normal;
+        word-break: normal;
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-scope {
+        color: var(--text-muted);
+        white-space: nowrap;
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-gotchas {
+        margin: 8px 0 14px;
+        padding-left: 22px;
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-gotchas li + li {
+        margin-top: 6px;
+      }
+      .tps-gcm-settings-page .tps-gcm-settings-base-query-links {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px 16px;
+        margin-top: 12px;
+      }
+      @media (max-width: 700px) {
+        .tps-gcm-settings-page .tps-gcm-settings-base-query-reference thead { display: none; }
+        .tps-gcm-settings-page .tps-gcm-settings-base-query-reference,
+        .tps-gcm-settings-page .tps-gcm-settings-base-query-reference tbody,
+        .tps-gcm-settings-page .tps-gcm-settings-base-query-reference tr,
+        .tps-gcm-settings-page .tps-gcm-settings-base-query-reference td { display: block; width: 100%; }
+        .tps-gcm-settings-page .tps-gcm-settings-base-query-reference tr {
+          padding: 8px 0;
+          border-bottom: 1px solid var(--background-modifier-border);
+        }
+        .tps-gcm-settings-page .tps-gcm-settings-base-query-reference td { min-width: 0; padding: 3px 0; border: 0; }
+        .tps-gcm-settings-page .tps-gcm-settings-base-query-scope { white-space: normal; }
+      }

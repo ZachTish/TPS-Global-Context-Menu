@@ -32,8 +32,8 @@ export class BucketSectionRenderer {
 
     render(container: HTMLElement): void {
         const { plugin, bindCommittedText, refresh } = this.context;
-        const section = container.createDiv({ cls: "tps-nn-section" });
-        section.id = "tps-nn-sort-buckets";
+        const section = container.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-section" });
+        section.id = "tps-gcm-settings-frontmatter-rules-sort-buckets";
 
         section.createEl("h3", { text: "Smart Sort Buckets" });
         section.createEl("p", {
@@ -41,7 +41,7 @@ export class BucketSectionRenderer {
             text: "Define buckets to group and sort notes. Files match the first bucket whose conditions they meet."
         });
         section.createEl("div", {
-            cls: "tps-nn-callout",
+            cls: "tps-gcm-settings-frontmatter-rules-callout",
             text: "Buckets are evaluated top-to-bottom. Within each bucket, notes are sorted by the defined criteria."
         });
 
@@ -141,7 +141,7 @@ export class BucketSectionRenderer {
                     });
             });
 
-        const toolbar = section.createDiv({ cls: "tps-nn-toolbar" });
+        const toolbar = section.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-toolbar" });
         this.createActionButton(toolbar, "+ Add bucket", async () => {
             const bucket = plugin.createDefaultSortBucket();
             plugin.settings.notebookNavigatorRules.smartSort.buckets.push(bucket);
@@ -169,13 +169,13 @@ export class BucketSectionRenderer {
             return;
         }
 
-        const shell = section.createDiv({ cls: "tps-nn-split" });
-        const listPane = shell.createDiv({ cls: "tps-nn-list-pane" });
-        const editorPane = shell.createDiv({ cls: "tps-nn-editor-pane" });
+        const shell = section.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-split" });
+        const listPane = shell.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-list-pane" });
+        const editorPane = shell.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-editor-pane" });
 
-        const filterRow = listPane.createDiv({ cls: "tps-nn-toolbar" });
+        const filterRow = listPane.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-toolbar" });
         const filterInput = filterRow.createEl("input", {
-            cls: "tps-nn-filter-input",
+            cls: "tps-gcm-settings-frontmatter-rules-filter-input",
             attr: {
                 type: "search",
                 placeholder: "Filter buckets..."
@@ -211,7 +211,7 @@ export class BucketSectionRenderer {
         index: number,
         activeId: string
     ): void {
-        const row = listPane.createEl("button", { cls: "tps-nn-list-item" });
+        const row = listPane.createEl("button", { cls: "tps-gcm-settings-frontmatter-rules-list-item" });
         row.type = "button";
         if (bucket.id === activeId) {
             row.addClass("is-active");
@@ -222,9 +222,9 @@ export class BucketSectionRenderer {
         });
 
         const title = bucket.name || `Bucket ${index + 1}`;
-        row.createDiv({ cls: "tps-nn-list-item-title", text: `${index + 1}. ${title}` });
-        row.createDiv({ cls: "tps-nn-list-item-summary", text: this.getBucketSummary(bucket) });
-        const meta = row.createDiv({ cls: "tps-nn-list-item-meta" });
+        row.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-list-item-title", text: `${index + 1}. ${title}` });
+        row.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-list-item-summary", text: this.getBucketSummary(bucket) });
+        const meta = row.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-list-item-meta" });
         this.renderMiniChip(meta, bucket.enabled ? "Enabled" : "Disabled");
         this.renderMiniChip(meta, `${bucket.conditions?.length ?? 0} conditions`);
         this.renderMiniChip(meta, `${bucket.sortCriteria?.length ?? 0} sort keys`);
@@ -236,7 +236,7 @@ export class BucketSectionRenderer {
         const bucketId = bucket.id;
         editorPane.createEl("h4", { text: `Editing Bucket ${index + 1}` });
 
-        const topBar = editorPane.createDiv({ cls: "tps-nn-toolbar" });
+        const topBar = editorPane.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-toolbar" });
         this.createActionButton(topBar, "Previous", async () => {
             const previousIndex = Math.max(0, index - 1);
             const previous = plugin.settings.notebookNavigatorRules.smartSort.buckets[previousIndex];
@@ -300,9 +300,9 @@ export class BucketSectionRenderer {
         bucket.match = normalizeRuleMatchMode(bucket.match);
         const conditions = this.ensureBucketConditions(bucket);
 
-        const panel = editorPane.createDiv({ cls: "tps-nn-sub-collapsible" });
+        const panel = editorPane.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-sub-collapsible" });
         panel.createEl("h5", { text: "Bucket matching conditions" });
-        const content = panel.createDiv({ cls: "tps-nn-sub-body" });
+        const content = panel.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-sub-body" });
 
         content.createEl("p", {
             cls: "setting-item-description",
@@ -365,11 +365,11 @@ export class BucketSectionRenderer {
         conditionIndex: number
     ): void {
         const { plugin, refresh } = this.context;
-        const conditionCard = container.createDiv({ cls: "tps-nn-condition-card" });
+        const conditionCard = container.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-card" });
 
-        const grid = conditionCard.createDiv({ cls: "tps-nn-condition-grid" });
+        const grid = conditionCard.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-grid" });
 
-        const sourceWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+        const sourceWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
         sourceWrap.createEl("label", { text: "Source" });
         const sourceSelect = sourceWrap.createEl("select");
         for (const source of CONDITION_SOURCE_OPTIONS) {
@@ -403,7 +403,7 @@ export class BucketSectionRenderer {
 
 
 
-        const operatorWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+        const operatorWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
         operatorWrap.createEl("label", { text: "Operator" });
         const operatorSelect = operatorWrap.createEl("select");
         const validOperators = getValidOperators(condition.source);
@@ -453,7 +453,7 @@ export class BucketSectionRenderer {
         });
 
         if (conditionSourceHasField(condition.source)) {
-            const fieldWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+            const fieldWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
             fieldWrap.createEl("label", { text: "Property" });
             const fieldInput = fieldWrap.createEl("input", {
                 attr: {
@@ -480,7 +480,7 @@ export class BucketSectionRenderer {
         }
 
         if (smartOperatorNeedsValue(condition.operator)) {
-            const valueWrap = grid.createDiv({ cls: "tps-nn-condition-field tps-nn-condition-field-value" });
+            const valueWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field tps-gcm-settings-frontmatter-rules-condition-field-value" });
             valueWrap.createEl("label", { text: "Value" });
             const valueInput = valueWrap.createEl("input", {
                 attr: {
@@ -506,8 +506,8 @@ export class BucketSectionRenderer {
             });
         }
 
-        const deleteWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
-        const deleteButton = deleteWrap.createEl("button", { text: "✕", cls: "tps-nn-compact-btn mod-warning" });
+        const deleteWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
+        const deleteButton = deleteWrap.createEl("button", { text: "✕", cls: "tps-gcm-settings-frontmatter-rules-compact-btn mod-warning" });
         deleteButton.type = "button";
         deleteButton.style.minHeight = "30px";
         deleteButton.style.padding = "0 8px";
@@ -529,9 +529,9 @@ export class BucketSectionRenderer {
         const { plugin, bindCommittedText, refresh } = this.context;
         const criteria = this.ensureSortCriteria(bucket);
 
-        const panel = editorPane.createDiv({ cls: "tps-nn-sub-collapsible" });
+        const panel = editorPane.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-sub-collapsible" });
         panel.createEl("h5", { text: "Sort criteria (within bucket)" });
-        const content = panel.createDiv({ cls: "tps-nn-sub-body" });
+        const content = panel.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-sub-body" });
 
         content.createEl("p", {
             cls: "setting-item-description",
@@ -574,14 +574,14 @@ export class BucketSectionRenderer {
         criterionIndex: number
     ): void {
         const { plugin, bindCommittedText, refresh } = this.context;
-        const criterionCard = container.createDiv({ cls: "tps-nn-condition-card" });
-        const head = criterionCard.createDiv({ cls: "tps-nn-condition-head" });
+        const criterionCard = container.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-card" });
+        const head = criterionCard.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-head" });
         head.createEl("strong", { text: `Criterion ${criterionIndex + 1}` });
 
-        const actions = head.createDiv({ cls: "tps-nn-inline-actions" });
+        const actions = head.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-inline-actions" });
 
         if (criterionIndex > 0) {
-            const upButton = actions.createEl("button", { text: "↑", cls: "tps-nn-compact-btn" });
+            const upButton = actions.createEl("button", { text: "↑", cls: "tps-gcm-settings-frontmatter-rules-compact-btn" });
             upButton.type = "button";
             upButton.addEventListener("click", () => {
                 void (async () => {
@@ -599,7 +599,7 @@ export class BucketSectionRenderer {
         }
 
         if (criterionIndex < this.ensureSortCriteria(this.getLiveBucket(bucketId) || { sortCriteria: [] } as SortBucket).length - 1) {
-            const downButton = actions.createEl("button", { text: "↓", cls: "tps-nn-compact-btn" });
+            const downButton = actions.createEl("button", { text: "↓", cls: "tps-gcm-settings-frontmatter-rules-compact-btn" });
             downButton.type = "button";
             downButton.addEventListener("click", () => {
                 void (async () => {
@@ -616,7 +616,7 @@ export class BucketSectionRenderer {
             });
         }
 
-        const deleteButton = actions.createEl("button", { text: "Delete", cls: "tps-nn-compact-btn" });
+        const deleteButton = actions.createEl("button", { text: "Delete", cls: "tps-gcm-settings-frontmatter-rules-compact-btn" });
         deleteButton.type = "button";
         deleteButton.addEventListener("click", () => {
             void (async () => {
@@ -631,9 +631,9 @@ export class BucketSectionRenderer {
             })();
         });
 
-        const grid = criterionCard.createDiv({ cls: "tps-nn-condition-grid" });
+        const grid = criterionCard.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-grid" });
 
-        const sourceWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+        const sourceWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
         sourceWrap.createEl("label", { text: "Source" });
         const sourceSelect = sourceWrap.createEl("select");
         for (const source of SORT_SOURCE_OPTIONS) {
@@ -674,7 +674,7 @@ export class BucketSectionRenderer {
             criterion.source === "extension";
 
         if (hasType) {
-            const typeWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+            const typeWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
             typeWrap.createEl("label", { text: "Type" });
             const typeSelect = typeWrap.createEl("select");
             for (const type of ["date", "status", "priority", "text", "number"]) {
@@ -700,7 +700,7 @@ export class BucketSectionRenderer {
         }
 
         if (conditionSourceHasField(criterion.source)) {
-            const fieldWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+            const fieldWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
             fieldWrap.createEl("label", { text: "Field" });
             const fieldInput = fieldWrap.createEl("input", {
                 attr: {
@@ -726,7 +726,7 @@ export class BucketSectionRenderer {
             });
         }
 
-        const directionWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+        const directionWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
         directionWrap.createEl("label", { text: "Direction" });
         const directionSelect = directionWrap.createEl("select");
         directionSelect.createEl("option", { value: "asc", text: "Ascending" });
@@ -749,7 +749,7 @@ export class BucketSectionRenderer {
         });
 
         if (isMetadata) {
-            const missingWrap = grid.createDiv({ cls: "tps-nn-condition-field" });
+            const missingWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field" });
             missingWrap.createEl("label", { text: "Missing values" });
             const missingSelect = missingWrap.createEl("select");
             missingSelect.createEl("option", { value: "last", text: "Sort last" });
@@ -771,7 +771,7 @@ export class BucketSectionRenderer {
                 })();
             });
 
-            const mappingWrap = grid.createDiv({ cls: "tps-nn-condition-field tps-nn-condition-field-value" });
+            const mappingWrap = grid.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-condition-field tps-gcm-settings-frontmatter-rules-condition-field-value" });
             mappingWrap.createEl("label", { text: "Value mappings (optional)" });
             const mappingInput = mappingWrap.createEl("input", {
                 attr: {
@@ -798,7 +798,7 @@ export class BucketSectionRenderer {
         }
         // Quick preset buttons
         if (hasType && (criterion.type === "priority" || criterion.type === "status")) {
-            const presetRow = criterionCard.createDiv({ cls: "tps-nn-toolbar" });
+            const presetRow = criterionCard.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-toolbar" });
             if (criterion.type === "priority") {
                 this.createActionButton(presetRow, "Priority preset", async () => {
                     const live = this.getLiveBucket(bucketId);
@@ -996,7 +996,7 @@ export class BucketSectionRenderer {
     }
 
     private renderMiniChip(container: HTMLElement, label: string): void {
-        container.createSpan({ cls: "tps-nn-mini-chip", text: label });
+        container.createSpan({ cls: "tps-gcm-settings-frontmatter-rules-mini-chip", text: label });
     }
 
     private createActionButton(

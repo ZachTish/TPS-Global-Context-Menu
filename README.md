@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.34.12
+
+- Frontmatter-rule settings no longer reuse TPS Notebook Navigator’s tps-nn-* DOM/CSS namespace. Their rule editor, list, condition, and Base-query classes are now GCM-owned and scoped to GCM settings.
+- The copied settings stylesheet now ships as normal GCM CSS instead of being permanently appended to document.head. On load, unload, and newly opened popouts, GCM removes the legacy injected style so an already-open Navigator recovers without restarting Obsidian.
+- This fixes the Navigator popout list being visibly cut off after visiting GCM’s Frontmatter Rules settings. It changes no setting keys, defaults, APIs, or note content.
+- This backward-compatible patch keeps minimum supported Obsidian at 1.10.0. Final validation and artifact hashes are recorded in release-notes/1.34.12.md.
+
 ## 1.34.11
 
 - Strict Source mode is now detected reliably on mobile when Obsidian reports a Markdown source editor but omits the desktop-only `source` boolean from the saved view state.
