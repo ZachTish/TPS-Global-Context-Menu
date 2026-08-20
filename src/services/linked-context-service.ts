@@ -110,6 +110,17 @@ export function extractLinkedContextMarkdown(
   return lines.slice(excerptStartLine, range.endLine + 1).join('\n');
 }
 
+export function hasMeaningfulLinkedContextMarkdown(markdown: unknown): boolean {
+  const withoutComments = String(markdown ?? '').replace(/<!--[\s\S]*?-->/gu, '');
+  return withoutComments.split(/\r?\n/u).some((line) => {
+    const trimmed = line.trim();
+    if (!trimmed) return false;
+    // Standalone block IDs attach to preceding content and render no content
+    // of their own. They must not keep an otherwise empty heading card alive.
+    return !/^\^[\p{L}\p{N}_-]+$/u.test(trimmed);
+  });
+}
+
 function isFilePropertiesCompanionFrontmatter(frontmatter: unknown): boolean {
   if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) return false;
   const record = frontmatter as Record<string, unknown>;
@@ -158,12 +169,14 @@ export class LinkedContextService {
         const key = `${range.kind}:${range.startLine}:${range.endLine}`;
         if (seen.has(key)) continue;
         seen.add(key);
+        const markdown = extractLinkedContextMarkdown(lines, range);
+        if (range.kind === 'heading' && !hasMeaningfulLinkedContextMarkdown(markdown)) continue;
         items.push({
           id: `${sourceFile.path}:${key}`,
           sourceFile,
           ...range,
           renderStartLine: range.kind === 'heading' ? range.startLine + 1 : range.startLine,
-          markdown: extractLinkedContextMarkdown(lines, range),
+          markdown,
         });
         if (range.kind === 'note') break;
       }

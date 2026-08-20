@@ -423,6 +423,9 @@ test('linked context uses central terminal-task semantics and explicit view-surf
   assert.match(itemSource, /isCompletedTaskSourceLine\(item\.markdown\)/);
   assert.match(itemSource, /tps-gcm-linked-context-card--terminal-task/);
   assert.match(itemSource, /classifyRenderedTaskRows\(body\)/);
+  assert.match(itemSource, /isLinkedContextBodyTerminalOnly\(body\)/);
+  assert.match(manager, /li\.task-list-item\.tps-gcm-mapped-completed-task/);
+  assert.match(manager, /private isLinkedContextBodyTerminalOnly\(body: HTMLElement\): boolean/);
   assert.match(manager, /taskRow\.setAttribute\('data-task', result\.task\.marker\)/);
   assert.match(manager, /checkbox\.disabled = false;\s*this\.ensureMenus\(\)/);
 });

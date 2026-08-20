@@ -27,6 +27,7 @@ type TaskVisibilityState = { showCompleted?: boolean; showTasks?: boolean };
 export class HideCompletedCheckboxesService {
   private observer: MutationObserver | null = null;
   private rootObservers = new WeakMap<HTMLElement, MutationObserver>();
+  private livePreviewCompletedRoots = new WeakMap<HTMLElement, boolean>();
   private refreshTimer: number | null = null;
   private pendingRoots = new Set<HTMLElement>();
   private pendingRenderedRoots = new Set<HTMLElement>();
@@ -54,12 +55,7 @@ export class HideCompletedCheckboxesService {
         }
 
         update(update: ViewUpdate): void {
-          if (
-            update.docChanged ||
-            update.viewportChanged ||
-            update.selectionSet ||
-            update.transactions.some((transaction) => transaction.reconfigured)
-          ) {
+          if (update.docChanged || update.transactions.some((transaction) => transaction.reconfigured)) {
             this.decorations = service.buildCompletedLineDecorations(update.view);
           }
         }
@@ -242,7 +238,8 @@ export class HideCompletedCheckboxesService {
 
   private observeRoot(root: HTMLElement): void {
     if (this.rootObservers.has(root)) return;
-    const observer = new MutationObserver(() => {
+    const observer = new MutationObserver((mutations) => {
+      if (!this.mutationsNeedLivePreviewRefresh(mutations)) return;
       if (this.isRootRecentlyEdited(root)) {
         this.markRootEditing(root);
         this.scheduleRefreshAfterQuiet(root);
@@ -255,6 +252,16 @@ export class HideCompletedCheckboxesService {
       subtree: true,
     });
     this.rootObservers.set(root, observer);
+  }
+
+  private mutationsNeedLivePreviewRefresh(mutations: readonly MutationRecord[]): boolean {
+    return mutations.some((mutation) => {
+      const target = mutation.target instanceof HTMLElement ? mutation.target : null;
+      // CodeMirror replaces virtual .cm-line nodes while the user scrolls.
+      // The editor extension already owns document decorations, so reacting to
+      // those viewport-only mutations turns scrolling into repeated DOM scans.
+      return target === null || target.closest('.cm-content') === null;
+    });
   }
 
   private observeRenderedRoot(root: HTMLElement): void {
@@ -344,10 +351,7 @@ export class HideCompletedCheckboxesService {
       return;
     }
     this.clearRootEditing(root);
-    const lines = Array.from(root.querySelectorAll<HTMLElement>('.cm-line'));
-    const completeMarkers = this.getCompleteTaskMarkers();
-    const completedLines = lines.filter((line) => this.isCompletedTaskLine(line, completeMarkers));
-    const hasCompletedTasks = completedLines.length > 0 || root.querySelector(
+    const hasCompletedTasks = this.livePreviewCompletedRoots.get(root) === true || root.querySelector(
       '.tps-gcm-linked-context-panel--live-preview .tps-gcm-linked-context-card--terminal-task, '
       + '.tps-gcm-linked-context-panel--live-preview li.task-list-item.tps-gcm-mapped-completed-task',
     ) !== null;
@@ -404,6 +408,7 @@ export class HideCompletedCheckboxesService {
     root.classList.remove(HAS_REVEAL_WIDGET_CLASS);
     root.classList.remove(TASK_HIDING_EXCLUDED_ROOT_CLASS);
     this.initializedRoots.delete(root);
+    this.livePreviewCompletedRoots.delete(root);
   }
 
   private clearRenderedRoot(root: HTMLElement): void {
@@ -783,16 +788,30 @@ export class HideCompletedCheckboxesService {
   }
 
   private buildCompletedLineDecorations(view: EditorView): DecorationSet {
-    if (!this.shouldHideCompletedTasksInLivePreview()) return Decoration.none;
     const root = view.dom.closest('.markdown-source-view.mod-cm6') as HTMLElement | null;
-    if (root && this.isRootTaskHidingExcluded(root)) return Decoration.none;
-    if (root && !this.isLivePreviewRoot(root)) return Decoration.none;
+    if (
+      !this.shouldHideCompletedTasksInLivePreview()
+      || (root && this.isRootTaskHidingExcluded(root))
+      || (root && !this.isLivePreviewRoot(root))
+    ) {
+      this.updateLivePreviewCompletedState(root, false);
+      return Decoration.none;
+    }
 
     const builder = new RangeSetBuilder<Decoration>();
-    for (const line of this.getHiddenCompletedLines(view)) {
+    const hiddenLines = this.getHiddenCompletedLines(view);
+    this.updateLivePreviewCompletedState(root, hiddenLines.length > 0);
+    for (const line of hiddenLines) {
       builder.add(line.from, line.from, Decoration.line({ class: HIDDEN_LINE_CLASS }));
     }
     return builder.finish();
+  }
+
+  private updateLivePreviewCompletedState(root: HTMLElement | null, hasCompletedTasks: boolean): void {
+    if (!root) return;
+    const previous = this.livePreviewCompletedRoots.get(root);
+    this.livePreviewCompletedRoots.set(root, hasCompletedTasks);
+    if (previous !== hasCompletedTasks) this.scheduleRefresh(root);
   }
 
   private getHiddenCompletedLines(view: EditorView): HiddenCompletedLine[] {

@@ -39,6 +39,40 @@ test('heading links include nested content until the next peer or parent heading
   ], range), '- first\n  - nested\n### Detail\nbody\n');
 });
 
+test('empty heading excerpts are omitted while nested visible content remains', async () => {
+  const { LinkedContextService, hasMeaningfulLinkedContextMarkdown } = await loadService();
+  assert.equal(hasMeaningfulLinkedContextMarkdown('\n<!-- bookkeeping -->\n^empty-heading\n'), false);
+  assert.equal(hasMeaningfulLinkedContextMarkdown('\n### Nested\n- visible\n'), true);
+
+  const target = { __tfile: true, path: 'Target.md', extension: 'md', basename: 'Target', stat: { mtime: 1 } };
+  const source = { __tfile: true, path: 'Daily.md', extension: 'md', basename: 'Daily', stat: { mtime: 2 } };
+  const link = (line) => ({ link: 'Target', position: { start: { line }, end: { line } } });
+  const cache = {
+    links: [link(0), link(4)],
+    embeds: [],
+    headings: [
+      { level: 2, position: { start: { line: 0 } } },
+      { level: 2, position: { start: { line: 4 } } },
+    ],
+  };
+  const app = {
+    metadataCache: {
+      resolvedLinks: { 'Daily.md': { 'Target.md': 2 } },
+      getFileCache: (file) => file.path === 'Daily.md' ? cache : undefined,
+      getFirstLinkpathDest: (raw) => raw === 'Target' ? target : null,
+    },
+    vault: {
+      getAbstractFileByPath: (path) => path === 'Daily.md' ? source : null,
+      cachedRead: async () => '## Empty [[Target]]\n\n<!-- bookkeeping -->\n^empty-heading\n## Useful [[Target]]\n- [ ] actual content',
+    },
+  };
+
+  const items = await new LinkedContextService(app).collect(target);
+  assert.deepEqual(items.map((item) => [item.startLine, item.markdown]), [
+    [4, '- [ ] actual content'],
+  ]);
+});
+
 test('ordinary links show only their source line', async () => {
   const { resolveLinkedContextRange } = await loadService();
   assert.deepEqual(resolveLinkedContextRange(7, 20, { headings: [] }), {

@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.34.8
+
+- Linked context no longer renders a heading card when the linked heading has no meaningful content beneath it. Whitespace, HTML comments, and a standalone block ID do not keep an empty excerpt alive; nested headings and visible content still do.
+- Heading and note excerpts containing only completed, won’t-do, or migrated tasks now hide the entire card with the completed-task setting. Mixed excerpts keep their card and hide only terminal rows, so open context remains visible and in its stable position.
+- Live Preview completed-task hiding no longer rescans the whole document on cursor movement, viewport changes, or CodeMirror's virtual-line churn. Document edits and mapping/configuration changes still rebuild the exact decorations and reveal state.
+- This backward-compatible patch changes no settings, APIs, note content, or defaults. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.34.8.md`.
+
 ## 1.34.7
 
 - Reading View Linked context recovery now learns the actual scrolling descendant from capture-phase scroll events instead of relying on one guessed Obsidian container. Downward wheel intent is recorded before the browser scrolls, so a detached top panel cannot be reattached in that frame and reset the note to the beginning.

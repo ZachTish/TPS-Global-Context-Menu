@@ -1162,6 +1162,10 @@ export class PersistentMenuManager {
     await MarkdownRenderer.render(this.plugin.app, item.markdown || '\n', body, item.sourceFile.path, component);
     this.enableLinkedContextTaskCheckboxes(body, card, item);
     this.plugin.hideCompletedCheckboxesService.classifyRenderedTaskRows(body);
+    card.classList.toggle(
+      'tps-gcm-linked-context-card--terminal-task',
+      this.isLinkedContextBodyTerminalOnly(body),
+    );
 
     const activate = (event: MouseEvent | KeyboardEvent) => {
       event.preventDefault();
@@ -1240,19 +1244,38 @@ export class PersistentMenuManager {
             taskRow.dataset.taskLine = String(result.task.lineNumber + 1);
             taskRow.dataset.tpsCalendarTaskText = taskLine.parsed?.body || result.task.rawLine;
           }
-          if (item.kind === 'line') {
-            card.classList.toggle(
-              'tps-gcm-linked-context-card--terminal-task',
-              this.plugin.hideCompletedCheckboxesService.isCompletedTaskSourceLine(result.task.rawLine),
-            );
-          }
         }
         card.classList.toggle('is-completed', result.task?.isComplete === true);
         this.plugin.hideCompletedCheckboxesService.classifyRenderedTaskRows(body);
+        card.classList.toggle(
+          'tps-gcm-linked-context-card--terminal-task',
+          this.isLinkedContextBodyTerminalOnly(body),
+        );
         checkbox.disabled = false;
         this.ensureMenus();
       });
     });
+  }
+
+  private isLinkedContextBodyTerminalOnly(body: HTMLElement): boolean {
+    const terminalTasks = body.querySelectorAll<HTMLElement>(
+      'li.task-list-item.tps-gcm-mapped-completed-task',
+    );
+    if (terminalTasks.length === 0) return false;
+
+    const walker = document.createTreeWalker(body, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+    let node: Node | null = walker.nextNode();
+    while (node) {
+      const owner = node instanceof HTMLElement ? node : node.parentElement;
+      if (!owner?.closest('li.task-list-item.tps-gcm-mapped-completed-task')) {
+        if (node.nodeType === Node.TEXT_NODE && node.textContent?.trim()) return false;
+        if (node instanceof HTMLElement && node.matches('img, video, audio, iframe, canvas, svg, table, hr, pre')) {
+          return false;
+        }
+      }
+      node = walker.nextNode();
+    }
+    return true;
   }
 
   private bindLinkedContextTaskLongPress(taskRow: HTMLElement): void {

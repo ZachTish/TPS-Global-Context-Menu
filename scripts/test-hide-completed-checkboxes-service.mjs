@@ -21,6 +21,10 @@ const observeLiveRootSource = source.slice(
   source.indexOf('private observeRoot'),
   source.indexOf('private observeRenderedRoot'),
 );
+const editorExtensionSource = source.slice(
+  source.indexOf('getEditorExtension(): Extension'),
+  source.indexOf('attach(): void'),
+);
 const syncRevealButtonSource = source.slice(
   source.indexOf('private syncRevealButton'),
   source.indexOf('private revealTemporarily'),
@@ -47,6 +51,8 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(source, /revealCompletedForFile\(filePath: string, lineNumber\?: number\): void/);
   assert.match(source, /getMarkdownRootsForFile\(filePath: string\): HTMLElement\[\]/);
   assert.match(source, /ViewPlugin\.fromClass/);
+  assert.match(editorExtensionSource, /update\.docChanged \|\| update\.transactions\.some/);
+  assert.doesNotMatch(editorExtensionSource, /viewportChanged|selectionSet/);
   assert.match(source, /buildCompletedLineDecorations\(view: EditorView\)/);
   assert.match(source, /Decoration\.line\(\{ class: HIDDEN_LINE_CLASS \}\)/);
   assert.match(source, /getHiddenCompletedLines\(view: EditorView\)/);
@@ -86,6 +92,8 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(refreshRootSource, /if \(this\.isRootRecentlyEdited\(root\)\)/);
   assert.doesNotMatch(refreshRootSource, /isRootActivelyBeingEdited/);
   assert.match(observeRootSource, /if \(this\.isRootRecentlyEdited\(root\)\)/);
+  assert.match(observeRootSource, /mutationsNeedLivePreviewRefresh\(mutations\)/);
+  assert.match(source, /target === null \|\| target\.closest\('\.cm-content'\) === null/);
   assert.doesNotMatch(observeRootSource, /isRootActivelyBeingEdited/);
   assert.match(syncRevealButtonSource, /if \(this\.isRootRecentlyEdited\(root\) && wrap\.parentElement === mount\) return;/);
   assert.match(syncRevealButtonSource, /if \(wrap\.parentElement !== mount\) mount\.prepend\(wrap\)/);
@@ -132,6 +140,9 @@ test('completed checkbox hiding is scoped and idle-aware to avoid typing jitter'
   assert.match(source, /attributeFilter: \['data-task'\]/);
   assert.doesNotMatch(source, /completedLines\.includes\(line\)/);
   assert.doesNotMatch(refreshRootSource, /classList\.toggle\(HIDDEN_LINE_CLASS/);
+  assert.match(refreshRootSource, /this\.livePreviewCompletedRoots\.get\(root\) === true/);
+  assert.doesNotMatch(refreshRootSource, /querySelectorAll<HTMLElement>\('\.cm-line'\)/);
+  assert.match(source, /updateLivePreviewCompletedState\(root, hiddenLines\.length > 0\)/);
   assert.doesNotMatch(styles, /\.cm-line:has/);
   assert.doesNotMatch(styles, /\.cm-line\[data-task=/);
   assert.match(styles, /\.markdown-source-view\.mod-cm6\.is-live-preview \.cm-line\.tps-gcm-hidden-completed-checkbox-line/);
@@ -190,9 +201,9 @@ test('reading-only completed-task scope clears Live Preview while retaining rend
   assert.match(source, /shouldHideCompletedTasksInLivePreview\(\): boolean/);
   assert.match(source, /completedTaskHidingScope !== 'reading-only'/);
   assert.match(source, /const enabled = this\.shouldHideCompletedTasksInLivePreview\(\)/);
-  assert.match(source, /if \(!this\.shouldHideCompletedTasksInLivePreview\(\)\) return Decoration\.none/);
+  assert.match(source, /!this\.shouldHideCompletedTasksInLivePreview\(\)[\s\S]{0,260}this\.updateLivePreviewCompletedState\(root, false\)[\s\S]{0,100}return Decoration\.none/);
   assert.match(source, /this\.clearLivePreviewRoot\(root\)/);
-  assert.match(source, /hasCompletedTasks = completedLines\.length > 0 \|\| root\.querySelector\(/);
+  assert.match(source, /hasCompletedTasks = this\.livePreviewCompletedRoots\.get\(root\) === true \|\| root\.querySelector\(/);
   assert.match(source, /tps-gcm-linked-context-panel--live-preview \.tps-gcm-linked-context-card--terminal-task/);
   assert.match(styles, /tps-gcm-linked-context-panel--reading \.tps-gcm-linked-context-card--terminal-task/);
   assert.match(styles, /not\(\.tps-gcm-hide-completed-checkboxes-reading-only\) \.tps-gcm-linked-context-panel--live-preview/);
@@ -253,7 +264,7 @@ test('task hiding exclusions bypass completed and all-task hiding by file patter
   assert.match(source, /private getTaskHidingExclusionPatterns\(\): string\[\]/);
   assert.match(source, /\.split\(\/\\r\?\\n\|,\/\)/);
   assert.match(source, /this\.plugin\.matchesAutoFrontmatterExclusionPattern\(normalizedPath, normalizedBasename, pattern\)/);
-  assert.match(source, /if \(root && this\.isRootTaskHidingExcluded\(root\)\) return Decoration\.none/);
+  assert.match(source, /root && this\.isRootTaskHidingExcluded\(root\)[\s\S]{0,180}this\.updateLivePreviewCompletedState\(root, false\)[\s\S]{0,100}return Decoration\.none/);
   assert.match(source, /this\.plugin\.settings\.hideCompletedCheckboxes === true \|\|[\s\S]*this\.plugin\.settings\.hideAllTaskLinesInReadingMode === true/);
   assert.match(source, /if \(this\.isRootTaskHidingExcluded\(root\)\) \{\s*this\.clearTaskHidingRoot\(root\);\s*continue;/);
   assert.match(source, /if \(this\.isRootTaskHidingExcluded\(root\)\) \{\s*this\.clearTaskHidingRoot\(root\);\s*return;/);
