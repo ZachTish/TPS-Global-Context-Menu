@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.34.10
+
+- Linked-context controls now have a clearly labeled home under **Menus & surfaces → Linked context** instead of being buried under the Child notes workflow.
+- **Linked context order** remains editable while the panel is off and offers stable **Source path A → Z** and **Source path Z → A** ordering. Placement and activation appear beside it when the panel is enabled.
+- This backward-compatible patch changes no setting keys, saved values, defaults, APIs, note content, or sorting semantics. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.34.10.md`.
+
 ## 1.34.9
 
 - Bottom-placed Linked context in Reading View now mounts as a stable child of the Markdown view instead of inside Obsidian's virtualized preview sizer. Scrolling can no longer detach the panel and make it disappear until a delayed recovery reattaches it.
@@ -911,12 +917,13 @@ TPS Table and TPS List use the same source-aware picker for empty and populated 
 ## Settings Surface
 
 - Settings open on an always-visible **Choose what to configure** hub with five destinations: **Rules & fields**, **Menus & surfaces**, **Workflows**, **Appearance**, and **Advanced**. Only the selected page is rendered.
+- **Menus & surfaces → Linked context** owns the panel toggle and stable source-path A → Z / Z → A ordering. The order remains editable while the panel is off; placement and activation appear beside it when enabled.
 - **Menus & surfaces → Note navigation** owns the existing note-navigation master and placement plus independent default-on Calendar, Tasks, and Mentions visibility controls. These settings stay editable while either master is off, use the same button factories for below-title and bottom-toolbar placement, and do not alter the scheduled Daily Note shortcut.
 - Note navigation and **Linked context** share stable mount ownership but independent visibility. Repeated note-open and layout reconciliation reuses unchanged top and bottom navigation, removes context belonging to the previously opened file before replacement work begins, and swaps same-file context only after its complete candidate is ready. A view-scoped observer recovers the panel when Obsidian replaces its Reading View or Live Preview mount while scrolling; source edits, renames, and deletions also invalidate dependent panels.
 - **Rules & fields** has a flat selector for Frontmatter rules, Custom fields, and View mode. Frontmatter rules expose direct Sort buckets, Tag rules, and Icon + color editors; Custom fields keeps placement/display controls beside field definitions; View mode keeps its master controls, keys, folders, and rules on one page.
 - Custom-field keys use case-insensitive exact identity after trimming only edge whitespace. Blank keys and duplicate exact identities are reported inline and are not saved over a valid key; existing invalid definitions remain visible for repair and are never renamed automatically. Punctuation and interior whitespace stay significant, and a newly added field receives a unique default key.
 - **Workflows** has direct buttons for Home & daily notes, Tasks, Child notes, Recurrence, and Time tracking. Advanced rule safeguards, each repeated custom-field editor, and the compact Base query reference are the only intentional disclosures.
-- **Workflows → Child notes → Linked context order** sorts source paths A → Z or Z → A and always keeps excerpts from one source in physical document order. Sorting never uses modification time, so interacting with an existing card cannot reorder the panel merely because the source note changed.
+- **Linked context order** sorts source paths A → Z or Z → A and always keeps excerpts from one source in physical document order. Sorting never uses modification time, so interacting with an existing card cannot reorder the panel merely because the source note changed.
 - **Ignore matching parent/child notes** is an off-by-default exact key/value rule. Keys and scalar or list-member values compare case-insensitively after trimming. A complete match removes the note from parent/child discovery, panels, new links, linked-checkbox actions, derived-status synchronization, and relationship automation, but leaves existing body links and frontmatter byte-for-byte intact; disabling or changing the rule makes the relationship visible again.
 - **Workflows → Tasks → After moving a task from a Daily Note** controls only GCM's configured move route: keep the `[>]` / `migratedTo` scratchpad record, or remove the complete source block after the destination commit. The default remains **Keep a migrated marker**. The independent Daily Note schedule-inheritance setting is not consulted for this source choice.
 - **Hide completed task lines** classifies the configured complete and won't-do checkbox mappings plus migrated `[>]` records. Its scope can remain **Reading view and Live Preview** for backward compatibility or switch to **Reading view only**; Source mode is never hidden, and Linked context follows the owning Markdown view's scope. Task-hiding exclusions and temporary reveal state retain priority.

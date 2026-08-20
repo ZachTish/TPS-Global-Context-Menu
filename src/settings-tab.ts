@@ -239,7 +239,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           id: 'menus-surfaces',
           label: 'Menus & surfaces',
           summary: settings.enableInlinePersistentMenus ? 'Inline menu on' : 'Inline menu off',
-          description: 'Right-click placement, view coverage, previews, and inline UI.',
+          description: 'Right-click placement, linked context, note navigation, and inline UI.',
         },
         {
           id: 'workflows',
@@ -318,6 +318,73 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       'tps-gcm-settings-subnav tps-gcm-settings-subnav--workflow',
       'Workflow sections',
     );
+  }
+
+  private renderLinkedContextSettings(container: HTMLElement): void {
+    container.createEl('h4', { text: 'Linked context' });
+    container.createEl('p', {
+      text: 'Show incoming-link excerpts and choose their stable source order.',
+      cls: 'setting-item-description',
+    });
+
+    new Setting(container)
+      .setName('Show linked context')
+      .setDesc('Show read-only excerpts from notes that link to the current note. Heading links include their nested section; frontmatter links include the whole source note.')
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.enableLinkedContextPanel === true).onChange(async (value) => {
+          this.plugin.settings.enableLinkedContextPanel = value;
+          await this.plugin.saveSettings();
+          this.plugin.persistentMenuManager.ensureMenus();
+          this.display();
+        })
+      );
+
+    new Setting(container)
+      .setName('Linked context order')
+      .setDesc('Sort source paths alphabetically while keeping excerpts from each source in document order. The chosen order remains stable while you interact with a card.')
+      .addDropdown((dropdown) =>
+        dropdown
+          .addOption('source-asc', 'Source path A → Z')
+          .addOption('source-desc', 'Source path Z → A')
+          .setValue(this.plugin.settings.linkedContextSortOrder || 'source-asc')
+          .onChange(async (value: 'source-asc' | 'source-desc') => {
+            this.plugin.settings.linkedContextSortOrder = value;
+            await this.plugin.saveSettings();
+            this.plugin.persistentMenuManager.ensureMenus();
+          })
+      );
+
+    if (this.plugin.settings.enableLinkedContextPanel === true) {
+      new Setting(container)
+        .setName('Linked context placement')
+        .setDesc('Place the linked material directly below the note title or after the note body.')
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('top', 'Below title')
+            .addOption('bottom', 'Bottom of note')
+            .setValue(this.plugin.settings.linkedContextPlacement || 'bottom')
+            .onChange(async (value: 'top' | 'bottom') => {
+              this.plugin.settings.linkedContextPlacement = value;
+              await this.plugin.saveSettings();
+              this.plugin.persistentMenuManager.ensureMenus();
+            })
+        );
+      new Setting(container)
+        .setName('Linked context activation')
+        .setDesc('Choose what happens when a read-only source card is activated.')
+        .addDropdown((dropdown) =>
+          dropdown
+            .addOption('same-tab', 'Open source in same tab')
+            .addOption('new-tab', 'Open source in new tab')
+            .addOption('hover-preview', 'Show hover preview')
+            .setValue(this.plugin.settings.linkedContextOpenBehavior || 'same-tab')
+            .onChange(async (value: 'same-tab' | 'new-tab' | 'hover-preview') => {
+              this.plugin.settings.linkedContextOpenBehavior = value;
+              await this.plugin.saveSettings();
+              this.plugin.persistentMenuManager.ensureMenus();
+            })
+        );
+    }
   }
 
   private bindNotebookNavigatorCommittedText: BindCommittedText = (
@@ -988,6 +1055,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             this.display();
           }),
         );
+
+      this.renderLinkedContextSettings(activePage);
 
       activePage.createEl('h4', { text: 'Note navigation' });
       activePage.createEl('p', {
@@ -2213,62 +2282,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           this.plugin.persistentMenuManager.ensureMenus();
         })
       );
-    new Setting(relationshipAutomation)
-      .setName('Show linked context')
-      .setDesc('Show read-only excerpts from notes that link to the current note. Heading links include their nested section; frontmatter links include the whole source note.')
-      .addToggle((toggle) =>
-        toggle.setValue(this.plugin.settings.enableLinkedContextPanel === true).onChange(async (value) => {
-          this.plugin.settings.enableLinkedContextPanel = value;
-          await this.plugin.saveSettings();
-          this.plugin.persistentMenuManager.ensureMenus();
-          this.display();
-        })
-      );
-    new Setting(relationshipAutomation)
-      .setName('Linked context order')
-      .setDesc('Sort source paths alphabetically while keeping excerpts from each source in document order. The chosen order remains stable while you interact with a card.')
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('source-asc', 'Source path A → Z')
-          .addOption('source-desc', 'Source path Z → A')
-          .setValue(this.plugin.settings.linkedContextSortOrder || 'source-asc')
-          .onChange(async (value: 'source-asc' | 'source-desc') => {
-            this.plugin.settings.linkedContextSortOrder = value;
-            await this.plugin.saveSettings();
-            this.plugin.persistentMenuManager.ensureMenus();
-          })
-      );
-    if (this.plugin.settings.enableLinkedContextPanel === true) {
-      new Setting(relationshipAutomation)
-        .setName('Linked context placement')
-        .setDesc('Place the linked material directly below the note title or after the note body.')
-        .addDropdown((dropdown) =>
-          dropdown
-            .addOption('top', 'Below title')
-            .addOption('bottom', 'Bottom of note')
-            .setValue(this.plugin.settings.linkedContextPlacement || 'bottom')
-            .onChange(async (value: 'top' | 'bottom') => {
-              this.plugin.settings.linkedContextPlacement = value;
-              await this.plugin.saveSettings();
-              this.plugin.persistentMenuManager.ensureMenus();
-            })
-        );
-      new Setting(relationshipAutomation)
-        .setName('Linked context activation')
-        .setDesc('Choose what happens when a read-only source card is activated.')
-        .addDropdown((dropdown) =>
-          dropdown
-            .addOption('same-tab', 'Open source in same tab')
-            .addOption('new-tab', 'Open source in new tab')
-            .addOption('hover-preview', 'Show hover preview')
-            .setValue(this.plugin.settings.linkedContextOpenBehavior || 'same-tab')
-            .onChange(async (value: 'same-tab' | 'new-tab' | 'hover-preview') => {
-              this.plugin.settings.linkedContextOpenBehavior = value;
-              await this.plugin.saveSettings();
-              this.plugin.persistentMenuManager.ensureMenus();
-            })
-        );
-    }
     new Setting(relationshipAutomation)
       .setName('Hidden child-note tags')
       .setDesc('Comma-separated tags to exclude from the child-note panel, such as hide, dailynote, or project.')

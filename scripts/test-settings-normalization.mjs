@@ -161,6 +161,16 @@ test('Daily Note move behavior and local item history have safe normalized setti
 });
 
 test('linked context, parent-child ignore, and completed-task scope settings normalize safely', () => {
+  const linkedContextSettingsStart = settingsTabSource.indexOf('private renderLinkedContextSettings');
+  const linkedContextSettingsEnd = settingsTabSource.indexOf('private bindNotebookNavigatorCommittedText', linkedContextSettingsStart);
+  const linkedContextSettingsSource = settingsTabSource.slice(linkedContextSettingsStart, linkedContextSettingsEnd);
+  const menusSurfaceStart = settingsTabSource.indexOf("if (this.activeSettingsPage === 'menus-surfaces')");
+  const menusSurfaceEnd = settingsTabSource.indexOf("if (this.activeSettingsPage === 'appearance')", menusSurfaceStart);
+  const menusSurfaceSource = settingsTabSource.slice(menusSurfaceStart, menusSurfaceEnd);
+  const childNotesStart = settingsTabSource.indexOf("if (this.activeWorkflowPage === 'child-notes')");
+  const childNotesEnd = settingsTabSource.indexOf("if (this.activeWorkflowPage === 'recurrence')", childNotesStart);
+  const childNotesSource = settingsTabSource.slice(childNotesStart, childNotesEnd);
+
   assert.match(typesSource, /CompletedTaskHidingScope = 'reading-and-live-preview' \| 'reading-only'/u);
   assert.match(typesSource, /LinkedContextSortOrder = 'source-asc' \| 'source-desc'/u);
   assert.match(constantsSource, /completedTaskHidingScope: 'reading-and-live-preview'/u);
@@ -175,15 +185,18 @@ test('linked context, parent-child ignore, and completed-task scope settings nor
   assert.match(mainSource, /parentChildIgnoreFrontmatterValue = String\([^)]*\)\.trim\(\)/u);
   assert.match(settingsTabSource, /setName\('Hide completed tasks in'\)/u);
   assert.match(settingsTabSource, /addOption\('reading-only', 'Reading view only'\)/u);
-  assert.match(settingsTabSource, /setName\('Linked context order'\)/u);
-  assert.match(settingsTabSource, /addOption\('source-desc', 'Source path Z → A'\)/u);
+  assert.match(linkedContextSettingsSource, /createEl\('h4', \{ text: 'Linked context' \}\)/u);
+  assert.match(linkedContextSettingsSource, /setName\('Linked context order'\)/u);
+  assert.match(linkedContextSettingsSource, /addOption\('source-desc', 'Source path Z → A'\)/u);
+  assert.match(menusSurfaceSource, /this\.renderLinkedContextSettings\(activePage\)/u);
+  assert.doesNotMatch(childNotesSource, /Linked context order|renderLinkedContextSettings/u);
   assert.match(settingsTabSource, /setName\('Ignore matching parent\/child notes'\)/u);
   assert.match(settingsTabSource, /Existing links and frontmatter are preserved/u);
   assert.match(settingsTabSource, /linkedSubitemCheckboxService\.ensureForAllMarkdownViews\(\)/u);
   assert.match(settingsTabSource, /linkedSubitemCheckboxService\.refreshLivePreviewEditors\(\)/u);
   assert.ok(
-    settingsTabSource.indexOf("setName('Linked context order')")
-      < settingsTabSource.indexOf("if (this.plugin.settings.enableLinkedContextPanel === true)"),
+    linkedContextSettingsSource.indexOf("setName('Linked context order')")
+      < linkedContextSettingsSource.indexOf("if (this.plugin.settings.enableLinkedContextPanel === true)"),
     'linked-context order remains configurable while the panel evaluator is off',
   );
   assert.ok(
@@ -848,6 +861,7 @@ test('settings use shallow routed pages with responsive, accessible selectors', 
   for (const route of ['rules-fields', 'menus-surfaces', 'workflows', 'appearance', 'advanced']) {
     assert.match(hubSource, new RegExp(`id: '${route}'`));
   }
+  assert.match(hubSource, /Right-click placement, linked context, note navigation, and inline UI\./);
   assert.equal((hubSource.match(/\bid: '/g) || []).length, 5);
   assert.match(settingsTabSource, /private activeSettingsPage: SettingsPageId = 'rules-fields';/);
   assert.match(settingsTabSource, /private activeRulesFieldsPage: RulesFieldsPageId = 'frontmatter';/);
