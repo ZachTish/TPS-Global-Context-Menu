@@ -21,6 +21,7 @@ buildSync({
 const {
   isLivePreviewEditorRoot,
   isStrictSourceEditorRoot,
+  isStrictSourceModeSnapshot,
 } = await import(`${pathToFileURL(bundledPath).href}?${Date.now()}`);
 
 function editorRoot({ markdown = true, livePreview = false, sourceClass = false } = {}) {
@@ -59,6 +60,38 @@ test('strict Source mode is the absence of Live Preview on a Markdown editor roo
   const unrelatedRoot = editorRoot({ markdown: false });
   assert.equal(isStrictSourceEditorRoot(unrelatedRoot), false);
   assert.equal(isLivePreviewEditorRoot(unrelatedRoot), false);
+});
+
+test('mobile Source mode falls back to the editor root when saved state omits source', () => {
+  const strictRoot = editorRoot();
+  const liveRoot = editorRoot({ livePreview: true });
+
+  assert.equal(isStrictSourceModeSnapshot({
+    reportedMode: 'source',
+    stateMode: 'source',
+    sourceRoot: strictRoot,
+  }), true);
+  assert.equal(isStrictSourceModeSnapshot({
+    reportedMode: 'source',
+    stateMode: 'source',
+    sourceRoot: liveRoot,
+  }), false);
+
+  assert.equal(isStrictSourceModeSnapshot({
+    reportedMode: 'source',
+    sourceState: true,
+    sourceRoot: liveRoot,
+  }), true, 'an explicit strict-source state wins during DOM transition');
+  assert.equal(isStrictSourceModeSnapshot({
+    reportedMode: 'source',
+    sourceState: false,
+    sourceRoot: strictRoot,
+  }), false, 'an explicit Live Preview state wins during DOM transition');
+  assert.equal(isStrictSourceModeSnapshot({
+    reportedMode: 'preview',
+    sourceState: true,
+    sourceRoot: strictRoot,
+  }), false, 'Reading View cannot be classified as Source from stale state');
 });
 
 test('every TPS editor substitution fails closed in strict Source mode', () => {

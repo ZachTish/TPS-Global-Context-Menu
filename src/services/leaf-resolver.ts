@@ -3,7 +3,7 @@
  * Extracted from PersistentMenuManager to keep that class focused on menu lifecycle.
  */
 import { App, MarkdownView, WorkspaceLeaf } from 'obsidian';
-import { isStrictSourceEditorRoot } from '../utils/markdown-editor-mode';
+import { isStrictSourceModeSnapshot } from '../utils/markdown-editor-mode';
 
 export function isCompatibleMarkdownView(view: unknown): view is MarkdownView {
   if (!view || typeof view !== 'object') return false;
@@ -47,32 +47,30 @@ export function getViewMode(view: MarkdownView): 'preview' | 'source' | null {
 
 export function isStrictSourceMode(view: MarkdownView): boolean {
   const anyView = view as any;
+  let reportedMode: unknown;
+  let state: any = null;
 
   try {
     if (typeof anyView.getMode === 'function') {
-      const mode = anyView.getMode();
-      if (mode === 'preview') return false;
-      if (mode === 'source') {
-        const state = typeof anyView.getState === 'function' ? anyView.getState() : null;
-        if (state?.source === true) return true;
-      }
+      reportedMode = anyView.getMode();
     }
   } catch {
     // Fall through to saved-state and DOM detection.
   }
 
   try {
-    const state = typeof anyView.getState === 'function' ? anyView.getState() : null;
-    if (state?.mode === 'source') {
-      return state.source === true;
-    }
+    state = typeof anyView.getState === 'function' ? anyView.getState() : null;
   } catch {
     // Fall through to DOM detection.
   }
 
   const sourceView = anyView.contentEl?.querySelector?.('.markdown-source-view') as HTMLElement | null | undefined;
-  if (!sourceView) return false;
-  return isStrictSourceEditorRoot(sourceView);
+  return isStrictSourceModeSnapshot({
+    reportedMode,
+    stateMode: state?.mode,
+    sourceState: state?.source,
+    sourceRoot: sourceView,
+  });
 }
 
 export function getCompatibleMarkdownViewFromLeaf(leaf: WorkspaceLeaf | null | undefined): MarkdownView | null {

@@ -10,12 +10,12 @@ const panelActionSource = readFileSync(new URL('../src/menu/panel-action-service
 
 test('strict source mode is detected separately from live preview', () => {
   assert.match(leafResolverSource, /export function isStrictSourceMode\(view: MarkdownView\): boolean/);
-  assert.match(leafResolverSource, /if \(mode === 'preview'\) return false/);
-  assert.match(leafResolverSource, /if \(mode === 'source'\) \{/);
-  assert.match(leafResolverSource, /state\?\.mode === 'source'/);
-  assert.match(leafResolverSource, /state\.source === true/);
+  assert.match(leafResolverSource, /return isStrictSourceModeSnapshot\(\{/);
+  assert.match(leafResolverSource, /reportedMode,/);
+  assert.match(leafResolverSource, /stateMode: state\?\.mode/);
+  assert.match(leafResolverSource, /sourceState: state\?\.source/);
   assert.match(leafResolverSource, /\.markdown-source-view/);
-  assert.match(leafResolverSource, /isStrictSourceEditorRoot\(sourceView\)/);
+  assert.match(leafResolverSource, /sourceRoot: sourceView/);
 });
 
 test('frontmatter title rendering restores filename in strict source mode', () => {

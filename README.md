@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.34.11
+
+- Strict Source mode is now detected reliably on mobile when Obsidian reports a Markdown source editor but omits the desktop-only `source` boolean from the saved view state.
+- The live editor root now supplies the missing distinction between Source and Live Preview. Literal Markdown—including headings, food-log lines, inline properties, and hidden TPS metadata—remains visible in Source, while linked context and every TPS editor substitution remain absent there.
+- Reading View and Live Preview retain the stable linked-context mount introduced in 1.34.9, and the **Menus & surfaces → Linked context → Linked context order** control introduced in 1.34.10 remains available. No settings, defaults, APIs, or note content change.
+- This backward-compatible patch keeps minimum supported Obsidian at 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.34.11.md`.
+
 ## 1.34.10
 
 - Linked-context controls now have a clearly labeled home under **Menus & surfaces → Linked context** instead of being buried under the Child notes workflow.
