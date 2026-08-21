@@ -52,6 +52,11 @@ export interface TimeTrackingRangeInput {
   end?: Date | string | number | null;
 }
 
+export interface TimeTrackingStartOptions {
+  notesMode?: 'workspace' | 'none';
+  start?: Date | string | number | null;
+}
+
 export interface TimeTrackingSession extends TimeTrackingSessionRecord {
   title: string;
   isActive: boolean;
@@ -140,6 +145,7 @@ export class TimeTrackingService {
   async startTimer(
     input?: TimeTrackingTargetInput,
     existingNotes?: Partial<TimeTrackingNotesReference>,
+    options: TimeTrackingStartOptions = {},
   ): Promise<TimeTrackingSession | null> {
     if (!this.ensureEnabled()) return null;
 
@@ -156,7 +162,7 @@ export class TimeTrackingService {
       if (!shouldStartAdditional) return active;
     }
 
-    const now = new Date();
+    const now = this.normalizeDateInput(options.start ?? null) ?? new Date();
     const timestamp = this.formatDateTime(now);
     let record: TimeTrackingSessionRecord = {
       id: this.createId('tt'),
@@ -164,6 +170,7 @@ export class TimeTrackingService {
       targetType: target.type,
       sourcePath: target.file.path,
       lineNumber: target.lineNumber,
+      notesMode: options.notesMode === 'none' ? 'none' : 'workspace',
       start: timestamp,
       createdAt: timestamp,
       updatedAt: timestamp,
@@ -172,19 +179,21 @@ export class TimeTrackingService {
     const storageFile = await this.resolveStorageFileForNewSession(target, now);
     let notesReference: EnsuredTimeTrackingNotesReference | null = null;
     try {
-      notesReference = await this.ensureSessionNotesWorkspace(record, target, now, existingNotes);
-      record = {
-        ...record,
-        notesPath: notesReference.notesPath,
-        notesHeading: notesReference.notesHeading,
-        notesBlockId: notesReference.notesBlockId,
-      };
+      if (record.notesMode !== 'none') {
+        notesReference = await this.ensureSessionNotesWorkspace(record, target, now, existingNotes);
+        record = {
+          ...record,
+          notesPath: notesReference.notesPath,
+          notesHeading: notesReference.notesHeading,
+          notesBlockId: notesReference.notesBlockId,
+        };
+      }
       await this.writeNewSession(target, record, storageFile);
     } catch (error) {
       if (notesReference?.created) {
         await this.rollbackEmptySessionNotes(notesReference).catch(() => undefined);
       }
-      logger.warn('[TimeTracking] Failed to create the work-session record and Daily Note workspace.', {
+      logger.warn('[TimeTracking] Failed to create the work-session record.', {
         targetPath: target.file.path,
         targetType: target.type,
         error,
@@ -330,6 +339,32 @@ export class TimeTrackingService {
     return hydrated;
   }
 
+  async stopTimerById(id: string, endInput?: Date | string | number | null): Promise<TimeTrackingSession | null> {
+    if (!this.ensureEnabled()) return null;
+    const stored = await this.findStoredSession(String(id || '').trim());
+    if (!stored || stored.record.end) return null;
+    const end = this.normalizeDateInput(endInput) ?? new Date();
+    const start = this.normalizeDateInput(stored.record.start) ?? end;
+    let updated: TimeTrackingSessionRecord = {
+      ...stored.record,
+      end: this.formatDateTime(end),
+      durationMinutes: Math.max(1, Math.round((end.getTime() - start.getTime()) / 60_000)),
+      updatedAt: this.formatDateTime(new Date()),
+    };
+    const target = await this.resolveTargetForRecord(updated, stored);
+    updated = this.withResolvedLineNumber(updated, target);
+    await this.replaceStoredSession(stored, updated);
+    const hydrated = await this.hydrateStoredSession({ ...stored, record: updated });
+    if (target?.file instanceof TFile) {
+      await this.syncTargetScheduledMetadata(target, updated, { mode: 'stopped', end });
+      this.refreshFileUi(target.file);
+    }
+    await this.refreshActiveTimerCache();
+    this.refreshStatusBar();
+    new Notice(`Stopped timer: ${hydrated.title}`);
+    return hydrated;
+  }
+
   async pauseActiveTimer(endInput?: Date | string | number | null): Promise<TimeTrackingSession | null> {
     if (!this.ensureEnabled()) return null;
 
@@ -362,6 +397,7 @@ export class TimeTrackingService {
       notesPath: hydrated.notesPath,
       notesHeading: hydrated.notesHeading,
       notesBlockId: hydrated.notesBlockId,
+      notesMode: active.record.notesMode,
     };
     await this.persistTimeTrackingState();
     await this.refreshActiveTimerCache();
@@ -399,6 +435,7 @@ export class TimeTrackingService {
         notesHeading: paused.notesHeading,
         notesBlockId: paused.notesBlockId,
       },
+      { notesMode: paused.notesMode === 'none' ? 'none' : 'workspace' },
     );
     if (started) {
       await this.clearPausedTimer({ silent: true });
@@ -577,6 +614,7 @@ export class TimeTrackingService {
   async openSessionNotes(id: string): Promise<boolean> {
     const stored = await this.findStoredSession(id);
     if (!stored) return false;
+    if (stored.record.notesMode === 'none') return this.openSessionTarget(id);
     const target = await this.resolveTargetForRecord(stored.record, stored);
     if (!target) return false;
     const start = this.normalizeDateInput(stored.record.start) ?? new Date();
@@ -606,6 +644,7 @@ export class TimeTrackingService {
     if (!paused) return false;
     const target = await this.resolveTargetForPausedState(paused);
     if (!target) return false;
+    if (paused.notesMode === 'none') return this.openResolvedTarget(target);
     const start = this.normalizeDateInput(paused.pausedAt) ?? new Date();
     const pseudoRecord: TimeTrackingSessionRecord = {
       id: paused.lastSessionId || this.createId('paused'),
@@ -616,6 +655,7 @@ export class TimeTrackingService {
       notesPath: paused.notesPath,
       notesHeading: paused.notesHeading,
       notesBlockId: paused.notesBlockId,
+      notesMode: paused.notesMode,
       start: paused.pausedAt,
       createdAt: paused.pausedAt,
       updatedAt: paused.pausedAt,
@@ -1440,6 +1480,7 @@ export class TimeTrackingService {
       notesPath: String(raw.notesPath || '').trim() || undefined,
       notesHeading: String(raw.notesHeading || '').trim() || undefined,
       notesBlockId: String(raw.notesBlockId || '').trim().replace(/^\^+/, '') || undefined,
+      notesMode: raw.notesMode === 'none' ? 'none' : 'workspace',
     };
   }
 
@@ -1559,6 +1600,7 @@ export class TimeTrackingService {
       notesPath: paused.notesPath,
       notesHeading: paused.notesHeading,
       notesBlockId: paused.notesBlockId,
+      notesMode: paused.notesMode,
       start: paused.pausedAt,
       createdAt: paused.pausedAt,
       updatedAt: paused.pausedAt,

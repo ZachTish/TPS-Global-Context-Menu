@@ -10,6 +10,7 @@ export interface TimeTrackingSessionRecord {
   notesPath?: string;
   notesHeading?: string;
   notesBlockId?: string;
+  notesMode?: 'workspace' | 'none';
   start: string;
   end?: string;
   durationMinutes?: number;
@@ -55,6 +56,7 @@ export function normalizeTimeTrackingRecord(value: unknown): TimeTrackingSession
   const notesPath = String(record.notesPath || '').trim();
   const notesHeading = String(record.notesHeading || '').trim();
   const notesBlockId = String(record.notesBlockId || '').trim().replace(/^\^+/, '');
+  const notesMode = record.notesMode === 'none' ? 'none' : 'workspace';
 
   return {
     id,
@@ -65,6 +67,7 @@ export function normalizeTimeTrackingRecord(value: unknown): TimeTrackingSession
     notesPath: notesPath || undefined,
     notesHeading: notesHeading || undefined,
     notesBlockId: notesBlockId || undefined,
+    notesMode,
     start,
     end: String(record.end || '').trim() || undefined,
     durationMinutes: Number.isFinite(durationMinutes) && durationMinutes > 0 ? durationMinutes : undefined,

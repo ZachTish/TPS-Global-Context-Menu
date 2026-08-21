@@ -103,6 +103,7 @@ export interface TimeTrackingPausedSessionState {
   notesPath?: string;
   notesHeading?: string;
   notesBlockId?: string;
+  notesMode?: 'workspace' | 'none';
 }
 export interface LinkedSubitemCheckboxMapping {
   checkboxState: string;

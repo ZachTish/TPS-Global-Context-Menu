@@ -37,6 +37,12 @@ test('normalizes frontmatter record arrays and JSON strings', () => {
   assert.equal(records[1].targetType, 'heading');
 });
 
+test('preserves external no-workspace session ownership', () => {
+  const [record] = normalizeTimeTrackingRecordList([{ ...baseRecord, notesMode: 'none', notesPath: '', notesHeading: '', notesBlockId: '' }]);
+  assert.equal(record.notesMode, 'none');
+  assert.equal(record.notesPath, undefined);
+});
+
 test('routes every time tracking storage mode to frontmatter storage', () => {
   assert.equal(resolveTimeTrackingStorageKind('source-note', 'task'), 'frontmatter');
   assert.equal(resolveTimeTrackingStorageKind('source-note', 'heading'), 'frontmatter');

@@ -686,6 +686,38 @@ test('ordinary note sessions create Daily Note notes without scheduling the note
   assert.deepEqual(timingMutationAttempts, []);
 });
 
+test('external task timers can reuse their target without creating notes and stop by exact session id', async () => {
+  const { bodies, dailyFile, frontmatter, service, sourceFile } = await createTimeTrackingNotesHarness();
+  const dailyBefore = bodies.get(dailyFile.path);
+  const lines = bodies.get(sourceFile.path).split(/\r?\n/u);
+  const rawTask = '- [ ] Ship release [tpsId:: task-one]';
+  const lineNumber = lines.indexOf(rawTask);
+  const external = await service.startTimer({
+    file: sourceFile,
+    type: 'task',
+    lineNumber,
+    rawLine: rawTask,
+    title: 'Workout',
+  }, undefined, {
+    notesMode: 'none',
+    start: '2026-08-03T08:00:00.000Z',
+  });
+  assert.ok(external);
+  assert.equal(external.notesMode, 'none');
+  assert.equal(external.notesPath, undefined);
+  assert.equal(external.start, '2026-08-03 08:00:00');
+  assert.equal(bodies.get(dailyFile.path), dailyBefore, 'no Time Tracking heading or workspace is created');
+
+  const ordinary = await service.startTimer({ file: sourceFile, type: 'note' });
+  assert.ok(ordinary);
+  const stopped = await service.stopTimerById(external.id, '2026-08-03T08:45:00.000Z');
+  assert.equal(stopped?.id, external.id);
+  assert.equal(stopped?.end, '2026-08-03 08:45:00');
+  const stored = frontmatter.get(sourceFile.path).timeTracking;
+  assert.equal(stored.find((record) => record.id === external.id).end, '2026-08-03 08:45:00');
+  assert.equal(stored.find((record) => record.id === ordinary.id).end, undefined, 'the unrelated active timer remains running');
+});
+
 test('authored note timing survives running, manual, stopped, and periodic session synchronization', async () => {
   const {
     dailyFile,

@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.35.0
+
+- The public Time Tracking service now supports externally owned sessions with `startTimer(target, existingNotes, { notesMode: 'none', start })`. These sessions use the same frontmatter record, active-timer cache, status bar/mobile dock, task scheduling, pause/resume, and tracked-target navigation without creating a Daily Note `## Time Tracking` workspace.
+- `stopTimerById(id, end)` stops one exact running session. Cross-plugin consumers no longer need to stop whichever timer happens to be first for a file, so an active Health workout cannot end an unrelated task timer in the same Daily Note.
+- `notesMode` persists through record normalization and pause/resume. Opening “session notes” for a no-workspace session opens its tracked target instead of silently generating a workspace later.
+- Existing `startTimer` calls, workspace-backed sessions, settings, storage modes, commands, and note formats remain compatible. The added record field is optional and old records normalize to `workspace`; no settings migration is required. Minimum supported Obsidian remains 1.10.0.
+- Validation: the full declared suite and a separate production-mode build passed in the isolated test vault. Focused integration coverage proves that a no-workspace external session honors its supplied start time, creates no notes workspace, survives normalization and pause/resume, and stops by exact session ID without ending another active timer. TPS Health Live Preview QA verified the consuming workout UI; the test vault's GCM time tracking setting remained disabled, so no real timer record or setting mutation was introduced during visual QA.
+
 ## 1.34.12
 
 - Frontmatter-rule settings no longer reuse TPS Notebook Navigator’s tps-nn-* DOM/CSS namespace. Their rule editor, list, condition, and Base-query classes are now GCM-owned and scoped to GCM settings.
