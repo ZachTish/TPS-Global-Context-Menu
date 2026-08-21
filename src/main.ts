@@ -116,6 +116,7 @@ import { ArchiveFileService } from './services/archive-file-service';
 import { TpsNotebookNavigatorMenuBridge } from './services/tps-notebook-navigator-menu-bridge';
 import { shouldReuseCustomPropertyPreviewPanel } from './services/custom-property-visibility';
 import { ItemHistoryService } from './services/item-history-service';
+import { createLivePreviewBodySelectionExtension } from './services/live-preview-body-selection-service';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -600,6 +601,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.linkedSubitemCheckboxService = new LinkedSubitemCheckboxService(this);
     this.frontmatterMutationService = new FrontmatterMutationService(this);
     this.sharedServices = createSharedServices(this);
+    this.registerEditorExtension(createLivePreviewBodySelectionExtension());
     this.registerEditorExtension(this.linkedSubitemCheckboxService.getEditorExtension());
     this.registerEditorExtension(this.hideCompletedCheckboxesService.getEditorExtension());
     this.registerEditorExtension(this.inlinePropertyDecorationService.getEditorExtension());

@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.35.1
+
+- In Live Preview, **Select All** (`Ctrl+A` on Windows/Linux or `Cmd+A` on macOS) now selects only the Markdown body after a complete YAML frontmatter block. Copying or replacing the selection therefore leaves note properties untouched.
+- Strict Source mode intentionally retains Obsidian's native full-file selection, including frontmatter. Notes without a valid, closed frontmatter block also retain native selection instead of using a guessed boundary.
+- The selector handles LF and CRLF line endings, UTF-8 BOMs, both `---` and `...` YAML closing delimiters, and an empty body. No setting or note migration is required.
+- This backward-compatible patch keeps minimum supported Obsidian at 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.35.1.md`.
+
 ## 1.35.0
 
 - The public Time Tracking service now supports externally owned sessions with `startTimer(target, existingNotes, { notesMode: 'none', start })`. These sessions use the same frontmatter record, active-timer cache, status bar/mobile dock, task scheduling, pause/resume, and tracked-target navigation without creating a Daily Note `## Time Tracking` workspace.
