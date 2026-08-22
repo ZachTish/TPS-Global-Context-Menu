@@ -347,6 +347,29 @@ export class MenuBuilder {
     });
   }
 
+  private populateBatchParentRelationSubmenu(menu: Menu, files: TFile[]): void {
+    const selectedPaths = new Set(files.map((file) => file.path));
+    menu.addItem((sub) => {
+      sub.setTitle('Link selected items to parent...')
+        .setIcon('plus')
+        .onClick(() => {
+          new FileSuggestModal(this.app, async (parentFile: TFile) => {
+            const linked = await this.plugin.bulkEditService.linkToParent(files, parentFile);
+            new Notice(linked > 0
+              ? `Linked ${linked} selected ${linked === 1 ? 'item' : 'items'} to ${parentFile.basename}.`
+              : 'The selected relationships are already present or no longer available.');
+          }, {
+            candidateFiles: this.plugin.parentLinkResolutionService.getRelationshipCandidates(),
+            includeAllExtensions: true,
+            filter: (candidate) => (
+              !selectedPaths.has(candidate.path)
+              && !this.plugin.parentLinkResolutionService.isIgnoredFile(candidate)
+            ),
+          }).open();
+        });
+    });
+  }
+
   private populateChildRelationSubmenu(menu: Menu, file: TFile): void {
     const childFiles = this.resolveChildFilesFor(file);
 
@@ -722,35 +745,44 @@ export class MenuBuilder {
       }, 'tps-props');
     }
 
-    // Parent/child links are property relationships. They are safe for one
-    // logical Markdown or companion-backed file target; body-only note actions
-    // remain below in the Markdown guard.
-    if (
-      includeSingleTargetActions
-      && entries.length === 1
-      && this.plugin.parentLinkResolutionService.isRelationshipTarget(file)
-      && !this.plugin.parentLinkResolutionService.isIgnoredFile(file)
-    ) {
-      const parentCount = this.resolveParentFilesFor(file).length;
-      const childCount = this.resolveChildFilesFor(file).length;
+    // Parent links can be applied to one or many logical files. Child creation
+    // and unlink/navigation remain single-target actions because their meaning
+    // would be ambiguous across a mixed selection.
+    const relationshipFiles = this.getPropertyFiles(propertyEntries).filter((candidate) => (
+      this.plugin.parentLinkResolutionService.isRelationshipTarget(candidate)
+      && !this.plugin.parentLinkResolutionService.isIgnoredFile(candidate)
+    ));
+    if (relationshipFiles.length === entries.length && relationshipFiles.length > 0) {
+      if (relationshipFiles.length > 1) {
+        menu.addItem((item) => {
+          item.setTitle(`Link to Parent (${relationshipFiles.length} items)`)
+            .setIcon('link')
+            .setSection('tps-props');
+          const subMenu = (item as any).setSubmenu();
+          this.populateBatchParentRelationSubmenu(subMenu, relationshipFiles);
+        });
+      } else if (includeSingleTargetActions) {
+        const parentCount = this.resolveParentFilesFor(file).length;
+        const childCount = this.resolveChildFilesFor(file).length;
 
-      menu.addItem((item) => {
-        item.setTitle(parentCount > 0 ? `Link to Parent (${parentCount})` : 'Link to Parent')
-          .setIcon('link')
-          .setSection('tps-props');
+        menu.addItem((item) => {
+          item.setTitle(parentCount > 0 ? `Link to Parent (${parentCount})` : 'Link to Parent')
+            .setIcon('link')
+            .setSection('tps-props');
 
-        const subMenu = (item as any).setSubmenu();
-        this.populateParentRelationSubmenu(subMenu, file);
-      });
+          const subMenu = (item as any).setSubmenu();
+          this.populateParentRelationSubmenu(subMenu, file);
+        });
 
-      menu.addItem((item) => {
-        item.setTitle(childCount > 0 ? `Link Children (${childCount})` : 'Link Children')
-          .setIcon('network')
-          .setSection('tps-props');
+        menu.addItem((item) => {
+          item.setTitle(childCount > 0 ? `Link Children (${childCount})` : 'Link Children')
+            .setIcon('network')
+            .setSection('tps-props');
 
-        const subMenu = (item as any).setSubmenu();
-        this.populateChildRelationSubmenu(subMenu, file);
-      });
+          const subMenu = (item as any).setSubmenu();
+          this.populateChildRelationSubmenu(subMenu, file);
+        });
+      }
     }
 
     // Embeds, note conversion, and time tracking mutate or interpret Markdown

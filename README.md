@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.35.4
+
+- Note rows in TPS List and TPS Table now support persistent `Cmd/Ctrl` toggle selection and `Shift` range selection. Right-clicking any selected note opens one exact batch menu for the selected notes rather than resolving an unrelated ambient file selection.
+- Batch note menus can set configured properties, add or remove tags/list values, archive or convert notes, and link every selected relationship-capable item to one parent. Actions that only make sense for one file remain hidden from multi-note menus.
+- TPS Table keeps note and task selection in separate domains. Selecting notes cannot leak them into task-line property changes or cross-plugin task dragging, and selecting a task clears the note batch.
+
 ## 1.35.3
 
 - Dragging one or more selected task rows from TPS List or TPS Table now shows a compact pointer-following preview instead of making the drag appear invisible.

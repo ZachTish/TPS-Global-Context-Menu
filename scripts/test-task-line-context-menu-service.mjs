@@ -115,7 +115,7 @@ test('TPS List and Table selections expose typed batch properties and cross-plug
   assert.match(serviceSource, /error: 'stale-item'/u);
   assert.match(logBaseViewSource, /__tpsGcmItemPropertyRef/u);
   assert.match(logBaseViewSource, /new CustomEvent\('tps-task-line-pointer-drop'/u);
-  assert.match(logBaseViewSource, /\.tps-log-base-row--selected\[data-tps-table-batch-selectable="true"\]/u);
+  assert.match(logBaseViewSource, /\.tps-log-base-row--selected\[data-tps-table-batch-kind="task"\]/u);
   assert.match(logBaseViewSource, /createPointerDragPreview\(/u);
   assert.match(logBaseViewSource, /movePointerDragPreview\(/u);
   assert.match(tpsListViewSource, /createPointerDragPreview\(/u);

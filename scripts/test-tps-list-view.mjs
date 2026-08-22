@@ -400,6 +400,7 @@ test('TPS List Shift-click selects every visible row kind in one persistent DOM 
   assert.match(viewSource, /row\.classList\.toggle\('tps-list-native-row--selected', selected\)/);
   assert.match(viewSource, /row\.setAttribute\('aria-selected', selected \? 'true' : 'false'\)/);
   assert.match(viewSource, /const seen = new Set<string>\(\)/);
+  assert.match(viewSource, /menuController\?\.addToExactFileMenu\?\.\(menu, targets, \{[\s\S]{0,100}includeTags: true,[\s\S]{0,100}includeSingleTargetActions: targets\.length === 1/);
   assert.doesNotMatch(viewSource, /querySelectorAll<HTMLElement>\('\.tps-kanban-card\[data-path\]'\)/);
   assert.match(gcmStyles, /\.tps-list-native-row--selected\s*\{[\s\S]*color-mix\(in srgb, var\(--interactive-accent\) 10%, transparent\)/);
 });
@@ -1691,7 +1692,7 @@ test('TPS List and TPS Table row menus expose built-in tag actions', async () =>
   assert.match(logLineUtilsSource, /collapseEmptiedInlineFieldComments\(source, matchingFields\)/);
   assert.match(viewSource, /removeInlineTagFromTaskLine\(line, tag\)/);
   assert.match(viewSource, /resolveExactLineRevisionIndex\(parts\.lines, lineIndex, rawLine\)/);
-  assert.match(viewSource, /menuController\?\.addToNativeMenu\?\.\(menu, targets, \{ includeTags: true \}\)/);
+  assert.match(viewSource, /menuController\?\.addToExactFileMenu\?\.\(menu, targets, \{[\s\S]{0,100}includeTags: true,[\s\S]{0,100}includeSingleTargetActions: targets\.length === 1/);
   assert.match(menuBuilderSource, /allEntriesSupportProperties && options\.includeTags === true/);
   assert.match(menuBuilderSource, /label: 'Tags',[\s\S]{0,100}key: 'tags',[\s\S]{0,100}listItemType: 'tag'/);
   assert.match(logBaseSource, /this\.addEntryTagsMenu\(menu, entry\)/);

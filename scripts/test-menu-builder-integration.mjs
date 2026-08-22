@@ -8,7 +8,7 @@ async function loadMenuBuilderModule() {
   const stubs = new Map([
     ["../main", "export default class TPSGlobalContextMenuPlugin {}"],
     ["../modals/text-input-modal", "export class TextInputModal { open() {} }"],
-    ["../modals/FileSuggestModal", "export class FileSuggestModal { constructor(_app, _choose, options) { globalThis.__tpsLatestFileSuggestOptions = options; } open() {} }"],
+    ["../modals/FileSuggestModal", "export class FileSuggestModal { constructor(_app, choose, options) { globalThis.__tpsLatestFileSuggestChoose = choose; globalThis.__tpsLatestFileSuggestOptions = options; } open() {} }"],
     ["../modals/MultiFileSelectModal", "export class MultiFileSelectModal { constructor(_app, _choose, options) { globalThis.__tpsLatestMultiFileOptions = options; } open() {} }"],
     ["../modals/file-properties-relink-modal", "export const promptFilePropertiesRelink = () => {};"],
     ["../logger", "export const warn = () => {};"],
@@ -161,7 +161,12 @@ function createBuilderHarness(MenuBuilder, TFile) {
       checkAndInitialize: async () => false,
     },
     timeTrackingService: { getActiveTimerCountForFileSync: () => 0 },
-    bulkEditService: {},
+    bulkEditService: {
+      linkToParent: async (targets, parent) => {
+        globalThis.__tpsLatestBatchParentWrite = { targets, parent };
+        return targets.length;
+      },
+    },
     notebookNavigatorRuleService: { applyRulesToFile: async () => {} },
     eventService: { emitFilesUpdated: () => {} },
     noteOperationService: {},
@@ -234,6 +239,28 @@ test("note time tracking exposes one inferred-target start action instead of tas
 
   assert.deepEqual(titles, ["Start work session", "Add manual session"]);
   assert.equal(titles.some((title) => /Track with task|Track with note/u.test(title)), false);
+});
+
+test("multi-note menus apply one parent choice to the exact selected files", async () => {
+  const { MenuBuilder, TFile } = await loadMenuBuilderModule();
+  const { builder, addFile } = createBuilderHarness(MenuBuilder, TFile);
+  const alpha = addFile("Notes/Alpha.md", 12);
+  const beta = addFile("Notes/Beta.md", 13);
+  const parent = addFile("Projects/Parent.md", 14);
+  const menu = buildMenu(builder, [alpha, beta], {
+    includeTitle: true,
+    includeTags: true,
+    includeSingleTargetActions: false,
+  });
+  const parentItem = menu.items.find((item) => item.title === "Link to Parent (2 items)");
+  assert.ok(parentItem?.submenu);
+  parentItem.submenu.items.find((item) => item.title === "Link selected items to parent...")?.click?.();
+  assert.equal(globalThis.__tpsLatestFileSuggestOptions.candidateFiles.includes(parent), true);
+  assert.equal(globalThis.__tpsLatestFileSuggestOptions.filter(alpha), false);
+  assert.equal(globalThis.__tpsLatestFileSuggestOptions.filter(beta), false);
+  await globalThis.__tpsLatestFileSuggestChoose(parent);
+  assert.deepEqual(globalThis.__tpsLatestBatchParentWrite.targets, [alpha, beta]);
+  assert.equal(globalThis.__tpsLatestBatchParentWrite.parent, parent);
 });
 
 test("the real menu builder exposes native properties for every non-Markdown file type", async () => {

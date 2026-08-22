@@ -140,9 +140,11 @@ import { parseLineEntityMetadata } from '../services/line-entity-source-provider
 import { MarkdownDocumentLineCache } from '../utils/markdown-document-line-cache';
 import { compileTpsBaseQueryPlan, type TpsBaseQueryPlan } from './tps-base-query-plan';
 import {
-  constrainTpsTableTaskSelection,
+  constrainTpsTableSelection,
+  getTpsTableSelectionKind,
+  getTpsTableSelectionOrder,
   getTpsTableTaskSelectionOrder,
-  isTpsTableTaskSelectionEntry,
+  type TpsTableSelectionKind,
 } from './tps-table-selection';
 import {
   createPointerDragPreview,
@@ -324,6 +326,7 @@ export class TpsTableView extends BasesView {
   private selectionAnchorId: string | null = null;
   private suppressEntryClickUntil = 0;
   private renderedTaskEntryOrder: string[] = [];
+  private renderedNoteEntryOrder: string[] = [];
   private columnWidths: Record<string, number> = {};
   private compiledFormulaSet: TpsCompiledFormulaSet = tpsBaseFormulaService.compile({}, 'tps-table:unresolved');
   private formulaDiagnostics = new Set<string>();
@@ -390,6 +393,7 @@ export class TpsTableView extends BasesView {
     this.selectedEntryIds.clear();
     this.selectionAnchorId = null;
     this.renderedTaskEntryOrder = [];
+    this.renderedNoteEntryOrder = [];
     const previousScroller = this.containerEl.querySelector<HTMLElement>('.tps-log-base-table-scroll');
     const previousScrollLeft = previousScroller?.scrollLeft ?? 0;
     const previousScrollTop = previousScroller?.scrollTop ?? 0;
@@ -860,6 +864,7 @@ export class TpsTableView extends BasesView {
     this.renderedResultCount = entries.length;
     this.tableIndexProgress = progress.totalFiles > 0 ? progress : null;
     this.renderedTaskEntryOrder = getTpsTableTaskSelectionOrder(renderedEntries);
+    this.renderedNoteEntryOrder = getTpsTableSelectionOrder(renderedEntries, 'note');
     const visibleEntryIds = new Set(renderedEntries.map((entry) => entry.selectionId));
     this.selectedEntryIds = new Set([...this.selectedEntryIds].filter((id) => visibleEntryIds.has(id)));
     if (this.selectionAnchorId && !visibleEntryIds.has(this.selectionAnchorId)) this.selectionAnchorId = null;
@@ -1906,9 +1911,13 @@ export class TpsTableView extends BasesView {
         rawLine: entry.line,
       } satisfies RenderedLogLineRevision;
     }
-    if (isTpsTableTaskSelectionEntry(entry)) {
-      row.dataset.tpsGcmContext = 'table-task';
+    const selectionKind = getTpsTableSelectionKind(entry);
+    if (selectionKind) {
       row.dataset.tpsTableBatchSelectable = 'true';
+      row.dataset.tpsTableBatchKind = selectionKind;
+    }
+    if (selectionKind === 'task') {
+      row.dataset.tpsGcmContext = 'table-task';
       row.dataset.taskPath = entry.file.path;
       row.dataset.taskLine = String(entry.lineNumber + 1);
       row.dataset.taskText = getTaskDisplayTitle(entry.line);
@@ -1925,7 +1934,7 @@ export class TpsTableView extends BasesView {
     row.addEventListener('click', (evt: MouseEvent) => this.handleEntryModifierClick(evt, entry), { capture: true });
     row.addEventListener('click', (evt: MouseEvent) => this.handleEntryClick(evt, entry));
     row.addEventListener('contextmenu', (evt) => entry.entityKind === 'note'
-      ? this.openNoteEntryContextMenu(evt, entry)
+      ? this.openNoteEntryContextMenu(evt, entry, row)
       : this.openEntryContextMenu(evt, entry, row, columns), { capture: true });
     for (const column of columns) {
       const cell = row.createEl('td', { cls: `bases-table-cell tps-log-base-cell tps-log-base-cell--${normalizeInlineKey(column.key)}` });
@@ -2923,21 +2932,21 @@ export class TpsTableView extends BasesView {
       evt.stopPropagation();
       return;
     }
-    const taskSelectable = isTpsTableTaskSelectionEntry(entry);
-    if (evt.shiftKey && taskSelectable) {
+    const selectionKind = getTpsTableSelectionKind(entry);
+    if (evt.shiftKey && selectionKind) {
       evt.preventDefault();
       evt.stopPropagation();
-      this.selectEntryRange(entry.selectionId);
+      this.selectEntryRange(entry.selectionId, selectionKind);
       return;
     }
-    if ((evt.metaKey || evt.ctrlKey) && taskSelectable) {
+    if ((evt.metaKey || evt.ctrlKey) && selectionKind) {
       evt.preventDefault();
       evt.stopPropagation();
-      this.toggleEntrySelection(entry.selectionId);
+      this.toggleEntrySelection(entry.selectionId, selectionKind);
       return;
     }
     this.selectOnlyEntry(entry.selectionId);
-    if (!taskSelectable) this.plugin.taskLineContextMenuService?.releaseTpsTableSelection?.(this.containerEl);
+    if (selectionKind !== 'task') this.plugin.taskLineContextMenuService?.releaseTpsTableSelection?.(this.containerEl);
     void this.openEntry(entry);
   }
 
@@ -2972,7 +2981,7 @@ export class TpsTableView extends BasesView {
         if (previewItemCount == null) {
           previewItemCount = entryId && this.selectedEntryIds.has(entryId)
             ? Math.max(1, this.containerEl.querySelectorAll(
-                '.tps-log-base-row--selected[data-tps-table-batch-selectable="true"]',
+                '.tps-log-base-row--selected[data-tps-table-batch-kind="task"]',
               ).length)
             : 1;
         }
@@ -3001,7 +3010,7 @@ export class TpsTableView extends BasesView {
       if (!rowRef) return;
       const entryId = row.dataset.entryId;
       const selectedRefs = Array.from(this.containerEl.querySelectorAll<HTMLElement>(
-        '.tps-log-base-row--selected[data-tps-table-batch-selectable="true"]',
+        '.tps-log-base-row--selected[data-tps-table-batch-kind="task"]',
       )).map((selectedRow) => (
         selectedRow as HTMLElement & { __tpsGcmItemPropertyRef?: typeof rowRef }
       ).__tpsGcmItemPropertyRef).filter((ref): ref is typeof rowRef => !!ref);
@@ -3026,12 +3035,13 @@ export class TpsTableView extends BasesView {
 
   private handleEntryModifierClick(evt: MouseEvent, entry: LogLineEntry): void {
     if (!evt.shiftKey && !evt.metaKey && !evt.ctrlKey) return;
-    if (!isTpsTableTaskSelectionEntry(entry)) return;
+    const selectionKind = getTpsTableSelectionKind(entry);
+    if (!selectionKind) return;
     evt.preventDefault();
     evt.stopPropagation();
     evt.stopImmediatePropagation();
-    if (evt.shiftKey) this.selectEntryRange(entry.selectionId);
-    else this.toggleEntrySelection(entry.selectionId);
+    if (evt.shiftKey) this.selectEntryRange(entry.selectionId, selectionKind);
+    else this.toggleEntrySelection(entry.selectionId, selectionKind);
   }
 
   private selectOnlyEntry(id: string): void {
@@ -3041,9 +3051,14 @@ export class TpsTableView extends BasesView {
     this.syncEntrySelectionClasses();
   }
 
-  private toggleEntrySelection(id: string): void {
-    const taskSelection = constrainTpsTableTaskSelection(this.selectedEntryIds, this.renderedTaskEntryOrder);
-    const result = toggleOrderedSelection(taskSelection, id, this.renderedTaskEntryOrder);
+  private getSelectionOrder(kind: TpsTableSelectionKind): string[] {
+    return kind === 'note' ? this.renderedNoteEntryOrder : this.renderedTaskEntryOrder;
+  }
+
+  private toggleEntrySelection(id: string, kind: TpsTableSelectionKind = 'task'): void {
+    const order = this.getSelectionOrder(kind);
+    const domainSelection = constrainTpsTableSelection(this.selectedEntryIds, order);
+    const result = toggleOrderedSelection(domainSelection, id, order);
     this.selectedEntryIds = result.selected;
     this.selectionAnchorId = result.anchor;
     this.syncEntrySelectionClasses();
@@ -3053,13 +3068,14 @@ export class TpsTableView extends BasesView {
     });
   }
 
-  private selectEntryRange(id: string): void {
-    if (!this.selectionAnchorId || !this.renderedTaskEntryOrder.includes(this.selectionAnchorId)) {
+  private selectEntryRange(id: string, kind: TpsTableSelectionKind = 'task'): void {
+    const order = this.getSelectionOrder(kind);
+    if (!this.selectionAnchorId || !order.includes(this.selectionAnchorId)) {
       this.selectOnlyEntry(id);
       logger.flow('TpsTableView', 'selection:changed', { mode: 'range-fallback', selectedCount: 1 });
       return;
     }
-    const range = getOrderedSelectionRange(this.renderedTaskEntryOrder, this.selectionAnchorId, id);
+    const range = getOrderedSelectionRange(order, this.selectionAnchorId, id);
     this.selectedEntryIds.clear();
     for (const selectedId of range) this.selectedEntryIds.add(selectedId);
     this.syncEntrySelectionClasses();
@@ -3080,7 +3096,7 @@ export class TpsTableView extends BasesView {
 
   private reconcileRenderedTaskSelection(): void {
     const selectedRows = Array.from(this.containerEl.querySelectorAll<HTMLElement>(
-      '.tps-log-base-row--selected[data-entry-id][data-tps-table-batch-selectable="true"]',
+      '.tps-log-base-row--selected[data-entry-id][data-tps-table-batch-kind="task"]',
     ));
     const anchorRow = this.selectionAnchorId
       ? selectedRows.find((candidate) => candidate.dataset.entryId === this.selectionAnchorId) ?? null
@@ -3101,15 +3117,20 @@ export class TpsTableView extends BasesView {
   applyEntryContextSelection(evt: MouseEvent, row: HTMLElement): boolean {
     const entryId = row.dataset.entryId;
     if (!entryId) return false;
-    if (row.dataset.tpsTableBatchSelectable !== 'true') {
+    const selectionKind = row.dataset.tpsTableBatchKind === 'note'
+      ? 'note'
+      : row.dataset.tpsTableBatchKind === 'task'
+        ? 'task'
+        : null;
+    if (row.dataset.tpsTableBatchSelectable !== 'true' || !selectionKind) {
       this.selectOnlyEntry(entryId);
       this.plugin.taskLineContextMenuService?.releaseTpsTableSelection?.(this.containerEl);
       return true;
     }
     if (evt.shiftKey) {
-      this.selectEntryRange(entryId);
+      this.selectEntryRange(entryId, selectionKind);
     } else if (evt.metaKey || evt.ctrlKey) {
-      this.toggleEntrySelection(entryId);
+      this.toggleEntrySelection(entryId, selectionKind);
     } else if (!this.selectedEntryIds.has(entryId)) {
       this.selectOnlyEntry(entryId);
     }
@@ -3123,14 +3144,14 @@ export class TpsTableView extends BasesView {
   ): Promise<void> {
     const row = target.closest<HTMLElement>('.tps-log-base-row[data-entry-id]');
     if (!row || !this.containerEl.contains(row)) return;
-    if (row.dataset.tpsTableBatchSelectable !== 'true') return;
+    if (row.dataset.tpsTableBatchKind !== 'task') return;
     const entryId = row.dataset.entryId;
     if (!entryId) return;
     if (!(preserveIfSelected && this.selectedEntryIds.has(entryId) && !evt.shiftKey && !evt.metaKey && !evt.ctrlKey)) {
       this.applyEntryContextSelection(evt, row);
     }
     const selectedRows = Array.from(this.containerEl.querySelectorAll<HTMLElement>(
-      '.tps-log-base-row--selected[data-entry-id][data-tps-table-batch-selectable="true"]',
+      '.tps-log-base-row--selected[data-entry-id][data-tps-table-batch-kind="task"]',
     ));
     const anchorRow = this.selectionAnchorId
       ? selectedRows.find((candidate) => candidate.dataset.entryId === this.selectionAnchorId) ?? null
@@ -3645,14 +3666,41 @@ export class TpsTableView extends BasesView {
     menu.showAtPosition({ x: evt.pageX, y: evt.pageY });
   }
 
-  private openNoteEntryContextMenu(evt: MouseEvent, entry: LogLineEntry): void {
+  private getSelectedNoteFiles(fallbackFile: TFile): TFile[] {
+    const files = new Map<string, TFile>();
+    this.containerEl.querySelectorAll<HTMLElement>(
+      '.tps-log-base-row--selected[data-entry-id][data-tps-table-batch-kind="note"][data-path]',
+    ).forEach((row) => {
+      const path = String(row.dataset.path || '').trim();
+      const current = path ? this.plugin.app.vault.getFileByPath(path) : null;
+      if (current instanceof TFile) files.set(current.path, current);
+    });
+    if (files.size === 0) {
+      const current = this.plugin.app.vault.getFileByPath(fallbackFile.path);
+      if (current instanceof TFile) files.set(current.path, current);
+    }
+    return [...files.values()];
+  }
+
+  private openNoteEntryContextMenu(evt: MouseEvent, entry: LogLineEntry, row: HTMLElement): void {
     evt.preventDefault();
     evt.stopPropagation();
+    evt.stopImmediatePropagation();
+    this.applyEntryContextSelection(evt, row);
+    this.plugin.taskLineContextMenuService?.releaseTpsTableSelection?.(this.containerEl);
+
+    const targets = this.getSelectedNoteFiles(entry.file);
     const menu = new Menu();
-    menu.addItem((item) => item
-      .setTitle('Open note')
-      .setIcon('file-text')
-      .onClick(() => void this.openEntry(entry)));
+    this.plugin.menuController?.addToExactFileMenu?.(menu, targets, {
+      includeTags: true,
+      includeSingleTargetActions: targets.length === 1,
+    });
+    if (targets.length > 1) {
+      this.plugin.app.workspace.trigger('files-menu', menu as any, targets as any);
+    } else if (targets[0]) {
+      this.plugin.app.workspace.trigger('file-menu', menu as any, targets[0] as any);
+    }
+    logger.flow('TpsTableView', 'note-context-menu', { selectedCount: targets.length });
     menu.showAtMouseEvent(evt);
   }
 

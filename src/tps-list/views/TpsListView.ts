@@ -9218,7 +9218,10 @@ export class TpsListView extends BasesView {
     const fallbackFile = logicalFile ?? entry.file;
     const targets = selectedFiles.length > 0 ? selectedFiles : [fallbackFile];
     const menuController = this.getGcmPlugin()?.menuController || this.getGcmApi()?.menuController;
-    menuController?.addToNativeMenu?.(menu, targets, { includeTags: true });
+    menuController?.addToExactFileMenu?.(menu, targets, {
+      includeTags: true,
+      includeSingleTargetActions: targets.length === 1,
+    });
     if (selectedFiles.length > 1) {
       this.app.workspace.trigger('files-menu', menu as any, selectedFiles as any);
     } else {
