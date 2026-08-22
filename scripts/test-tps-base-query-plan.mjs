@@ -62,6 +62,8 @@ test('production Tasks Base semantics include open tasks and projects while excl
     { id: 'task-migrated', rowKind: 'task', fields: { kind: 'task', status: 'migrated', folder: 'Inbox' }, file: file('Inbox/Tasks.md') },
     { id: 'project', rowKind: 'note', fields: { kind: 'note', explicitkind: 'project', status: 'working', folder: 'Projects' }, file: file('Projects/Alpha.md', { kind: 'project' }) },
     { id: 'archived-project', rowKind: 'note', fields: { kind: 'note', explicitkind: 'project', status: 'working', folder: '_archive' }, file: file('_archive/Old.md', { kind: 'project' }) },
+    { id: 'nested-archived-task', rowKind: 'task', fields: { kind: 'task', status: 'todo', folder: '_archive/QA' }, file: file('_archive/QA/TPS Filter Smoke Source.md') },
+    { id: 'prefixed-archive-task', rowKind: 'task', fields: { kind: 'task', status: 'todo', folder: '_archive-old/QA' }, file: file('_archive-old/QA/Still Archived.md') },
   ];
   const result = rows.filter((row) => evaluateLogBaseFilterRoots(roots, row) === true).map((row) => row.id);
   assert.deepEqual(result, ['task-open', 'task-migrated', 'project']);
@@ -76,4 +78,9 @@ test('production Tasks Base semantics include open tasks and projects while excl
     globalRoots,
     'serialized runtime controller state is not executed as a filter root',
   );
+
+  assert.equal(evaluateLogBaseFilterRoots(['folder is "_archive"'], rows[6]), true);
+  assert.equal(evaluateLogBaseFilterRoots(['folder is not "_archive"'], rows[6]), false);
+  assert.equal(evaluateLogBaseFilterRoots([{ property: 'file.folder', operator: 'is', value: '_archive' }], rows[6]), true);
+  assert.equal(evaluateLogBaseFilterRoots([{ property: 'folderPath', operator: 'is not', value: '_archive' }], rows[7]), false);
 });

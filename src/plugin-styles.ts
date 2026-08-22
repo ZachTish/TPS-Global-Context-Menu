@@ -79,8 +79,6 @@ export const PLUGIN_STYLES = `
       }
 
       .tps-list-native-row {
-        content-visibility: auto;
-        contain-intrinsic-block-size: 24px;
         display: grid;
         grid-template-columns: var(--checkbox-size, 18px) minmax(0, 1fr);
         column-gap: 8px;

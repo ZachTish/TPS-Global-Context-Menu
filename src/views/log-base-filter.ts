@@ -287,6 +287,7 @@ function evaluateStringFilter(rawExpression: string, context: LogBaseFilterConte
         call.method,
         args.map((value) => resolveLiteral(value, context)),
         isExactContainsProperty(call.property, context),
+        isFolderProperty(call.property),
       );
     }
   } else {
@@ -305,6 +306,7 @@ function evaluateStringFilter(rawExpression: string, context: LogBaseFilterConte
       comparison.operator,
       [resolveLiteral(comparison.expected, context)],
       isExactContainsProperty(comparison.property, context),
+      isFolderProperty(comparison.property),
     );
   }
   if (result == null) {
@@ -329,7 +331,13 @@ function evaluateObjectFilter(record: Record<string, unknown>, context: LogBaseF
   const operator = String(record.operator ?? record.op ?? record.comparison ?? record.condition ?? 'equals').trim();
   const rawExpected = record.values ?? record.value ?? record.expected ?? record.right ?? record.rhs ?? record.target;
   const expected = asArray(rawExpected).map((value) => resolveLiteral(value, context));
-  const result = evaluateValues(values, operator, expected, isExactContainsProperty(property, context));
+  const result = evaluateValues(
+    values,
+    operator,
+    expected,
+    isExactContainsProperty(property, context),
+    isFolderProperty(property),
+  );
   if (result == null && /^formula\./iu.test(property)) {
     markFormulaFailure(context, unsupportedFormulaFilterResult(property, operator));
   } else if (result == null) {
@@ -716,6 +724,16 @@ function isExactContainsProperty(rawProperty: string, context: LogBaseFilterCont
       && Array.isArray(context.formulaSession?.get(rawProperty).value));
 }
 
+function isFolderProperty(rawProperty: string): boolean {
+  const property = String(rawProperty || '').trim();
+  const semanticProperty = normalizePropertyKeyIdentity(
+    property.replace(/^(?:tps|kanban|task|line|heading)\./iu, ''),
+  );
+  return semanticProperty === 'folder'
+    || semanticProperty === 'folderpath'
+    || /^file\.(?:folder|folderpath)$/iu.test(property);
+}
+
 function readTaskTagValues(context: LogBaseFilterContext): string[] {
   const inlineTagFields = Object.entries(context.fields)
     .filter(([key]) => /^(?:tag|tags)$/u.test(normalizePropertyKeyIdentity(key)))
@@ -811,6 +829,7 @@ function evaluateValues(
   rawOperator: string,
   expected: unknown[],
   exactContains = false,
+  folderHierarchy = false,
 ): boolean | null {
   const operator = normalizeOperator(rawOperator);
   if (['isempty', 'empty'].includes(operator)) return current.length === 0 || current.every(isEmptyValue);
@@ -825,8 +844,14 @@ function evaluateValues(
   }
   if (operator === 'startswith') return expected.some((target) => current.some((value) => normalizeValue(value).startsWith(normalizeValue(target))));
   if (operator === 'endswith') return expected.some((target) => current.some((value) => normalizeValue(value).endsWith(normalizeValue(target))));
-  if (['!=', '!==', 'isnot', 'notequal', 'notequals', 'doesnotequal'].includes(operator)) return expected.every((target) => current.every((value) => compareValues(value, target) !== 0));
-  if (['=', '==', 'is', 'equal', 'equals'].includes(operator)) return expected.some((target) => current.some((value) => compareValues(value, target) === 0));
+  if (['!=', '!==', 'isnot', 'notequal', 'notequals', 'doesnotequal'].includes(operator)) {
+    if (folderHierarchy) return expected.every((target) => current.every((value) => !isFolderPrefixMatch(value, target)));
+    return expected.every((target) => current.every((value) => compareValues(value, target) !== 0));
+  }
+  if (['=', '==', 'is', 'equal', 'equals'].includes(operator)) {
+    if (folderHierarchy) return expected.some((target) => current.some((value) => isFolderPrefixMatch(value, target)));
+    return expected.some((target) => current.some((value) => compareValues(value, target) === 0));
+  }
   if (['>', '>=', '<', '<='].includes(operator)) {
     return expected.some((target) => current.some((value) => {
       const comparison = compareValues(value, target);
@@ -834,6 +859,13 @@ function evaluateValues(
     }));
   }
   return null;
+}
+
+function isFolderPrefixMatch(rawFolder: unknown, rawTarget: unknown): boolean {
+  const folder = normalizePathValue(rawFolder);
+  const target = normalizePathValue(rawTarget);
+  if (!target) return !folder;
+  return folder.startsWith(target);
 }
 
 function compareValues(left: unknown, right: unknown): number {

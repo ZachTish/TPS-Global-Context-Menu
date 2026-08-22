@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.35.2
+
+- TPS List now preserves the actual Obsidian Bases scroll container across data, filter, index, and property refreshes. It no longer captures an always-zero offset from the non-scrolling inner content wrapper or applies a delayed stale scroll restoration after the user has moved.
+- Variable-height TPS List rows no longer use a fixed 24px browser virtualization placeholder. Wrapped titles, multiple properties, and taller task rows therefore keep their measured height while scrolling instead of popping, jumping, clipping, or making the viewport appear to flicker.
+- Bare `folder`/`folderPath` and `file.folder` equality filters now use folder-prefix semantics. For example, `folder is not _archive` excludes `_archive`, `_archive/QA`, and `_archive-old`. TPS List and TPS Table share this behavior for note and synthesized line rows.
+- Grouping, sorting, progressive indexing, selection, task editing, and note data are unchanged. This is a backward-compatible filtering and rendering-stability patch with no settings or Base migration.
+
 ## 1.35.1
 
 - In Live Preview, **Select All** (`Ctrl+A` on Windows/Linux or `Cmd+A` on macOS) now selects only the Markdown body after a complete YAML frontmatter block. Copying or replacing the selection therefore leaves note properties untouched.

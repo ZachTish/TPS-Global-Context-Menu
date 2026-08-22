@@ -2759,6 +2759,37 @@ test('TPS List invalidates synthesized task-only rows for delete and rename even
   assert.equal(refreshes, 1);
 });
 
+test('TPS List preserves the real Bases scroller and avoids variable-height row virtualization', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const lane = {
+    scrollTop: 33,
+    closest: () => ({ dataset: { displayLaneId: 'lane-a' } }),
+  };
+  view.scrollEl = { scrollTop: 420, scrollLeft: 17 };
+  view.containerEl = {
+    scrollTop: 0,
+    scrollLeft: 0,
+    querySelectorAll: () => [lane],
+  };
+
+  const state = view.captureRenderScrollState();
+  assert.deepEqual(state, { top: 420, left: 17, laneCards: { 'lane-a': 33 } });
+
+  view.scrollEl.scrollTop = 0;
+  view.scrollEl.scrollLeft = 0;
+  lane.scrollTop = 0;
+  view.restoreRenderScrollState(state);
+  assert.equal(view.scrollEl.scrollTop, 420);
+  assert.equal(view.scrollEl.scrollLeft, 17);
+  assert.equal(lane.scrollTop, 33);
+  assert.equal(view.containerEl.scrollTop, 0, 'the non-scrolling content wrapper is never treated as the scroll owner');
+
+  const styles = readFileSync(new URL('../src/plugin-styles.ts', import.meta.url), 'utf8');
+  const rowRule = styles.match(/\.tps-list-native-row\s*\{([\s\S]*?)\n\s*\}/u)?.[1] || '';
+  assert.doesNotMatch(rowRule, /content-visibility|contain-intrinsic/u);
+});
+
 test('TPS List special field routing is consistent for task, bullet, heading, and note rows', async () => {
   const { TpsListView } = await loadTpsListViewHarness();
   const view = Object.create(TpsListView.prototype);

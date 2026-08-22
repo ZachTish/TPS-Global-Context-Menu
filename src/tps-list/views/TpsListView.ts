@@ -2449,27 +2449,22 @@ export class TpsListView extends BasesView {
       });
     }
     return {
-      top: this.containerEl?.scrollTop || 0,
-      left: this.containerEl?.scrollLeft || 0,
+      top: this.scrollEl?.scrollTop || 0,
+      left: this.scrollEl?.scrollLeft || 0,
       laneCards,
     };
   }
 
   private restoreRenderScrollState(state: TpsListRenderScrollState | null): void {
-    if (!state || !this.containerEl) return;
-    const restore = () => {
-      if (!this.containerEl) return;
-      this.containerEl.scrollTop = state.top;
-      this.containerEl.scrollLeft = state.left;
-      this.containerEl.querySelectorAll<HTMLElement>('.tps-kanban-lane[data-display-lane-id] .tps-kanban-cards').forEach((cardsEl) => {
-        const laneEl = cardsEl.closest<HTMLElement>('.tps-kanban-lane[data-display-lane-id]');
-        const laneId = laneEl?.dataset.displayLaneId || '';
-        if (!laneId || state.laneCards[laneId] == null) return;
-        cardsEl.scrollTop = state.laneCards[laneId];
-      });
-    };
-    restore();
-    window.requestAnimationFrame(restore);
+    if (!state || !this.containerEl || !this.scrollEl) return;
+    this.scrollEl.scrollTop = state.top;
+    this.scrollEl.scrollLeft = state.left;
+    this.containerEl.querySelectorAll<HTMLElement>('.tps-kanban-lane[data-display-lane-id] .tps-kanban-cards').forEach((cardsEl) => {
+      const laneEl = cardsEl.closest<HTMLElement>('.tps-kanban-lane[data-display-lane-id]');
+      const laneId = laneEl?.dataset.displayLaneId || '';
+      if (!laneId || state.laneCards[laneId] == null) return;
+      cardsEl.scrollTop = state.laneCards[laneId];
+    });
   }
 
   private isVisibleFile(path: string): boolean {
