@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.35.3
+
+- Dragging one or more selected task rows from TPS List or TPS Table now shows a compact pointer-following preview instead of making the drag appear invisible.
+- Single-item previews show the task title; multi-item previews show the exact selected-task count. The preview stays inside the active window and never intercepts the Notebook Navigator drop target.
+- The existing cross-plugin payload, property-type behavior, selection semantics, and Notebook Navigator file dragging are unchanged. This is a backward-compatible visual-feedback patch with no settings, Base, or note migration.
+
 ## 1.35.2
 
 - TPS List now preserves the actual Obsidian Bases scroll container across data, filter, index, and property refreshes. It no longer captures an always-zero offset from the non-scrolling inner content wrapper or applies a delayed stale scroll restoration after the user has moved.

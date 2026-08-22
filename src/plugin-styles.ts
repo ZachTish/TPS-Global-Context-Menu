@@ -104,6 +104,49 @@ export const PLUGIN_STYLES = `
         -webkit-user-select: none;
       }
 
+      .tps-gcm-pointer-drag-preview {
+        position: fixed;
+        inset: 0 auto auto 0;
+        z-index: 100000;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        max-width: min(320px, calc(100vw - 32px));
+        pointer-events: none;
+        user-select: none;
+        border: 1px solid var(--interactive-accent);
+        border-radius: 8px;
+        background: var(--background-secondary);
+        color: var(--text-normal);
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.38);
+        font-size: var(--font-ui-small);
+        font-weight: 650;
+        line-height: 1.2;
+        padding: 8px 10px;
+        will-change: transform;
+      }
+
+      .tps-gcm-pointer-drag-preview__icon {
+        display: grid;
+        place-items: center;
+        flex: 0 0 auto;
+        min-width: 20px;
+        height: 20px;
+        padding: 0 4px;
+        border-radius: 999px;
+        background: var(--interactive-accent);
+        color: var(--text-on-accent);
+        font-size: 11px;
+        font-weight: 750;
+      }
+
+      .tps-gcm-pointer-drag-preview__label {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       .tps-list-native-row--task.tps-kanban-card-task--dragging {
         opacity: 0.7;
         outline: 1px solid var(--interactive-accent);

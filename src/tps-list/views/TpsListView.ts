@@ -178,6 +178,12 @@ import {
   type LogBaseFilterContext,
 } from '../../views/log-base-filter';
 import { compileTpsBaseQueryPlan, type TpsBaseQueryPlan } from '../../views/tps-base-query-plan';
+import {
+  createPointerDragPreview,
+  movePointerDragPreview,
+  removePointerDragPreview,
+  type PointerDragPreview,
+} from '../../utils/pointer-drag-preview';
 
 export const TPS_LIST_VIEW_TYPE = 'tps-list';
 
@@ -237,6 +243,8 @@ type ActiveTaskPointerDrag = {
   activationTimer: number | null;
   detachLostPointerCapture: (() => void) | null;
   cardEl: HTMLElement;
+  preview: PointerDragPreview | null;
+  externalItems: Array<{ path: string; lineNumber: number; rawLine: string }> | null;
 };
 
 type TpsListRenderScrollState = {
@@ -5744,6 +5752,8 @@ export class TpsListView extends BasesView {
       activationTimer: null,
       detachLostPointerCapture: null,
       cardEl,
+      preview: null,
+      externalItems: null,
     };
     const active = this.activeTaskPointerDrag;
     const onLostPointerCapture = () => this.clearActiveTaskPointerDrag(active.pointerId);
@@ -5790,6 +5800,18 @@ export class TpsListView extends BasesView {
     event.preventDefault();
     event.stopPropagation();
     active.cardEl.addClass('tps-kanban-card-task--dragging');
+    const items = this.getExternalTaskPointerDragItems(active);
+    if (!active.preview) {
+      active.preview = createPointerDragPreview(
+        active.cardEl.ownerDocument || document,
+        active.text || 'Task item',
+        items.length,
+        event.clientX,
+        event.clientY,
+      );
+    } else {
+      movePointerDragPreview(active.preview, event.clientX, event.clientY);
+    }
   }
 
   private async handleTaskPointerUp(event: PointerEvent): Promise<void> {
@@ -5805,19 +5827,7 @@ export class TpsListView extends BasesView {
     const releaseTarget = document.elementFromPoint(event.clientX, event.clientY) as HTMLElement | null;
     const targetDisplayLane = this.getRenderedDisplayLaneFromElement(releaseTarget);
     if (!targetDisplayLane) {
-      const draggedRef = {
-        path: active.path,
-        lineNumber: Math.max(0, active.line - 1),
-        rawLine: active.rawLine,
-      };
-      const selectedRefs = this.getSelectedRows()
-        .filter((row) => row.dataset.tpsGcmContext === 'kanban-task')
-        .map((row) => (row as HTMLElement & { __tpsGcmItemPropertyRef?: typeof draggedRef }).__tpsGcmItemPropertyRef)
-        .filter((ref): ref is typeof draggedRef => !!ref);
-      const draggedSelectionId = active.cardEl.dataset.tpsListSelectionId;
-      const items = draggedSelectionId && this.selectedRowIds.has(draggedSelectionId) && selectedRefs.length > 0
-        ? selectedRefs
-        : [draggedRef];
+      const items = this.getExternalTaskPointerDragItems(active);
       const dropEvent = new CustomEvent(TPS_TASK_LINE_POINTER_DROP_EVENT, {
         bubbles: true,
         cancelable: true,
@@ -5870,6 +5880,7 @@ export class TpsListView extends BasesView {
     this.activeTaskPointerDrag = null;
     if (active.activationTimer != null) window.clearTimeout(active.activationTimer);
     active.detachLostPointerCapture?.();
+    removePointerDragPreview(active.preview);
     active.cardEl.removeClass('tps-kanban-card-task--dragging');
     active.cardEl.removeClass('tps-list-native-row--drag-ready');
     try {
@@ -5879,6 +5890,28 @@ export class TpsListView extends BasesView {
     } catch {
       // Ignore capture cleanup failures for detached/rerendered rows.
     }
+  }
+
+  private getExternalTaskPointerDragItems(active: ActiveTaskPointerDrag): Array<{
+    path: string;
+    lineNumber: number;
+    rawLine: string;
+  }> {
+    if (active.externalItems) return active.externalItems;
+    const draggedRef = {
+      path: active.path,
+      lineNumber: Math.max(0, active.line - 1),
+      rawLine: String(active.rawLine || ''),
+    };
+    const selectedRefs = this.getSelectedRows()
+      .filter((row) => row.dataset.tpsGcmContext === 'kanban-task')
+      .map((row) => (row as HTMLElement & { __tpsGcmItemPropertyRef?: typeof draggedRef }).__tpsGcmItemPropertyRef)
+      .filter((ref): ref is typeof draggedRef => !!ref);
+    const draggedSelectionId = active.cardEl.dataset.tpsListSelectionId;
+    active.externalItems = draggedSelectionId && this.selectedRowIds.has(draggedSelectionId) && selectedRefs.length > 0
+      ? selectedRefs
+      : [draggedRef];
+    return active.externalItems;
   }
 
   private getRenderedDisplayLaneFromElement(target: Element | null | undefined): DisplayLaneGroup | null {

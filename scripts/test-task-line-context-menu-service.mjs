@@ -35,6 +35,7 @@ const subitemCreationSource = readFileSync(new URL('../src/services/subitem-crea
 const dailyInboxLineSource = readFileSync(new URL('../src/services/daily-inbox-line-service.ts', import.meta.url), 'utf8');
 const notebookRuleSettingsSource = readFileSync(new URL('../src/services/notebook-navigator-rule-settings.ts', import.meta.url), 'utf8');
 const taskLineResolutionSource = readFileSync(new URL('../src/utils/task-line-resolution.ts', import.meta.url), 'utf8');
+const pointerDragPreviewSource = readFileSync(new URL('../src/utils/pointer-drag-preview.ts', import.meta.url), 'utf8');
 
 test('task checkbox UI mutations share ownership cleanup and atomic mapping guards', () => {
   assert.doesNotMatch(serviceSource, /setTaskCheckboxToken\(/u);
@@ -115,6 +116,12 @@ test('TPS List and Table selections expose typed batch properties and cross-plug
   assert.match(logBaseViewSource, /__tpsGcmItemPropertyRef/u);
   assert.match(logBaseViewSource, /new CustomEvent\('tps-task-line-pointer-drop'/u);
   assert.match(logBaseViewSource, /\.tps-log-base-row--selected\[data-tps-table-batch-selectable="true"\]/u);
+  assert.match(logBaseViewSource, /createPointerDragPreview\(/u);
+  assert.match(logBaseViewSource, /movePointerDragPreview\(/u);
+  assert.match(tpsListViewSource, /createPointerDragPreview\(/u);
+  assert.match(tpsListViewSource, /getExternalTaskPointerDragItems\(active\)/u);
+  assert.match(pointerDragPreviewSource, /ownerDocument\.body\.appendChild\(preview\)/u);
+  assert.match(pluginStylesSource, /\.tps-gcm-pointer-drag-preview\s*\{[\s\S]{0,500}pointer-events:\s*none/u);
 });
 
 test('Home Daily Note tasks use standard task interactions while the capture editor stays isolated', () => {
@@ -160,6 +167,7 @@ const notebookRuleServiceSource = readFileSync(new URL('../src/services/notebook
 const taskApiSource = readFileSync(new URL('../src/services/task-api-service.ts', import.meta.url), 'utf8');
 const linkedSubitemCheckboxSource = readFileSync(new URL('../src/services/linked-subitem-checkbox-service.ts', import.meta.url), 'utf8');
 const logBaseViewSource = readFileSync(new URL('../src/views/log-base-view.ts', import.meta.url), 'utf8');
+const tpsListViewSource = readFileSync(new URL('../src/tps-list/views/TpsListView.ts', import.meta.url), 'utf8');
 const mobileOverlaySource = readFileSync(new URL('../src/utils/mobile-overlay.ts', import.meta.url), 'utf8');
 
 async function importUtility() {

@@ -2594,6 +2594,16 @@ test('TPS List pointer drag resolves the real rendered group and cleans up mouse
     let lostPointerCapture = null;
     const cardEl = {
       isConnected: true,
+      dataset: {},
+      ownerDocument: {
+        createElement: () => ({
+          className: '', textContent: '', children: [], style: {}, isConnected: false,
+          setAttribute() {},
+          appendChild(child) { this.children.push(child); },
+          remove() { this.isConnected = false; },
+        }),
+        body: { appendChild(el) { el.isConnected = true; } },
+      },
       addClass: (name) => classes.add(name),
       removeClass: (name) => classes.delete(name),
       addEventListener: (name, callback) => { if (name === 'lostpointercapture') lostPointerCapture = callback; },
@@ -2614,6 +2624,8 @@ test('TPS List pointer drag resolves the real rendered group and cleans up mouse
     const file = { path: 'Inbox/Tasks.md' };
     view.getMappedCheckboxStateForTask = () => '[ ]';
     view.getTaskVisibleTitle = () => 'Move me';
+    view.selectedRowIds = new Set();
+    view.getSelectedRows = () => [];
     view.beginTaskPointerDrag(
       { button: 0, pointerId: 7, pointerType: 'touch', clientX: 10, clientY: 10 },
       file,
@@ -2638,6 +2650,7 @@ test('TPS List pointer drag resolves the real rendered group and cleans up mouse
       stopPropagation() {},
     });
     assert.equal(view.activeTaskPointerDrag.moved, true);
+    assert.equal(view.activeTaskPointerDrag.preview?.el?.isConnected, true);
     view.cancelTaskPointerDrag({ pointerId: 7 });
     assert.equal(view.activeTaskPointerDrag, null);
     assert.equal(captured, false);

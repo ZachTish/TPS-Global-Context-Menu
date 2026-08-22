@@ -144,6 +144,12 @@ import {
   getTpsTableTaskSelectionOrder,
   isTpsTableTaskSelectionEntry,
 } from './tps-table-selection';
+import {
+  createPointerDragPreview,
+  movePointerDragPreview,
+  removePointerDragPreview,
+  type PointerDragPreview,
+} from '../utils/pointer-drag-preview';
 
 export const TPS_TABLE_VIEW_TYPE = 'tps-table';
 const TPS_TABLE_TITLE_ALIASES = new Set([
@@ -2942,12 +2948,16 @@ export class TpsTableView extends BasesView {
     const startX = event.clientX;
     const startY = event.clientY;
     let moved = false;
+    let preview: PointerDragPreview | null = null;
+    let previewItemCount: number | null = null;
     const ownerDocument = row.ownerDocument;
     const cleanup = () => {
       ownerDocument.removeEventListener('pointermove', onMove, true);
       ownerDocument.removeEventListener('pointerup', onUp, true);
       ownerDocument.removeEventListener('pointercancel', onCancel, true);
       row.removeClass('tps-log-base-row--dragging');
+      removePointerDragPreview(preview);
+      preview = null;
     };
     const onMove = (moveEvent: PointerEvent) => {
       if (moveEvent.pointerId !== event.pointerId) return;
@@ -2958,6 +2968,25 @@ export class TpsTableView extends BasesView {
       if (moved) {
         moveEvent.preventDefault();
         moveEvent.stopPropagation();
+        const entryId = row.dataset.entryId;
+        if (previewItemCount == null) {
+          previewItemCount = entryId && this.selectedEntryIds.has(entryId)
+            ? Math.max(1, this.containerEl.querySelectorAll(
+                '.tps-log-base-row--selected[data-tps-table-batch-selectable="true"]',
+              ).length)
+            : 1;
+        }
+        if (!preview) {
+          preview = createPointerDragPreview(
+            ownerDocument,
+            row.dataset.taskText || 'Task item',
+            previewItemCount,
+            moveEvent.clientX,
+            moveEvent.clientY,
+          );
+        } else {
+          movePointerDragPreview(preview, moveEvent.clientX, moveEvent.clientY);
+        }
       }
     };
     const onUp = (upEvent: PointerEvent) => {
