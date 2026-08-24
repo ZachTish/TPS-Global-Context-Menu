@@ -51,6 +51,13 @@ test('property visibility UI names each key and value mode explicitly', () => {
   }
 });
 
+test('property visibility UI exposes conditional frontmatter hiding', () => {
+  assert.match(settings, /Hide when properties match/);
+  assert.match(settings, /kind=area hides Status on areas/);
+  assert.match(settings, /prop\.hideWhenProperties = this\.parsePropertyScopeConditions\(value\)/);
+  assert.match(resolveProfiles, /property\.hideWhenProperties/);
+});
+
 test('inline and context menu visibility are resolved independently', () => {
   assert.match(panelBuilder, /resolveCustomProperties\(this\.plugin\.settings\.properties \|\| \[\], entries, new ViewModeService\(\), 'inline'\)/);
   assert.match(panelBuilder, /resolveCustomProperties\(this\.plugin\.settings\.properties \|\| \[\], entries, new ViewModeService\(\), 'inline'\)[\s\S]{0,120}\.filter\(\(prop\) => prop && prop\.showInCollapsed !== false\)/);

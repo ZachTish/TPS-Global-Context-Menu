@@ -36,6 +36,14 @@ export function resolveCustomProperties(
             return false;
         }
 
+        const hiddenByProperties = normalizePropertyConditions(property.hideWhenProperties || []);
+        if (
+            hiddenByProperties.length > 0
+            && entryContexts.some((context) => hiddenByProperties.some((condition) => matchesPropertyCondition(context.frontmatter, condition)))
+        ) {
+            return false;
+        }
+
         const required = normalizeScopeTags(property.scopeTags || []);
         const requiredPaths = normalizeScopeList(property.scopePaths || []);
         const requiredProperties = normalizePropertyConditions(property.scopeProperties || []);

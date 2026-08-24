@@ -143,6 +143,74 @@ test("Always show includes a missing Priority immediately without changing conte
   assert.deepEqual(events, ["commit", "refresh", "persist:start", "persist:end"]);
 });
 
+test("matching frontmatter can hide one configured field on every property surface", async () => {
+  const { resolveCustomProperties } = await loadVisibilityModule();
+  const properties = [
+    {
+      id: "status",
+      key: "status",
+      label: "Status",
+      type: "selector",
+      showWhen: "always",
+      inlineShowWhen: "always",
+      contextMenuShowWhen: "always",
+      hideWhenProperties: [{ key: "kind", value: "area", operator: "equals" }],
+    },
+    {
+      id: "priority",
+      key: "priority",
+      label: "Priority",
+      type: "selector",
+      showWhen: "always",
+    },
+  ];
+  const area = [{ file: { path: "Areas/Home.md" }, frontmatter: { Kind: "AREA", status: "active" } }];
+  const project = [{ file: { path: "Projects/Home.md" }, frontmatter: { kind: "project", status: "active" } }];
+
+  for (const surface of ["any", "inline", "context"]) {
+    assert.deepEqual(
+      resolveCustomProperties(properties, area, {}, surface).map((property) => property.id),
+      ["priority"],
+      `${surface} hides only Status for a case-insensitive kind match`,
+    );
+    assert.deepEqual(
+      resolveCustomProperties(properties, project, {}, surface).map((property) => property.id),
+      ["status", "priority"],
+      `${surface} keeps Status for a nonmatching item`,
+    );
+  }
+});
+
+test("hide conditions are OR rules and mixed selections fail safely", async () => {
+  const { resolveCustomProperties } = await loadVisibilityModule();
+  const status = {
+    id: "status",
+    key: "status",
+    label: "Status",
+    type: "selector",
+    hideWhenProperties: [
+      { key: "kind", value: "area", operator: "equals" },
+      { key: "lifecycle", value: "archived", operator: "equals" },
+    ],
+  };
+
+  assert.deepEqual(
+    resolveCustomProperties([status], [
+      { file: { path: "Areas/Home.md" }, frontmatter: { kind: "area" } },
+      { file: { path: "Projects/App.md" }, frontmatter: { kind: "project" } },
+    ], {}, "context"),
+    [],
+    "a batch action is hidden when the field is inapplicable to any selected item",
+  );
+  assert.deepEqual(
+    resolveCustomProperties([status], [
+      { file: { path: "Projects/Old.md" }, frontmatter: { kind: "project", lifecycle: "archived" } },
+    ], {}, "inline"),
+    [],
+    "any matching rule hides the field",
+  );
+});
+
 test("mounted views refresh once, continue after one renderer throws, and never block persistence", async () => {
   const {
     applyCustomPropertyVisibilityUpdate,

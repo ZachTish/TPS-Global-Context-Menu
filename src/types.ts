@@ -1,5 +1,11 @@
 import { TFile, MarkdownView } from 'obsidian';
 
+export interface CustomPropertyCondition {
+  key: string;
+  value: string;
+  operator?: 'equals' | 'contains' | 'exists' | 'missing' | 'not-equals' | 'not-contains';
+}
+
 export interface CustomProperty {
   id: string;
   label: string;
@@ -28,7 +34,9 @@ export interface CustomProperty {
   excludeTags?: string[];
   scopePaths?: string[];
   excludePaths?: string[];
-  scopeProperties?: Array<{ key: string; value: string; operator?: 'equals' | 'contains' | 'exists' | 'missing' | 'not-equals' | 'not-contains' }>;
+  scopeProperties?: CustomPropertyCondition[];
+  /** Hide this property when any condition matches a selected item's logical frontmatter. */
+  hideWhenProperties?: CustomPropertyCondition[];
   icon?: string;
   showInCollapsed?: boolean; // Whether to show this property in the collapsed inline header
   showInContextMenu?: boolean; // Whether to show this property in the right-click context menu

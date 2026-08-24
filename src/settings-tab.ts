@@ -2768,6 +2768,21 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           text.inputEl.cols = 30;
         });
 
+      new Setting(scopeDiv)
+        .setName('Hide when properties match')
+        .setDesc('One condition per line. Any matching logical frontmatter condition hides this field without deleting its value. Example: kind=area hides Status on areas.')
+        .addTextArea((text) => {
+          text
+            .setPlaceholder('kind=area\nworkflowState=archived')
+            .setValue((prop.hideWhenProperties || []).map((condition) => this.serializePropertyScopeCondition(condition)).join('\n'))
+            .onChange(async (value) => {
+              prop.hideWhenProperties = this.parsePropertyScopeConditions(value);
+              await this.plugin.saveSettings();
+            });
+          text.inputEl.rows = 3;
+          text.inputEl.cols = 30;
+        });
+
       valueSettingsHost = div.createDiv({ cls: 'tps-gcm-property-value-settings' });
       valueSettingsHost.style.gridColumn = '1 / -1';
       this.renderCustomPropertyValueSettings(valueSettingsHost, prop);

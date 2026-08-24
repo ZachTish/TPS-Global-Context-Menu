@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.36.0
+
+- Every configured custom field now supports **Hide when properties match** under **Rules & fields → Custom fields**. Add one logical frontmatter condition per line—for example, add `kind=area` to Status to omit Status from area notes without deleting the stored value.
+- Conditions support the same case-insensitive `key=value`, `key!=value`, `key contains value`, `key not-contains value`, `key exists`, and `key missing` forms as property scoping. Any matching line hides the field across GCM's stacked/inline and right-click property surfaces.
+- A mixed multi-selection hides an inapplicable field if any selected item matches one of its hide rules, preventing a batch action from writing a field that is intentionally unavailable on part of the selection. Existing fields have no hide rules and retain their current behavior.
+
 ## 1.35.5
 
 - TPS List and TPS Table now coalesce bursts of Base/filter/index updates into one trailing refresh and atomically replace the last stable result surface. Opening a view no longer schedules a guaranteed second paint, and cold index batches update lightweight progress text instead of repeatedly rebuilding every row.
@@ -978,6 +984,7 @@ TPS Table and TPS List use the same source-aware picker for empty and populated 
 - Note navigation and **Linked context** share stable mount ownership but independent visibility. Repeated note-open and layout reconciliation reuses unchanged top and bottom navigation, removes context belonging to the previously opened file before replacement work begins, and swaps same-file context only after its complete candidate is ready. A view-scoped observer recovers the panel when Obsidian replaces its Reading View or Live Preview mount while scrolling; source edits, renames, and deletions also invalidate dependent panels.
 - **Rules & fields** has a flat selector for Frontmatter rules, Custom fields, and View mode. Frontmatter rules expose direct Sort buckets, Tag rules, and Icon + color editors; Custom fields keeps placement/display controls beside field definitions; View mode keeps its master controls, keys, folders, and rules on one page.
 - Custom-field keys use case-insensitive exact identity after trimming only edge whitespace. Blank keys and duplicate exact identities are reported inline and are not saved over a valid key; existing invalid definitions remain visible for repair and are never renamed automatically. Punctuation and interior whitespace stay significant, and a newly added field receives a unique default key.
+- Each custom field can define **Hide when properties match** rules against the selected item's logical frontmatter. Rules are case-insensitive, one per line, and OR together; `kind=area` on Status hides Status for an area while preserving its stored value. In mixed selection, any matching item hides the shared field/action so batch changes fail safely.
 - **Workflows** has direct buttons for Home & daily notes, Tasks, Child notes, Recurrence, and Time tracking. Advanced rule safeguards, each repeated custom-field editor, and the compact Base query reference are the only intentional disclosures.
 - **Linked context order** sorts source paths A → Z or Z → A and always keeps excerpts from one source in physical document order. Sorting never uses modification time, so interacting with an existing card cannot reorder the panel merely because the source note changed.
 - **Ignore matching parent/child notes** is an off-by-default exact key/value rule. Keys and scalar or list-member values compare case-insensitively after trimming. A complete match removes the note from parent/child discovery, panels, new links, linked-checkbox actions, derived-status synchronization, and relationship automation, but leaves existing body links and frontmatter byte-for-byte intact; disabling or changing the rule makes the relationship visible again.
