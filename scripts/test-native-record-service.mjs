@@ -86,6 +86,7 @@ function createHarness(mode = 'native-records') {
   const contents = new WeakMap();
   const metadata = new WeakMap();
   const events = [];
+  const vaultEventHandlers = new Map();
   const root = new TFolder('');
   entries.set('', root);
 
@@ -130,7 +131,20 @@ function createHarness(mode = 'native-records') {
       if (parsed) metadata.set(file, parsed.frontmatter);
       return next;
     },
-    on: () => ({}),
+    rename: async (file, nextPath) => {
+      const oldPath = file.path;
+      entries.delete(oldPath);
+      file.path = String(nextPath).replace(/^\/+|\/+$/gu, '');
+      file.refreshIdentity();
+      entries.set(file.path, file);
+      for (const handler of vaultEventHandlers.get('rename') || []) handler(file, oldPath);
+    },
+    on: (eventName, handler) => {
+      const handlers = vaultEventHandlers.get(eventName) || [];
+      handlers.push(handler);
+      vaultEventHandlers.set(eventName, handlers);
+      return {};
+    },
   };
   const plugin = {
     settings: { dataArchitectureMode: mode, nativeRecordRootPath: '_records' },
@@ -206,6 +220,22 @@ test('native record create, update, archive, and asset paths preserve typed valu
   assert.equal(service.resolveAssetCached(assetSource)?.id, 'asset-1');
   assert.equal((await service.resolveAsset(assetSource))?.id, 'asset-1');
   assert.ok(events.some((event) => event.type === 'explicit'));
+});
+
+test('native record IDs remain the canonical filenames after a user or plugin rename', async () => {
+  const { service, vault, entries } = createHarness();
+  const created = await service.create('calendar-event', {
+    title: 'Renamed event',
+    scheduled: '2026-08-25T09:00:00.000Z',
+  }, { id: 'calendar-event-1' });
+
+  await vault.rename(created.file, '_records/calendar-events/2026-08-25 Renamed event.md');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(created.file.path, '_records/calendar-events/calendar-event-1.md');
+  assert.equal(entries.get(created.file.path), created.file);
+  assert.equal(await service.resolve('calendar-event-1').then((record) => record?.path), created.file.path);
 });
 
 test('task promotion creates one task record and replaces only the confirmed source line with a stable link', async () => {

@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.38.1
+
+- Native record IDs now remain the canonical filenames. If a user, plugin, or file-title workflow renames a native task, calendar, Health, workout, or asset record, GCM restores the schema-defined `_records/<kind>/<tpsId>.md` path instead of allowing title-based naming to weaken identity.
+- Canonical restoration is fail-closed: an occupied target is never overwritten, and the conflicting record remains indexed for diagnosis. This is a backward-compatible native-record reliability fix; Legacy mode is unchanged.
+- Focused rename/re-resolution coverage, the full declared suite, a separate production build, and live POC Calendar creation verified the stable-ID contract. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.38.0
 
 - Adds the opt-in **Native Markdown records** architecture while leaving every existing vault on **Legacy** by default. Native mode stores tracked tasks and assets as ordinary Markdown files under a configurable `_records` root and disables GCM's TPS List/Table views, virtual Base embeds, custom Base row index/query machinery, and automatic companion-note creation.

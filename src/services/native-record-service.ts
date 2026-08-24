@@ -199,8 +199,7 @@ export class NativeRecordService {
       if (file instanceof TFile) this.removePath(file.path);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('rename', (file, oldPath) => {
-      this.removePath(oldPath);
-      if (file instanceof TFile) this.indexFile(file);
+      void this.handleRecordRename(file, oldPath);
     }));
   }
 
@@ -604,6 +603,63 @@ export class NativeRecordService {
     const paths = this.pathsById.get(id);
     paths?.delete(path);
     if (!paths || paths.size === 0) this.pathsById.delete(id);
+  }
+
+  private async handleRecordRename(file: unknown, oldPath: string): Promise<void> {
+    const prior = this.recordsByPath.get(oldPath);
+    this.removePath(oldPath);
+    if (!(file instanceof TFile)) return;
+
+    const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
+    const envelope = isNativeRecordEnvelope(cached)
+      ? cached
+      : isNativeRecordEnvelope(prior)
+        ? prior
+        : null;
+    if (!envelope) {
+      this.indexFile(file);
+      return;
+    }
+
+    const canonicalPath = buildNativeRecordPath(this.getRootPath(), envelope.kind, envelope.tpsId);
+    if (file.path === canonicalPath) {
+      this.indexFile(file, envelope);
+      return;
+    }
+    if (this.plugin.app.vault.getFileByPath(file.path) !== file) return;
+
+    const occupied = this.plugin.app.vault.getAbstractFileByPath(canonicalPath);
+    if (occupied && occupied !== file) {
+      this.indexFile(file, envelope);
+      logger.warn('[TPS GCM] Native record filename restore blocked by an occupied canonical path', {
+        recordId: envelope.tpsId,
+        recordKind: envelope.kind,
+        currentPath: file.path,
+        canonicalPath,
+      });
+      return;
+    }
+
+    try {
+      await this.ensureParentFolder(canonicalPath);
+      if (this.plugin.app.vault.getFileByPath(file.path) !== file) return;
+      await this.plugin.app.vault.rename(file, canonicalPath);
+      this.indexFile(file, envelope);
+      logger.flow('NativeRecords', 'canonical-path:restored', {
+        recordId: envelope.tpsId,
+        recordKind: envelope.kind,
+        oldPath,
+        canonicalPath,
+      });
+    } catch (error) {
+      this.indexFile(file, envelope);
+      logger.flowError('NativeRecords', 'canonical-path:restore-failed', error, {
+        recordId: envelope.tpsId,
+        recordKind: envelope.kind,
+        currentPath: file.path,
+        canonicalPath,
+      });
+    }
   }
 
   private idKey(id: string): string {
