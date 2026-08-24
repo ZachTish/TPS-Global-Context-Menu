@@ -238,6 +238,33 @@ test('native record IDs remain the canonical filenames after a user or plugin re
   assert.equal(await service.resolve('calendar-event-1').then((record) => record?.path), created.file.path);
 });
 
+test('native record rename restores the canonical filename before MetadataCache is ready', async () => {
+  const { service, vault, entries, metadata, addFile } = createHarness();
+  const record = addFile('_records/calendar-events/calendar-event-cold.md', serializeNativeRecordDocument({
+    bom: '',
+    newline: '\n',
+    closer: '---',
+    body: '',
+    frontmatter: {
+      tpsId: 'calendar-event-cold',
+      tpsSchemaVersion: 1,
+      kind: 'calendar-event',
+      title: 'Cold cache event',
+      createdDate: '2026-08-25T09:00:00.000Z',
+      modifiedDate: '2026-08-25T09:00:00.000Z',
+    },
+  }));
+  metadata.delete(record);
+
+  await vault.rename(record, '_records/calendar-events/2026-08-25 Cold cache event.md');
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(record.path, '_records/calendar-events/calendar-event-cold.md');
+  assert.equal(entries.get(record.path), record);
+  assert.equal(await service.resolve('calendar-event-cold').then((resolved) => resolved?.path), record.path);
+});
+
 test('task promotion creates one task record and replaces only the confirmed source line with a stable link', async () => {
   const { service, plugin, addFile, contents } = createHarness();
   const sourceLine = '- [ ] Ship release #work [scheduled:: 2026-08-25 09:00:00]';

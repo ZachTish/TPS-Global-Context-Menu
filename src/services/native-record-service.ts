@@ -611,11 +611,20 @@ export class NativeRecordService {
     if (!(file instanceof TFile)) return;
 
     const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
-    const envelope = isNativeRecordEnvelope(cached)
+    let envelope = isNativeRecordEnvelope(cached)
       ? cached
       : isNativeRecordEnvelope(prior)
         ? prior
         : null;
+    if (!envelope) {
+      try {
+        const parsed = parseNativeRecordDocument(await this.plugin.app.vault.cachedRead(file));
+        if (parsed && isNativeRecordEnvelope(parsed.frontmatter)) envelope = parsed.frontmatter;
+      } catch {
+        // A rename can race MetadataCache. If the authoritative read also fails,
+        // leave the file untouched and let the next metadata event index it.
+      }
+    }
     if (!envelope) {
       this.indexFile(file);
       return;

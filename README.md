@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.38.2
+
+- Stable native-record filenames now recover even when a rename occurs before Obsidian's Metadata Cache has indexed the file. GCM reads the renamed Markdown record authoritatively and restores `_records/<kind>/<tpsId>.md` without relying on warm cache state.
+- The canonical path remains fail-closed when occupied. Legacy mode, record schemas, settings, and public API versions are unchanged.
+- A cold-cache rename regression and a live POC rename exercise cover the startup timing that escaped 1.38.1. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.38.1
 
 - Native record IDs now remain the canonical filenames. If a user, plugin, or file-title workflow renames a native task, calendar, Health, workout, or asset record, GCM restores the schema-defined `_records/<kind>/<tpsId>.md` path instead of allowing title-based naming to weaken identity.
