@@ -351,7 +351,12 @@ export class TpsNotebookNavigatorMenuBridge {
     )
       return;
 
-    const operations = this.buildExactFileActions([current]);
+    const operations = this.buildExactFileActions([current], {
+      includeTitle: false,
+      includeDelete: false,
+      excludeStandardTagProperties: true,
+      includeSingleTargetActions: true,
+    });
     if (!operations) return;
     for (const operation of operations) {
       if (operation.kind === "item") {

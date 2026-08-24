@@ -117,6 +117,9 @@ function createBuilderHarness(MenuBuilder, TFile) {
     { id: "legacy-tag", key: "Tag", label: "Legacy Tag", type: "selector" },
     { id: "categories", key: "categories", label: "Categories", type: "list", listItemType: "tag" },
     { id: "priority", key: "priority", label: "Priority", type: "selector" },
+    { id: "parents", key: "parent", label: "Parents", type: "list" },
+    { id: "recurrence", key: "recurrence", label: "Recurrence", type: "recurrence" },
+    { id: "created-date", key: "createdDate", label: "createdDate", type: "datetime" },
   ];
   const plugin = {
     app: {
@@ -133,8 +136,10 @@ function createBuilderHarness(MenuBuilder, TFile) {
       properties,
       showCustomPropertiesInContextMenu: true,
       enableTimeTracking: true,
+      dateCreatedFrontmatterKey: "dateCreated",
     },
     parentLinkResolutionService: {
+      getParentKey: () => "parent",
       getParentsForChild: () => [],
       hasParent: () => false,
       isIgnoredFile: () => false,
@@ -227,6 +232,9 @@ test("the real menu builder de-duplicates only standard Markdown tags", async ()
   assert.equal(titles.some((title) => title.startsWith("Priority")), true);
   assert.equal(titles.includes("Link to Parent"), true);
   assert.equal(titles.includes("Time Tracking"), true);
+  assert.equal(titles.some((title) => title.startsWith("Parents")), false);
+  assert.equal(titles.some((title) => title.startsWith("Recurrence")), false);
+  assert.equal(titles.some((title) => title.startsWith("createdDate")), false);
 });
 
 test("note time tracking exposes one inferred-target start action instead of task-vs-note modes", async () => {

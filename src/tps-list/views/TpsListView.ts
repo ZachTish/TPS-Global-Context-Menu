@@ -43,6 +43,7 @@ import {
 } from '../base-filter-roots';
 import { resolveBaseEmbedSourcePath } from '../../views/base-embed-context';
 import { getOrderedSelectionRange, toggleOrderedSelection } from '../../utils/ordered-selection';
+import { constrainGcmMenu } from '../../menu/menu-presentation';
 import { hashSelectionIdentity } from '../../utils/selection-identity';
 import { getTaskLineIdentity } from '../../utils/task-line-resolution';
 import { resolveBulletLineSourceTarget } from '../bullet-line-source-target';
@@ -129,7 +130,6 @@ import {
 } from '../../menu/property-value-choice-menu';
 import {
   addLineEntityPropertyMenus,
-  getConfiguredLineContextPropertyKeys,
 } from '../../menu/line-entity-property-menu';
 import {
   getWikilinkDisplayText,
@@ -1423,7 +1423,7 @@ export class TpsListView extends BasesView {
       const { lineIndex, rawLine } = revision;
       const resolvedOneBasedLine = lineIndex + 1;
       const plugin = this.getGcmPlugin();
-      const menu = new Menu();
+      const menu = constrainGcmMenu(new Menu(), { truncateText: true });
       const addHeadingAction = (
         title: string,
         icon: string,
@@ -1502,12 +1502,6 @@ export class TpsListView extends BasesView {
         });
       }, true);
 
-      const menuController = plugin?.menuController || this.getGcmApi()?.menuController;
-      menuController?.addToNativeMenu?.(menu, [file], {
-        includeTitle: false,
-        excludeCustomPropertyKeys: getConfiguredLineContextPropertyKeys(plugin),
-      });
-      this.app.workspace.trigger('file-menu', menu as any, file as any);
       menu.showAtPosition({ x: event.clientX, y: event.clientY });
       flow('HeadingLineMenu', 'open', {
         path: file.path,
@@ -1547,10 +1541,9 @@ export class TpsListView extends BasesView {
         ? this.app.vault.getAbstractFileByPath(sourceDecision.resolution.path)
         : null;
       const sourceNote = resolvedSource instanceof TFile ? resolvedSource : null;
-      const menuTarget = sourceNote ?? file;
       const lineService = plugin?.dailyInboxLineService || api?.dailyInboxLineService;
       const context = { file, lineIndex, rawLine };
-      const menu = new Menu();
+      const menu = constrainGcmMenu(new Menu(), { truncateText: true });
       const addLineAction = (
         title: string,
         icon: string,
@@ -1656,22 +1649,10 @@ export class TpsListView extends BasesView {
         });
       }
 
-      plugin?.contextTargetService?.clearRecentContextTarget?.();
-      const menuController = plugin?.menuController || api?.menuController;
-      if (typeof menuController?.addToNativeMenu === 'function') {
-        const targetLabel = sourceNote ? 'source note' : 'containing note';
-        menuController.addToNativeMenu(menu, [menuTarget], {
-          deleteLabel: `Delete ${targetLabel}`,
-          includeTitle: false,
-          excludeCustomPropertyKeys: getConfiguredLineContextPropertyKeys(plugin),
-        });
-      }
-      this.app.workspace.trigger('file-menu', menu as any, menuTarget as any);
       menu.showAtPosition({ x: event.clientX, y: event.clientY });
       flow('BulletLineMenu', 'open', {
         path: file.path,
         line: resolvedOneBasedLine,
-        menuTargetPath: menuTarget.path,
         sourceNotePath: sourceNote?.path || null,
         sourceRoute: sourceDecision.resolution?.route || 'source-fallback',
         sourceKey: sourceDecision.resolution?.sourceKey || null,

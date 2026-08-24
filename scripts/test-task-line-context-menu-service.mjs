@@ -632,6 +632,11 @@ test('task clicks keep exact-line editing outside Reading View and Reading View 
   assert.match(serviceSource, /const renderedListItem = target\?\.closest<HTMLElement>\('li'\);/u);
   assert.match(serviceSource, /!renderedListItem\.querySelector\(':scope > input\.task-list-item-checkbox/u);
   assert.match(serviceSource, /private showReadingBulletMenu\(/u);
+  const readingBulletMenuSource = serviceSource.slice(
+    serviceSource.indexOf('private showReadingBulletMenu('),
+    serviceSource.indexOf('private addReadingBulletTagMenu('),
+  );
+  assert.doesNotMatch(readingBulletMenuSource, /addToNativeMenu|trigger\('file-menu'/u);
   assert.match(serviceSource, /markdown-reading-view, \.markdown-preview-view, \.markdown-rendered/u);
   assert.match(serviceSource, /view\?\.getMode\?\.\(\) === 'preview'/u);
   assert.match(serviceSource, /Edit full line…/u);

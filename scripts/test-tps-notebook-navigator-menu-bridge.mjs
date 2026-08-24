@@ -486,6 +486,12 @@ test("exact row actions use the canonical current file and never retarget a stal
   );
   assert.equal(exactCalls.length, 1);
   assert.deepEqual(exactCalls[0].files, [file]);
+  assert.deepEqual(exactCalls[0].options, {
+    includeTitle: false,
+    includeDelete: false,
+    excludeStandardTagProperties: true,
+    includeSingleTargetActions: true,
+  });
 
   const crossRealmSnapshot = {
     path: file.path,

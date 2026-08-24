@@ -711,7 +711,16 @@ test('every synthesized non-task row routes configured relationships to its own 
     /target\.closest\('\[data-tps-task-context="true"\], \[data-tps-line-context="true"\]'\)/,
     'the document-level note interceptor yields to task and non-task line menus',
   );
-  assert.match(listSource, /excludeCustomPropertyKeys:\s*getConfiguredLineContextPropertyKeys\(plugin\)/);
+  const headingMenuSource = listSource.slice(
+    listSource.indexOf('private async openHeadingLineContextMenu'),
+    listSource.indexOf('private async openBulletLineContextMenu'),
+  );
+  const bulletMenuSource = listSource.slice(
+    listSource.indexOf('private async openBulletLineContextMenu'),
+    listSource.indexOf('private async openOrFocusFile'),
+  );
+  assert.doesNotMatch(headingMenuSource, /addToNativeMenu|trigger\('file-menu'/);
+  assert.doesNotMatch(bulletMenuSource, /addToNativeMenu|trigger\('file-menu'/);
   assert.match(menuBuilderSource, /excludeCustomPropertyKeys\?:\s*readonly string\[\]/);
   assert.match(menuBuilderSource, /createCustomPropertyMenuExclusionPredicate\(\{[\s\S]{0,160}excludeCustomPropertyKeys/);
   assert.match(menuBuilderSource, /isExcludedCustomProperty\(prop\)/);

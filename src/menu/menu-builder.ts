@@ -24,6 +24,7 @@ import { addPropertyValueChoiceMenuItems } from './property-value-choice-menu';
 import { propertyUsesEntityOptions } from '../utils/property-option-source';
 import { isPathInArchiveFolder } from '../services/archive-file-service';
 import { createCustomPropertyMenuExclusionPredicate } from '../services/custom-property-menu-filter';
+import { constrainGcmMenu } from './menu-presentation';
 
 export interface NativeMenuLabelOptions {
   archiveLabel?: string;
@@ -522,15 +523,16 @@ export class MenuBuilder {
     options: NativeMenuLabelOptions,
     markTpsItems: boolean,
   ): void {
+    const presentedTargetMenu = constrainGcmMenu(targetMenu);
     const menu: GcmMenuSink = markTpsItems
       ? {
-          addItem: (callback) => targetMenu.addItem((item) => {
+          addItem: (callback) => presentedTargetMenu.addItem((item) => {
             callback(item);
             (item as any)._isTpsItem = true;
           }),
-          addSeparator: () => targetMenu.addSeparator(),
+          addSeparator: () => presentedTargetMenu.addSeparator(),
         }
-      : targetMenu;
+      : presentedTargetMenu;
 
     // Create entries for ALL resolved files
     const entries = this.delegates.createFileEntries([...resolvedFiles]);
@@ -637,6 +639,7 @@ export class MenuBuilder {
         if (prop.showInContextMenu === false) return;
         if (String(prop.key || '').trim().toLowerCase() === 'title' || String(prop.id || '').trim().toLowerCase() === 'title') return;
         if (isExcludedCustomProperty(prop)) return;
+        if (!this.isActionableContextProperty(prop)) return;
 
         if (isEntityReferenceProperty(prop)) {
           this.addEntityReferenceToMenu(menu, propertyEntries, prop, 'tps-props');
@@ -675,8 +678,6 @@ export class MenuBuilder {
           this.addListToMenu(menu, propertyEntries, prop, 'tps-props');
         } else if (prop.type === 'datetime') {
           this.addDatetimeToMenu(menu, propertyEntries, prop, 'tps-props');
-        } else if (prop.type === 'recurrence') {
-          this.addRecurrenceToMenu(menu, propertyEntries, prop, 'tps-props');
         } else if (prop.type === 'folder') {
           this.addFolderToMenu(menu, propertyEntries, prop, 'tps-props');
         }
@@ -1123,13 +1124,34 @@ export class MenuBuilder {
     });
   }
 
-  addRecurrenceToMenu(menu: GcmMenuSink, entries: any[], prop: any, sectionId: string) {
-    menu.addItem((item) => {
-      item.setTitle(`${prop.label} (read-only)`)
-        .setIcon(prop.icon || 'repeat')
-        .setSection(sectionId)
-        .setDisabled(true);
-    });
+  private isActionableContextProperty(prop: any): boolean {
+    const key = String(prop?.key || '').trim().toLowerCase();
+    const id = String(prop?.id || '').trim().toLowerCase();
+    const type = String(prop?.type || '').trim().toLowerCase();
+    if (type === 'recurrence') return false;
+
+    const parentKeys = new Set([
+      this.plugin.parentLinkResolutionService.getParentKey(),
+      'parent',
+      'parents',
+      'childOf',
+    ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean));
+    if (parentKeys.has(key) || parentKeys.has(id)) return false;
+
+    const generatedKeys = new Set([
+      this.plugin.settings.dateCreatedFrontmatterKey,
+      'createdDate',
+      'createdAt',
+      'dateCreated',
+      'dateModified',
+      'modifiedDate',
+      'updatedAt',
+      'tpsId',
+      'stableId',
+      'externalEventId',
+      'tpsCalendarUid',
+    ].map((value) => String(value || '').trim().toLowerCase()).filter(Boolean));
+    return !generatedKeys.has(key) && !generatedKeys.has(id);
   }
 
   addFolderToMenu(menu: GcmMenuSink, entries: any[], prop: any, sectionId: string) {

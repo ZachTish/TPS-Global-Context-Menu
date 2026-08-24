@@ -1643,17 +1643,18 @@ test('TPS List parses, displays, and safely renames Markdown headings', async ()
   assert.match(viewSource, /source: 'tps-list-heading-menu'/);
   assert.match(viewSource, /blockKind: 'heading-section'/);
   assert.match(viewSource, /reason: 'tps-list-heading-delete'/);
-  assert.match(
-    viewSource,
-    /addToNativeMenu\?\.\(menu, \[file\], \{[\s\S]{0,180}includeTitle: false,[\s\S]{0,180}excludeCustomPropertyKeys:/,
+  const headingMenuSource = viewSource.slice(
+    viewSource.indexOf('private async openHeadingLineContextMenu'),
+    viewSource.indexOf('private async openBulletLineContextMenu'),
   );
+  assert.doesNotMatch(headingMenuSource, /addToNativeMenu|trigger\('file-menu'/);
   assert.match(viewSource, /item\.task\.itemKind === 'heading' \? 'heading' as const : 'task' as const/);
   assert.match(viewSource, /if \(task\.itemKind === 'heading'\) return true;/);
   assert.match(viewSource, /Obsidian Bases is the sole authority for note inclusion/u);
   assert.match(gcmStyles, /\.tps-list-native-row--heading/);
 });
 
-test('TPS List opens plain bullets in the line editor and composes the normal GCM menu', () => {
+test('TPS List opens plain bullets in the line editor and keeps the menu line-owned', () => {
   assert.match(viewSource, /if \(isBullet && this\.openBulletLineEditor\(event, file, task\.line, task\.rawLine \|\| ''\)\) return;/);
   assert.match(viewSource, /if \(!isBullet && this\.openTaskQuickEditor\(event, row, title\)\) return;/);
   assert.match(viewSource, /resolveRenderedLineRevision\([\s\S]{0,180}'BulletLineEditor'[\s\S]{0,180}service\.openLineEditor\(file, revision\.lineIndex\)/);
@@ -1670,17 +1671,15 @@ test('TPS List opens plain bullets in the line editor and composes the normal GC
   assert.match(viewSource, /addLineAction\('Delete line item', 'trash-2'/);
   assert.match(viewSource, /requestLineItemDelete\(\{/);
   assert.match(viewSource, /source: 'tps-list-bullet-menu'/);
-  assert.match(viewSource, /deleteLabel: `Delete \$\{targetLabel\}`/);
-  assert.match(viewSource, /includeTitle: false/);
-  assert.match(viewSource, /menuController\.addToNativeMenu\(menu, \[menuTarget\], \{/);
-  assert.match(viewSource, /this\.app\.workspace\.trigger\('file-menu', menu as any, menuTarget as any\)/);
-  assert.match(viewSource, /const menuTarget = sourceNote \?\? file/);
+  const bulletMenuSource = viewSource.slice(
+    viewSource.indexOf('private async openBulletLineContextMenu'),
+    viewSource.indexOf('private async openOrFocusFile'),
+  );
+  assert.doesNotMatch(bulletMenuSource, /addToNativeMenu|trigger\('file-menu'|menuTarget/);
   assert.match(viewSource, /if \(sourceNote && sourceNote\.path !== file\.path\)/);
   assert.match(viewSource, /if \(!sourceNote && typeof lineService\?\.createNoteForLine === 'function'\)/);
   assert.match(viewSource, /addLineAction\('Create note for bullet', 'file-plus-2'/);
   assert.match(viewSource, /lineService\.createNoteForLine\(context\)/);
-  assert.match(viewSource, /clearRecentContextTarget\?\.\(\)/);
-  assert.match(viewSource, /this\.app\.workspace\.trigger\('file-menu', menu as any, menuTarget as any\)/);
   assert.match(viewSource, /\(item as any\)\._isTpsItem = true/);
 });
 

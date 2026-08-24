@@ -106,6 +106,11 @@ import {
   propertyUsesEntityOptions,
 } from '../utils/property-option-source';
 import { addPropertyValueChoiceMenuItems } from '../menu/property-value-choice-menu';
+import {
+  GCM_MENU_LABEL_MAX_CHARACTERS,
+  constrainGcmMenu,
+  truncateGcmMenuLabel,
+} from '../menu/menu-presentation';
 import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
 import {
   abortDirectTaskHistory,
@@ -184,12 +189,10 @@ const KANBAN_TASK_SELECTOR = [
   'input.task-list-item-checkbox',
 ].join(', ');
 
-export const TASK_MENU_LABEL_MAX_CHARACTERS = 25;
+export const TASK_MENU_LABEL_MAX_CHARACTERS = GCM_MENU_LABEL_MAX_CHARACTERS;
 
 export function truncateTaskMenuLabel(value: string): string {
-  const characters = Array.from(String(value || ''));
-  if (characters.length <= TASK_MENU_LABEL_MAX_CHARACTERS) return characters.join('');
-  return `${characters.slice(0, TASK_MENU_LABEL_MAX_CHARACTERS - 1).join('')}…`;
+  return truncateGcmMenuLabel(value);
 }
 
 function taskElSurface(element: HTMLElement): string {
@@ -219,29 +222,7 @@ export class TaskLineContextMenuService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
   private constrainTaskMenu<T>(menu: T): T {
-    const candidate = menu as any;
-    if (candidate?.addItem && candidate.__tpsGcmTaskLabelConstraint !== true) {
-      const addItem = candidate.addItem.bind(candidate);
-      candidate.__tpsGcmTaskLabelConstraint = true;
-      candidate.addItem = (callback: (item: any) => unknown) => addItem((item: any) => {
-        const setTitle = item.setTitle.bind(item);
-        item.setTitle = (title: string | DocumentFragment) => {
-          if (typeof title !== 'string') return setTitle(title);
-          const displayTitle = truncateTaskMenuLabel(title);
-          const result = setTitle(displayTitle);
-          const applyFullLabel = () => {
-            const itemEl = item?.dom?.el || item?.dom || item?.el;
-            const titleEl = item?.titleEl || itemEl?.querySelector?.('.menu-item-title') || itemEl;
-            titleEl?.setAttribute?.('title', title);
-            titleEl?.setAttribute?.('aria-label', title);
-          };
-          applyFullLabel();
-          globalThis.setTimeout(applyFullLabel, 0);
-          return result;
-        };
-        return callback(item);
-      });
-    }
+    const candidate = constrainGcmMenu(menu, { truncateText: true }) as any;
     const menuEl = candidate?.dom?.el || candidate?.dom || candidate?.menuEl;
     menuEl?.classList?.add?.('tps-gcm-task-line-menu');
     return menu;
@@ -404,7 +385,7 @@ export class TaskLineContextMenuService {
     x: number,
     y: number,
   ): void {
-    const menu = new Menu();
+    const menu = constrainGcmMenu(new Menu(), { truncateText: true });
     menu.addItem((item) => {
       item.setTitle('Edit full line…').setIcon('text-cursor-input').setSection('tps-line').onClick(() => {
         void this.plugin.homeCaptureService.openLineEditor(file, lineIndex);
@@ -447,11 +428,6 @@ export class TaskLineContextMenuService {
       (item as any).setWarning?.(true);
       (item as any)._isTpsItem = true;
     });
-    this.plugin.menuController?.addToNativeMenu?.(menu, [file], {
-      includeTitle: false,
-      excludeCustomPropertyKeys: (this.plugin.settings.properties || []).map((property) => property.key),
-    });
-    this.plugin.app.workspace.trigger('file-menu', menu as any, file as any);
     const rect = anchor.getBoundingClientRect();
     menu.showAtPosition({
       x: x || rect.left + Math.min(rect.width, 24),

@@ -5017,7 +5017,29 @@ export const PLUGIN_STYLES = `
 
       .modal.mod-tps-gcm {
         width: min(var(--tps-gcm-modal-width), calc(100vw - 32px));
+        max-width: calc(100vw - 32px);
         max-height: var(--tps-gcm-modal-max-height);
+      }
+
+      .modal.mod-tps-gcm :is(.modal-content, .setting-item, .setting-item-info, .setting-item-control) {
+        min-width: 0;
+      }
+
+      .modal.mod-tps-gcm :is(h1, h2, h3, .setting-item-name, .setting-item-description) {
+        overflow-wrap: anywhere;
+      }
+
+      .menu.tps-gcm-bounded-menu,
+      .menu:has(> .tps-gcm-bounded-menu-item) {
+        max-width: min(360px, calc(100vw - 24px));
+      }
+
+      .tps-gcm-bounded-menu-item .menu-item-title {
+        min-width: 0;
+        max-width: 25ch;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .modal.mod-tps-gcm .modal-content {
