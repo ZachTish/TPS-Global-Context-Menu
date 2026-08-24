@@ -175,7 +175,15 @@ export class MenuController {
       const f = this.plugin.filePropertiesService?.isCompanionFile(candidate)
         ? this.plugin.filePropertiesService.getSourceFileForCompanion(candidate)
         : candidate;
-      if (!(f instanceof TFile) || !this.isPropertyFile(f)) return [];
+      if (!(f instanceof TFile)) return [];
+      if (
+        this.plugin.usesNativeRecordArchitecture()
+        && f.extension?.toLowerCase() !== 'md'
+        && !this.plugin.filePropertiesService?.isCompanionFile(f)
+      ) {
+        return [{ file: f, frontmatter: {}, nativeAssetSource: true }];
+      }
+      if (!this.isPropertyFile(f)) return [];
       const frontmatter = f.extension?.toLowerCase() !== 'md' && this.plugin.filePropertiesService?.isPropertyTarget(f)
         ? this.plugin.filePropertiesService.read(f)
         : this.app.metadataCache.getFileCache(f)?.frontmatter || {};

@@ -60,6 +60,7 @@ import { TpsIdentityService } from './services/tps-identity-service';
 import { CardContentService } from './services/card-content-service';
 import { IdentityMigrationService } from './services/identity-migration-service';
 import { FilePropertiesService } from './services/file-properties-service';
+import { NativeRecordService, normalizeNativeRecordRoot } from './services/native-record-service';
 import { NoteTitleRenderService } from './services/note-title-render-service';
 import { VirtualBaseEmbedService } from './services/virtual-base-embed-service';
 import { HeadingCollapseOnOpenService } from './services/heading-collapse-on-open-service';
@@ -372,6 +373,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   cardContentService: CardContentService;
   identityMigrationService: IdentityMigrationService;
   filePropertiesService: FilePropertiesService;
+  nativeRecordService: NativeRecordService;
   /** @deprecated Use filePropertiesService. Kept for one compatibility release. */
   canvasPropertiesService: FilePropertiesService;
   noteTitleRenderService: NoteTitleRenderService;
@@ -501,6 +503,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       taskLinesVersion: Number(api?.taskLines?.version) || null,
       taskCheckboxesVersion: Number(api?.taskCheckboxes?.version) || null,
       tasksVersion: Number(api?.tasks?.version) || null,
+      nativeRecordsVersion: Number(api?.nativeRecords?.version) || null,
       itemHistoryVersion: Number(api?.history?.version) || null,
       filePropertiesVersion: Number(api?.fileProperties?.version) || null,
       itemPropertiesVersion: Number(api?.itemProperties?.version) || null,
@@ -521,20 +524,22 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.register(installVisibleViewportContract());
     this.homeComponentActionService = new HomeComponentActionService(this);
     this.registerView(TPS_HOME_VIEW_TYPE, (leaf) => new TpsHomeView(leaf, this));
-    this.registerBasesView(TPS_TABLE_VIEW_TYPE, {
-      name: 'TPS Table',
-      icon: 'table',
-      factory: (controller: QueryController, containerEl: HTMLElement): BasesView =>
-        new TpsTableView(controller, containerEl, this),
-      options: () => createTpsTableViewOptions(this),
-    });
-    this.registerBasesView(TPS_LIST_VIEW_TYPE, {
-      name: 'tps list',
-      icon: 'list',
-      factory: (controller: QueryController, containerEl: HTMLElement): BasesView =>
-        createTpsListView(controller, containerEl, this),
-      options: () => createTpsListViewOptions(createBaseCreateButtonOptions(this)),
-    });
+    if (!this.usesNativeRecordArchitecture()) {
+      this.registerBasesView(TPS_TABLE_VIEW_TYPE, {
+        name: 'TPS Table',
+        icon: 'table',
+        factory: (controller: QueryController, containerEl: HTMLElement): BasesView =>
+          new TpsTableView(controller, containerEl, this),
+        options: () => createTpsTableViewOptions(this),
+      });
+      this.registerBasesView(TPS_LIST_VIEW_TYPE, {
+        name: 'tps list',
+        icon: 'list',
+        factory: (controller: QueryController, containerEl: HTMLElement): BasesView =>
+          createTpsListView(controller, containerEl, this),
+        options: () => createTpsListViewOptions(createBaseCreateButtonOptions(this)),
+      });
+    }
 
     this.contextTargetService = new ContextTargetService(this);
     this.bulkEditService = new BulkEditService(this);
@@ -545,7 +550,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.commandQueueService = new CommandQueueService();
     this.vaultQueryService = new VaultQueryService(this);
     this.baseRowIndexService = new BaseRowIndexService(this);
-    this.baseRowIndexService.setup();
+    if (!this.usesNativeRecordArchitecture()) this.baseRowIndexService.setup();
     this.entityIndexService = new EntityIndexService(this);
     this.configureEntityIndexDimensions();
     this.entityIndexService.setup();
@@ -579,35 +584,37 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.identityMigrationService = new IdentityMigrationService(this);
     this.filePropertiesService = new FilePropertiesService(this);
     this.canvasPropertiesService = this.filePropertiesService;
-    this.registerEvent(this.app.metadataCache.on('resolved', () => {
-      void this.filePropertiesService.handleMetadataResolved().then(() => {
-        this.entityIndexService?.invalidate();
-      }).catch((error) => {
-        logger.warn('[TPS GCM] Post-metadata file-property catalog rebuild failed', { error });
-      });
-    }));
-    if ((this.app.metadataCache as any).initialized === true) {
-      void this.filePropertiesService.handleMetadataResolved().catch((error) => {
-        logger.warn('[TPS GCM] Initialized file-property catalog rebuild failed', { error });
+    if (!this.usesNativeRecordArchitecture()) {
+      this.registerEvent(this.app.metadataCache.on('resolved', () => {
+        void this.filePropertiesService.handleMetadataResolved().then(() => {
+          this.entityIndexService?.invalidate();
+        }).catch((error) => {
+          logger.warn('[TPS GCM] Post-metadata file-property catalog rebuild failed', { error });
+        });
+      }));
+      if ((this.app.metadataCache as any).initialized === true) {
+        void this.filePropertiesService.handleMetadataResolved().catch((error) => {
+          logger.warn('[TPS GCM] Initialized file-property catalog rebuild failed', { error });
+        });
+      }
+      this.app.workspace.onLayoutReady(() => {
+        void this.filePropertiesService.setup().then(() => {
+          this.entityIndexService?.invalidate();
+        }).catch((error) => {
+          logger.warn('[TPS GCM] Native file-property catalog setup failed', { error });
+        });
       });
     }
-    this.app.workspace.onLayoutReady(() => {
-      void this.filePropertiesService.setup().then(() => {
-        this.entityIndexService?.invalidate();
-      }).catch((error) => {
-        logger.warn('[TPS GCM] Native file-property catalog setup failed', { error });
-      });
-    });
     this.register(() => this.filePropertiesService.dispose());
     this.noteTitleRenderService = new NoteTitleRenderService(this);
     this.virtualBaseEmbedService = new VirtualBaseEmbedService(this);
-    this.addChild(this.virtualBaseEmbedService);
+    if (!this.usesNativeRecordArchitecture()) this.addChild(this.virtualBaseEmbedService);
     this.headingCollapseOnOpenService = new HeadingCollapseOnOpenService(this);
     this.addChild(this.headingCollapseOnOpenService);
     this.foldExpansionContextMenuService = new FoldExpansionContextMenuService(this);
     this.homeCaptureService = new HomeCaptureService(this);
     this.baseLineEditProtocolService = new BaseLineEditProtocolService(this);
-    this.baseLineEditProtocolService.register();
+    if (!this.usesNativeRecordArchitecture()) this.baseLineEditProtocolService.register();
     this.archiveFileService = new ArchiveFileService(this);
     this.register(this.homeComponentActionService.register(HOME_CAPTURE_COMMAND_ID, (context) => (
       this.homeCaptureService.openCaptureModalForContext(context)
@@ -618,6 +625,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.addChild(this.foldExpansionContextMenuService);
     this.linkedSubitemCheckboxService = new LinkedSubitemCheckboxService(this);
     this.frontmatterMutationService = new FrontmatterMutationService(this);
+    this.nativeRecordService = new NativeRecordService(this);
+    this.nativeRecordService.setup();
     this.sharedServices = createSharedServices(this);
     this.registerEditorExtension(createLivePreviewBodySelectionExtension());
     this.registerEditorExtension(this.linkedSubitemCheckboxService.getEditorExtension());
@@ -702,20 +711,22 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.emitGcmApiChanged(true);
     this.timeTrackingService.setup();
     this.timeTrackingStatusBarService.setup();
-    this.registerEvent(this.app.metadataCache.on('resolved', () => {
-      this.virtualBaseEmbedService.scheduleRefresh(0);
-    }));
-    this.registerEvent(this.app.workspace.on('file-open', () => {
-      this.virtualBaseEmbedService.scheduleRefresh(80);
-    }));
-    this.registerEvent(this.app.workspace.on('layout-change', () => {
-      this.virtualBaseEmbedService.scheduleRefresh(80);
-    }));
-    this.app.workspace.onLayoutReady(() => {
-      this.virtualBaseEmbedService.scheduleRefresh(0);
-      window.setTimeout(() => this.virtualBaseEmbedService.scheduleRefresh(0), 350);
-      window.setTimeout(() => this.virtualBaseEmbedService.scheduleRefresh(0), 1200);
-    });
+    if (!this.usesNativeRecordArchitecture()) {
+      this.registerEvent(this.app.metadataCache.on('resolved', () => {
+        this.virtualBaseEmbedService.scheduleRefresh(0);
+      }));
+      this.registerEvent(this.app.workspace.on('file-open', () => {
+        this.virtualBaseEmbedService.scheduleRefresh(80);
+      }));
+      this.registerEvent(this.app.workspace.on('layout-change', () => {
+        this.virtualBaseEmbedService.scheduleRefresh(80);
+      }));
+      this.app.workspace.onLayoutReady(() => {
+        this.virtualBaseEmbedService.scheduleRefresh(0);
+        window.setTimeout(() => this.virtualBaseEmbedService.scheduleRefresh(0), 350);
+        window.setTimeout(() => this.virtualBaseEmbedService.scheduleRefresh(0), 1200);
+      });
+    }
     this.app.workspace.onLayoutReady(() => {
       if (!this.canRunBackgroundAutomation()) return;
       if (!this.notebookNavigatorRuleService.shouldApplyOnStartup()) return;
@@ -848,8 +859,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   private registerInteractionHandlers(): void {
-    this.registerTpsListNativeCreateHandler();
-    this.registerTpsTableNativeCreateHandler();
+    if (!this.usesNativeRecordArchitecture()) {
+      this.registerTpsListNativeCreateHandler();
+      this.registerTpsTableNativeCreateHandler();
+    }
     this.registerLinkedSubitemHandlers();
     this.registerManualContextMenuHandler();
   }
@@ -2002,6 +2015,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     await this.persistSettingsSnapshot();
   }
 
+  usesNativeRecordArchitecture(): boolean {
+    return this.settings?.dataArchitectureMode === 'native-records';
+  }
+
   async loadSettings(): Promise<void> {
     const loaded = (await this.loadData()) as Partial<TPSGlobalContextMenuSettings> & {
       enableShiftClickCancel?: boolean;
@@ -2021,6 +2038,12 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       );
     }
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
+    this.settings.dataArchitectureMode = loaded?.dataArchitectureMode === 'native-records'
+      ? 'native-records'
+      : 'legacy';
+    this.settings.nativeRecordRootPath = normalizeNativeRecordRoot(
+      loaded?.nativeRecordRootPath ?? DEFAULT_SETTINGS.nativeRecordRootPath,
+    );
     const preNormalizationSettings = JSON.parse(JSON.stringify(this.settings)) as SettingsRecord;
     const loadedSettingsRecord = (loaded ?? {}) as SettingsRecord;
     for (const key of AUTHORITATIVE_HOME_SETTING_KEYS) {

@@ -2346,6 +2346,28 @@ export class TaskLineContextMenuService {
           this.runTaskMenuAction(context, 'open-task-line', () => this.openTaskLine(context));
         });
     });
+    if (this.plugin.nativeRecordService?.isEnabled()) {
+      menu.addItem((item) => {
+        item
+          .setTitle('Promote to tracked task')
+          .setIcon('file-up')
+          .onClick(() => {
+            this.runTaskMenuAction(context, 'promote-task-record', async () => {
+              const result = await this.plugin.nativeRecordService.promoteTask({
+                path: context.file.path,
+                lineNumber: context.lineIndex,
+                rawLine: context.rawLine,
+              }, { kind: 'user', surface: 'task-context-menu' });
+              if (!result.ok) {
+                new Notice(`TPS GCM: ${result.error || 'Could not promote this task.'}`);
+                return false;
+              }
+              new Notice(`Promoted task to ${result.record?.path || 'a tracked record'}.`);
+              return true;
+            });
+          });
+      });
+    }
     if (includeNoteActions) {
       const hasAssociatedNote = Boolean(
         readTaskAssociatedNotePath(context.rawLine)

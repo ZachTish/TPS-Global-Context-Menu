@@ -1,12 +1,12 @@
 {
   "name": "tps-global-context-menu",
-  "version": "1.37.0",
+  "version": "1.38.0",
   "private": true,
   "description": "Define a single reusable context menu for every note link across the vault.",
   "main": "main.js",
   "type": "module",
   "scripts": {
-    "prepretest": "node --test scripts/test-reading-line-activation.mjs scripts/test-item-property-batch.mjs scripts/test-linked-context-service.mjs scripts/test-health-property-import.mjs scripts/test-menu-presentation.mjs",
+    "prepretest": "node --test scripts/test-reading-line-activation.mjs scripts/test-item-property-batch.mjs scripts/test-linked-context-service.mjs scripts/test-health-property-import.mjs scripts/test-menu-presentation.mjs scripts/test-native-record-service.mjs",
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "pretest": "node --test scripts/test-base-view-refresh.mjs scripts/test-pointer-drag-preview.mjs scripts/test-live-preview-body-selection.mjs scripts/test-linked-context-service.mjs scripts/test-linked-context-interactions.mjs scripts/test-parent-child-ignore.mjs scripts/test-note-navigation-visibility.mjs scripts/test-text-input-tag-suggestions.mjs scripts/test-tps-base-formula-service.mjs scripts/test-tps-base-query-plan.mjs scripts/test-base-row-index-service.mjs scripts/test-base-value-semantics.mjs scripts/test-tps-field-type-matrix.mjs scripts/test-tps-list-note-filter-semantics.mjs scripts/test-property-key-identity.mjs scripts/test-markdown-document-line-cache.mjs scripts/test-item-history-service.mjs scripts/test-direct-task-history-callers.mjs scripts/test-line-metadata-api.mjs scripts/test-panel-checkbox-properties.mjs scripts/test-frontmatter-write-ownership.mjs scripts/test-completed-date-event-batching.mjs scripts/test-canvas-open-guard-installation.mjs scripts/test-subitem-sort-efficiency.mjs scripts/test-base-line-edit-protocol.mjs scripts/test-daily-note-home-setting-transaction.mjs scripts/test-serialized-latest-setting-writer.mjs scripts/test-daily-note-home-enable-toggle.mjs scripts/test-tps-notebook-navigator-menu-bridge.mjs scripts/test-menu-builder-integration.mjs scripts/test-file-properties-service.mjs scripts/test-file-properties-relink-flow.mjs scripts/test-file-property-consumers.mjs scripts/test-custom-property-menu-filter.mjs scripts/test-custom-property-surface-visibility.mjs scripts/test-create-task-checkbox-mapping.mjs scripts/test-checklist-promotion-reliability.mjs",

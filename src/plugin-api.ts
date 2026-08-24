@@ -724,6 +724,54 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         removeListValues: filePropertiesApi.removeListValues,
         deleteKeys: filePropertiesApi.deleteKeys,
     };
+    const nativeRecordsApi = {
+        version: plugin.nativeRecordService.version,
+        getMode: () => plugin.nativeRecordService.getMode(),
+        isEnabled: () => plugin.nativeRecordService.isEnabled(),
+        getRootPath: () => plugin.nativeRecordService.getRootPath(),
+        isRecord: (file: TFile) => plugin.nativeRecordService.isRecordFile(file),
+        create: (
+            kind: Parameters<typeof plugin.nativeRecordService.create>[0],
+            properties: Parameters<typeof plugin.nativeRecordService.create>[1],
+            options?: Parameters<typeof plugin.nativeRecordService.create>[2],
+        ) => plugin.nativeRecordService.create(kind, properties, options),
+        createAsset: (
+            source: Parameters<typeof plugin.nativeRecordService.createAsset>[0],
+            properties?: Parameters<typeof plugin.nativeRecordService.createAsset>[1],
+            options?: Parameters<typeof plugin.nativeRecordService.createAsset>[2],
+        ) => plugin.nativeRecordService.createAsset(source, properties, options),
+        ensureAsset: (
+            source: Parameters<typeof plugin.nativeRecordService.ensureAsset>[0],
+            properties?: Parameters<typeof plugin.nativeRecordService.ensureAsset>[1],
+            options?: Parameters<typeof plugin.nativeRecordService.ensureAsset>[2],
+        ) => plugin.nativeRecordService.ensureAsset(source, properties, options),
+        resolveAsset: (source: Parameters<typeof plugin.nativeRecordService.resolveAsset>[0]) =>
+            plugin.nativeRecordService.resolveAsset(source),
+        resolve: (reference: Parameters<typeof plugin.nativeRecordService.resolve>[0]) =>
+            plugin.nativeRecordService.resolve(reference),
+        update: (
+            reference: Parameters<typeof plugin.nativeRecordService.update>[0],
+            updates: Parameters<typeof plugin.nativeRecordService.update>[1],
+            cause?: Parameters<typeof plugin.nativeRecordService.update>[2],
+        ) => plugin.nativeRecordService.update(reference, updates, publicMutationCause(cause)),
+        archive: (
+            reference: Parameters<typeof plugin.nativeRecordService.archive>[0],
+            cause?: Parameters<typeof plugin.nativeRecordService.archive>[1],
+        ) => plugin.nativeRecordService.archive(reference, publicMutationCause(cause)),
+    };
+    const taskRecordsApi = {
+        version: 1,
+        promote: (
+            reference: Parameters<typeof plugin.nativeRecordService.promoteTask>[0],
+            cause?: Parameters<typeof plugin.nativeRecordService.promoteTask>[1],
+        ) => plugin.nativeRecordService.promoteTask(reference, publicMutationCause(cause)),
+        resolve: async (reference: Parameters<typeof plugin.nativeRecordService.resolve>[0]) => {
+            const record = await plugin.nativeRecordService.resolve(reference);
+            return record?.kind === 'task' ? record : null;
+        },
+        update: nativeRecordsApi.update,
+        archive: nativeRecordsApi.archive,
+    };
 
     (plugin as any).api = {
         // ── Shared services ──────────────────────────────────────────────────
@@ -979,6 +1027,8 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         },
         taskCheckboxes: taskCheckboxesApi,
         tasks: plugin.taskApiService,
+        nativeRecords: nativeRecordsApi,
+        taskRecords: taskRecordsApi,
         history: {
             version: 1,
             resolveEntity: (reference: string | ItemHistoryTaskReference) =>

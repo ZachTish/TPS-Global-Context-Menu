@@ -2259,6 +2259,34 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
     if (this.activeSettingsPage === 'advanced') {
       const diagnostics = activePage;
+      diagnostics.createEl('h4', { text: 'Data architecture' });
+
+      new Setting(diagnostics)
+        .setName('TPS data architecture')
+        .setDesc('Legacy keeps TPS List/Table, virtual Base embeds, line-row indexing, and non-Markdown companion properties. Native records keeps GCM menus and inline-task tools while ordinary Markdown records and core Bases own stored data and filtering. Changing this requires an Obsidian reload.')
+        .addDropdown((dropdown) => dropdown
+          .addOption('legacy', 'Legacy TPS views and companions')
+          .addOption('native-records', 'Native Markdown records and core Bases')
+          .setValue(this.plugin.settings.dataArchitectureMode || 'legacy')
+          .onChange(async (value) => {
+            this.plugin.settings.dataArchitectureMode = value === 'native-records'
+              ? 'native-records'
+              : 'legacy';
+            await this.plugin.saveSettings();
+            new Notice('Reload Obsidian to apply the TPS data architecture change.');
+          }));
+
+      new Setting(diagnostics)
+        .setName('Native record root')
+        .setDesc('Vault-relative folder for generated task, calendar, food, activity, workout, and asset records. This remains editable before native mode is enabled.')
+        .addText((text) => text
+          .setPlaceholder('_records')
+          .setValue(this.plugin.settings.nativeRecordRootPath || '_records')
+          .onChange(async (value) => {
+            this.plugin.settings.nativeRecordRootPath = value.trim() || '_records';
+            await this.plugin.saveSettings();
+          }));
+
       diagnostics.createEl('h4', { text: 'Debug logging' });
 
       new Setting(diagnostics)

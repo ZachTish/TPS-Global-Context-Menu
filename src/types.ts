@@ -66,6 +66,7 @@ export type TimeTrackingDailyNotePlacement = 'top' | 'bottom';
 export type TpsBaseWriteFallbackMode = 'filter-required' | 'today-daily-note' | 'specific-note';
 export type CompletedTaskHidingScope = 'reading-and-live-preview' | 'reading-only';
 export type LinkedContextSortOrder = 'source-asc' | 'source-desc';
+export type TpsDataArchitectureMode = 'legacy' | 'native-records';
 type ExtensibleLiteral<T extends string> = T | (string & Record<never, never>);
 
 export type TpsRecordKind = ExtensibleLiteral<'note' | 'task' | 'project' | 'food' | 'log' | 'workflow' | 'run' | 'workout' | 'workout-plan'>;
@@ -454,6 +455,13 @@ export function createDefaultConditionGroup(): ConditionGroup {
 }
 
 export interface TPSGlobalContextMenuSettings {
+  /**
+   * `legacy` preserves the existing TPS custom Base/companion behavior.
+   * `native-records` keeps GCM's interaction tools while making ordinary
+   * Markdown records and core Bases authoritative.
+   */
+  dataArchitectureMode: TpsDataArchitectureMode;
+  nativeRecordRootPath: string;
   enableLogging: boolean;
   logOpenerDecisions: boolean;
   enableInlinePersistentMenus: boolean;

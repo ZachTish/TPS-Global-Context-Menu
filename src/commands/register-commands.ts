@@ -1,6 +1,7 @@
 import { MarkdownView, Notice, TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { promptFilePropertiesRelink } from '../modals/file-properties-relink-modal';
+import * as logger from '../logger';
 
 /**
  * Registers all plugin commands on the given plugin instance.
@@ -52,6 +53,32 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
         name: 'Create task',
         callback: () => {
             plugin.createTaskService.openCreateTaskModal();
+        },
+    });
+
+    plugin.addCommand({
+        id: 'promote-current-task-to-record',
+        name: 'Tasks: Promote current task to tracked record',
+        callback: async () => {
+            if (!plugin.nativeRecordService.isEnabled()) {
+                new Notice('TPS GCM: Enable Native Markdown records in Advanced settings, then reload Obsidian.');
+                return;
+            }
+            const view = getActiveMarkdownEditor(plugin);
+            const file = view?.file;
+            if (!view || !(file instanceof TFile)) return;
+            const lineNumber = view.editor.getCursor().line;
+            const rawLine = view.editor.getLine(lineNumber);
+            const result = await plugin.nativeRecordService.promoteTask({
+                path: file.path,
+                lineNumber,
+                rawLine,
+            }, { kind: 'user', surface: 'command-promote-task-record' });
+            if (!result.ok) {
+                new Notice(`TPS GCM: ${result.error || 'Could not promote this task.'}`);
+                return;
+            }
+            new Notice(`Promoted task to ${result.record?.path || 'a tracked record'}.`);
         },
     });
 
@@ -117,6 +144,34 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
                 });
             } catch {
                 new Notice(`TPS GCM: Could not create the properties note for ${file.name}.`);
+            }
+        },
+    });
+
+    plugin.addCommand({
+        id: 'open-or-create-native-asset-record',
+        name: 'Native records: Open or create asset record for current file',
+        callback: async () => {
+            const file = plugin.app.workspace.getActiveFile();
+            if (!plugin.usesNativeRecordArchitecture()) {
+                new Notice('TPS GCM: Native record mode is not enabled.');
+                return;
+            }
+            if (!(file instanceof TFile) || file.extension.toLowerCase() === 'md') {
+                new Notice('TPS GCM: Open a non-Markdown file first.');
+                return;
+            }
+            try {
+                const record = await plugin.nativeRecordService.ensureAsset(file, {}, {
+                    cause: { kind: 'user', surface: 'native-asset-command' },
+                });
+                await plugin.openFileInLeaf(record.file, false, () => plugin.app.workspace.getLeaf(false), {
+                    revealLeaf: true,
+                    ignoreCanvasDragGuard: true,
+                });
+            } catch (error) {
+                logger.warn('[TPS GCM] Could not open native asset record', { path: file.path, error });
+                new Notice(`TPS GCM: Could not create the asset record for ${file.name}.`);
             }
         },
     });

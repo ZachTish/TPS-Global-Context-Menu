@@ -25,6 +25,8 @@ views:
 `;
 
 export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
+  dataArchitectureMode: 'legacy',
+  nativeRecordRootPath: '_records',
   enableLogging: false,
   logOpenerDecisions: false,
   enableInlinePersistentMenus: false,

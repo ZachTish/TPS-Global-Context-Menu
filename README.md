@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.38.0
+
+- Adds the opt-in **Native Markdown records** architecture while leaving every existing vault on **Legacy** by default. Native mode stores tracked tasks and assets as ordinary Markdown files under a configurable `_records` root and disables GCM's TPS List/Table views, virtual Base embeds, custom Base row index/query machinery, and automatic companion-note creation.
+- Native records use schema version 1 with stable `tpsId` filenames and required `kind`, `title`, `createdDate`, and `modifiedDate` properties. The versioned `nativeRecords` and `taskRecords` APIs support create, resolve, atomic update, archive, and promotion without exposing note bodies.
+- **Promote to tracked task** converts an exact inline task into a native task record, preserves its child block, and replaces only the task line with a stable record link. Non-Markdown files receive explicit **Create/Open asset record** actions instead of hidden metadata writes.
+- Legacy companion records remain readable in Legacy mode. Switching modes performs no bulk rewrite or deletion; migration remains explicit and copy-only.
+- Native mode is intended for core Bases and real Markdown rows. Lightweight inline tasks, context menus, relationships, linked context, and ordinary file property actions remain available. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.37.0
 
 - Context menus now have one explicit ownership boundary. Task, bullet, and heading menus contain only actions for that exact Markdown line; they no longer append the containing/source note's property, conversion, archive, delete, or native file actions underneath the line actions.

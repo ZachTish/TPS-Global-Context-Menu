@@ -256,7 +256,8 @@ export class ContextTargetService {
     private isPropertyFile(file: TFile): boolean {
         if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
         return file.extension?.toLowerCase() === 'md'
-            || this.plugin.filePropertiesService?.isPropertyTarget(file) === true;
+            || this.plugin.filePropertiesService?.isPropertyTarget(file) === true
+            || (this.plugin.usesNativeRecordArchitecture() && !this.plugin.nativeRecordService.isRecordFile(file));
     }
 
     private resolveLogicalPropertyFile(file: TFile): TFile | null {

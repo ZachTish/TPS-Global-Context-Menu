@@ -256,7 +256,8 @@ export class FilePropertiesService {
   }
 
   isPropertyTarget(file: unknown): file is TFile {
-    return file instanceof TFile
+    return this.plugin.settings?.dataArchitectureMode !== 'native-records'
+      && file instanceof TFile
       && String(file.extension || '').toLocaleLowerCase() !== 'md'
       && !this.isManagedCatalogPath(file.path);
   }

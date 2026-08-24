@@ -590,6 +590,47 @@ export class MenuBuilder {
       });
     }
 
+    const nativeAssetEntries = entries.filter((entry) => entry?.nativeAssetSource === true && entry.file instanceof TFile);
+    if (nativeAssetEntries.length > 0) {
+      const existing = nativeAssetEntries.length === 1
+        ? this.plugin.nativeRecordService.resolveAssetCached(nativeAssetEntries[0].file)
+        : null;
+      menu.addItem((item) => {
+        const label = nativeAssetEntries.length > 1
+          ? `Create asset records (${nativeAssetEntries.length})`
+          : existing
+            ? 'Open asset record'
+            : 'Create asset record';
+        item.setTitle(label)
+          .setIcon('database')
+          .setSection('tps-file-ops')
+          .onClick(async () => {
+            try {
+              const records = [];
+              for (const entry of nativeAssetEntries) {
+                records.push(await this.plugin.nativeRecordService.ensureAsset(entry.file, {}, {
+                  cause: { kind: 'user', surface: 'native-asset-menu' },
+                }));
+              }
+              if (records.length === 1) {
+                await this.plugin.openFileInLeaf(records[0].file, false, () => this.app.workspace.getLeaf(false), {
+                  revealLeaf: true,
+                  ignoreCanvasDragGuard: true,
+                });
+              } else {
+                new Notice(`Created or resolved ${records.length} asset records.`);
+              }
+            } catch (error) {
+              logger.warn('[TPS GCM] Could not create or open native asset record', {
+                error,
+                count: nativeAssetEntries.length,
+              });
+              new Notice('Could not create the native asset record.');
+            }
+          });
+      });
+    }
+
     if (includeSingleTargetActions && this.plugin.filePropertiesService?.isPropertyTarget(file)) {
       const service = this.plugin.filePropertiesService;
       const exactRelinkCandidate = service.getRelinkCandidate(file);
