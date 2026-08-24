@@ -122,7 +122,11 @@ function createHarness(mode = 'native-records') {
       return entry instanceof TFile ? entry : null;
     },
     createFolder: async (path) => ensureFolder(path),
-    create: async (path, content) => addFile(path, content),
+    create: async (path, content) => {
+      const file = addFile(path, content);
+      for (const handler of vaultEventHandlers.get('create') || []) handler(file);
+      return file;
+    },
     cachedRead: async (file) => contents.get(file) || '',
     process: async (file, processor) => {
       const next = processor(contents.get(file) || '');
@@ -220,6 +224,58 @@ test('native record create, update, archive, and asset paths preserve typed valu
   assert.equal(service.resolveAssetCached(assetSource)?.id, 'asset-1');
   assert.equal((await service.resolveAsset(assetSource))?.id, 'asset-1');
   assert.ok(events.some((event) => event.type === 'explicit'));
+});
+
+test('a new empty task draft created by core Bases is adopted into the canonical native task folder', async () => {
+  const { service, vault, entries, contents, events } = createHarness();
+  const draft = await vault.create('Untitled.md', serializeNativeRecordDocument({
+    bom: '',
+    newline: '\n',
+    closer: '---',
+    body: '',
+    frontmatter: {
+      kind: 'task',
+      title: null,
+      status: null,
+      priority: null,
+      scheduled: null,
+      due: null,
+      timeEstimate: null,
+      parents: null,
+      tags: null,
+    },
+  }));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.match(draft.path, /^_records\/tasks\/task-[^.]+\.md$/u);
+  assert.equal(entries.has('Untitled.md'), false);
+  const parsed = parseNativeRecordDocument(contents.get(draft));
+  assert.equal(parsed?.frontmatter.kind, 'task');
+  assert.equal(parsed?.frontmatter.title, 'Untitled');
+  assert.equal(parsed?.frontmatter.status, 'todo');
+  assert.equal(parsed?.frontmatter.tpsSchemaVersion, 1);
+  assert.match(String(parsed?.frontmatter.tpsId), /^task-/u);
+  assert.equal((await service.resolve(String(parsed?.frontmatter.tpsId)))?.path, draft.path);
+  assert.ok(events.some((event) => event.type === 'explicit'
+    && event.details?.source === 'native-base-new-task'));
+});
+
+test('native draft adoption never absorbs existing, non-task, enveloped, or body-bearing notes', async () => {
+  const { vault } = createHarness();
+  const cases = [
+    ['Body task.md', { kind: 'task', title: '' }, 'human notes'],
+    ['Project.md', { kind: 'project', title: '' }, ''],
+    ['Partial.md', { kind: 'task', title: '', tpsId: 'manual-id' }, ''],
+    ['Schema.md', { kind: 'task', title: '', tpsSchemaVersion: 1 }, ''],
+  ];
+  for (const [path, frontmatter, body] of cases) {
+    const file = await vault.create(path, serializeNativeRecordDocument({
+      bom: '', newline: '\n', closer: '---', body, frontmatter,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(file.path, path);
+  }
 });
 
 test('native record IDs remain the canonical filenames after a user or plugin rename', async () => {

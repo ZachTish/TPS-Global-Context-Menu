@@ -178,6 +178,9 @@ export function isNativeRecordEnvelope(value: unknown): value is TpsNativeRecord
 export class NativeRecordService {
   readonly version = 1;
   private setupComplete = false;
+  private readonly newlyCreatedFiles = new WeakSet<TFile>();
+  private readonly draftEligibilityTimers = new WeakMap<TFile, ReturnType<typeof setTimeout>>();
+  private readonly draftAdoptions = new WeakMap<TFile, Promise<void>>();
   private readonly idsByPath = new Map<string, string>();
   private readonly pathsById = new Map<string, Set<string>>();
   private readonly recordsByPath = new Map<string, TpsNativeRecordEnvelope>();
@@ -191,9 +194,19 @@ export class NativeRecordService {
     this.rebuildIndex();
     this.plugin.registerEvent(this.plugin.app.metadataCache.on('changed', (file, _data, cache) => {
       this.indexFile(file, cache?.frontmatter);
+      if (this.newlyCreatedFiles.has(file)) void this.adoptNewTaskDraft(file);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('create', (file) => {
-      if (file instanceof TFile) this.indexFile(file);
+      if (!(file instanceof TFile)) return;
+      this.newlyCreatedFiles.add(file);
+      const timer = globalThis.setTimeout(() => {
+        this.newlyCreatedFiles.delete(file);
+        this.draftEligibilityTimers.delete(file);
+      }, 10_000);
+      (timer as unknown as { unref?: () => void }).unref?.();
+      this.draftEligibilityTimers.set(file, timer);
+      this.indexFile(file);
+      void this.adoptNewTaskDraft(file);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('delete', (file) => {
       if (file instanceof TFile) this.removePath(file.path);
@@ -537,6 +550,95 @@ export class NativeRecordService {
     return copied;
   }
 
+  /**
+   * Core Bases creates a new Markdown file beside the Base, then materializes
+   * positive property filters into its frontmatter. In the native TPS profile,
+   * a task Base also filters by the canonical record folder, so that temporary
+   * file would otherwise disappear from the view immediately. Adopt only files
+   * observed through this session's Vault create event, and only while they are
+   * still empty, unenveloped task drafts.
+   */
+  private adoptNewTaskDraft(file: TFile): Promise<void> {
+    const existing = this.draftAdoptions.get(file);
+    if (existing) return existing;
+    const operation = this.adoptNewTaskDraftInternal(file)
+      .catch((error) => {
+        logger.flowError('NativeRecords', 'base-task-draft:adopt-failed', error, {
+          path: file.path,
+        });
+      })
+      .finally(() => {
+        this.draftAdoptions.delete(file);
+      });
+    this.draftAdoptions.set(file, operation);
+    return operation;
+  }
+
+  private async adoptNewTaskDraftInternal(file: TFile): Promise<void> {
+    if (!this.isEnabled() || !this.newlyCreatedFiles.has(file)) return;
+    if (file.extension.toLocaleLowerCase() !== 'md') return;
+    if (this.plugin.app.vault.getFileByPath(file.path) !== file) return;
+
+    const originalPath = file.path;
+    const originalContent = await this.plugin.app.vault.cachedRead(file);
+    const original = parseNativeRecordDocument(originalContent);
+    if (!original || original.body.trim().length > 0) return;
+    if (isNativeRecordEnvelope(original.frontmatter)) return;
+    if (Object.prototype.hasOwnProperty.call(original.frontmatter, 'tpsId')) return;
+    if (Object.prototype.hasOwnProperty.call(original.frontmatter, 'tpsSchemaVersion')) return;
+    if (typeof original.frontmatter.kind !== 'string'
+      || original.frontmatter.kind.trim().toLocaleLowerCase() !== 'task') return;
+
+    const now = new Date().toISOString();
+    const title = String(original.frontmatter.title || file.basename)
+      .replace(/\s+/gu, ' ')
+      .trim() || 'New task';
+    const id = this.generateAvailableId('task');
+    const canonicalPath = buildNativeRecordPath(this.getRootPath(), 'task', id);
+    await this.ensureParentFolder(canonicalPath);
+
+    let adopted: TpsNativeRecordEnvelope | null = null;
+    await this.plugin.app.vault.process(file, (content) => {
+      if (content !== originalContent) return content;
+      const parsed = parseNativeRecordDocument(content);
+      if (!parsed || parsed.body.trim().length > 0) return content;
+      if (isNativeRecordEnvelope(parsed.frontmatter)) return content;
+      if (Object.prototype.hasOwnProperty.call(parsed.frontmatter, 'tpsId')) return content;
+      if (Object.prototype.hasOwnProperty.call(parsed.frontmatter, 'tpsSchemaVersion')) return content;
+      if (typeof parsed.frontmatter.kind !== 'string'
+        || parsed.frontmatter.kind.trim().toLocaleLowerCase() !== 'task') return content;
+      const status = String(parsed.frontmatter.status || '').trim();
+      parsed.frontmatter = {
+        ...parsed.frontmatter,
+        tpsId: id,
+        tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
+        kind: 'task',
+        title,
+        createdDate: now,
+        modifiedDate: now,
+        status: status || 'todo',
+      };
+      adopted = parsed.frontmatter as TpsNativeRecordEnvelope;
+      return serializeNativeRecordDocument(parsed);
+    });
+    if (!adopted) return;
+    if (this.plugin.app.vault.getFileByPath(originalPath) !== file) return;
+
+    await this.plugin.app.vault.rename(file, canonicalPath);
+    this.newlyCreatedFiles.delete(file);
+    const timer = this.draftEligibilityTimers.get(file);
+    if (timer != null) globalThis.clearTimeout(timer);
+    this.draftEligibilityTimers.delete(file);
+    this.indexFile(file, adopted);
+    this.plugin.entityIndexService?.upsertFile(file, adopted);
+    this.notify([originalPath, canonicalPath], { kind: 'user', surface: 'native-base-new-task' }, 'native-base-new-task');
+    logger.flow('NativeRecords', 'base-task-draft:adopted', {
+      originalPath,
+      canonicalPath,
+      recordId: id,
+    });
+  }
+
   private async readHandle(file: TFile): Promise<TpsNativeRecordHandle | null> {
     const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
     if (isNativeRecordEnvelope(cached)) return this.toHandle(file, cached);
@@ -681,6 +783,15 @@ export class NativeRecordService {
       ? globalThis.crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
     return `${prefix}-${uuid}`;
+  }
+
+  private generateAvailableId(kind: TpsNativeRecordKind): string {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      const id = this.generateId(kind);
+      const path = buildNativeRecordPath(this.getRootPath(), kind, id);
+      if (!this.plugin.app.vault.getAbstractFileByPath(path) && !this.pathsById.has(this.idKey(id))) return id;
+    }
+    throw new Error(`Unable to allocate a unique TPS native ${kind} record ID.`);
   }
 
   private async ensureParentFolder(path: string): Promise<void> {

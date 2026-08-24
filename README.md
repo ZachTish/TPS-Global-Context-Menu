@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 1.38.3
+
+- The core Tasks Base **New** button now works with native records. GCM adopts only an empty `kind: task` file observed through the current session's create event, supplies its TPS identity and required timestamps, defaults blank status to `todo`, and moves the same file to `_records/tasks/<tpsId>.md` so the Base's folder filter does not immediately hide it.
+- Adoption is deliberately narrow: existing notes, notes with body content, non-task files, partial TPS envelopes, and files created while native-record mode is disabled are never absorbed. No Base or settings migration is required, and Legacy mode is unchanged.
+- Focused creation/containment coverage, the full declared suite, a separate production build, and isolated test-vault deployment cover the repair. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.38.2
 
 - Stable native-record filenames now recover even when a rename occurs before Obsidian's Metadata Cache has indexed the file. GCM reads the renamed Markdown record authoritatively and restores `_records/<kind>/<tpsId>.md` without relying on warm cache state.
