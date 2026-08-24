@@ -119,6 +119,9 @@ import {
   applyTaskItemPropertyMutation,
   type ItemPropertyMutation,
 } from '../utils/item-property-mutation';
+import { resolveReadingBulletSourceLine } from '../utils/reading-line-activation';
+import { addLineEntityPropertyMenus } from '../menu/line-entity-property-menu';
+import { resolveExactLineRevisionIndex, splitLineItemContent } from '../utils/line-item-deletion';
 
 export type TaskLineContext = {
   file: TFile;
@@ -299,8 +302,14 @@ export class TaskLineContextMenuService {
     if (this.isTaskInteractionBoundary(target)) return false;
     if (target?.matches('input.task-list-item-checkbox, input[type="checkbox"]')) return false;
     if (this.isTaskEditorExcludedTarget(target)) return false;
+    const renderedListItem = target?.closest<HTMLElement>('li');
+    if (renderedListItem
+      && renderedListItem.closest('.markdown-reading-view, .markdown-preview-view, .markdown-rendered')
+      && !renderedListItem.querySelector(':scope > input.task-list-item-checkbox, :scope > input[type="checkbox"]')) {
+      return this.handleReadingBulletClick(evt, target);
+    }
     const taskEl = this.resolveTaskElement(target);
-    if (!taskEl) return false;
+    if (!taskEl) return this.handleReadingBulletClick(evt, target);
     if (!this.isTaskEditorActivationTarget(target, taskEl)) return false;
     const surface = taskElSurface(taskEl);
     if (surface === 'tps-table' && (evt.shiftKey || evt.metaKey || evt.ctrlKey)) return false;
@@ -331,9 +340,209 @@ export class TaskLineContextMenuService {
         return;
       }
       this.taskSelectionAnchor = { ...context };
-      this.showTaskEditor(context, taskEl);
+      if (surface === 'markdown-reading') {
+        this.showMenu(context, taskEl, evt.pageX, evt.pageY);
+      } else {
+        this.showTaskEditor(context, taskEl);
+      }
     });
     return true;
+  }
+
+  private handleReadingBulletClick(evt: MouseEvent, target: HTMLElement | null): boolean {
+    if (!target || this.isTaskEditorExcludedTarget(target) || this.isTaskPropertyTarget(target)) return false;
+    const bulletEl = target.closest<HTMLElement>('li');
+    if (!bulletEl || !bulletEl.closest('.markdown-reading-view, .markdown-preview-view, .markdown-rendered')) return false;
+    if (bulletEl.closest('.tps-gcm-linked-context-panel')) return false;
+    if (bulletEl.querySelector(':scope > input.task-list-item-checkbox, :scope > input[type="checkbox"]')) return false;
+    const view = this.resolveMarkdownViewForElement(bulletEl);
+    const readingPreviewEl = view?.previewMode?.containerEl;
+    const isReadingView = view?.getMode?.() === 'preview'
+      || view?.currentMode?.type === 'preview'
+      || (readingPreviewEl instanceof HTMLElement && readingPreviewEl.contains(bulletEl));
+    if (!isReadingView) return false;
+    const file = view?.file;
+    const previewEl = readingPreviewEl
+      || view?.containerEl?.querySelector?.('.markdown-preview-view, .markdown-rendered, .markdown-reading-view');
+    if (!(file instanceof TFile) || !(previewEl instanceof HTMLElement) || !previewEl.contains(bulletEl)) return false;
+
+    const renderedItems = Array.from(previewEl.querySelectorAll<HTMLElement>('li'))
+      .filter((item) => !item.closest('.tps-gcm-linked-context-panel'));
+    const renderedOrdinal = renderedItems.findIndex((item) => item === bulletEl);
+    if (renderedOrdinal < 0) return false;
+    const renderedLineHint = this.parseRenderedLineHint(bulletEl.getAttribute('data-line'));
+    const x = evt.pageX;
+    const y = evt.pageY;
+    evt.preventDefault();
+    evt.stopPropagation();
+    evt.stopImmediatePropagation();
+    void this.plugin.app.vault.cachedRead(file).then((content) => {
+      const source = resolveReadingBulletSourceLine(content, renderedOrdinal, renderedLineHint);
+      if (!source) {
+        new Notice('Could not resolve the bullet line.');
+        return;
+      }
+      this.showReadingBulletMenu(file, source.lineIndex, source.rawLine, bulletEl, x, y);
+    }).catch((error) => {
+      logger.flowError('ReadingLineMenu', 'resolve:failed', error, { path: file.path, renderedOrdinal });
+      new Notice('Could not resolve the bullet line.');
+    });
+    return true;
+  }
+
+  private parseRenderedLineHint(value: string | null): number | null {
+    if (value == null || !/^\d+$/u.test(value.trim())) return null;
+    const parsed = Number(value);
+    return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : null;
+  }
+
+  private showReadingBulletMenu(
+    file: TFile,
+    lineIndex: number,
+    rawLine: string,
+    anchor: HTMLElement,
+    x: number,
+    y: number,
+  ): void {
+    const menu = new Menu();
+    menu.addItem((item) => {
+      item.setTitle('Edit full line…').setIcon('text-cursor-input').setSection('tps-line').onClick(() => {
+        void this.plugin.homeCaptureService.openLineEditor(file, lineIndex);
+      });
+      (item as any)._isTpsItem = true;
+    });
+    this.addReadingBulletTagMenu(menu, file, lineIndex, rawLine);
+    addLineEntityPropertyMenus({
+      app: this.plugin.app,
+      plugin: this.plugin,
+      menu,
+      file,
+      rawLine,
+      mutateLine: (updater, property, action) => this.updateReadingBulletLine(
+        file,
+        lineIndex,
+        rawLine,
+        updater,
+        `property-${action}:${property.key}`,
+      ),
+    });
+    menu.addItem((item) => {
+      item.setTitle('Open line in note').setIcon('file-text').setSection('tps-line').onClick(() => {
+        void this.plugin.app.workspace.getLeaf(false).openFile(file, { eState: { line: lineIndex } });
+      });
+      (item as any)._isTpsItem = true;
+    });
+    menu.addItem((item) => {
+      item.setTitle('Delete line item').setIcon('trash-2').setSection('tps-line').onClick(() => {
+        void requestLineItemDelete({
+          app: this.plugin.app,
+          file,
+          lineIndex,
+          rawLine,
+          itemLabel: 'line item',
+          source: 'reading-bullet-menu',
+          onDeleted: () => this.refreshReadingBulletSurface(file, 'delete'),
+        });
+      });
+      (item as any).setWarning?.(true);
+      (item as any)._isTpsItem = true;
+    });
+    this.plugin.menuController?.addToNativeMenu?.(menu, [file], {
+      includeTitle: false,
+      excludeCustomPropertyKeys: (this.plugin.settings.properties || []).map((property) => property.key),
+    });
+    this.plugin.app.workspace.trigger('file-menu', menu as any, file as any);
+    const rect = anchor.getBoundingClientRect();
+    menu.showAtPosition({
+      x: x || rect.left + Math.min(rect.width, 24),
+      y: y || rect.top + Math.min(rect.height, 24),
+    });
+    logger.flow('ReadingLineMenu', 'open', { path: file.path, lineNumber: lineIndex + 1 });
+  }
+
+  private addReadingBulletTagMenu(menu: Menu, file: TFile, lineIndex: number, rawLine: string): void {
+    const current = readTaskLineTags(rawLine);
+    menu.addItem((item) => {
+      item.setTitle('Tags').setIcon('tag').setSection('tps-line');
+      (item as any)._isTpsItem = true;
+      const submenu = this.constrainTaskMenu((item as any).setSubmenu());
+      submenu.addItem((sub: any) => {
+        sub.setTitle('Add tag…').setIcon('plus').onClick(() => {
+          new TextInputModal(this.plugin.app, 'Tag', '', async (value) => {
+            if (!String(value || '').trim()) return;
+            await this.updateReadingBulletLine(
+              file,
+              lineIndex,
+              rawLine,
+              (line) => addInlineTagsToTaskLine(line, value),
+              'tag-add',
+            );
+          }, { suggestions: collectKnownVaultTags(this.plugin.app) }).open();
+        });
+      });
+      for (const tag of current) {
+        submenu.addItem((sub: any) => {
+          sub.setTitle(`Remove #${tag}`).setIcon('x').onClick(() => {
+            void this.updateReadingBulletLine(
+              file,
+              lineIndex,
+              rawLine,
+              (line) => removeInlineTagFromTaskLine(line, tag),
+              'tag-remove',
+            );
+          });
+        });
+      }
+    });
+  }
+
+  private async updateReadingBulletLine(
+    file: TFile,
+    lineIndex: number,
+    rawLine: string,
+    updater: (line: string) => string,
+    action: string,
+  ): Promise<boolean> {
+    const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
+    try {
+      await this.plugin.app.vault.process(file, (content) => {
+        const parts = splitLineItemContent(content);
+        const resolved = resolveExactLineRevisionIndex(parts.lines, lineIndex, rawLine);
+        if (resolved < 0) {
+          mutation.outcome = 'stale';
+          return content;
+        }
+        const current = parts.lines[resolved] || '';
+        const next = updater(current);
+        if (next === current) return content;
+        parts.lines[resolved] = next;
+        mutation.outcome = 'changed';
+        return `${parts.lines.join(parts.newline)}${parts.endsWithNewline ? parts.newline : ''}`;
+      });
+    } catch (error) {
+      logger.flowError('ReadingLineMenu', 'mutation:failed', error, { action, path: file.path, lineNumber: lineIndex + 1 });
+      new Notice('Could not update that bullet line.');
+      return false;
+    }
+    if (mutation.outcome === 'stale') {
+      new Notice('That bullet changed before it could be updated. Refresh and try again.');
+      return false;
+    }
+    if (mutation.outcome !== 'changed') return false;
+    this.refreshReadingBulletSurface(file, action);
+    return true;
+  }
+
+  private refreshReadingBulletSurface(file: TFile, action: string): void {
+    this.plugin.eventService.emitFilesUpdated([file.path]);
+    this.plugin.overlayRenderingService?.invalidate?.({
+      reason: `reading-bullet-${action}`,
+      file,
+      surfaces: ['menus', 'linked-subitems', 'live-preview-editors'],
+      rebuildInlineSubitems: true,
+      refreshLivePreviewEditors: true,
+      delayMs: 80,
+    });
   }
 
   private routeTpsListSelection(

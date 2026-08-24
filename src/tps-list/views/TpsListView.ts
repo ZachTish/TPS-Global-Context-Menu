@@ -1,5 +1,5 @@
 
-import { BasesView, QueryController, Menu, BasesEntry, BasesEntryGroup, setIcon, TFile, debounce, normalizePath, Modal, Setting, WorkspaceLeaf, parseYaml, Notice, Platform } from 'obsidian';
+import { BasesView, QueryController, Menu, BasesEntry, BasesEntryGroup, setIcon, TFile, normalizePath, Modal, Setting, WorkspaceLeaf, parseYaml, Notice, Platform } from 'obsidian';
 import {
   extractGroupValues as extractKanbanGroupValues,
   getFrontmatterPropNameFromId as getKanbanFrontmatterPropNameFromId,
@@ -107,6 +107,7 @@ import {
   type TpsBaseMultiValueGroupingMode,
   type TpsBaseValueSemantics,
 } from '../../views/base-value-semantics';
+import { TpsBaseRefreshCoordinator } from '../../views/base-view-refresh';
 import {
   resolveTpsBaseDateExpression,
   resolveTpsBaseLineCreationPlan,
@@ -587,6 +588,7 @@ export class TpsListView extends BasesView {
   private scrollEl: HTMLElement;
   private containerEl: HTMLElement;
   private refreshDebounced: () => void;
+  private refreshCoordinator: TpsBaseRefreshCoordinator;
   private selectedRowIds = new Set<string>();
   private activeNotePath: string | null = null;
   private selectionAnchorRowId: string | null = null;
@@ -648,7 +650,8 @@ export class TpsListView extends BasesView {
     scrollEl.addClass('tps-list-scroll');
     Object.assign(scrollEl, { __tpsListView: this });
     this.containerEl = scrollEl.createDiv({ cls: 'tps-list-container' });
-    this.refreshDebounced = debounce(() => this.render(), 120, false);
+    this.refreshCoordinator = new TpsBaseRefreshCoordinator(() => this.render(), 280);
+    this.refreshDebounced = () => this.refreshCoordinator.request();
     this.applyLayoutSettings();
   }
 
@@ -2112,7 +2115,7 @@ export class TpsListView extends BasesView {
       if (nextSignature === this.baseFilterSignature) return;
       this.baseFilterSignature = nextSignature;
       this.refreshDebounced();
-    }, 400);
+    }, 1000);
     this.register(() => {
       if (this.baseFilterPollInterval) {
         window.clearInterval(this.baseFilterPollInterval);
@@ -2153,11 +2156,17 @@ export class TpsListView extends BasesView {
     this.registerDomEvent(document, 'visibilitychange', () => {
       if (document.visibilityState !== 'visible') this.clearActiveTaskPointerDrag();
     });
-    this.render();
-    window.setTimeout(() => this.render(), 300);
+    this.containerEl.setAttribute('aria-busy', 'true');
+    this.containerEl.createDiv({
+      cls: 'tps-list-native-empty tps-list-index-progress',
+      attr: { role: 'status' },
+      text: 'Loading TPS List…',
+    });
+    this.refreshDebounced();
   }
 
   onunload(): void {
+    this.refreshCoordinator.cancel();
     this.clearActiveTaskPointerDrag();
     this.renderedDisplayLanesById.clear();
     const taskSelectionService = this.getGcmPlugin()?.taskLineContextMenuService || this.getGcmApi()?.taskLineContextMenuService;
@@ -2253,8 +2262,7 @@ export class TpsListView extends BasesView {
 
   onDataUpdated(): void {
     this.ensureContainer();
-    this.render();
-    this.syncNativeResultsCountSoon();
+    this.refreshDebounced();
   }
 
   private queuePostCreateRefresh(): void {
@@ -2717,7 +2725,7 @@ export class TpsListView extends BasesView {
    */
   private getGroupByPropName(): string | null {
     // Primary: read from the internal config (works when Bases exposes groupBy)
-    const raw = resolveTpsBaseGroupDescriptor(this.getConfigValue('groupBy'))?.property;
+    const raw = this.getGroupDescriptor()?.property;
     if (raw) {
       if (raw.toLowerCase() === 'file.tags') return 'tags';
       if (isSourceNoteGroupProperty(raw)) return raw;
@@ -2760,7 +2768,7 @@ export class TpsListView extends BasesView {
   private getGroupByPropId(propName: string | null): string | null {
     if (!propName) return null;
 
-    const raw = resolveTpsBaseGroupDescriptor(this.getConfigValue('groupBy'))?.property;
+    const raw = this.getGroupDescriptor()?.property;
     if (raw) {
       if (raw.includes('.')) return raw;
       return `note.${raw}`;
@@ -2775,6 +2783,13 @@ export class TpsListView extends BasesView {
 
     const suffix = allProps.find((p) => p.toLowerCase().endsWith(`.${lower}`));
     return suffix || null;
+  }
+
+  private getGroupDescriptor() {
+    return resolveTpsBaseGroupDescriptor(
+      this.getConfigValue('groupBy'),
+      this.getConfigValue('groupDirection'),
+    );
   }
 
   private getFrontmatterPropNameFromId(propId: unknown): string | null {
@@ -2799,14 +2814,15 @@ export class TpsListView extends BasesView {
     return false;
   }
 
-  private buildMultiValueGroups(propId: string): BasesEntryGroup[] {
+  private buildMultiValueGroups(propId: string, direction: 'asc' | 'desc'): BasesEntryGroup[] {
     const entries: BasesEntry[] = this.data?.data ?? [];
-    return this.groupEntriesByProperty(entries, propId);
+    return this.groupEntriesByProperty(entries, propId, direction);
   }
 
   private getSourceGroupsForRender(propId: string | null, listGrouping: boolean): BasesEntryGroup[] {
+    const direction = this.getGroupDescriptor()?.direction ?? 'asc';
     const rawNativeGroups: BasesEntryGroup[] = (listGrouping && propId)
-      ? this.buildMultiValueGroups(propId)
+      ? this.buildMultiValueGroups(propId, direction)
       : (this.data?.groupedData ?? []);
     const nativeGroups = rawNativeGroups.filter((group) => Array.isArray(group?.entries));
 
@@ -2817,17 +2833,18 @@ export class TpsListView extends BasesView {
     if (canonicalized.changed || reconciledEntries !== canonicalized.entries) {
       const sortedEntries = this.sortEntriesForView(reconciledEntries);
       if (propId && (isSourceNoteGroupProperty(propId) || this.getConfiguredCustomProperty(propId)?.type === 'folder')) {
-        return this.groupEntriesBySourceNote(sortedEntries, propId);
+        return this.groupEntriesBySourceNote(sortedEntries, propId, direction);
       }
       return propId
-        ? this.groupEntriesByProperty(sortedEntries, propId)
+        ? this.groupEntriesByProperty(sortedEntries, propId, direction)
         : [{ key: null, entries: sortedEntries, hasKey: () => false } as unknown as BasesEntryGroup];
     }
     if (propId && (isSourceNoteGroupProperty(propId) || this.getConfiguredCustomProperty(propId)?.type === 'folder')) {
       return nativeEntries.length
-        ? this.groupEntriesBySourceNote(nativeEntries, propId)
+        ? this.groupEntriesBySourceNote(nativeEntries, propId, direction)
         : nativeGroups;
     }
+    if (propId) return this.groupEntriesByProperty(nativeEntries, propId, direction);
     // Obsidian Bases is the sole authority for note inclusion, native formula
     // evaluation, filtering, grouping, sorting, and search. TPS augments that
     // result with synthesized line rows later; it never recreates note rows
@@ -3056,7 +3073,11 @@ export class TpsListView extends BasesView {
     return this.groupsContainEntries(groups);
   }
 
-  private groupEntriesByProperty(entries: BasesEntry[], propId: string | null): BasesEntryGroup[] {
+  private groupEntriesByProperty(
+    entries: BasesEntry[],
+    propId: string | null,
+    direction: 'asc' | 'desc' = 'asc',
+  ): BasesEntryGroup[] {
     if (!propId) {
       return [{
         key: null,
@@ -3077,10 +3098,15 @@ export class TpsListView extends BasesView {
             : entry.getValue(propId as any),
       this.getOrderingSemantics(propId),
       this.getMultiValueGroupingMode(),
+      direction,
     );
   }
 
-  private groupEntriesBySourceNote(entries: BasesEntry[], propId: string): BasesEntryGroup[] {
+  private groupEntriesBySourceNote(
+    entries: BasesEntry[],
+    propId: string,
+    direction: 'asc' | 'desc' = 'asc',
+  ): BasesEntryGroup[] {
     return this.groupEntriesByValue(
       entries,
       (entry) => {
@@ -3091,6 +3117,7 @@ export class TpsListView extends BasesView {
       },
       this.getOrderingSemantics(propId),
       this.getMultiValueGroupingMode(),
+      direction,
     );
   }
 
@@ -3099,6 +3126,7 @@ export class TpsListView extends BasesView {
     getValue: (entry: BasesEntry) => unknown,
     semantics: TpsBaseValueSemantics = { kind: 'auto', collection: false },
     multiValueMode: TpsBaseMultiValueGroupingMode = 'separate',
+    direction: 'asc' | 'desc' = 'asc',
   ): BasesEntryGroup[] {
 
     const byKey = new Map<string, BasesEntry[]>();
@@ -3136,6 +3164,14 @@ export class TpsListView extends BasesView {
         hasKey: () => true,
       } as unknown as BasesEntryGroup);
     }
+    groups.sort((left, right) => compareTpsBaseValues(
+      left.key,
+      right.key,
+      semantics.collection
+        ? { kind: semantics.itemKind || semantics.kind, collection: false }
+        : semantics,
+      direction,
+    ));
 
     if (ungrouped.length) {
       groups.push({
@@ -3969,7 +4005,9 @@ export class TpsListView extends BasesView {
           totalFiles: progress.totalFiles,
           complete: progress.complete,
         };
-        this.refreshDebounced();
+        // Cache progressive batches without rebuilding the entire List. The
+        // final callback below publishes one stable, complete result surface.
+        this.syncNativeResultsCountSoon();
       },
     }).finally(() => {
       if (generation !== this.taskIndexLoadGeneration) return;
@@ -7629,6 +7667,23 @@ export class TpsListView extends BasesView {
       : [...orderedKeyed, ...ungrouped];
   }
 
+  private sortGroupsByConfiguredDirection(
+    groups: BasesEntryGroup[],
+    propId: string | null,
+  ): BasesEntryGroup[] {
+    const descriptor = this.getGroupDescriptor();
+    if (!descriptor || !propId) return groups;
+    const keyed = groups.filter((group) => this.getLaneId(group) !== 'ungrouped');
+    const ungrouped = groups.filter((group) => this.getLaneId(group) === 'ungrouped');
+    keyed.sort((left, right) => compareTpsBaseValues(
+      left.key,
+      right.key,
+      this.getOrderingSemantics(propId),
+      descriptor.direction,
+    ));
+    return [...keyed, ...ungrouped];
+  }
+
   private getSelectedFiles(): TFile[] {
     const selected: TFile[] = [];
     const seen = new Set<string>();
@@ -8792,6 +8847,19 @@ export class TpsListView extends BasesView {
     this.renderGeneration += 1;
     if (!this.shouldRenderView()) return;
     const generation = this.renderGeneration;
+    if (!this.isBaseFileFilterReady()) {
+      this.scheduleBaseFileFilterLoad();
+      this.containerEl.setAttribute('aria-busy', 'true');
+      if (!this.containerEl.childElementCount) {
+        this.containerEl.createDiv({
+          cls: 'tps-list-native-empty tps-list-index-progress',
+          attr: { role: 'status' },
+          text: 'Loading Base definition…',
+        });
+      }
+      return;
+    }
+    this.containerEl.removeAttribute('aria-busy');
     this.clearActiveTaskPointerDrag();
     this.renderedDisplayLanesById.clear();
     this.taskFormulaSessions = new WeakMap<OpenTaskSubitem, TpsFormulaRowSession>();
@@ -8809,7 +8877,14 @@ export class TpsListView extends BasesView {
     const scrollState = preserveScroll ? this.captureRenderScrollState() : null;
     this.applyLayoutSettings();
     this.ensureContainer();
-    this.containerEl.empty();
+    this.containerEl.setAttribute('aria-busy', 'true');
+    if (!this.containerEl.childElementCount) {
+      this.containerEl.createDiv({
+        cls: 'tps-list-native-empty tps-list-index-progress',
+        attr: { role: 'status' },
+        text: 'Loading TPS List…',
+      });
+    }
 
     if (!this.activeQueryPlan.valid) {
       for (const failure of this.activeQueryPlan.diagnostics) {
@@ -8820,6 +8895,8 @@ export class TpsListView extends BasesView {
       this.renderedTaskItemCount = 0;
       this.renderedResultCount = 0;
       this.hasRenderedResultCount = true;
+      this.containerEl.empty();
+      this.containerEl.removeAttribute('aria-busy');
       this.containerEl.createDiv({
         cls: 'tps-list-native-empty tps-list-filter-error',
         attr: { role: 'alert' },
@@ -8849,6 +8926,7 @@ export class TpsListView extends BasesView {
     if (generation !== this.renderGeneration) return;
     this.activeNotePath = this.getActiveMarkdownPath();
     const allGroups = this.mergeGroupsByLaneId(sourceGroups);
+    const propId = this.getGroupByPropId(propName) ?? propName;
 
     // Separate keyed groups from the ungrouped lane, then reorder per settings
     const keyed = allGroups.filter((g) => this.getLaneId(g) !== 'ungrouped');
@@ -8890,6 +8968,7 @@ export class TpsListView extends BasesView {
       taskFilter,
     );
     groups = this.ensureGroupsForTaskLanes(groups, taskRenderItemsByLane);
+    groups = this.applyManualLaneOrder(this.sortGroupsByConfiguredDirection(groups, propId));
     parentByChild = this.buildParentByChild(groups);
     laneRenderItemsByLane = !this.shouldRenderNoteEntriesForGroups(groups, taskFilter)
       ? new Map<string, LaneRenderItem[]>()
@@ -8966,6 +9045,8 @@ export class TpsListView extends BasesView {
     groups: BasesEntryGroup[],
     propName: string | null,
   ): void {
+    this.containerEl.empty();
+    this.containerEl.removeAttribute('aria-busy');
     const list = this.containerEl.createDiv({ cls: 'tps-list-native' });
     const progress = this.taskIndexProgress;
     if (progress && !progress.complete) {

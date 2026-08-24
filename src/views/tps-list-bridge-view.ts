@@ -14,6 +14,24 @@ export function createTpsListViewOptions(createButtonOptions: ViewOption): ViewO
       displayName: 'Grouping',
       items: [
         {
+          key: 'groupBy',
+          type: 'property',
+          displayName: 'Group by',
+          default: '',
+          placeholder: 'No grouping',
+        },
+        {
+          key: 'groupDirection',
+          type: 'dropdown',
+          displayName: 'Group order',
+          default: 'asc',
+          options: {
+            asc: 'Ascending',
+            desc: 'Descending',
+          },
+          shouldHide: (config) => !String(config.get('groupBy') || '').trim(),
+        },
+        {
           key: 'ungroupedPosition',
           type: 'dropdown',
           displayName: 'Items without a group',

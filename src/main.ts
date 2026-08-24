@@ -202,6 +202,24 @@ function createTpsTableViewOptions(plugin: TPSGlobalContextMenuPlugin): ViewOpti
       displayName: 'Table records',
       items: [
         {
+          key: 'groupBy',
+          type: 'property',
+          displayName: 'Group by',
+          default: '',
+          placeholder: 'No grouping',
+        },
+        {
+          key: 'groupDirection',
+          type: 'dropdown',
+          displayName: 'Group order',
+          default: 'asc',
+          options: {
+            asc: 'Ascending',
+            desc: 'Descending',
+          },
+          shouldHide: (config) => !String(config.get('groupBy') || '').trim(),
+        },
+        {
           key: 'lineFilterKey',
           type: 'text',
           displayName: 'Required inline field',

@@ -83,12 +83,20 @@ export function getTpsBaseGroupLaneId(value: unknown): string {
   return label ? `key:${label.toLowerCase()}` : 'ungrouped';
 }
 
-export function resolveTpsBaseGroupDescriptor(raw: unknown): TpsBaseGroupDescriptor | null {
+export function resolveTpsBaseGroupDescriptor(
+  raw: unknown,
+  fallbackDirection: unknown = 'asc',
+): TpsBaseGroupDescriptor | null {
   const property = typeof raw === 'string'
     ? raw.trim()
     : String((raw as any)?.property ?? (raw as any)?.field ?? (raw as any)?.key ?? '').trim();
   if (!property) return null;
-  const rawDirection = String((raw as any)?.direction ?? (raw as any)?.dir ?? (raw as any)?.order ?? '').trim().toLowerCase();
+  const rawDirection = String(
+    (typeof raw === 'object' && raw != null
+      ? (raw as any)?.direction ?? (raw as any)?.dir ?? (raw as any)?.order
+      : null)
+    ?? fallbackDirection,
+  ).trim().toLowerCase();
   return {
     property,
     direction: rawDirection === 'desc' || rawDirection === 'descending' ? 'desc' : 'asc',

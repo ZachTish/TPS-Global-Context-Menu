@@ -1748,6 +1748,10 @@ test('TPS List and TPS Table group synthesized rows by their containing source n
     property: 'file.path',
     direction: 'desc',
   });
+  assert.deepEqual(resolveTpsBaseGroupDescriptor('file.path', 'desc'), {
+    property: 'file.path',
+    direction: 'desc',
+  });
   assert.equal(isSourceNoteGroupProperty('file.name'), true);
   assert.equal(isSourceNoteGroupProperty('task.path'), true);
   assert.equal(isSourceNoteGroupProperty('file.tags'), false);
@@ -1778,12 +1782,23 @@ test('TPS List and TPS Table group synthesized rows by their containing source n
   assert.match(viewSource, /getSourceNoteGroupValue\(file, propId\)/);
   assert.match(viewSource, /return \[getTpsBaseGroupLaneId\(sourceNoteValue\)\]/);
   assert.match(viewSource, /if \(!this\.isWritableTaskGroupingProperty\(propName\)\) return/);
-  assert.match(logBaseSource, /resolveTpsBaseGroupDescriptor\(this\.getConfigValue\('groupBy'\)\)/);
+  assert.match(logBaseSource, /resolveTpsBaseGroupDescriptor\([\s\S]{0,120}getConfigValue\('groupBy'\)[\s\S]{0,120}getConfigValue\('groupDirection'\)/);
   assert.match(logBaseSource, /groupTpsBaseRows\(entries/);
   assert.match(logBaseSource, /tps-log-base-group-row/);
   assert.match(logBaseSource, /scope: 'rowgroup'/);
   assert.match(logBaseSource, /this\.renderedTaskEntryOrder = getTpsTableTaskSelectionOrder\(renderedEntries\)/);
   assert.doesNotMatch(logBaseSource, /tps-log-base-row tps-log-base-row--group/);
+  assert.match(bridgeSource, /key: 'groupBy'[\s\S]{0,100}type: 'property'/u);
+  assert.match(bridgeSource, /key: 'groupDirection'[\s\S]{0,180}desc: 'Descending'/u);
+  assert.match(mainSource, /key: 'groupBy'[\s\S]{0,100}type: 'property'/u);
+  assert.match(mainSource, /key: 'groupDirection'[\s\S]{0,180}desc: 'Descending'/u);
+  assert.doesNotMatch(viewSource, /window\.setTimeout\(\(\) => this\.render\(\), 300\)/u);
+  assert.match(viewSource, /text: 'Loading TPS List…',[\s\S]{0,100}this\.refreshDebounced\(\);/u);
+  assert.match(viewSource, /new TpsBaseRefreshCoordinator\(\(\) => this\.render\(\), 280\)/u);
+  assert.match(viewSource, /Cache progressive batches without rebuilding the entire List/u);
+  assert.match(viewSource, /this\.containerEl\.setAttribute\('aria-busy', 'true'\)/u);
+  assert.match(logBaseSource, /new TpsBaseRefreshCoordinator\(\(\) => void this\.render\(\), 280\)/u);
+  assert.match(logBaseSource, /onProgress\?\.\(\[\],/u);
 });
 
 test('task-only source-note grouping keeps synthesized tasks reachable by canonical lane ID', async () => {
@@ -1838,9 +1853,16 @@ test('task-only source-note grouping keeps synthesized tasks reachable by canoni
     ['QA Task Sink.md', 2],
   ]);
   assert.deepEqual(pathGroups.map((group) => group.key), [
-    'Inbox/QA Task Sink.md',
     'Archive/QA Task Sink.md',
+    'Inbox/QA Task Sink.md',
   ]);
+  assert.deepEqual(
+    view.groupEntriesBySourceNote(nativeEntries, 'file.path', 'desc').map((group) => group.key),
+    [
+      'Inbox/QA Task Sink.md',
+      'Archive/QA Task Sink.md',
+    ],
+  );
 });
 
 test('TPS List task lane synthesis reuses one full-vault task build without changing task results', async () => {

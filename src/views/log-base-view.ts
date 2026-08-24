@@ -69,6 +69,7 @@ import {
   type TpsBaseGroupDescriptor,
   type TpsBaseRowGroup,
 } from './base-row-grouping';
+import { TpsBaseRefreshCoordinator } from './base-view-refresh';
 import {
   compareTpsBaseValues,
   getTpsBaseAdditiveKindValues,
@@ -317,7 +318,7 @@ class TpsTableLineCreateModal extends Modal {
 export class TpsTableView extends BasesView {
   type = TPS_TABLE_VIEW_TYPE;
   private containerEl: HTMLElement;
-  private refreshTimer: number | null = null;
+  private refreshCoordinator: TpsBaseRefreshCoordinator;
   private renderGeneration = 0;
   private renderedResultCount = 0;
   private tableIndexProgress: { completedFiles: number; totalFiles: number; complete: boolean } | null = null;
@@ -348,6 +349,7 @@ export class TpsTableView extends BasesView {
     }
     this.containerEl.addClass('tps-log-base');
     (this.containerEl as any).__tpsTableView = this;
+    this.refreshCoordinator = new TpsBaseRefreshCoordinator(() => void this.render(), 280);
   }
 
   onload(): void {
@@ -385,7 +387,7 @@ export class TpsTableView extends BasesView {
   }
 
   onunload(): void {
-    if (this.refreshTimer != null) window.clearTimeout(this.refreshTimer);
+    this.refreshCoordinator.cancel();
     this.renderGeneration += 1;
     this.sourceLineCache?.clear();
     this.sourceLineCache = undefined;
@@ -808,22 +810,29 @@ export class TpsTableView extends BasesView {
     // Invalidate an active render immediately. The debounced replacement gets
     // its own generation when it starts.
     this.renderGeneration += 1;
-    if (this.refreshTimer != null) window.clearTimeout(this.refreshTimer);
-    this.refreshTimer = window.setTimeout(() => {
-      this.refreshTimer = null;
-      void this.render();
-    }, 150);
+    this.refreshCoordinator.request();
   }
 
   private async render(): Promise<void> {
     const generation = ++this.renderGeneration;
     const start = performance.now();
+    this.containerEl.setAttribute('aria-busy', 'true');
+    if (!this.containerEl.childElementCount) {
+      this.containerEl.createDiv({
+        cls: 'tps-log-base-index-progress',
+        attr: { role: 'status' },
+        text: 'Loading TPS Table…',
+      });
+    }
     this.formulaDiagnostics.clear();
     this.filterDiagnostics.clear();
     this.formulaNow = new Date();
-    const entries = await this.loadEntries((partialEntries, progress) => {
+    const entries = await this.loadEntries((_partialEntries, progress) => {
       if (generation !== this.renderGeneration) return;
-      this.renderEntries(partialEntries, generation, start, progress);
+      const status = this.containerEl.querySelector<HTMLElement>('.tps-log-base-index-progress');
+      if (status && progress.totalFiles > 0) {
+        status.setText(`Indexing… ${progress.completedFiles}/${progress.totalFiles} files. Results are incomplete.`);
+      }
     });
     this.renderEntries(entries, generation, start, {
       completedFiles: 0,
@@ -844,7 +853,10 @@ export class TpsTableView extends BasesView {
     }
 
     const columns = this.getColumns(entries);
-    const groupBy = resolveTpsBaseGroupDescriptor(this.getConfigValue('groupBy'));
+    const groupBy = resolveTpsBaseGroupDescriptor(
+      this.getConfigValue('groupBy'),
+      this.getConfigValue('groupDirection'),
+    );
     const ungroupedPosition = String(this.getConfigValue('ungroupedPosition') || '').trim().toLowerCase() === 'first'
       ? 'first'
       : 'last';
@@ -872,6 +884,7 @@ export class TpsTableView extends BasesView {
     const previousScrollLeft = previousScroller?.scrollLeft ?? 0;
     const previousScrollTop = previousScroller?.scrollTop ?? 0;
     this.containerEl.empty();
+    this.containerEl.removeAttribute('aria-busy');
 
     this.syncNativeResultsCountSoon();
 
@@ -964,6 +977,7 @@ export class TpsTableView extends BasesView {
     ) => void,
   ): Promise<LogLineEntry[]> {
     const entries: LogLineEntry[] = [];
+    let lastProgressPublishAt = performance.now();
     const loadGeneration = typeof this.renderGeneration === 'number' ? this.renderGeneration : null;
     const isCancelled = (): boolean => loadGeneration != null && loadGeneration !== this.renderGeneration;
     const filterRoots = await this.getEffectiveBaseFilterRoots();
@@ -1116,7 +1130,10 @@ export class TpsTableView extends BasesView {
         }) => {
           if (!processSourceResults(progress.results) || isCancelled()) return;
           if (!progress.complete) {
-            onProgress?.(this.sortEntries([...entries]), {
+            const now = performance.now();
+            if (now - lastProgressPublishAt < 280) return;
+            lastProgressPublishAt = now;
+            onProgress?.([], {
               completedFiles: progress.completedFiles,
               totalFiles: progress.totalFiles,
               complete: false,

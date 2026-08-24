@@ -612,7 +612,7 @@ test('task quick editor can replace the editable body without changing task stru
   );
 });
 
-test('normal task clicks open the exact-line quick editor across task surfaces', () => {
+test('task clicks keep exact-line editing outside Reading View and Reading View opens menus', () => {
   assert.match(serviceSource, /data-tps-gcm-context="table-task"/);
   assert.match(serviceSource, /private showTaskEditor\(context: TaskLineContext, anchorEl: HTMLElement\)/);
   assert.match(serviceSource, /async openQuickEditorForElement\(taskEl: HTMLElement, sourceEl: HTMLElement \| null = taskEl\)/);
@@ -627,6 +627,15 @@ test('normal task clicks open the exact-line quick editor across task surfaces',
   assert.match(serviceSource, /this\.updateTaskLine\(context/);
   assert.match(serviceSource, /TaskQuickEditor', 'open'/);
   assert.match(serviceSource, /TaskQuickEditor', 'save'/);
+  assert.match(serviceSource, /if \(surface === 'markdown-reading'\) \{\s*this\.showMenu\(context, taskEl, evt\.pageX, evt\.pageY\);/u);
+  assert.match(serviceSource, /if \(!taskEl\) return this\.handleReadingBulletClick\(evt, target\);/u);
+  assert.match(serviceSource, /const renderedListItem = target\?\.closest<HTMLElement>\('li'\);/u);
+  assert.match(serviceSource, /!renderedListItem\.querySelector\(':scope > input\.task-list-item-checkbox/u);
+  assert.match(serviceSource, /private showReadingBulletMenu\(/u);
+  assert.match(serviceSource, /markdown-reading-view, \.markdown-preview-view, \.markdown-rendered/u);
+  assert.match(serviceSource, /view\?\.getMode\?\.\(\) === 'preview'/u);
+  assert.match(serviceSource, /Edit full line…/u);
+  assert.match(serviceSource, /source: 'reading-bullet-menu'/u);
   assert.match(serviceSource, /tps-gcm-task-editor-checkbox/);
   assert.match(serviceSource, /cls: 'task-list-item-checkbox tps-gcm-task-editor-checkbox'/);
   assert.match(serviceSource, /type: 'checkbox'/);
