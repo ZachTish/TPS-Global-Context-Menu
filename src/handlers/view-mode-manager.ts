@@ -3,11 +3,13 @@ import TPSGlobalContextMenuPlugin from "../main";
 import * as logger from "../logger";
 import { NormalizedViewMode, ViewModeService } from "../services/view-mode-service";
 import { ViewModeRule } from "../types";
+import { shouldRepairStaleLivePreviewSnapshot } from "../utils/markdown-editor-mode";
 
 export class ViewModeManager extends Component {
     plugin: TPSGlobalContextMenuPlugin;
     private service = new ViewModeService();
     private applyingLeaves = new WeakSet<WorkspaceLeaf>();
+    private lastLivePreviewRepairAt = new WeakMap<MarkdownView, number>();
     private lastDecisions = new WeakMap<WorkspaceLeaf, { filePath: string; mode: NormalizedViewMode; ts: number }>();
     private invalidModeWarnings = new Map<string, number>();
 
@@ -60,14 +62,15 @@ export class ViewModeManager extends Component {
 
         if (!leaf || !(leaf.view instanceof MarkdownView)) return;
 
-        if (this.plugin.dailyNoteHomeService?.isLivePreviewOverride(leaf)) return;
-
         // Strict view type check to avoid interfering with custom views that inherit from MarkdownView (e.g. Kanban, Excalidraw, Feed Bases)
         if (leaf.view.getViewType() !== 'markdown') return;
 
         const view = leaf.view as MarkdownView;
         const file = view.file;
         if (!file) return;
+
+        if (await this.repairStaleLivePreviewMount(view)) return;
+        if (this.plugin.dailyNoteHomeService?.isLivePreviewOverride(leaf)) return;
 
         if (this.service.shouldIgnorePath(file.path, this.plugin.settings.viewModeIgnoredFolders)) {
             logger.log(`[TPS GCM] Skipping view mode check for ${file.basename} (Path ignored: ${file.path})`);
@@ -141,6 +144,40 @@ export class ViewModeManager extends Component {
             this.lastDecisions.set(leaf, { filePath: file.path, mode: targetMode, ts: Date.now() });
             logger.log(`[TPS GCM] No update needed.`);
         }
+    }
+
+    private async repairStaleLivePreviewMount(view: MarkdownView): Promise<boolean> {
+        const getState = (view as any).getState;
+        const setState = (view as any).setState;
+        if (typeof getState !== "function" || typeof setState !== "function") return false;
+
+        const state = getState.call(view) || {};
+        let reportedMode: unknown;
+        try {
+            reportedMode = typeof (view as any).getMode === "function" ? (view as any).getMode() : undefined;
+        } catch {
+            reportedMode = undefined;
+        }
+        const sourceRoot = view.contentEl?.querySelector?.(".markdown-source-view") as HTMLElement | null | undefined;
+        if (!shouldRepairStaleLivePreviewSnapshot({
+            reportedMode,
+            stateMode: state.mode,
+            sourceState: state.source,
+            sourceRoot,
+        })) return false;
+
+        const now = Date.now();
+        const previousRepair = this.lastLivePreviewRepairAt.get(view) ?? 0;
+        if (now - previousRepair < 2_000) return true;
+        this.lastLivePreviewRepairAt.set(view, now);
+
+        try {
+            await setState.call(view, { ...state, mode: "source", source: false }, { history: false });
+            logger.flow("ViewMode", "live-preview:repaired-stale-mobile-root", { path: view.file?.path || "" });
+        } catch (error) {
+            logger.flowError("ViewMode", "live-preview:repair-failed", error, { path: view.file?.path || "" });
+        }
+        return true;
     }
 
     async handlePotentialFrontmatterChange(files: TFile[], updateKeys: string[]): Promise<void> {

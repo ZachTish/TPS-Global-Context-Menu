@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.40.1
+
+- Mobile Live Preview now fails closed when Obsidian temporarily mounts a strict Source editor while retaining the stale `source:false` view flag. TPS properties, linked context, inline replacements, and other rendered surfaces no longer appear over literal Markdown during that mismatch.
+- When the persisted editor intent is Live Preview, GCM performs one bounded, history-free state repair after the editor root settles. Core Base embeds, headings, Health dashboards, and ordinary Markdown formatting can render again without requiring an app restart or repeated mode toggling.
+- Deliberate Source mode remains authoritative and fully literal. A `source:true` state is never repaired into Live Preview, and repeated repair attempts are suppressed for two seconds to avoid mobile remount loops.
+- This is a backward-compatible mobile rendering fix with no settings, note, Base, schema, or API migration. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.40.0
 
 - Custom fields can now be scoped directly by logical `kind`, independently of folders and tags. **Show only for kinds** and **Hide for kinds** apply to note-backed records and structural task, bullet, and heading rows; authored note frontmatter wins over the generic structural `note` row label.

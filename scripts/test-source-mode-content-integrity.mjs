@@ -22,6 +22,7 @@ const {
   isLivePreviewEditorRoot,
   isStrictSourceEditorRoot,
   isStrictSourceModeSnapshot,
+  shouldRepairStaleLivePreviewSnapshot,
 } = await import(`${pathToFileURL(bundledPath).href}?${Date.now()}`);
 
 function editorRoot({ markdown = true, livePreview = false, sourceClass = false } = {}) {
@@ -86,12 +87,36 @@ test('mobile Source mode falls back to the editor root when saved state omits so
     reportedMode: 'source',
     sourceState: false,
     sourceRoot: strictRoot,
-  }), false, 'an explicit Live Preview state wins during DOM transition');
+  }), true, 'a mounted strict editor wins over a stale mobile Live Preview flag');
   assert.equal(isStrictSourceModeSnapshot({
     reportedMode: 'preview',
     sourceState: true,
     sourceRoot: strictRoot,
   }), false, 'Reading View cannot be classified as Source from stale state');
+});
+
+test('a stale mobile Live Preview flag requests one bounded editor-state repair', () => {
+  const strictRoot = editorRoot();
+  const liveRoot = editorRoot({ livePreview: true });
+
+  assert.equal(shouldRepairStaleLivePreviewSnapshot({
+    reportedMode: 'source',
+    stateMode: 'source',
+    sourceState: false,
+    sourceRoot: strictRoot,
+  }), true);
+  assert.equal(shouldRepairStaleLivePreviewSnapshot({
+    reportedMode: 'source',
+    stateMode: 'source',
+    sourceState: false,
+    sourceRoot: liveRoot,
+  }), false);
+  assert.equal(shouldRepairStaleLivePreviewSnapshot({
+    reportedMode: 'source',
+    stateMode: 'source',
+    sourceState: true,
+    sourceRoot: strictRoot,
+  }), false, 'deliberate Source mode is never repaired into Live Preview');
 });
 
 test('every TPS editor substitution fails closed in strict Source mode', () => {
@@ -101,6 +126,7 @@ test('every TPS editor substitution fails closed in strict Source mode', () => {
   const linkedSubitemsSource = readFileSync(new URL('../src/services/linked-subitem-checkbox-service.ts', import.meta.url), 'utf8');
   const dailyNavSource = readFileSync(new URL('../src/handlers/daily-note-nav-manager.ts', import.meta.url), 'utf8');
   const persistentMenuSource = readFileSync(new URL('../src/menu/persistent-menu-manager.ts', import.meta.url), 'utf8');
+  const viewModeManagerSource = readFileSync(new URL('../src/handlers/view-mode-manager.ts', import.meta.url), 'utf8');
 
   assert.match(inlineSource, /isStrictSourceEditorRoot\(root\).*?return Decoration\.none/s);
   assert.match(inlineSource, /handleScheduledTaskContinuationKeydown[\s\S]*?isStrictSourceEditorRoot\(root\).*?return false/);
@@ -135,6 +161,9 @@ test('every TPS editor substitution fails closed in strict Source mode', () => {
   for (const source of [inlineSource, hidingSource, embedsSource, linkedSubitemsSource]) {
     assert.doesNotMatch(source, /classList\.contains\(['"]is-source-mode['"]\)/);
   }
+  assert.match(viewModeManagerSource, /repairStaleLivePreviewMount\(view\)/);
+  assert.match(viewModeManagerSource, /source: false \}, \{ history: false \}/);
+  assert.match(viewModeManagerSource, /now - previousRepair < 2_000/);
 });
 
 test('active mode transitions rebuild editor and injected surfaces from real view state', () => {

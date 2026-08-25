@@ -34,11 +34,25 @@ export function isStrictSourceModeSnapshot(input: {
     || !!input.sourceRoot;
   if (!reportsSource) return false;
 
-  // Desktop commonly persists this boolean, but mobile builds can omit it.
-  // When it exists it is the strongest signal and avoids trusting stale DOM
-  // during a mode transition. Otherwise the actual editor root distinguishes
-  // strict Source from Live Preview reliably.
+  // A strict signal must fail closed. Obsidian Mobile can retain `source:false`
+  // while mounting an editor root without `is-live-preview`; trusting that
+  // stale flag caused TPS replacements to render over literal Source mode.
+  // Conversely, `source:true` must stay literal while the DOM is transitioning.
   if (input.sourceState === true) return true;
+  if (isStrictSourceEditorRoot(input.sourceRoot)) return true;
+  if (isLivePreviewEditorRoot(input.sourceRoot)) return false;
   if (input.sourceState === false) return false;
   return isStrictSourceEditorRoot(input.sourceRoot);
+}
+
+export function shouldRepairStaleLivePreviewSnapshot(input: {
+  reportedMode?: unknown;
+  stateMode?: unknown;
+  sourceState?: unknown;
+  sourceRoot?: MarkdownEditorRootLike | null;
+}): boolean {
+  if (input.reportedMode === 'preview' || input.stateMode === 'preview') return false;
+  return input.sourceState === false
+    && (input.reportedMode === 'source' || input.stateMode === 'source')
+    && isStrictSourceEditorRoot(input.sourceRoot);
 }
