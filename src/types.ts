@@ -30,8 +30,12 @@ export interface CustomProperty {
   disabled?: boolean;
   hidden?: boolean;
   scopeTags?: string[];
+  /** Logical note/line kinds where this property is applicable. */
+  scopeKinds?: string[];
   scopeMode?: 'any' | 'all';
   excludeTags?: string[];
+  /** Logical note/line kinds where this property must never be shown. */
+  excludeKinds?: string[];
   scopePaths?: string[];
   excludePaths?: string[];
   scopeProperties?: CustomPropertyCondition[];

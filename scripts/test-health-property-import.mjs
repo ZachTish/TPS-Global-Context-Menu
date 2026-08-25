@@ -76,13 +76,32 @@ test('re-import refreshes matching keys without duplicates and retires stale imp
   assert.deepEqual(second.properties, first.properties);
 });
 
-test('unsupported catalogs fail before settings can be replaced', () => {
-  assert.throws(() => importHealthPropertyCatalog([], { version: 2 }), /unsupported property catalog/i);
+test('version 2 native record fields merge kind scopes with an existing task field', () => {
+  const result = importHealthPropertyCatalog([{
+    id: 'status', key: 'status', label: 'Status', type: 'selector', scopeKinds: ['task'], options: ['todo'],
+  }], {
+    version: 2,
+    food: [],
+    dailyRollups: [],
+    nativeRecords: [{
+      id: 'record-status', key: 'status', label: 'Status', type: 'selector', options: ['active', 'complete'],
+      scope: { mode: 'any', kinds: ['workout-session', 'activity-entry'] },
+    }],
+  });
+  assert.equal(result.properties.length, 1);
+  assert.deepEqual(result.properties[0].scopeKinds, ['workout-session', 'activity-entry', 'task']);
+  assert.deepEqual(result.properties[0].options, ['active', 'complete', 'todo']);
+  assert.equal(result.properties[0].showWhen, 'always');
 });
 
-test('settings UI wires an explicit Health import action', () => {
+test('unsupported catalogs fail before settings can be replaced', () => {
+  assert.throws(() => importHealthPropertyCatalog([], { version: 3 }), /unsupported property catalog/i);
+});
+
+test('settings UI wires one explicit task and Health catalog action', () => {
   const settingsSource = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
-  assert.match(settingsSource, /Import TPS Health properties/);
+  assert.match(settingsSource, /Install TPS task and Health fields/);
+  assert.match(settingsSource, /installTaskRecordProperties/);
   assert.match(settingsSource, /getPropertyCatalog/);
-  assert.match(settingsSource, /health-properties:imported/);
+  assert.match(settingsSource, /tps-record-properties:installed/);
 });

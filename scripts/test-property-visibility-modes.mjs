@@ -114,6 +114,25 @@ test('lean optional-property defaults stay off and the inline master toggle is a
   assert.match(inlineDecoration, /private getInlineDateTimePropertyKeys\(\): Set<string> \{[\s\S]{0,160}showCustomPropertiesInInlineUi === false\) return keys/);
 });
 
+test('stacked properties remain available when floating inline menus are disabled', () => {
+  assert.match(
+    persistentMenu,
+    /if \(!this\.plugin\.settings\.enableInlinePersistentMenus\) \{[\s\S]{0,360}showStandaloneStackedProperties[\s\S]{0,520}resolvePrimaryMarkdownView\(this\.plugin\.app\)/,
+  );
+  assert.match(
+    persistentMenu,
+    /this\.ensureTopParentNav\(standaloneView, \{ allowNavigation: false \}\)/,
+  );
+  assert.match(
+    persistentMenu,
+    /options: \{ force\?: boolean; allowNavigation\?: boolean \}[\s\S]{0,900}options\.allowNavigation !== false[\s\S]{0,100}enableTopParentNav === true/,
+  );
+  assert.match(
+    persistentMenu,
+    /if \(this\.isStrictSourceMode\(view\)\) \{[\s\S]{0,180}this\.removeTopParentNav\(view\)/,
+  );
+});
+
 test('TPS Health metric rings use goal state instead of metric color for bounded goals', () => {
   assert.ok(panelBuilder.includes("type TPSHealthMetricState = 'good' | 'under' | 'over' | 'neutral';"));
   assert.ok(panelBuilder.includes('data-tps-health-state'));

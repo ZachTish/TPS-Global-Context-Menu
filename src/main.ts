@@ -2438,6 +2438,16 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       if (normalized.allowInlineSet === undefined) {
         normalized.allowInlineSet = !DEFAULT_INLINE_PROPERTY_DENY_KEYS.has(String(normalized.key || '').trim().toLowerCase());
       }
+      for (const key of ['scopeKinds', 'excludeKinds'] as const) {
+        const values = Array.isArray(normalized[key])
+          ? normalized[key]
+          : String(normalized[key] || '').split(/[\n,]/u);
+        const normalizedKinds = Array.from(new Set(values
+          .map((value) => String(value || '').trim().toLocaleLowerCase())
+          .filter(Boolean)));
+        if (normalizedKinds.length > 0) normalized[key] = normalizedKinds;
+        else delete normalized[key];
+      }
       return normalized;
     });
   }

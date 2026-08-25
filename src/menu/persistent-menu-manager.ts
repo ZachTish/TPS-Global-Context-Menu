@@ -580,6 +580,11 @@ export class PersistentMenuManager {
     this.updateMobileBottomOffsets();
 
     if (!this.plugin.settings.enableInlinePersistentMenus) {
+      const showStandaloneStackedProperties = this.plugin.settings.showCustomPropertiesUnderTitle === true
+        && this.plugin.settings.showCustomPropertiesInInlineUi !== false;
+      const standaloneView = showStandaloneStackedProperties
+        ? resolvePrimaryMarkdownView(this.plugin.app)
+        : null;
       for (const view of Array.from(this.menus.keys())) {
         this.cleanup(view);
       }
@@ -596,7 +601,7 @@ export class PersistentMenuManager {
         this.removeInlineTitleIcon(view);
       }
       for (const view of Array.from(this.topParentNavs.keys())) {
-        this.removeTopParentNav(view);
+        if (view !== standaloneView) this.removeTopParentNav(view);
       }
       for (const view of Array.from(this.bottomParentNavs.keys())) {
         this.removeBottomParentNav(view);
@@ -608,6 +613,13 @@ export class PersistentMenuManager {
       ]);
       for (const view of linkedContextViews) {
         this.removeLinkedContextPanel(view);
+      }
+      if (standaloneView && isCompatibleMarkdownView(standaloneView)) {
+        try {
+          this.ensureTopParentNav(standaloneView, { allowNavigation: false });
+        } catch (error) {
+          logger.error('[TPS GCM] Failed to ensure standalone stacked properties:', error);
+        }
       }
       return;
     }
@@ -4119,7 +4131,10 @@ export class PersistentMenuManager {
     return this.baseLinkPreviewFile?.path === path;
   }
 
-  public ensureTopParentNav(view: MarkdownView, options: { force?: boolean } = {}): void {
+  public ensureTopParentNav(
+    view: MarkdownView,
+    options: { force?: boolean; allowNavigation?: boolean } = {},
+  ): void {
     if (this.isStrictSourceMode(view)) {
       this.clearNativePropertyVisibility(view);
       this.removeTopParentNav(view);
@@ -4129,7 +4144,8 @@ export class PersistentMenuManager {
     const wantsTopProperties = this.plugin.settings.showCustomPropertiesUnderTitle === true
       && this.plugin.settings.showCustomPropertiesInInlineUi !== false;
     const showStackedProperties = wantsTopProperties && !this.isStrictSourceMode(view);
-    const showTopNavigation = this.plugin.settings.enableTopParentNav === true;
+    const showTopNavigation = options.allowNavigation !== false
+      && this.plugin.settings.enableTopParentNav === true;
     const relationshipPlacement = this.getTopParentNavPlacement();
     if (!showTopNavigation) {
       this.removeBottomParentNav(view);

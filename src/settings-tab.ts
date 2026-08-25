@@ -36,6 +36,7 @@ import { FileSuggestModal } from './modals/FileSuggestModal';
 import * as logger from './logger';
 import { runDailyNoteHomeSettingTransaction } from './services/daily-note-home-setting-transaction';
 import { importHealthPropertyCatalog } from './integrations/health-property-import';
+import { installTaskRecordProperties } from './integrations/task-property-install';
 import {
   BASE_QUERY_GUIDE_GOTCHAS,
   BASE_QUERY_GUIDE_SECTIONS,
@@ -2332,31 +2333,34 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     const healthApi = healthPlugin?.api || healthPlugin;
     const canImportHealthProperties = typeof healthApi?.getPropertyCatalog === 'function';
     new Setting(container)
-      .setName('Import TPS Health properties')
+      .setName('Install TPS task and Health fields')
       .setDesc(canImportHealthProperties
-        ? 'Add or refresh Health-owned food fields and Daily Note rollups. Food fields follow TPS Health’s current tag, folder, or frontmatter identification mode; rollups appear only when Health wrote that rollup key.'
-        : 'Enable or update TPS Health, then reopen settings to import its scoped food and Daily Note rollup fields.')
+        ? 'Add or refresh the fields TPS actually writes. Task workflow fields are limited to tasks; Health fields are limited to their food, activity, exercise, workout, or Daily Note record kinds.'
+        : 'Install the scoped task field catalog now. Enable or update TPS Health and run this again to add its scoped Health fields.')
       .addButton((button) => {
         button
-          .setButtonText('Import / refresh')
-          .setDisabled(!canImportHealthProperties)
+          .setButtonText('Install / refresh')
           .onClick(async () => {
             try {
-              const catalog = await Promise.resolve(healthApi.getPropertyCatalog());
-              const result = importHealthPropertyCatalog(this.plugin.settings.properties || [], catalog);
-              this.plugin.settings.properties = result.properties as CustomProperty[];
+              const taskResult = installTaskRecordProperties(this.plugin.settings.properties || []);
+              const healthResult = canImportHealthProperties
+                ? importHealthPropertyCatalog(taskResult.properties, await Promise.resolve(healthApi.getPropertyCatalog()))
+                : { properties: taskResult.properties, added: 0, updated: 0, removed: 0 };
+              this.plugin.settings.properties = healthResult.properties as CustomProperty[];
               await this.plugin.saveSettings();
-              logger.flow('Settings', 'health-properties:imported', {
-                added: result.added,
-                updated: result.updated,
-                removed: result.removed,
-                total: result.properties.length,
+              logger.flow('Settings', 'tps-record-properties:installed', {
+                taskAdded: taskResult.added,
+                taskUpdated: taskResult.updated,
+                healthAdded: healthResult.added,
+                healthUpdated: healthResult.updated,
+                healthRemoved: healthResult.removed,
+                total: healthResult.properties.length,
               });
-              new Notice(`TPS Health properties imported: ${result.added} added, ${result.updated} refreshed${result.removed ? `, ${result.removed} retired` : ''}.`);
+              new Notice(`TPS record fields refreshed: ${taskResult.added + healthResult.added} added, ${taskResult.updated + healthResult.updated} updated${healthResult.removed ? `, ${healthResult.removed} retired` : ''}.`);
               this.display();
             } catch (error) {
-              logger.flowError('Settings', 'health-properties:import-failed', error);
-              new Notice('Could not import TPS Health properties. Update TPS Health and try again.');
+              logger.flowError('Settings', 'tps-record-properties:install-failed', error);
+              new Notice('Could not install TPS record fields. Update TPS Health and try again.');
             }
           });
       });
@@ -2697,6 +2701,42 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
       const scopeDiv = div.createDiv();
       scopeDiv.style.gridColumn = '1 / -1';
+      new Setting(scopeDiv)
+        .setName('Show only for kinds')
+        .setDesc('Optional comma/newline list of logical note or line kinds, such as task, exercise, food-entry, or workout-session.')
+        .addTextArea((text) => {
+          text
+            .setPlaceholder('task, workout-session')
+            .setValue((prop.scopeKinds || []).join(', '))
+            .onChange(async (value) => {
+              prop.scopeKinds = value
+                .split(/[,\n]/u)
+                .map((kind) => kind.trim().toLocaleLowerCase())
+                .filter(Boolean);
+              await this.plugin.saveSettings();
+            });
+          text.inputEl.rows = 2;
+          text.inputEl.cols = 30;
+        });
+
+      new Setting(scopeDiv)
+        .setName('Hide for kinds')
+        .setDesc('Optional comma/newline list. Matching logical note or line kinds never show this property.')
+        .addTextArea((text) => {
+          text
+            .setPlaceholder('area, asset')
+            .setValue((prop.excludeKinds || []).join(', '))
+            .onChange(async (value) => {
+              prop.excludeKinds = value
+                .split(/[,\n]/u)
+                .map((kind) => kind.trim().toLocaleLowerCase())
+                .filter(Boolean);
+              await this.plugin.saveSettings();
+            });
+          text.inputEl.rows = 2;
+          text.inputEl.cols = 30;
+        });
+
       new Setting(scopeDiv)
         .setName('Show only for tags')
         .setDesc('Optional comma/newline list. When set, this property only appears on notes with matching tags, for example type/shopping-item.')

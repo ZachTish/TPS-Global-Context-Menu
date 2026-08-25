@@ -211,6 +211,29 @@ test("hide conditions are OR rules and mixed selections fail safely", async () =
   );
 });
 
+test("kind scopes distinguish note records from structural task lines", async () => {
+  const { resolveCustomProperties } = await loadVisibilityModule();
+  const properties = [
+    { id: "status", key: "status", type: "selector", scopeKinds: ["task", "workout-session"] },
+    { id: "protein", key: "proteinG", type: "number", scopeKinds: ["food-entry"] },
+  ];
+  assert.deepEqual(
+    resolveCustomProperties(properties, [{ kind: "task", file: { path: "Today.md" }, frontmatter: {} }], {}, "context")
+      .map((property) => property.id),
+    ["status"],
+  );
+  assert.deepEqual(
+    resolveCustomProperties(properties, [{ kind: "note", file: { path: "Food.md" }, frontmatter: { kind: "FOOD-ENTRY" } }], {}, "inline")
+      .map((property) => property.id),
+    ["protein"],
+    "authored frontmatter kind overrides the structural note-row kind",
+  );
+  assert.deepEqual(
+    resolveCustomProperties([{ ...properties[0], excludeKinds: ["area"] }], [{ file: { path: "Area.md" }, frontmatter: { kind: "area" } }], {}, "any"),
+    [],
+  );
+});
+
 test("mounted views refresh once, continue after one renderer throws, and never block persistence", async () => {
   const {
     applyCustomPropertyVisibilityUpdate,

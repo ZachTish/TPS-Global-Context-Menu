@@ -350,8 +350,19 @@ test('task promotion creates one task record and replaces only the confirmed sou
   assert.equal(result.ok, true);
   assert.equal(result.record?.path, '_records/tasks/task-123.md');
   assert.equal(result.record?.frontmatter.timeEstimate, 45);
+  assert.equal(Object.hasOwn(result.record?.frontmatter || {}, 'sourceTaskId'), false, 'tpsId is the only task-record identity');
   assert.equal(contents.get(source), '# Inbox\n- [[_records/tasks/task-123|Ship release]]\n  - supporting note\n');
   assert.equal((await service.resolve('task-123'))?.path, result.record?.path);
+});
+
+test('task identity normalization removes only a matching legacy sourceTaskId alias', async () => {
+  const { service } = createHarness();
+  const matching = await service.create('task', { title: 'Matching', sourceTaskId: 'task-one' }, { id: 'task-one' });
+  const conflicting = await service.create('task', { title: 'Conflicting', sourceTaskId: 'old-inline-id' }, { id: 'task-two' });
+  const result = await service.normalizeTaskRecordIdentities();
+  assert.deepEqual(result, { inspected: 2, updated: 1, skipped: 1 });
+  assert.equal(Object.hasOwn((await service.resolve(matching.file)).frontmatter, 'sourceTaskId'), false);
+  assert.equal((await service.resolve(conflicting.file)).frontmatter.sourceTaskId, 'old-inline-id', 'conflicting history fails closed');
 });
 
 test('only task lines with an authored scheduled or due value cross the native-record boundary', () => {

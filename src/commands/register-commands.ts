@@ -83,10 +83,23 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
     });
 
     plugin.addCommand({
-        id: 'ai-assisted-task-creator',
+      id: 'ai-assisted-task-creator',
         name: 'AI assisted task creator',
         callback: () => {
             plugin.aiAssistedTaskService.openAiAssistedTaskModal();
+        },
+    });
+
+    plugin.addCommand({
+        id: 'normalize-native-task-identities',
+        name: 'Native records: Consolidate task identities',
+        checkCallback: (checking) => {
+            if (!plugin.nativeRecordService.isEnabled()) return false;
+            if (!checking) void (async () => {
+                const result = await plugin.nativeRecordService.normalizeTaskRecordIdentities();
+                new Notice(`TPS task identity cleanup: ${result.updated} of ${result.inspected} records updated; ${result.skipped} conflicting record(s) preserved.`);
+            })();
+            return true;
         },
     });
 

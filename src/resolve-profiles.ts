@@ -19,6 +19,9 @@ export function resolveCustomProperties(
     const entryContexts = (entries || []).map((entry) => ({
         entry,
         tags: collectEntryTags(entry),
+        // A file row is structurally a "note", but its authored kind is the
+        // domain identity used by scoped fields (task, food-entry, exercise…).
+        kind: normalizeKindValue(entry?.frontmatter?.kind || entry?.kind || entry?.itemKind),
         path: normalizePathValue(entry?.file?.path || ''),
         frontmatter: entry?.frontmatter || {},
     }));
@@ -28,6 +31,11 @@ export function resolveCustomProperties(
 
         const excluded = normalizeScopeTags(property.excludeTags || []);
         if (excluded.length > 0 && entryContexts.some((context) => excluded.some((tag) => context.tags.has(tag)))) {
+            return false;
+        }
+
+        const excludedKinds = normalizeScopeKinds(property.excludeKinds || []);
+        if (excludedKinds.length > 0 && entryContexts.some((context) => excludedKinds.includes(context.kind))) {
             return false;
         }
 
@@ -45,10 +53,11 @@ export function resolveCustomProperties(
         }
 
         const required = normalizeScopeTags(property.scopeTags || []);
+        const requiredKinds = normalizeScopeKinds(property.scopeKinds || []);
         const requiredPaths = normalizeScopeList(property.scopePaths || []);
         const requiredProperties = normalizePropertyConditions(property.scopeProperties || []);
         const mode = property.scopeMode === 'all' ? 'all' : 'any';
-        const scopeMatches = required.length === 0 && requiredPaths.length === 0 && requiredProperties.length === 0
+        const scopeMatches = required.length === 0 && requiredKinds.length === 0 && requiredPaths.length === 0 && requiredProperties.length === 0
             ? true
             : entryContexts.every((context) => {
                 const checks: boolean[] = [];
@@ -56,6 +65,9 @@ export function resolveCustomProperties(
                     checks.push(mode === 'all'
                         ? required.every((tag) => context.tags.has(tag))
                         : required.some((tag) => context.tags.has(tag)));
+                }
+                if (requiredKinds.length > 0) {
+                    checks.push(requiredKinds.includes(context.kind));
                 }
                 if (requiredPaths.length > 0) {
                     checks.push(matchesAnyPathScope(context.path, requiredPaths));
@@ -74,6 +86,14 @@ export function resolveCustomProperties(
             getCustomPropertySurfaceVisibilityMode(property, surface),
         );
     });
+}
+
+function normalizeKindValue(value: unknown): string {
+    return String(value || '').trim().toLocaleLowerCase();
+}
+
+function normalizeScopeKinds(kinds: unknown): string[] {
+    return Array.from(new Set(normalizeScopeList(kinds).map(normalizeKindValue).filter(Boolean)));
 }
 
 function matchesVisibilityMode(

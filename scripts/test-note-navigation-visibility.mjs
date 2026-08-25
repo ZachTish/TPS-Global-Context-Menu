@@ -154,7 +154,7 @@ test("top navigation cache identity includes every independent visibility choice
   );
   assert.match(
     ensureTopSource,
-    /const showTopNavigation = this\.plugin\.settings\.enableTopParentNav === true/,
+    /const showTopNavigation = options\.allowNavigation !== false\s*&& this\.plugin\.settings\.enableTopParentNav === true/,
   );
 });
 

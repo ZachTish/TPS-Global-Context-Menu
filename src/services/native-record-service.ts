@@ -410,6 +410,28 @@ export class NativeRecordService {
     }, cause);
   }
 
+  async normalizeTaskRecordIdentities(): Promise<{ inspected: number; updated: number; skipped: number }> {
+    const records = [...this.recordsByPath.entries()]
+      .filter(([, frontmatter]) => frontmatter.kind === 'task')
+      .sort(([left], [right]) => left.localeCompare(right));
+    let updated = 0;
+    let skipped = 0;
+    for (const [path, frontmatter] of records) {
+      if (!Object.prototype.hasOwnProperty.call(frontmatter, 'sourceTaskId')) continue;
+      const legacyId = String(frontmatter.sourceTaskId || '').trim();
+      if (legacyId && legacyId !== frontmatter.tpsId) {
+        skipped += 1;
+        continue;
+      }
+      const result = await this.update(path, { sourceTaskId: null }, {
+        kind: 'user', surface: 'native-task-identity-normalization',
+      });
+      if (result) updated += 1;
+      else skipped += 1;
+    }
+    return { inspected: records.length, updated, skipped };
+  }
+
   async promoteTask(
     reference: GcmTaskRef,
     cause: FilePropertiesMutationCause = { kind: 'user', surface: 'task-record-promotion' },
@@ -508,7 +530,6 @@ export class NativeRecordService {
       tags: [...task.tags],
       sourcePath: task.path,
       sourceLine: task.line,
-      sourceTaskId: task.stableId || undefined,
     };
     for (const key of SHARED_TASK_FIELDS) {
       const sourceKey = key === 'recurrenceRule' && !task.fields.recurrenceRule ? 'recurrence' : key;

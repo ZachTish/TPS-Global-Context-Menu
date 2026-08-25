@@ -2138,6 +2138,7 @@ export class TaskLineContextMenuService {
     const statusKey = this.getStatusKey().toLowerCase();
     const candidates = contexts.map((context) => {
       const frontmatter: Record<string, unknown> = readTaskInlineFieldRecord(context.rawLine);
+      frontmatter.kind = 'task';
       const tags = readTaskLineTags(context.rawLine);
       if (tags.length > 0) frontmatter.tags = tags;
       return { file: context.file, frontmatter };
@@ -2550,6 +2551,7 @@ export class TaskLineContextMenuService {
     if (this.plugin.settings.showCustomPropertiesInContextMenu === false) return;
     const statusKey = this.getStatusKey().toLowerCase();
     const frontmatter: Record<string, unknown> = readTaskInlineFieldRecord(context.rawLine);
+    frontmatter.kind = 'task';
     const tags = readTaskLineTags(context.rawLine);
     if (tags.length > 0) frontmatter.tags = tags;
     const properties = resolveCustomProperties(

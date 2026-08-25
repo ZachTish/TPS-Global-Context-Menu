@@ -26,6 +26,7 @@ import {
 import { propertyUsesEntityOptions } from '../utils/property-option-source';
 import {
   readInlineFieldValue,
+  parseTaskLine,
   readTaskLineTags,
   readTaskInlineFieldRecord,
 } from '../utils/task-line-metadata';
@@ -78,6 +79,14 @@ export function resolveLineEntityContextProperties(
   if (properties.length === 0) return [];
 
   const frontmatter: Record<string, unknown> = readTaskInlineFieldRecord(rawLine);
+  const trimmed = rawLine.trimStart();
+  frontmatter.kind = parseTaskLine(rawLine)
+    ? 'task'
+    : /^#{1,6}\s+/u.test(trimmed)
+      ? 'heading'
+      : /^[-*+]\s+/u.test(trimmed)
+        ? 'bullet'
+        : 'line';
   const tags = readTaskLineTags(rawLine);
   if (tags.length > 0) frontmatter.tags = tags;
 
