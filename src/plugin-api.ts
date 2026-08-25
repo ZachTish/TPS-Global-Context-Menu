@@ -756,6 +756,11 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             updates: Parameters<typeof plugin.nativeRecordService.update>[1],
             cause?: Parameters<typeof plugin.nativeRecordService.update>[2],
         ) => plugin.nativeRecordService.update(reference, updates, publicMutationCause(cause)),
+        rename: (
+            reference: Parameters<typeof plugin.nativeRecordService.rename>[0],
+            fileName: Parameters<typeof plugin.nativeRecordService.rename>[1],
+            cause?: Parameters<typeof plugin.nativeRecordService.rename>[2],
+        ) => plugin.nativeRecordService.rename(reference, fileName, publicMutationCause(cause)),
         archive: (
             reference: Parameters<typeof plugin.nativeRecordService.archive>[0],
             cause?: Parameters<typeof plugin.nativeRecordService.archive>[1],

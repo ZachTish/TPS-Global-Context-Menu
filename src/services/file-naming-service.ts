@@ -946,9 +946,8 @@ export class FileNamingService {
         // Companion property notes are storage records for non-Markdown files,
         // not ordinary notes. Never add titles/timestamps or rename them.
         if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
-        // Native records use their TPS identity as the canonical filename. A
-        // generic title-based rename would immediately be restored by the
-        // native-record service and can trigger Obsidian's update-links prompt.
+        // Native-record filenames are owned by their creating workflow (or by
+        // the user). Keep generic note auto-naming out of that contract.
         if (this.plugin.nativeRecordService?.isRecordFile(file)) return false;
 
         // Grace period for newly created files to allow other plugins (TPS-Controller, Templater) to finish initialization

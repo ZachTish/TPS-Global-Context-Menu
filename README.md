@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.43.1
+
+- Native-record identity is no longer coupled to an opaque physical filename. The stable TPS ID remains in the configured property or identity tag, while the creating workflow or user may choose a readable Markdown filename.
+- Public `nativeRecords` API version 3 adds an optional `fileName` on create and an atomic `rename` operation. GCM sanitizes the requested name, keeps it inside the configured root/layout, resolves collisions with deterministic numeric suffixes, updates links through Obsidian's File Manager, and preserves the same record ID.
+- Manual native-record renames remain in place and continue resolving by stable identity. Generic GCM note auto-naming still ignores native records so it cannot override workflow-owned names.
+- Existing records are not renamed during load. Owning workflows may migrate their records during their next normal reconciliation. Legacy mode, record schemas, storage profiles, and minimum Obsidian 1.10.0 compatibility are unchanged.
+
 ## 1.43.0
 
 - Native record system metadata is now a configurable storage profile under **Advanced → Data architecture → Native record properties**. Identity may use configurable ID/schema property names or one tag containing schema, kind, and the stable record ID.

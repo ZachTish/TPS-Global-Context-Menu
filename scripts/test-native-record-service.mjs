@@ -177,6 +177,7 @@ function createHarness(mode = 'native-records', options = {}) {
       },
       fileManager: {
         generateMarkdownLink: (file, _sourcePath, _subpath, alias) => `[[${file.path.replace(/\.md$/u, '')}|${alias}]]`,
+        renameFile: (file, path) => vault.rename(file, path),
       },
     },
     entityIndexService: { upsertFile: () => {} },
@@ -197,6 +198,7 @@ test('native record envelope and path helpers are deterministic', () => {
   assert.equal(normalizeNativeRecordRoot('/'), '');
   assert.equal(buildNativeRecordPath('_records', 'calendar-event', 'event:one'), '_records/calendar-events/event-one.md');
   assert.equal(buildNativeRecordPath('/', 'calendar-event', 'event:one', 'flat-root'), 'event-one.md');
+  assert.equal(buildNativeRecordPath('/', 'calendar-event', 'event:one', 'flat-root', '2026-08-25 - Standup.md'), '2026-08-25 - Standup.md');
   const envelope = {
     tpsId: 'task-1',
     tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
@@ -310,6 +312,22 @@ test('native record create, update, archive, and asset paths preserve typed valu
   assert.ok(events.some((event) => event.type === 'explicit'));
 });
 
+test('native record callers can choose readable filenames without changing stable identity', async () => {
+  const { service, addFile } = createHarness('native-records', { root: '/', layout: 'flat-root' });
+  addFile('2026-08-25 - Standup.md', 'ordinary note');
+  const created = await service.create('calendar-event', {
+    title: 'Standup',
+    scheduled: '2026-08-25T09:00:00.000Z',
+  }, { id: 'calendar-event-1', fileName: '2026-08-25 - Standup' });
+  assert.equal(created.path, '2026-08-25 - Standup (2).md');
+  assert.equal(created.id, 'calendar-event-1');
+
+  const renamed = await service.rename(created.file, '2026-08-26 - Standup');
+  assert.equal(renamed?.path, '2026-08-26 - Standup.md');
+  assert.equal(renamed?.id, 'calendar-event-1');
+  assert.equal((await service.resolve('calendar-event-1'))?.path, '2026-08-26 - Standup.md');
+});
+
 test('a new empty task draft created by core Bases is adopted into the canonical native task folder', async () => {
   const { service, vault, entries, contents, events } = createHarness();
   const draft = await vault.create('Untitled.md', serializeNativeRecordDocument({
@@ -362,7 +380,7 @@ test('native draft adoption never absorbs existing, non-task, enveloped, or body
   }
 });
 
-test('native record IDs remain the canonical filenames after a user or plugin rename', async () => {
+test('native record identity remains resolvable after a user or plugin rename', async () => {
   const { service, vault, entries } = createHarness();
   const created = await service.create('calendar-event', {
     title: 'Renamed event',
@@ -373,12 +391,12 @@ test('native record IDs remain the canonical filenames after a user or plugin re
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(created.file.path, '_records/calendar-events/calendar-event-1.md');
+  assert.equal(created.file.path, '_records/calendar-events/2026-08-25 Renamed event.md');
   assert.equal(entries.get(created.file.path), created.file);
   assert.equal(await service.resolve('calendar-event-1').then((record) => record?.path), created.file.path);
 });
 
-test('native record rename restores the canonical filename before MetadataCache is ready', async () => {
+test('native record rename remains indexed before MetadataCache is ready', async () => {
   const { service, vault, entries, metadata, addFile } = createHarness();
   const record = addFile('_records/calendar-events/calendar-event-cold.md', serializeNativeRecordDocument({
     bom: '',
@@ -400,7 +418,7 @@ test('native record rename restores the canonical filename before MetadataCache 
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
 
-  assert.equal(record.path, '_records/calendar-events/calendar-event-cold.md');
+  assert.equal(record.path, '_records/calendar-events/2026-08-25 Cold cache event.md');
   assert.equal(entries.get(record.path), record);
   assert.equal(await service.resolve('calendar-event-cold').then((resolved) => resolved?.path), record.path);
 });
@@ -455,9 +473,9 @@ test('only task lines with an authored scheduled or due value cross the native-r
   assert.equal(taskLineNeedsNativeRecord('- Plain bullet [scheduled:: 2026-08-26 09:00:00]'), false);
 });
 
-test('ordinary note auto-naming never renames canonical native record files', () => {
+test('ordinary note auto-naming never overrides workflow-owned native record filenames', () => {
   assert.match(fileNamingSource, /nativeRecordService\?\.isRecordFile\(file\)/u);
-  assert.match(fileNamingSource, /trigger Obsidian's update-links prompt/u);
+  assert.match(fileNamingSource, /Native-record filenames are owned by their creating workflow/u);
 });
 
 test('legacy mode rejects new record creation and leaves existing behavior opt-in', async () => {
@@ -484,7 +502,7 @@ test('native profile is explicit, default-off, and removes legacy active paths o
 });
 
 test('public GCM API exposes versioned generic and task record contracts', () => {
-  assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,1800}archive:/u);
+  assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,1800}rename:[\s\S]{0,800}archive:/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);
   assert.match(apiSource, /const taskRecordsApi = \{[\s\S]{0,200}version: 1[\s\S]{0,500}promote:[\s\S]{0,900}resolve:/u);
   assert.match(apiSource, /nativeRecords: nativeRecordsApi,[\s\S]{0,100}taskRecords: taskRecordsApi/u);

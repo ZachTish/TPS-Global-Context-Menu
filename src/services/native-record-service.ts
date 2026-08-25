@@ -74,6 +74,7 @@ export interface TpsNativeRecordStorageMigrationResult {
 export interface TpsNativeRecordCreateOptions {
   id?: string;
   now?: Date;
+  fileName?: string;
   cause?: FilePropertiesMutationCause;
 }
 
@@ -365,12 +366,15 @@ export function buildNativeRecordPath(
   kind: TpsNativeRecordKind,
   id: string,
   layout: TpsNativeRecordLayout = 'kind-folders',
+  fileName?: string,
 ): string {
-  const safeId = String(id || '')
+  const safeId = String(fileName || id || '')
     .trim()
+    .replace(/\.md$/iu, '')
+    .replace(/\s+/gu, ' ')
     .replace(/[\\/:*?"<>|#^\[\]]+/gu, '-')
     .replace(/\.{2,}/gu, '-')
-    .replace(/^-+|-+$/gu, '')
+    .replace(/^[.\s-]+|[.\s-]+$/gu, '')
     .slice(0, 180);
   if (!safeId) throw new Error('Native record ID cannot be represented as a filename.');
   const normalizedRoot = normalizeNativeRecordRoot(root);
@@ -450,7 +454,7 @@ export function isNativeRecordEnvelope(value: unknown): value is TpsNativeRecord
  * legacy companion note.
  */
 export class NativeRecordService {
-  readonly version = 2;
+  readonly version = 3;
   private setupComplete = false;
   private readonly newlyCreatedFiles = new WeakSet<TFile>();
   private readonly draftEligibilityTimers = new WeakMap<TFile, ReturnType<typeof setTimeout>>();
@@ -589,10 +593,7 @@ export class NativeRecordService {
       this.getStorageProfile(),
       this.getReadableStorageProfiles(),
     );
-    const path = buildNativeRecordPath(this.getRootPath(), kind, id, this.getLayout());
-    if (this.plugin.app.vault.getAbstractFileByPath(path)) {
-      throw new Error(`TPS native record path already exists: ${path}`);
-    }
+    const path = this.availableRecordPath(kind, id, options.fileName);
     await this.ensureParentFolder(path);
     const content = serializeNativeRecordDocument({
       bom: '',
@@ -607,6 +608,32 @@ export class NativeRecordService {
     this.notify([file.path], options.cause, 'native-record-create');
     logger.flow('NativeRecords', 'create:done', { kind, id, path: file.path });
     return this.toHandle(file, frontmatter);
+  }
+
+  async rename(
+    reference: NativeRecordReference,
+    fileName: string,
+    cause?: FilePropertiesMutationCause,
+  ): Promise<TpsNativeRecordHandle | null> {
+    this.assertEnabled();
+    const record = await this.resolve(reference);
+    if (!record) return null;
+    const nextPath = this.availableRecordPath(record.kind, record.id, fileName, record.file);
+    if (nextPath === record.file.path) return record;
+    const oldPath = record.file.path;
+    await this.ensureParentFolder(nextPath);
+    if (this.plugin.app.vault.getFileByPath(oldPath) !== record.file) return null;
+    await this.plugin.app.fileManager.renameFile(record.file, nextPath);
+    this.removePath(oldPath);
+    this.indexFile(record.file, record.frontmatter);
+    this.notify([oldPath, record.file.path], cause, 'native-record-rename');
+    logger.flow('NativeRecords', 'rename:done', {
+      kind: record.kind,
+      id: record.id,
+      oldPath,
+      path: record.file.path,
+    });
+    return this.toHandle(record.file, record.frontmatter);
   }
 
   async createAsset(
@@ -1173,45 +1200,34 @@ export class NativeRecordService {
       return;
     }
 
-    const canonicalPath = buildNativeRecordPath(this.getRootPath(), envelope.kind, envelope.tpsId, this.getLayout());
-    if (file.path === canonicalPath) {
-      this.indexFile(file, envelope);
-      return;
-    }
-    if (this.plugin.app.vault.getFileByPath(file.path) !== file) return;
+    this.indexFile(file, envelope);
+    logger.flow('NativeRecords', 'path:changed', {
+      recordId: envelope.tpsId,
+      recordKind: envelope.kind,
+      oldPath,
+      path: file.path,
+    });
+  }
 
-    const occupied = this.plugin.app.vault.getAbstractFileByPath(canonicalPath);
-    if (occupied && occupied !== file) {
-      this.indexFile(file, envelope);
-      logger.warn('[TPS GCM] Native record filename restore blocked by an occupied canonical path', {
-        recordId: envelope.tpsId,
-        recordKind: envelope.kind,
-        currentPath: file.path,
-        canonicalPath,
-      });
-      return;
+  private availableRecordPath(
+    kind: TpsNativeRecordKind,
+    id: string,
+    fileName?: string,
+    current?: TFile,
+  ): string {
+    const preferred = buildNativeRecordPath(this.getRootPath(), kind, id, this.getLayout(), fileName);
+    const occupied = this.plugin.app.vault.getAbstractFileByPath(preferred);
+    if (!occupied || occupied === current) return preferred;
+    if (!fileName) throw new Error(`TPS native record path already exists: ${preferred}`);
+    const dot = preferred.toLocaleLowerCase().endsWith('.md') ? preferred.length - 3 : preferred.length;
+    const stem = preferred.slice(0, dot);
+    const extension = preferred.slice(dot);
+    for (let suffix = 2; suffix <= 999; suffix += 1) {
+      const candidate = `${stem} (${suffix})${extension}`;
+      const collision = this.plugin.app.vault.getAbstractFileByPath(candidate);
+      if (!collision || collision === current) return candidate;
     }
-
-    try {
-      await this.ensureParentFolder(canonicalPath);
-      if (this.plugin.app.vault.getFileByPath(file.path) !== file) return;
-      await this.plugin.app.vault.rename(file, canonicalPath);
-      this.indexFile(file, envelope);
-      logger.flow('NativeRecords', 'canonical-path:restored', {
-        recordId: envelope.tpsId,
-        recordKind: envelope.kind,
-        oldPath,
-        canonicalPath,
-      });
-    } catch (error) {
-      this.indexFile(file, envelope);
-      logger.flowError('NativeRecords', 'canonical-path:restore-failed', error, {
-        recordId: envelope.tpsId,
-        recordKind: envelope.kind,
-        currentPath: file.path,
-        canonicalPath,
-      });
-    }
+    throw new Error(`Unable to allocate a unique TPS native record filename for ${preferred}.`);
   }
 
   private idKey(id: string): string {
