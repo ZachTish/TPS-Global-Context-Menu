@@ -2301,6 +2301,61 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }));
 
+      diagnostics.createEl('h4', { text: 'Template identity' });
+
+      new Setting(diagnostics)
+        .setName('Identify TPS templates by')
+        .setDesc('Controls template discovery in TPS pickers. Exact template paths remain valid. The folder option follows Templater; tag and property modes work in a folderless vault.')
+        .addDropdown((dropdown) => dropdown
+          .addOption('templater-folder', 'Templater folder')
+          .addOption('tag', 'Tag')
+          .addOption('property', 'Property key and value')
+          .setValue(this.plugin.settings.templateIdentificationMode || 'templater-folder')
+          .onChange(async (value) => {
+            this.plugin.settings.templateIdentificationMode = value === 'tag' || value === 'property'
+              ? value
+              : 'templater-folder';
+            await this.plugin.saveSettings();
+            this.display();
+          }));
+
+      new Setting(diagnostics)
+        .setName('Template tag')
+        .setDesc('Used when template identity is Tag. Enter the tag without #. This remains editable in every mode.')
+        .addText((text) => text
+          .setPlaceholder('tps-template')
+          .setValue(this.plugin.settings.templateIdentificationTag || '')
+          .onChange(async (value) => {
+            this.plugin.settings.templateIdentificationTag = value.trim().replace(/^#+/, '');
+            await this.plugin.saveSettings();
+          }));
+
+      new Setting(diagnostics)
+        .setName('Template property')
+        .setDesc('Used when template identity is Property. Matching is case-insensitive. Contains is useful for unresolved template expressions such as a title containing <% .')
+        .addText((text) => text
+          .setPlaceholder('tpsTemplate')
+          .setValue(this.plugin.settings.templateIdentificationPropertyKey || '')
+          .onChange(async (value) => {
+            this.plugin.settings.templateIdentificationPropertyKey = value.trim();
+            await this.plugin.saveSettings();
+          }))
+        .addDropdown((dropdown) => dropdown
+          .addOption('equals', 'equals')
+          .addOption('contains', 'contains')
+          .setValue(this.plugin.settings.templateIdentificationPropertyMatch || 'equals')
+          .onChange(async (value) => {
+            this.plugin.settings.templateIdentificationPropertyMatch = value === 'contains' ? 'contains' : 'equals';
+            await this.plugin.saveSettings();
+          }))
+        .addText((text) => text
+          .setPlaceholder('true')
+          .setValue(this.plugin.settings.templateIdentificationPropertyValue || '')
+          .onChange(async (value) => {
+            this.plugin.settings.templateIdentificationPropertyValue = value.trim();
+            await this.plugin.saveSettings();
+          }));
+
       diagnostics.createEl('h4', { text: 'Debug logging' });
 
       new Setting(diagnostics)

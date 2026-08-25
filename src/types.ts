@@ -72,6 +72,8 @@ export type CompletedTaskHidingScope = 'reading-and-live-preview' | 'reading-onl
 export type LinkedContextSortOrder = 'source-asc' | 'source-desc';
 export type TpsDataArchitectureMode = 'legacy' | 'native-records';
 export type TpsNativeRecordLayout = 'kind-folders' | 'flat-root';
+export type TpsTemplateIdentificationMode = 'templater-folder' | 'tag' | 'property';
+export type TpsTemplatePropertyMatch = 'equals' | 'contains';
 type ExtensibleLiteral<T extends string> = T | (string & Record<never, never>);
 
 export type TpsRecordKind = ExtensibleLiteral<'note' | 'task' | 'project' | 'food' | 'log' | 'workflow' | 'run' | 'workout' | 'workout-plan'>;
@@ -468,6 +470,11 @@ export interface TPSGlobalContextMenuSettings {
   dataArchitectureMode: TpsDataArchitectureMode;
   nativeRecordRootPath: string;
   nativeRecordLayout: TpsNativeRecordLayout;
+  templateIdentificationMode: TpsTemplateIdentificationMode;
+  templateIdentificationTag: string;
+  templateIdentificationPropertyKey: string;
+  templateIdentificationPropertyValue: string;
+  templateIdentificationPropertyMatch: TpsTemplatePropertyMatch;
   enableLogging: boolean;
   logOpenerDecisions: boolean;
   enableInlinePersistentMenus: boolean;

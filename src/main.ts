@@ -61,6 +61,7 @@ import { CardContentService } from './services/card-content-service';
 import { IdentityMigrationService } from './services/identity-migration-service';
 import { FilePropertiesService } from './services/file-properties-service';
 import { NativeRecordService, normalizeNativeRecordLayout, normalizeNativeRecordRoot } from './services/native-record-service';
+import { TemplateIdentityService } from './services/template-identity-service';
 import { NoteTitleRenderService } from './services/note-title-render-service';
 import { VirtualBaseEmbedService } from './services/virtual-base-embed-service';
 import { HeadingCollapseOnOpenService } from './services/heading-collapse-on-open-service';
@@ -374,6 +375,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   identityMigrationService: IdentityMigrationService;
   filePropertiesService: FilePropertiesService;
   nativeRecordService: NativeRecordService;
+  templateIdentityService: TemplateIdentityService;
   /** @deprecated Use filePropertiesService. Kept for one compatibility release. */
   canvasPropertiesService: FilePropertiesService;
   noteTitleRenderService: NoteTitleRenderService;
@@ -627,6 +629,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.frontmatterMutationService = new FrontmatterMutationService(this);
     this.nativeRecordService = new NativeRecordService(this);
     this.nativeRecordService.setup();
+    this.templateIdentityService = new TemplateIdentityService(this);
     this.sharedServices = createSharedServices(this);
     this.registerEditorExtension(createLivePreviewBodySelectionExtension());
     this.registerEditorExtension(this.linkedSubitemCheckboxService.getEditorExtension());
@@ -2045,6 +2048,22 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       loaded?.nativeRecordRootPath ?? DEFAULT_SETTINGS.nativeRecordRootPath,
     );
     this.settings.nativeRecordLayout = normalizeNativeRecordLayout(loaded?.nativeRecordLayout);
+    this.settings.templateIdentificationMode = loaded?.templateIdentificationMode === 'tag'
+      || loaded?.templateIdentificationMode === 'property'
+      ? loaded.templateIdentificationMode
+      : 'templater-folder';
+    this.settings.templateIdentificationTag = String(
+      loaded?.templateIdentificationTag ?? DEFAULT_SETTINGS.templateIdentificationTag,
+    ).trim().replace(/^#+/, '');
+    this.settings.templateIdentificationPropertyKey = String(
+      loaded?.templateIdentificationPropertyKey ?? DEFAULT_SETTINGS.templateIdentificationPropertyKey,
+    ).trim();
+    this.settings.templateIdentificationPropertyValue = String(
+      loaded?.templateIdentificationPropertyValue ?? DEFAULT_SETTINGS.templateIdentificationPropertyValue,
+    ).trim();
+    this.settings.templateIdentificationPropertyMatch = loaded?.templateIdentificationPropertyMatch === 'contains'
+      ? 'contains'
+      : 'equals';
     const preNormalizationSettings = JSON.parse(JSON.stringify(this.settings)) as SettingsRecord;
     const loadedSettingsRecord = (loaded ?? {}) as SettingsRecord;
     for (const key of AUTHORITATIVE_HOME_SETTING_KEYS) {

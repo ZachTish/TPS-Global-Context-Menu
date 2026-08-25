@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.42.0
+
+- GCM now owns one versioned template-identity rule for TPS plugins. Templates can be recognized through the existing Templater folder, a tag, or an exact property key/value rule; property matching supports equality or containment and does not require moving the template into a special folder.
+- The rule is configured under **Advanced → Data architecture → Template identity**. Rule values stay editable when a different mode is active, and existing vaults remain on the legacy Templater-folder mode.
+- Public API `templates` version 1 exposes the active mode, exact-file matching, and a current template list. TPS Calendar Base and TPS Notebook Navigator can consume the same rule without copying its settings or reading GCM internals.
+- The POC root-template profile uses `title contains <%`, which identifies the unresolved Daily Note template without adding a marker that would be copied into every generated note. Core Templater's own picker remains folder-based; this rule controls TPS consumers.
+- This is a backward-compatible settings/API feature. No note, template, or folder is moved automatically, and minimum supported Obsidian remains 1.10.0.
+
 ## 1.41.0
 
 - Native-record mode can now write every generated task, calendar, food, activity, workout, and asset record directly into one destination without kind subfolders. Set **Native record root** to `/` and **Native record layout** to **Flat in the selected destination** for a fully flat vault-root layout.

@@ -772,6 +772,12 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         update: nativeRecordsApi.update,
         archive: nativeRecordsApi.archive,
     };
+    const templatesApi = {
+        version: plugin.templateIdentityService.version,
+        getMode: () => plugin.templateIdentityService.getMode(),
+        matches: (file: TFile) => plugin.templateIdentityService.matches(file),
+        list: () => plugin.templateIdentityService.list(),
+    };
 
     (plugin as any).api = {
         // ── Shared services ──────────────────────────────────────────────────
@@ -1029,6 +1035,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         tasks: plugin.taskApiService,
         nativeRecords: nativeRecordsApi,
         taskRecords: taskRecordsApi,
+        templates: templatesApi,
         history: {
             version: 1,
             resolveEntity: (reference: string | ItemHistoryTaskReference) =>
