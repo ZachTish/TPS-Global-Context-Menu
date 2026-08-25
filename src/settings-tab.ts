@@ -35,6 +35,7 @@ import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { FileSuggestModal } from './modals/FileSuggestModal';
 import * as logger from './logger';
 import { runDailyNoteHomeSettingTransaction } from './services/daily-note-home-setting-transaction';
+import { normalizeNativeRecordLayout, normalizeNativeRecordRoot } from './services/native-record-service';
 import { importHealthPropertyCatalog } from './integrations/health-property-import';
 import { installTaskRecordProperties } from './integrations/task-property-install';
 import {
@@ -2279,12 +2280,24 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
       new Setting(diagnostics)
         .setName('Native record root')
-        .setDesc('Vault-relative folder for generated task, calendar, food, activity, workout, and asset records. This remains editable before native mode is enabled.')
+        .setDesc('Vault-relative destination for generated task, calendar, food, activity, workout, and asset records. Enter / for the vault root. This remains editable before native mode is enabled.')
         .addText((text) => text
           .setPlaceholder('_records')
-          .setValue(this.plugin.settings.nativeRecordRootPath || '_records')
+          .setValue(this.plugin.settings.nativeRecordRootPath || '/')
           .onChange(async (value) => {
-            this.plugin.settings.nativeRecordRootPath = value.trim() || '_records';
+            this.plugin.settings.nativeRecordRootPath = normalizeNativeRecordRoot(value);
+            await this.plugin.saveSettings();
+          }));
+
+      new Setting(diagnostics)
+        .setName('Native record layout')
+        .setDesc('Kind folders preserves the existing _records/tasks-style layout. Flat stores every generated record directly in the selected destination, using its stable TPS ID as the filename.')
+        .addDropdown((dropdown) => dropdown
+          .addOption('kind-folders', 'Separate folders by record kind')
+          .addOption('flat-root', 'Flat in the selected destination')
+          .setValue(this.plugin.settings.nativeRecordLayout || 'kind-folders')
+          .onChange(async (value) => {
+            this.plugin.settings.nativeRecordLayout = normalizeNativeRecordLayout(value);
             await this.plugin.saveSettings();
           }));
 

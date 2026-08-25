@@ -9,6 +9,7 @@ import type TPSGlobalContextMenuPlugin from '../main';
 import * as logger from '../logger';
 import type { GcmTaskRef, GcmTaskRecord } from './task-api-service';
 import type { FilePropertiesMutationCause } from './file-properties-service';
+import type { TpsNativeRecordLayout } from '../types';
 import { parseStringListInput } from '../utils/list-utils';
 import { joinContent, splitContent } from '../utils/task-block-move';
 import { parseTaskLine, readInlineFieldValue } from '../utils/task-line-metadata';
@@ -95,8 +96,9 @@ const SHARED_TASK_FIELDS = [
 ] as const;
 
 export function normalizeNativeRecordRoot(value: unknown): string {
-  const normalized = normalizePath(String(value || DEFAULT_NATIVE_RECORD_ROOT)
-    .trim()
+  const raw = typeof value === 'string' ? value.trim() : DEFAULT_NATIVE_RECORD_ROOT;
+  if (raw === '' || raw === '/' || raw === '.') return '';
+  const normalized = normalizePath(raw
     .replace(/^\/+|\/+$/gu, ''));
   if (!normalized || normalized === '.' || normalized.toLocaleLowerCase() === '.obsidian') {
     return DEFAULT_NATIVE_RECORD_ROOT;
@@ -104,10 +106,15 @@ export function normalizeNativeRecordRoot(value: unknown): string {
   return normalized;
 }
 
+export function normalizeNativeRecordLayout(value: unknown): TpsNativeRecordLayout {
+  return value === 'flat-root' ? 'flat-root' : 'kind-folders';
+}
+
 export function buildNativeRecordPath(
   root: string,
   kind: TpsNativeRecordKind,
   id: string,
+  layout: TpsNativeRecordLayout = 'kind-folders',
 ): string {
   const safeId = String(id || '')
     .trim()
@@ -116,7 +123,11 @@ export function buildNativeRecordPath(
     .replace(/^-+|-+$/gu, '')
     .slice(0, 180);
   if (!safeId) throw new Error('Native record ID cannot be represented as a filename.');
-  return normalizePath(`${normalizeNativeRecordRoot(root)}/${RECORD_FOLDER_BY_KIND[kind]}/${safeId}.md`);
+  const normalizedRoot = normalizeNativeRecordRoot(root);
+  const segments = [normalizedRoot];
+  if (normalizeNativeRecordLayout(layout) === 'kind-folders') segments.push(RECORD_FOLDER_BY_KIND[kind]);
+  segments.push(`${safeId}.md`);
+  return normalizePath(segments.filter(Boolean).join('/'));
 }
 
 /**
@@ -241,6 +252,10 @@ export class NativeRecordService {
     return normalizeNativeRecordRoot(this.plugin.settings.nativeRecordRootPath);
   }
 
+  getLayout(): TpsNativeRecordLayout {
+    return normalizeNativeRecordLayout(this.plugin.settings.nativeRecordLayout);
+  }
+
   isRecordFile(file: unknown): file is TFile {
     if (!(file instanceof TFile) || file.extension.toLocaleLowerCase() !== 'md') return false;
     const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
@@ -274,7 +289,7 @@ export class NativeRecordService {
       createdDate: timestamp,
       modifiedDate: timestamp,
     };
-    const path = buildNativeRecordPath(this.getRootPath(), kind, id);
+    const path = buildNativeRecordPath(this.getRootPath(), kind, id, this.getLayout());
     if (this.plugin.app.vault.getAbstractFileByPath(path)) {
       throw new Error(`TPS native record path already exists: ${path}`);
     }
@@ -628,7 +643,7 @@ export class NativeRecordService {
       .replace(/\s+/gu, ' ')
       .trim() || 'New task';
     const id = this.generateAvailableId('task');
-    const canonicalPath = buildNativeRecordPath(this.getRootPath(), 'task', id);
+    const canonicalPath = buildNativeRecordPath(this.getRootPath(), 'task', id, this.getLayout());
     await this.ensureParentFolder(canonicalPath);
 
     let adopted: TpsNativeRecordEnvelope | null = null;
@@ -766,7 +781,7 @@ export class NativeRecordService {
       return;
     }
 
-    const canonicalPath = buildNativeRecordPath(this.getRootPath(), envelope.kind, envelope.tpsId);
+    const canonicalPath = buildNativeRecordPath(this.getRootPath(), envelope.kind, envelope.tpsId, this.getLayout());
     if (file.path === canonicalPath) {
       this.indexFile(file, envelope);
       return;
@@ -822,7 +837,7 @@ export class NativeRecordService {
   private generateAvailableId(kind: TpsNativeRecordKind): string {
     for (let attempt = 0; attempt < 8; attempt += 1) {
       const id = this.generateId(kind);
-      const path = buildNativeRecordPath(this.getRootPath(), kind, id);
+      const path = buildNativeRecordPath(this.getRootPath(), kind, id, this.getLayout());
       if (!this.plugin.app.vault.getAbstractFileByPath(path) && !this.pathsById.has(this.idKey(id))) return id;
     }
     throw new Error(`Unable to allocate a unique TPS native ${kind} record ID.`);

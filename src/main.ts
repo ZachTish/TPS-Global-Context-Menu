@@ -60,7 +60,7 @@ import { TpsIdentityService } from './services/tps-identity-service';
 import { CardContentService } from './services/card-content-service';
 import { IdentityMigrationService } from './services/identity-migration-service';
 import { FilePropertiesService } from './services/file-properties-service';
-import { NativeRecordService, normalizeNativeRecordRoot } from './services/native-record-service';
+import { NativeRecordService, normalizeNativeRecordLayout, normalizeNativeRecordRoot } from './services/native-record-service';
 import { NoteTitleRenderService } from './services/note-title-render-service';
 import { VirtualBaseEmbedService } from './services/virtual-base-embed-service';
 import { HeadingCollapseOnOpenService } from './services/heading-collapse-on-open-service';
@@ -2044,6 +2044,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.nativeRecordRootPath = normalizeNativeRecordRoot(
       loaded?.nativeRecordRootPath ?? DEFAULT_SETTINGS.nativeRecordRootPath,
     );
+    this.settings.nativeRecordLayout = normalizeNativeRecordLayout(loaded?.nativeRecordLayout);
     const preNormalizationSettings = JSON.parse(JSON.stringify(this.settings)) as SettingsRecord;
     const loadedSettingsRecord = (loaded ?? {}) as SettingsRecord;
     for (const key of AUTHORITATIVE_HOME_SETTING_KEYS) {

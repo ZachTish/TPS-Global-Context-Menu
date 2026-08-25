@@ -27,6 +27,7 @@ views:
 export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   dataArchitectureMode: 'legacy',
   nativeRecordRootPath: '_records',
+  nativeRecordLayout: 'kind-folders',
   enableLogging: false,
   logOpenerDecisions: false,
   enableInlinePersistentMenus: false,

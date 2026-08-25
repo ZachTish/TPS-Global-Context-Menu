@@ -83,7 +83,7 @@ const filePropertiesSource = readFileSync(new URL('../src/services/file-properti
 const fileNamingSource = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
 const apiSource = readFileSync(new URL('../src/plugin-api.ts', import.meta.url), 'utf8');
 
-function createHarness(mode = 'native-records') {
+function createHarness(mode = 'native-records', options = {}) {
   const entries = new Map();
   const contents = new WeakMap();
   const metadata = new WeakMap();
@@ -153,7 +153,11 @@ function createHarness(mode = 'native-records') {
     },
   };
   const plugin = {
-    settings: { dataArchitectureMode: mode, nativeRecordRootPath: '_records' },
+    settings: {
+      dataArchitectureMode: mode,
+      nativeRecordRootPath: options.root ?? '_records',
+      nativeRecordLayout: options.layout ?? 'kind-folders',
+    },
     manifest: { id: 'tps-global-context-menu' },
     registerEvent: () => {},
     app: {
@@ -180,7 +184,9 @@ function createHarness(mode = 'native-records') {
 
 test('native record envelope and path helpers are deterministic', () => {
   assert.equal(normalizeNativeRecordRoot(' /_records// '), '_records');
+  assert.equal(normalizeNativeRecordRoot('/'), '');
   assert.equal(buildNativeRecordPath('_records', 'calendar-event', 'event:one'), '_records/calendar-events/event-one.md');
+  assert.equal(buildNativeRecordPath('/', 'calendar-event', 'event:one', 'flat-root'), 'event-one.md');
   const envelope = {
     tpsId: 'task-1',
     tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
@@ -196,6 +202,14 @@ test('native record envelope and path helpers are deterministic', () => {
   assert.equal(parsed?.newline, '\r\n');
   assert.equal(parsed?.closer, '...');
   assert.equal(parsed?.body, 'notes');
+});
+
+test('flat-root layout creates every native record directly in the configured destination', async () => {
+  const { service } = createHarness('native-records', { root: '/', layout: 'flat-root' });
+  const task = await service.create('task', { title: 'Root task' }, { id: 'task-root' });
+  const food = await service.create('food-entry', { title: 'Root food' }, { id: 'food-root' });
+  assert.equal(task.path, 'task-root.md');
+  assert.equal(food.path, 'food-root.md');
 });
 
 test('native record create, update, archive, and asset paths preserve typed values', async () => {

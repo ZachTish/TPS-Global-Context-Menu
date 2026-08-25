@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.41.0
+
+- Native-record mode can now write every generated task, calendar, food, activity, workout, and asset record directly into one destination without kind subfolders. Set **Native record root** to `/` and **Native record layout** to **Flat in the selected destination** for a fully flat vault-root layout.
+- Existing vaults remain on **Separate folders by record kind**, preserving `_records/tasks`, `_records/food-entries`, and the prior canonical paths. Changing the layout affects new records and canonical rename recovery only; it does not silently move existing files.
+- Flat records continue using the stable `tpsId` as their filename, so kind/title changes cannot create naming collisions or weaken record identity. The native-record schema and public API version are unchanged.
+- This is a backward-compatible storage-layout feature. Legacy mode is unchanged and the minimum supported Obsidian version remains 1.10.0.
+
 ## 1.40.1
 
 - Mobile Live Preview now fails closed when Obsidian temporarily mounts a strict Source editor while retaining the stale `source:false` view flag. TPS properties, linked context, inline replacements, and other rendered surfaces no longer appear over literal Markdown during that mismatch.
