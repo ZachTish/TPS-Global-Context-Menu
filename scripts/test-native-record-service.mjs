@@ -72,6 +72,7 @@ const {
   normalizeNativeRecordRoot,
   parseNativeRecordDocument,
   serializeNativeRecordDocument,
+  taskLineNeedsNativeRecord,
 } = await loadModule();
 
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
@@ -79,6 +80,7 @@ const constantsSource = readFileSync(new URL('../src/constants.ts', import.meta.
 const typesSource = readFileSync(new URL('../src/types.ts', import.meta.url), 'utf8');
 const settingsSource = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
 const filePropertiesSource = readFileSync(new URL('../src/services/file-properties-service.ts', import.meta.url), 'utf8');
+const fileNamingSource = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
 const apiSource = readFileSync(new URL('../src/plugin-api.ts', import.meta.url), 'utf8');
 
 function createHarness(mode = 'native-records') {
@@ -350,6 +352,19 @@ test('task promotion creates one task record and replaces only the confirmed sou
   assert.equal(result.record?.frontmatter.timeEstimate, 45);
   assert.equal(contents.get(source), '# Inbox\n- [[_records/tasks/task-123|Ship release]]\n  - supporting note\n');
   assert.equal((await service.resolve('task-123'))?.path, result.record?.path);
+});
+
+test('only task lines with an authored scheduled or due value cross the native-record boundary', () => {
+  assert.equal(taskLineNeedsNativeRecord('- [ ] Quick reminder'), false);
+  assert.equal(taskLineNeedsNativeRecord('- [ ] Meeting [scheduled:: 2026-08-26 09:00:00]'), true);
+  assert.equal(taskLineNeedsNativeRecord('- [ ] Submit report [due:: 2026-08-28]'), true);
+  assert.equal(taskLineNeedsNativeRecord('- [ ] Clear date [scheduled:: ] [due:: ]'), false);
+  assert.equal(taskLineNeedsNativeRecord('- Plain bullet [scheduled:: 2026-08-26 09:00:00]'), false);
+});
+
+test('ordinary note auto-naming never renames canonical native record files', () => {
+  assert.match(fileNamingSource, /nativeRecordService\?\.isRecordFile\(file\)/u);
+  assert.match(fileNamingSource, /trigger Obsidian's update-links prompt/u);
 });
 
 test('legacy mode rejects new record creation and leaves existing behavior opt-in', async () => {

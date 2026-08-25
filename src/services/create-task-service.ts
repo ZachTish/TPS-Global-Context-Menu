@@ -22,6 +22,7 @@ import {
   resolveLinkedSubitemSemanticCheckboxPlanForState,
 } from '../utils/linked-subitem-mapping';
 import * as logger from '../logger';
+import { taskLineNeedsNativeRecord } from './native-record-service';
 
 export class CreateTaskService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
@@ -187,6 +188,36 @@ export class CreateTaskService {
         await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       }
       historySettled = true;
+      if (
+        this.plugin.nativeRecordService?.isEnabled()
+        && taskLineNeedsNativeRecord(insertedTaskLine)
+      ) {
+        const promotion = await this.plugin.nativeRecordService.promoteTask({
+          path: targetFile.path,
+          lineNumber: insertedLineNumber,
+          rawLine: insertedTaskLine,
+        }, {
+          kind: 'user',
+          sourcePluginId: 'tps-global-context-menu',
+          surface: 'create-task-modal:instantiate-dated-task',
+        });
+        if (promotion.ok && promotion.record) {
+          new Notice(`Created tracked task in ${promotion.record.path}`);
+          await this.plugin.openFileInLeaf(
+            promotion.record.file,
+            false,
+            () => this.plugin.app.workspace.getLeaf(false),
+            { revealLeaf: true },
+          );
+          return promotion.record.file;
+        }
+        logger.flowWarn('CreateTask', 'dated-task:promotion-failed', {
+          path: targetFile.path,
+          lineNumber: insertedLineNumber + 1,
+          error: promotion.error || 'unknown',
+        });
+        new Notice(`Task was created, but its tracked record could not be created: ${promotion.error || 'unknown error'}`);
+      }
       new Notice(`Created task in ${targetFile.basename}`);
       await this.focusLineBeforeInsertedTask(targetFile, insertedTaskLine);
       return targetFile;

@@ -1,5 +1,14 @@
 # TPS Global Context Menu
 
+## 1.39.0
+
+- Native-record mode now treats an authored `scheduled` or `due` value as the boundary between a lightweight inline reminder and a durable tracked task. After a confirmed GCM task-menu, quick-editor, selected-task, or item-property mutation leaves either value populated, GCM promotes that exact current task into `_records/tasks/<tpsId>.md` and replaces the source line with its stable record link.
+- The standard **Create task** flow follows the same rule. A task created with a scheduled value is written and history-confirmed first, then promoted and opened as a tracked record; an undated task remains inline.
+- Promotion copies status, priority, dates, estimate, parents, recurrence, tags, and completion metadata through the existing native task contract. Native mode no longer offers the Legacy Daily Note move prompt after setting `scheduled`, because the record's property is now the sole schedule location.
+- Native record files are excluded from ordinary title-based auto-naming. Their TPS identity remains the canonical filename without a rename/restore loop or Obsidian **Update links** prompt.
+- The boundary is deliberately explicit and non-migrating: inherited Daily Note dates, empty date fields, bullets, and untouched pre-existing tasks do not create records in the background. Legacy mode and manual **Promote to tracked task** behavior remain unchanged.
+- This is a backward-compatible native-workflow feature with no settings, Base, schema, or public API migration. Minimum supported Obsidian remains 1.10.0. Final validation and artifact hashes are recorded in `release-notes/1.39.0.md`.
+
 ## 1.38.3
 
 - The core Tasks Base **New** button now works with native records. GCM adopts only an empty `kind: task` file observed through the current session's create event, supplies its TPS identity and required timestamps, defaults blank status to `todo`, and moves the same file to `_records/tasks/<tpsId>.md` so the Base's folder filter does not immediately hide it.

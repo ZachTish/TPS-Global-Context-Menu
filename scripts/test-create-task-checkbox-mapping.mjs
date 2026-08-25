@@ -210,6 +210,72 @@ test('manual create derives ordered options and rebuilds the line from the selec
   assert.match(historyEvents[4].input.after.rawLine, /\[tpsId:: create-history-id\]/u);
 });
 
+test('manual create promotes a confirmed scheduled task into a native record', async () => {
+  const { CreateTaskService, TFile, Notice } = await loadCreateTaskModules();
+  globalThis.window = { setTimeout: (callback) => callback(), moment: () => ({ format: () => '2026-08-02' }) };
+  Notice.messages.length = 0;
+  const sourceFile = new TFile('Inbox/Tasks.md');
+  const recordFile = new TFile('_records/tasks/create-history-id.md');
+  let content = '# Tasks\n';
+  const promotions = [];
+  const opened = [];
+  const plugin = {
+    settings: {
+      linkedSubitemCheckboxMappings: mappings(),
+      autoSyncFileTimestamps: false,
+      dateCreatedFrontmatterKey: 'createdDate',
+      dateModifiedFrontmatterKey: 'modifiedDate',
+      fileTimestampFormat: 'YYYY-MM-DD HH:mm:ss',
+    },
+    sharedServices: { status: { normalize: normalizeStatus } },
+    noteOperationService: { async ensureDailyNote() { return sourceFile; } },
+    itemHistoryService: {
+      async beginTaskMutation() { return { id: 'pending-create' }; },
+      ensureTaskIdentity(_handle, line) { return `${line} [tpsId:: create-history-id]`; },
+      async commitTaskMutation() {},
+      async abortTaskMutation() {},
+    },
+    nativeRecordService: {
+      isEnabled: () => true,
+      async promoteTask(ref, cause) {
+        promotions.push({ ref, cause });
+        return {
+          ok: true,
+          changed: true,
+          record: { file: recordFile, path: recordFile.path },
+          sourcePath: sourceFile.path,
+          sourceLine: ref.lineNumber,
+        };
+      },
+    },
+    app: {
+      vault: {
+        async process(_file, updater) { content = updater(content); },
+        async cachedRead() { return content; },
+      },
+      workspace: { getLeaf: () => ({}) },
+    },
+    async openFileInLeaf(file) { opened.push(file); },
+    findOpenLeafForFile() { return null; },
+  };
+
+  const created = await new CreateTaskService(plugin).createTask(taskResult({
+    targetFile: sourceFile,
+    scheduledValue: '2026-08-26 09:00:00',
+    timeEstimate: 30,
+  }));
+
+  assert.equal(created, recordFile);
+  assert.equal(promotions.length, 1);
+  assert.equal(promotions[0].ref.path, sourceFile.path);
+  assert.equal(promotions[0].ref.lineNumber, 1);
+  assert.match(promotions[0].ref.rawLine, /\[scheduled:: 2026-08-26 09:00:00\]/u);
+  assert.match(promotions[0].ref.rawLine, /\[tpsId:: create-history-id\]/u);
+  assert.equal(promotions[0].cause.surface, 'create-task-modal:instantiate-dated-task');
+  assert.deepEqual(opened, [recordFile]);
+  assert.ok(Notice.messages.some((message) => message.includes('Created tracked task')));
+});
+
 test('manual create fails before target creation or processing when mappings are missing or stale', async () => {
   const { CreateTaskService } = await loadCreateTaskModules();
   let processCalls = 0;

@@ -88,6 +88,20 @@ test('direct task UI writes journal only confirmed user mutations with atomic id
   assert.match(deleteTargetSource, /surface: context\.isCalendarTask \? 'calendar-task-context-menu' : 'task-line-context-menu'/u);
 });
 
+test('confirmed GCM edits instantiate dated tasks in native mode without Daily Note line migration', () => {
+  const updateStart = serviceSource.indexOf('private async updateTaskLine(');
+  const updateEnd = serviceSource.indexOf('private async updateTaskLines(', updateStart);
+  const updateSource = serviceSource.slice(updateStart, updateEnd);
+  assert.ok(updateStart >= 0 && updateEnd > updateStart);
+  assert.match(updateSource, /commitDirectTaskHistory\([\s\S]{0,1400}promoteDatedTaskAfterConfirmedMutation\(/u);
+  assert.match(updateSource, /if \(!historyTerminalDelete\)/u);
+  assert.match(serviceSource, /private async promoteDatedTaskAfterConfirmedMutation\([\s\S]{0,500}taskLineNeedsNativeRecord\(context\.rawLine\)/u);
+  assert.match(serviceSource, /promoteTask\(\{[\s\S]{0,220}lineNumber: context\.lineIndex,[\s\S]{0,100}rawLine: context\.rawLine/u);
+  assert.match(serviceSource, /surface: `\$\{surface\}:instantiate-dated-task`/u);
+  assert.match(serviceSource, /scheduledChange && !this\.plugin\.nativeRecordService\?\.isEnabled\(\)/u);
+  assert.match(serviceSource, /isScheduled && !this\.plugin\.nativeRecordService\?\.isEnabled\(\)/u);
+});
+
 test('task resolution inherits exact source metadata from rendered surface hosts', () => {
   assert.match(serviceSource, /closest<HTMLElement>\('\[data-task-path\], \[data-tps-kanban-path\], \[data-source-path\], \[data-file-path\], \[data-path\]'\)/);
   assert.match(serviceSource, /metadataHost\?\.dataset\.sourcePath/);

@@ -127,6 +127,7 @@ import {
 import { resolveReadingBulletSourceLine } from '../utils/reading-line-activation';
 import { addLineEntityPropertyMenus } from '../menu/line-entity-property-menu';
 import { resolveExactLineRevisionIndex, splitLineItemContent } from '../utils/line-item-deletion';
+import { taskLineNeedsNativeRecord } from './native-record-service';
 
 export type TaskLineContext = {
   file: TFile;
@@ -1164,7 +1165,7 @@ export class TaskLineContextMenuService {
         this.refreshTaskEditorAnchorIdentity(anchorEl, context);
         this.closeTaskEditor();
         const scheduledChange = propertyChanges.find((change) => change.key.toLowerCase() === 'scheduled');
-        if (scheduledChange) {
+        if (scheduledChange && !this.plugin.nativeRecordService?.isEnabled()) {
           await this.maybePromptMoveScheduledDailyNoteTask(context, scheduledChange.value || '');
         }
       } catch (error) {
@@ -2721,7 +2722,7 @@ export class TaskLineContextMenuService {
     });
     if (!updated) return;
 
-    if (isScheduled) {
+    if (isScheduled && !this.plugin.nativeRecordService?.isEnabled()) {
       await this.maybePromptMoveScheduledDailyNoteTask(context, result.date);
     }
   }
@@ -3322,6 +3323,13 @@ export class TaskLineContextMenuService {
     } else {
       await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
     }
+    if (!historyTerminalDelete) {
+      await this.promoteDatedTaskAfterConfirmedMutation(
+        context,
+        historyContext.surface,
+        options.historySourcePluginId || 'tps-global-context-menu',
+      );
+    }
     this.plugin.eventService.emitFilesUpdated([context.file.path]);
     this.plugin.overlayRenderingService?.invalidate({
       reason: 'task-line-context-menu-write',
@@ -3337,6 +3345,44 @@ export class TaskLineContextMenuService {
       checkboxMutation: options.checkboxMutation === true,
     });
     return true;
+  }
+
+  private async promoteDatedTaskAfterConfirmedMutation(
+    context: TaskLineContext,
+    surface: string,
+    sourcePluginId: string,
+  ): Promise<void> {
+    if (
+      !this.plugin.nativeRecordService?.isEnabled()
+      || !taskLineNeedsNativeRecord(context.rawLine)
+    ) return;
+
+    const result = await this.plugin.nativeRecordService.promoteTask({
+      path: context.file.path,
+      lineNumber: context.lineIndex,
+      rawLine: context.rawLine,
+    }, {
+      kind: 'user',
+      sourcePluginId,
+      surface: `${surface}:instantiate-dated-task`,
+    });
+    if (!result.ok) {
+      logger.flowWarn('NativeRecords', 'dated-task:promotion-failed', {
+        path: context.file.path,
+        lineNumber: context.lineNumber,
+        surface,
+        error: result.error || 'unknown',
+      });
+      new Notice(`Task was updated, but its tracked record could not be created: ${result.error || 'unknown error'}`);
+      return;
+    }
+    logger.flow('NativeRecords', 'dated-task:promoted', {
+      sourcePath: context.file.path,
+      sourceLine: context.lineNumber,
+      recordPath: result.record?.path || '',
+      surface,
+    });
+    new Notice(`Scheduled task is now tracked in ${result.record?.path || 'a native task record'}.`);
   }
 
   private async updateTaskLines(

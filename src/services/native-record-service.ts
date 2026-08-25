@@ -11,7 +11,7 @@ import type { GcmTaskRef, GcmTaskRecord } from './task-api-service';
 import type { FilePropertiesMutationCause } from './file-properties-service';
 import { parseStringListInput } from '../utils/list-utils';
 import { joinContent, splitContent } from '../utils/task-block-move';
-import { parseTaskLine } from '../utils/task-line-metadata';
+import { parseTaskLine, readInlineFieldValue } from '../utils/task-line-metadata';
 
 export const TPS_NATIVE_RECORD_SCHEMA_VERSION = 1;
 export const DEFAULT_NATIVE_RECORD_ROOT = '_records';
@@ -117,6 +117,19 @@ export function buildNativeRecordPath(
     .slice(0, 180);
   if (!safeId) throw new Error('Native record ID cannot be represented as a filename.');
   return normalizePath(`${normalizeNativeRecordRoot(root)}/${RECORD_FOLDER_BY_KIND[kind]}/${safeId}.md`);
+}
+
+/**
+ * Native mode keeps quick, undated reminders inline. Once a task carries a
+ * scheduling boundary it needs an independently addressable record so Bases,
+ * TishOS, and other file-backed consumers can track it without synthesizing a
+ * line row.
+ */
+export function taskLineNeedsNativeRecord(rawLine: string): boolean {
+  if (!parseTaskLine(rawLine)) return false;
+  return ['scheduled', 'due'].some((key) => (
+    String(readInlineFieldValue(rawLine, key) || '').trim().length > 0
+  ));
 }
 
 export function parseNativeRecordDocument(content: string): ParsedNativeRecordDocument | null {
