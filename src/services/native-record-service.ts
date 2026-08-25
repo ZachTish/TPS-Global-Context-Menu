@@ -9,13 +9,26 @@ import type TPSGlobalContextMenuPlugin from '../main';
 import * as logger from '../logger';
 import type { GcmTaskRef, GcmTaskRecord } from './task-api-service';
 import type { FilePropertiesMutationCause } from './file-properties-service';
-import type { TpsNativeRecordLayout } from '../types';
+import type {
+  TpsNativeRecordLayout,
+  TpsNativeRecordStorageProfile,
+} from '../types';
 import { parseStringListInput } from '../utils/list-utils';
 import { joinContent, splitContent } from '../utils/task-block-move';
 import { parseTaskLine, readInlineFieldValue } from '../utils/task-line-metadata';
 
 export const TPS_NATIVE_RECORD_SCHEMA_VERSION = 1;
 export const DEFAULT_NATIVE_RECORD_ROOT = '_records';
+export const DEFAULT_NATIVE_RECORD_STORAGE_PROFILE: TpsNativeRecordStorageProfile = {
+  identityMode: 'property',
+  identityPropertyKey: 'tpsId',
+  schemaPropertyKey: 'tpsSchemaVersion',
+  identityTagPrefix: 'tps/record',
+  kindPropertyKey: 'kind',
+  titlePropertyKey: 'title',
+  createdPropertyKey: 'createdDate',
+  modifiedPropertyKey: 'modifiedDate',
+};
 
 export type TpsNativeRecordKind =
   | 'task'
@@ -41,6 +54,21 @@ export interface TpsNativeRecordHandle {
   id: string;
   kind: TpsNativeRecordKind;
   frontmatter: TpsNativeRecordEnvelope;
+}
+
+export interface TpsNativeRecordInspection {
+  id: string;
+  kind: TpsNativeRecordKind;
+  schemaVersion: number;
+  frontmatter: TpsNativeRecordEnvelope;
+  profile: TpsNativeRecordStorageProfile;
+}
+
+export interface TpsNativeRecordStorageMigrationResult {
+  inspected: number;
+  updated: number;
+  skipped: number;
+  failed: number;
 }
 
 export interface TpsNativeRecordCreateOptions {
@@ -78,12 +106,234 @@ const RECORD_FOLDER_BY_KIND: Record<TpsNativeRecordKind, string> = {
   asset: 'assets',
 };
 
-const IMMUTABLE_ENVELOPE_KEYS = new Set([
+const CANONICAL_ENVELOPE_KEYS = new Set([
   'tpsid',
   'tpsschemaversion',
   'kind',
   'createddate',
 ]);
+
+function normalizePropertyKey(value: unknown, fallback: string, allowEmpty = false): string {
+  if (value === undefined || value === null) return fallback;
+  const normalized = String(value ?? '').trim();
+  return normalized || (allowEmpty ? '' : fallback);
+}
+
+function normalizeIdentityTagPrefix(value: unknown): string {
+  const normalized = String(value ?? '')
+    .trim()
+    .replace(/^#+|\/+$/gu, '')
+    .replace(/\s+/gu, '-')
+    .replace(/\/{2,}/gu, '/');
+  return normalized || DEFAULT_NATIVE_RECORD_STORAGE_PROFILE.identityTagPrefix;
+}
+
+export function normalizeNativeRecordStorageProfile(
+  value: Partial<TpsNativeRecordStorageProfile> | null | undefined,
+): TpsNativeRecordStorageProfile {
+  return {
+    identityMode: value?.identityMode === 'tag' ? 'tag' : 'property',
+    identityPropertyKey: normalizePropertyKey(
+      value?.identityPropertyKey,
+      DEFAULT_NATIVE_RECORD_STORAGE_PROFILE.identityPropertyKey,
+    ),
+    schemaPropertyKey: normalizePropertyKey(
+      value?.schemaPropertyKey,
+      DEFAULT_NATIVE_RECORD_STORAGE_PROFILE.schemaPropertyKey,
+    ),
+    identityTagPrefix: normalizeIdentityTagPrefix(value?.identityTagPrefix),
+    kindPropertyKey: normalizePropertyKey(
+      value?.kindPropertyKey,
+      DEFAULT_NATIVE_RECORD_STORAGE_PROFILE.kindPropertyKey,
+      true,
+    ),
+    titlePropertyKey: normalizePropertyKey(
+      value?.titlePropertyKey,
+      DEFAULT_NATIVE_RECORD_STORAGE_PROFILE.titlePropertyKey,
+    ),
+    createdPropertyKey: normalizePropertyKey(
+      value?.createdPropertyKey,
+      DEFAULT_NATIVE_RECORD_STORAGE_PROFILE.createdPropertyKey,
+      true,
+    ),
+    modifiedPropertyKey: normalizePropertyKey(
+      value?.modifiedPropertyKey,
+      DEFAULT_NATIVE_RECORD_STORAGE_PROFILE.modifiedPropertyKey,
+      true,
+    ),
+  };
+}
+
+export function validateNativeRecordStorageProfile(profileValue: TpsNativeRecordStorageProfile): string[] {
+  const profile = normalizeNativeRecordStorageProfile(profileValue);
+  const errors: string[] = [];
+  if (!profile.titlePropertyKey) errors.push('Title property is required.');
+  if (profile.identityMode === 'property' && !profile.kindPropertyKey) {
+    errors.push('Kind property is required when record identity uses properties.');
+  }
+  const keyedFields = [
+    ...(profile.identityMode === 'property' ? [profile.identityPropertyKey, profile.schemaPropertyKey] : []),
+    profile.kindPropertyKey,
+    profile.titlePropertyKey,
+    profile.createdPropertyKey,
+    profile.modifiedPropertyKey,
+  ].filter(Boolean);
+  const normalizedKeys = keyedFields.map((key) => key.toLocaleLowerCase());
+  if (new Set(normalizedKeys).size !== normalizedKeys.length) {
+    errors.push('Every native record system property must use a distinct key.');
+  }
+  if (profile.identityMode === 'tag' && normalizedKeys.includes('tags')) {
+    errors.push('The tags property is reserved for tag-based record identity.');
+  }
+  return errors;
+}
+
+function profileKey(profile: TpsNativeRecordStorageProfile): string {
+  return JSON.stringify(profile);
+}
+
+function encodeIdentityTagSegment(value: string): string {
+  const normalized = String(value || '').trim();
+  if (/^[A-Za-z0-9_-]+$/u.test(normalized)) return normalized;
+  const bytes = new TextEncoder().encode(normalized);
+  return `hex-${[...bytes].map((byte) => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
+function decodeIdentityTagSegment(value: string): string {
+  if (!value.startsWith('hex-')) return value;
+  const hex = value.slice(4);
+  if (!hex || hex.length % 2 !== 0 || !/^[0-9a-f]+$/iu.test(hex)) return '';
+  const bytes = new Uint8Array(hex.match(/.{2}/gu)?.map((pair) => Number.parseInt(pair, 16)) || []);
+  try {
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return '';
+  }
+}
+
+function readTagValues(value: unknown): string[] {
+  if (Array.isArray(value)) return value.flatMap((entry) => readTagValues(entry));
+  return String(value ?? '')
+    .split(/[\s,]+/gu)
+    .map((entry) => entry.trim().replace(/^#+/u, ''))
+    .filter(Boolean);
+}
+
+function buildIdentityTag(profile: TpsNativeRecordStorageProfile, envelope: TpsNativeRecordEnvelope): string {
+  return `${profile.identityTagPrefix}/v${TPS_NATIVE_RECORD_SCHEMA_VERSION}/${envelope.kind}/${encodeIdentityTagSegment(envelope.tpsId)}`;
+}
+
+function inspectWithProfile(
+  raw: Record<string, unknown>,
+  profile: TpsNativeRecordStorageProfile,
+): TpsNativeRecordInspection | null {
+  let id = '';
+  let kind = '';
+  let schemaVersion = 0;
+  if (profile.identityMode === 'tag') {
+    const prefix = `${profile.identityTagPrefix}/v${TPS_NATIVE_RECORD_SCHEMA_VERSION}/`;
+    const matches = readTagValues(raw.tags).filter((tag) => tag.startsWith(prefix));
+    if (matches.length !== 1) return null;
+    const remainder = matches[0].slice(prefix.length);
+    const slash = remainder.indexOf('/');
+    if (slash < 1) return null;
+    schemaVersion = TPS_NATIVE_RECORD_SCHEMA_VERSION;
+    kind = remainder.slice(0, slash);
+    id = decodeIdentityTagSegment(remainder.slice(slash + 1));
+  } else {
+    id = String(raw[profile.identityPropertyKey] ?? '').trim();
+    schemaVersion = Number(raw[profile.schemaPropertyKey]);
+    kind = profile.kindPropertyKey ? String(raw[profile.kindPropertyKey] ?? '').trim() : '';
+  }
+  if (schemaVersion !== TPS_NATIVE_RECORD_SCHEMA_VERSION || !id) return null;
+  if (profile.kindPropertyKey) {
+    const authoredKind = String(raw[profile.kindPropertyKey] ?? '').trim();
+    if (kind && authoredKind && kind !== authoredKind) return null;
+    kind = kind || authoredKind;
+  }
+  if (!Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, kind)) return null;
+  const title = String(raw[profile.titlePropertyKey] ?? '').trim();
+  if (!title) return null;
+  const createdDate = profile.createdPropertyKey
+    ? String(raw[profile.createdPropertyKey] ?? '')
+    : '';
+  const modifiedDate = profile.modifiedPropertyKey
+    ? String(raw[profile.modifiedPropertyKey] ?? '')
+    : '';
+  const frontmatter: TpsNativeRecordEnvelope = {
+    ...raw,
+    tpsId: id,
+    tpsSchemaVersion: schemaVersion,
+    kind: kind as TpsNativeRecordKind,
+    title,
+    createdDate,
+    modifiedDate,
+  };
+  return {
+    id,
+    kind: kind as TpsNativeRecordKind,
+    schemaVersion,
+    frontmatter,
+    profile,
+  };
+}
+
+function storageKeys(profile: TpsNativeRecordStorageProfile): string[] {
+  return [
+    profile.identityPropertyKey,
+    profile.schemaPropertyKey,
+    profile.kindPropertyKey,
+    profile.titlePropertyKey,
+    profile.createdPropertyKey,
+    profile.modifiedPropertyKey,
+  ].filter(Boolean);
+}
+
+function removeIdentityTags(
+  frontmatter: Record<string, unknown>,
+  profiles: TpsNativeRecordStorageProfile[],
+): void {
+  const prefixes = profiles
+    .filter((profile) => profile.identityMode === 'tag')
+    .map((profile) => `${profile.identityTagPrefix}/v${TPS_NATIVE_RECORD_SCHEMA_VERSION}/`);
+  if (!prefixes.length || !Object.prototype.hasOwnProperty.call(frontmatter, 'tags')) return;
+  const tags = readTagValues(frontmatter.tags).filter((tag) => !prefixes.some((prefix) => tag.startsWith(prefix)));
+  if (tags.length) frontmatter.tags = tags;
+  else delete frontmatter.tags;
+}
+
+function applyEnvelopeToRawFrontmatter(
+  raw: Record<string, unknown>,
+  envelope: TpsNativeRecordEnvelope,
+  profile: TpsNativeRecordStorageProfile,
+  readableProfiles: TpsNativeRecordStorageProfile[],
+): Record<string, unknown> {
+  const next = { ...envelope };
+  const everyProfile = [DEFAULT_NATIVE_RECORD_STORAGE_PROFILE, ...readableProfiles, profile];
+  removeIdentityTags(next, everyProfile);
+  const protectedKeys = new Set(everyProfile.flatMap(storageKeys).map((key) => key.toLocaleLowerCase()));
+  for (const key of Object.keys(next)) {
+    const lower = key.toLocaleLowerCase();
+    if (CANONICAL_ENVELOPE_KEYS.has(lower) || protectedKeys.has(lower)) delete next[key];
+  }
+
+  if (profile.identityMode === 'tag') {
+    const tags = readTagValues(raw.tags).filter((tag) => !everyProfile.some((candidate) => (
+      candidate.identityMode === 'tag'
+      && tag.startsWith(`${candidate.identityTagPrefix}/v${TPS_NATIVE_RECORD_SCHEMA_VERSION}/`)
+    )));
+    tags.push(buildIdentityTag(profile, envelope));
+    next.tags = [...new Set(tags)];
+  } else {
+    next[profile.identityPropertyKey] = envelope.tpsId;
+    next[profile.schemaPropertyKey] = envelope.tpsSchemaVersion;
+  }
+  if (profile.kindPropertyKey) next[profile.kindPropertyKey] = envelope.kind;
+  next[profile.titlePropertyKey] = envelope.title;
+  if (profile.createdPropertyKey) next[profile.createdPropertyKey] = envelope.createdDate;
+  if (profile.modifiedPropertyKey) next[profile.modifiedPropertyKey] = envelope.modifiedDate;
+  return next;
+}
 
 const SHARED_TASK_FIELDS = [
   'priority',
@@ -200,7 +450,7 @@ export function isNativeRecordEnvelope(value: unknown): value is TpsNativeRecord
  * legacy companion note.
  */
 export class NativeRecordService {
-  readonly version = 1;
+  readonly version = 2;
   private setupComplete = false;
   private readonly newlyCreatedFiles = new WeakSet<TFile>();
   private readonly draftEligibilityTimers = new WeakMap<TFile, ReturnType<typeof setTimeout>>();
@@ -256,10 +506,53 @@ export class NativeRecordService {
     return normalizeNativeRecordLayout(this.plugin.settings.nativeRecordLayout);
   }
 
+  getStorageProfile(): TpsNativeRecordStorageProfile {
+    return normalizeNativeRecordStorageProfile({
+      identityMode: this.plugin.settings.nativeRecordIdentityMode,
+      identityPropertyKey: this.plugin.settings.nativeRecordIdentityPropertyKey,
+      schemaPropertyKey: this.plugin.settings.nativeRecordSchemaPropertyKey,
+      identityTagPrefix: this.plugin.settings.nativeRecordIdentityTagPrefix,
+      kindPropertyKey: this.plugin.settings.nativeRecordKindPropertyKey,
+      titlePropertyKey: this.plugin.settings.nativeRecordTitlePropertyKey,
+      createdPropertyKey: this.plugin.settings.nativeRecordCreatedPropertyKey,
+      modifiedPropertyKey: this.plugin.settings.nativeRecordModifiedPropertyKey,
+    });
+  }
+
+  getReadableStorageProfiles(): TpsNativeRecordStorageProfile[] {
+    const current = this.getStorageProfile();
+    const values = [
+      current,
+      ...(Array.isArray(this.plugin.settings.nativeRecordStorageAliases)
+        ? this.plugin.settings.nativeRecordStorageAliases
+        : []),
+      DEFAULT_NATIVE_RECORD_STORAGE_PROFILE,
+    ].map((profile) => normalizeNativeRecordStorageProfile(profile));
+    const seen = new Set<string>();
+    return values.filter((profile) => {
+      if (validateNativeRecordStorageProfile(profile).length > 0) return false;
+      const key = profileKey(profile);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+  }
+
+  inspect(frontmatter: unknown): TpsNativeRecordInspection | null {
+    if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) return null;
+    const raw = frontmatter as Record<string, unknown>;
+    const matches = this.getReadableStorageProfiles()
+      .map((profile) => inspectWithProfile(raw, profile))
+      .filter((value): value is TpsNativeRecordInspection => value !== null);
+    if (!matches.length) return null;
+    const identities = new Set(matches.map((match) => `${this.idKey(match.id)}\u0000${match.kind}`));
+    return identities.size === 1 ? matches[0] : null;
+  }
+
   isRecordFile(file: unknown): file is TFile {
     if (!(file instanceof TFile) || file.extension.toLocaleLowerCase() !== 'md') return false;
     const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
-    return isNativeRecordEnvelope(cached) || this.idsByPath.has(file.path);
+    return this.inspect(cached) !== null || this.idsByPath.has(file.path);
   }
 
   async create(
@@ -268,6 +561,7 @@ export class NativeRecordService {
     options: TpsNativeRecordCreateOptions = {},
   ): Promise<TpsNativeRecordHandle> {
     this.assertEnabled();
+    this.assertValidStorageProfile();
     if (!Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, kind)) {
       throw new Error(`Unsupported TPS native record kind: ${String(kind)}`);
     }
@@ -289,6 +583,12 @@ export class NativeRecordService {
       createdDate: timestamp,
       modifiedDate: timestamp,
     };
+    const persistedFrontmatter = applyEnvelopeToRawFrontmatter(
+      this.copyUserProperties(properties),
+      frontmatter,
+      this.getStorageProfile(),
+      this.getReadableStorageProfiles(),
+    );
     const path = buildNativeRecordPath(this.getRootPath(), kind, id, this.getLayout());
     if (this.plugin.app.vault.getAbstractFileByPath(path)) {
       throw new Error(`TPS native record path already exists: ${path}`);
@@ -299,10 +599,10 @@ export class NativeRecordService {
       newline: '\n',
       closer: '---',
       body: '',
-      frontmatter,
+      frontmatter: persistedFrontmatter,
     });
     const file = await this.plugin.app.vault.create(path, content);
-    this.indexFile(file, frontmatter);
+    this.indexFile(file, persistedFrontmatter);
     this.plugin.entityIndexService?.upsertFile(file, frontmatter);
     this.notify([file.path], options.cause, 'native-record-create');
     logger.flow('NativeRecords', 'create:done', { kind, id, path: file.path });
@@ -388,28 +688,41 @@ export class NativeRecordService {
     updates: Record<string, unknown>,
     cause: FilePropertiesMutationCause = { kind: 'user' },
   ): Promise<TpsNativeRecordHandle | null> {
+    this.assertValidStorageProfile();
     const record = await this.resolve(reference);
     if (!record) return null;
     let nextEnvelope: TpsNativeRecordEnvelope | null = null;
     let changed = false;
     await this.plugin.app.vault.process(record.file, (content) => {
       const parsed = parseNativeRecordDocument(content);
-      if (!parsed || !isNativeRecordEnvelope(parsed.frontmatter)) return content;
-      if (parsed.frontmatter.tpsId !== record.id || parsed.frontmatter.kind !== record.kind) return content;
+      const inspection = parsed ? this.inspect(parsed.frontmatter) : null;
+      if (!parsed || !inspection) return content;
+      if (inspection.id !== record.id || inspection.kind !== record.kind) return content;
+      const canonical = { ...inspection.frontmatter };
       for (const [key, value] of Object.entries(updates || {})) {
-        if (IMMUTABLE_ENVELOPE_KEYS.has(key.trim().toLocaleLowerCase())) continue;
-        if (value === undefined || value === null) delete parsed.frontmatter[key];
-        else parsed.frontmatter[key] = value;
+        const normalizedKey = key.trim().toLocaleLowerCase();
+        if (CANONICAL_ENVELOPE_KEYS.has(normalizedKey)) {
+          if (normalizedKey === 'title' && value != null) canonical.title = String(value).replace(/\s+/gu, ' ').trim();
+          continue;
+        }
+        if (value === undefined || value === null) delete canonical[key];
+        else canonical[key] = value;
       }
-      parsed.frontmatter.modifiedDate = new Date().toISOString();
+      canonical.modifiedDate = new Date().toISOString();
+      parsed.frontmatter = applyEnvelopeToRawFrontmatter(
+        canonical,
+        canonical,
+        this.getStorageProfile(),
+        this.getReadableStorageProfiles(),
+      );
       const next = serializeNativeRecordDocument(parsed);
       if (next === content) return content;
       changed = true;
-      nextEnvelope = parsed.frontmatter as TpsNativeRecordEnvelope;
+      nextEnvelope = canonical;
       return next;
     });
     if (!changed || !nextEnvelope) return this.resolve(record.file);
-    this.indexFile(record.file, nextEnvelope);
+    this.indexFile(record.file);
     this.plugin.entityIndexService?.upsertFile(record.file, nextEnvelope);
     this.notify([record.file.path], cause, 'native-record-update');
     return this.toHandle(record.file, nextEnvelope);
@@ -423,6 +736,75 @@ export class NativeRecordService {
       archived: true,
       archivedDate: new Date().toISOString(),
     }, cause);
+  }
+
+  rememberCurrentStorageProfile(): void {
+    const current = this.getStorageProfile();
+    const aliases = Array.isArray(this.plugin.settings.nativeRecordStorageAliases)
+      ? this.plugin.settings.nativeRecordStorageAliases.map((profile) => normalizeNativeRecordStorageProfile(profile))
+      : [];
+    const currentKey = profileKey(current);
+    if (!aliases.some((profile) => profileKey(profile) === currentKey)) aliases.unshift(current);
+    this.plugin.settings.nativeRecordStorageAliases = aliases.slice(0, 12);
+  }
+
+  async migrateStorageProfile(): Promise<TpsNativeRecordStorageMigrationResult> {
+    this.assertEnabled();
+    this.assertValidStorageProfile();
+    this.rebuildIndex();
+    const records = [...this.recordsByPath.keys()].sort((left, right) => left.localeCompare(right));
+    const result: TpsNativeRecordStorageMigrationResult = {
+      inspected: records.length,
+      updated: 0,
+      skipped: 0,
+      failed: 0,
+    };
+    const profile = this.getStorageProfile();
+    const readableProfiles = this.getReadableStorageProfiles();
+    for (const path of records) {
+      const file = this.plugin.app.vault.getFileByPath(path);
+      if (!(file instanceof TFile)) {
+        result.failed += 1;
+        continue;
+      }
+      const state: { outcome: 'updated' | 'skipped' | 'failed' } = { outcome: 'failed' };
+      let persisted: Record<string, unknown> | null = null;
+      try {
+        await this.plugin.app.vault.process(file, (content) => {
+          const parsed = parseNativeRecordDocument(content);
+          const inspection = parsed ? this.inspect(parsed.frontmatter) : null;
+          if (!parsed || !inspection) return content;
+          parsed.frontmatter = applyEnvelopeToRawFrontmatter(
+            parsed.frontmatter,
+            inspection.frontmatter,
+            profile,
+            readableProfiles,
+          );
+          const next = serializeNativeRecordDocument(parsed);
+          persisted = parsed.frontmatter;
+          state.outcome = next === content ? 'skipped' : 'updated';
+          return next;
+        });
+      } catch (error) {
+        logger.flowError('NativeRecords', 'storage-profile:migrate-failed', error, { path });
+      }
+      result[state.outcome] += 1;
+      if (persisted) {
+        this.indexFile(file, persisted);
+        const inspection = this.inspect(persisted);
+        if (inspection) this.plugin.entityIndexService?.upsertFile(file, inspection.frontmatter);
+      }
+      if (state.outcome === 'updated') {
+        this.notify([path], { kind: 'user', surface: 'native-record-storage-migration' }, 'native-record-storage-migration');
+      }
+    }
+    if (result.failed === 0) {
+      this.plugin.settings.nativeRecordStorageAliases = [];
+      await this.plugin.saveSettings();
+    }
+    this.rebuildIndex();
+    logger.flow('NativeRecords', 'storage-profile:migrate-done', { ...result });
+    return result;
   }
 
   async normalizeTaskRecordIdentities(): Promise<{ inspected: number; updated: number; skipped: number }> {
@@ -592,8 +974,12 @@ export class NativeRecordService {
 
   private copyUserProperties(properties: Record<string, unknown>): Record<string, unknown> {
     const copied: Record<string, unknown> = {};
+    const protectedKeys = new Set(
+      this.getReadableStorageProfiles().flatMap(storageKeys).map((key) => key.toLocaleLowerCase()),
+    );
     for (const [key, value] of Object.entries(properties || {})) {
-      if (!key.trim() || IMMUTABLE_ENVELOPE_KEYS.has(key.trim().toLocaleLowerCase())) continue;
+      const normalizedKey = key.trim().toLocaleLowerCase();
+      if (!key.trim() || CANONICAL_ENVELOPE_KEYS.has(normalizedKey) || protectedKeys.has(normalizedKey)) continue;
       if (value !== undefined) copied[key] = value;
     }
     return copied;
@@ -632,14 +1018,14 @@ export class NativeRecordService {
     const originalContent = await this.plugin.app.vault.cachedRead(file);
     const original = parseNativeRecordDocument(originalContent);
     if (!original || original.body.trim().length > 0) return;
-    if (isNativeRecordEnvelope(original.frontmatter)) return;
-    if (Object.prototype.hasOwnProperty.call(original.frontmatter, 'tpsId')) return;
-    if (Object.prototype.hasOwnProperty.call(original.frontmatter, 'tpsSchemaVersion')) return;
-    if (typeof original.frontmatter.kind !== 'string'
-      || original.frontmatter.kind.trim().toLocaleLowerCase() !== 'task') return;
+    if (this.hasNativeIdentityMarker(original.frontmatter)) return;
+    const profile = this.getStorageProfile();
+    if (!profile.kindPropertyKey) return;
+    if (typeof original.frontmatter[profile.kindPropertyKey] !== 'string'
+      || String(original.frontmatter[profile.kindPropertyKey]).trim().toLocaleLowerCase() !== 'task') return;
 
     const now = new Date().toISOString();
-    const title = String(original.frontmatter.title || file.basename)
+    const title = String(original.frontmatter[profile.titlePropertyKey] || file.basename)
       .replace(/\s+/gu, ' ')
       .trim() || 'New task';
     const id = this.generateAvailableId('task');
@@ -651,13 +1037,11 @@ export class NativeRecordService {
       if (content !== originalContent) return content;
       const parsed = parseNativeRecordDocument(content);
       if (!parsed || parsed.body.trim().length > 0) return content;
-      if (isNativeRecordEnvelope(parsed.frontmatter)) return content;
-      if (Object.prototype.hasOwnProperty.call(parsed.frontmatter, 'tpsId')) return content;
-      if (Object.prototype.hasOwnProperty.call(parsed.frontmatter, 'tpsSchemaVersion')) return content;
-      if (typeof parsed.frontmatter.kind !== 'string'
-        || parsed.frontmatter.kind.trim().toLocaleLowerCase() !== 'task') return content;
+      if (this.hasNativeIdentityMarker(parsed.frontmatter)) return content;
+      if (typeof parsed.frontmatter[profile.kindPropertyKey] !== 'string'
+        || String(parsed.frontmatter[profile.kindPropertyKey]).trim().toLocaleLowerCase() !== 'task') return content;
       const status = String(parsed.frontmatter.status || '').trim();
-      parsed.frontmatter = {
+      const canonical: TpsNativeRecordEnvelope = {
         ...parsed.frontmatter,
         tpsId: id,
         tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
@@ -667,7 +1051,13 @@ export class NativeRecordService {
         modifiedDate: now,
         status: status || 'todo',
       };
-      adopted = parsed.frontmatter as TpsNativeRecordEnvelope;
+      parsed.frontmatter = applyEnvelopeToRawFrontmatter(
+        parsed.frontmatter,
+        canonical,
+        profile,
+        this.getReadableStorageProfiles(),
+      );
+      adopted = canonical;
       return serializeNativeRecordDocument(parsed);
     });
     if (!adopted) return;
@@ -678,7 +1068,7 @@ export class NativeRecordService {
     const timer = this.draftEligibilityTimers.get(file);
     if (timer != null) globalThis.clearTimeout(timer);
     this.draftEligibilityTimers.delete(file);
-    this.indexFile(file, adopted);
+    this.indexFile(file);
     this.plugin.entityIndexService?.upsertFile(file, adopted);
     this.notify([originalPath, canonicalPath], { kind: 'user', surface: 'native-base-new-task' }, 'native-base-new-task');
     logger.flow('NativeRecords', 'base-task-draft:adopted', {
@@ -690,12 +1080,14 @@ export class NativeRecordService {
 
   private async readHandle(file: TFile): Promise<TpsNativeRecordHandle | null> {
     const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
-    if (isNativeRecordEnvelope(cached)) return this.toHandle(file, cached);
+    const cachedInspection = this.inspect(cached);
+    if (cachedInspection) return this.toHandle(file, cachedInspection.frontmatter);
     try {
       const parsed = parseNativeRecordDocument(await this.plugin.app.vault.cachedRead(file));
-      if (!parsed || !isNativeRecordEnvelope(parsed.frontmatter)) return null;
+      const inspection = parsed ? this.inspect(parsed.frontmatter) : null;
+      if (!inspection) return null;
       this.indexFile(file, parsed.frontmatter);
-      return this.toHandle(file, parsed.frontmatter);
+      return this.toHandle(file, inspection.frontmatter);
     } catch {
       return null;
     }
@@ -722,15 +1114,17 @@ export class NativeRecordService {
   private indexFile(file: TFile, frontmatter?: Record<string, unknown> | null): void {
     this.removePath(file.path);
     const resolved = frontmatter ?? this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
-    if (!isNativeRecordEnvelope(resolved)) return;
-    const id = this.idKey(resolved.tpsId);
+    const inspection = this.inspect(resolved);
+    if (!inspection) return;
+    const resolvedEnvelope = inspection.frontmatter;
+    const id = this.idKey(resolvedEnvelope.tpsId);
     this.idsByPath.set(file.path, id);
-    this.recordsByPath.set(file.path, { ...resolved });
+    this.recordsByPath.set(file.path, { ...resolvedEnvelope });
     const paths = this.pathsById.get(id) || new Set<string>();
     paths.add(file.path);
     this.pathsById.set(id, paths);
-    if (resolved.kind === 'asset') {
-      const sourcePath = normalizePath(String(resolved.sourcePath || '').trim());
+    if (resolvedEnvelope.kind === 'asset') {
+      const sourcePath = normalizePath(String(resolvedEnvelope.sourcePath || '').trim());
       if (sourcePath) {
         const assetPaths = this.assetPathsBySourcePath.get(sourcePath) || new Set<string>();
         assetPaths.add(file.path);
@@ -762,15 +1156,13 @@ export class NativeRecordService {
     if (!(file instanceof TFile)) return;
 
     const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
-    let envelope = isNativeRecordEnvelope(cached)
-      ? cached
-      : isNativeRecordEnvelope(prior)
-        ? prior
-        : null;
+    let envelope = this.inspect(cached)?.frontmatter
+      || (isNativeRecordEnvelope(prior) ? prior : null);
     if (!envelope) {
       try {
         const parsed = parseNativeRecordDocument(await this.plugin.app.vault.cachedRead(file));
-        if (parsed && isNativeRecordEnvelope(parsed.frontmatter)) envelope = parsed.frontmatter;
+        const inspection = parsed ? this.inspect(parsed.frontmatter) : null;
+        if (inspection) envelope = inspection.frontmatter;
       } catch {
         // A rename can race MetadataCache. If the authoritative read also fails,
         // leave the file untouched and let the next metadata event index it.
@@ -826,6 +1218,21 @@ export class NativeRecordService {
     return String(id || '').trim().toLocaleLowerCase();
   }
 
+  private hasNativeIdentityMarker(frontmatter: Record<string, unknown>): boolean {
+    if (this.inspect(frontmatter)) return true;
+    for (const profile of this.getReadableStorageProfiles()) {
+      if (profile.identityMode === 'property') {
+        if (Object.prototype.hasOwnProperty.call(frontmatter, profile.identityPropertyKey)) return true;
+        if (Object.prototype.hasOwnProperty.call(frontmatter, profile.schemaPropertyKey)) return true;
+      } else if (readTagValues(frontmatter.tags).some((tag) => (
+        tag.startsWith(`${profile.identityTagPrefix}/v${TPS_NATIVE_RECORD_SCHEMA_VERSION}/`)
+      ))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private generateId(kind: TpsNativeRecordKind): string {
     const prefix = RECORD_FOLDER_BY_KIND[kind].replace(/-entries$|-sessions$|-exercises$|s$/gu, '');
     const uuid = typeof globalThis.crypto?.randomUUID === 'function'
@@ -870,6 +1277,11 @@ export class NativeRecordService {
     if (!this.isEnabled()) {
       throw new Error('TPS native record creation requires the native-records data architecture mode.');
     }
+  }
+
+  private assertValidStorageProfile(): void {
+    const errors = validateNativeRecordStorageProfile(this.getStorageProfile());
+    if (errors.length) throw new Error(`Invalid native record storage settings: ${errors.join(' ')}`);
   }
 
   private assertAssetSource(source: TFile): void {

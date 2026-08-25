@@ -157,6 +157,15 @@ function createHarness(mode = 'native-records', options = {}) {
       dataArchitectureMode: mode,
       nativeRecordRootPath: options.root ?? '_records',
       nativeRecordLayout: options.layout ?? 'kind-folders',
+      nativeRecordIdentityMode: options.identityMode,
+      nativeRecordIdentityPropertyKey: options.identityPropertyKey,
+      nativeRecordSchemaPropertyKey: options.schemaPropertyKey,
+      nativeRecordIdentityTagPrefix: options.identityTagPrefix,
+      nativeRecordKindPropertyKey: options.kindPropertyKey,
+      nativeRecordTitlePropertyKey: options.titlePropertyKey,
+      nativeRecordCreatedPropertyKey: options.createdPropertyKey,
+      nativeRecordModifiedPropertyKey: options.modifiedPropertyKey,
+      nativeRecordStorageAliases: options.storageAliases || [],
     },
     manifest: { id: 'tps-global-context-menu' },
     registerEvent: () => {},
@@ -176,6 +185,7 @@ function createHarness(mode = 'native-records', options = {}) {
       emitExplicitAction: (paths, details) => events.push({ type: 'explicit', paths, details }),
     },
     taskApiService: { get: async () => null },
+    saveSettings: async () => {},
   };
   const service = new NativeRecordService(plugin);
   service.setup();
@@ -210,6 +220,64 @@ test('flat-root layout creates every native record directly in the configured de
   const food = await service.create('food-entry', { title: 'Root food' }, { id: 'food-root' });
   assert.equal(task.path, 'task-root.md');
   assert.equal(food.path, 'food-root.md');
+});
+
+test('tag identity writes no fixed ID/schema fields and configurable envelope fields remain typed', async () => {
+  const { service, contents } = createHarness('native-records', {
+    root: '/',
+    layout: 'flat-root',
+    identityMode: 'tag',
+    identityTagPrefix: 'my/records',
+    kindPropertyKey: 'recordType',
+    titlePropertyKey: 'name',
+    createdPropertyKey: '',
+    modifiedPropertyKey: '',
+  });
+  const created = await service.create('food-entry', {
+    title: 'Tagged lunch',
+    tags: ['lunch', '#favorite'],
+    calories: 420,
+  }, { id: 'food:one' });
+  const parsed = parseNativeRecordDocument(contents.get(created.file));
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'tpsId'), false);
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'tpsSchemaVersion'), false);
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'kind'), false);
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'title'), false);
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'createdDate'), false);
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'modifiedDate'), false);
+  assert.equal(parsed.frontmatter.recordType, 'food-entry');
+  assert.equal(parsed.frontmatter.name, 'Tagged lunch');
+  assert.deepEqual(parsed.frontmatter.tags, ['lunch', 'favorite', 'my/records/v1/food-entry/hex-666f6f643a6f6e65']);
+  assert.equal(service.inspect(parsed.frontmatter)?.id, 'food:one');
+  assert.equal((await service.resolve('food:one'))?.frontmatter.calories, 420);
+
+  const updated = await service.update(created.file, { title: 'Updated lunch', calories: 500 });
+  assert.equal(updated?.frontmatter.title, 'Updated lunch');
+  const updatedRaw = parseNativeRecordDocument(contents.get(created.file)).frontmatter;
+  assert.equal(updatedRaw.name, 'Updated lunch');
+  assert.equal(updatedRaw.calories, 500);
+  assert.equal(Object.hasOwn(updatedRaw, 'modifiedDate'), false);
+});
+
+test('storage migration preserves user properties and tags while consolidating legacy identity fields', async () => {
+  const { service, plugin, contents } = createHarness();
+  const created = await service.create('calendar-event', {
+    title: 'Migration event',
+    tags: ['calendar', 'important'],
+    scheduled: '2026-08-25T14:00:00.000Z',
+  }, { id: 'calendar-event-1' });
+  service.rememberCurrentStorageProfile();
+  plugin.settings.nativeRecordIdentityMode = 'tag';
+  plugin.settings.nativeRecordIdentityTagPrefix = 'tishos/item';
+  const result = await service.migrateStorageProfile();
+  assert.deepEqual(result, { inspected: 1, updated: 1, skipped: 0, failed: 0 });
+  const raw = parseNativeRecordDocument(contents.get(created.file)).frontmatter;
+  assert.equal(Object.hasOwn(raw, 'tpsId'), false);
+  assert.equal(Object.hasOwn(raw, 'tpsSchemaVersion'), false);
+  assert.deepEqual(raw.tags, ['calendar', 'important', 'tishos/item/v1/calendar-event/calendar-event-1']);
+  assert.equal(raw.scheduled, '2026-08-25T14:00:00.000Z');
+  assert.equal((await service.resolve('calendar-event-1'))?.kind, 'calendar-event');
+  assert.deepEqual(plugin.settings.nativeRecordStorageAliases, []);
 });
 
 test('native record create, update, archive, and asset paths preserve typed values', async () => {

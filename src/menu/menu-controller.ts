@@ -184,9 +184,11 @@ export class MenuController {
         return [{ file: f, frontmatter: {}, nativeAssetSource: true }];
       }
       if (!this.isPropertyFile(f)) return [];
-      const frontmatter = f.extension?.toLowerCase() !== 'md' && this.plugin.filePropertiesService?.isPropertyTarget(f)
+      const storedFrontmatter = f.extension?.toLowerCase() !== 'md' && this.plugin.filePropertiesService?.isPropertyTarget(f)
         ? this.plugin.filePropertiesService.read(f)
         : this.app.metadataCache.getFileCache(f)?.frontmatter || {};
+      const frontmatter = this.plugin.nativeRecordService.inspect(storedFrontmatter)?.frontmatter
+        || storedFrontmatter;
       return [{
         file: f,
         frontmatter,

@@ -729,6 +729,8 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         getMode: () => plugin.nativeRecordService.getMode(),
         isEnabled: () => plugin.nativeRecordService.isEnabled(),
         getRootPath: () => plugin.nativeRecordService.getRootPath(),
+        getStorageProfile: () => plugin.nativeRecordService.getStorageProfile(),
+        inspect: (frontmatter: unknown) => plugin.nativeRecordService.inspect(frontmatter),
         isRecord: (file: TFile) => plugin.nativeRecordService.isRecordFile(file),
         create: (
             kind: Parameters<typeof plugin.nativeRecordService.create>[0],
@@ -758,6 +760,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             reference: Parameters<typeof plugin.nativeRecordService.archive>[0],
             cause?: Parameters<typeof plugin.nativeRecordService.archive>[1],
         ) => plugin.nativeRecordService.archive(reference, publicMutationCause(cause)),
+        migrateStorageProfile: () => plugin.nativeRecordService.migrateStorageProfile(),
     };
     const taskRecordsApi = {
         version: 1,

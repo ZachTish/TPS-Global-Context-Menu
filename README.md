@@ -1,5 +1,14 @@
 # TPS Global Context Menu
 
+## 1.43.0
+
+- Native record system metadata is now a configurable storage profile under **Advanced → Data architecture → Native record properties**. Identity may use configurable ID/schema property names or one tag containing schema, kind, and the stable record ID.
+- Tag identity writes no `tpsId` or `tpsSchemaVersion` frontmatter properties. The default `#tps/record/v1/<kind>/<id>` prefix is configurable, unsafe tag characters use a reversible encoding, and conflicting/duplicate identities fail closed.
+- The `kind`, `title`, `createdDate`, and `modifiedDate` property names are configurable. Creation/modification timestamps can be disabled by leaving their property names blank; tag identity can derive kind without a separate kind property. The title property remains required because native record bodies are intentionally empty.
+- GCM remembers prior storage profiles as read-only aliases so changing a key or tag prefix does not strand records. **Consolidate native record storage** explicitly rewrites recognized records to the current profile while preserving user properties, user tags, bodies, IDs, and filenames. It never silently rewrites notes during load.
+- Public `nativeRecords` API version 2 adds `inspect`, `getStorageProfile`, and `migrateStorageProfile`. Returned handles retain a canonical in-memory envelope for compatibility even when those keys do not physically exist in Markdown.
+- GCM menus, stacked fields, and native previews resolve configured kind/title mappings through the canonical inspector. Existing property-based records remain readable, Legacy mode is unchanged, and minimum supported Obsidian remains 1.10.0.
+
 ## 1.42.0
 
 - GCM now owns one versioned template-identity rule for TPS plugins. Templates can be recognized through the existing Templater folder, a tag, or an exact property key/value rule; property matching supports equality or containment and does not require moving the template into a special folder.

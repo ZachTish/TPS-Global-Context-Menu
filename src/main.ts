@@ -60,7 +60,12 @@ import { TpsIdentityService } from './services/tps-identity-service';
 import { CardContentService } from './services/card-content-service';
 import { IdentityMigrationService } from './services/identity-migration-service';
 import { FilePropertiesService } from './services/file-properties-service';
-import { NativeRecordService, normalizeNativeRecordLayout, normalizeNativeRecordRoot } from './services/native-record-service';
+import {
+  NativeRecordService,
+  normalizeNativeRecordLayout,
+  normalizeNativeRecordRoot,
+  normalizeNativeRecordStorageProfile,
+} from './services/native-record-service';
 import { TemplateIdentityService } from './services/template-identity-service';
 import { NoteTitleRenderService } from './services/note-title-render-service';
 import { VirtualBaseEmbedService } from './services/virtual-base-embed-service';
@@ -1749,7 +1754,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   private getPreviewPropertiesSignature(file: TFile): string {
-    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+    const storedFrontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+    const frontmatter = this.nativeRecordService.inspect(storedFrontmatter)?.frontmatter
+      || storedFrontmatter;
     const propertyKeys = (this.settings.properties || [])
       .filter((property) => property && property.showInCollapsed !== false)
       .map((property) => String(property.key || property.id || '').trim())
@@ -1763,7 +1770,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   private applyNativePreviewPropertyVisibility(root: HTMLElement, file: TFile, isNativeHoverPopover: boolean): void {
-    const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+    const storedFrontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
+    const frontmatter = this.nativeRecordService.inspect(storedFrontmatter)?.frontmatter
+      || storedFrontmatter;
     const entries = [{ file, frontmatter }];
     const configuredKeys = new Set<string>();
     for (const property of this.settings.properties || []) {
@@ -2048,6 +2057,27 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       loaded?.nativeRecordRootPath ?? DEFAULT_SETTINGS.nativeRecordRootPath,
     );
     this.settings.nativeRecordLayout = normalizeNativeRecordLayout(loaded?.nativeRecordLayout);
+    const nativeRecordStorageProfile = normalizeNativeRecordStorageProfile({
+      identityMode: loaded?.nativeRecordIdentityMode,
+      identityPropertyKey: loaded?.nativeRecordIdentityPropertyKey,
+      schemaPropertyKey: loaded?.nativeRecordSchemaPropertyKey,
+      identityTagPrefix: loaded?.nativeRecordIdentityTagPrefix,
+      kindPropertyKey: loaded?.nativeRecordKindPropertyKey,
+      titlePropertyKey: loaded?.nativeRecordTitlePropertyKey,
+      createdPropertyKey: loaded?.nativeRecordCreatedPropertyKey,
+      modifiedPropertyKey: loaded?.nativeRecordModifiedPropertyKey,
+    });
+    this.settings.nativeRecordIdentityMode = nativeRecordStorageProfile.identityMode;
+    this.settings.nativeRecordIdentityPropertyKey = nativeRecordStorageProfile.identityPropertyKey;
+    this.settings.nativeRecordSchemaPropertyKey = nativeRecordStorageProfile.schemaPropertyKey;
+    this.settings.nativeRecordIdentityTagPrefix = nativeRecordStorageProfile.identityTagPrefix;
+    this.settings.nativeRecordKindPropertyKey = nativeRecordStorageProfile.kindPropertyKey;
+    this.settings.nativeRecordTitlePropertyKey = nativeRecordStorageProfile.titlePropertyKey;
+    this.settings.nativeRecordCreatedPropertyKey = nativeRecordStorageProfile.createdPropertyKey;
+    this.settings.nativeRecordModifiedPropertyKey = nativeRecordStorageProfile.modifiedPropertyKey;
+    this.settings.nativeRecordStorageAliases = Array.isArray(loaded?.nativeRecordStorageAliases)
+      ? loaded.nativeRecordStorageAliases.slice(0, 12).map((profile) => normalizeNativeRecordStorageProfile(profile))
+      : [];
     this.settings.templateIdentificationMode = loaded?.templateIdentificationMode === 'tag'
       || loaded?.templateIdentificationMode === 'property'
       ? loaded.templateIdentificationMode

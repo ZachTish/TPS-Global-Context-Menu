@@ -35,7 +35,11 @@ import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { FileSuggestModal } from './modals/FileSuggestModal';
 import * as logger from './logger';
 import { runDailyNoteHomeSettingTransaction } from './services/daily-note-home-setting-transaction';
-import { normalizeNativeRecordLayout, normalizeNativeRecordRoot } from './services/native-record-service';
+import {
+  normalizeNativeRecordLayout,
+  normalizeNativeRecordRoot,
+  normalizeNativeRecordStorageProfile,
+} from './services/native-record-service';
 import { importHealthPropertyCatalog } from './integrations/health-property-import';
 import { installTaskRecordProperties } from './integrations/task-property-install';
 import {
@@ -2299,6 +2303,118 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           .onChange(async (value) => {
             this.plugin.settings.nativeRecordLayout = normalizeNativeRecordLayout(value);
             await this.plugin.saveSettings();
+          }));
+
+      diagnostics.createEl('h4', { text: 'Native record properties' });
+
+      new Setting(diagnostics)
+        .setName('Store record identity as')
+        .setDesc('Property mode writes configurable ID and schema properties. Tag mode stores schema, kind, and ID in one configurable tag and writes no ID or schema property. Existing profiles remain readable until you consolidate them below.')
+        .addDropdown((dropdown) => dropdown
+          .addOption('property', 'Properties')
+          .addOption('tag', 'Tag')
+          .setValue(this.plugin.settings.nativeRecordIdentityMode || 'property')
+          .onChange(async (value) => {
+            this.plugin.nativeRecordService.rememberCurrentStorageProfile();
+            this.plugin.settings.nativeRecordIdentityMode = value === 'tag' ? 'tag' : 'property';
+            await this.plugin.saveSettings();
+          }));
+
+      new Setting(diagnostics)
+        .setName('Identity property names')
+        .setDesc('Used in property mode. These values remain editable while tag mode is active so the fallback profile is always configurable.')
+        .addText((text) => text
+          .setPlaceholder('tpsId')
+          .setValue(this.plugin.settings.nativeRecordIdentityPropertyKey || '')
+          .onChange(async (value) => {
+            this.plugin.nativeRecordService.rememberCurrentStorageProfile();
+            this.plugin.settings.nativeRecordIdentityPropertyKey = normalizeNativeRecordStorageProfile({
+              identityPropertyKey: value,
+            }).identityPropertyKey;
+            await this.plugin.saveSettings();
+          }))
+        .addText((text) => text
+          .setPlaceholder('tpsSchemaVersion')
+          .setValue(this.plugin.settings.nativeRecordSchemaPropertyKey || '')
+          .onChange(async (value) => {
+            this.plugin.nativeRecordService.rememberCurrentStorageProfile();
+            this.plugin.settings.nativeRecordSchemaPropertyKey = normalizeNativeRecordStorageProfile({
+              schemaPropertyKey: value,
+            }).schemaPropertyKey;
+            await this.plugin.saveSettings();
+          }));
+
+      new Setting(diagnostics)
+        .setName('Identity tag prefix')
+        .setDesc('Used in tag mode, without #. A record tag contains this prefix plus schema, kind, and the stable ID, for example #tps/record/v1/task/task-123.')
+        .addText((text) => text
+          .setPlaceholder('tps/record')
+          .setValue(this.plugin.settings.nativeRecordIdentityTagPrefix || '')
+          .onChange(async (value) => {
+            this.plugin.nativeRecordService.rememberCurrentStorageProfile();
+            this.plugin.settings.nativeRecordIdentityTagPrefix = normalizeNativeRecordStorageProfile({
+              identityTagPrefix: value,
+            }).identityTagPrefix;
+            await this.plugin.saveSettings();
+          }));
+
+      new Setting(diagnostics)
+        .setName('Kind and title properties')
+        .setDesc('Choose the frontmatter names used by native records. Leave Kind blank only when consumers should derive kind from a tag identity. Title must have a property name so it survives reloads.')
+        .addText((text) => text
+          .setPlaceholder('kind (blank allowed)')
+          .setValue(this.plugin.settings.nativeRecordKindPropertyKey || '')
+          .onChange(async (value) => {
+            this.plugin.nativeRecordService.rememberCurrentStorageProfile();
+            this.plugin.settings.nativeRecordKindPropertyKey = value.trim();
+            await this.plugin.saveSettings();
+          }))
+        .addText((text) => text
+          .setPlaceholder('title')
+          .setValue(this.plugin.settings.nativeRecordTitlePropertyKey || '')
+          .onChange(async (value) => {
+            this.plugin.nativeRecordService.rememberCurrentStorageProfile();
+            this.plugin.settings.nativeRecordTitlePropertyKey = normalizeNativeRecordStorageProfile({
+              titlePropertyKey: value,
+            }).titlePropertyKey;
+            await this.plugin.saveSettings();
+          }));
+
+      new Setting(diagnostics)
+        .setName('Timestamp properties')
+        .setDesc('Choose the frontmatter names used for creation and modification timestamps. Leave either blank to stop writing that timestamp field on newly created or consolidated records.')
+        .addText((text) => text
+          .setPlaceholder('createdDate (blank disables)')
+          .setValue(this.plugin.settings.nativeRecordCreatedPropertyKey || '')
+          .onChange(async (value) => {
+            this.plugin.nativeRecordService.rememberCurrentStorageProfile();
+            this.plugin.settings.nativeRecordCreatedPropertyKey = value.trim();
+            await this.plugin.saveSettings();
+          }))
+        .addText((text) => text
+          .setPlaceholder('modifiedDate (blank disables)')
+          .setValue(this.plugin.settings.nativeRecordModifiedPropertyKey || '')
+          .onChange(async (value) => {
+            this.plugin.nativeRecordService.rememberCurrentStorageProfile();
+            this.plugin.settings.nativeRecordModifiedPropertyKey = value.trim();
+            await this.plugin.saveSettings();
+          }));
+
+      new Setting(diagnostics)
+        .setName('Consolidate native record storage')
+        .setDesc('Rewrite recognized native records to the current identity and property profile. User properties, tags, bodies, stable IDs, and filenames are preserved. Records that cannot be proven unique fail closed.')
+        .addButton((button) => button
+          .setButtonText('Consolidate records')
+          .onClick(async () => {
+            button.setDisabled(true);
+            try {
+              const result = await this.plugin.nativeRecordService.migrateStorageProfile();
+              new Notice(`Native records: ${result.updated} updated, ${result.skipped} already current, ${result.failed} failed.`);
+            } catch (error) {
+              new Notice(error instanceof Error ? error.message : String(error));
+            } finally {
+              button.setDisabled(false);
+            }
           }));
 
       diagnostics.createEl('h4', { text: 'Template identity' });

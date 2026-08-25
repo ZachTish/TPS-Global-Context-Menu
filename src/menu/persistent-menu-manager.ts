@@ -4284,7 +4284,9 @@ export class PersistentMenuManager {
 
   private isTpsHealthFoodPropertyRecord(file: TFile): boolean {
     const cache = this.plugin.app.metadataCache.getFileCache(file);
-    const frontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
+    const storedFrontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
+    const frontmatter = this.plugin.nativeRecordService.inspect(storedFrontmatter)?.frontmatter
+      || storedFrontmatter;
     const kind = String(frontmatter.kind || '').trim().toLowerCase();
     if (kind === 'food') return true;
 
@@ -4739,7 +4741,9 @@ export class PersistentMenuManager {
   private async ensureNativePropertyRows(file: TFile): Promise<void> {
     if (this.nativePropertyInitializationInFlight.has(file.path)) return;
 
-    const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter || {};
+    const storedFrontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter || {};
+    const frontmatter = this.plugin.nativeRecordService.inspect(storedFrontmatter)?.frontmatter
+      || storedFrontmatter;
     const entries = [{ file, frontmatter }];
     const applicableProperties = resolveCustomProperties(
       this.plugin.settings.properties || [],

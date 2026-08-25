@@ -72,6 +72,17 @@ export type CompletedTaskHidingScope = 'reading-and-live-preview' | 'reading-onl
 export type LinkedContextSortOrder = 'source-asc' | 'source-desc';
 export type TpsDataArchitectureMode = 'legacy' | 'native-records';
 export type TpsNativeRecordLayout = 'kind-folders' | 'flat-root';
+export type TpsNativeRecordIdentityMode = 'property' | 'tag';
+export interface TpsNativeRecordStorageProfile {
+  identityMode: TpsNativeRecordIdentityMode;
+  identityPropertyKey: string;
+  schemaPropertyKey: string;
+  identityTagPrefix: string;
+  kindPropertyKey: string;
+  titlePropertyKey: string;
+  createdPropertyKey: string;
+  modifiedPropertyKey: string;
+}
 export type TpsTemplateIdentificationMode = 'templater-folder' | 'tag' | 'property';
 export type TpsTemplatePropertyMatch = 'equals' | 'contains';
 type ExtensibleLiteral<T extends string> = T | (string & Record<never, never>);
@@ -470,6 +481,15 @@ export interface TPSGlobalContextMenuSettings {
   dataArchitectureMode: TpsDataArchitectureMode;
   nativeRecordRootPath: string;
   nativeRecordLayout: TpsNativeRecordLayout;
+  nativeRecordIdentityMode: TpsNativeRecordIdentityMode;
+  nativeRecordIdentityPropertyKey: string;
+  nativeRecordSchemaPropertyKey: string;
+  nativeRecordIdentityTagPrefix: string;
+  nativeRecordKindPropertyKey: string;
+  nativeRecordTitlePropertyKey: string;
+  nativeRecordCreatedPropertyKey: string;
+  nativeRecordModifiedPropertyKey: string;
+  nativeRecordStorageAliases: TpsNativeRecordStorageProfile[];
   templateIdentificationMode: TpsTemplateIdentificationMode;
   templateIdentificationTag: string;
   templateIdentificationPropertyKey: string;
