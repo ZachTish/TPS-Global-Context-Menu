@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.44.2
+
+- Linked task and child-note rows no longer render native-record storage identity tags as user-facing tag pills. Current and readable legacy tag prefixes are recognized through the same native-record storage profiles used to resolve the note; ordinary user tags remain visible and editable.
+- Reading View and Live Preview rows now wrap within the Markdown content width. Long titles, tags, selectors, and other configured property values truncate inside their pill instead of widening the note's horizontal scroller, with the complete value retained in the hover title and accessible label.
+- This is a presentation-only compatibility fix. It changes no note content, record identity, setting, schema, command, or public API; Base embeds retain their own local horizontal scrolling.
+- Validation passed the focused relational-row matrix (29/29), the complete declared suite, TypeScript, and the final production build/deploy. At a measured 430 CSS-pixel test-vault window, Live Preview's Markdown scroller stayed exactly 371/371 pixels with `scrollLeft = 0`, the linked row stayed inside its surface, and Reading View wrapped the same long-title fixture without document-level horizontal overflow.
+
 ## 1.44.1
 
 - In **Native Markdown records** mode, the explicit **Create task** command now always creates a note-backed `kind: task` record, even when the task has no Scheduled or Due value. The staged checkbox is immediately promoted, replaced by a stable task-note link in the selected containing note, and the new task note opens for editing.

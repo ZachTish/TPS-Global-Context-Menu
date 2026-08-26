@@ -2326,6 +2326,8 @@ export const PLUGIN_STYLES = `
       .markdown-source-view.mod-cm6.is-live-preview .cm-line.tps-gcm-linked-subitem-task .tps-gcm-linked-subitem-cm-widget,
       .markdown-source-view.mod-cm6.is-live-preview .cm-line.tps-gcm-linked-subitem-task .tps-gcm-linked-subitem-row-content.is-cm-widget {
         margin-left: var(--list-indent, 1.5em) !important;
+        max-width: calc(100% - var(--list-indent, 1.5em)) !important;
+        min-width: 0 !important;
       }
 
       .markdown-source-view.mod-cm6.is-live-preview .cm-line.tps-gcm-linked-subitem-task .cm-formatting-task {
@@ -2351,12 +2353,13 @@ export const PLUGIN_STYLES = `
         display: flex !important;
         align-items: center;
         gap: var(--tps-gcm-linked-subitem-gap);
-        flex-wrap: nowrap !important;
+        flex-wrap: wrap !important;
         min-width: 0;
-        max-width: none;
+        max-width: 100%;
         flex: 0 1 auto;
-        white-space: nowrap;
+        white-space: normal;
         width: auto !important;
+        box-sizing: border-box;
         background: transparent !important;
         box-shadow: none !important;
         border: 0 !important;
@@ -2397,8 +2400,10 @@ export const PLUGIN_STYLES = `
       li.tps-gcm-linked-subitem-task > div.tps-gcm-linked-subitem-row,
       li.tps-gcm-linked-subitem-task > span.tps-gcm-linked-subitem-row-content {
         display: flex !important;
+        flex-wrap: wrap !important;
         margin: 0;
         flex: 1 1 auto;
+        max-width: 100%;
         min-width: 0;
         width: auto;
       }
@@ -2492,7 +2497,9 @@ export const PLUGIN_STYLES = `
         display: inline-flex !important;
         align-items: center;
         gap: var(--tps-gcm-linked-subitem-gap);
-        flex-wrap: nowrap;
+        flex-wrap: wrap;
+        max-width: 100%;
+        min-width: 0;
         vertical-align: baseline;
       }
 
@@ -2501,11 +2508,13 @@ export const PLUGIN_STYLES = `
         display: inline-flex !important;
         align-items: center;
         gap: var(--tps-gcm-linked-subitem-gap);
-        flex-wrap: nowrap;
+        flex-wrap: wrap;
         vertical-align: baseline;
         width: auto !important;
-        max-width: none !important;
-        flex: 0 0 auto !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
+        flex: 0 1 auto !important;
+        overflow: hidden;
         background: transparent !important;
         box-shadow: none !important;
         border: 0 !important;
@@ -2515,13 +2524,25 @@ export const PLUGIN_STYLES = `
 
       /* Link text styling */
       .tps-gcm-linked-subitem-link {
+        flex: 0 1 auto;
         font-weight: 600;
         color: var(--text-normal);
         cursor: pointer;
+        max-width: 100%;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .tps-gcm-linked-subitem-link:hover {
         color: var(--text-accent);
+      }
+
+      .tps-gcm-linked-subitem-link:focus-visible,
+      .tps-gcm-linked-subitem-pill:focus-visible {
+        outline: 2px solid var(--interactive-accent);
+        outline-offset: 2px;
       }
 
       /* Pills container */
@@ -2529,8 +2550,11 @@ export const PLUGIN_STYLES = `
         display: inline-flex;
         align-items: center;
         gap: 4px;
-        flex-wrap: nowrap;
+        flex: 0 1 auto;
+        flex-wrap: wrap;
         margin-left: 4px;
+        max-width: 100%;
+        min-width: 0;
       }
 
       .task-list-item.tps-gcm-linked-subitem-task {
@@ -2558,6 +2582,11 @@ export const PLUGIN_STYLES = `
         padding: 1px 4px;
         margin-left: 4px;
         cursor: pointer;
+        flex: 0 1 auto;
+        max-width: 100%;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
         white-space: nowrap;
         opacity: 1;
         visibility: visible;
@@ -2610,11 +2639,12 @@ export const PLUGIN_STYLES = `
       .tps-gcm-linked-subitem-cm-widget {
         display: inline-flex;
         align-items: center;
-        flex-wrap: nowrap;
+        flex-wrap: wrap;
         gap: var(--tps-gcm-linked-subitem-gap);
         vertical-align: baseline;
-        max-width: none;
-        overflow: visible;
+        max-width: 100%;
+        min-width: 0;
+        overflow: hidden;
         background: transparent !important;
         box-shadow: none !important;
         border: 0 !important;
@@ -2667,8 +2697,10 @@ export const PLUGIN_STYLES = `
       .markdown-preview-view li.tps-gcm-linked-subitem-task > p {
         display: inline-flex !important;
         align-items: center !important;
+        flex-wrap: wrap !important;
         gap: var(--tps-gcm-linked-subitem-gap) !important;
         margin: 0 !important;
+        max-width: 100% !important;
         min-width: 0 !important;
         width: auto !important;
         background: transparent !important;
@@ -2691,8 +2723,11 @@ export const PLUGIN_STYLES = `
       .markdown-preview-view li.task-list-item.tps-gcm-linked-subitem-task .tps-gcm-linked-subitem-row-content.is-reading-mode {
         display: inline-flex !important;
         align-items: center !important;
+        flex-wrap: wrap !important;
         gap: var(--tps-gcm-linked-subitem-gap) !important;
         margin: 0 !important;
+        max-width: 100% !important;
+        min-width: 0 !important;
         padding: 0 !important;
         background: transparent !important;
         box-shadow: none !important;

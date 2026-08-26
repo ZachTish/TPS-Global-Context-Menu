@@ -65,8 +65,11 @@ export function buildLinkedSubitemRow(
   const link = document.createElement('span');
   link.className = 'tps-gcm-linked-subitem-link';
   link.textContent = model.displayLabel;
+  link.title = model.displayLabel;
   link.dataset.linkedSubitemPath = model.childFile.path;
   link.setAttribute('role', 'link');
+  link.setAttribute('aria-label', model.displayLabel);
+  link.tabIndex = 0;
   link.addEventListener('mousedown', (evt) => {
     evt.preventDefault();
     evt.stopPropagation();
@@ -75,6 +78,12 @@ export function buildLinkedSubitemRow(
     evt.preventDefault();
     evt.stopPropagation();
     onLinkClick(model.childFile.path);
+  });
+  link.addEventListener('keydown', (evt) => {
+    if (evt.key !== 'Enter') return;
+    evt.preventDefault();
+    evt.stopPropagation();
+    link.click();
   });
   container.appendChild(link);
 
@@ -85,6 +94,10 @@ export function buildLinkedSubitemRow(
     const pill = document.createElement('span');
     pill.className = `tps-gcm-linked-subitem-pill tps-gcm-linked-subitem-pill--${pillData.kind}`;
     pill.textContent = pillData.label;
+    pill.title = pillData.label;
+    pill.setAttribute('aria-label', pillData.label);
+    pill.setAttribute('role', 'button');
+    pill.tabIndex = 0;
     pill.dataset.linkedSubitemPath = model.childFile.path;
     pill.dataset.linkedSubitemPillKind = pillData.kind;
     pill.dataset.linkedSubitemPillValue = pillData.value || pillData.label;
@@ -98,6 +111,12 @@ export function buildLinkedSubitemRow(
       evt.preventDefault();
       evt.stopPropagation();
       onPillClick(evt, pillData);
+    });
+    pill.addEventListener('keydown', (evt) => {
+      if (evt.key !== 'Enter' && evt.key !== ' ') return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      pill.click();
     });
     pillsContainer.appendChild(pill);
   }

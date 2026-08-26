@@ -369,17 +369,44 @@ export class SubitemLineModelService {
   private readTags(frontmatter: Record<string, unknown>): string[] {
     const tagsKey = Object.keys(frontmatter).find((candidate) => candidate.toLowerCase() === 'tags');
     const raw = tagsKey ? frontmatter[tagsKey] : undefined;
-    const values = Array.isArray(raw) ? raw : raw != null ? [raw] : [];
+    const values = this.readTagValues(raw);
+    const nativeRecordIdentityPrefixes = this.readNativeRecordIdentityTagPrefixes();
     const ignored = new Set(
       (this.plugin.settings.ignoredSubitemTags || [])
         .map((tag) => String(tag || '').trim().replace(/^#/, '').toLowerCase())
         .filter(Boolean),
     );
     return values
-      .map((value) => String(value || '').trim().replace(/^#/, ''))
-      .filter(Boolean)
       .filter((tag, index, all) => all.indexOf(tag) === index)
-      .filter((tag) => !ignored.has(tag.toLowerCase()));
+      .filter((tag) => !ignored.has(tag.toLowerCase()))
+      .filter((tag) => !this.isNativeRecordIdentityTag(tag, nativeRecordIdentityPrefixes));
+  }
+
+  private readNativeRecordIdentityTagPrefixes(): string[] {
+    const profiles = this.plugin.nativeRecordService?.getReadableStorageProfiles?.() || [];
+    return [...new Set(profiles
+      .filter((profile) => profile.identityMode === 'tag')
+      .map((profile) => String(profile.identityTagPrefix || '')
+        .trim()
+        .replace(/^#+|\/+$/gu, '')
+        .toLowerCase())
+      .filter(Boolean))];
+  }
+
+  private readTagValues(value: unknown): string[] {
+    if (Array.isArray(value)) return value.flatMap((entry) => this.readTagValues(entry));
+    return String(value ?? '')
+      .split(/[\s,]+/gu)
+      .map((entry) => entry.trim().replace(/^#+/u, ''))
+      .filter(Boolean);
+  }
+
+  private isNativeRecordIdentityTag(tag: string, prefixes: string[]): boolean {
+    const normalized = String(tag || '').trim().replace(/^#+/u, '').toLowerCase();
+    return prefixes.some((prefix) => {
+      if (!normalized.startsWith(`${prefix}/`)) return false;
+      return /^\/v\d+\/[^/]+\/[^/]+$/u.test(normalized.slice(prefix.length));
+    });
   }
 
   /**

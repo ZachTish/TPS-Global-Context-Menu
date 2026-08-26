@@ -612,6 +612,159 @@ test('linked PDF and Base rows render status, title, and pills from logical comp
   }
 });
 
+test('linked child pills omit readable native-record identity tags but preserve ordinary tags', async () => {
+  const { SubitemLineModelService } = await subitemLineModelPromise;
+  const child = {
+    path: 'Order carts.md',
+    basename: 'Order carts',
+    extension: 'md',
+    parent: { path: '/', name: '/' },
+  };
+  const frontmatter = {
+    title: 'Order carts',
+    tags: [
+      'records/current/v2/task/item_current',
+      'tps/record/v1/task/item_legacy',
+      'work',
+      'customer/this-is-an-intentionally-long-user-facing-tag-that-must-remain-visible',
+      'records/current/not-an-identity',
+    ],
+  };
+  const service = new SubitemLineModelService({
+    settings: {
+      showCustomPropertiesInInlineUi: true,
+      properties: [{
+        id: 'tags',
+        key: 'tags',
+        label: 'Tags',
+        type: 'list',
+        listItemType: 'tag',
+      }],
+      ignoredSubitemTags: [],
+    },
+    nativeRecordService: {
+      getReadableStorageProfiles: () => [
+        { identityMode: 'tag', identityTagPrefix: 'records/current' },
+        { identityMode: 'tag', identityTagPrefix: 'tps/record' },
+      ],
+    },
+    parentLinkResolutionService: {
+      getLogicalFrontmatter: () => frontmatter,
+    },
+  });
+
+  assert.deepEqual(
+    service.getPropertyPills(child, 'bullet').map(({ kind, label }) => ({ kind, label })),
+    [
+      { kind: 'tag', label: '#work' },
+      {
+        kind: 'tag',
+        label: '#customer/this-is-an-intentionally-long-user-facing-tag-that-must-remain-visible',
+      },
+      { kind: 'tag', label: '#records/current/not-an-identity' },
+      { kind: 'action', label: '+' },
+    ],
+  );
+});
+
+test('linked child tag filtering ignores property-mode prefixes and tokenizes scalar tag lists', async () => {
+  const { SubitemLineModelService } = await subitemLineModelPromise;
+  const child = {
+    path: 'Scalar tags.md',
+    basename: 'Scalar tags',
+    extension: 'md',
+    parent: { path: '/', name: '/' },
+  };
+  const frontmatter = {
+    tags: 'tps/record/v1/task/property-shaped records/current/v2/task/item_current, work customer',
+  };
+  const service = new SubitemLineModelService({
+    settings: {
+      showCustomPropertiesInInlineUi: true,
+      properties: [{
+        id: 'tags',
+        key: 'tags',
+        label: 'Tags',
+        type: 'list',
+        listItemType: 'tag',
+      }],
+      ignoredSubitemTags: [],
+    },
+    nativeRecordService: {
+      getReadableStorageProfiles: () => [
+        { identityMode: 'tag', identityTagPrefix: 'records/current' },
+        { identityMode: 'property', identityTagPrefix: 'tps/record' },
+      ],
+    },
+    parentLinkResolutionService: {
+      getLogicalFrontmatter: () => frontmatter,
+    },
+  });
+
+  assert.deepEqual(
+    service.getPropertyPills(child, 'bullet').map(({ kind, label }) => ({ kind, label })),
+    [
+      { kind: 'tag', label: '#tps/record/v1/task/property-shaped' },
+      { kind: 'tag', label: '#work' },
+      { kind: 'tag', label: '#customer' },
+      { kind: 'action', label: '+' },
+    ],
+  );
+
+  frontmatter.tags = 'work, records/current/v2/task/item_current customer';
+  assert.deepEqual(
+    service.getPropertyPills(child, 'bullet').map(({ kind, label }) => ({ kind, label })),
+    [
+      { kind: 'tag', label: '#work' },
+      { kind: 'tag', label: '#customer' },
+      { kind: 'action', label: '+' },
+    ],
+  );
+});
+
+test('linked child rows contain long labels without widening the Markdown scroller', () => {
+  const stylesSource = readFileSync(new URL('../src/plugin-styles.ts', import.meta.url), 'utf8');
+  const rowSource = readFileSync(new URL('../src/services/linked-subitem-row-builder.ts', import.meta.url), 'utf8');
+  const rowRule = stylesSource.match(/\.tps-gcm-linked-subitem-row-content\s*\{[^}]+\}/u)?.[0] || '';
+  const pillsRule = stylesSource.match(/\.tps-gcm-linked-subitem-pills\s*\{[^}]+\}/u)?.[0] || '';
+  const pillRule = stylesSource.match(/\.tps-gcm-linked-subitem-pill\s*\{[^}]+\}/u)?.[0] || '';
+  const cmWidgetRule = stylesSource.match(/\.tps-gcm-linked-subitem-cm-widget\s*\{[^}]+\}/u)?.[0] || '';
+
+  assert.match(rowRule, /flex-wrap:\s*wrap/u);
+  assert.match(rowRule, /max-width:\s*100%/u);
+  assert.match(rowRule, /min-width:\s*0/u);
+  assert.doesNotMatch(rowRule, /flex-wrap:\s*nowrap|max-width:\s*none|overflow:\s*visible/u);
+  assert.match(pillsRule, /flex-wrap:\s*wrap/u);
+  assert.match(pillsRule, /max-width:\s*100%/u);
+  assert.match(pillsRule, /min-width:\s*0/u);
+  assert.match(pillRule, /max-width:\s*100%/u);
+  assert.match(pillRule, /min-width:\s*0/u);
+  assert.match(pillRule, /overflow:\s*hidden/u);
+  assert.match(pillRule, /text-overflow:\s*ellipsis/u);
+  assert.match(cmWidgetRule, /flex-wrap:\s*wrap/u);
+  assert.match(cmWidgetRule, /max-width:\s*100%/u);
+  assert.match(cmWidgetRule, /min-width:\s*0/u);
+  assert.doesNotMatch(cmWidgetRule, /flex-wrap:\s*nowrap|max-width:\s*none|overflow:\s*visible/u);
+  assert.match(
+    stylesSource,
+    /\.markdown-source-view\.mod-cm6\.is-live-preview[^\n]+\.tps-gcm-linked-subitem-cm-widget,[\s\S]{0,420}max-width:\s*calc\(100% - var\(--list-indent, 1\.5em\)\) !important/u,
+  );
+  assert.match(
+    stylesSource,
+    /\.markdown-reading-view li\.task-list-item\.tps-gcm-linked-subitem-task > p,[\s\S]{0,900}flex-wrap:\s*wrap !important;[\s\S]{0,180}max-width:\s*100% !important/u,
+  );
+  assert.match(rowSource, /link\.title = model\.displayLabel/u);
+  assert.match(rowSource, /link\.setAttribute\('aria-label', model\.displayLabel\)/u);
+  assert.match(rowSource, /link\.tabIndex = 0/u);
+  assert.match(rowSource, /link\.addEventListener\('keydown'/u);
+  assert.match(rowSource, /pill\.title = pillData\.label/u);
+  assert.match(rowSource, /pill\.setAttribute\('aria-label', pillData\.label\)/u);
+  assert.match(rowSource, /pill\.setAttribute\('role', 'button'\)/u);
+  assert.match(rowSource, /pill\.tabIndex = 0/u);
+  assert.match(rowSource, /pill\.addEventListener\('keydown'/u);
+  assert.match(stylesSource, /\.tps-gcm-linked-subitem-link:focus-visible,[\s\S]{0,160}outline:\s*2px solid var\(--interactive-accent\)/u);
+});
+
 test('the reserved blank checkbox remains intrinsically open even in malformed persisted mappings', async () => {
   const { getLinkedSubitemCompleteMarkers } = await linkedSubitemMappingPromise;
   assert.deepEqual(
