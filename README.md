@@ -1,5 +1,14 @@
 # TPS Global Context Menu
 
+## 1.44.1
+
+- In **Native Markdown records** mode, the explicit **Create task** command now always creates a note-backed `kind: task` record, even when the task has no Scheduled or Due value. The staged checkbox is immediately promoted, replaced by a stable task-note link in the selected containing note, and the new task note opens for editing.
+- The creation modal identifies this route as **Create task note**, labels the checkbox mapping as the task's initial status, and explains that the selected containing note receives the stable link. Legacy-mode copy and behavior remain unchanged.
+- Native creation mints a stable `tpsId` independently from optional Item History, so duplicate-looking task lines still promote deterministically and a preserved unlinked record can be recovered without allocating another identity.
+- Native/Legacy mode is bound when the modal opens and revalidated inside the atomic Markdown update. A setting change while the dialog is open fails without writing either route. A post-commit navigation failure reports that the task was created but could not be opened; it does not invite a duplicate retry.
+- If promotion cannot be confirmed, GCM preserves the exact staged checkbox for recovery and never follows with a misleading inline-success message. When the record was created but the source-link write lost a concurrent-edit race, the notice identifies the preserved recovery record instead of claiming it does not exist.
+- Hand-authored checkboxes remain lightweight. Scheduling or explicitly promoting one still uses the existing guarded promotion boundary; this patch changes only the explicit **Create task** command in native mode. No settings, record schema, Base, command ID, or public API migration is required. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.44.0
 
 - Daily Note navigation now has a **Visible day buttons** setting from one through seven. Short ranges stay contiguous around the active Daily Note, while seven preserves the existing Monday-Sunday week.

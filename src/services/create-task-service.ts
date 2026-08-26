@@ -15,6 +15,7 @@ import {
   type DirectTaskHistoryHandle,
   type DirectTaskHistoryLogContext,
 } from '../utils/direct-task-history';
+import { ensureTaskHistoryIdentity, getTaskHistoryIdentity } from './item-history-core';
 import {
   isLinkedSubitemSemanticCheckboxPlanCurrent,
   mapStatusToSubitemCheckboxState,
@@ -22,7 +23,6 @@ import {
   resolveLinkedSubitemSemanticCheckboxPlanForState,
 } from '../utils/linked-subitem-mapping';
 import * as logger from '../logger';
-import { taskLineNeedsNativeRecord } from './native-record-service';
 
 export class CreateTaskService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
@@ -47,6 +47,7 @@ export class CreateTaskService {
       defaultTimeEstimate: 30,
       checkboxOptions,
       defaultCheckboxMarker,
+      createTrackedRecord: this.plugin.nativeRecordService?.isEnabled() === true,
       onSubmit: async (result) => {
         await this.createTask(result);
       },
@@ -57,6 +58,16 @@ export class CreateTaskService {
     const title = String(result.title || '').trim();
     if (!title) {
       new Notice('Task title is required.');
+      return null;
+    }
+
+    const nativeRecordModeEnabled = this.plugin.nativeRecordService?.isEnabled() === true;
+    if (result.createTrackedRecord !== nativeRecordModeEnabled) {
+      logger.flowWarn('CreateTask', 'route:mode-changed', {
+        expected: result.createTrackedRecord ? 'native-records' : 'legacy',
+        current: nativeRecordModeEnabled ? 'native-records' : 'legacy',
+      });
+      new Notice('Task creation mode changed while this dialog was open. Reopen Create task and try again.');
       return null;
     }
 
@@ -134,12 +145,20 @@ export class CreateTaskService {
           rawLine: stampedTaskLine,
         },
       });
+      const nativeTaskIdentity = nativeRecordModeEnabled
+        ? String(historyHandle?.entityId || '').trim() || this.plugin.identityService.createInternalId()
+        : '';
       let mappingChanged = false;
+      let modeChanged = false;
       let writeAccepted = false;
       let historyReady = true;
       let insertedTaskLine = stampedTaskLine;
       let insertedLineNumber = 0;
       await this.plugin.app.vault.process(targetFile, (content) => {
+        if ((this.plugin.nativeRecordService?.isEnabled() === true) !== nativeRecordModeEnabled) {
+          modeChanged = true;
+          return content;
+        }
         if (!isLinkedSubitemSemanticCheckboxPlanCurrent(
           this.getConfiguredMappings(),
           creationPlan,
@@ -159,11 +178,25 @@ export class CreateTaskService {
           historyContext!,
         );
         insertedTaskLine = historyIdentity.line.trim();
+        if (nativeRecordModeEnabled && !getTaskHistoryIdentity(insertedTaskLine)) {
+          insertedTaskLine = ensureTaskHistoryIdentity(insertedTaskLine, nativeTaskIdentity);
+        }
         historyReady = historyReady && historyIdentity.ready;
         const trimmedContent = String(content || '').replace(/\s+$/gu, '');
         insertedLineNumber = trimmedContent ? trimmedContent.split(/\r?\n/u).length : 0;
         return insertLineAfterFrontmatter(content, insertedTaskLine);
       });
+      if (modeChanged) {
+        await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
+        historySettled = true;
+        logger.flowWarn('CreateTask', 'write:mode-changed', {
+          expected: nativeRecordModeEnabled ? 'native-records' : 'legacy',
+          current: this.plugin.nativeRecordService?.isEnabled() === true ? 'native-records' : 'legacy',
+          targetPath: targetFile.path,
+        });
+        new Notice('Task creation mode changed while this dialog was open. Reopen Create task and try again.');
+        return null;
+      }
       if (mappingChanged || !writeAccepted) {
         await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
         historySettled = true;
@@ -188,10 +221,7 @@ export class CreateTaskService {
         await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       }
       historySettled = true;
-      if (
-        this.plugin.nativeRecordService?.isEnabled()
-        && taskLineNeedsNativeRecord(insertedTaskLine)
-      ) {
+      if (nativeRecordModeEnabled) {
         const promotion = await this.plugin.nativeRecordService.promoteTask({
           path: targetFile.path,
           lineNumber: insertedLineNumber,
@@ -199,24 +229,37 @@ export class CreateTaskService {
         }, {
           kind: 'user',
           sourcePluginId: 'tps-global-context-menu',
-          surface: 'create-task-modal:instantiate-dated-task',
+          surface: 'create-task-modal:native-task-record',
         });
         if (promotion.ok && promotion.record) {
-          new Notice(`Created tracked task in ${promotion.record.path}`);
-          await this.plugin.openFileInLeaf(
-            promotion.record.file,
-            false,
-            () => this.plugin.app.workspace.getLeaf(false),
-            { revealLeaf: true },
-          );
+          try {
+            await this.plugin.openFileInLeaf(
+              promotion.record.file,
+              false,
+              () => this.plugin.app.workspace.getLeaf(false),
+              { revealLeaf: true },
+            );
+            new Notice(`Created task note ${promotion.record.path}`);
+          } catch (error) {
+            logger.flowWarn('CreateTask', 'native-task:open-failed', {
+              recordPath: promotion.record.path,
+              error: error instanceof Error ? error.message : String(error),
+            });
+            new Notice(`Created task note ${promotion.record.path}, but it could not be opened automatically.`);
+          }
           return promotion.record.file;
         }
-        logger.flowWarn('CreateTask', 'dated-task:promotion-failed', {
+        logger.flowWarn('CreateTask', 'native-task:promotion-failed', {
           path: targetFile.path,
           lineNumber: insertedLineNumber + 1,
           error: promotion.error || 'unknown',
         });
-        new Notice(`Task was created, but its tracked record could not be created: ${promotion.error || 'unknown error'}`);
+        if (promotion.record) {
+          new Notice(`Task note ${promotion.record.path} was created, but its stable link could not be written. The task checkbox was preserved for recovery: ${promotion.error || 'unknown error'}`);
+        } else {
+          new Notice(`The task checkbox was preserved for recovery, but task-note creation could not be completed: ${promotion.error || 'unknown error'}`);
+        }
+        return null;
       }
       new Notice(`Created task in ${targetFile.basename}`);
       await this.focusLineBeforeInsertedTask(targetFile, insertedTaskLine);

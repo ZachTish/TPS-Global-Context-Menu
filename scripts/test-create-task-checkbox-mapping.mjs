@@ -11,6 +11,7 @@ async function loadCreateTaskModules() {
     stdin: {
       contents: `
         export { CreateTaskService } from './src/services/create-task-service.ts';
+        export { resolveCreateTaskModalCopy } from './src/modals/create-task-modal.ts';
         export { AiAssistedTaskService } from './src/services/ai-assisted-task-service.ts';
         export { buildCreatedTaskLine, normalizeCreateTaskCheckboxMarker } from './src/utils/create-task-parser.ts';
         export { TFile, Notice } from 'obsidian';
@@ -91,6 +92,7 @@ function normalizeStatus(value) {
 
 function taskResult(overrides = {}) {
   return {
+    createTrackedRecord: false,
     title: 'Mapped task',
     targetFile: null,
     checkboxMarker: 'o',
@@ -119,6 +121,24 @@ test('create-task parser rejects missing and malformed checkbox tokens instead o
     () => buildCreatedTaskLine({ title: 'No truncation', checkboxMarker: 'oops' }),
     /must be one configured character/,
   );
+});
+
+test('Create task modal copy distinguishes a native task note from a legacy checkbox', async () => {
+  const { resolveCreateTaskModalCopy } = await loadCreateTaskModules();
+  assert.deepEqual(resolveCreateTaskModalCopy(true), {
+    title: 'Create task note',
+    taskDescription: 'Creates a note-backed task. Natural language schedule text is parsed into its Scheduled field.',
+    targetDescription: 'The containing note receives a stable link to the new task note.',
+    checkboxLabel: 'Initial status',
+    submitLabel: 'Create task note',
+  });
+  assert.deepEqual(resolveCreateTaskModalCopy(false), {
+    title: 'Create task',
+    taskDescription: 'Natural language schedule text is parsed into the Scheduled field.',
+    targetDescription: 'The containing note is the task parent.',
+    checkboxLabel: 'Checkbox',
+    submitLabel: 'Create task',
+  });
 });
 
 test('manual create derives ordered options and rebuilds the line from the selected configured marker', async () => {
@@ -210,7 +230,7 @@ test('manual create derives ordered options and rebuilds the line from the selec
   assert.match(historyEvents[4].input.after.rawLine, /\[tpsId:: create-history-id\]/u);
 });
 
-test('manual create promotes a confirmed scheduled task into a native record', async () => {
+test('manual Create task always promotes a confirmed native-mode task into a note-backed record', async () => {
   const { CreateTaskService, TFile, Notice } = await loadCreateTaskModules();
   globalThis.window = { setTimeout: (callback) => callback(), moment: () => ({ format: () => '2026-08-02' }) };
   Notice.messages.length = 0;
@@ -248,6 +268,7 @@ test('manual create promotes a confirmed scheduled task into a native record', a
         };
       },
     },
+    identityService: { createInternalId: () => 'item_native-create-fallback' },
     app: {
       vault: {
         async process(_file, updater) { content = updater(content); },
@@ -260,20 +281,328 @@ test('manual create promotes a confirmed scheduled task into a native record', a
   };
 
   const created = await new CreateTaskService(plugin).createTask(taskResult({
+    createTrackedRecord: true,
     targetFile: sourceFile,
-    scheduledValue: '2026-08-26 09:00:00',
-    timeEstimate: 30,
   }));
 
   assert.equal(created, recordFile);
   assert.equal(promotions.length, 1);
   assert.equal(promotions[0].ref.path, sourceFile.path);
   assert.equal(promotions[0].ref.lineNumber, 1);
-  assert.match(promotions[0].ref.rawLine, /\[scheduled:: 2026-08-26 09:00:00\]/u);
+  assert.doesNotMatch(promotions[0].ref.rawLine, /\[(?:scheduled|due)::/u);
   assert.match(promotions[0].ref.rawLine, /\[tpsId:: create-history-id\]/u);
-  assert.equal(promotions[0].cause.surface, 'create-task-modal:instantiate-dated-task');
+  assert.equal(promotions[0].cause.surface, 'create-task-modal:native-task-record');
   assert.deepEqual(opened, [recordFile]);
-  assert.ok(Notice.messages.some((message) => message.includes('Created tracked task')));
+  assert.ok(Notice.messages.some((message) => message.includes('Created task note')));
+});
+
+test('manual Create task never reports inline success when native record promotion fails', async () => {
+  const { CreateTaskService, TFile, Notice } = await loadCreateTaskModules();
+  globalThis.window = { setTimeout: (callback) => callback(), moment: () => ({ format: () => '2026-08-02' }) };
+  Notice.messages.length = 0;
+  const sourceFile = new TFile('Inbox/Tasks.md');
+  let content = '# Tasks\n';
+  const plugin = {
+    settings: {
+      linkedSubitemCheckboxMappings: mappings(),
+      autoSyncFileTimestamps: false,
+      dateCreatedFrontmatterKey: 'createdDate',
+      dateModifiedFrontmatterKey: 'modifiedDate',
+      fileTimestampFormat: 'YYYY-MM-DD HH:mm:ss',
+    },
+    sharedServices: { status: { normalize: normalizeStatus } },
+    noteOperationService: { async ensureDailyNote() { return sourceFile; } },
+    itemHistoryService: {
+      async beginTaskMutation() { return { id: 'pending-create' }; },
+      ensureTaskIdentity(_handle, line) { return `${line} [tpsId:: create-history-id]`; },
+      async commitTaskMutation() {},
+      async abortTaskMutation() {},
+    },
+    nativeRecordService: {
+      isEnabled: () => true,
+      async promoteTask() {
+        return { ok: false, changed: false, record: null, error: 'promotion failed' };
+      },
+    },
+    identityService: { createInternalId: () => 'item_native-create-fallback' },
+    app: {
+      vault: {
+        async process(_file, updater) { content = updater(content); },
+        async cachedRead() { return content; },
+      },
+      workspace: { getLeaf: () => ({}) },
+    },
+    async openFileInLeaf() {},
+    findOpenLeafForFile() { return null; },
+  };
+
+  const created = await new CreateTaskService(plugin).createTask(taskResult({
+    createTrackedRecord: true,
+    targetFile: sourceFile,
+  }));
+
+  assert.equal(created, null);
+  assert.match(content, /- \[o\] Mapped task/u, 'the exact staged checkbox stays available for retry');
+  assert.ok(Notice.messages.some((message) => message.includes('preserved for recovery')));
+  assert.ok(Notice.messages.every((message) => !message.includes('Created task in')));
+});
+
+test('manual Create task reports a preserved recovery record when source-link replacement loses its race', async () => {
+  const { CreateTaskService, TFile, Notice } = await loadCreateTaskModules();
+  globalThis.window = { setTimeout: (callback) => callback(), moment: () => ({ format: () => '2026-08-02' }) };
+  Notice.messages.length = 0;
+  const sourceFile = new TFile('Inbox/Tasks.md');
+  const recoveryFile = new TFile('2026-08-26 - Mapped task.md');
+  let content = '# Tasks\n';
+  const plugin = {
+    settings: {
+      linkedSubitemCheckboxMappings: mappings(),
+      autoSyncFileTimestamps: false,
+      dateCreatedFrontmatterKey: 'createdDate',
+      dateModifiedFrontmatterKey: 'modifiedDate',
+      fileTimestampFormat: 'YYYY-MM-DD HH:mm:ss',
+    },
+    sharedServices: { status: { normalize: normalizeStatus } },
+    noteOperationService: { async ensureDailyNote() { return sourceFile; } },
+    itemHistoryService: {
+      async beginTaskMutation() { return { id: 'pending-create' }; },
+      ensureTaskIdentity(_handle, line) { return `${line} [tpsId:: create-history-id]`; },
+      async commitTaskMutation() {},
+      async abortTaskMutation() {},
+    },
+    nativeRecordService: {
+      isEnabled: () => true,
+      async promoteTask() {
+        return {
+          ok: false,
+          changed: true,
+          record: { file: recoveryFile, path: recoveryFile.path },
+          error: 'The task changed before its stable record link could be written.',
+        };
+      },
+    },
+    identityService: { createInternalId: () => 'item_native-create-fallback' },
+    app: {
+      vault: {
+        async process(_file, updater) { content = updater(content); },
+        async cachedRead() { return content; },
+      },
+      workspace: { getLeaf: () => ({}) },
+    },
+    async openFileInLeaf() {},
+    findOpenLeafForFile() { return null; },
+  };
+
+  const created = await new CreateTaskService(plugin).createTask(taskResult({
+    createTrackedRecord: true,
+    targetFile: sourceFile,
+  }));
+
+  assert.equal(created, null);
+  assert.match(content, /- \[o\] Mapped task/u, 'the exact staged checkbox stays available for retry');
+  assert.ok(Notice.messages.some((message) => message.includes(`Task note ${recoveryFile.path} was created`)));
+  assert.ok(Notice.messages.some((message) => message.includes('stable link could not be written')));
+  assert.ok(Notice.messages.every((message) => !message.includes('task note could not be created')));
+  assert.ok(Notice.messages.every((message) => !message.includes('Created task in')));
+});
+
+test('Create task fails closed before any write when its native or legacy route changes while open', async () => {
+  const { CreateTaskService, Notice } = await loadCreateTaskModules();
+  Notice.messages.length = 0;
+  for (const [expectedNative, currentNative] of [[true, false], [false, true]]) {
+    let processCalls = 0;
+    let dailyNoteCalls = 0;
+    const plugin = {
+      nativeRecordService: { isEnabled: () => currentNative },
+      noteOperationService: {
+        async ensureDailyNote() {
+          dailyNoteCalls += 1;
+          return null;
+        },
+      },
+      app: {
+        vault: {
+          async process() { processCalls += 1; },
+        },
+      },
+    };
+
+    const created = await new CreateTaskService(plugin).createTask(taskResult({
+      createTrackedRecord: expectedNative,
+    }));
+
+    assert.equal(created, null);
+    assert.equal(processCalls, 0);
+    assert.equal(dailyNoteCalls, 0);
+  }
+  assert.equal(Notice.messages.filter((message) => message.includes('mode changed')).length, 2);
+});
+
+test('Create task rechecks its native or legacy route inside the atomic write boundary', async () => {
+  const { CreateTaskService, TFile, Notice } = await loadCreateTaskModules();
+  Notice.messages.length = 0;
+  for (const initialNative of [true, false]) {
+    const sourceFile = new TFile('Inbox/Tasks.md');
+    const original = '# Tasks\n';
+    let content = original;
+    let currentNative = initialNative;
+    let processCalls = 0;
+    let promotionCalls = 0;
+    let abortCalls = 0;
+    const plugin = {
+      settings: {
+        linkedSubitemCheckboxMappings: mappings(),
+        autoSyncFileTimestamps: false,
+        dateCreatedFrontmatterKey: 'createdDate',
+        dateModifiedFrontmatterKey: 'modifiedDate',
+        fileTimestampFormat: 'YYYY-MM-DD HH:mm:ss',
+      },
+      sharedServices: { status: { normalize: normalizeStatus } },
+      itemHistoryService: {
+        async beginTaskMutation() {
+          currentNative = !initialNative;
+          return { id: 'pending-create', entityId: 'item_mode-race' };
+        },
+        ensureTaskIdentity(_handle, line) { return `${line} [tpsId:: item_mode-race]`; },
+        async abortTaskMutation() { abortCalls += 1; },
+      },
+      identityService: { createInternalId: () => 'item_mode-fallback' },
+      nativeRecordService: {
+        isEnabled: () => currentNative,
+        async promoteTask() { promotionCalls += 1; },
+      },
+      app: {
+        vault: {
+          async process(_file, updater) {
+            processCalls += 1;
+            content = updater(content);
+          },
+        },
+      },
+    };
+
+    const created = await new CreateTaskService(plugin).createTask(taskResult({
+      createTrackedRecord: initialNative,
+      targetFile: sourceFile,
+    }));
+
+    assert.equal(created, null);
+    assert.equal(content, original);
+    assert.equal(processCalls, 1, 'the atomic updater observes and rejects the late mode change');
+    assert.equal(promotionCalls, 0);
+    assert.equal(abortCalls, 1);
+  }
+  assert.equal(Notice.messages.filter((message) => message.includes('mode changed')).length, 2);
+});
+
+test('Create task returns its created record when automatic navigation fails', async () => {
+  const { CreateTaskService, TFile, Notice } = await loadCreateTaskModules();
+  globalThis.window = { setTimeout: (callback) => callback(), moment: () => ({ format: () => '2026-08-02' }) };
+  Notice.messages.length = 0;
+  const sourceFile = new TFile('Inbox/Tasks.md');
+  const recordFile = new TFile('2026-08-26 - Mapped task.md');
+  let content = '# Tasks\n';
+  const plugin = {
+    settings: {
+      linkedSubitemCheckboxMappings: mappings(),
+      autoSyncFileTimestamps: false,
+      dateCreatedFrontmatterKey: 'createdDate',
+      dateModifiedFrontmatterKey: 'modifiedDate',
+      fileTimestampFormat: 'YYYY-MM-DD HH:mm:ss',
+    },
+    sharedServices: { status: { normalize: normalizeStatus } },
+    noteOperationService: { async ensureDailyNote() { return sourceFile; } },
+    itemHistoryService: {
+      async beginTaskMutation() { return { id: 'pending-create' }; },
+      ensureTaskIdentity(_handle, line) { return `${line} [tpsId:: create-history-id]`; },
+      async commitTaskMutation() {},
+      async abortTaskMutation() {},
+    },
+    nativeRecordService: {
+      isEnabled: () => true,
+      async promoteTask() {
+        return {
+          ok: true,
+          changed: true,
+          record: { file: recordFile, path: recordFile.path },
+        };
+      },
+    },
+    identityService: { createInternalId: () => 'item_native-create-fallback' },
+    app: {
+      vault: {
+        async process(_file, updater) { content = updater(content); },
+        async cachedRead() { return content; },
+      },
+      workspace: { getLeaf: () => ({}) },
+    },
+    async openFileInLeaf() { throw new Error('navigation failed'); },
+    findOpenLeafForFile() { return null; },
+  };
+
+  const created = await new CreateTaskService(plugin).createTask(taskResult({
+    createTrackedRecord: true,
+    targetFile: sourceFile,
+  }));
+
+  assert.equal(created, recordFile);
+  assert.ok(Notice.messages.some((message) => message.includes('could not be opened automatically')));
+  assert.ok(Notice.messages.every((message) => !message.includes('Unable to create task')));
+});
+
+test('native Create task mints a stable identity without Item History and disambiguates duplicate raw lines', async () => {
+  const { CreateTaskService, TFile } = await loadCreateTaskModules();
+  globalThis.window = { setTimeout: (callback) => callback(), moment: () => ({ format: () => '2026-08-02' }) };
+  const sourceFile = new TFile('Inbox/Tasks.md');
+  const recordFile = new TFile('2026-08-26 - Mapped task.md');
+  let content = '# Tasks\n- [o] Mapped task\n';
+  let promotedRef = null;
+  const plugin = {
+    settings: {
+      linkedSubitemCheckboxMappings: mappings(),
+      autoSyncFileTimestamps: false,
+      dateCreatedFrontmatterKey: 'createdDate',
+      dateModifiedFrontmatterKey: 'modifiedDate',
+      fileTimestampFormat: 'YYYY-MM-DD HH:mm:ss',
+    },
+    sharedServices: { status: { normalize: normalizeStatus } },
+    noteOperationService: { async ensureDailyNote() { return sourceFile; } },
+    itemHistoryService: {
+      async beginTaskMutation() { return null; },
+    },
+    identityService: { createInternalId: () => 'item_native-create-no-history' },
+    nativeRecordService: {
+      isEnabled: () => true,
+      async promoteTask(ref) {
+        promotedRef = ref;
+        return {
+          ok: true,
+          changed: true,
+          record: { file: recordFile, path: recordFile.path },
+        };
+      },
+    },
+    app: {
+      vault: {
+        async process(_file, updater) { content = updater(content); },
+        async cachedRead() { return content; },
+      },
+      workspace: { getLeaf: () => ({}) },
+    },
+    async openFileInLeaf() {},
+    findOpenLeafForFile() { return null; },
+  };
+
+  const created = await new CreateTaskService(plugin).createTask(taskResult({
+    createTrackedRecord: true,
+    targetFile: sourceFile,
+  }));
+
+  assert.equal(created, recordFile);
+  assert.equal(promotedRef.lineNumber, 2);
+  assert.match(promotedRef.rawLine, /\[tpsId:: item_native-create-no-history\]/u);
+  assert.match(content, /- \[o\] Mapped task \[tpsId:: item_native-create-no-history\]/u);
+  assert.equal(content.match(/^- \[o\] Mapped task$/gmu)?.length, 1, 'the pre-existing duplicate remains distinct');
 });
 
 test('manual create fails before target creation or processing when mappings are missing or stale', async () => {

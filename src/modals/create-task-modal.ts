@@ -7,6 +7,7 @@ import {
 } from '../utils/create-task-parser';
 
 export interface CreateTaskModalResult {
+  createTrackedRecord: boolean;
   title: string;
   targetFile: TFile | null;
   checkboxMarker: string;
@@ -17,6 +18,32 @@ export interface CreateTaskModalResult {
   allDay: boolean;
   timeEstimate: number;
   taskLine: string;
+}
+
+export interface CreateTaskModalCopy {
+  title: string;
+  taskDescription: string;
+  targetDescription: string;
+  checkboxLabel: string;
+  submitLabel: string;
+}
+
+export function resolveCreateTaskModalCopy(createTrackedRecord: boolean): CreateTaskModalCopy {
+  return createTrackedRecord
+    ? {
+      title: 'Create task note',
+      taskDescription: 'Creates a note-backed task. Natural language schedule text is parsed into its Scheduled field.',
+      targetDescription: 'The containing note receives a stable link to the new task note.',
+      checkboxLabel: 'Initial status',
+      submitLabel: 'Create task note',
+    }
+    : {
+      title: 'Create task',
+      taskDescription: 'Natural language schedule text is parsed into the Scheduled field.',
+      targetDescription: 'The containing note is the task parent.',
+      checkboxLabel: 'Checkbox',
+      submitLabel: 'Create task',
+    };
 }
 
 export interface CreateTaskCheckboxOption {
@@ -49,6 +76,7 @@ export class CreateTaskModal extends Modal {
       defaultTimeEstimate: number;
       checkboxOptions: readonly CreateTaskCheckboxOption[];
       defaultCheckboxMarker: string;
+      createTrackedRecord: boolean;
       onSubmit: (result: CreateTaskModalResult) => void | Promise<void>;
     },
   ) {
@@ -59,12 +87,13 @@ export class CreateTaskModal extends Modal {
   onOpen(): void {
     this.modalEl.addClass('mod-tps-gcm', 'tps-gcm-create-task-modal');
     const { contentEl } = this;
+    const copy = resolveCreateTaskModalCopy(this.options.createTrackedRecord);
     contentEl.empty();
-    contentEl.createEl('h2', { text: 'Create task' });
+    contentEl.createEl('h2', { text: copy.title });
 
     new Setting(contentEl)
       .setName('Task')
-      .setDesc('Natural language schedule text is parsed into the Scheduled field.')
+      .setDesc(copy.taskDescription)
       .addText((text) => {
         this.titleInput = text;
         text.setPlaceholder('go for a run tomorrow at 5pm #health');
@@ -86,7 +115,7 @@ export class CreateTaskModal extends Modal {
 
     new Setting(contentEl)
       .setName('Write to')
-      .setDesc('The containing note is the task parent.')
+      .setDesc(copy.targetDescription)
       .addButton((button) => {
         this.targetEl = button.buttonEl;
         this.renderTargetButton();
@@ -99,7 +128,7 @@ export class CreateTaskModal extends Modal {
       });
 
     new Setting(contentEl)
-      .setName('Checkbox')
+      .setName(copy.checkboxLabel)
       .addDropdown((dropdown) => {
         this.checkboxInput = dropdown.selectEl;
         for (const option of this.options.checkboxOptions) {
@@ -159,7 +188,10 @@ export class CreateTaskModal extends Modal {
         button.setButtonText('Cancel').onClick(() => this.close());
       })
       .addButton((button) => {
-        button.setButtonText('Create task').setCta().onClick(() => void this.submit());
+        button
+          .setButtonText(copy.submitLabel)
+          .setCta()
+          .onClick(() => void this.submit());
       });
 
     this.reparseFromTitle();
@@ -228,6 +260,7 @@ export class CreateTaskModal extends Modal {
     const checkboxOption = this.options.checkboxOptions
       .find((option) => option.checkboxMarker === checkboxMarker);
     const result: CreateTaskModalResult = {
+      createTrackedRecord: this.options.createTrackedRecord,
       title: this.parsed.title || this.titleInput?.getValue?.() || 'Untitled task',
       targetFile: this.targetFile,
       checkboxMarker,
