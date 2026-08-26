@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.44.0
+
+- Daily Note navigation now has a **Visible day buttons** setting from one through seven. Short ranges stay contiguous around the active Daily Note, while seven preserves the existing Monday-Sunday week.
+- Existing vaults remain at seven days. Saved values are clamped safely on load and save, and changing the control rebuilds the current navigation strip immediately.
+- Previous, Today, and Next behavior is unchanged. The setting changes only the visible date-button range and does not rewrite Daily Notes.
+- This is a backward-compatible appearance feature with no note migration or public API change. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.43.2
 
 - Daily Note identity is now strict and centralized. GCM accepts the current canonical path, an unambiguous whole-name legacy date, or explicit Daily Note metadata; a date embedded in a calendar, food, workout, task, or other record filename is never enough.
@@ -1080,6 +1087,7 @@ TPS Table and TPS List use the same source-aware picker for empty and populated 
 - Settings open on an always-visible **Choose what to configure** hub with five destinations: **Rules & fields**, **Menus & surfaces**, **Workflows**, **Appearance**, and **Advanced**. Only the selected page is rendered.
 - **Menus & surfaces → Linked context** owns the panel toggle and stable source-path A → Z / Z → A ordering. The order remains editable while the panel is off; placement and activation appear beside it when enabled.
 - **Menus & surfaces → Note navigation** owns the existing note-navigation master and placement plus independent default-on Calendar, Tasks, and Mentions visibility controls. These settings stay editable while either master is off, use the same button factories for below-title and bottom-toolbar placement, and do not alter the scheduled Daily Note shortcut.
+- **Appearance → Daily Note Navigation → Visible day buttons** controls the Daily Note timeline from one through seven days. The persisted `dailyNavDayCount` value is clamped to that range and defaults to seven, preserving the existing ISO Monday-Sunday strip. Counts below seven form one contiguous range around the active Daily Note; odd counts balance evenly, while even counts place the extra day before the active day. Changing the setting rebuilds the current strip immediately without changing Previous, Today, or Next navigation.
 - Note navigation and **Linked context** share stable mount ownership but independent visibility. Repeated note-open and layout reconciliation reuses unchanged top and bottom navigation, removes context belonging to the previously opened file before replacement work begins, and swaps same-file context only after its complete candidate is ready. A view-scoped observer recovers the panel when Obsidian replaces its Reading View or Live Preview mount while scrolling; source edits, renames, and deletions also invalidate dependent panels.
 - **Rules & fields** has a flat selector for Frontmatter rules, Custom fields, and View mode. Frontmatter rules expose direct Sort buckets, Tag rules, and Icon + color editors; Custom fields keeps placement/display controls beside field definitions; View mode keeps its master controls, keys, folders, and rules on one page.
 - Custom-field keys use case-insensitive exact identity after trimming only edge whitespace. Blank keys and duplicate exact identities are reported inline and are not saved over a valid key; existing invalid definitions remain visible for repair and are never renamed automatically. Punctuation and interior whitespace stay significant, and a newly added field receives a unique default key.

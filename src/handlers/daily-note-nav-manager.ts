@@ -2,6 +2,7 @@ import { App, Component, MarkdownView, Modal, TFile, WorkspaceLeaf, setIcon, nor
 import TPSGlobalContextMenuPlugin from "../main";
 import * as logger from "../logger";
 import { isStrictSourceMode } from "../services/leaf-resolver";
+import { getDailyNavDayOffsets, normalizeDailyNavDayCount } from "../utils/daily-note-nav-days";
 
 type DailyNavTarget = {
     leaf: WorkspaceLeaf;
@@ -19,6 +20,7 @@ export class DailyNoteNavManager extends Component {
     private _currentLeaf: WorkspaceLeaf | null = null;
     private _currentIsoDate: string | null = null;
     private _currentKind: DailyNavTarget["kind"] | null = null;
+    private _currentDayCount: number | null = null;
 
     constructor(plugin: TPSGlobalContextMenuPlugin) {
         super();
@@ -122,11 +124,14 @@ export class DailyNoteNavManager extends Component {
             return;
         }
 
+        const dayCount = normalizeDailyNavDayCount(this.plugin.settings.dailyNavDayCount);
+
         if (
             this.currentNav?.isConnected &&
             this._currentLeaf === target.leaf &&
             this._currentIsoDate === target.isoDate &&
-            this._currentKind === target.kind
+            this._currentKind === target.kind &&
+            this._currentDayCount === dayCount
         ) {
             return;
         }
@@ -135,6 +140,7 @@ export class DailyNoteNavManager extends Component {
         this._currentLeaf = target.leaf;
         this._currentIsoDate = target.isoDate;
         this._currentKind = target.kind;
+        this._currentDayCount = dayCount;
         if (target.kind === "daily-note") {
             this.injectNav(target.leaf, target.isoDate);
         } else {
@@ -161,6 +167,7 @@ export class DailyNoteNavManager extends Component {
         this._currentLeaf = null;
         this._currentIsoDate = null;
         this._currentKind = null;
+        this._currentDayCount = null;
     }
 
     private getTargetLeaf(): DailyNavTarget | null {
@@ -317,12 +324,15 @@ export class DailyNoteNavManager extends Component {
         const activeDate = m(isoDateStr, "YYYY-MM-DD");
         const todayIso = m().format("YYYY-MM-DD");
         const isTodayActive = isoDateStr === todayIso;
-        const weekStart = activeDate.clone().isoWeekday(1);
+        const dayOffsets = getDailyNavDayOffsets(
+            this.plugin.settings.dailyNavDayCount,
+            activeDate.isoWeekday()
+        );
 
         const timeline = nav.createDiv({ cls: "tps-daily-nav-timeline" });
         this.hardenNavControl(timeline);
-        for (let offset = 0; offset < 7; offset++) {
-            const day = weekStart.clone().add(offset, "days");
+        for (const offset of dayOffsets) {
+            const day = activeDate.clone().add(offset, "days");
             const dayIso = day.format("YYYY-MM-DD");
             const dayBtn = timeline.createEl("button", {
                 cls: "tps-daily-nav-day",

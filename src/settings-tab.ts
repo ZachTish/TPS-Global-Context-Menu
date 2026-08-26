@@ -49,6 +49,7 @@ import {
   OBSIDIAN_BASES_FUNCTIONS_URL,
   OBSIDIAN_BASES_SYNTAX_URL,
 } from './base-query-guide';
+import { normalizeDailyNavDayCount } from './utils/daily-note-nav-days';
 
 const NN_TEXT_COMMIT_DEBOUNCE_MS = 300;
 export const LEGACY_GCM_NOTEBOOK_NAVIGATOR_RULE_SETTINGS_STYLE_ID = 'tps-gcm-notebook-navigator-rule-settings-style';
@@ -1074,6 +1075,21 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           }),
       );
     attachAppearanceSyncToggle(dailyNavScaleSetting, 'dailyNavScale');
+
+    new Setting(appearance)
+      .setName('Visible day buttons')
+      .setDesc('Choose how many contiguous days the Daily Note navigator shows. Seven keeps the existing Monday-Sunday week; shorter ranges stay centered on the active day.')
+      .addSlider((slider) =>
+        slider
+          .setLimits(1, 7, 1)
+          .setDynamicTooltip()
+          .setValue(normalizeDailyNavDayCount(this.plugin.settings.dailyNavDayCount))
+          .onChange(async (value) => {
+            this.plugin.settings.dailyNavDayCount = normalizeDailyNavDayCount(value);
+            await this.plugin.saveSettings();
+            this.plugin.dailyNoteNavManager?.refresh();
+          }),
+      );
 
     const dailyNavOpacitySetting = new Setting(appearance)
       .setName('Nav resting opacity')

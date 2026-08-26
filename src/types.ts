@@ -622,6 +622,7 @@ export interface TPSGlobalContextMenuSettings {
 
   // Daily Note Navigation
   enableDailyNoteNav: boolean;
+  dailyNavDayCount: number;
   enableTopParentNav: boolean;
   topParentNavPlacement: 'top' | 'bottom';
   showCalendarNavButton: boolean;

@@ -181,6 +181,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   workspaceRibbonButtons: false,
   workspaceRibbonIcons: {},
   enableDailyNoteNav: true,
+  dailyNavDayCount: 7,
   enableTopParentNav: true,
   topParentNavPlacement: 'top',
   showCalendarNavButton: true,

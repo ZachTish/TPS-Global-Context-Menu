@@ -124,6 +124,7 @@ import { TpsNotebookNavigatorMenuBridge } from './services/tps-notebook-navigato
 import { shouldReuseCustomPropertyPreviewPanel } from './services/custom-property-visibility';
 import { ItemHistoryService } from './services/item-history-service';
 import { createLivePreviewBodySelectionExtension } from './services/live-preview-body-selection-service';
+import { normalizeDailyNavDayCount } from './utils/daily-note-nav-days';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -2151,6 +2152,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (this.settings.topParentNavPlacement !== 'top' && this.settings.topParentNavPlacement !== 'bottom') {
       this.settings.topParentNavPlacement = DEFAULT_SETTINGS.topParentNavPlacement;
     }
+    this.settings.dailyNavDayCount = normalizeDailyNavDayCount(this.settings.dailyNavDayCount);
     if (this.settings.linkedContextPlacement !== 'top' && this.settings.linkedContextPlacement !== 'bottom') {
       this.settings.linkedContextPlacement = DEFAULT_SETTINGS.linkedContextPlacement;
     }
@@ -2822,6 +2824,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   async saveSettings(): Promise<void> {
     this.settings.parentLinkFormat = normalizeParentLinkFormat(this.settings.parentLinkFormat);
+    this.settings.dailyNavDayCount = normalizeDailyNavDayCount(this.settings.dailyNavDayCount);
     this.settings.linkedSubitemCheckboxMappings = normalizeLinkedSubitemMappings(
       this.settings.linkedSubitemCheckboxMappings,
       { enforceStrictDefaults: true },
