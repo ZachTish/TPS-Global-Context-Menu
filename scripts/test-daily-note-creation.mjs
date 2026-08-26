@@ -80,7 +80,15 @@ async function loadDailyNoteTaskSchedule() {
 
 async function loadFileNamingService() {
   const result = await build({
-    entryPoints: [fileURLToPath(new URL('../src/services/file-naming-service.ts', import.meta.url))],
+    stdin: {
+      contents: [
+        "export * from './src/services/file-naming-service.ts';",
+        "export { findExistingDailyNoteForIsoDate, parseDailyNoteFileDate } from './src/utils/daily-note-task-schedule.ts';",
+      ].join('\n'),
+      resolveDir: fileURLToPath(new URL('..', import.meta.url)),
+      sourcefile: 'file-naming-test-entry.ts',
+      loader: 'ts',
+    },
     bundle: true,
     write: false,
     platform: 'node',
@@ -95,15 +103,29 @@ async function loadFileNamingService() {
           contents: `
             export class TFile {
               constructor(path) {
+                this.__isTestTFile = true;
                 this.path = path;
                 this.name = path.split('/').pop() || path;
                 this.extension = this.name.includes('.') ? this.name.split('.').pop() : '';
                 this.basename = this.name.replace(/\\.[^.]+$/, '');
               }
+              static [Symbol.hasInstance](value) {
+                return Boolean(value && value.__isTestTFile === true);
+              }
             }
+            export class TFolder {}
+            export class Notice {}
+            export class Menu {}
+            const momentFactory = (value, format) => globalThis.window?.moment?.(value, format)
+              || { isValid: () => false, format: () => String(value || '') };
+            momentFactory.ISO_8601 = Symbol('ISO_8601');
+            momentFactory.invalid = () => ({ isValid: () => false, format: () => '' });
+            export const moment = momentFactory;
             export function normalizePath(path) {
               return String(path || '').replace(/\\\\/g, '/').replace(/\\/{2,}/g, '/').replace(/^\\//, '');
             }
+            export function parseYaml() { return {}; }
+            export function stringifyYaml(value) { return JSON.stringify(value); }
           `,
         }));
       },
@@ -114,7 +136,15 @@ async function loadFileNamingService() {
 
 async function loadNoteOperationService() {
   const result = await build({
-    entryPoints: [fileURLToPath(new URL('../src/services/note-operation-service.ts', import.meta.url))],
+    stdin: {
+      contents: [
+        "export * from './src/services/note-operation-service.ts';",
+        "export { invalidateDailyNoteCandidateIndex, markDailyNoteCandidatePathDirty } from './src/utils/daily-note-task-schedule.ts';",
+      ].join('\n'),
+      resolveDir: fileURLToPath(new URL('..', import.meta.url)),
+      sourcefile: 'daily-note-creation-test-entry.ts',
+      loader: 'ts',
+    },
     bundle: true,
     write: false,
     platform: 'node',
@@ -166,7 +196,23 @@ async function loadNoteOperationService() {
             export function normalizePath(path) {
               return String(path || '').replace(/\\\\/g, '/').replace(/\\/+/g, '/').replace(/^\\//, '');
             }
-            export function parseYaml() { return {}; }
+            export function parseYaml(source) {
+              const normalized = String(source || '').trim();
+              if (/^(?:null|~)$/iu.test(normalized)) return null;
+              if (/^-\\s+/u.test(normalized)) return [{}];
+              if (normalized && !normalized.split(/\\r?\\n/u).some((line) => /^([^:#]+):\\s*(.*)$/u.test(line))) {
+                return normalized;
+              }
+              const parsed = {};
+              for (const line of normalized.split(/\\r?\\n/)) {
+                const match = line.match(/^([^:#]+):\\s*(.*)$/);
+                if (!match) continue;
+                let value = match[2].trim();
+                if (/^(['"]).*\\1$/.test(value)) value = value.slice(1, -1);
+                parsed[match[1].trim()] = value;
+              }
+              return parsed;
+            }
             export function stringifyYaml(value) { return JSON.stringify(value); }
             export const moment = Object.assign(() => null, { ISO_8601: Symbol('ISO_8601') });
           `,
@@ -231,17 +277,34 @@ function createDailyNoteServiceHarness(TFile, {
   templaterLocalAutoTrigger,
   templaterAutoHookDelayMs = 20,
   templaterAutoHookWriteDelayMs = 50,
+  templaterTransform = null,
+  createDelayMs = 0,
+  templaterAvailable = true,
   simulateCreateRace = false,
+  simulateCreateRaceContent = null,
+  vaultProcessAvailable = true,
+  vaultProcessError = null,
+  metadataFrontmatterOverride = null,
+  afterOwnedFrontmatterProcess,
+  beforeRead,
+  beforeProcess,
+  beforeAdapterExists,
 } = {}) {
   const files = new Map();
+  const fileObjects = new Map();
   const fileTimes = new Map();
   const folders = new Set(['']);
+  const vaultListeners = new Map();
+  const emitVault = (event, ...args) => {
+    for (const callback of vaultListeners.get(event) || []) callback(...args);
+  };
   const templaterPendingFiles = new Set();
   const autoHookPromises = [];
   let createCount = 0;
   let templaterRuns = 0;
   let templaterAutoRuns = 0;
   let templaterExplicitRuns = 0;
+  let registeredDailyNoteConfiguration = null;
   if (templateContent !== null) {
     files.set('Templates/Daily.md', templateContent);
     fileTimes.set('Templates/Daily.md', Date.now() - 10_000);
@@ -250,8 +313,9 @@ function createDailyNoteServiceHarness(TFile, {
     ? templaterLocalAutoTrigger
     : templaterAutoTrigger;
   const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-  const applyTemplaterCommands = (content) => String(content || '')
-    .replace('<% daily-body %>', 'Templater body');
+  const applyTemplaterCommands = (content) => typeof templaterTransform === 'function'
+    ? templaterTransform(String(content || ''))
+    : String(content || '').replace('<% daily-body %>', 'Templater body');
   const scheduleTemplaterAutoHook = (path) => {
     if (!effectiveTemplaterAutoTrigger) return;
     const autoHook = (async () => {
@@ -290,7 +354,11 @@ function createDailyNoteServiceHarness(TFile, {
   };
   const fileFor = (path) => {
     if (!files.has(path)) return null;
-    const file = new TFile(path);
+    let file = fileObjects.get(path);
+    if (!file) {
+      file = new TFile(path);
+      fileObjects.set(path, file);
+    }
     const timestamp = fileTimes.get(path) ?? (Date.now() - 10_000);
     file.stat = {
       ctime: timestamp,
@@ -309,6 +377,12 @@ function createDailyNoteServiceHarness(TFile, {
     },
     internalPlugins: {
       getPluginById(id) {
+        if (id === 'daily-notes' && registeredDailyNoteConfiguration) {
+          return {
+            enabled: true,
+            instance: { options: registeredDailyNoteConfiguration },
+          };
+        }
         if (id === 'daily-notes' && runtimeDailyNotes !== null) {
           return {
             enabled: runtimeDailyNotesEnabled,
@@ -336,7 +410,7 @@ function createDailyNoteServiceHarness(TFile, {
           : null;
       },
       plugins: {
-        'templater-obsidian': {
+        'templater-obsidian': templaterAvailable ? {
           settings: {
             trigger_on_file_creation: templaterAutoTrigger,
           },
@@ -348,12 +422,18 @@ function createDailyNoteServiceHarness(TFile, {
               files.set(file.path, applyTemplaterCommands(files.get(file.path)));
             },
           },
-        },
+        } : null,
       },
     },
     metadataCache: {
       getFirstLinkpathDest: () => null,
       getFileCache(file) {
+        if (metadataFrontmatterOverride !== null) {
+          const override = typeof metadataFrontmatterOverride === 'function'
+            ? metadataFrontmatterOverride(file)
+            : metadataFrontmatterOverride;
+          if (override !== undefined && override !== null) return { frontmatter: override };
+        }
         return { frontmatter: parseFrontmatter(files.get(file.path) || '').frontmatter };
       },
     },
@@ -361,6 +441,7 @@ function createDailyNoteServiceHarness(TFile, {
       configDir: '.obsidian',
       adapter: {
         async exists(path) {
+          await beforeAdapterExists?.({ app, path, files, fileTimes, emitVault, fileFor });
           return files.has(path) || folders.has(path);
         },
         async read(path) {
@@ -380,7 +461,13 @@ function createDailyNoteServiceHarness(TFile, {
       getMarkdownFiles() {
         return Array.from(files.keys()).filter((path) => path.endsWith('.md')).map((path) => fileFor(path));
       },
+      on(event, callback) {
+        const callbacks = vaultListeners.get(event) || [];
+        callbacks.push(callback);
+        vaultListeners.set(event, callbacks);
+      },
       async read(file) {
+        await beforeRead?.({ app, file, files, fileTimes, emitVault });
         return files.get(file.path);
       },
       async cachedRead(file) {
@@ -392,24 +479,55 @@ function createDailyNoteServiceHarness(TFile, {
         folders.add(path);
       },
       async create(path, content) {
-        await Promise.resolve();
+        if (createDelayMs > 0) await delay(createDelayMs);
+        else await Promise.resolve();
         if (files.has(path)) throw new Error(`File already exists: ${path}`);
         const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
         if (parent && !folders.has(parent)) throw new Error(`Missing parent folder: ${parent}`);
         createCount += 1;
         files.set(path, content);
         fileTimes.set(path, Date.now());
+        emitVault('create', fileFor(path));
         scheduleTemplaterAutoHook(path);
         if (simulateCreateRace) {
+          if (simulateCreateRaceContent !== null) files.set(path, simulateCreateRaceContent);
           throw new Error(`File already exists: ${path}`);
         }
         return fileFor(path);
       },
       async modify(file, content) {
         files.set(file.path, content);
+        emitVault('modify', file);
+      },
+      async process(file, processor) {
+        await beforeProcess?.({ app, file, files, fileTimes, emitVault });
+        const current = files.get(file.path);
+        const next = processor(current);
+        files.set(file.path, next);
+        emitVault('modify', file);
+        return next;
       },
     },
     fileManager: {
+      async renameFile(file, targetPath) {
+        const sourcePath = file.path;
+        if (!files.has(sourcePath) || files.has(targetPath)) {
+          throw new Error(`Cannot rename ${sourcePath} to ${targetPath}`);
+        }
+        const content = files.get(sourcePath);
+        const timestamp = fileTimes.get(sourcePath);
+        files.delete(sourcePath);
+        fileTimes.delete(sourcePath);
+        fileObjects.delete(sourcePath);
+        files.set(targetPath, content);
+        if (timestamp !== undefined) fileTimes.set(targetPath, timestamp);
+        file.path = targetPath;
+        file.extension = targetPath.split('.').pop();
+        file.basename = targetPath.split('/').pop().replace(/\.[^.]+$/, '');
+        file.parent = { path: targetPath.includes('/') ? targetPath.slice(0, targetPath.lastIndexOf('/')) : '/' };
+        fileObjects.set(targetPath, file);
+        emitVault('rename', file, sourcePath);
+      },
       async processFrontMatter(file, mutator) {
         const parsed = parseFrontmatter(files.get(file.path) || '');
         mutator(parsed.frontmatter);
@@ -417,16 +535,63 @@ function createDailyNoteServiceHarness(TFile, {
       },
     },
   };
+  if (!vaultProcessAvailable) {
+    delete app.vault.process;
+  } else if (vaultProcessError) {
+    app.vault.process = async () => {
+      throw vaultProcessError;
+    };
+  }
   let nativeProcessFrontMatterCalls = 0;
   const processOwnedFrontmatter = async (file, mutator) => {
     const parsed = parseFrontmatter(files.get(file.path) || '');
     await mutator(parsed.frontmatter);
     files.set(file.path, writeFrontmatter(parsed.frontmatter, parsed.body));
+    await afterOwnedFrontmatterProcess?.({ app, file, files, fileTimes, emitVault });
     return true;
   };
   app.fileManager.processFrontMatter = async () => {
     nativeProcessFrontMatterCalls += 1;
     throw new Error('Daily-note creation bypassed the owned frontmatter mutation service.');
+  };
+  const getDailyNoteConfigurationSnapshot = () => {
+    const core = runtimeDailyNotes !== null && runtimeDailyNotesEnabled
+      ? runtimeDailyNotes
+      : null;
+    const persistedTemplate = String(persistedDailyNotes?.template || '').trim();
+    if (core && !String(core.template || '').trim() && persistedTemplate) {
+      return {
+        folder: String(persistedDailyNotes?.folder || '').replace(/^\/+|\/+$/g, ''),
+        format: String(persistedDailyNotes?.format || '').trim() || 'YYYY-MM-DD',
+        template: persistedTemplate,
+        source: 'persisted-recovery',
+      };
+    }
+    if (core) {
+      return {
+        folder: String(core.folder || '').replace(/^\/+|\/+$/g, ''),
+        format: String(core.format || '').trim() || 'YYYY-MM-DD',
+        template: String(core.template || '').trim(),
+        source: 'core',
+      };
+    }
+    if (periodicDailyNotes) {
+      return {
+        folder: String(periodicDailyNotes.folder || '').replace(/^\/+|\/+$/g, ''),
+        format: String(periodicDailyNotes.format || '').trim() || 'YYYY-MM-DD',
+        template: String(periodicDailyNotes.template || '').trim(),
+        source: 'periodic',
+      };
+    }
+    if (persistedDailyNotes) {
+      return {
+        folder: String(persistedDailyNotes.folder || '').replace(/^\/+|\/+$/g, ''),
+        format: String(persistedDailyNotes.format || '').trim() || 'YYYY-MM-DD',
+        template: persistedTemplate,
+        source: 'persisted',
+      };
+    }
+    return { folder: 'System/Dailynotes', format: 'YYYY-MM-DD', template: '', source: 'default' };
   };
   const plugin = {
     app,
@@ -435,7 +600,12 @@ function createDailyNoteServiceHarness(TFile, {
       process: processOwnedFrontmatter,
     },
     fileNamingService: {
-      registerDailyNoteConfiguration() {},
+      registerDailyNoteConfiguration(folder, format) {
+        registeredDailyNoteConfiguration = { folder, format, template: '' };
+      },
+      isDailyNoteConfigurationReady() { return true; },
+      async whenDailyNoteConfigurationReady() {},
+      getDailyNoteConfigurationSnapshot,
       async processFileOnOpen() {},
     },
     notebookNavigatorRuleService: { async applyRulesToFile() {} },
@@ -443,9 +613,16 @@ function createDailyNoteServiceHarness(TFile, {
   return {
     plugin,
     files,
+    seedExisting(path, content, ageMs = 10_000) {
+      files.set(path, content);
+      fileTimes.set(path, Date.now() - Math.max(0, ageMs));
+      emitVault('create', fileFor(path));
+      return fileFor(path);
+    },
     seedExternalCreation(path, content) {
       files.set(path, content);
       fileTimes.set(path, Date.now());
+      emitVault('create', fileFor(path));
       scheduleTemplaterAutoHook(path);
       return fileFor(path);
     },
@@ -586,15 +763,16 @@ test('all active GCM Daily Note creation routes use the canonical creator', () =
   const timeTrackingSource = readFileSync(new URL('../src/services/time-tracking-service.ts', import.meta.url), 'utf8');
   const createTaskSource = readFileSync(new URL('../src/services/create-task-service.ts', import.meta.url), 'utf8');
   const homeViewSource = readFileSync(new URL('../src/views/home-view.ts', import.meta.url), 'utf8');
+  const fileNamingSource = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
 
   assert.match(noteOperationSource, /pendingDailyNoteEnsures/u);
-  assert.match(noteOperationSource, /getPluginById\?\.\('daily-notes'\)[\s\S]*plugins\?\.\['daily-notes'\]/u);
-  assert.match(noteOperationSource, /daily-notes\.json/u);
+  assert.match(noteOperationSource, /getDailyNoteConfigurationSnapshot\?\.\(\)/u);
+  assert.match(fileNamingSource, /daily-notes\.json/u);
   assert.match(noteOperationSource, /Configured Daily Notes template is unavailable; refusing to create a template-less note/u);
   assert.doesNotMatch(noteOperationSource, /createViaDailyNoteProvider/u);
   assert.match(
     noteOperationSource,
-    /finishPendingTemplaterTemplate\(created, \{\s*awaitAutoCreateHook: true,\s*createStartedAt,\s*\}\)/u,
+    /finishPendingTemplaterTemplate\(created, \{\s*awaitAutoCreateHook: true,\s*createStartedAt: templaterCreateObservedAt,\s*preparedInput:/u,
   );
   assert.match(noteOperationSource, /loadLocalStorage\?\.\('templater-local-settings'\)/u);
   assert.match(noteOperationSource, /waitForTemplaterCreateHook/u);
@@ -618,13 +796,18 @@ test('all active GCM Daily Note creation routes use the canonical creator', () =
 
 test('Daily Note kind identity receives the title and filename sync exception', () => {
   const fileNamingSource = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
+  const dailyNoteScheduleSource = readFileSync(new URL('../src/utils/daily-note-task-schedule.ts', import.meta.url), 'utf8');
   const noteOperationSource = readFileSync(new URL('../src/services/note-operation-service.ts', import.meta.url), 'utf8');
   const bulkEditSource = readFileSync(new URL('../src/services/bulk-edit-service.ts', import.meta.url), 'utf8');
   const settingsSource = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
 
-  assert.match(fileNamingSource, /const kinds = this\.normalizeFrontmatterStringList\(\(frontmatter as any\)\.kind \|\| \(frontmatter as any\)\.kinds\)/u);
-  assert.match(fileNamingSource, /value === 'dailynote'/u);
-  assert.match(fileNamingSource, /isConfiguredDailyNotePath\(liveFile\)/u);
+  assert.match(fileNamingSource, /return parseDailyNoteFileDate\(this\.plugin\.app, this\.plugin\.settings, file\) !== null/u);
+  assert.match(dailyNoteScheduleSource, /isAcceptedDailyNoteMarker\(normalizeDailyNoteMarker\(value\)\)/u);
+  assert.match(
+    dailyNoteScheduleSource,
+    /marker === 'daily'[\s\S]{0,120}marker === 'dailynote'[\s\S]{0,120}marker === 'notedaily'/u,
+  );
+  assert.match(fileNamingSource, /if \(await this\.isDailyNoteFile\(liveFile\)\) return/u);
   assert.match(fileNamingSource, /loadPersistedDailyNoteConfiguration/u);
   assert.match(fileNamingSource, /await this\.dailyNoteConfigurationReady/u);
   assert.match(fileNamingSource, /getPeriodicDailyNoteOptions/u);
@@ -632,7 +815,7 @@ test('Daily Note kind identity receives the title and filename sync exception', 
   assert.match(fileNamingSource, /knownDailyNoteConfigurations/u);
   assert.match(noteOperationSource, /registerDailyNoteConfiguration\(settings\.folder, settings\.format\)/u);
   assert.match(fileNamingSource, /preserveDailyNoteIdentity/u);
-  assert.match(bulkEditSource, /const kind = this\.normalizeStringList\(\(frontmatter as any\)\.kind \|\| \(frontmatter as any\)\.kinds\)/u);
+  assert.match(bulkEditSource, /return this\.plugin\.fileNamingService\.isDailyNoteFile\(file\)/u);
   assert.match(settingsSource, /Daily Notes keep their template or user title and retain the canonical Daily Notes filename\./u);
 });
 
@@ -646,20 +829,22 @@ test('Daily Note move classification awaits persisted settings and honors Period
         'YYYY_MM_DD': /^\d{4}_\d{2}_\d{2}$/u,
         'YYYY/MM/DD': /^\d{4}\/\d{2}\/\d{2}$/u,
       };
-      const valid = Boolean(patterns[String(format || '')]?.test(text));
-      return { isValid: () => valid, format: () => text };
+      const formats = Array.isArray(format) ? format : [format];
+      const valid = formats.some((candidate) => Boolean(patterns[String(candidate || '')]?.test(text)));
+      const iso = text.replace(/_/g, '-').replace(/\//g, '-');
+      return { isValid: () => valid, format: (target) => target === 'YYYY-MM-DD' ? iso : text };
     },
   };
   try {
     const { FileNamingService } = await loadFileNamingService();
-    const createPlugin = ({ persisted, periodic }) => ({
+    const createPlugin = ({ persisted, periodic, core = null, beforePersistedRead }) => ({
       settings: { dailyNoteDateFormat: '' },
       app: {
         internalPlugins: {
           plugins: {
             'daily-notes': {
-              enabled: false,
-              instance: { options: { folder: 'Disabled/Core', format: 'YYYY-MM-DD' } },
+              enabled: core !== null,
+              instance: { options: core ?? { folder: 'Disabled/Core', format: 'YYYY-MM-DD' } },
             },
           },
         },
@@ -676,27 +861,295 @@ test('Daily Note move classification awaits persisted settings and honors Period
           getFiles: () => [],
           adapter: {
             async read() {
+              await beforePersistedRead?.();
               if (persisted == null) throw new Error('missing settings');
               return JSON.stringify(persisted);
             },
           },
         },
+        metadataCache: {
+          getFileCache(file) {
+            return { frontmatter: file.frontmatter || {} };
+          },
+        },
       },
+    });
+    const testFile = (path, frontmatter) => ({
+      path,
+      basename: path.split('/').pop().replace(/\.md$/u, ''),
+      ...(frontmatter ? { frontmatter } : {}),
     });
 
     const periodicService = new FileNamingService(createPlugin({
       persisted: { folder: 'Stale/Core', format: 'YYYY-MM-DD' },
       periodic: { folder: 'Periodic/Daily', format: 'YYYY_MM_DD' },
     }));
-    assert.equal(await periodicService.isDailyNoteFile({ path: 'Periodic/Daily/2026_08_10.md' }), true);
-    assert.equal(await periodicService.isDailyNoteFile({ path: 'Disabled/Core/2026-08-10.md' }), false);
-    assert.equal(await periodicService.isDailyNoteFile({ path: 'Projects/2026_08_10.md' }), false);
+    assert.equal(periodicService.isDailyNoteConfigurationReady(), false);
+    assert.equal(await periodicService.isDailyNoteFile(testFile('Periodic/Daily/2026_08_10.md')), true);
+    assert.equal(periodicService.isDailyNoteConfigurationReady(), true);
+    assert.deepEqual(periodicService.getDailyNoteConfigurationSnapshot(), {
+      folder: 'Periodic/Daily',
+      format: 'YYYY_MM_DD',
+      template: '',
+      source: 'periodic',
+    });
+    assert.equal(await periodicService.isDailyNoteFile(testFile('Disabled/Core/2026-08-10.md')), false);
+    assert.equal(await periodicService.isDailyNoteFile(testFile('Projects/2026_08_10.md')), false);
 
     const persistedService = new FileNamingService(createPlugin({
       persisted: { folder: 'Saved/Daily', format: 'YYYY/MM/DD' },
       periodic: null,
     }));
-    assert.equal(await persistedService.isDailyNoteFile({ path: 'Saved/Daily/2026/08/10.md' }), true);
+    assert.equal(await persistedService.isDailyNoteFile(testFile('Saved/Daily/2026/08/10.md')), true);
+    assert.equal(persistedService.getDailyNoteConfigurationSnapshot()?.source, 'persisted');
+
+    const coreService = new FileNamingService(createPlugin({
+      persisted: null,
+      periodic: null,
+      core: { folder: 'Journal', format: 'YYYY-MM-DD', template: '' },
+    }));
+    assert.equal(await coreService.isDailyNoteFile(testFile('2026-08-10.md')), false);
+    assert.equal(await coreService.isDailyNoteFile(testFile('Journal/2026-08-10.md')), true);
+    assert.equal(await coreService.isDailyNoteFile(
+      testFile('Journal/2026-08-11.md', { kind: 'calendar-event' }),
+    ), false);
+
+    const recoveringCore = { folder: '', format: '', template: '' };
+    const recoveringService = new FileNamingService(createPlugin({
+      persisted: { folder: 'Saved/Journal', format: 'YYYY_MM_DD', template: 'Templates/Daily' },
+      periodic: null,
+      core: recoveringCore,
+    }));
+    assert.equal(await recoveringService.isDailyNoteFile(testFile('Saved/Journal/2026_08_12.md')), true);
+    assert.equal(recoveringService.getDailyNoteConfigurationSnapshot()?.source, 'persisted-recovery');
+    recoveringCore.folder = 'Settled/Journal';
+    recoveringCore.format = 'YYYY-MM-DD';
+    recoveringCore.template = 'Templates/Daily';
+    assert.equal(await recoveringService.isDailyNoteFile(testFile('Saved/Journal/2026_08_12.md')), false);
+    assert.equal(await recoveringService.isDailyNoteFile(testFile('Settled/Journal/2026-08-12.md')), true);
+    assert.deepEqual(recoveringService.getDailyNoteConfigurationSnapshot(), {
+      folder: 'Settled/Journal',
+      format: 'YYYY-MM-DD',
+      template: 'Templates/Daily',
+      source: 'core',
+    });
+    recoveringCore.template = '';
+    assert.deepEqual(recoveringService.getDailyNoteConfigurationSnapshot(), {
+      folder: 'Settled/Journal',
+      format: 'YYYY-MM-DD',
+      template: '',
+      source: 'core',
+    }, 'a later intentional blank Core template must not revive the startup snapshot');
+
+    let releasePersistedRead;
+    const persistedReadGate = new Promise((resolve) => { releasePersistedRead = resolve; });
+    const racingCore = { folder: '', format: '', template: '' };
+    const racingService = new FileNamingService(createPlugin({
+      persisted: { folder: 'Saved/Race', format: 'YYYY_MM_DD', template: 'Templates/Daily' },
+      periodic: null,
+      core: racingCore,
+      beforePersistedRead: () => persistedReadGate,
+    }));
+    racingCore.folder = 'Live/Race';
+    racingCore.format = 'YYYY-MM-DD';
+    racingCore.template = '';
+    releasePersistedRead();
+    await racingService.whenDailyNoteConfigurationReady();
+    assert.deepEqual(racingService.getDailyNoteConfigurationSnapshot(), {
+      folder: 'Live/Race',
+      format: 'YYYY-MM-DD',
+      template: '',
+      source: 'core',
+    }, 'a Core change during persisted I/O must win as the live snapshot');
+  } finally {
+    globalThis.window = priorWindow;
+  }
+});
+
+test('metadata refresh blocks only sync identity reads while the ready configuration stays stable', async () => {
+  const priorWindow = globalThis.window;
+  globalThis.window = {
+    moment: (value) => {
+      const text = String(value || '').slice(0, 10);
+      const valid = /^\d{4}-\d{2}-\d{2}$/u.test(text);
+      return { isValid: () => valid, format: () => valid ? text : '' };
+    },
+  };
+  try {
+    const {
+      FileNamingService,
+      findExistingDailyNoteForIsoDate,
+      parseDailyNoteFileDate,
+    } = await loadFileNamingService();
+    const vaultEvents = new Map();
+    const metadataEvents = new Map();
+    const registered = [];
+    let apiReadyNotifications = 0;
+    let overlapReadScenario = null;
+    let overlapReadCount = 0;
+    let olderReadStarted;
+    let releaseOlderRead;
+    let olderReadGate;
+    let signalOlderReadStarted;
+    const configureOverlapRead = (scenario) => {
+      overlapReadScenario = scenario;
+      overlapReadCount = 0;
+      olderReadStarted = new Promise((resolve) => { signalOlderReadStarted = resolve; });
+      olderReadGate = new Promise((resolve) => { releaseOlderRead = resolve; });
+    };
+    const markdownFile = {
+      __isTestTFile: true,
+      path: 'Journal/2026-08-25.md',
+      basename: '2026-08-25',
+      extension: 'md',
+    };
+    const attachmentFile = {
+      __isTestTFile: true,
+      path: 'Diagram.png',
+      basename: 'Diagram',
+      extension: 'png',
+    };
+    const folder = { path: 'Attachments', children: [] };
+    const plugin = {
+      settings: { dailyNoteDateFormat: '' },
+      registerEvent(ref) { registered.push(ref); },
+      emitGcmApiChanged(available) {
+        if (available) apiReadyNotifications += 1;
+      },
+      app: {
+        internalPlugins: {
+          getPluginById(id) {
+            return id === 'daily-notes'
+              ? { enabled: true, instance: { options: { folder: 'Journal', format: 'YYYY-MM-DD', template: '' } } }
+              : null;
+          },
+          plugins: {},
+        },
+        plugins: { getPlugin: () => null, plugins: {} },
+        vault: {
+          configDir: '.obsidian',
+          getFiles: () => [],
+          getMarkdownFiles: () => [markdownFile],
+          getAbstractFileByPath: (path) => path === markdownFile.path ? markdownFile : null,
+          async read(file) {
+            assert.equal(file, markdownFile);
+            if (overlapReadScenario) {
+              overlapReadCount += 1;
+              if (overlapReadCount === 1) {
+                signalOlderReadStarted();
+                await olderReadGate;
+                if (overlapReadScenario === 'older-fails-last') {
+                  throw new Error('older background read failed after the newer refresh');
+                }
+              } else if (overlapReadScenario === 'newer-fails-first') {
+                throw new Error('newer background read failed before the older refresh');
+              }
+            }
+            return '---\nkind: dailynote\nscheduled: 2026-08-25 00:00:00\n---\nLive Daily Note';
+          },
+          adapter: { async read() { throw new Error('missing'); } },
+          on(event, callback) {
+            const ref = { event, callback };
+            vaultEvents.set(event, ref);
+            return ref;
+          },
+        },
+        metadataCache: {
+          initialized: true,
+          getFileCache: () => ({ frontmatter: { kind: 'project' } }),
+          on(event, callback) {
+            const ref = { event, callback };
+            metadataEvents.set(event, ref);
+            return ref;
+          },
+        },
+      },
+    };
+    const service = new FileNamingService(plugin);
+    await service.whenDailyNoteConfigurationReady();
+    assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+    assert.equal(service.getDailyNoteConfigurationSnapshot()?.folder, 'Journal');
+
+    for (const event of ['create', 'modify', 'rename']) {
+      vaultEvents.get(event).callback(attachmentFile);
+      assert.equal(
+        service.isDailyNoteMetadataCacheReady(),
+        true,
+        `${event} on a non-Markdown attachment must not await impossible Markdown metadata`,
+      );
+      vaultEvents.get(event).callback(folder);
+      assert.equal(
+        service.isDailyNoteMetadataCacheReady(),
+        true,
+        `${event} on a folder must not await impossible Markdown metadata`,
+      );
+    }
+    vaultEvents.get('modify').callback(markdownFile);
+    assert.equal(service.isDailyNoteMetadataCacheReady(), false);
+    assert.equal(service.getDailyNoteConfigurationSnapshot()?.folder, 'Journal');
+    const backgroundRefresh = metadataEvents.get('changed').callback(markdownFile);
+    assert.equal(
+      service.isDailyNoteMetadataCacheReady(),
+      false,
+      'an uncorrelated metadata event must not expose sync identity before current bytes win',
+    );
+    await backgroundRefresh;
+    assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+    assert.equal(await service.isDailyNoteFile(markdownFile), true);
+    assert.equal(
+      findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, '2026-08-25'),
+      markdownFile,
+      'findForIsoDate identity must recover from the current-byte override',
+    );
+    assert.equal(
+      parseDailyNoteFileDate(plugin.app, plugin.settings, markdownFile),
+      '2026-08-25',
+      'dateForFile and task-policy identity must recover from the current-byte override',
+    );
+    assert.equal(apiReadyNotifications, 1, 'provider consumers must be notified when identity becomes ready');
+
+    configureOverlapRead('older-fails-last');
+    vaultEvents.get('modify').callback(markdownFile);
+    const olderRefresh = metadataEvents.get('changed').callback(markdownFile);
+    await olderReadStarted;
+    const newerRefresh = metadataEvents.get('changed').callback(markdownFile);
+    await newerRefresh;
+    assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+    assert.equal(apiReadyNotifications, 2, 'the newer successful owner must publish readiness once');
+    releaseOlderRead();
+    await olderRefresh;
+    assert.equal(
+      service.isDailyNoteMetadataCacheReady(),
+      true,
+      'an older failed callback must not re-block identity after the newer owner drained dirty state',
+    );
+    assert.equal(apiReadyNotifications, 2, 'the superseded callback must not publish duplicate readiness');
+
+    configureOverlapRead('newer-fails-first');
+    vaultEvents.get('modify').callback(markdownFile);
+    const olderSuccess = metadataEvents.get('changed').callback(markdownFile);
+    await olderReadStarted;
+    const newerFailure = metadataEvents.get('changed').callback(markdownFile);
+    await newerFailure;
+    assert.equal(service.isDailyNoteMetadataCacheReady(), false);
+    assert.equal(apiReadyNotifications, 2);
+    releaseOlderRead();
+    await olderSuccess;
+    assert.equal(
+      service.isDailyNoteMetadataCacheReady(),
+      true,
+      'an older successful drain must recover identity after the newer callback failed first',
+    );
+    assert.equal(apiReadyNotifications, 3, 'the recovered generation must publish readiness exactly once');
+    assert.ok(registered.length >= 8, 'all vault/metadata listeners must be lifecycle-owned');
+
+    const apiSource = readFileSync(new URL('../src/plugin-api.ts', import.meta.url), 'utf8');
+    assert.match(apiSource, /findForIsoDate:[\s\S]{0,180}dailyNoteIdentityReady\(\)/u);
+    assert.match(apiSource, /dateForFile:[\s\S]{0,180}dailyNoteIdentityReady\(\)/u);
+    assert.match(apiSource, /getTaskSchedulePolicy:[\s\S]{0,220}dailyNoteIdentityReady\(\)/u);
+    assert.match(apiSource, /pathForIsoDate:[\s\S]{0,160}refreshDailyNoteConfiguration\(\)/u);
+    assert.doesNotMatch(apiSource.match(/pathForIsoDate:[\s\S]*?ensureForIsoDate:/u)?.[0] || '', /dailyNoteIdentityReady/u);
+    assert.match(apiSource, /ensureForIsoDate:[\s\S]{0,1200}refreshDailyNoteConfiguration\(\)/u);
   } finally {
     globalThis.window = priorWindow;
   }
@@ -746,6 +1199,247 @@ test('canonical GCM creation inserts the template once and preserves its readabl
   assert.equal(harness.stats.templaterRuns, 1, 'reusing an existing Daily Note must not rerun Templater');
   assert.match(harness.files.get(first.path), /title: "Tuesday planning"/);
   assert.equal(harness.stats.nativeProcessFrontMatterCalls, 0, 'daily-note normalization must stay on the owned mutation service');
+});
+
+test('canonical GCM creation fails closed when legacy Daily Note identity is ambiguous', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      const slash = path.lastIndexOf('/');
+      this.parent = { path: slash >= 0 ? path.slice(0, slash) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes: {
+      folder: 'Daily',
+      format: 'YYYY_MM_DD',
+      template: 'Templates/Daily',
+    },
+  });
+  harness.seedExternalCreation('Daily/2026-07-28.md', [
+    '---',
+    'kind: dailynote',
+    'scheduled: 2026-07-28 00:00:00',
+    '---',
+  ].join('\n'));
+  harness.seedExternalCreation('Daily/Planning 2026-07-28.md', [
+    '---',
+    'tags: daily-note',
+    'scheduled: 2026-07-28 00:00:00',
+    '---',
+  ].join('\n'));
+
+  const service = new NoteOperationService(harness.plugin);
+  const resolved = await service.ensureDailyNote('2026-07-28 00:00:00');
+
+  assert.equal(resolved, null);
+  assert.equal(harness.stats.createCount, 0, 'ambiguity must not create a third Daily Note');
+  assert.equal(harness.files.has('Daily/2026_07_28.md'), false);
+});
+
+test('canonical GCM creation rechecks legacy identity after async template work', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService, invalidateDailyNoteCandidateIndex } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      const slash = path.lastIndexOf('/');
+      this.parent = { path: slash >= 0 ? path.slice(0, slash) : '/' };
+    }
+  }
+  let injected = false;
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes: {
+      folder: 'Daily',
+      format: 'YYYY_MM_DD',
+      template: 'Templates/Daily',
+    },
+    beforeRead({ app, file, files, fileTimes, emitVault }) {
+      if (injected || file.path !== 'Templates/Daily.md') return;
+      injected = true;
+      const content = [
+        '---',
+        'kind: dailynote',
+        'scheduled: 2026-07-29 00:00:00',
+        '---',
+      ].join('\n');
+      files.set('Daily/2026-07-29.md', content);
+      files.set('Daily/Planning 2026-07-29.md', content);
+      fileTimes.set('Daily/2026-07-29.md', Date.now());
+      fileTimes.set('Daily/Planning 2026-07-29.md', Date.now());
+      emitVault('create', new FakeFile('Daily/2026-07-29.md'));
+      emitVault('create', new FakeFile('Daily/Planning 2026-07-29.md'));
+      invalidateDailyNoteCandidateIndex(app);
+    },
+  });
+
+  const service = new NoteOperationService(harness.plugin);
+  const resolved = await service.ensureDailyNote('2026-07-29 00:00:00');
+
+  assert.equal(resolved, null);
+  assert.equal(harness.stats.createCount, 0, 'late ambiguity must not create a canonical Daily Note');
+  assert.equal(harness.files.has('Daily/2026_07_29.md'), false);
+});
+
+test('canonical creation aborts when the authoritative configuration changes before mutation', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const runtimeDailyNotes = {
+    folder: 'Daily',
+    format: 'YYYY-MM-DD',
+    template: 'Templates/Daily',
+  };
+  let changed = false;
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes,
+    beforeRead({ file }) {
+      if (changed || file.path !== 'Templates/Daily.md') return;
+      changed = true;
+      runtimeDailyNotes.folder = 'New Daily';
+    },
+  });
+  const service = new NoteOperationService(harness.plugin);
+  assert.equal(await service.ensureDailyNote(
+    '2026-08-12 00:00:00',
+    { expectedPath: 'Daily/2026-08-12.md' },
+  ), null);
+  assert.equal(harness.stats.createCount, 0);
+  assert.equal(harness.files.has('Daily/2026-08-12.md'), false);
+  assert.equal(harness.files.has('New Daily/2026-08-12.md'), false);
+});
+
+test('mixed constrained and unconstrained ensures share one ISO-date mutation owner', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const runtimeDailyNotes = {
+    folder: 'Daily',
+    format: 'YYYY-MM-DD',
+    template: 'Templates/Daily',
+  };
+  let releaseTemplateRead;
+  const templateReadReleased = new Promise((resolve) => { releaseTemplateRead = resolve; });
+  let templateReadEntered;
+  const templateReadStarted = new Promise((resolve) => { templateReadEntered = resolve; });
+  let blocked = false;
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes,
+    async beforeRead({ file }) {
+      if (blocked || file.path !== 'Templates/Daily.md') return;
+      blocked = true;
+      templateReadEntered();
+      await templateReadReleased;
+    },
+  });
+  const service = new NoteOperationService(harness.plugin);
+  const constrained = service.ensureDailyNote(
+    '2026-08-12 00:00:00',
+    { expectedPath: 'Daily/2026-08-12.md' },
+  );
+  await templateReadStarted;
+  runtimeDailyNotes.folder = 'New Daily';
+  const unconstrained = service.ensureDailyNote('2026-08-12 00:00:00');
+  releaseTemplateRead();
+
+  const [constrainedResult, unconstrainedResult] = await Promise.all([constrained, unconstrained]);
+  assert.equal(constrainedResult, null);
+  assert.equal(unconstrainedResult?.path, 'New Daily/2026-08-12.md');
+  assert.equal(harness.stats.createCount, 1, 'the ordinary joiner retries only after the first owner releases');
+  assert.equal(harness.files.has('Daily/2026-08-12.md'), false);
+  assert.equal(harness.files.has('New Daily/2026-08-12.md'), true);
+});
+
+test('an expected-path joiner independently rejects an ordinary owner result', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  let releaseTemplateRead;
+  const templateReadReleased = new Promise((resolve) => { releaseTemplateRead = resolve; });
+  let templateReadEntered;
+  const templateReadStarted = new Promise((resolve) => { templateReadEntered = resolve; });
+  let blocked = false;
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes: {
+      folder: 'New Daily',
+      format: 'YYYY-MM-DD',
+      template: 'Templates/Daily',
+    },
+    async beforeRead({ file }) {
+      if (blocked || file.path !== 'Templates/Daily.md') return;
+      blocked = true;
+      templateReadEntered();
+      await templateReadReleased;
+    },
+  });
+  const service = new NoteOperationService(harness.plugin);
+  const ordinary = service.ensureDailyNote('2026-08-13 00:00:00');
+  await templateReadStarted;
+  const constrained = service.ensureDailyNote(
+    '2026-08-13 00:00:00',
+    { expectedPath: 'Old Daily/2026-08-13.md' },
+  );
+  releaseTemplateRead();
+
+  const [ordinaryResult, constrainedResult] = await Promise.all([ordinary, constrained]);
+  assert.equal(ordinaryResult?.path, 'New Daily/2026-08-13.md');
+  assert.equal(constrainedResult, null);
+  assert.equal(harness.stats.createCount, 1);
+});
+
+test('provider expected path rejects a configuration changed before GCM starts', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes: {
+      folder: 'New Daily',
+      format: 'YYYY-MM-DD',
+      template: 'Templates/Daily',
+    },
+  });
+  const service = new NoteOperationService(harness.plugin);
+  assert.equal(await service.ensureDailyNote(
+    '2026-08-12 00:00:00',
+    { expectedPath: '/Daily/2026-08-12.md' },
+  ), null);
+  assert.equal(harness.stats.createCount, 0);
+  assert.equal(harness.files.has('Daily/2026-08-12.md'), false);
+  assert.equal(harness.files.has('New Daily/2026-08-12.md'), false);
 });
 
 test('Templater local auto-create processing settles before a later capture mutation', async () => {
@@ -897,6 +1591,189 @@ test('an already-exists creation race still waits for the competing Templater ho
   assert.match(harness.files.get(file.path), /Templater body/);
 });
 
+test('authoritative non-Daily exact-path collisions are never accepted as Daily Notes', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const projectContent = [
+    '---',
+    'kind: project',
+    'scheduled: 2026-08-18 00:00:00',
+    '---',
+    'Project content',
+  ].join('\n');
+
+  let adapterCollisionInjected = false;
+  const adapterCollision = createDailyNoteServiceHarness(FakeFile, {
+    beforeAdapterExists({ path, files, fileTimes, emitVault, fileFor }) {
+      if (adapterCollisionInjected || path !== 'Daily/2026-08-18.md') return;
+      adapterCollisionInjected = true;
+      files.set(path, projectContent);
+      fileTimes.set(path, Date.now());
+      emitVault('create', fileFor(path));
+    },
+  });
+  const adapterService = new NoteOperationService(adapterCollision.plugin);
+  assert.equal(await adapterService.ensureDailyNote('2026-08-18 00:00:00'), null);
+  assert.equal(adapterCollision.files.get('Daily/2026-08-18.md'), projectContent);
+  assert.equal(adapterCollision.stats.createCount, 0);
+
+  const createCollision = createDailyNoteServiceHarness(FakeFile, {
+    simulateCreateRace: true,
+    simulateCreateRaceContent: projectContent.replace(/2026-08-18/gu, '2026-08-19'),
+  });
+  const createService = new NoteOperationService(createCollision.plugin);
+  assert.equal(await createService.ensureDailyNote('2026-08-19 00:00:00'), null);
+  assert.match(createCollision.files.get('Daily/2026-08-19.md'), /kind: project/u);
+  assert.equal(createCollision.stats.createCount, 1);
+});
+
+test('current bytes veto stale-cache non-Daily canonical and legacy candidates without Templater', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const projectContent = (date) => [
+    '---',
+    'kind: project',
+    `scheduled: ${date} 00:00:00`,
+    '---',
+    'Project content',
+  ].join('\n');
+
+  const canonicalPath = 'Daily/2026-08-27.md';
+  const canonicalHarness = createDailyNoteServiceHarness(FakeFile, {
+    templaterLocalAutoTrigger: false,
+    metadataFrontmatterOverride(file) {
+      return file.path === canonicalPath ? { kind: 'dailynote' } : undefined;
+    },
+  });
+  const canonicalBytes = projectContent('2026-08-27');
+  canonicalHarness.seedExisting(canonicalPath, canonicalBytes, 20_000);
+  const canonicalService = new NoteOperationService(canonicalHarness.plugin);
+  assert.equal(await canonicalService.ensureDailyNote('2026-08-27 00:00:00'), null);
+  assert.equal(canonicalHarness.files.get(canonicalPath), canonicalBytes);
+  assert.equal(canonicalHarness.stats.createCount, 0);
+
+  const legacyPath = '2026-08-28.md';
+  const legacyHarness = createDailyNoteServiceHarness(FakeFile, {
+    templaterLocalAutoTrigger: false,
+    metadataFrontmatterOverride(file) {
+      return file.path === legacyPath ? { kind: 'dailynote' } : undefined;
+    },
+  });
+  const legacyBytes = projectContent('2026-08-28');
+  legacyHarness.seedExisting(legacyPath, legacyBytes, 20_000);
+  const legacyService = new NoteOperationService(legacyHarness.plugin);
+  assert.equal(await legacyService.ensureDailyNote('2026-08-28 00:00:00'), null);
+  assert.equal(legacyHarness.files.get(legacyPath), legacyBytes);
+  assert.equal(legacyHarness.files.has('Daily/2026-08-28.md'), false);
+  assert.equal(legacyHarness.stats.createCount, 0);
+});
+
+test('current companion markers veto stale-cache canonical return and moved-legacy reconciliation', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const companionBytes = (date) => [
+    '---',
+    'tpsGcmFileProperties: 1',
+    `tpsGcmFileId: companion-${date}`,
+    'tpsGcmSourcePath: Assets/Source.canvas',
+    'kind: dailynote',
+    `scheduled: ${date} 00:00:00`,
+    '---',
+    'Moved companion body',
+  ].join('\n');
+
+  const canonicalDate = '2026-09-04';
+  const canonicalPath = `Daily/${canonicalDate}.md`;
+  const canonicalHarness = createDailyNoteServiceHarness(FakeFile, {
+    templaterLocalAutoTrigger: false,
+    metadataFrontmatterOverride(file) {
+      return file.path === canonicalPath ? { kind: 'dailynote' } : undefined;
+    },
+  });
+  canonicalHarness.seedExisting(canonicalPath, companionBytes(canonicalDate), 20_000);
+  const canonicalService = new NoteOperationService(canonicalHarness.plugin);
+  assert.equal(await canonicalService.ensureDailyNote(`${canonicalDate} 00:00:00`), null);
+  assert.equal(canonicalHarness.files.get(canonicalPath), companionBytes(canonicalDate));
+  assert.equal(canonicalHarness.stats.createCount, 0);
+
+  const legacyDate = '2026-09-05';
+  const legacyPath = 'Moved file properties companion.md';
+  const legacyHarness = createDailyNoteServiceHarness(FakeFile, {
+    templaterLocalAutoTrigger: false,
+    metadataFrontmatterOverride(file) {
+      return file.path === legacyPath
+        ? { kind: 'dailynote', scheduled: `${legacyDate} 00:00:00` }
+        : undefined;
+    },
+  });
+  legacyHarness.seedExisting(legacyPath, companionBytes(legacyDate), 20_000);
+  const legacyService = new NoteOperationService(legacyHarness.plugin);
+  assert.equal(await legacyService.ensureDailyNote(`${legacyDate} 00:00:00`), null);
+  assert.equal(legacyHarness.files.get(legacyPath), companionBytes(legacyDate));
+  assert.equal(legacyHarness.files.has(`Daily/${legacyDate}.md`), false);
+  assert.equal(legacyHarness.stats.createCount, 0);
+});
+
+test('a dirty live Daily Note overrides stale-negative cache before canonical creation', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService, markDailyNoteCandidatePathDirty } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const legacyPath = 'Planning journal.md';
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templaterLocalAutoTrigger: false,
+    metadataFrontmatterOverride(file) {
+      return file.path === legacyPath ? { kind: 'project' } : undefined;
+    },
+  });
+  const liveBytes = [
+    '---',
+    'kind: dailynote',
+    'scheduled: 2026-08-29 00:00:00',
+    '---',
+    'Live Daily Note body',
+  ].join('\n');
+  const legacy = harness.seedExisting(legacyPath, liveBytes, 20_000);
+  markDailyNoteCandidatePathDirty(harness.plugin.app, legacy);
+
+  const service = new NoteOperationService(harness.plugin);
+  const resolved = await service.ensureDailyNote('2026-08-29 00:00:00');
+  assert.equal(resolved?.path, 'Daily/2026-08-29.md');
+  assert.equal(harness.stats.createCount, 0, 'the stale-negative cache must not permit a duplicate create');
+  assert.equal(harness.files.has(legacyPath), false);
+  assert.equal(harness.files.get('Daily/2026-08-29.md'), liveBytes);
+});
+
 test('a freshly observed exact-existing Daily Note waits for its external Templater hook', async () => {
   installDailyNoteMoment();
   const { NoteOperationService } = await loadNoteOperationService();
@@ -939,6 +1816,574 @@ test('a freshly observed exact-existing Daily Note waits for its external Templa
   assert.match(harness.files.get(file.path), /capture after external creation/);
 });
 
+for (const scenario of [
+  {
+    label: 'non-Daily kind',
+    date: '2026-08-24',
+    transform(content) {
+      return `\uFEFF${content
+        .replace('kind: dailynote', 'kind: task')
+        .replace('<% daily-body %>', 'Processed as a task')}`;
+    },
+    expected: /kind: task/u,
+  },
+  {
+    label: 'process-run marker',
+    date: '2026-08-25',
+    transform(content) {
+      return content
+        .replace('kind: dailynote', 'kind: dailynote\nrunKind: run')
+        .replace('<% daily-body %>', 'Processed as a run');
+    },
+    expected: /runKind: run/u,
+  },
+]) {
+  test(`external Templater settlement rejects a live ${scenario.label} despite stale Daily Note metadata`, async () => {
+    installDailyNoteMoment();
+    const { NoteOperationService } = await loadNoteOperationService();
+    class FakeFile {
+      constructor(path) {
+        this.path = path;
+        this.extension = path.split('.').pop();
+        this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+        this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+      }
+    }
+    const harness = createDailyNoteServiceHarness(FakeFile, {
+      templaterLocalAutoTrigger: true,
+      templaterAutoHookDelayMs: 20,
+      templaterAutoHookWriteDelayMs: 80,
+      templaterTransform: scenario.transform,
+      metadataFrontmatterOverride: { kind: 'dailynote' },
+    });
+    const path = `Daily/${scenario.date}.md`;
+    harness.seedExternalCreation(path, [
+      '---',
+      'kind: dailynote',
+      '---',
+      '<% daily-body %>',
+    ].join('\n'));
+
+    const service = new NoteOperationService(harness.plugin);
+    assert.equal(await service.ensureDailyNote(`${scenario.date} 00:00:00`), null);
+    assert.match(harness.files.get(path), scenario.expected);
+    assert.equal(harness.stats.templaterAutoRuns, 1);
+    assert.equal(harness.stats.templaterExplicitRuns, 0);
+    assert.equal(harness.stats.createCount, 0);
+  });
+}
+
+for (const scenario of [
+  {
+    label: 'array',
+    date: '2026-09-01',
+    yaml: '- kind: task',
+  },
+  {
+    label: 'scalar',
+    date: '2026-09-02',
+    yaml: 'project',
+  },
+  {
+    label: 'null',
+    date: '2026-09-03',
+    yaml: 'null',
+  },
+]) {
+  test(`external Templater settlement rejects a ${scenario.label} YAML document root`, async () => {
+    installDailyNoteMoment();
+    const { NoteOperationService } = await loadNoteOperationService();
+    class FakeFile {
+      constructor(path) {
+        this.path = path;
+        this.extension = path.split('.').pop();
+        this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+        this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+      }
+    }
+    const output = ['---', scenario.yaml, '---', `Processed ${scenario.label} root`].join('\n');
+    const harness = createDailyNoteServiceHarness(FakeFile, {
+      templaterLocalAutoTrigger: true,
+      templaterAutoHookDelayMs: 20,
+      templaterAutoHookWriteDelayMs: 80,
+      templaterTransform: () => output,
+      metadataFrontmatterOverride: { kind: 'dailynote' },
+    });
+    const path = `Daily/${scenario.date}.md`;
+    harness.seedExternalCreation(path, [
+      '---',
+      'kind: dailynote',
+      '---',
+      '<% daily-body %>',
+    ].join('\n'));
+
+    const service = new NoteOperationService(harness.plugin);
+    assert.equal(await service.ensureDailyNote(`${scenario.date} 00:00:00`), null);
+    assert.equal(harness.files.get(path), output);
+    assert.equal(harness.stats.templaterAutoRuns, 1);
+    assert.equal(harness.stats.createCount, 0);
+  });
+}
+
+test('a recent external Templater no-op remains fail-closed without rewriting mature content', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templaterLocalAutoTrigger: true,
+    templaterAutoHookDelayMs: 20,
+    templaterAutoHookWriteDelayMs: 80,
+  });
+  const original = [
+    '---',
+    'kind: dailynote',
+    '---',
+    '<% unknown-command %>',
+  ].join('\n');
+  const external = harness.seedExternalCreation('Daily/2026-08-20.md', original);
+  const service = new NoteOperationService(harness.plugin);
+  assert.equal(await service.ensureDailyNote('2026-08-20 00:00:00'), null);
+  assert.equal(harness.files.get('Daily/2026-08-20.md'), original);
+  await new Promise((resolve) => setTimeout(resolve, 425));
+  assert.equal(
+    await service.ensureDailyNote('2026-08-20 00:00:00'),
+    null,
+    'unchanged failed bytes must remain blocked after the recent-create window expires',
+  );
+  const recovered = original.replace('<% unknown-command %>', 'Recovered by the user');
+  await harness.plugin.app.vault.modify(external, recovered);
+  assert.equal(
+    (await service.ensureDailyNote('2026-08-20 00:00:00'))?.path,
+    external.path,
+    'a proven external edit releases the same-session fingerprint',
+  );
+  assert.equal(harness.files.get('Daily/2026-08-20.md'), recovered);
+  assert.equal(harness.stats.createCount, 0);
+  assert.equal(harness.stats.templaterAutoRuns, 1);
+  assert.equal(harness.stats.templaterExplicitRuns, 0);
+});
+
+test('external settlement failure evidence survives reconciliation to a changed Core path', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const runtimeDailyNotes = {
+    folder: 'Daily',
+    format: 'YYYY-MM-DD',
+    template: 'Templates/Daily',
+  };
+  const original = [
+    '---',
+    'kind: dailynote',
+    '---',
+    '<% unknown-command %>',
+  ].join('\n');
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes,
+    templaterLocalAutoTrigger: true,
+    templaterAutoHookDelayMs: 20,
+    templaterAutoHookWriteDelayMs: 80,
+  });
+  const sourcePath = 'Daily/2026-09-06.md';
+  const targetPath = 'Journal/2026-09-06.md';
+  const external = harness.seedExternalCreation(sourcePath, original);
+  const service = new NoteOperationService(harness.plugin);
+
+  assert.equal(await service.ensureDailyNote('2026-09-06 00:00:00'), null);
+  await new Promise((resolve) => setTimeout(resolve, 425));
+  runtimeDailyNotes.folder = 'Journal';
+
+  assert.equal(await service.ensureDailyNote('2026-09-06 00:00:00'), null);
+  assert.equal(external.path, targetPath, 'reconciliation should preserve the stable TFile while renaming it');
+  assert.equal(harness.files.has(sourcePath), false);
+  assert.equal(harness.files.get(targetPath), original);
+  assert.equal(harness.stats.createCount, 0);
+  assert.equal(harness.stats.templaterAutoRuns, 1, 'renaming must not rerun or accept the failed template');
+});
+
+test('a transient post-hook read failure stays fail-closed and records owned failure evidence', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  let targetReads = 0;
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templaterLocalAutoTrigger: true,
+    templaterAutoHookDelayMs: 20,
+    templaterAutoHookWriteDelayMs: 50,
+    beforeRead({ file }) {
+      if (file.path !== 'Daily/2026-08-26.md') return;
+      targetReads += 1;
+      // First read inspects the prepared template; the second confirms that
+      // the auto hook settled; the third is the post-hook equality proof.
+      if (targetReads === 3) throw new Error('transient post-hook read failure');
+    },
+  });
+  const service = new NoteOperationService(harness.plugin);
+  assert.equal(await service.ensureDailyNote('2026-08-26 00:00:00'), null);
+  assert.match(
+    harness.files.get('Daily/2026-08-26.md'),
+    /<!-- tps-daily-note-template-incomplete:v1 -->\n$/u,
+  );
+  assert.equal(harness.stats.templaterAutoRuns, 1);
+  assert.equal(harness.stats.createCount, 1);
+});
+
+test('a mature existing Daily Note containing literal Templater syntax stays byte-for-byte unchanged', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, { templaterLocalAutoTrigger: true });
+  const original = [
+    '---',
+    'title: Mature Daily Note',
+    'kind: dailynote',
+    '---',
+    '',
+    'Literal documentation: <% do not execute this %>',
+    '',
+  ].join('\n');
+  harness.seedExisting('Daily/2026-08-06.md', original, 20_000);
+
+  const service = new NoteOperationService(harness.plugin);
+  const file = await service.ensureDailyNote('2026-08-06 00:00:00');
+
+  assert.equal(file?.path, 'Daily/2026-08-06.md');
+  assert.equal(harness.files.get(file.path), original);
+  assert.equal(harness.stats.createCount, 0);
+  assert.equal(harness.stats.templaterRuns, 0);
+});
+
+test('a reconciled legacy Daily Note keeps its bytes while only its path changes', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes: {
+      folder: 'Daily',
+      format: 'YYYY_MM_DD',
+      template: 'Templates/Daily',
+    },
+    templaterLocalAutoTrigger: true,
+  });
+  const original = [
+    '---',
+    'title: Legacy Daily Note',
+    'kind: dailynote',
+    'scheduled: 2026-08-07 00:00:00',
+    '---',
+    '',
+    'Literal documentation: <% do not execute this %>',
+    '',
+  ].join('\n');
+  harness.seedExisting('Daily/2026-08-07.md', original, 20_000);
+
+  const service = new NoteOperationService(harness.plugin);
+  const file = await service.ensureDailyNote('2026-08-07 00:00:00');
+
+  assert.equal(file?.path, 'Daily/2026_08_07.md');
+  assert.equal(harness.files.get(file.path), original);
+  assert.equal(harness.files.has('Daily/2026-08-07.md'), false);
+  assert.equal(harness.stats.createCount, 0);
+  assert.equal(harness.stats.templaterRuns, 0);
+});
+
+test('Templater creation eligibility mirrors upstream includes/startsWith guards', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile);
+  const service = new NoteOperationService(harness.plugin);
+  const templater = {
+    settings: {
+      templates_folder: 'Templates',
+      ignore_folders_on_creation: [{ folder: 'Archive' }],
+    },
+  };
+
+  assert.equal(service.isTemplaterAutoCreateEligible(new FakeFile('Templates/Note.md'), templater), false);
+  assert.equal(service.isTemplaterAutoCreateEligible(new FakeFile('Templates/Sub/Note.md'), templater), false);
+  assert.equal(service.isTemplaterAutoCreateEligible(new FakeFile('MyTemplatesArchive/Note.md'), templater), false);
+  assert.equal(service.isTemplaterAutoCreateEligible(new FakeFile('Archive/Note.md'), templater), false);
+  assert.equal(service.isTemplaterAutoCreateEligible(new FakeFile('Archive2/Note.md'), templater), false);
+});
+
+test('a slow vault create cannot consume the passive Templater hook grace period', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templateContent: [
+      '---',
+      'title: "{{date:dddd}} planning"',
+      'kind: dailynote',
+      '---',
+      '',
+      'Static template body',
+    ].join('\n'),
+    templaterLocalAutoTrigger: true,
+    createDelayMs: 450,
+    templaterAutoHookDelayMs: 120,
+    templaterAutoHookWriteDelayMs: 30,
+  });
+  const service = new NoteOperationService(harness.plugin);
+  const file = await service.ensureDailyNote('2026-08-08 00:00:00');
+
+  assert.ok(file);
+  assert.equal(harness.stats.templaterRuns, 1);
+  assert.equal(harness.stats.templaterAutoRuns, 1);
+  assert.equal(harness.stats.templaterExplicitRuns, 0);
+});
+
+test('positive Templater processing accepts intentional literal delimiters in output', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templateContent: [
+      '---',
+      'title: "{{date:dddd}} planning"',
+      'kind: dailynote',
+      '---',
+      '',
+      '<% daily-body %>',
+      'Literal documentation: <% do not execute this example %>',
+    ].join('\n'),
+    templaterLocalAutoTrigger: true,
+  });
+  const service = new NoteOperationService(harness.plugin);
+  const file = await service.ensureDailyNote('2026-08-09 00:00:00');
+
+  assert.ok(file);
+  assert.match(harness.files.get(file.path), /Templater body/u);
+  assert.match(harness.files.get(file.path), /<% do not execute this example %>/u);
+});
+
+test('Templater ownership still fails closed when prepared template bytes never change', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templateContent: [
+      '',
+      '---',
+      'kind: dailynote',
+      '---',
+      '',
+      '<% unknown-command %>',
+    ].join('\n'),
+    templaterLocalAutoTrigger: false,
+  });
+  const service = new NoteOperationService(harness.plugin);
+  assert.equal(await service.ensureDailyNote('2026-08-13 00:00:00'), null);
+  assert.match(
+    harness.files.get('Daily/2026-08-13.md'),
+    /<!-- tps-daily-note-template-incomplete:v1 -->\n$/u,
+  );
+  assert.match(
+    harness.files.get('Daily/2026-08-13.md'),
+    /^\n---\n/u,
+    'GCM normalization must not manufacture evidence that an explicit Templater pass succeeded',
+  );
+});
+
+test('auto Templater no-op with leading whitespace remains fail-closed before normalization', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templateContent: [
+      '',
+      '---',
+      'kind: dailynote',
+      '---',
+      '<% unknown-command %>',
+    ].join('\n'),
+    templaterLocalAutoTrigger: true,
+  });
+  const service = new NoteOperationService(harness.plugin);
+  assert.equal(await service.ensureDailyNote('2026-08-17 00:00:00'), null);
+  const failed = harness.files.get('Daily/2026-08-17.md');
+  assert.match(failed, /^\n---\n/u);
+  assert.match(failed, /<!-- tps-daily-note-template-incomplete:v1 -->\n$/u);
+});
+
+test('leading frontmatter normalization atomically transforms the current vault bytes', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  let concurrentEditApplied = false;
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templateContent: [
+      '',
+      '---',
+      'kind: dailynote',
+      '---',
+      '<% daily-body %>',
+    ].join('\n'),
+    beforeProcess({ file, files }) {
+      if (concurrentEditApplied || file.path !== 'Daily/2026-08-14.md') return;
+      concurrentEditApplied = true;
+      files.set(file.path, [
+        '',
+        '---',
+        'kind: dailynote',
+        '---',
+        'Concurrent Sync edit',
+      ].join('\n'));
+    },
+  });
+  const service = new NoteOperationService(harness.plugin);
+  const file = await service.ensureDailyNote('2026-08-14 00:00:00');
+  assert.ok(file);
+  const current = harness.files.get(file.path);
+  assert.match(current, /^---\n/u);
+  assert.match(current, /Concurrent Sync edit/u, 'normalization must preserve the live concurrent bytes');
+});
+
+test('owned static and Templater outputs must retain Daily Note identity before return', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+
+  const staticHarness = createDailyNoteServiceHarness(FakeFile, {
+    templateContent: [
+      '---',
+      'kind: project',
+      '---',
+      'Static project output',
+    ].join('\n'),
+  });
+  const staticService = new NoteOperationService(staticHarness.plugin);
+  assert.equal(await staticService.ensureDailyNote('2026-08-21 00:00:00'), null);
+  assert.match(staticHarness.files.get('Daily/2026-08-21.md'), /kind: "project"/u);
+  assert.equal(staticHarness.stats.createCount, 1, 'invalid owned output is preserved for inspection');
+
+  const templaterHarness = createDailyNoteServiceHarness(FakeFile, {
+    templateContent: [
+      '---',
+      'kind: dailynote',
+      '---',
+      '<% daily-body %>',
+    ].join('\n'),
+    templaterLocalAutoTrigger: false,
+    metadataFrontmatterOverride: { kind: 'dailynote' },
+    afterOwnedFrontmatterProcess({ file, files }) {
+      const current = files.get(file.path);
+      if (!current.startsWith('\uFEFF')) files.set(file.path, `\uFEFF${current}`);
+    },
+    templaterTransform(content) {
+      return content
+        .replace('kind: dailynote', 'kind: task')
+        .replace('<% daily-body %>', 'Processed as a task');
+    },
+  });
+  const templaterService = new NoteOperationService(templaterHarness.plugin);
+  assert.equal(await templaterService.ensureDailyNote('2026-08-22 00:00:00'), null);
+  assert.match(templaterHarness.files.get('Daily/2026-08-22.md'), /^\uFEFF---\n/u);
+  assert.match(templaterHarness.files.get('Daily/2026-08-22.md'), /kind: "task"/u);
+  assert.match(templaterHarness.files.get('Daily/2026-08-22.md'), /Processed as a task/u);
+  assert.equal(templaterHarness.stats.createCount, 1);
+
+  const processHarness = createDailyNoteServiceHarness(FakeFile, {
+    templateContent: [
+      '---',
+      'kind: dailynote',
+      'runKind: run',
+      '---',
+      'Process output',
+    ].join('\n'),
+    metadataFrontmatterOverride: { kind: 'dailynote' },
+  });
+  const processService = new NoteOperationService(processHarness.plugin);
+  assert.equal(await processService.ensureDailyNote('2026-08-23 00:00:00'), null);
+  assert.match(processHarness.files.get('Daily/2026-08-23.md'), /runKind: "run"/u);
+  assert.equal(processHarness.stats.createCount, 1);
+});
+
 test('a disabled Templater local auto-create setting performs exactly one explicit pass', async () => {
   installDailyNoteMoment();
   const { NoteOperationService } = await loadNoteOperationService();
@@ -962,6 +2407,182 @@ test('a disabled Templater local auto-create setting performs exactly one explic
   assert.equal(harness.stats.templaterAutoRuns, 0);
   assert.equal(harness.stats.templaterExplicitRuns, 1);
   assert.match(harness.files.get(file.path), /Templater body/);
+});
+
+test('an incomplete owned template creation remains fail-closed on retry without deleting the file', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templaterAvailable: false,
+  });
+  const service = new NoteOperationService(harness.plugin);
+  assert.equal(await service.ensureDailyNote('2026-08-10 00:00:00'), null);
+  assert.equal(harness.files.has('Daily/2026-08-10.md'), true);
+  const failedContent = harness.files.get('Daily/2026-08-10.md');
+  assert.match(failedContent, /^---\n/u, 'the durable marker must preserve YAML frontmatter at byte zero');
+  assert.match(failedContent, /<!-- tps-daily-note-template-incomplete:v1 -->\n$/u);
+  await new Promise((resolve) => setTimeout(resolve, 425));
+  assert.equal(await service.ensureDailyNote('2026-08-10 00:00:00'), null);
+  const afterReload = new NoteOperationService(harness.plugin);
+  assert.equal(await afterReload.ensureDailyNote('2026-08-10 00:00:00'), null);
+  assert.equal(harness.stats.createCount, 1, 'retry must not reuse or recreate the incomplete file');
+  const source = readFileSync(new URL('../src/services/note-operation-service.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /rollbackIncompleteOwnedDailyNote|\.trash\(/u);
+});
+
+test('deliberately removing the durable incomplete marker recovers in the same session', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, { templaterAvailable: false });
+  const service = new NoteOperationService(harness.plugin);
+  const path = 'Daily/2026-08-15.md';
+  assert.equal(await service.ensureDailyNote('2026-08-15 00:00:00'), null);
+  assert.match(harness.files.get(path), /tps-daily-note-template-incomplete/u);
+  harness.files.set(
+    path,
+    harness.files.get(path).replace(/\n?<!-- tps-daily-note-template-incomplete:v1 -->\n?$/u, '\n'),
+  );
+  assert.equal((await service.ensureDailyNote('2026-08-15 00:00:00'))?.path, path);
+  assert.equal(harness.stats.createCount, 1);
+});
+
+test('an unreadable failure-state fingerprint remains unconditionally blocked for the session', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  let targetReads = 0;
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templaterAvailable: false,
+    beforeRead({ file }) {
+      if (file.path !== 'Daily/2026-08-16.md') return;
+      targetReads += 1;
+      if (targetReads === 2) throw new Error('transient failure-state read error');
+    },
+  });
+  const service = new NoteOperationService(harness.plugin);
+  assert.equal(await service.ensureDailyNote('2026-08-16 00:00:00'), null);
+  assert.doesNotMatch(harness.files.get('Daily/2026-08-16.md'), /tps-daily-note-template-incomplete/u);
+  assert.equal(await service.ensureDailyNote('2026-08-16 00:00:00'), null);
+  assert.equal(harness.stats.createCount, 1);
+});
+
+test('durable incomplete marking never overwrites a concurrent user edit', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  let changed = false;
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templaterAvailable: false,
+    beforeProcess({ file, files }) {
+      if (changed) return;
+      changed = true;
+      files.set(file.path, `${files.get(file.path)}\nConcurrent user edit\n`);
+    },
+  });
+  const service = new NoteOperationService(harness.plugin);
+  assert.equal(await service.ensureDailyNote('2026-08-11 00:00:00'), null);
+  const content = harness.files.get('Daily/2026-08-11.md');
+  assert.match(content, /Concurrent user edit/u);
+  assert.doesNotMatch(content, /tps-daily-note-template-incomplete/u);
+});
+
+for (const [label, processOptions] of [
+  ['unavailable', { vaultProcessAvailable: false }],
+  ['throwing', { vaultProcessError: new Error('process failed') }],
+]) {
+  test(`same-session incomplete creation stays blocked when vault.process is ${label}`, async () => {
+    installDailyNoteMoment();
+    const { NoteOperationService } = await loadNoteOperationService();
+    class FakeFile {
+      constructor(path) {
+        this.path = path;
+        this.extension = path.split('.').pop();
+        this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+        this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+      }
+    }
+    const harness = createDailyNoteServiceHarness(FakeFile, {
+      templaterAvailable: false,
+      ...processOptions,
+    });
+    const service = new NoteOperationService(harness.plugin);
+    assert.equal(await service.ensureDailyNote('2026-08-12 00:00:00'), null);
+    const rejected = harness.files.get('Daily/2026-08-12.md');
+    assert.doesNotMatch(rejected, /tps-daily-note-template-incomplete/u);
+    assert.equal(await service.ensureDailyNote('2026-08-12 00:00:00'), null);
+    assert.equal(harness.files.get('Daily/2026-08-12.md'), rejected);
+    assert.equal(harness.stats.createCount, 1);
+
+    harness.files.set('Daily/2026-08-12.md', `${rejected}\nUser recovery edit\n`);
+    assert.ok(await service.ensureDailyNote('2026-08-12 00:00:00'));
+  });
+}
+
+test('marker-unavailable owned failure evidence survives reconciliation to a changed Core path', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/u, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const runtimeDailyNotes = {
+    folder: 'Daily',
+    format: 'YYYY-MM-DD',
+    template: 'Templates/Daily',
+  };
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes,
+    templaterAvailable: false,
+    vaultProcessAvailable: false,
+  });
+  const sourcePath = 'Daily/2026-09-07.md';
+  const targetPath = 'Journal/2026-09-07.md';
+  const service = new NoteOperationService(harness.plugin);
+
+  assert.equal(await service.ensureDailyNote('2026-09-07 00:00:00'), null);
+  const rejected = harness.files.get(sourcePath);
+  assert.doesNotMatch(rejected, /tps-daily-note-template-incomplete/u);
+  runtimeDailyNotes.folder = 'Journal';
+
+  assert.equal(await service.ensureDailyNote('2026-09-07 00:00:00'), null);
+  assert.equal(harness.files.has(sourcePath), false);
+  assert.equal(harness.files.get(targetPath), rejected);
+  assert.equal(harness.stats.createCount, 1, 'renaming must not recreate or accept failed owned bytes');
 });
 
 test('canonical GCM creation fails closed when a configured template is missing', async () => {
@@ -1055,7 +2676,7 @@ test('a disabled Core Daily Notes wrapper cannot mask configured Periodic Notes'
   assert.equal(harness.stats.templaterRuns, 1);
 });
 
-test('partial runtime Daily Notes settings merge the persisted template and avoid the provider path', async () => {
+test('partial runtime Daily Notes settings recover one coherent persisted snapshot', async () => {
   installDailyNoteMoment();
   const { NoteOperationService } = await loadNoteOperationService();
   class FakeFile {
@@ -1080,13 +2701,13 @@ test('partial runtime Daily Notes settings merge the persisted template and avoi
   const service = new NoteOperationService(harness.plugin);
   const file = await service.ensureDailyNote('2026-07-28 00:00:00');
 
-  assert.equal(file.path, 'Runtime/Daily/2026-07-28.md');
+  assert.equal(file.path, 'Stale/Persisted/2026_07_28.md');
   assert.match(harness.files.get(file.path), /Tuesday planning/);
   assert.match(harness.files.get(file.path), /Templater body/);
   assert.equal(harness.stats.templaterRuns, 1);
 });
 
-test('a transient blank runtime template cannot mask the saved Daily Notes template', async () => {
+test('a transient blank runtime configuration cannot split the saved Daily Notes identity', async () => {
   installDailyNoteMoment();
   const { NoteOperationService } = await loadNoteOperationService();
   class FakeFile {
@@ -1104,13 +2725,15 @@ test('a transient blank runtime template cannot mask the saved Daily Notes templ
       template: '',
     },
     persistedDailyNotes: {
+      folder: 'Persisted/Daily',
+      format: 'YYYY_MM_DD',
       template: 'Templates/Daily',
     },
   });
   const service = new NoteOperationService(harness.plugin);
   const file = await service.ensureDailyNote('2026-07-29 00:00:00');
 
-  assert.equal(file.path, 'Runtime/Daily/2026-07-29.md');
+  assert.equal(file.path, 'Persisted/Daily/2026_07_29.md');
   assert.match(harness.files.get(file.path), /Template section/);
   assert.match(harness.files.get(file.path), /Templater body/);
   assert.equal(harness.stats.templaterRuns, 1);

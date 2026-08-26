@@ -2,10 +2,11 @@ import { App, TFile, Notice, FuzzySuggestModal, Modal, parseYaml, stringifyYaml,
 import type TPSGlobalContextMenuPlugin from "../main";
 import * as logger from "../logger";
 import { mergeNormalizedTags, normalizeTagValue } from "../utils/tag-utils";
-import { findExistingDailyNoteForIsoDate, getDailyNoteScheduledValueForIsoDate, getIsoDateFromScheduledValue } from "../utils/daily-note-task-schedule";
+import { getDailyNoteScheduledValueForIsoDate, getIsoDateFromScheduledValue, hasAuthoritativeNonDailyNoteIdentity, normalizeExpectedDailyNotePath, parseDailyNoteFileDate, reconcileExistingDailyNoteForIsoDate } from "../utils/daily-note-task-schedule";
 import type { CustomProperty } from "../types";
 import { propertyUsesEntityOptions } from "../utils/property-option-source";
 import { applyCoreDailyNoteTemplateVariables, ensureDailyNoteTitleFallback } from "../utils/daily-note-creation";
+import { isFilePropertiesCompanionRecord } from "./file-properties-service";
 
 type HeaderTarget = {
     line: number;
@@ -22,11 +23,25 @@ type DailyNoteCreationSettings = {
     templateTimeFormat: string;
 };
 
+export type DailyNoteEnsureOptions = {
+    expectedPath?: string | null;
+};
+
+type PendingDailyNoteEnsure = {
+    promise: Promise<TFile | null>;
+    expectedPath: string | null;
+};
+
 const TEMPLATER_CREATE_HOOK_DELAY_MS = 300;
 const TEMPLATER_CREATE_HOOK_SETTLE_BUFFER_MS = 100;
 const TEMPLATER_CREATE_HOOK_POLL_MS = 25;
 const TEMPLATER_CREATE_HOOK_TIMEOUT_MS = 5_000;
 const TEMPLATER_COMMAND_PATTERN = /<%[\s\S]*?%>/u;
+const INCOMPLETE_DAILY_NOTE_TEMPLATE_MARKER = '<!-- tps-daily-note-template-incomplete:v1 -->';
+
+function hasIncompleteDailyNoteTemplateMarker(content: string): boolean {
+    return content.trimEnd().endsWith(INCOMPLETE_DAILY_NOTE_TEMPLATE_MARKER);
+}
 
 export interface NoteToCanvasOptions {
     outputFolder?: string;
@@ -36,7 +51,23 @@ export interface NoteToCanvasOptions {
 export class NoteOperationService {
     app: App;
     plugin: TPSGlobalContextMenuPlugin;
-    private readonly pendingDailyNoteEnsures = new Map<string, Promise<TFile | null>>();
+    private readonly pendingDailyNoteEnsures = new Map<string, PendingDailyNoteEnsure>();
+    /**
+     * Same-session fallback when the durable EOF marker cannot be written.
+     * Bind evidence to the stable TFile object so Daily Note reconciliation
+     * cannot lose it while atomically renaming the same file to a new Core path.
+     * Exact rejected bytes release after a proven external edit; null records
+     * an unreadable failure fingerprint and remains blocked until reload.
+     */
+    private readonly incompleteOwnedDailyNoteCreations = new WeakMap<TFile, string | null>();
+    /**
+     * External/competing Templater failures are not ours to mark or rewrite.
+     * Retain only an exact same-session byte fingerprint on the stable TFile:
+     * unchanged bytes stay blocked across reconciliation renames and after the
+     * recent-create window expires, while a proven user/plugin edit releases
+     * the guard. null means the failure bytes were unreadable.
+     */
+    private readonly failedExternalDailyNoteSettlements = new WeakMap<TFile, string | null>();
 
     constructor(plugin: TPSGlobalContextMenuPlugin) {
         this.plugin = plugin;
@@ -44,17 +75,10 @@ export class NoteOperationService {
     }
 
     public async populateDailyNoteWithScheduledItems(dailyNote: TFile): Promise<void> {
-        let dailyNoteDateStr = '';
-        const parsed = (window as any).moment(dailyNote.basename, [
-            this.plugin.fileNamingService.getDailyNoteDateFormat(),
-            "YYYY-MM-DD", "YYYY_MM_DD", "YYYYMMDD",
-            "MMMM D, YYYY", "MMM D, YYYY"
-        ], true);
-        if (parsed.isValid()) {
-            dailyNoteDateStr = parsed.format('YYYY-MM-DD');
-        } else {
-            return;
-        }
+        await this.plugin.fileNamingService.whenDailyNoteConfigurationReady();
+        if (!this.plugin.fileNamingService.getDailyNoteConfigurationSnapshot()) return;
+        const dailyNoteDateStr = parseDailyNoteFileDate(this.app, this.plugin.settings, dailyNote);
+        if (!dailyNoteDateStr) return;
 
         // Check if the note already has content - don't auto-populate if it does
         // This prevents repeated expensive scans and modifications
@@ -79,8 +103,9 @@ export class NoteOperationService {
             const scheduledMillis = this.plugin.sharedServices?.schedule?.parseDateMillis(scheduled) ?? null;
             const scheduledDate = scheduledMillis == null ? null : (window as any).moment(scheduledMillis);
             if (scheduledDate?.isValid() && scheduledDate.format('YYYY-MM-DD') === dailyNoteDateStr) {
-                // Ignore files that are themselves daily notes
-                if (this.plugin.fileNamingService.isDateOnlyBasename(file.basename)) continue;
+                // Ignore files that are themselves Daily Notes using the same
+                // strict identity contract as every other task surface.
+                if (parseDailyNoteFileDate(this.app, this.plugin.settings, file)) continue;
                 scheduledFiles.push(file);
             }
         }
@@ -836,13 +861,35 @@ export class NoteOperationService {
         });
     }
 
-    async ensureDailyNote(dateStr: string): Promise<TFile | null> {
+    async ensureDailyNote(dateStr: string, options: DailyNoteEnsureOptions = {}): Promise<TFile | null> {
         const isoDate = getIsoDateFromScheduledValue(dateStr);
+        const hasExpectedPath = options.expectedPath !== undefined && options.expectedPath !== null;
+        const expectedPath = hasExpectedPath
+            ? normalizeExpectedDailyNotePath(options.expectedPath)
+            : null;
+        if (hasExpectedPath && !expectedPath) {
+            logger.flowWarn('DailyNote', 'ensure:invalid-expected-path', { date: isoDate });
+            return null;
+        }
+        // One date owns at most one mutation. A caller-specific expected path
+        // is a result constraint, not a second ownership lane: otherwise a
+        // constrained provider call and an unconstrained legacy caller can
+        // race each other into two different configured targets.
         const operationKey = isoDate ? `iso:${isoDate}` : `value:${String(dateStr || '').trim()}`;
         const pending = this.pendingDailyNoteEnsures.get(operationKey);
-        if (pending) return pending;
+        if (pending) {
+            const result = await pending.promise;
+            if (result === null && expectedPath === null && pending.expectedPath !== null) {
+                // The constrained owner may have declined a now-changed
+                // provider target. Its finally has released the ISO gate;
+                // retry this ordinary caller sequentially against the current
+                // authoritative configuration rather than inheriting null.
+                return this.ensureDailyNote(dateStr, options);
+            }
+            return this.acceptDailyNoteResultForExpectedPath(result, expectedPath);
+        }
 
-        const operation = this.ensureDailyNoteOnce(dateStr, isoDate).catch((error) => {
+        const work = this.ensureDailyNoteOnce(dateStr, isoDate, expectedPath).catch((error) => {
             logger.error('Daily Note creation failed', {
                 date: isoDate ?? String(dateStr || '').trim(),
                 error,
@@ -850,17 +897,34 @@ export class NoteOperationService {
             new Notice('TPS GCM: The Daily Note could not be created. Check the configured template and try again.');
             return null;
         });
-        this.pendingDailyNoteEnsures.set(operationKey, operation);
-        try {
-            return await operation;
-        } finally {
-            if (this.pendingDailyNoteEnsures.get(operationKey) === operation) {
+        const entry: PendingDailyNoteEnsure = { promise: work, expectedPath };
+        entry.promise = work.finally(() => {
+            if (this.pendingDailyNoteEnsures.get(operationKey) === entry) {
                 this.pendingDailyNoteEnsures.delete(operationKey);
             }
-        }
+        });
+        this.pendingDailyNoteEnsures.set(operationKey, entry);
+        return this.acceptDailyNoteResultForExpectedPath(await entry.promise, expectedPath);
     }
 
-    private async ensureDailyNoteOnce(dateStr: string, isoDate: string | null): Promise<TFile | null> {
+    private acceptDailyNoteResultForExpectedPath(
+        file: TFile | null,
+        expectedPath: string | null,
+    ): TFile | null {
+        if (!file || expectedPath === null) return file;
+        if (normalizePath(file.path) === expectedPath) return file;
+        logger.flowWarn('DailyNote', 'ensure:joined-result-path-mismatch', {
+            expectedPath,
+        });
+        return null;
+    }
+
+    private async ensureDailyNoteOnce(
+        dateStr: string,
+        isoDate: string | null,
+        expectedPath: string | null,
+    ): Promise<TFile | null> {
+        await this.plugin.fileNamingService.whenDailyNoteConfigurationReady?.();
         const settings = await this.getDailyNoteCreationSettings();
         this.plugin.fileNamingService.registerDailyNoteConfiguration(settings.folder, settings.format);
         const targetDate = isoDate
@@ -874,6 +938,13 @@ export class NoteOperationService {
                 ? `${settings.folder}/${formattedBasename}.md`
                 : `${formattedBasename}.md`,
         );
+        if (expectedPath && path !== expectedPath) {
+            logger.flowWarn('DailyNote', 'ensure:expected-path-mismatch', {
+                date: isoDate,
+                stage: 'configuration-capture',
+            });
+            return null;
+        }
         const titleValue = isoDate
             ? (path.split('/').pop()?.replace(/\.md$/i, '') || isoDate)
             : dateStr;
@@ -884,38 +955,40 @@ export class NoteOperationService {
         const configuredTemplate = String(settings.template || '').trim();
 
         const exactExisting = this.app.vault.getAbstractFileByPath(path);
-        const existingDailyNote = exactExisting instanceof TFile
-            && !this.plugin.filePropertiesService?.isCompanionFile(exactExisting)
-            ? exactExisting
-            : isoDate
-            ? findExistingDailyNoteForIsoDate(this.app, this.plugin.settings, isoDate)
-            : null;
-        if (existingDailyNote instanceof TFile) {
-            if (!(await this.finishPendingTemplaterTemplate(existingDailyNote))) {
+        let existingDailyNote: TFile | null = null;
+        if (isoDate) {
+            const resolution = await reconcileExistingDailyNoteForIsoDate(
+                this.app,
+                this.plugin.settings,
+                isoDate,
+                expectedPath === null ? undefined : { expectedPath },
+            );
+            if (resolution.status === 'blocked') {
+                logger.flowWarn('DailyNote', 'ensure:identity-blocked', {
+                    date: isoDate,
+                    reason: resolution.reason,
+                });
                 return null;
             }
-            await this.normalizeCreatedDailyNote(
-                existingDailyNote,
-                titleValue,
-                existingDailyNote.parent?.path || targetFolder,
-                isoDate,
-            );
-            return existingDailyNote;
+            existingDailyNote = resolution.status === 'found' ? resolution.file : null;
+        } else if (exactExisting instanceof TFile && !this.plugin.filePropertiesService?.isCompanionFile(exactExisting)) {
+            existingDailyNote = exactExisting;
+        }
+        if (existingDailyNote instanceof TFile) {
+            return await this.settleExistingDailyNoteIfPending(existingDailyNote)
+                ? existingDailyNote
+                : null;
         }
 
         if (await adapter.exists(path)) {
+            if (isoDate) {
+                return this.settleConfirmedDailyNoteCollision(isoDate, expectedPath, 'adapter-exists');
+            }
             const existing = this.app.vault.getAbstractFileByPath(path);
             if (existing instanceof TFile && !this.plugin.filePropertiesService?.isCompanionFile(existing)) {
-                if (!(await this.finishPendingTemplaterTemplate(existing))) {
-                    return null;
-                }
-                await this.normalizeCreatedDailyNote(
-                    existing,
-                    titleValue,
-                    existing.parent?.path || targetFolder,
-                    isoDate,
-                );
-                return existing;
+                return await this.settleExistingDailyNoteIfPending(existing)
+                    ? existing
+                    : null;
             }
             return null;
         }
@@ -972,15 +1045,88 @@ export class NoteOperationService {
             content = `---\ntitle: ${JSON.stringify(titleValue)}\ntags: [dailynote]\n---\n\n${content}`;
         }
 
+        // Template/folder work above can yield long enough for Sync or another
+        // plugin to create a legacy Daily Note. Reconcile once more at the
+        // mutation boundary so this call cannot create a canonical duplicate.
+        if (isoDate) {
+            const latestConfiguration = this.plugin.fileNamingService.getDailyNoteConfigurationSnapshot?.();
+            const currentTargetBasename = latestConfiguration
+                ? targetDate.format(latestConfiguration.format)
+                : '';
+            const currentTargetPath = latestConfiguration
+                ? normalizePath(
+                    latestConfiguration.folder
+                        ? `${latestConfiguration.folder}/${currentTargetBasename}.md`
+                        : `${currentTargetBasename}.md`,
+                )
+                : null;
+            if (
+                !latestConfiguration
+                || latestConfiguration.folder !== settings.folder
+                || latestConfiguration.format !== settings.format
+                || latestConfiguration.template !== settings.template
+                || currentTargetPath !== path
+                || (expectedPath !== null && currentTargetPath !== expectedPath)
+            ) {
+                logger.flowWarn('DailyNote', 'ensure:configuration-changed-before-create', { date: isoDate });
+                return null;
+            }
+            const beforeCreate = await reconcileExistingDailyNoteForIsoDate(
+                this.app,
+                this.plugin.settings,
+                isoDate,
+                expectedPath === null ? undefined : { expectedPath },
+            );
+            if (beforeCreate.status === 'blocked') {
+                logger.flowWarn('DailyNote', 'ensure:identity-blocked-before-create', {
+                    date: isoDate,
+                    reason: beforeCreate.reason,
+                });
+                return null;
+            }
+            if (beforeCreate.status === 'found') {
+                const existing = beforeCreate.file;
+                return await this.settleExistingDailyNoteIfPending(existing)
+                    ? existing
+                    : null;
+            }
+            const finalConfiguration = this.plugin.fileNamingService.getDailyNoteConfigurationSnapshot?.();
+            const finalTargetBasename = finalConfiguration
+                ? targetDate.format(finalConfiguration.format)
+                : '';
+            const finalTargetPath = finalConfiguration
+                ? normalizePath(
+                    finalConfiguration.folder
+                        ? `${finalConfiguration.folder}/${finalTargetBasename}.md`
+                        : `${finalTargetBasename}.md`,
+                )
+                : null;
+            if (
+                !finalConfiguration
+                || finalTargetPath !== path
+                || (expectedPath !== null && finalTargetPath !== expectedPath)
+            ) {
+                logger.flowWarn('DailyNote', 'ensure:expected-path-changed-before-create', { date: isoDate });
+                return null;
+            }
+        }
+
         let created: TFile | null = null;
         let createdByThisCall = false;
-        const createStartedAt = Date.now();
+        let templaterCreateObservedAt = Date.now();
         try {
             created = await this.app.vault.create(path, content);
             createdByThisCall = true;
+            // Templater's create hook is scheduled from the actual vault event,
+            // which may occur after a slow adapter write. Never spend its
+            // passive grace period while iCloud/Sync is still creating the file.
+            templaterCreateObservedAt = Date.now();
         } catch (err: any) {
             const msg = err instanceof Error ? err.message : String(err);
             if (typeof msg === 'string' && msg.toLowerCase().includes('already exists')) {
+                if (isoDate) {
+                    return this.settleConfirmedDailyNoteCollision(isoDate, expectedPath, 'create-collision');
+                }
                 const existing = this.app.vault.getAbstractFileByPath(path);
                 if (existing instanceof TFile) {
                     created = existing;
@@ -989,19 +1135,55 @@ export class NoteOperationService {
             if (!created) throw err;
         }
 
-        if (!(await this.finishPendingTemplaterTemplate(created, {
-            awaitAutoCreateHook: true,
-            createStartedAt,
-        }))) {
+        if (createdByThisCall) {
+            if (!(await this.finishPendingTemplaterTemplate(created, {
+                awaitAutoCreateHook: true,
+                createStartedAt: templaterCreateObservedAt,
+                preparedInput: TEMPLATER_COMMAND_PATTERN.test(content) ? content : undefined,
+            }))) {
+                await this.markIncompleteOwnedDailyNote(created);
+                return null;
+            }
+
+            await this.normalizeCreatedDailyNote(
+                created,
+                titleValue,
+                created.parent?.path || targetFolder,
+                isoDate,
+            );
+            if (isoDate) {
+                if (!(await this.validateCurrentDailyNoteBytes(created, {
+                    stage: 'owned-output',
+                    date: isoDate,
+                    requireFrontmatter: true,
+                }))) {
+                    return null;
+                }
+                const verified = await reconcileExistingDailyNoteForIsoDate(
+                    this.app,
+                    this.plugin.settings,
+                    isoDate,
+                    expectedPath === null ? undefined : { expectedPath },
+                );
+                if (
+                    verified.status !== 'found'
+                    || normalizePath(verified.file.path) !== normalizePath(created.path)
+                ) {
+                    logger.flowWarn('DailyNote', 'ensure:owned-output-identity-blocked', {
+                        date: isoDate,
+                        reason: verified.status === 'blocked'
+                            ? verified.reason
+                            : verified.status === 'found'
+                                ? 'created-path-changed'
+                                : 'identity-unconfirmed',
+                    });
+                    return null;
+                }
+                created = verified.file;
+            }
+        } else if (!(await this.settleExistingDailyNoteIfPending(created))) {
             return null;
         }
-
-        await this.normalizeCreatedDailyNote(
-            created,
-            titleValue,
-            created.parent?.path || targetFolder,
-            isoDate,
-        );
         logger.flow('DailyNote', 'ensure:created', {
             path: created.path,
             date: isoDate,
@@ -1010,6 +1192,33 @@ export class NoteOperationService {
         });
 
         return created;
+    }
+
+    private async settleConfirmedDailyNoteCollision(
+        isoDate: string,
+        expectedPath: string | null,
+        stage: 'adapter-exists' | 'create-collision',
+    ): Promise<TFile | null> {
+        // A path collision is not proof of Daily Note identity. Reconcile again
+        // at this mutation boundary so metadata-unresolved, companion, and
+        // authoritative non-Daily records fail closed instead of being returned.
+        const resolution = await reconcileExistingDailyNoteForIsoDate(
+            this.app,
+            this.plugin.settings,
+            isoDate,
+            expectedPath === null ? undefined : { expectedPath },
+        );
+        if (resolution.status !== 'found') {
+            logger.flowWarn('DailyNote', 'ensure:collision-identity-blocked', {
+                date: isoDate,
+                stage,
+                reason: resolution.status === 'blocked' ? resolution.reason : 'identity-unconfirmed',
+            });
+            return null;
+        }
+        return await this.settleExistingDailyNoteIfPending(resolution.file)
+            ? resolution.file
+            : null;
     }
 
     private async normalizeCreatedDailyNote(file: TFile, titleValue: string, folder: string, isoDate: string | null = getIsoDateFromScheduledValue(titleValue)): Promise<void> {
@@ -1055,82 +1264,17 @@ export class NoteOperationService {
 
     private async getDailyNoteCreationSettings(): Promise<DailyNoteCreationSettings> {
         const templateFormats = await this.getCoreTemplateFormats();
-        const internalPlugins = (this.app as any).internalPlugins;
-        const corePlugin = internalPlugins?.getPluginById?.('daily-notes')
-            ?? internalPlugins?.plugins?.['daily-notes'];
-        const coreOptions = corePlugin?.enabled === false
-            ? null
-            : corePlugin?.instance?.options;
-        if (coreOptions && typeof coreOptions === 'object') {
-            const hasRuntimeFormat = typeof coreOptions.format === 'string';
-            const hasRuntimeFolder = typeof coreOptions.folder === 'string';
-            const persisted = await this.readPersistedDailyNoteSettings();
-            const runtimeTemplate = typeof coreOptions.template === 'string'
-                ? String(coreOptions.template || '').trim()
-                : '';
-            const persistedTemplate = String(persisted?.template || '').trim();
-            const template = runtimeTemplate || persistedTemplate;
-            if (!runtimeTemplate && persistedTemplate) {
-                logger.flow('DailyNote', 'settings:persisted-template-recovered', {
-                    source: 'core-runtime-empty',
-                });
-            }
-            return {
-                format: (
-                    hasRuntimeFormat
-                        ? String(coreOptions.format || '').trim()
-                        : String(persisted?.format || '').trim()
-                ) || 'YYYY-MM-DD',
-                folder: normalizePath(
-                    hasRuntimeFolder
-                        ? String(coreOptions.folder || '').trim()
-                        : String(persisted?.folder || '').trim(),
-                ).replace(/^\/+|\/+$/g, ''),
-                template,
-                ...templateFormats,
-            };
-        }
-
-        const periodicPlugin = (this.app as any).plugins?.getPlugin?.('periodic-notes')
-            ?? (this.app as any).plugins?.plugins?.['periodic-notes'];
-        const periodicOptions = periodicPlugin?.settings?.daily;
-        if (periodicOptions && typeof periodicOptions === 'object') {
-            return {
-                format: String(periodicOptions.format || '').trim() || 'YYYY-MM-DD',
-                folder: normalizePath(String(periodicOptions.folder || '').trim()).replace(/^\/+|\/+$/g, ''),
-                template: String(periodicOptions.template || '').trim(),
-                ...templateFormats,
-            };
-        }
-
-        const persisted = await this.readPersistedDailyNoteSettings();
-        if (persisted) {
-            return {
-                format: String(persisted?.format || '').trim() || 'YYYY-MM-DD',
-                folder: normalizePath(String(persisted?.folder || '').trim()).replace(/^\/+|\/+$/g, ''),
-                template: String(persisted?.template || '').trim(),
-                ...templateFormats,
-            };
+        await this.plugin.fileNamingService.whenDailyNoteConfigurationReady?.();
+        const readySnapshot = this.plugin.fileNamingService.getDailyNoteConfigurationSnapshot?.();
+        if (!readySnapshot) {
+            throw new Error('Daily Note configuration is not ready.');
         }
         return {
-            format: 'YYYY-MM-DD',
-            folder: 'System/Dailynotes',
-            template: '',
+            folder: readySnapshot.folder,
+            format: readySnapshot.format,
+            template: readySnapshot.template,
             ...templateFormats,
         };
-    }
-
-    private async readPersistedDailyNoteSettings(): Promise<Record<string, unknown> | null> {
-        try {
-            const configDir = String((this.app.vault as any)?.configDir || '.obsidian').trim() || '.obsidian';
-            const raw = await this.app.vault.adapter.read(normalizePath(`${configDir}/daily-notes.json`));
-            const parsed = JSON.parse(raw);
-            return parsed && typeof parsed === 'object'
-                ? parsed as Record<string, unknown>
-                : null;
-        } catch {
-            return null;
-        }
     }
 
     private async getCoreTemplateFormats(): Promise<{ templateDateFormat: string; templateTimeFormat: string }> {
@@ -1192,6 +1336,7 @@ export class NoteOperationService {
         options: {
             awaitAutoCreateHook?: boolean;
             createStartedAt?: number;
+            preparedInput?: string;
         } = {},
     ): Promise<boolean> {
         let content = '';
@@ -1223,20 +1368,40 @@ export class NoteOperationService {
             ? this.normalizeTemplaterCreateStart(options.createStartedAt)
             : this.getRecentTemplaterCreateStart(file, templater);
         if (autoCreateEligible && observedCreateStart !== null) {
-            return this.waitForTemplaterCreateHook(file, templater, observedCreateStart);
+            try {
+                const settled = await this.waitForTemplaterCreateHook(file, templater, observedCreateStart);
+                if (!settled) return false;
+                if (options.preparedInput !== undefined) {
+                    const processed = await this.app.vault.read(file);
+                    if (processed === options.preparedInput) {
+                        logger.warn('[NoteOperationService] Templater finished without changing the prepared Daily Note template', {
+                            file: file.path,
+                        });
+                        return false;
+                    }
+                }
+                await this.normalizeLeadingWhitespaceBeforeFrontmatter(file);
+                return true;
+            } catch (error) {
+                logger.warn('[NoteOperationService] Could not verify the Daily Note after Templater auto-create processing', {
+                    file: file.path,
+                    error,
+                });
+                return false;
+            }
         }
         if (!hasTemplaterCommands) return true;
 
         try {
             await templater.templater.overwrite_file_commands(file, false);
-            await this.normalizeLeadingWhitespaceBeforeFrontmatter(file);
             const processed = await this.app.vault.read(file);
-            if (TEMPLATER_COMMAND_PATTERN.test(processed)) {
-                logger.warn('[NoteOperationService] Daily Note still contains unprocessed Templater expressions', {
+            if (options.preparedInput !== undefined && processed === options.preparedInput) {
+                logger.warn('[NoteOperationService] Templater finished without changing the prepared Daily Note template', {
                     file: file.path,
                 });
                 return false;
             }
+            await this.normalizeLeadingWhitespaceBeforeFrontmatter(file);
             return true;
         } catch (error) {
             logger.warn('[NoteOperationService] Templater failed to process the Daily Note', {
@@ -1244,6 +1409,212 @@ export class NoteOperationService {
                 error,
             });
             return false;
+        }
+    }
+
+    private async settleExistingDailyNoteIfPending(file: TFile): Promise<boolean> {
+        const normalizedPath = normalizePath(file.path);
+        let current = '';
+        try {
+            current = await this.app.vault.read(file);
+        } catch (error) {
+            this.failedExternalDailyNoteSettlements.set(file, null);
+            logger.flowWarn('DailyNote', 'ensure:external-settlement-read-failed', {
+                path: normalizedPath,
+                errorType: error instanceof Error ? error.name : 'unknown',
+            });
+            return false;
+        }
+        if (hasIncompleteDailyNoteTemplateMarker(current)) {
+            // The durable marker is now the only required evidence. Clearing
+            // the pre-marker fallback makes deliberate marker removal recover
+            // immediately in this session, as documented.
+            this.incompleteOwnedDailyNoteCreations.delete(file);
+            logger.flowWarn('DailyNote', 'ensure:incomplete-owned-create-blocked', {
+                path: normalizedPath,
+            });
+            return false;
+        }
+        if (this.incompleteOwnedDailyNoteCreations.has(file)) {
+            const rejectedBytes = this.incompleteOwnedDailyNoteCreations.get(file);
+            if (rejectedBytes === null || current === rejectedBytes) {
+                logger.flowWarn('DailyNote', 'ensure:incomplete-owned-create-session-blocked', {
+                    path: normalizedPath,
+                    evidence: rejectedBytes === null ? 'unreadable' : 'exact-bytes',
+                });
+                return false;
+            }
+        }
+        // Removing the durable marker is an explicit recovery action. Do not
+        // infer ownership from arbitrary Templater delimiters in mature notes.
+        // A same-session fallback is likewise released only after exact bytes
+        // change, proving an external/user recovery edit occurred.
+        this.incompleteOwnedDailyNoteCreations.delete(file);
+
+        if (this.failedExternalDailyNoteSettlements.has(file)) {
+            const rejectedBytes = this.failedExternalDailyNoteSettlements.get(file);
+            if (rejectedBytes === null || rejectedBytes === current) {
+                logger.flowWarn('DailyNote', 'ensure:external-settlement-session-blocked', {
+                    path: normalizedPath,
+                    evidence: rejectedBytes === null ? 'unreadable' : 'exact-bytes',
+                });
+                return false;
+            }
+            this.failedExternalDailyNoteSettlements.delete(file);
+        }
+
+        const templater = (this.app as any)?.plugins?.getPlugin?.('templater-obsidian')
+            ?? (this.app as any)?.plugins?.plugins?.['templater-obsidian'];
+        const pendingFiles = templater?.templater?.files_with_pending_templates;
+        const isPending = typeof pendingFiles?.has === 'function' && pendingFiles.has(file.path);
+        const isRecentEligibleCreation = Boolean(
+            templater?.templater?.overwrite_file_commands
+            && this.isTemplaterAutoCreateEnabled(templater)
+            && this.isTemplaterAutoCreateEligible(file, templater)
+            && this.getRecentTemplaterCreateStart(file, templater) !== null,
+        );
+        if (!isPending && !isRecentEligibleCreation) {
+            return this.validateCurrentDailyNoteBytes(file, {
+                stage: 'external-settlement',
+                requireFrontmatter: false,
+            });
+        }
+        const settled = await this.finishPendingTemplaterTemplate(file, {
+            preparedInput: TEMPLATER_COMMAND_PATTERN.test(current) ? current : undefined,
+        });
+        if (!settled) {
+            await this.rememberFailedExternalDailyNoteSettlement(file);
+            return false;
+        }
+        return this.validateCurrentDailyNoteBytes(file, {
+            stage: 'external-settlement',
+            requireFrontmatter: false,
+        });
+    }
+
+    private async rememberFailedExternalDailyNoteSettlement(file: TFile): Promise<void> {
+        const path = normalizePath(file.path);
+        this.failedExternalDailyNoteSettlements.set(file, null);
+        try {
+            this.failedExternalDailyNoteSettlements.set(file, await this.app.vault.read(file));
+        } catch (error) {
+            logger.flowWarn('DailyNote', 'ensure:external-settlement-fingerprint-read-failed', {
+                path,
+                errorType: error instanceof Error ? error.name : 'unknown',
+            });
+        }
+    }
+
+    /**
+     * MetadataCache can still describe the pre-Templater bytes while the hook
+     * has already rewritten the file. Inspect the current vault bytes before
+     * returning any owned or externally settled Daily Note so an authoritative
+     * task/project/process/workout identity always wins over a stale cache.
+     */
+    private async validateCurrentDailyNoteBytes(
+        file: TFile,
+        options: {
+            stage: 'owned-output' | 'external-settlement';
+            date?: string | null;
+            requireFrontmatter: boolean;
+        },
+    ): Promise<boolean> {
+        let current = '';
+        try {
+            current = await this.app.vault.read(file);
+        } catch (error) {
+            logger.flowWarn('DailyNote', 'ensure:live-output-read-failed', {
+                stage: options.stage,
+                date: options.date ?? null,
+                errorType: error instanceof Error ? error.name : 'unknown',
+            });
+            return false;
+        }
+
+        const document = this.extractYamlFrontmatter(current);
+        if (!document) {
+            const withoutBom = current.startsWith('\uFEFF') ? current.slice(1) : current;
+            const resemblesFrontmatter = withoutBom.trimStart().startsWith('---');
+            if (options.requireFrontmatter || resemblesFrontmatter) {
+                logger.flowWarn('DailyNote', 'ensure:live-output-identity-blocked', {
+                    stage: options.stage,
+                    date: options.date ?? null,
+                    reason: 'unparseable-frontmatter-output',
+                });
+                return false;
+            }
+            return true;
+        }
+
+        const isCompanionOutput = isFilePropertiesCompanionRecord(document.frontmatter);
+        if (isCompanionOutput || hasAuthoritativeNonDailyNoteIdentity(document.frontmatter, this.plugin.settings)) {
+            logger.flowWarn('DailyNote', 'ensure:live-output-identity-blocked', {
+                stage: options.stage,
+                date: options.date ?? null,
+                reason: isCompanionOutput
+                    ? 'file-properties-companion-output'
+                    : 'authoritative-non-daily-output',
+            });
+            return false;
+        }
+        return true;
+    }
+
+    /**
+     * Persist fail-closed evidence only when the bytes are still exactly the
+     * failed owner output. Vault.process supplies the atomic compare-and-swap;
+     * a concurrent user/plugin edit is never overwritten.
+     *
+     */
+    private async markIncompleteOwnedDailyNote(file: TFile): Promise<void> {
+        const path = normalizePath(file.path);
+        // If even the failure-state read is unavailable, no byte fingerprint
+        // can prove that a later retry is safe. Keep an unconditional
+        // same-session sentinel; a reload is the only safe reset.
+        this.incompleteOwnedDailyNoteCreations.set(file, null);
+        let failedBytes = '';
+        try {
+            failedBytes = await this.app.vault.read(file);
+        } catch {
+            logger.flowWarn('DailyNote', 'ensure:incomplete-owned-create-marker-read-failed', { path });
+            return;
+        }
+        this.incompleteOwnedDailyNoteCreations.set(file, failedBytes);
+        if (hasIncompleteDailyNoteTemplateMarker(failedBytes)) {
+            this.incompleteOwnedDailyNoteCreations.delete(file);
+            return;
+        }
+
+        const process = (this.app.vault as any)?.process;
+        if (typeof process !== 'function') {
+            logger.flowWarn('DailyNote', 'ensure:incomplete-owned-create-marker-unavailable', { path });
+            return;
+        }
+        let applied = false;
+        try {
+            await process.call(this.app.vault, file, (current: string) => {
+                if (current !== failedBytes) return current;
+                applied = true;
+                const separator = !current || current.endsWith('\n') ? '' : '\n';
+                return `${current}${separator}${INCOMPLETE_DAILY_NOTE_TEMPLATE_MARKER}\n`;
+            });
+            const current = await this.app.vault.read(file);
+            if (hasIncompleteDailyNoteTemplateMarker(current)) {
+                this.incompleteOwnedDailyNoteCreations.delete(file);
+                logger.flowWarn('DailyNote', 'ensure:incomplete-owned-create-recorded', { path });
+                return;
+            }
+            logger.flowWarn('DailyNote', 'ensure:incomplete-owned-create-marker-cas-missed', {
+                path,
+                markerApplied: applied,
+            });
+            return;
+        } catch (error) {
+            logger.flowWarn('DailyNote', 'ensure:incomplete-owned-create-marker-failed', {
+                path,
+                errorType: error instanceof Error ? error.name : 'unknown',
+            });
+            return;
         }
     }
 
@@ -1265,10 +1636,13 @@ export class NoteOperationService {
         const settings = templaterPlugin?.settings
             ?? templaterPlugin?.templater?.plugin?.settings
             ?? {};
-        const templateFolder = String(settings.templates_folder || '')
-            .trim()
-            .replace(/^\/+|\/+$/g, '');
-        if (templateFolder && file.path.includes(templateFolder)) return false;
+        const normalizedFilePath = normalizePath(String(file.path || '').trim()).replace(/^\/+|\/+$/g, '');
+        const normalizeFolder = (value: unknown) => normalizePath(String(value || '').trim()).replace(/^\/+|\/+$/g, '');
+        const templateFolder = normalizeFolder(settings.templates_folder);
+        // Mirror Templater's own raw guards. These intentionally are not path
+        // segment checks: upstream skips paths containing the template-folder
+        // text and ignored paths by startsWith.
+        if (templateFolder && normalizedFilePath.includes(templateFolder)) return false;
 
         const ignoredFolders = Array.isArray(settings.ignore_folders_on_creation)
             ? settings.ignore_folders_on_creation
@@ -1277,8 +1651,8 @@ export class NoteOperationService {
             const raw = entry && typeof entry === 'object' && 'folder' in entry
                 ? (entry as { folder?: unknown }).folder
                 : entry;
-            const ignoredPath = String(raw || '').trim().replace(/^\/+|\/+$/g, '');
-            return Boolean(ignoredPath && file.path.startsWith(ignoredPath));
+            const ignoredPath = normalizeFolder(raw);
+            return Boolean(ignoredPath && normalizedFilePath.startsWith(ignoredPath));
         });
     }
 
@@ -1322,8 +1696,6 @@ export class NoteOperationService {
             + TEMPLATER_CREATE_HOOK_DELAY_MS
             + TEMPLATER_CREATE_HOOK_SETTLE_BUFFER_MS;
         const deadline = startedAt + TEMPLATER_CREATE_HOOK_TIMEOUT_MS;
-        let stableContent: string | null = null;
-
         while (Date.now() < deadline) {
             const now = Date.now();
             if (now < settleAfter) {
@@ -1336,19 +1708,11 @@ export class NoteOperationService {
                 : false;
             if (!isPending) {
                 try {
-                    const processed = await this.app.vault.read(file);
-                    if (!TEMPLATER_COMMAND_PATTERN.test(processed)) {
-                        if (stableContent === processed) {
-                            await this.normalizeLeadingWhitespaceBeforeFrontmatter(file);
-                            logger.flow('DailyNote', 'templater:auto-create-settled', {
-                                path: file.path,
-                            });
-                            return true;
-                        }
-                        stableContent = processed;
-                    } else {
-                        stableContent = null;
-                    }
+                    await this.app.vault.read(file);
+                    logger.flow('DailyNote', 'templater:auto-create-settled', {
+                        path: file.path,
+                    });
+                    return true;
                 } catch (error) {
                     logger.warn('[NoteOperationService] Could not inspect the Daily Note while waiting for Templater', {
                         file: file.path,
@@ -1356,8 +1720,6 @@ export class NoteOperationService {
                     });
                     return false;
                 }
-            } else {
-                stableContent = null;
             }
 
             await this.delayTemplaterPoll(TEMPLATER_CREATE_HOOK_POLL_MS);
@@ -1376,31 +1738,34 @@ export class NoteOperationService {
     }
 
     private async normalizeLeadingWhitespaceBeforeFrontmatter(file: TFile): Promise<void> {
-        let content = '';
-        try {
-            content = await this.app.vault.cachedRead(file);
-        } catch {
-            return;
-        }
-
-        if (!content) return;
-
-        const normalized = content.replace(/\r\n/g, '\n');
-        const bom = normalized.startsWith('\uFEFF') ? '\uFEFF' : '';
-        const body = bom ? normalized.slice(1) : normalized;
-        if (body.startsWith('---\n')) return;
-
-        const trimmedLeading = body.replace(/^\s*/, '');
-        const leadingOffset = body.length - trimmedLeading.length;
-        if (leadingOffset <= 0 || !trimmedLeading.startsWith('---\n')) return;
-
-        const prefix = body.slice(0, leadingOffset);
-        if (/\S/.test(prefix)) return;
-
         const liveFile = this.app.vault.getAbstractFileByPath(file.path);
         if (!(liveFile instanceof TFile)) return;
+        const process = (this.app.vault as any)?.process;
+        if (typeof process !== 'function') return;
+        try {
+            await process.call(this.app.vault, liveFile, (current: string) => {
+                if (!current) return current;
+                const bom = current.startsWith('\uFEFF') ? '\uFEFF' : '';
+                const body = bom ? current.slice(1) : current;
+                if (body.startsWith('---\n') || body.startsWith('---\r\n')) return current;
 
-        await this.app.vault.modify(liveFile, `${bom}${trimmedLeading}`);
+                const trimmedLeading = body.replace(/^\s*/u, '');
+                const leadingOffset = body.length - trimmedLeading.length;
+                if (
+                    leadingOffset <= 0
+                    || !(trimmedLeading.startsWith('---\n') || trimmedLeading.startsWith('---\r\n'))
+                ) {
+                    return current;
+                }
+                const prefix = body.slice(0, leadingOffset);
+                return /\S/u.test(prefix) ? current : `${bom}${trimmedLeading}`;
+            });
+        } catch (error) {
+            logger.warn('[NoteOperationService] Could not normalize Daily Note frontmatter atomically', {
+                file: file.path,
+                error,
+            });
+        }
     }
 
     private hasKeys(value: unknown): boolean {
@@ -1417,7 +1782,8 @@ export class NoteOperationService {
     }
 
     private extractYamlFrontmatter(raw: string): { frontmatter: Record<string, unknown>; body: string } | null {
-        const normalized = String(raw || "").replace(/\r\n/g, "\n");
+        const source = String(raw || "").replace(/\r\n/g, "\n");
+        const normalized = source.startsWith('\uFEFF') ? source.slice(1) : source;
         if (!normalized.startsWith("---\n")) {
             return null;
         }
@@ -1435,11 +1801,14 @@ export class NoteOperationService {
 
         try {
             const parsed = parseYaml(yamlBlock);
-            const frontmatter = this.cloneFrontmatterObject((parsed && typeof parsed === "object" ? parsed : {}) as Record<string, unknown>);
+            if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                return null;
+            }
+            const frontmatter = this.cloneFrontmatterObject(parsed as Record<string, unknown>);
             return { frontmatter, body };
         } catch (err) {
             logger.warn("Failed to parse YAML frontmatter block", err);
-            return { frontmatter: {}, body };
+            return null;
         }
     }
 

@@ -711,6 +711,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }
 
     // Expose inter-plugin API
+    await this.fileNamingService.whenDailyNoteConfigurationReady();
     setupPluginApi(this);
     this.tpsNotebookNavigatorMenuBridge.start();
     this.registerEvent(this.app.workspace.on(TPS_EVENTS.GCM_API_REQUEST as any, () => {

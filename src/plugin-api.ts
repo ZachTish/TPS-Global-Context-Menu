@@ -16,6 +16,8 @@ import {
     dailyNoteTaskScheduleInheritanceEnabled,
     findExistingDailyNoteForIsoDate,
     getDailyNotePathForIsoDate,
+    normalizeExpectedDailyNotePath,
+    normalizeDailyNoteIsoDate,
     parseDailyNoteFileDate,
 } from './utils/daily-note-task-schedule';
 import { tpsBaseFormulaService } from './services/tps-base-formula-service';
@@ -278,18 +280,10 @@ function getPromotionParentDate(plugin: TPSGlobalContextMenuPlugin, rootFile: TF
         const parsedScheduled = moment(scheduled);
         if (parsedScheduled?.isValid?.() && parsedScheduled.isValid()) return parsedScheduled.format('YYYY-MM-DD 00:00:00');
     }
-    if (plugin.fileNamingService.isDateOnlyBasename(rootFile.basename)) {
-        const parsedName = moment(rootFile.basename, [
-            plugin.fileNamingService.getDailyNoteDateFormat(),
-            'YYYY-MM-DD',
-            'YYYY_MM_DD',
-            'YYYYMMDD',
-            'dddd, MMMM Do YYYY',
-            'MMMM D, YYYY',
-            'MMM D, YYYY',
-        ], true);
-        if (parsedName?.isValid?.() && parsedName.isValid()) return parsedName.format('YYYY-MM-DD 00:00:00');
-    }
+    if (!plugin.fileNamingService.getDailyNoteConfigurationSnapshot()) return null;
+    if (plugin.fileNamingService.isDailyNoteMetadataCacheReady?.() === false) return null;
+    const dailyNoteDate = parseDailyNoteFileDate(plugin.app, plugin.settings, rootFile);
+    if (dailyNoteDate) return `${dailyNoteDate} 00:00:00`;
     return null;
 }
 
@@ -579,6 +573,14 @@ export async function promoteChecklistItemToChild(
  */
 export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
     const services = plugin.sharedServices;
+    const dailyNoteConfigurationReady = (): boolean =>
+        plugin.fileNamingService?.isDailyNoteConfigurationReady() === true;
+    const refreshDailyNoteConfiguration = (): boolean =>
+        dailyNoteConfigurationReady()
+        && plugin.fileNamingService.getDailyNoteConfigurationSnapshot() !== null;
+    const dailyNoteIdentityReady = (): boolean =>
+        refreshDailyNoteConfiguration()
+        && plugin.fileNamingService.isDailyNoteMetadataCacheReady();
     const publicMutationCause = (
         cause?: FilePropertiesMutationCause,
     ): FilePropertiesMutationCause => (
@@ -929,12 +931,50 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             execute: (action: any, context: any) => plugin.homeComponentActionService.execute(action, context),
         },
         dailyNotes: {
-            version: 2,
-            findForIsoDate: (isoDate: string) => findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, isoDate),
-            pathForIsoDate: (isoDate: string) => getDailyNotePathForIsoDate(plugin.app, plugin.settings, isoDate),
-            ensureForIsoDate: (isoDate: string) => plugin.noteOperationService.ensureDailyNote(`${isoDate} 00:00:00`),
+            version: 4,
+            findForIsoDate: (isoDate: string) => {
+                if (!dailyNoteIdentityReady()) return null;
+                const normalized = normalizeDailyNoteIsoDate(isoDate);
+                return normalized ? findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, normalized) : null;
+            },
+            dateForFile: (file: Pick<TFile, 'path' | 'basename'>) =>
+                dailyNoteIdentityReady()
+                    ? normalizeDailyNoteIsoDate(parseDailyNoteFileDate(plugin.app, plugin.settings, file))
+                    : null,
+            pathForIsoDate: (isoDate: string) => {
+                if (!refreshDailyNoteConfiguration()) return null;
+                const normalized = normalizeDailyNoteIsoDate(isoDate);
+                return normalized ? getDailyNotePathForIsoDate(plugin.app, plugin.settings, normalized) : null;
+            },
+            ensureForIsoDate: async (
+                isoDate: string,
+                options?: { expectedPath?: string | null },
+            ) => {
+                const normalized = normalizeDailyNoteIsoDate(isoDate);
+                if (!normalized) return null;
+                const hasExpectedPath = options?.expectedPath !== undefined && options.expectedPath !== null;
+                const expectedPath = hasExpectedPath
+                    ? normalizeExpectedDailyNotePath(options?.expectedPath)
+                    : null;
+                if (hasExpectedPath && !expectedPath) return null;
+                await plugin.fileNamingService.whenDailyNoteConfigurationReady();
+                if (!refreshDailyNoteConfiguration()) return null;
+                const currentPath = getDailyNotePathForIsoDate(plugin.app, plugin.settings, normalized);
+                if (!currentPath || (expectedPath !== null && currentPath !== expectedPath)) {
+                    logger.flowWarn('DailyNoteApi', 'ensure:expected-path-mismatch', {
+                        date: normalized,
+                        stage: 'api-entry',
+                    });
+                    return null;
+                }
+                return plugin.noteOperationService.ensureDailyNote(
+                    `${normalized} 00:00:00`,
+                    expectedPath === null ? undefined : { expectedPath },
+                );
+            },
             getTaskSchedulePolicy: (file: Pick<TFile, 'path' | 'basename'>) => ({
-                isDailyNote: parseDailyNoteFileDate(plugin.app, plugin.settings, file) !== null,
+                isDailyNote: dailyNoteIdentityReady()
+                    && parseDailyNoteFileDate(plugin.app, plugin.settings, file) !== null,
                 inheritUnscheduled: dailyNoteTaskScheduleInheritanceEnabled(plugin.settings),
             }),
         },

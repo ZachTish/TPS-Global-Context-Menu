@@ -33,7 +33,7 @@ test('GCM public capability surface owns cross-plugin configuration and task int
   const mappings = readFileSync(new URL('../src/utils/linked-subitem-mapping.ts', import.meta.url), 'utf8');
   const shared = readFileSync(new URL('../src/services/shared/index.ts', import.meta.url), 'utf8');
   assert.match(api, /configuration:\s*\{[\s\S]{0,1500}version:\s*1,[\s\S]{0,1500}isInlinePropertyAllowed:[\s\S]{0,1500}getParentLinkPolicy:/u);
-  assert.match(api, /dailyNotes:\s*\{[\s\S]{0,1200}version:\s*2,[\s\S]{0,1200}getTaskSchedulePolicy:[\s\S]{0,1200}isDailyNote:[\s\S]{0,1200}inheritUnscheduled:/u);
+  assert.match(api, /dailyNotes:\s*\{[\s\S]{0,1200}version:\s*4,[\s\S]{0,1200}dateForFile:[\s\S]{0,1800}expectedPath[\s\S]{0,1800}getTaskSchedulePolicy:[\s\S]{0,1200}isDailyNote:[\s\S]{0,1200}inheritUnscheduled:/u);
   assert.match(api, /parseDailyNoteFileDate\(plugin\.app, plugin\.settings, file\) !== null/u);
   assert.match(api, /dailyNoteTaskScheduleInheritanceEnabled\(plugin\.settings\)/u);
   assert.match(api, /taskLines:\s*\{[\s\S]{0,1500}version:\s*1,[\s\S]{0,1500}handleContextMenu:[\s\S]{0,1500}openQuickEditorForElement:/u);

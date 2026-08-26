@@ -170,6 +170,9 @@ function createPromotionHarness(TFile, options = {}) {
       isIgnoredFrontmatter: () => false,
     },
     fileNamingService: {
+      whenDailyNoteConfigurationReady: async () => undefined,
+      getDailyNoteConfigurationSnapshot: () => ({ folder: '', format: 'YYYY-MM-DD' }),
+      isDailyNoteMetadataCacheReady: () => true,
       isDateOnlyBasename: () => false,
       getDailyNoteDateFormat: () => 'YYYY-MM-DD',
     },
@@ -846,6 +849,9 @@ test('non-Markdown parents create Markdown children from logical tags and tempor
         getLogicalFrontmatter: (file) => file === parentFile ? logicalParent : {},
       },
       fileNamingService: {
+        whenDailyNoteConfigurationReady: async () => undefined,
+        getDailyNoteConfigurationSnapshot: () => ({ folder: '', format: 'YYYY-MM-DD' }),
+        isDailyNoteMetadataCacheReady: () => true,
         isDateOnlyBasename: () => false,
         getDailyNoteDateFormat: () => 'YYYY-MM-DD',
       },

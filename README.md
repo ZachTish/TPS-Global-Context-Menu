@@ -1,5 +1,14 @@
 # TPS Global Context Menu
 
+## 1.43.2
+
+- Daily Note identity is now strict and centralized. GCM accepts the current canonical path, an unambiguous whole-name legacy date, or explicit Daily Note metadata; a date embedded in a calendar, food, workout, task, or other record filename is never enough.
+- One legacy Daily Note can reconcile atomically to the current Core path. Canonical-plus-legacy duplicates, conflicting date signals, occupied targets, non-Daily record identity, unresolved metadata, and configuration changes fail closed instead of selecting an arbitrary file or creating a second note.
+- Public `dailyNotes` API version 4 adds optional expected-path enforcement while preserving every v2/v3 method and one-argument caller. Notebook Navigator can therefore confirm and create against the same path even when Core settings change during an action.
+- Daily Note configuration now has one ready snapshot across Core Daily Notes, Periodic Notes, persisted startup recovery, naming, reconciliation, and API calls. Indexed identity lookup avoids repeated full-vault scans and refreshes through plugin-owned lifecycle listeners.
+- Newly owned Templater work is awaited exactly once. Mature notes are never inferred unfinished from literal template syntax; failed owned output is retained with a hidden EOF marker or exact-byte same-session evidence and is never deleted.
+- This is a backward-compatible correctness patch with no settings or note migration. Minimum supported Obsidian remains 1.10.0.
+
 ## 1.43.1
 
 - Native-record identity is no longer coupled to an opaque physical filename. The stable TPS ID remains in the configured property or identity tag, while the creating workflow or user may choose a readable Markdown filename.
@@ -21,7 +30,7 @@
 - GCM now owns one versioned template-identity rule for TPS plugins. Templates can be recognized through the existing Templater folder, a tag, or an exact property key/value rule; property matching supports equality or containment and does not require moving the template into a special folder.
 - The rule is configured under **Advanced → Data architecture → Template identity**. Rule values stay editable when a different mode is active, and existing vaults remain on the legacy Templater-folder mode.
 - Public API `templates` version 1 exposes the active mode, exact-file matching, and a current template list. TPS Calendar Base and TPS Notebook Navigator can consume the same rule without copying its settings or reading GCM internals.
-- The POC root-template profile uses `title contains <%`, which identifies the unresolved Daily Note template without adding a marker that would be copied into every generated note. Core Templater's own picker remains folder-based; this rule controls TPS consumers.
+- The POC root-template profile uses `title contains {{`, which identifies the unresolved Daily Note template without adding a marker that would be copied into every generated note. Core Templater's own picker remains folder-based; this rule controls TPS consumers.
 - This is a backward-compatible settings/API feature. No note, template, or folder is moved automatically, and minimum supported Obsidian remains 1.10.0.
 
 ## 1.41.0

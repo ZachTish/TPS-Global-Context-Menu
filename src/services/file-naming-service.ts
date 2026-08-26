@@ -2,7 +2,23 @@ import { normalizePath, TFile } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
 import * as logger from "../logger";
 import { extractDatePrefix, extractDateSuffix, stripDatePrefix, stripDateSuffix, FULL_DATE_REGEX } from '../utils/date-suffix-utils';
-import { getDailyNotePathDateCandidate } from '../utils/daily-note-creation';
+import {
+    clearDailyNoteConfigurationOverride,
+    hasPendingDailyNoteCandidatePathRefresh,
+    invalidateDailyNoteCandidateIndex,
+    markDailyNoteCandidateMetadataReady,
+    markDailyNoteCandidatePathDirty,
+    parseDailyNoteFileDate,
+    refreshPendingDailyNoteCandidatePaths,
+    registerDailyNoteConfigurationOverride,
+} from '../utils/daily-note-task-schedule';
+
+export type DailyNoteConfigurationSnapshot = {
+    folder: string;
+    format: string;
+    template: string;
+    source: 'core' | 'persisted-recovery' | 'periodic' | 'persisted' | 'default';
+};
 
 /**
  * Handles automatic file naming based on title and scheduled date
@@ -15,11 +31,119 @@ export class FileNamingService {
     private timestampWriteStateByPath: Map<string, { fingerprint: string; modifiedValue: string }> = new Map();
     private inferredDailyNoteFormat: string | null = null;
     private knownDailyNoteConfigurations = new Map<string, { folder: string; format: string }>();
+    private persistedDailyNoteConfiguration: Record<string, unknown> | null = null;
+    private dailyNoteConfigurationSnapshot: DailyNoteConfigurationSnapshot | null = null;
+    private persistedRecoveryRuntimeSignature: string | null = null;
     private dailyNoteConfigurationReady: Promise<void>;
+    private dailyNoteConfigurationLoaded = false;
+    private dailyNoteMetadataReady = false;
+    private dailyNoteMetadataRefreshPending = false;
+    private dailyNoteMetadataRefreshEpoch = 0;
+    private dailyNoteMetadataReadyNotificationPending = false;
 
     constructor(plugin: TPSGlobalContextMenuPlugin) {
         this.plugin = plugin;
-        this.dailyNoteConfigurationReady = this.loadPersistedDailyNoteConfiguration();
+        this.registerDailyNoteIndexInvalidation();
+        this.dailyNoteConfigurationReady = this.loadPersistedDailyNoteConfiguration()
+            .finally(() => {
+                this.dailyNoteConfigurationLoaded = true;
+            });
+    }
+
+    public isDailyNoteConfigurationReady(): boolean {
+        return this.dailyNoteConfigurationLoaded;
+    }
+
+    public async whenDailyNoteConfigurationReady(): Promise<void> {
+        await this.dailyNoteConfigurationReady;
+    }
+
+    public isDailyNoteMetadataCacheReady(): boolean {
+        const metadataCache = (this.plugin.app as any)?.metadataCache;
+        if (
+            this.dailyNoteMetadataRefreshPending
+            || metadataCache?.initialized === false
+            || hasPendingDailyNoteCandidatePathRefresh(this.plugin.app)
+        ) return false;
+        if (this.dailyNoteMetadataReady) return true;
+        const getMarkdownFiles = (this.plugin.app.vault as any)?.getMarkdownFiles;
+        if (typeof metadataCache?.getFileCache !== 'function' || typeof getMarkdownFiles !== 'function') {
+            this.dailyNoteMetadataReady = true;
+            return true;
+        }
+        this.dailyNoteMetadataReady = getMarkdownFiles.call(this.plugin.app.vault)
+            .every((file: TFile) => metadataCache.getFileCache(file) != null);
+        return this.dailyNoteMetadataReady;
+    }
+
+    public getDailyNoteConfigurationSnapshot(): DailyNoteConfigurationSnapshot | null {
+        if (!this.dailyNoteConfigurationLoaded) return null;
+        return { ...this.refreshDailyNoteConfigurationSnapshot() };
+    }
+
+    private registerDailyNoteIndexInvalidation(): void {
+        const registerEvent = (this.plugin as any)?.registerEvent;
+        if (typeof registerEvent !== 'function') return;
+        for (const event of ['create', 'modify', 'delete', 'rename']) {
+            const ref = (this.plugin.app.vault as any)?.on?.(event, (file: unknown, oldPath?: string) => {
+                invalidateDailyNoteCandidateIndex(this.plugin.app);
+                // Folder and attachment events can never be followed by a
+                // Markdown metadata-cache event. They still invalidate the
+                // candidate index, but must not leave synchronous Daily Note
+                // identity disabled indefinitely.
+                if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'md') return;
+                if (event === 'delete') {
+                    markDailyNoteCandidateMetadataReady(this.plugin.app, file);
+                } else {
+                    if (event === 'rename' && oldPath) {
+                        markDailyNoteCandidateMetadataReady(this.plugin.app, oldPath);
+                    }
+                    markDailyNoteCandidatePathDirty(this.plugin.app, file);
+                    this.dailyNoteMetadataReadyNotificationPending = true;
+                }
+                this.dailyNoteMetadataReady = false;
+                if (event !== 'delete') this.dailyNoteMetadataRefreshPending = true;
+            });
+            if (ref) registerEvent.call(this.plugin, ref);
+        }
+        for (const event of ['changed', 'deleted', 'resolve', 'resolved']) {
+            const ref = (this.plugin.app.metadataCache as any)?.on?.(event, async (file?: unknown) => {
+                const refreshEpoch = ++this.dailyNoteMetadataRefreshEpoch;
+                if (file instanceof TFile) {
+                    markDailyNoteCandidateMetadataReady(this.plugin.app, file);
+                } else if (event === 'resolved') {
+                    markDailyNoteCandidateMetadataReady(this.plugin.app);
+                } else {
+                    invalidateDailyNoteCandidateIndex(this.plugin.app);
+                }
+                this.dailyNoteMetadataReady = false;
+                await refreshPendingDailyNoteCandidatePaths(
+                    this.plugin.app,
+                    this.plugin.settings,
+                );
+                // The refresh result itself may be an older failed read while
+                // another owner (or mutation reconciliation) already drained
+                // the same generation. Current dirty state is authoritative.
+                const identityReady = !hasPendingDailyNoteCandidatePathRefresh(this.plugin.app);
+                if (identityReady) {
+                    // Any completion can prove readiness after draining the
+                    // live generation, even if a newer callback failed first.
+                    this.dailyNoteMetadataRefreshPending = false;
+                    if (this.dailyNoteMetadataReadyNotificationPending) {
+                        this.dailyNoteMetadataReadyNotificationPending = false;
+                        // Consumers cache provider readiness. Re-announce the
+                        // same API once current-byte identity is observable.
+                        (this.plugin as any).emitGcmApiChanged?.(true);
+                    }
+                } else if (refreshEpoch === this.dailyNoteMetadataRefreshEpoch) {
+                    // Only the latest still-dirty callback may publish a
+                    // blocked state; an older failure cannot re-block a newer
+                    // in-flight/successful generation.
+                    this.dailyNoteMetadataRefreshPending = true;
+                }
+            });
+            if (ref) registerEvent.call(this.plugin, ref);
+        }
     }
 
     private static readonly TEMPLATE_TITLE_MARKERS: RegExp[] = [
@@ -30,10 +154,13 @@ export class FileNamingService {
     ];
 
     public getDailyNoteDateFormat(): string {
-        const configured = String((this.plugin as any)?.settings?.dailyNoteDateFormat || '').trim();
-        if (configured) return configured;
+        if (this.dailyNoteConfigurationLoaded) {
+            return this.refreshDailyNoteConfigurationSnapshot().format;
+        }
         const dailyNotesFormat = String(this.getCoreDailyNoteOptions()?.format || '').trim();
         if (dailyNotesFormat) return dailyNotesFormat;
+        const configured = String((this.plugin as any)?.settings?.dailyNoteDateFormat || '').trim();
+        if (configured) return configured;
         if (!this.inferredDailyNoteFormat) {
             const hasPrettyDaily = this.plugin.app.vault.getFiles().some((file) =>
                 /\/Notes\/[A-Za-z]+,\s+[A-Za-z]+\s+\d{1,2}(st|nd|rd|th)\s+\d{4}\.md$/.test(file.path),
@@ -66,6 +193,7 @@ export class FileNamingService {
     public registerDailyNoteConfiguration(folder: unknown, format: unknown): void {
         const normalizedFolder = normalizePath(String(folder || '').trim()).replace(/^\/+|\/+$/g, '');
         const normalizedFormat = String(format || '').trim() || 'YYYY-MM-DD';
+        this.knownDailyNoteConfigurations.clear();
         this.knownDailyNoteConfigurations.set(
             `${normalizedFolder}\u0000${normalizedFormat}`,
             { folder: normalizedFolder, format: normalizedFormat },
@@ -82,75 +210,137 @@ export class FileNamingService {
     }
 
     private async loadPersistedDailyNoteConfiguration(): Promise<void> {
+        const coreBeforeRead = this.getCoreDailyNoteOptions();
+        const runtimeSignatureBeforeRead = coreBeforeRead
+            ? this.getCoreDailyNoteRuntimeSignature(coreBeforeRead)
+            : null;
         try {
             const configDir = String((this.plugin.app.vault as any)?.configDir || '.obsidian').trim() || '.obsidian';
             const raw = await this.plugin.app.vault.adapter.read(normalizePath(`${configDir}/daily-notes.json`));
             const parsed = JSON.parse(raw);
             if (parsed && typeof parsed === 'object') {
-                this.registerDailyNoteConfiguration(
-                    (parsed as Record<string, unknown>).folder,
-                    (parsed as Record<string, unknown>).format,
-                );
+                this.persistedDailyNoteConfiguration = parsed as Record<string, unknown>;
             }
         } catch {
             // Core Daily Notes may be disabled or may not have written settings yet.
         }
+        const core = this.getCoreDailyNoteOptions();
+        const persistedTemplate = String(this.persistedDailyNoteConfiguration?.template || '').trim();
+        const runtimeSignatureAfterRead = core ? this.getCoreDailyNoteRuntimeSignature(core) : null;
+        if (
+            core
+            && !String(core.template || '').trim()
+            && persistedTemplate
+            && runtimeSignatureBeforeRead === runtimeSignatureAfterRead
+        ) {
+            // Recovery is bound to the exact incomplete startup snapshot. Once
+            // Core publishes any different signature, a later blank template
+            // is intentional live state and must not resurrect persisted data.
+            this.persistedRecoveryRuntimeSignature = runtimeSignatureAfterRead;
+        }
+        this.refreshDailyNoteConfigurationSnapshot();
+    }
+
+    private getCoreDailyNoteRuntimeSignature(options: Record<string, unknown>): string {
+        return [
+            normalizePath(String(options.folder || '').trim()).replace(/^\/+|\/+$/g, ''),
+            String(options.format || '').trim(),
+            String(options.template || '').trim(),
+        ].join('\u0000');
+    }
+
+    private refreshDailyNoteConfigurationSnapshot(): DailyNoteConfigurationSnapshot {
+        const normalizeFolder = (value: unknown) => normalizePath(String(value || '').trim()).replace(/^\/+|\/+$/g, '');
+        const normalizeFormat = (value: unknown) => String(value || '').trim() || 'YYYY-MM-DD';
+        const core = this.getCoreDailyNoteOptions();
+        const persisted = this.persistedDailyNoteConfiguration;
+        const periodic = core ? null : this.getPeriodicDailyNoteOptions();
+        const runtimeTemplate = String(core?.template || '').trim();
+        const persistedTemplate = String(persisted?.template || '').trim();
+        const runtimeSignature = core ? this.getCoreDailyNoteRuntimeSignature(core) : null;
+        const recoverPersistedStartupSnapshot = Boolean(
+            core
+            && !runtimeTemplate
+            && persistedTemplate
+            && this.persistedRecoveryRuntimeSignature
+            && runtimeSignature === this.persistedRecoveryRuntimeSignature,
+        );
+        if (core && this.persistedRecoveryRuntimeSignature && runtimeSignature !== this.persistedRecoveryRuntimeSignature) {
+            this.persistedRecoveryRuntimeSignature = null;
+        }
+
+        let snapshot: DailyNoteConfigurationSnapshot;
+        if (recoverPersistedStartupSnapshot) {
+            snapshot = {
+                folder: normalizeFolder(persisted?.folder),
+                format: normalizeFormat(persisted?.format),
+                template: persistedTemplate,
+                source: 'persisted-recovery',
+            };
+        } else if (core) {
+            snapshot = {
+                folder: normalizeFolder(core.folder),
+                format: normalizeFormat(core.format),
+                template: runtimeTemplate,
+                source: 'core',
+            };
+        } else if (periodic) {
+            snapshot = {
+                folder: normalizeFolder(periodic.folder),
+                format: normalizeFormat(periodic.format),
+                template: String(periodic.template || '').trim(),
+                source: 'periodic',
+            };
+        } else if (persisted) {
+            snapshot = {
+                folder: normalizeFolder(persisted.folder),
+                format: normalizeFormat(persisted.format),
+                template: persistedTemplate,
+                source: 'persisted',
+            };
+        } else {
+            snapshot = {
+                folder: 'System/Dailynotes',
+                format: String((this.plugin as any)?.settings?.dailyNoteDateFormat || '').trim() || 'YYYY-MM-DD',
+                template: '',
+                source: 'default',
+            };
+        }
+
+        if (snapshot.source === 'core') {
+            clearDailyNoteConfigurationOverride(this.plugin.app);
+        } else if (!registerDailyNoteConfigurationOverride(this.plugin.app, snapshot.folder, snapshot.format)) {
+            // A settled Core runtime deliberately refused a stale startup
+            // override. Commit that live Core snapshot locally too; never
+            // return a split persisted view to creation while lookup uses Core.
+            const liveCore = this.getCoreDailyNoteOptions();
+            if (liveCore) {
+                this.persistedRecoveryRuntimeSignature = null;
+                snapshot = {
+                    folder: normalizeFolder(liveCore.folder),
+                    format: normalizeFormat(liveCore.format),
+                    template: String(liveCore.template || '').trim(),
+                    source: 'core',
+                };
+                clearDailyNoteConfigurationOverride(this.plugin.app);
+            }
+        }
+        const previous = this.dailyNoteConfigurationSnapshot;
+        const changed = !previous
+            || previous.folder !== snapshot.folder
+            || previous.format !== snapshot.format
+            || previous.template !== snapshot.template
+            || previous.source !== snapshot.source;
+        this.dailyNoteConfigurationSnapshot = snapshot;
+        this.registerDailyNoteConfiguration(snapshot.folder, snapshot.format);
+        if (changed) invalidateDailyNoteCandidateIndex(this.plugin.app);
+        return snapshot;
     }
 
     public async isDailyNoteFile(file: TFile): Promise<boolean> {
         await this.dailyNoteConfigurationReady;
-        return this.isConfiguredDailyNotePath(file);
-    }
-
-    private isConfiguredDailyNotePath(file: TFile): boolean {
-        const coreOptions = this.getCoreDailyNoteOptions();
-        const periodicOptions = this.getPeriodicDailyNoteOptions();
-        if (coreOptions) {
-            this.registerDailyNoteConfiguration(coreOptions.folder, coreOptions.format);
-        }
-        if (periodicOptions) {
-            this.registerDailyNoteConfiguration(periodicOptions.folder, periodicOptions.format);
-        }
-
-        const configurations = Array.from(this.knownDailyNoteConfigurations.values());
-        if (configurations.length === 0) {
-            configurations.push({
-                folder: '',
-                format: String((this.plugin as any)?.settings?.dailyNoteDateFormat || '').trim()
-                    || this.getDailyNoteDateFormat(),
-            });
-        }
-        return configurations.some(({ folder, format }) => {
-            const candidate = getDailyNotePathDateCandidate(file.path, folder);
-            if (!candidate) return false;
-            const formats = Array.from(new Set([
-                format,
-                String((this.plugin as any)?.settings?.dailyNoteDateFormat || '').trim(),
-            ].filter(Boolean)));
-            return formats.some((candidateFormat) => {
-                const parsed = window.moment(candidate, candidateFormat, true);
-                return Boolean(parsed?.isValid?.() && parsed.isValid());
-            });
-        });
-    }
-
-    private isDailyNoteFrontmatter(frontmatter: Record<string, unknown> | undefined | null): boolean {
-        if (!frontmatter) return false;
-        if (this.isProcessRunFrontmatter(frontmatter)) return false;
-        const tags = this.normalizeFrontmatterStringList((frontmatter as any).tags || (frontmatter as any).tag)
-            .map((tag) => tag.replace(/^#/, '').trim().toLowerCase());
-        if (tags.some((tag) => tag === 'type/note/daily' || tag === 'dailynote')) return true;
-        const types = this.normalizeFrontmatterStringList((frontmatter as any).type || (frontmatter as any).types)
-            .map((value) => value.replace(/^#/, '').trim().toLowerCase());
-        if (types.some((value) => value === 'daily' || value === 'note/daily' || value === 'type/note/daily')) return true;
-        const kinds = this.normalizeFrontmatterStringList((frontmatter as any).kind || (frontmatter as any).kinds)
-            .map((value) => value.replace(/^#/, '').trim().toLowerCase());
-        return kinds.some((value) =>
-            value === 'dailynote'
-            || value === 'daily'
-            || value === 'note/daily'
-            || value === 'type/note/daily'
-        );
+        this.refreshDailyNoteConfigurationSnapshot();
+        return parseDailyNoteFileDate(this.plugin.app, this.plugin.settings, file) !== null;
     }
 
     private isProcessRunFrontmatter(frontmatter: Record<string, unknown> | undefined | null): boolean {
@@ -164,6 +354,8 @@ export class FileNamingService {
             || workflowKind === 'workflow'
             || kind === 'workout'
             || kind === 'workout-plan'
+            || kind === 'workout-session'
+            || kind === 'workout-exercise'
             || Boolean(runType)
             || Boolean(workflowType);
     }
@@ -242,6 +434,7 @@ export class FileNamingService {
     }
 
     private async repairDailyNoteScheduled(file: TFile): Promise<boolean> {
+        if (!(await this.isDailyNoteFile(file))) return false;
         const expectedDate = this.parseDailyNoteBasenameToIso(file.basename);
         if (!expectedDate) return false;
         const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
@@ -434,7 +627,11 @@ export class FileNamingService {
 
             // Populate daily note with scheduled items if applicable
             const frontmatter = this.plugin.app.metadataCache.getFileCache(liveFile)?.frontmatter as Record<string, unknown> | undefined;
-            if (this.plugin.settings.enableAutoPopulateDailyNotes && this.isDateOnlyBasename(liveFile.basename) && !this.isProcessRunFrontmatter(frontmatter)) {
+            if (
+                this.plugin.settings.enableAutoPopulateDailyNotes
+                && !this.isProcessRunFrontmatter(frontmatter)
+                && await this.isDailyNoteFile(liveFile)
+            ) {
                 await logger.timeAsync('fileNaming:populateDailyNoteWithScheduledItems', { file: liveFile.path }, () =>
                     this.plugin.noteOperationService.populateDailyNoteWithScheduledItems(liveFile)
                 );
@@ -730,11 +927,10 @@ export class FileNamingService {
             const rawBasename = (liveFile.basename || '').trim();
             if (!rawBasename) return "skipped";
 
-            // Date-only files (daily notes) are owned by the Companion
-            // plugin for title sync. Skip them here to avoid fighting over title values.
-            const isProcessRun = this.isProcessRunFrontmatter(fm);
-            if ((this.isDateOnlyBasename(rawBasename) || this.isConfiguredDailyNotePath(liveFile)) && !isProcessRun) return "skipped";
-            if (this.isDailyNoteFrontmatter(fm) && !isProcessRun) return "skipped";
+            // Only the unified identity classifier can grant the Daily Note
+            // exception. A root date-only project/calendar/food record remains
+            // an ordinary note when Core owns a different folder.
+            if (await this.isDailyNoteFile(liveFile)) return "skipped";
             if (await this.plugin.bulkEditService.shouldSkipNoteLevelRecurrence(liveFile, scheduled)) return "skipped";
 
             // Avoid writing clearly-stale template-derived titles
@@ -854,17 +1050,9 @@ export class FileNamingService {
             return;
         }
 
-        // Date-only files (daily notes) should never be renamed based on
-        // title/scheduled logic. Their filename IS the canonical identifier.
-        const isProcessRun = this.isProcessRunFrontmatter(fm);
-        if (
-            (
-                this.isDateOnlyBasename(String(liveFile.basename).trim())
-                || this.isConfiguredDailyNotePath(liveFile)
-            )
-            && !isProcessRun
-        ) return;
-        if (this.isDailyNoteFrontmatter(fm) && !isProcessRun) return;
+        // Daily Note filename ownership is granted only by the unified strict
+        // classifier, including its non-Daily kind vetoes.
+        if (await this.isDailyNoteFile(liveFile)) return;
 
         const expectedBasename = this.buildExpectedBasename(title, scheduled);
 

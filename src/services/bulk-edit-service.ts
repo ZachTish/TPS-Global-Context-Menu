@@ -21,13 +21,12 @@ import {
     removeMixedEntityReferenceListValues,
 } from '../utils/entity-property';
 import { propertyUsesEntityOptions } from '../utils/property-option-source';
-import { stripDatePrefix, stripDateSuffix } from '../utils/date-suffix-utils';
+import { stripDateSuffix } from '../utils/date-suffix-utils';
 import { setCompletedDateValue } from '../utils/completed-date-utils';
 import { ChecklistHandler } from '../handlers/checklist-handler';
 import { ParentLinkHandler } from '../handlers/parent-link-handler';
 import { buildParentFrontmatterLinkValue, buildParentLinkValue, linkValueMatchesFile, extractLinkTarget, resolveLinkValueToFile } from '../handlers/parent-link-format';
-import { findExistingDailyNoteForIsoDate } from '../utils/daily-note-task-schedule';
-import { parseDateFromFilename } from '../utils/daily-file-date';
+import { reconcileExistingDailyNoteForIsoDate } from '../utils/daily-note-task-schedule';
 import {
     classifyDeletedMarkdownLink,
     createDeletedMarkdownLinkContext,
@@ -174,121 +173,8 @@ export class BulkEditService {
     }
 
     private async isConfiguredDailyNote(file: TFile, scheduled?: string): Promise<boolean> {
-        const { format, folder } = await this.getDailyNoteSettings();
-        const normalizedFolder = normalizePath(folder).replace(/^\/+|\/+$/g, "");
-        const fileFolder = normalizePath(file.parent?.path || "").replace(/^\/+|\/+$/g, "");
-        if (normalizedFolder !== fileFolder) return false;
-
-        const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
-        if (this.isProcessRunFrontmatter(frontmatter)) return false;
-        const parsedScheduled = scheduled ? window.moment(scheduled) : null;
-        const scheduledIso = parsedScheduled?.isValid?.() && parsedScheduled.isValid()
-            ? parsedScheduled.format("YYYY-MM-DD")
-            : null;
-
-        const parseFormats = [
-            format,
-            "ddd, MMM DD YYYY",
-            "ddd, MMM D YYYY",
-            "YYYY-MM-DD",
-            "YYYY_M_D",
-            "YYYY_M_DD",
-            "YYYY_MM_D",
-            "YYYY_MM_DD",
-            "YYYYMMDD",
-        ].filter((candidate, index, all) => !!candidate && all.indexOf(candidate) === index);
-
-        const basenameCandidates = [
-            file.basename,
-            stripDatePrefix(stripDateSuffix(file.basename)).trim(),
-        ].filter((candidate, index, all) => !!candidate && all.indexOf(candidate) === index);
-        const parsedBasename = basenameCandidates
-            .map((candidate) => window.moment(candidate, parseFormats, true))
-            .find((candidate) => candidate?.isValid?.() && candidate.isValid()) ?? null;
-        const title = typeof frontmatter?.title === "string" ? frontmatter.title.trim() : "";
-        const parsedTitle = title
-            ? window.moment(title, parseFormats, true)
-            : null;
-        const titleIsDailyNoteDate = !!parsedTitle?.isValid?.() && parsedTitle.isValid();
-
-        if (parseDateFromFilename(file.basename, format).isValid()) {
-            return true;
-        }
-
-        if (this.hasDailyNoteMarker(frontmatter)) {
-            if (!scheduledIso || !parsedBasename) return true;
-            return parsedBasename.format("YYYY-MM-DD") === scheduledIso;
-        }
-
-        if (titleIsDailyNoteDate) return true;
-
-        if (!parsedBasename?.isValid?.() || !parsedBasename.isValid()) {
-            if (!normalizedFolder || !scheduledIso) return false;
-            const expectedBasename = window.moment(scheduledIso, "YYYY-MM-DD", true).format(format);
-            const normalizedBasename = String(file.basename || "").toLowerCase();
-            return normalizedBasename.includes(expectedBasename.toLowerCase()) || normalizedBasename.includes(scheduledIso.toLowerCase());
-        }
-
-        const basenameScheduled = parsedBasename.format("YYYY-MM-DD");
-        const expectedBasename = window.moment(parsedBasename).format(format);
-        const matchesConfiguredName = file.basename === expectedBasename;
-        if (!matchesConfiguredName && scheduled) {
-            if (!scheduledIso || scheduledIso !== basenameScheduled) {
-                return false;
-            }
-        }
-
-        if (!scheduled) return true;
-        return scheduledIso
-            ? scheduledIso === parsedBasename.format("YYYY-MM-DD")
-            : true;
-    }
-
-    private hasDailyNoteMarker(frontmatter: Record<string, unknown> | undefined): boolean {
-        if (!frontmatter) return false;
-        if (this.isProcessRunFrontmatter(frontmatter)) return false;
-        const tags = this.normalizeStringList((frontmatter as any).tags || (frontmatter as any).tag)
-            .map((tag) => tag.replace(/^#/, "").trim().toLowerCase());
-        if (tags.some((tag) => tag === "type/note/daily" || tag === "dailynote")) return true;
-        const type = this.normalizeStringList((frontmatter as any).type || (frontmatter as any).types)
-            .map((value) => value.replace(/^#/, "").trim().toLowerCase());
-        if (type.some((value) => value === "daily" || value === "note/daily" || value === "type/note/daily")) return true;
-        const kind = this.normalizeStringList((frontmatter as any).kind || (frontmatter as any).kinds)
-            .map((value) => value.replace(/^#/, "").trim().toLowerCase());
-        return kind.some((value) =>
-            value === "dailynote"
-            || value === "daily"
-            || value === "note/daily"
-            || value === "type/note/daily"
-        );
-    }
-
-    private isProcessRunFrontmatter(frontmatter: Record<string, unknown> | undefined): boolean {
-        if (!frontmatter) return false;
-        const runKind = this.frontmatterString(frontmatter, "runKind").toLowerCase();
-        const workflowKind = this.frontmatterString(frontmatter, "workflowKind").toLowerCase();
-        const kind = this.frontmatterString(frontmatter, "kind").toLowerCase();
-        const runType = this.frontmatterString(frontmatter, "runType").toLowerCase();
-        const workflowType = this.frontmatterString(frontmatter, "workflowType").toLowerCase();
-        return runKind === "run"
-            || workflowKind === "workflow"
-            || kind === "workout"
-            || kind === "workout-plan"
-            || Boolean(runType)
-            || Boolean(workflowType);
-    }
-
-    private frontmatterString(frontmatter: Record<string, unknown>, key: string): string {
-        const actualKey = findKeyCaseInsensitive(frontmatter, key);
-        return actualKey ? String(frontmatter[actualKey] ?? "").trim() : "";
-    }
-
-    private normalizeStringList(value: unknown): string[] {
-        const source = Array.isArray(value) ? value : value == null || value === "" ? [] : [value];
-        return source
-            .flatMap((item) => Array.isArray(item) ? item : [item])
-            .map((item) => String(item ?? "").trim())
-            .filter(Boolean);
+        void scheduled;
+        return this.plugin.fileNamingService.isDailyNoteFile(file);
     }
 
     private async isConfiguredDailyNoteTemplate(file: TFile): Promise<boolean> {
@@ -299,22 +185,11 @@ export class BulkEditService {
     }
 
     private async isDailyNoteRecurrenceDirectFile(file: TFile, scheduled?: string): Promise<boolean> {
-        return await this.isDailyNoteLikeFile(file) || await this.isConfiguredDailyNote(file, scheduled) || await this.isConfiguredDailyNoteTemplate(file);
+        return await this.isConfiguredDailyNote(file, scheduled) || await this.isConfiguredDailyNoteTemplate(file);
     }
 
     async shouldSkipNoteLevelRecurrence(file: TFile, scheduled?: string): Promise<boolean> {
         return await this.isDailyNoteRecurrenceDirectFile(file, scheduled);
-    }
-
-    private async isDailyNoteLikeFile(file: TFile): Promise<boolean> {
-        const { format } = await this.getDailyNoteSettings();
-        const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
-        if (this.isProcessRunFrontmatter(frontmatter)) return false;
-        if (this.hasDailyNoteMarker(frontmatter)) return true;
-        if (parseDateFromFilename(file.basename, format).isValid()) return true;
-
-        const title = typeof frontmatter?.title === "string" ? frontmatter.title.trim() : "";
-        return !!title && parseDateFromFilename(title, format).isValid();
     }
 
     private resolveDailyNoteTemplateFile(templatePath: string): TFile | null {
@@ -364,7 +239,21 @@ export class BulkEditService {
         const newFileName = newFilePath.split("/").pop() || newFilePath;
         const newScheduled = window.moment(nextDate).format("YYYY-MM-DD 00:00:00");
         const nextIsoDate = window.moment(nextDate).format("YYYY-MM-DD");
-        const existingDailyNote = findExistingDailyNoteForIsoDate(this.plugin.app, this.plugin.settings, nextIsoDate);
+        const existingResolution = await reconcileExistingDailyNoteForIsoDate(
+            this.plugin.app,
+            this.plugin.settings,
+            nextIsoDate,
+        );
+        if (existingResolution.status === 'blocked') {
+            logger.flowWarn('DailyNoteRecurrence', 'identity-blocked', {
+                date: nextIsoDate,
+                reason: existingResolution.reason,
+            });
+            return false;
+        }
+        const existingDailyNote = existingResolution.status === 'found'
+            ? existingResolution.file
+            : null;
         if (this.hasGeneratedRecurrence(frontmatter, newScheduled) && existingDailyNote instanceof TFile) {
             return true;
         }
@@ -383,7 +272,22 @@ export class BulkEditService {
         }
 
         try {
-            const existingBeforeCreate = findExistingDailyNoteForIsoDate(this.plugin.app, this.plugin.settings, nextIsoDate);
+            const beforeCreateResolution = await reconcileExistingDailyNoteForIsoDate(
+                this.plugin.app,
+                this.plugin.settings,
+                nextIsoDate,
+            );
+            if (beforeCreateResolution.status === 'blocked') {
+                logger.flowWarn('DailyNoteRecurrence', 'identity-blocked', {
+                    date: nextIsoDate,
+                    reason: beforeCreateResolution.reason,
+                });
+                await this.failRecurrenceOp(recurrenceOpKey);
+                return false;
+            }
+            const existingBeforeCreate = beforeCreateResolution.status === 'found'
+                ? beforeCreateResolution.file
+                : null;
             if (existingBeforeCreate instanceof TFile) {
                 await this.completeRecurrenceOp(recurrenceOpKey, newFilePath);
                 await this.markRecurrenceGenerated(file, newScheduled);

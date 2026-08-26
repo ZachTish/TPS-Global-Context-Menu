@@ -1641,19 +1641,24 @@ test('daily note task scheduled inheritance is configurable and shared across ta
   assert.match(serviceSource, /resolveTaskScheduledValue\(this\.plugin\.app, this\.plugin\.settings, context\.file, context\.rawLine\)/);
   assert.match(serviceSource, /maybePromptMoveScheduledDailyNoteTask\(context, result\.date\)/);
   assert.match(serviceSource, /DailyNoteTaskMovePromptModal/);
-  assert.match(noteOperationSource, /findExistingDailyNoteForIsoDate\(this\.app, this\.plugin\.settings, isoDate\)/);
+  assert.match(noteOperationSource, /reconcileExistingDailyNoteForIsoDate\([\s\S]{0,180}this\.app,[\s\S]{0,180}this\.plugin\.settings,[\s\S]{0,180}isoDate/);
 });
 
-test('daily note creation reuses equivalent D/DD daily note paths before creating duplicates', () => {
+test('daily note creation reconciles strict legacy paths before creating duplicates', () => {
   assert.match(dailyNoteScheduleSource, /export function findExistingDailyNoteForIsoDate/);
   assert.match(dailyNoteScheduleSource, /getDailyNotePathForIsoDate\(app, settings, wanted\)/);
-  assert.match(dailyNoteScheduleSource, /parseDailyNoteFileDate\(app, settings, file\) === wanted/);
+  assert.match(dailyNoteScheduleSource, /classifyDailyNoteFile\(app, settings, file\)/);
+  assert.match(dailyNoteScheduleSource, /index\.byDate\.get\(isoDate\)/);
+  assert.match(dailyNoteScheduleSource, /export async function reconcileExistingDailyNoteForIsoDate/);
   assert.match(dailyNoteScheduleSource, /export function getDailyNoteScheduledValueForIsoDate/);
-  assert.match(noteOperationSource, /findExistingDailyNoteForIsoDate\(this\.app, this\.plugin\.settings, isoDate\)/);
-  assert.match(noteOperationSource, /normalizeCreatedDailyNote\([\s\S]{0,180}existingDailyNote[\s\S]{0,180}isoDate/);
+  assert.match(noteOperationSource, /reconcileExistingDailyNoteForIsoDate\([\s\S]{0,180}this\.app,[\s\S]{0,180}this\.plugin\.settings,[\s\S]{0,180}isoDate/);
+  assert.match(noteOperationSource, /resolution\.status === 'blocked'[\s\S]{0,220}return null/);
+  assert.match(noteOperationSource, /if \(createdByThisCall\) \{[\s\S]{0,600}normalizeCreatedDailyNote\(/);
+  assert.match(noteOperationSource, /existingDailyNote instanceof TFile[\s\S]{0,180}settleExistingDailyNoteIfPending/);
   assert.match(noteOperationSource, /getDailyNoteScheduledValueForIsoDate\(isoDate\)/);
   assert.match(dailyNavSource, /noteOperationService\.ensureDailyNote\(`\$\{isoDate\} 00:00:00`\)/);
-  assert.match(bulkEditSource, /findExistingDailyNoteForIsoDate\(this\.plugin\.app, this\.plugin\.settings, nextIsoDate\)/);
+  assert.match(bulkEditSource, /reconcileExistingDailyNoteForIsoDate\([\s\S]{0,120}nextIsoDate/);
+  assert.match(bulkEditSource, /existingResolution\.status === 'blocked'[\s\S]{0,220}return false/);
 });
 
 test('note-level recurrence skips configured daily notes instead of creating daily note instances', () => {
@@ -1661,10 +1666,9 @@ test('note-level recurrence skips configured daily notes instead of creating dai
   assert.match(bulkEditSource, /private readonly dailyRecurrenceRule = 'FREQ=DAILY';/);
   assert.match(bulkEditSource, /normalizeRecurrenceRuleValue\(recurrenceRule: unknown\): string/);
   assert.match(bulkEditSource, /value\.toLowerCase\(\) === 'dailynote' \? this\.dailyRecurrenceRule : value/);
-  assert.match(bulkEditSource, /const basenameCandidates = \[[\s\S]{0,180}stripDatePrefix\(stripDateSuffix\(file\.basename\)\)\.trim\(\)/);
-  assert.match(bulkEditSource, /if \(this\.hasDailyNoteMarker\(frontmatter\)\) \{[\s\S]{0,160}return true;/);
-  assert.match(bulkEditSource, /parseDateFromFilename\(file\.basename, format\)\.isValid\(\)/);
-  assert.match(bulkEditSource, /normalizedBasename\.includes\(expectedBasename\.toLowerCase\(\)\) \|\| normalizedBasename\.includes\(scheduledIso\.toLowerCase\(\)\)/);
+  assert.match(bulkEditSource, /return this\.plugin\.fileNamingService\.isDailyNoteFile\(file\)/);
+  assert.doesNotMatch(bulkEditSource, /parseDateFromFilename/);
+  assert.match(fileNamingSource, /parseDailyNoteFileDate\(this\.plugin\.app, this\.plugin\.settings, file\) !== null/);
   assert.match(bulkEditSource, /if \(await this\.shouldSkipNoteLevelRecurrence\(file, fm\.scheduled\)\) continue;/);
   assert.match(bulkEditSource, /if \(await this\.shouldSkipNoteLevelRecurrence\(file, currentScheduled\)\) \{[\s\S]{0,520}applyRecurrenceDirectly\(file, this\.dailyRecurrenceRule, null\)[\s\S]{0,140}return false;/);
   assert.ok(
@@ -1682,17 +1686,18 @@ test('note-level recurrence skips configured daily notes instead of creating dai
 });
 
 test('daily-note-marked files are not renamed or title-synced by scheduled note naming', () => {
-  assert.match(fileNamingSource, /private isDailyNoteFrontmatter\(frontmatter: Record<string, unknown> \| undefined \| null\): boolean/);
   assert.match(fileNamingSource, /private isProcessRunFrontmatter\(frontmatter: Record<string, unknown> \| undefined \| null\): boolean/);
-  assert.match(fileNamingSource, /if \(this\.isProcessRunFrontmatter\(frontmatter\)\) return false;/);
-  assert.match(fileNamingSource, /tag === 'type\/note\/daily' \|\| tag === 'dailynote'/);
-  assert.match(fileNamingSource, /value === 'daily' \|\| value === 'note\/daily' \|\| value === 'type\/note\/daily'/);
-  assert.match(bulkEditSource, /const title = typeof frontmatter\?\.title === "string" \? frontmatter\.title\.trim\(\) : "";/);
-  assert.match(bulkEditSource, /if \(titleIsDailyNoteDate\) return true;/);
-  assert.match(fileNamingSource, /this\.isDateOnlyBasename\(rawBasename\) \|\| this\.isConfiguredDailyNotePath\(liveFile\)/);
-  assert.match(fileNamingSource, /this\.isDateOnlyBasename\(String\(liveFile\.basename\)\.trim\(\)\)[\s\S]{0,120}\|\| this\.isConfiguredDailyNotePath\(liveFile\)/);
-  assert.match(bulkEditSource, /private isProcessRunFrontmatter\(frontmatter: Record<string, unknown> \| undefined\): boolean/);
-  assert.match(bulkEditSource, /if \(this\.isProcessRunFrontmatter\(frontmatter\)\) return false;/);
+  assert.match(fileNamingSource, /return parseDailyNoteFileDate\(this\.plugin\.app, this\.plugin\.settings, file\) !== null/);
+  assert.match(dailyNoteScheduleSource, /if \(!frontmatter \|\| isProcessRunFrontmatter\(frontmatter\)\) return false;/);
+  assert.match(
+    dailyNoteScheduleSource,
+    /marker === 'daily'[\s\S]{0,120}marker === 'dailynote'[\s\S]{0,120}marker === 'notedaily'[\s\S]{0,120}marker === 'typenotedaily'/,
+  );
+  assert.match(dailyNoteScheduleSource, /marker === 'dailynote' \|\| marker === 'typenotedaily'/);
+  assert.match(fileNamingSource, /if \(await this\.isDailyNoteFile\(liveFile\)\) return "skipped"/);
+  assert.match(fileNamingSource, /if \(await this\.isDailyNoteFile\(liveFile\)\) return;/);
+  assert.doesNotMatch(fileNamingSource, /isConfiguredDailyNotePath/);
+  assert.doesNotMatch(bulkEditSource, /hasDailyNoteMarker/);
 });
 
 test('recurrence template marker writes and detection are migrated', () => {

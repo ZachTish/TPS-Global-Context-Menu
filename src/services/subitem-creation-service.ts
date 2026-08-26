@@ -5,6 +5,7 @@ import { CreateSubitemModal } from '../modals/create-subitem-modal';
 import { mergeNormalizedTags, parseTagInput } from '../utils/tag-utils';
 import { currentCompletedDateStamp } from '../utils/completed-date-utils';
 import * as logger from '../logger';
+import { parseDailyNoteFileDate } from '../utils/daily-note-task-schedule';
 import {
   isFilePropertiesCompanionPath,
   isFilePropertiesCompanionRecord,
@@ -118,16 +119,16 @@ export async function createSubitemForParentWithTitle(
 
   let isDailyNoteParent = false;
   let dailyNoteDateStr = '';
-  if (plugin.fileNamingService.isDateOnlyBasename(parentFile.basename)) {
+  await plugin.fileNamingService.whenDailyNoteConfigurationReady();
+  if (
+    plugin.fileNamingService.getDailyNoteConfigurationSnapshot()
+    && plugin.fileNamingService.isDailyNoteMetadataCacheReady?.() !== false
+  ) {
+    const dailyNoteDate = parseDailyNoteFileDate(plugin.app, plugin.settings, parentFile);
+    if (dailyNoteDate) {
       isDailyNoteParent = true;
-      const parsed = window.moment(parentFile.basename, [
-          plugin.fileNamingService.getDailyNoteDateFormat(),
-          "YYYY-MM-DD", "YYYY_MM_DD", "YYYYMMDD",
-          "dddd, MMMM Do YYYY", "MMMM D, YYYY", "MMM D, YYYY"
-      ], true);
-      if (parsed.isValid()) {
-          dailyNoteDateStr = parsed.format('YYYY-MM-DD 00:00:00');
-      }
+      dailyNoteDateStr = `${dailyNoteDate} 00:00:00`;
+    }
   }
 
   const frontmatterLines = [
