@@ -9,6 +9,31 @@ import type { FilePropertiesMutationCause } from './file-properties-service';
 
 type FrontmatterRecord = Record<string, unknown>;
 type FrontmatterMutator = (frontmatter: FrontmatterRecord) => void | Promise<void>;
+type SynchronousFrontmatterMutator = (frontmatter: FrontmatterRecord) => void;
+type SourcePreservingMutationOptions = {
+  emitEvents?: boolean;
+  updateEntityIndex?: boolean;
+};
+type OwnedValueSnapshot = {
+  actualKey: string | null;
+  signature: string;
+};
+type OwnedSourceMutation = {
+  sourceKey: string;
+  remove: boolean;
+  value?: unknown;
+};
+type SourceLine = {
+  start: number;
+  end: number;
+  text: string;
+};
+type SourceKeySpan = {
+  key: string;
+  keyToken: string;
+  start: number;
+  end: number;
+};
 type ActivityChange = {
   key: string;
   from?: unknown;
@@ -126,6 +151,130 @@ export class FrontmatterMutationService {
     return changed;
   }
 
+  /**
+   * Atomically updates only the named top-level frontmatter keys while leaving
+   * every unrelated source byte alone. This is intentionally narrower than
+   * process(): automation-owned presentation fields must not reserialize a
+   * native record's identity, timestamps, tags, key order, comments, or body.
+   */
+  async processOwnedKeysPreservingSource(
+    file: TFile,
+    ownedKeys: string[],
+    mutator: SynchronousFrontmatterMutator,
+    cause: FilePropertiesMutationCause = { kind: 'automation' },
+    options: SourcePreservingMutationOptions = {},
+  ): Promise<boolean> {
+    if (!(file instanceof TFile)) return false;
+    if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
+    if (file.extension.toLowerCase() !== 'md') {
+      return this.plugin.filePropertiesService?.isPropertyTarget(file)
+        ? this.plugin.filePropertiesService.process(file, mutator, cause)
+        : false;
+    }
+
+    const keys = this.normalizeOwnedKeys(ownedKeys);
+    if (keys.length === 0) return false;
+
+    let changed = false;
+    let indexedFrontmatter: FrontmatterRecord | null = null;
+    const started = performance.now();
+    await this.runSerialized(file, async () => {
+      await this.plugin.app.vault.process(file, (currentContent) => {
+        const raw = String(currentContent || '');
+        if (/\r(?!\n)/u.test(raw)) {
+          this.warnMalformed(file, 'unsupported-bare-cr-line-ending');
+          return raw;
+        }
+        const contentForParsing = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
+        const parsed = this.parseFrontmatterDocument(contentForParsing);
+        if (parsed.ok !== true) {
+          this.warnMalformed(file, parsed.reason, parsed.error);
+          return raw;
+        }
+        const duplicateOwnedKey = this.findDuplicateOwnedSourceKey(raw, keys);
+        if (duplicateOwnedKey) {
+          this.warnMalformed(file, `duplicate-owned-key:${duplicateOwnedKey}`);
+          logger.warn('[TPS GCM] Refusing ambiguous source-preserving frontmatter write', {
+            file: file.path,
+            duplicateOwnedKey,
+            ownedKeys: keys,
+          });
+          return raw;
+        }
+
+        const frontmatter = parsed.frontmatter;
+        const before = this.snapshotOwnedValues(frontmatter, keys);
+        mutator(frontmatter);
+        const mutations = this.collectOwnedMutations(before, frontmatter, keys);
+        if (mutations.length === 0) return raw;
+
+        const nextContent = this.rewriteOwnedFrontmatterSource(raw, mutations);
+        if (nextContent === raw) return raw;
+
+        const validation = this.validateNextContent(nextContent);
+        if (validation.ok !== true) {
+          this.warnMalformed(file, validation.reason, validation.error);
+          logger.warn('[TPS GCM] Refusing source-preserving frontmatter write that failed validation', {
+            file: file.path,
+            reason: validation.reason,
+            ownedKeys: keys,
+            stack: new Error().stack,
+          });
+          return raw;
+        }
+        if (!this.hasSuspiciousBrokenSubitemLine(raw) && this.hasSuspiciousBrokenSubitemLine(nextContent)) {
+          this.warnMalformed(file, 'suspicious-broken-subitem-line');
+          logger.warn('[TPS GCM] Refusing source-preserving frontmatter write that would introduce a broken subitem line', {
+            file: file.path,
+            ownedKeys: keys,
+            stack: new Error().stack,
+          });
+          return raw;
+        }
+
+        const indexedDocument = this.parseFrontmatterDocument(
+          nextContent.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n'),
+        );
+        if (indexedDocument.ok !== true) {
+          this.warnMalformed(file, indexedDocument.reason, indexedDocument.error);
+          logger.warn('[TPS GCM] Refusing source-preserving frontmatter write that could not be re-indexed', {
+            file: file.path,
+            reason: indexedDocument.reason,
+            ownedKeys: keys,
+            stack: new Error().stack,
+          });
+          return raw;
+        }
+
+        indexedFrontmatter = { ...indexedDocument.frontmatter };
+        changed = true;
+        return nextContent;
+      });
+
+      if (!changed || options.emitEvents === false) return;
+      const sourcePluginId = String(cause.sourcePluginId || this.plugin.manifest.id);
+      this.plugin.eventService.emitFilesUpdated([file.path], { sourcePluginId });
+      if (cause.kind !== 'automation') {
+        this.plugin.eventService.emitExplicitAction([file.path], {
+          sourcePluginId,
+          source: String(cause.surface || 'frontmatter'),
+        });
+      }
+    });
+
+    logger.perf('frontmatterMutation.processOwnedKeysPreservingSource', {
+      file: file.path,
+      changed,
+      ownedKeys: keys,
+      durationMs: Math.round(performance.now() - started),
+      stack: changed ? compactStack(new Error().stack) : undefined,
+    });
+    if (changed && indexedFrontmatter && options.updateEntityIndex !== false) {
+      this.plugin.entityIndexService?.upsertFile(file, indexedFrontmatter);
+    }
+    return changed;
+  }
+
   async updateValues(
     files: TFile[],
     updates: Record<string, unknown>,
@@ -228,6 +377,308 @@ export class FrontmatterMutationService {
       }
     }, cause);
     return [...updatedMarkdown, ...updatedNonMarkdown];
+  }
+
+  private normalizeOwnedKeys(keys: string[]): string[] {
+    const normalized: string[] = [];
+    const seen = new Set<string>();
+    for (const rawKey of keys || []) {
+      const key = String(rawKey || '').trim();
+      const folded = casefold(key);
+      if (!key || seen.has(folded)) continue;
+      seen.add(folded);
+      normalized.push(key);
+    }
+    return normalized;
+  }
+
+  private snapshotOwnedValues(frontmatter: FrontmatterRecord, keys: string[]): Map<string, OwnedValueSnapshot> {
+    const snapshots = new Map<string, OwnedValueSnapshot>();
+    for (const requestedKey of keys) {
+      const actualKey = findKeyCaseInsensitive(frontmatter, requestedKey);
+      snapshots.set(casefold(requestedKey), {
+        actualKey,
+        signature: actualKey ? this.ownedValueSignature(frontmatter[actualKey]) : 'missing',
+      });
+    }
+    return snapshots;
+  }
+
+  private collectOwnedMutations(
+    before: Map<string, OwnedValueSnapshot>,
+    frontmatter: FrontmatterRecord,
+    keys: string[],
+  ): OwnedSourceMutation[] {
+    const mutations: OwnedSourceMutation[] = [];
+    for (const requestedKey of keys) {
+      const snapshot = before.get(casefold(requestedKey));
+      const afterKey = findKeyCaseInsensitive(frontmatter, requestedKey);
+      const beforeExists = !!snapshot?.actualKey;
+      const afterExists = !!afterKey;
+      if (!beforeExists && !afterExists) continue;
+
+      const afterSignature = afterKey ? this.ownedValueSignature(frontmatter[afterKey]) : 'missing';
+      if (beforeExists === afterExists && snapshot?.signature === afterSignature) continue;
+
+      mutations.push({
+        sourceKey: snapshot?.actualKey || afterKey || requestedKey,
+        remove: !afterKey,
+        value: afterKey ? frontmatter[afterKey] : undefined,
+      });
+    }
+    return mutations;
+  }
+
+  private ownedValueSignature(value: unknown): string {
+    if (value instanceof Date) return `date:${value.toISOString()}`;
+    if (value === undefined) return 'undefined';
+    if (typeof value === 'number' && Number.isNaN(value)) return 'number:NaN';
+    try {
+      return `${typeof value}:${JSON.stringify(value, (_key, entry) => {
+        if (entry instanceof Date) return { __tpsDate: entry.toISOString() };
+        if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+          return Object.fromEntries(
+            Object.entries(entry as Record<string, unknown>)
+              .sort(([left], [right]) => left.localeCompare(right)),
+          );
+        }
+        return entry;
+      })}`;
+    } catch {
+      return `${typeof value}:${String(value)}`;
+    }
+  }
+
+  private findDuplicateOwnedSourceKey(rawContent: string, ownedKeys: string[]): string | null {
+    const source = rawContent.startsWith('\uFEFF') ? rawContent.slice(1) : rawContent;
+    const openStart = this.findSourceFrontmatterStart(source);
+    if (openStart < 0) return null;
+    const openingLineEnd = source.indexOf('\n', openStart);
+    if (openingLineEnd < 0) return null;
+    const blockStart = openingLineEnd + 1;
+    const closeStart = this.findSourceFrontmatterClose(source, blockStart);
+    if (closeStart < 0) return null;
+
+    const owned = new Map(ownedKeys.map((key) => [casefold(key), key]));
+    const counts = new Map<string, number>();
+    for (const span of this.findSourceKeySpans(source, blockStart, closeStart)) {
+      const folded = casefold(span.key);
+      if (!owned.has(folded)) continue;
+      const count = (counts.get(folded) || 0) + 1;
+      if (count > 1) return owned.get(folded) || span.key;
+      counts.set(folded, count);
+    }
+    return null;
+  }
+
+  private rewriteOwnedFrontmatterSource(rawContent: string, mutations: OwnedSourceMutation[]): string {
+    if (mutations.length === 0) return rawContent;
+    const bom = rawContent.startsWith('\uFEFF') ? '\uFEFF' : '';
+    const source = bom ? rawContent.slice(1) : rawContent;
+    const newline = source.includes('\r\n') ? '\r\n' : '\n';
+    const openStart = this.findSourceFrontmatterStart(source);
+
+    if (openStart < 0) {
+      const additions = mutations
+        .filter((mutation) => !mutation.remove)
+        .map((mutation) => this.serializeOwnedProperty(mutation.sourceKey, mutation.value, newline));
+      if (additions.length === 0) return rawContent;
+      return `${bom}---${newline}${additions.join(newline)}${newline}---${newline}${source}`;
+    }
+
+    const openingLineEnd = source.indexOf('\n', openStart);
+    if (openingLineEnd < 0) return rawContent;
+    const blockStart = openingLineEnd + 1;
+    const closeStart = this.findSourceFrontmatterClose(source, blockStart);
+    if (closeStart < 0) return rawContent;
+
+    const spansByKey = new Map<string, SourceKeySpan[]>();
+    for (const span of this.findSourceKeySpans(source, blockStart, closeStart)) {
+      const folded = casefold(span.key);
+      const spans = spansByKey.get(folded) || [];
+      spans.push(span);
+      spansByKey.set(folded, spans);
+    }
+
+    const patches: Array<{ start: number; end: number; text: string }> = [];
+    const additions: string[] = [];
+    for (const mutation of mutations) {
+      const spans = spansByKey.get(casefold(mutation.sourceKey)) || [];
+      if (spans.length === 0) {
+        if (!mutation.remove) {
+          additions.push(this.serializeOwnedProperty(mutation.sourceKey, mutation.value, newline));
+        }
+        continue;
+      }
+      if (spans.length !== 1) return rawContent;
+      const target = spans[0];
+      if (mutation.remove) {
+        patches.push({ start: target.start, end: target.end, text: '' });
+      } else {
+        const original = source.slice(target.start, target.end);
+        const trailingNewline = original.endsWith('\r\n')
+          ? '\r\n'
+          : original.endsWith('\n')
+            ? '\n'
+            : '';
+        patches.push({
+          start: target.start,
+          end: target.end,
+          text: `${this.serializeOwnedProperty(target.key, mutation.value, newline, target.keyToken)}${trailingNewline}`,
+        });
+      }
+    }
+
+    if (additions.length > 0) {
+      const needsLeadingNewline = closeStart > blockStart && source[closeStart - 1] !== '\n';
+      patches.push({
+        start: closeStart,
+        end: closeStart,
+        text: `${needsLeadingNewline ? newline : ''}${additions.join(newline)}${newline}`,
+      });
+    }
+
+    let rewritten = source;
+    for (const patch of patches.sort((left, right) => right.start - left.start || right.end - left.end)) {
+      rewritten = `${rewritten.slice(0, patch.start)}${patch.text}${rewritten.slice(patch.end)}`;
+    }
+    return `${bom}${rewritten}`;
+  }
+
+  private findSourceFrontmatterStart(source: string): number {
+    if (source.startsWith('---\n') || source.startsWith('---\r\n')) return 0;
+    const leadingWhitespace = source.match(/^[ \t\r\n]*/)?.[0] || '';
+    const start = leadingWhitespace.length;
+    if (start > 0 && (source.startsWith('---\n', start) || source.startsWith('---\r\n', start))) {
+      return start;
+    }
+    return -1;
+  }
+
+  private findSourceFrontmatterClose(source: string, blockStart: number): number {
+    let cursor = blockStart;
+    while (cursor <= source.length) {
+      const newlineIndex = source.indexOf('\n', cursor);
+      const lineEnd = newlineIndex < 0 ? source.length : newlineIndex;
+      const contentEnd = lineEnd > cursor && source[lineEnd - 1] === '\r' ? lineEnd - 1 : lineEnd;
+      const text = source.slice(cursor, contentEnd);
+      if (/^(?:---|\.\.\.)[ \t]*$/.test(text)) return cursor;
+      if (newlineIndex < 0) break;
+      cursor = newlineIndex + 1;
+    }
+    return -1;
+  }
+
+  private findSourceKeySpans(source: string, blockStart: number, blockEnd: number): SourceKeySpan[] {
+    const lines = this.readSourceLines(source, blockStart, blockEnd);
+    const keyLines = lines
+      .map((line, index) => ({ line, index, parsed: this.parseSourceKeyLine(line.text) }))
+      .filter((entry): entry is { line: SourceLine; index: number; parsed: { key: string; keyToken: string; tail: string } } => !!entry.parsed);
+    const spans: SourceKeySpan[] = [];
+
+    for (const entry of keyLines) {
+      let end = entry.line.end;
+      const tail = entry.parsed.tail.trim();
+      const hasBlockValue = !tail || /^[|>][+\-]?\d?(?:\s+#.*)?$/.test(tail);
+      if (hasBlockValue) {
+        for (let index = entry.index + 1; index < lines.length; index++) {
+          const continuation = lines[index];
+          if (!continuation.text) {
+            const next = lines[index + 1];
+            if (!next || !/^[ \t]/.test(next.text)) break;
+            end = continuation.end;
+            continue;
+          }
+          if (!/^[ \t]/.test(continuation.text)) break;
+          end = continuation.end;
+        }
+      }
+      spans.push({ key: entry.parsed.key, keyToken: entry.parsed.keyToken, start: entry.line.start, end });
+    }
+    return spans;
+  }
+
+  private readSourceLines(source: string, start: number, end: number): SourceLine[] {
+    const lines: SourceLine[] = [];
+    let cursor = start;
+    while (cursor < end) {
+      const newlineIndex = source.indexOf('\n', cursor);
+      const lineEnd = newlineIndex < 0 || newlineIndex >= end ? end : newlineIndex + 1;
+      let contentEnd = lineEnd;
+      if (contentEnd > cursor && source[contentEnd - 1] === '\n') contentEnd -= 1;
+      if (contentEnd > cursor && source[contentEnd - 1] === '\r') contentEnd -= 1;
+      lines.push({ start: cursor, end: lineEnd, text: source.slice(cursor, contentEnd) });
+      cursor = lineEnd;
+    }
+    return lines;
+  }
+
+  private parseSourceKeyLine(line: string): { key: string; keyToken: string; tail: string } | null {
+    if (!line || /^[ \t#]/.test(line)) return null;
+    if (line[0] === '"') {
+      let escaped = false;
+      for (let index = 1; index < line.length; index++) {
+        const character = line[index];
+        if (character === '"' && !escaped) {
+          const suffix = line.slice(index + 1);
+          const separator = suffix.match(/^[ \t]*:[ \t]*/);
+          if (!separator) return null;
+          let key: string;
+          try {
+            key = JSON.parse(line.slice(0, index + 1));
+          } catch {
+            return null;
+          }
+          return {
+            key: String(key),
+            keyToken: line.slice(0, index + 1),
+            tail: suffix.slice(separator[0].length),
+          };
+        }
+        escaped = character === '\\' && !escaped;
+        if (character !== '\\') escaped = false;
+      }
+      return null;
+    }
+    if (line[0] === "'") {
+      let index = 1;
+      while (index < line.length) {
+        if (line[index] !== "'") {
+          index += 1;
+          continue;
+        }
+        if (line[index + 1] === "'") {
+          index += 2;
+          continue;
+        }
+        const suffix = line.slice(index + 1);
+        const separator = suffix.match(/^[ \t]*:[ \t]*/);
+        if (!separator) return null;
+        return {
+          key: line.slice(1, index).replace(/''/g, "'"),
+          keyToken: line.slice(0, index + 1),
+          tail: suffix.slice(separator[0].length),
+        };
+      }
+      return null;
+    }
+
+    const separatorIndex = line.indexOf(':');
+    if (separatorIndex <= 0) return null;
+    const key = line.slice(0, separatorIndex).trim();
+    if (!key || /[\[\]{}]/.test(key)) return null;
+    const afterSeparator = line.slice(separatorIndex + 1);
+    if (afterSeparator && !/^[ \t]/.test(afterSeparator)) return null;
+    return { key, keyToken: line.slice(0, separatorIndex).trimEnd(), tail: afterSeparator.replace(/^[ \t]*/, '') };
+  }
+
+  private serializeOwnedProperty(key: string, value: unknown, newline: string, keyToken?: string): string {
+    const serialized = stringifyYaml({ [key]: value }).trimEnd();
+    const preservedKeyToken = String(keyToken || '').trim();
+    const withPreservedKey = preservedKeyToken
+      ? serialized.replace(/^[^:\r\n]+(?=:)/, preservedKeyToken)
+      : serialized;
+    return withPreservedKey.replace(/\n/g, newline);
   }
 
   private partitionByStorageType(files: TFile[]): { markdownFiles: TFile[]; nonMarkdownFiles: TFile[] } {
@@ -476,7 +927,7 @@ export class FrontmatterMutationService {
   }
 
   private findLineDelimiter(content: string, fromIndex: number): number {
-    const pattern = /(^|\n)---[ \t]*(?=\n|$)/g;
+    const pattern = /(^|\n)(?:---|\.\.\.)[ \t]*(?=\n|$)/g;
     pattern.lastIndex = Math.max(0, fromIndex);
     let match: RegExpExecArray | null;
     while ((match = pattern.exec(content)) !== null) {

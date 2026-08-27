@@ -40,6 +40,42 @@ async function importModule(relativePath) {
   return import(`data:text/javascript;base64,${Buffer.from(bundled).toString('base64')}`);
 }
 
+async function importNativeRecordStorageModule() {
+  const build = await esbuild.build({
+    stdin: {
+      contents: "export { resolveWritableNativeRecordStorageConfiguration } from '../src/services/native-record-service.ts';",
+      resolveDir: fileURLToPath(new URL('.', import.meta.url)),
+      sourcefile: 'native-record-storage-settings-harness.ts',
+      loader: 'ts',
+    },
+    bundle: true,
+    format: 'esm',
+    platform: 'node',
+    write: false,
+    logLevel: 'silent',
+    plugins: [{
+      name: 'native-record-storage-settings-stubs',
+      setup(builder) {
+        builder.onResolve({ filter: /^obsidian$/u }, () => ({ path: 'obsidian', namespace: 'native-record-storage-settings' }));
+        builder.onResolve({ filter: /^\.\.\/logger$/u }, () => ({ path: 'logger', namespace: 'native-record-storage-settings' }));
+        builder.onLoad({ filter: /.*/, namespace: 'native-record-storage-settings' }, (args) => ({
+          loader: 'js',
+          contents: args.path === 'logger'
+            ? 'export const flow = () => {}; export const flowError = () => {};'
+            : `
+              export class TFile {}
+              export class TFolder {}
+              export const normalizePath = (value) => String(value || '');
+              export const parseYaml = () => ({});
+              export const stringifyYaml = () => '';
+            `,
+        }));
+      },
+    }],
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(build.outputFiles[0].text).toString('base64')}`);
+}
+
 test('linked subitem mapping presentation fields survive textarea-style parse results', async () => {
   const { mergeLinkedSubitemMappingPresentation } = await importModule('../src/utils/linked-subitem-mapping.ts');
 
@@ -615,6 +651,165 @@ test('settings controls use immediate persistence rather than unload-unsafe time
     'only the persistence coordinator adapter may call saveData directly',
   );
   assert.match(mainSource, /if \(needsSettingsMigration\) await this\.persistSettingsSnapshot\(\);/);
+});
+
+test('legacy tag identity settings resolve to a property writer and retain the exact tag reader', async () => {
+  const { resolveWritableNativeRecordStorageConfiguration } = await importNativeRecordStorageModule();
+  const configuredTagProfile = {
+    identityMode: 'tag',
+    identityPropertyKey: 'stableRecordId',
+    schemaPropertyKey: 'recordSchema',
+    identityTagPrefix: 'custom/record',
+    kindPropertyKey: '',
+    titlePropertyKey: 'displayName',
+    createdPropertyKey: 'createdAt',
+    modifiedPropertyKey: 'updatedAt',
+  };
+  const existingPropertyAlias = {
+    ...configuredTagProfile,
+    identityMode: 'property',
+    kindPropertyKey: 'recordKind',
+  };
+
+  const resolved = resolveWritableNativeRecordStorageConfiguration(
+    configuredTagProfile,
+    [existingPropertyAlias],
+  );
+
+  assert.equal(resolved.retiredTagIdentity, true);
+  assert.equal(resolved.requiresSettingsMigration, true);
+  assert.equal(resolved.configuredProfile.identityMode, 'tag');
+  assert.equal(resolved.writeProfile.identityMode, 'property');
+  assert.equal(resolved.writeProfile.identityPropertyKey, 'stableRecordId');
+  assert.equal(resolved.writeProfile.schemaPropertyKey, 'recordSchema');
+  assert.equal(resolved.writeProfile.kindPropertyKey, 'kind');
+  assert.deepEqual(resolved.readAliases[0], configuredTagProfile);
+  assert.deepEqual(resolved.readAliases[1], existingPropertyAlias);
+});
+
+test('tag identity retirement uses serialized settings persistence without rewriting notes on load', async () => {
+  const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
+  const legacyTagProfile = {
+    identityMode: 'tag',
+    identityPropertyKey: 'tpsId',
+    schemaPropertyKey: 'tpsSchemaVersion',
+    identityTagPrefix: 'custom/record',
+    kindPropertyKey: 'kind',
+    titlePropertyKey: 'title',
+    createdPropertyKey: 'createdDate',
+    modifiedPropertyKey: 'modifiedDate',
+  };
+  let disk = {
+    nativeRecordIdentityMode: 'tag',
+    nativeRecordStorageAliases: [],
+    unrelatedSetting: 'before',
+  };
+  const requested = {
+    ...disk,
+    nativeRecordIdentityMode: 'property',
+    nativeRecordStorageAliases: [legacyTagProfile],
+  };
+  const coordinator = new SettingsPersistenceCoordinator(
+    async () => structuredClone(disk),
+    async (next) => {
+      disk = structuredClone(next);
+    },
+  );
+  coordinator.setBaseline(disk);
+  disk.unrelatedSetting = 'changed-concurrently';
+
+  await coordinator.request(requested);
+
+  assert.equal(disk.nativeRecordIdentityMode, 'property');
+  assert.deepEqual(disk.nativeRecordStorageAliases, [legacyTagProfile]);
+  assert.equal(disk.unrelatedSetting, 'changed-concurrently');
+
+  const loadSettingsStart = mainSource.indexOf('async loadSettings(): Promise<void>');
+  const loadSettingsEnd = mainSource.indexOf('private normalizeHomeComponents(', loadSettingsStart);
+  const loadSettingsSource = mainSource.slice(loadSettingsStart, loadSettingsEnd);
+  assert.ok(loadSettingsStart >= 0 && loadSettingsEnd > loadSettingsStart);
+  assert.match(loadSettingsSource, /resolveWritableNativeRecordStorageConfiguration\([\s\S]{0,180}loaded\?\.nativeRecordStorageAliases/);
+  assert.match(loadSettingsSource, /const nativeRecordStorageProfile = nativeRecordStorageConfiguration\.writeProfile;/);
+  assert.match(loadSettingsSource, /this\.settings\.nativeRecordStorageAliases = nativeRecordStorageConfiguration\.readAliases;/);
+  assert.match(loadSettingsSource, /hasRawNativeRecordStorageRepair = nativeRecordStorageSettingValues\.some/);
+  assert.match(loadSettingsSource, /hasRawNativeRecordStorageAliasRepair = \([\s\S]{0,500}JSON\.stringify\(nativeRecordStorageConfiguration\.readAliases\)/);
+  assert.match(loadSettingsSource, /needsNativeRecordIdentityMigration = nativeRecordStorageConfiguration\.requiresSettingsMigration\s*\|\| hasRawNativeRecordStorageRepair\s*\|\| hasRawNativeRecordStorageAliasRepair/);
+  assert.match(loadSettingsSource, /originalStorageValue\('nativeRecordIdentityPropertyKey',[\s\S]{0,900}originalStorageValue\('nativeRecordTitlePropertyKey/);
+  assert.match(loadSettingsSource, /nativeRecordStorageAliases: originalStorageValue\('nativeRecordStorageAliases', \[\]\)/);
+  assert.match(loadSettingsSource, /needsNativeRecordIdentityMigration = nativeRecordStorageConfiguration\.requiresSettingsMigration/);
+  assert.match(loadSettingsSource, /needsNativeRecordIdentityMigration[\s\S]{0,500}if \(needsSettingsMigration\) await this\.persistSettingsSnapshot\(\);/);
+  assert.match(loadSettingsSource, /migration:native-record-property-identity'[\s\S]{0,220}noteRewrite: false/);
+  assert.doesNotMatch(loadSettingsSource, /nativeRecordService\.migrateStorageProfile\(/);
+});
+
+test('sanitized native record aliases replace the raw persisted alias array', async () => {
+  const { resolveWritableNativeRecordStorageConfiguration } = await importNativeRecordStorageModule();
+  const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
+  const legacyTagProfile = {
+    identityMode: 'tag',
+    identityPropertyKey: 'tpsId',
+    schemaPropertyKey: 'tpsSchemaVersion',
+    identityTagPrefix: 'custom/record',
+    kindPropertyKey: 'kind',
+    titlePropertyKey: 'title',
+    createdPropertyKey: 'createdDate',
+    modifiedPropertyKey: 'modifiedDate',
+  };
+  const rawAliases = [legacyTagProfile, structuredClone(legacyTagProfile)];
+  const resolved = resolveWritableNativeRecordStorageConfiguration({ identityMode: 'property' }, rawAliases);
+  assert.deepEqual(resolved.readAliases, [legacyTagProfile], 'duplicate raw aliases are sanitized deterministically');
+
+  let disk = {
+    nativeRecordIdentityMode: 'property',
+    nativeRecordStorageAliases: structuredClone(rawAliases),
+    unrelatedSetting: 'preserve',
+  };
+  const requested = {
+    ...disk,
+    nativeRecordStorageAliases: structuredClone(resolved.readAliases),
+  };
+  const coordinator = new SettingsPersistenceCoordinator(
+    async () => structuredClone(disk),
+    async (next) => {
+      disk = structuredClone(next);
+    },
+  );
+  coordinator.setBaseline(disk);
+
+  await coordinator.request(requested);
+
+  assert.deepEqual(disk.nativeRecordStorageAliases, [legacyTagProfile]);
+  assert.equal(disk.unrelatedSetting, 'preserve');
+});
+
+test('native record settings expose property identity only and explain legacy consolidation', () => {
+  const nativeSettingsStart = settingsTabSource.indexOf("diagnostics.createEl('h4', { text: 'Native record properties' })");
+  const nativeSettingsEnd = settingsTabSource.indexOf("diagnostics.createEl('h4', { text: 'Template identity' })", nativeSettingsStart);
+  const nativeSettingsSource = settingsTabSource.slice(nativeSettingsStart, nativeSettingsEnd);
+
+  assert.ok(nativeSettingsStart >= 0 && nativeSettingsEnd > nativeSettingsStart);
+  assert.match(nativeSettingsSource, /setName\('Record identity storage'\)/);
+  assert.match(nativeSettingsSource, /Generated records always store their stable ID and schema version in properties/);
+  assert.doesNotMatch(nativeSettingsSource, /setName\('Store record identity as'\)/);
+  assert.doesNotMatch(nativeSettingsSource, /addOption\('tag', 'Tag'\)/);
+  assert.doesNotMatch(nativeSettingsSource, /setName\('Identity tag prefix'\)/);
+  assert.match(nativeSettingsSource, /nativeRecordKindPropertyKey = value\.trim\(\) \|\| 'kind';/);
+  assert.match(nativeSettingsSource, /Legacy readers stay enabled for records that arrive later through Sync/);
+  assert.match(
+    nativeSettingsSource,
+    /rememberNativeRecordProfileOnFocus[\s\S]*inputEl\.addEventListener\('focus',[\s\S]*rememberCurrentStorageProfile\(\)/,
+    'the pre-edit profile is captured once when a property editor receives focus',
+  );
+  assert.equal(
+    (nativeSettingsSource.match(/rememberNativeRecordProfileOnFocus\(text\);/g) ?? []).length,
+    6,
+    'every native storage property editor must bind the focus transaction',
+  );
+  assert.doesNotMatch(
+    nativeSettingsSource,
+    /\.onChange\(async \(value\) => \{\s*this\.plugin\.nativeRecordService\.rememberCurrentStorageProfile\(\)/,
+    'intermediate keystrokes must not create storage-profile aliases',
+  );
 });
 
 test('TPS Base write fallback settings default safely and persist every Tasks workflow choice', () => {

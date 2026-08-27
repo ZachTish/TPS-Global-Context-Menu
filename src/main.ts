@@ -65,6 +65,7 @@ import {
   normalizeNativeRecordLayout,
   normalizeNativeRecordRoot,
   normalizeNativeRecordStorageProfile,
+  resolveWritableNativeRecordStorageConfiguration,
 } from './services/native-record-service';
 import { TemplateIdentityService } from './services/template-identity-service';
 import { NoteTitleRenderService } from './services/note-title-render-service';
@@ -2051,6 +2052,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         await this.loadLegacyNotebookNavigatorCompanionSettings(),
       );
     }
+    const loadedSettingsRecord = (loaded ?? {}) as SettingsRecord;
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
     this.settings.dataArchitectureMode = loaded?.dataArchitectureMode === 'native-records'
       ? 'native-records'
@@ -2059,7 +2061,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       loaded?.nativeRecordRootPath ?? DEFAULT_SETTINGS.nativeRecordRootPath,
     );
     this.settings.nativeRecordLayout = normalizeNativeRecordLayout(loaded?.nativeRecordLayout);
-    const nativeRecordStorageProfile = normalizeNativeRecordStorageProfile({
+    const configuredNativeRecordStorageProfile = normalizeNativeRecordStorageProfile({
       identityMode: loaded?.nativeRecordIdentityMode,
       identityPropertyKey: loaded?.nativeRecordIdentityPropertyKey,
       schemaPropertyKey: loaded?.nativeRecordSchemaPropertyKey,
@@ -2069,6 +2071,33 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       createdPropertyKey: loaded?.nativeRecordCreatedPropertyKey,
       modifiedPropertyKey: loaded?.nativeRecordModifiedPropertyKey,
     });
+    const nativeRecordStorageConfiguration = resolveWritableNativeRecordStorageConfiguration(
+      configuredNativeRecordStorageProfile,
+      loaded?.nativeRecordStorageAliases,
+    );
+    const nativeRecordStorageProfile = nativeRecordStorageConfiguration.writeProfile;
+    const nativeRecordStorageSettingValues: Array<[string, string]> = [
+      ['nativeRecordIdentityMode', nativeRecordStorageProfile.identityMode],
+      ['nativeRecordIdentityPropertyKey', nativeRecordStorageProfile.identityPropertyKey],
+      ['nativeRecordSchemaPropertyKey', nativeRecordStorageProfile.schemaPropertyKey],
+      ['nativeRecordIdentityTagPrefix', nativeRecordStorageProfile.identityTagPrefix],
+      ['nativeRecordKindPropertyKey', nativeRecordStorageProfile.kindPropertyKey],
+      ['nativeRecordTitlePropertyKey', nativeRecordStorageProfile.titlePropertyKey],
+      ['nativeRecordCreatedPropertyKey', nativeRecordStorageProfile.createdPropertyKey],
+      ['nativeRecordModifiedPropertyKey', nativeRecordStorageProfile.modifiedPropertyKey],
+    ];
+    const hasRawNativeRecordStorageRepair = nativeRecordStorageSettingValues.some(([key, resolved]) => (
+      Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key)
+      && String(loadedSettingsRecord[key] ?? '') !== resolved
+    ));
+    const hasRawNativeRecordStorageAliasRepair = (
+      Object.prototype.hasOwnProperty.call(loadedSettingsRecord, 'nativeRecordStorageAliases')
+      && JSON.stringify(loadedSettingsRecord.nativeRecordStorageAliases)
+        !== JSON.stringify(nativeRecordStorageConfiguration.readAliases)
+    );
+    const needsNativeRecordIdentityMigration = nativeRecordStorageConfiguration.requiresSettingsMigration
+      || hasRawNativeRecordStorageRepair
+      || hasRawNativeRecordStorageAliasRepair;
     this.settings.nativeRecordIdentityMode = nativeRecordStorageProfile.identityMode;
     this.settings.nativeRecordIdentityPropertyKey = nativeRecordStorageProfile.identityPropertyKey;
     this.settings.nativeRecordSchemaPropertyKey = nativeRecordStorageProfile.schemaPropertyKey;
@@ -2077,9 +2106,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.nativeRecordTitlePropertyKey = nativeRecordStorageProfile.titlePropertyKey;
     this.settings.nativeRecordCreatedPropertyKey = nativeRecordStorageProfile.createdPropertyKey;
     this.settings.nativeRecordModifiedPropertyKey = nativeRecordStorageProfile.modifiedPropertyKey;
-    this.settings.nativeRecordStorageAliases = Array.isArray(loaded?.nativeRecordStorageAliases)
-      ? loaded.nativeRecordStorageAliases.slice(0, 12).map((profile) => normalizeNativeRecordStorageProfile(profile))
-      : [];
+    this.settings.nativeRecordStorageAliases = nativeRecordStorageConfiguration.readAliases;
     this.settings.templateIdentificationMode = loaded?.templateIdentificationMode === 'tag'
       || loaded?.templateIdentificationMode === 'property'
       ? loaded.templateIdentificationMode
@@ -2097,7 +2124,24 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       ? 'contains'
       : 'equals';
     const preNormalizationSettings = JSON.parse(JSON.stringify(this.settings)) as SettingsRecord;
-    const loadedSettingsRecord = (loaded ?? {}) as SettingsRecord;
+    if (needsNativeRecordIdentityMigration) {
+      const originalStorageValue = (key: string, fallback: unknown): unknown => (
+        Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key)
+          ? loadedSettingsRecord[key]
+          : fallback
+      );
+      Object.assign(preNormalizationSettings, {
+        nativeRecordIdentityMode: originalStorageValue('nativeRecordIdentityMode', configuredNativeRecordStorageProfile.identityMode),
+        nativeRecordIdentityPropertyKey: originalStorageValue('nativeRecordIdentityPropertyKey', configuredNativeRecordStorageProfile.identityPropertyKey),
+        nativeRecordSchemaPropertyKey: originalStorageValue('nativeRecordSchemaPropertyKey', configuredNativeRecordStorageProfile.schemaPropertyKey),
+        nativeRecordIdentityTagPrefix: originalStorageValue('nativeRecordIdentityTagPrefix', configuredNativeRecordStorageProfile.identityTagPrefix),
+        nativeRecordKindPropertyKey: originalStorageValue('nativeRecordKindPropertyKey', configuredNativeRecordStorageProfile.kindPropertyKey),
+        nativeRecordTitlePropertyKey: originalStorageValue('nativeRecordTitlePropertyKey', configuredNativeRecordStorageProfile.titlePropertyKey),
+        nativeRecordCreatedPropertyKey: originalStorageValue('nativeRecordCreatedPropertyKey', configuredNativeRecordStorageProfile.createdPropertyKey),
+        nativeRecordModifiedPropertyKey: originalStorageValue('nativeRecordModifiedPropertyKey', configuredNativeRecordStorageProfile.modifiedPropertyKey),
+        nativeRecordStorageAliases: originalStorageValue('nativeRecordStorageAliases', []),
+      });
+    }
     for (const key of AUTHORITATIVE_HOME_SETTING_KEYS) {
       if (!Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key)) {
         delete preNormalizationSettings[key];
@@ -2317,6 +2361,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       hadRetiredHomeCaptureHeadingSettings ||
       needsActivityBasePathMigration ||
       needsCheckboxMappingMigration ||
+      needsNativeRecordIdentityMigration ||
       normalizedAuthoritativeHomeSettingKeys.length > 0 ||
       removedRetiredPropertyCount > 0;
     this.settingsPersistence = null;
@@ -2335,6 +2380,13 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (needsCheckboxMappingMigration) {
       logger.flow('Settings', 'migration:checkbox-status-mappings', {
         count: this.settings.linkedSubitemCheckboxMappings.length,
+      });
+    }
+    if (needsNativeRecordIdentityMigration) {
+      logger.flow('Settings', 'migration:native-record-property-identity', {
+        retiredTagIdentity: nativeRecordStorageConfiguration.retiredTagIdentity,
+        legacyAliasCount: this.settings.nativeRecordStorageAliases.filter((profile) => profile.identityMode === 'tag').length,
+        noteRewrite: false,
       });
     }
     if (normalizedAuthoritativeHomeSettingKeys.length > 0) {

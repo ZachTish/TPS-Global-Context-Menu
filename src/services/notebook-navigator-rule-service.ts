@@ -139,12 +139,36 @@ export class NotebookNavigatorRuleService {
     const settings = this.getSettings();
     const ruleEngine = this.getRuleEngine();
     if (!settings || !ruleEngine) return false;
+    const iconField = this.getIconField(settings);
+    const colorField = this.getColorField(settings);
+    const canMutateGeneratedTitle = options.reason === 'create';
+    const canMutateHideTags = options.reason !== 'file-open'
+      && (settings.hideRules || []).some((rule: any) => rule?.enabled && this.normalizeTag(rule?.tagName || 'hide'));
+    const ownedKeys = [iconField, colorField];
+    if (options.reason !== 'file-open' && settings.smartSort?.enabled) {
+      ownedKeys.push(settings.smartSort?.field || 'sort');
+    }
+    if (canMutateGeneratedTitle) ownedKeys.push('title');
+    if (canMutateHideTags) ownedKeys.push('tags');
 
     const started = performance.now();
     const body = await this.readBody(file);
-    const changed = await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
+    const changed = await this.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(file, ownedKeys, (frontmatter) => {
       const context = this.buildRuleContext(file, frontmatter, body);
-      this.removeGeneratedBlankNoteTitle(file, frontmatter, body, options);
+      // A record remains a record while the global architecture setting is temporarily
+      // switched to Legacy. Protect proven record-owned fields from unrelated visual
+      // automation based on the document identity itself, not the current write mode.
+      const nativeRecordInspection = this.plugin.nativeRecordService?.inspect(frontmatter) || null;
+      const isNativeRecord = !!nativeRecordInspection;
+      const nativeRecordProtectedKeys = nativeRecordInspection
+        ? this.getNativeRecordProtectedKeys(nativeRecordInspection)
+        : null;
+      const canMutateDestination = (key: string): boolean => (
+        !nativeRecordProtectedKeys?.has(String(key || '').trim().toLowerCase())
+      );
+      if (canMutateGeneratedTitle && !isNativeRecord) {
+        this.removeGeneratedBlankNoteTitle(file, frontmatter, body, options);
+      }
       const visualOutputs = ruleEngine.resolveVisualOutputs(settings.rules || [], context);
       const desiredIcon = visualOutputs?.icon?.matched
         ? String(visualOutputs.icon.value || '').trim()
@@ -152,25 +176,32 @@ export class NotebookNavigatorRuleService {
       const desiredColor = visualOutputs?.color?.matched
         ? this.normalizeNoteColorValue(String(visualOutputs.color.value || '').trim())
         : settings.clearColorWhenNoMatch ? null : undefined;
-      const iconField = this.getIconField(settings);
-      const colorField = this.getColorField(settings);
 
       if (iconField.toLowerCase() === colorField.toLowerCase()) {
-        this.applyScalarMutation(frontmatter, iconField, desiredIcon !== undefined ? desiredIcon : desiredColor);
+        if (canMutateDestination(iconField)) {
+          this.applyScalarMutation(frontmatter, iconField, desiredIcon !== undefined ? desiredIcon : desiredColor);
+        }
       } else {
-        this.applyScalarMutation(frontmatter, iconField, desiredIcon);
-        this.applyScalarMutation(frontmatter, colorField, desiredColor);
+        if (canMutateDestination(iconField)) {
+          this.applyScalarMutation(frontmatter, iconField, desiredIcon);
+        }
+        if (canMutateDestination(colorField)) {
+          this.applyScalarMutation(frontmatter, colorField, desiredColor);
+        }
       }
 
       // Opening a note is a latency-sensitive, device-local visual refresh.
       // Controller-owned sweeps and metadata automation retain sort/hide writes.
       if (options.reason !== 'file-open') {
         const sortKey = this.computeSortKey(ruleEngine, settings, context);
-        if (sortKey !== undefined) {
-          this.applyScalarMutation(frontmatter, settings.smartSort?.field || 'sort', sortKey);
+        const sortField = settings.smartSort?.field || 'sort';
+        if (sortKey !== undefined && canMutateDestination(sortField)) {
+          this.applyScalarMutation(frontmatter, sortField, sortKey);
         }
 
-        this.applyHideTagMutations(ruleEngine, settings, context, frontmatter);
+        if (canMutateHideTags && !isNativeRecord) {
+          this.applyHideTagMutations(ruleEngine, settings, context, frontmatter);
+        }
       }
     }, {
       kind: 'automation',
@@ -191,6 +222,41 @@ export class NotebookNavigatorRuleService {
       });
     }
     return changed;
+  }
+
+  private getNativeRecordProtectedKeys(inspection: any): Set<string> {
+    const protectedKeys = new Set([
+      'tpsid',
+      'tpsschemaversion',
+      'kind',
+      'title',
+      'createddate',
+      'modifieddate',
+      'tags',
+    ]);
+    const nativeRecordService = this.plugin.nativeRecordService;
+    const profiles = [
+      nativeRecordService?.getStorageProfile?.(),
+      inspection?.profile,
+      ...(nativeRecordService?.getReadableStorageProfiles?.() || []),
+    ].filter(Boolean);
+
+    for (const profile of profiles) {
+      const propertyKeys = [
+        ...(profile.identityMode === 'property'
+          ? [profile.identityPropertyKey, profile.schemaPropertyKey]
+          : []),
+        profile.kindPropertyKey,
+        profile.titlePropertyKey,
+        profile.createdPropertyKey,
+        profile.modifiedPropertyKey,
+      ];
+      for (const key of propertyKeys) {
+        const normalized = String(key || '').trim().toLowerCase();
+        if (normalized) protectedKeys.add(normalized);
+      }
+    }
+    return protectedKeys;
   }
 
   markUserEdited(file: TFile): void {

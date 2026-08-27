@@ -1,5 +1,19 @@
 # TPS Global Context Menu
 
+## 1.45.0
+
+- Native Markdown records now always store their stable identity in configurable ID and schema properties. Generated records no longer create one unique Obsidian tag per record; `tags` remains available for meaningful user and workflow classification.
+- A saved tag-storage profile is retired safely on load: GCM switches the writer to properties, preserves the exact tag profile as a read-only compatibility alias, and persists that settings change through the serialized settings coordinator without rewriting notes.
+- **Consolidate native record storage** replaces recognized legacy identity tags with the current ID, schema, kind, and title properties while preserving paths, stable IDs, bodies, ordinary tags, and unrelated frontmatter. Conflicting or ambiguous identity still fails closed.
+- Built-in `tps/record` tags and saved custom tag prefixes remain readable after consolidation so a delayed legacy record arriving through Sync is not stranded. Compatibility aliases are no longer discarded after a successful consolidation.
+- The settings surface no longer offers tag identity as a write format. It keeps the configurable identity/kind/title/timestamp property names and describes legacy-tag consolidation directly beside them.
+- Native-record updates and Notebook Navigator automation now rewrite only the top-level frontmatter fields they own. Unrelated properties, YAML comments and ordering, quoting, multiline values, BOM and line-ending style, and Markdown body bytes remain source-exact; ordinary notes keep their existing title and hide-tag automation, while proven native records keep workflow-owned titles and tags.
+- Source-preserving owned-field writes fail closed on malformed frontmatter, ambiguous or case-duplicate owned fields, and unsupported CR-only Markdown. Native-record create, update, rename, resolution, and consolidation separately fail closed on conflicting identity evidence and duplicate stable IDs.
+- Legacy property fields are removed only when that exact storage profile identifies the record, so an unrelated user field that merely shares an old alias name is preserved. Reserved legacy identity tags are reconciled independently by recognized prefix, schema, kind, and stable ID; an agreeing tag is removed even when its historical title mapping is unavailable, while malformed or disagreeing evidence is left untouched and blocks the mutation.
+- Historical tag-only IDs with a valid `hex-` segment retain the released deterministic decoding needed for unsafe IDs. Without property identity, an originally literal safe ID that itself began with `hex-` is inherently indistinguishable from that old encoding; consolidation preserves the released interpretation rather than guessing a new identity.
+- Public `nativeRecords` API version 4 makes `getStorageProfile()` the property-only write contract while retaining tag-based inspection as a legacy read contract. Native schema version 1, record IDs, paths, commands, Legacy architecture mode, and minimum supported Obsidian 1.10.0 remain compatible.
+- Validation passed 114/114 focused and adjacent native-identity, settings, ownership, and source-preservation checks, the complete declared suite with zero failures, TypeScript and diff checks, and the mandatory separate production build. In the isolated test vault, the UI **Create task** route produced a property-identified task note with no per-record tag; legacy-tag consolidation preserved the stable ID, ordinary tag, body, and path; disposable fixtures were archived; and runtime-owned state was restored byte-for-byte.
+
 ## 1.44.2
 
 - Linked task and child-note rows no longer render native-record storage identity tags as user-facing tag pills. Current and readable legacy tag prefixes are recognized through the same native-record storage profiles used to resolve the note; ordinary user tags remain visible and editable.
@@ -1010,6 +1024,8 @@ Line commands are visible in the palette and guard themselves at runtime. If the
 
 ## Agent API Contract
 
+`plugin.api.nativeRecords` is version `4`. New native records always write the configured stable-ID and schema-version properties, and `getStorageProfile()` returns that property-only writer. `inspect()`, `resolve()`, updates, and consolidation continue to recognize schema-v1 tag identities through the built-in `tps/record` reader and any saved legacy storage aliases. Consumers must treat `inspection.profile.identityMode === "tag"` as historical read evidence, not as permission to emit a new identity tag. A property/tag identity disagreement for the same file remains unresolved and cannot be mutated through the API.
+
 GCM exposes deterministic Task API v3 operations through `plugin.api.tasks`. Agent-facing calls should use these APIs rather than command-palette automation or natural-language command strings. Mutating calls require stable, auditable references such as vault file path plus line number/raw line, and return structured before/after records. `tasks.version` is `3`; task records expose `stableId` from `tpsId` or the compatible `subitemId` alias, never from recurrence identity.
 
 Stable task operations:
@@ -1101,6 +1117,7 @@ TPS Table and TPS List use the same source-aware picker for empty and populated 
 ## Settings Surface
 
 - Settings open on an always-visible **Choose what to configure** hub with five destinations: **Rules & fields**, **Menus & surfaces**, **Workflows**, **Appearance**, and **Advanced**. Only the selected page is rendered.
+- **Advanced → Data architecture → Native record properties** always writes stable identity through the configured ID and schema properties. The former tag-prefix writer is intentionally absent; legacy tag records remain readable and the adjacent consolidation action removes their reserved identity tags without removing ordinary tags.
 - **Menus & surfaces → Linked context** owns the panel toggle and stable source-path A → Z / Z → A ordering. The order remains editable while the panel is off; placement and activation appear beside it when enabled.
 - **Menus & surfaces → Note navigation** owns the existing note-navigation master and placement plus independent default-on Calendar, Tasks, and Mentions visibility controls. These settings stay editable while either master is off, use the same button factories for below-title and bottom-toolbar placement, and do not alter the scheduled Daily Note shortcut.
 - **Appearance → Daily Note Navigation → Visible day buttons** controls the Daily Note timeline from one through seven days. The persisted `dailyNavDayCount` value is clamped to that range and defaults to seven, preserving the existing ISO Monday-Sunday strip. Counts below seven form one contiguous range around the active Daily Note; odd counts balance evenly, while even counts place the extra day before the active day. Changing the setting rebuilds the current strip immediately without changing Previous, Today, or Next navigation.
