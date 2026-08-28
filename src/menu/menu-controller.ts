@@ -16,6 +16,10 @@ import { getEffectivePropertyOptions } from '../utils/property-options';
 import { BadgeRenderer, hashStringToHue } from './badge-renderer';
 import { PanelBuilder } from './panel-builder';
 import { MenuBuilder, type GcmMenuSink, type NativeMenuLabelOptions } from './menu-builder';
+import {
+  navigateTagWithNotebookNavigator,
+  TPS_NOTEBOOK_NAVIGATOR_PLUGIN_ID,
+} from '../services/notebook-navigator-tag-navigation';
 
 export function addSafeClickListener(element: HTMLElement, handler: (e: MouseEvent) => void) {
   element.addEventListener('click', (e) => {
@@ -714,21 +718,29 @@ export class MenuController {
   triggerTagSearch(tag: string): void {
     const cleanTag = normalizeTagValue(tag);
     const fallbackToNotebookNavigator = () => {
-      const pluginManager = (this.app as any)?.plugins;
-      const notebookNavigator =
-        pluginManager?.getPlugin?.('notebook-navigator') ??
-        pluginManager?.plugins?.['notebook-navigator'];
-      const notebookNavigatorNavigateToTag = notebookNavigator?.api?.navigation?.navigateToTag;
-
-      if (typeof notebookNavigatorNavigateToTag === 'function') {
-        Promise.resolve(notebookNavigatorNavigateToTag.call(notebookNavigator.api.navigation, cleanTag))
-          .catch((error: unknown) => {
-            logger.error('[TPS GCM] Notebook Navigator tag navigation failed:', error);
-            new Notice('Tag Canvas and Notebook Navigator tag navigation are unavailable.');
+      void navigateTagWithNotebookNavigator(this.app as any, cleanTag, ({ pluginId, phase, reason, error }) => {
+        if (pluginId === TPS_NOTEBOOK_NAVIGATOR_PLUGIN_ID && phase === 'clear-search') {
+          logger.warn('[TPS GCM] TPS Notebook Navigator tag navigation succeeded but its filter could not be cleared:', {
+            reason,
+            error,
           });
-        return;
-      }
-      new Notice('Tag Canvas and Notebook Navigator tag navigation are unavailable.');
+          return;
+        }
+        if (pluginId === TPS_NOTEBOOK_NAVIGATOR_PLUGIN_ID) {
+          logger.warn('[TPS GCM] TPS Notebook Navigator tag navigation failed; falling back:', {
+            reason,
+            error,
+          });
+          return;
+        }
+        logger.error('[TPS GCM] Notebook Navigator tag navigation failed:', { reason, error });
+      }).then((pluginId) => {
+        if (pluginId) return;
+        new Notice('Tag Canvas and Notebook Navigator tag navigation are unavailable.');
+      }).catch((error: unknown) => {
+        logger.error('[TPS GCM] Notebook Navigator tag navigation failed unexpectedly:', error);
+        new Notice('Tag Canvas and Notebook Navigator tag navigation are unavailable.');
+      });
     };
 
     try {
@@ -798,17 +810,7 @@ export class MenuController {
         return;
       }
 
-      const notebookNavigator =
-        pluginManager?.getPlugin?.('notebook-navigator') ??
-        pluginManager?.plugins?.['notebook-navigator'];
-      const notebookNavigatorNavigateToTag = notebookNavigator?.api?.navigation?.navigateToTag;
-
-      if (typeof notebookNavigatorNavigateToTag === 'function') {
-        Promise.resolve(notebookNavigatorNavigateToTag.call(notebookNavigator.api.navigation, cleanTag))
-          .catch((error: unknown) => logger.error('[TPS GCM] Notebook Navigator tag navigation failed:', error));
-        return;
-      }
-      new Notice('Tag Canvas and Notebook Navigator tag navigation are unavailable.');
+      fallbackToNotebookNavigator();
     } catch (error) {
       logger.error('[TPS GCM] Failed to navigate tag from context menu:', error);
       new Notice('Tag Canvas and Notebook Navigator tag navigation are unavailable.');

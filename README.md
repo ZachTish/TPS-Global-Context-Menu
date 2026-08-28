@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.46.1
+
+- Clicking a tag chip rendered by GCM now opens that tag in **TPS Notebook Navigator** when the TPS fork is installed, instead of sending the click to the co-installed upstream Notebook Navigator.
+- GCM preserves Tag Canvas as the first-choice destination when its integration is available. Without Tag Canvas, it tries TPS Notebook Navigator first and falls back to upstream Notebook Navigator only when the TPS navigation API is missing, rejects the request, or reports that the tag could not be selected.
+- A successful TPS route clears TPS Notebook Navigator's active Filter Search after selecting the exact tag. A filter-clear failure does not bounce the user into the upstream navigator after the tag was already selected.
+- Navigation calls keep their owning API receiver, asynchronous failures fall through safely, and terminal unavailability produces one notice instead of duplicate errors. No setting, note, record, schema, or public GCM API changes; minimum supported Obsidian remains 1.10.0.
+- Validation passed the focused tag-routing suite 9/9, the complete declared suite with zero failures, TypeScript and diff checks, and the mandatory separate production build. Obsidian 1.13.7 loaded GCM 1.46.1 beside TPS Notebook Navigator 5.22.0 and upstream Notebook Navigator 3.2.3 in the isolated test vault: clicking the real GCM tag chip selected `qa/nn522-route` in TPS, cleared a seeded TPS Filter Search, did not switch upstream, and left Core Search's existing `tag:#qa` query unchanged. The fixture was moved directly to `_archive`; `data.json`, recurrence session, and Hot Reload state retained their exact pre-QA hashes; production was not accessed.
+
 ## 1.46.0
 
 - In **Native Markdown records** mode, **Create task** now opens with **Standalone** as its default parent. Submitting that route creates only one `kind: task` Markdown record and opens it; it does not resolve or create today's Daily Note, write a source checkbox or stable link, or add source/parent metadata.
