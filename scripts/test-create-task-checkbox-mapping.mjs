@@ -1,10 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+const createTaskModalSource = readFileSync(new URL('../src/modals/create-task-modal.ts', import.meta.url), 'utf8');
+const pluginStylesSource = readFileSync(new URL('../src/plugin-styles.ts', import.meta.url), 'utf8');
 
 async function loadCreateTaskModules() {
   const result = await build({
@@ -14,7 +17,7 @@ async function loadCreateTaskModules() {
         export { resolveCreateTaskModalCopy } from './src/modals/create-task-modal.ts';
         export { AiAssistedTaskService } from './src/services/ai-assisted-task-service.ts';
         export { buildCreatedTaskLine, normalizeCreateTaskCheckboxMarker } from './src/utils/create-task-parser.ts';
-        export { TFile, Notice } from 'obsidian';
+        export { Modal, TFile, Notice } from 'obsidian';
       `,
       resolveDir: repoRoot,
       sourcefile: 'create-task-checkbox-test-entry.ts',
@@ -33,9 +36,15 @@ async function loadCreateTaskModules() {
           loader: 'js',
           contents: `
             export class App {}
-            export class Modal { constructor(app) { this.app = app; } open() {} close() {} }
+            export class Modal {
+              static instances = [];
+              constructor(app) { this.app = app; Modal.instances.push(this); }
+              open() {}
+              close() {}
+            }
             export class FuzzySuggestModal extends Modal {}
             export class Setting {}
+            export class ButtonComponent {}
             export class TextComponent {}
             export class ToggleComponent {}
             export class Notice {
@@ -93,6 +102,7 @@ function normalizeStatus(value) {
 function taskResult(overrides = {}) {
   return {
     createTrackedRecord: false,
+    parentMode: 'note',
     title: 'Mapped task',
     targetFile: null,
     checkboxMarker: 'o',
@@ -128,7 +138,7 @@ test('Create task modal copy distinguishes a native task note from a legacy chec
   assert.deepEqual(resolveCreateTaskModalCopy(true), {
     title: 'Create task note',
     taskDescription: 'Creates a note-backed task. Natural language schedule text is parsed into its Scheduled field.',
-    targetDescription: 'The containing note receives a stable link to the new task note.',
+    targetDescription: 'Standalone creates only the task note. Choose a parent note to place its stable link there.',
     checkboxLabel: 'Initial status',
     submitLabel: 'Create task note',
   });
@@ -139,6 +149,79 @@ test('Create task modal copy distinguishes a native task note from a legacy chec
     checkboxLabel: 'Checkbox',
     submitLabel: 'Create task',
   });
+});
+
+test('Create task parent controls expose an accessible standalone reset and wrap on narrow screens', () => {
+  assert.match(createTaskModalSource, /setName\(this\.options\.allowStandaloneParent \? 'Parent' : 'Write to'\)/u);
+  assert.match(createTaskModalSource, /setButtonText\('Today'\)[\s\S]*this\.parentMode = 'note';[\s\S]*this\.targetFile = null;/u);
+  assert.match(createTaskModalSource, /setButtonText\('Standalone'\)/u);
+  assert.match(createTaskModalSource, /todayParentButton\?\.buttonEl\.setAttribute\('aria-pressed', String\(today\)\)/u);
+  assert.match(createTaskModalSource, /setAttribute\('aria-pressed', String\(standalone\)\)/u);
+  assert.match(createTaskModalSource, /Choose a parent note; current parent is Standalone/u);
+  assert.match(pluginStylesSource, /\.tps-gcm-create-task-parent \.setting-item-control \{\s*flex-wrap: wrap;/u);
+  assert.match(pluginStylesSource, /\.tps-gcm-create-task-parent \.setting-item-control button \{[\s\S]*white-space: normal;/u);
+});
+
+test('Create task opens standalone by default in native mode without resolving a Daily Note', async () => {
+  const { CreateTaskService, Modal } = await loadCreateTaskModules();
+  globalThis.window = { moment: () => ({ format: () => '2026-08-28' }) };
+  let dailyNoteCalls = 0;
+  const plugin = {
+    settings: {
+      createTaskDefaultParentMode: 'standalone',
+      linkedSubitemCheckboxMappings: mappings(),
+    },
+    sharedServices: { status: { normalize: normalizeStatus } },
+    nativeRecordService: { isEnabled: () => true },
+    noteOperationService: {
+      async ensureDailyNote() {
+        dailyNoteCalls += 1;
+        throw new Error('standalone must not resolve a Daily Note');
+      },
+    },
+    app: {},
+  };
+
+  new CreateTaskService(plugin).openCreateTaskModal();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(dailyNoteCalls, 0);
+  const modal = Modal.instances.at(-1);
+  assert.equal(modal.options.defaultParentMode, 'standalone');
+  assert.equal(modal.options.defaultTargetFile, null);
+  assert.equal(modal.options.allowStandaloneParent, true);
+});
+
+test('Create task defers the configured Daily Note default and Legacy destination until submission', async () => {
+  const { CreateTaskService, Modal } = await loadCreateTaskModules();
+  globalThis.window = { moment: () => ({ format: () => '2026-08-28' }) };
+  for (const [native, configuredMode] of [[true, 'today-daily-note'], [false, 'standalone']]) {
+    let dailyNoteCalls = 0;
+    const plugin = {
+      settings: {
+        createTaskDefaultParentMode: configuredMode,
+        linkedSubitemCheckboxMappings: mappings(),
+      },
+      sharedServices: { status: { normalize: normalizeStatus } },
+      nativeRecordService: { isEnabled: () => native },
+      noteOperationService: {
+        async ensureDailyNote() {
+          dailyNoteCalls += 1;
+          throw new Error('opening or canceling the modal must not create a Daily Note');
+        },
+      },
+      app: {},
+    };
+
+    new CreateTaskService(plugin).openCreateTaskModal();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(dailyNoteCalls, 0);
+    const modal = Modal.instances.at(-1);
+    assert.equal(modal.options.defaultParentMode, 'note');
+    assert.equal(modal.options.defaultTargetFile, null);
+    assert.equal(modal.options.defaultTargetLabel, "Today's Daily Note");
+    assert.equal(modal.options.allowStandaloneParent, native);
+  }
 });
 
 test('manual create derives ordered options and rebuilds the line from the selected configured marker', async () => {
@@ -228,6 +311,98 @@ test('manual create derives ordered options and rebuilds the line from the selec
   assert.equal(historyEvents[4].input.after.path, file.path);
   assert.equal(historyEvents[4].input.after.lineNumber, 1);
   assert.match(historyEvents[4].input.after.rawLine, /\[tpsId:: create-history-id\]/u);
+});
+
+test('native standalone Create task writes only one task record and never resolves or mutates a Daily Note', async () => {
+  const { CreateTaskService, TFile, Notice } = await loadCreateTaskModules();
+  Notice.messages.length = 0;
+  const recordFile = new TFile('_records/tasks/task-standalone.md');
+  let dailyNoteCalls = 0;
+  let sourceWriteCalls = 0;
+  let promotionCalls = 0;
+  let createInput = null;
+  const opened = [];
+  const plugin = {
+    settings: {
+      createTaskDefaultParentMode: 'standalone',
+      linkedSubitemCheckboxMappings: mappings(),
+      autoSyncFileTimestamps: false,
+      dateCreatedFrontmatterKey: 'createdDate',
+      dateModifiedFrontmatterKey: 'modifiedDate',
+      fileTimestampFormat: 'YYYY-MM-DD HH:mm:ss',
+    },
+    sharedServices: { status: { normalize: normalizeStatus } },
+    noteOperationService: {
+      async ensureDailyNote() { dailyNoteCalls += 1; return null; },
+    },
+    nativeRecordService: {
+      isEnabled: () => true,
+      async createStandaloneTask(rawLine, cause, commitGuard) {
+        createInput = { rawLine, cause, commitGuard };
+        return { file: recordFile, path: recordFile.path };
+      },
+      async promoteTask() { promotionCalls += 1; },
+    },
+    app: {
+      vault: {
+        async process() { sourceWriteCalls += 1; },
+      },
+      workspace: { getLeaf: () => ({}) },
+    },
+    async openFileInLeaf(file) { opened.push(file); },
+  };
+
+  const created = await new CreateTaskService(plugin).createTask(taskResult({
+    createTrackedRecord: true,
+    parentMode: 'standalone',
+    title: 'Standalone task #work',
+    priority: 'high',
+    scheduledValue: '2026-08-29 09:00:00',
+    timeEstimate: 45,
+  }));
+
+  assert.equal(created, recordFile);
+  assert.equal(dailyNoteCalls, 0);
+  assert.equal(sourceWriteCalls, 0);
+  assert.equal(promotionCalls, 0);
+  assert.match(createInput.rawLine, /^- \[o\] Standalone task #work/u);
+  assert.match(createInput.rawLine, /\[priority:: high\]/u);
+  assert.match(createInput.rawLine, /\[scheduled:: 2026-08-29 09:00:00\]/u);
+  assert.match(createInput.rawLine, /\[timeEstimate:: 45\]/u);
+  assert.deepEqual(createInput.cause, {
+    kind: 'user',
+    sourcePluginId: 'tps-global-context-menu',
+    surface: 'create-task-modal:standalone-native-task-record',
+  });
+  assert.equal(typeof createInput.commitGuard, 'function');
+  assert.equal(createInput.commitGuard(), true);
+  assert.deepEqual(opened, [recordFile]);
+  assert.ok(Notice.messages.some((message) => message.includes('Created standalone task note')));
+});
+
+test('Legacy Create task rejects an impossible standalone request before resolving or writing a note', async () => {
+  const { CreateTaskService, Notice } = await loadCreateTaskModules();
+  Notice.messages.length = 0;
+  let dailyNoteCalls = 0;
+  let processCalls = 0;
+  const plugin = {
+    settings: {
+      linkedSubitemCheckboxMappings: mappings(),
+      autoSyncFileTimestamps: false,
+    },
+    sharedServices: { status: { normalize: normalizeStatus } },
+    noteOperationService: { async ensureDailyNote() { dailyNoteCalls += 1; return null; } },
+    app: { vault: { async process() { processCalls += 1; } } },
+  };
+
+  const created = await new CreateTaskService(plugin).createTask(taskResult({
+    parentMode: 'standalone',
+  }));
+
+  assert.equal(created, null);
+  assert.equal(dailyNoteCalls, 0);
+  assert.equal(processCalls, 0);
+  assert.ok(Notice.messages.some((message) => message.includes('require Native Markdown records')));
 });
 
 test('manual Create task always promotes a confirmed native-mode task into a note-backed record', async () => {

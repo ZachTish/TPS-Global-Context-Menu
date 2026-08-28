@@ -1,6 +1,6 @@
 import { App, ButtonComponent, Notice, PluginSettingTab, Setting, TextAreaComponent, TextComponent } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
-import type { AppearanceSettingKey, CustomProperty, LinkedSubitemCheckboxMapping, ViewModeConditionOperator, ViewModeConditionType, ViewModeRule, ViewModeRuleCondition } from './types';
+import type { AppearanceSettingKey, CreateTaskDefaultParentMode, CustomProperty, LinkedSubitemCheckboxMapping, ViewModeConditionOperator, ViewModeConditionType, ViewModeRule, ViewModeRuleCondition } from './types';
 import { BucketSectionRenderer } from './notebook-navigator-settings/bucket-section';
 import { HideSectionRenderer } from './notebook-navigator-settings/hide-section';
 import { RulesSectionRenderer } from './notebook-navigator-settings/rules-section';
@@ -50,6 +50,7 @@ import {
   OBSIDIAN_BASES_SYNTAX_URL,
 } from './base-query-guide';
 import { normalizeDailyNavDayCount } from './utils/daily-note-nav-days';
+import { normalizeCreateTaskDefaultParentMode } from './utils/create-task-default-parent';
 
 const NN_TEXT_COMMIT_DEBOUNCE_MS = 300;
 export const LEGACY_GCM_NOTEBOOK_NAVIGATOR_RULE_SETTINGS_STYLE_ID = 'tps-gcm-notebook-navigator-rule-settings-style';
@@ -1766,9 +1767,23 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       taskAutomation.dataset.tpsSettingsRoute = 'tasks';
       taskAutomation.createEl('h4', { text: 'Tasks' });
       taskAutomation.createEl('p', {
-        text: 'Task-line creation, hiding, checkbox/status mapping, and completion safeguards.',
+        text: 'Task-note and task-line creation, hiding, checkbox/status mapping, and completion safeguards.',
         cls: 'setting-item-description',
       });
+      new Setting(taskAutomation)
+        .setName('Create task default parent')
+        .setDesc('Choose whether Create task note starts standalone or adds a stable link in today’s Daily Note. You can still choose a different parent in the dialog. Legacy checkbox tasks still require a destination note.')
+        .addDropdown((dropdown) => {
+          dropdown
+            .addOption('standalone', 'Standalone (no parent)')
+            .addOption('today-daily-note', 'Today’s Daily Note')
+            .setValue(this.plugin.settings.createTaskDefaultParentMode)
+            .onChange(async (value: CreateTaskDefaultParentMode) => {
+              this.plugin.settings.createTaskDefaultParentMode = normalizeCreateTaskDefaultParentMode(value);
+              await this.plugin.saveSettings();
+            });
+          dropdown.selectEl.setAttribute('aria-label', 'Create task default parent');
+        });
       new Setting(taskAutomation)
         .setName('When a Base has no write target')
         .setDesc('Fallback write note for new TPS List/Table task and bullet lines. Today’s Daily Note is the default; an exact active-view or whole-Base file.path/task.path filter always wins.')

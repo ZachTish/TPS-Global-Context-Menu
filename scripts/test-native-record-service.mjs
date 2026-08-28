@@ -1850,6 +1850,59 @@ test('task promotion creates one task record and replaces only the confirmed sou
   assert.equal((await service.resolve('task-123'))?.path, result.record?.path);
 });
 
+test('standalone task creation preserves task semantics without source or parent metadata', async () => {
+  const { service, plugin, events } = createHarness();
+  const rawLine = '- [ ] Standalone task #work #health [priority:: high] [scheduled:: 2026-08-29 09:00:00] [timeEstimate:: 45]';
+  plugin.taskApiService.parseLine = (path, lineNumber, line) => {
+    assert.equal(path, '');
+    assert.equal(lineNumber, 0);
+    assert.equal(line, rawLine);
+    return {
+      type: 'task-line',
+      id: ':1',
+      stableId: null,
+      path: '',
+      line: 1,
+      lineNumber: 0,
+      rawLine,
+      title: 'Standalone task',
+      checkbox: '[ ]',
+      marker: ' ',
+      status: 'todo',
+      inlineStatus: '',
+      isComplete: false,
+      tags: ['work', 'health'],
+      fields: {
+        priority: 'high',
+        scheduled: '2026-08-29 09:00:00',
+        timeEstimate: '45',
+      },
+      blockLineCount: 1,
+    };
+  };
+
+  const record = await service.createStandaloneTask(rawLine, {
+    kind: 'user',
+    sourcePluginId: 'tps-global-context-menu',
+    surface: 'create-task-modal:standalone-native-task-record',
+  });
+
+  assert.equal(record.kind, 'task');
+  assert.equal(record.frontmatter.title, 'Standalone task');
+  assert.equal(record.frontmatter.status, 'todo');
+  assert.deepEqual(record.frontmatter.tags, ['work', 'health']);
+  assert.equal(record.frontmatter.priority, 'high');
+  assert.equal(record.frontmatter.scheduled, '2026-08-29 09:00:00');
+  assert.equal(record.frontmatter.timeEstimate, 45);
+  for (const key of ['sourcePath', 'sourceLine', 'parents', 'promotionState']) {
+    assert.equal(Object.hasOwn(record.frontmatter, key), false, `${key} must stay absent`);
+  }
+  assert.ok(events.some((event) => (
+    event.type === 'explicit'
+    && event.details?.source === 'create-task-modal:standalone-native-task-record'
+  )));
+});
+
 test('task identity normalization removes only a matching legacy sourceTaskId alias', async () => {
   const { service } = createHarness();
   const matching = await service.create('task', { title: 'Matching', sourceTaskId: 'task-one' }, { id: 'task-one' });
@@ -1879,6 +1932,66 @@ test('legacy mode rejects new record creation and leaves existing behavior opt-i
   await assert.rejects(
     service.create('task', { title: 'Must not create' }),
     /requires the native-records data architecture mode/u,
+  );
+});
+
+test('native record creation rechecks architecture after asynchronous folder preparation', async () => {
+  const { service, plugin, vault, entries } = createHarness('native-records', { root: 'Records' });
+  const createFolder = vault.createFolder;
+  vault.createFolder = async (path) => {
+    const result = await createFolder(path);
+    plugin.settings.dataArchitectureMode = 'legacy';
+    return result;
+  };
+
+  await assert.rejects(
+    service.create('task', { title: 'Do not create after mode change' }),
+    /requires the native-records data architecture mode/u,
+  );
+  assert.equal(
+    [...entries.values()].filter((entry) => entry instanceof TFile).length,
+    0,
+    'folder preparation may finish, but no record file is written after the mode change',
+  );
+});
+
+test('standalone task creation rechecks its semantic mapping after asynchronous folder preparation', async () => {
+  const { service, plugin, vault, entries } = createHarness('native-records', { root: 'Records' });
+  const rawLine = '- [ ] Mapping race task';
+  plugin.taskApiService.parseLine = () => ({
+    type: 'task-line',
+    id: ':1',
+    stableId: null,
+    path: '',
+    line: 1,
+    lineNumber: 0,
+    rawLine,
+    title: 'Mapping race task',
+    checkbox: '[ ]',
+    marker: ' ',
+    status: 'todo',
+    inlineStatus: '',
+    isComplete: false,
+    tags: [],
+    fields: {},
+    blockLineCount: 1,
+  });
+  let mappingCurrent = true;
+  const createFolder = vault.createFolder;
+  vault.createFolder = async (path) => {
+    const result = await createFolder(path);
+    mappingCurrent = false;
+    return result;
+  };
+
+  await assert.rejects(
+    service.createStandaloneTask(rawLine, undefined, () => mappingCurrent),
+    /checkbox mapping changed/u,
+  );
+  assert.equal(
+    [...entries.values()].filter((entry) => entry instanceof TFile).length,
+    0,
+    'mapping changes may leave an empty prepared folder but never a stale-status task record',
   );
 });
 

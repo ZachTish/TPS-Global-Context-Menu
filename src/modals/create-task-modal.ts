@@ -1,4 +1,4 @@
-import { App, Modal, Setting, TFile, TextComponent, ToggleComponent } from 'obsidian';
+import { App, ButtonComponent, Modal, Setting, TFile, TextComponent, ToggleComponent } from 'obsidian';
 import { FileSuggestModal } from './FileSuggestModal';
 import {
   buildCreatedTaskLine,
@@ -8,6 +8,7 @@ import {
 
 export interface CreateTaskModalResult {
   createTrackedRecord: boolean;
+  parentMode: CreateTaskParentMode;
   title: string;
   targetFile: TFile | null;
   checkboxMarker: string;
@@ -19,6 +20,8 @@ export interface CreateTaskModalResult {
   timeEstimate: number;
   taskLine: string;
 }
+
+export type CreateTaskParentMode = 'standalone' | 'note';
 
 export interface CreateTaskModalCopy {
   title: string;
@@ -33,7 +36,7 @@ export function resolveCreateTaskModalCopy(createTrackedRecord: boolean): Create
     ? {
       title: 'Create task note',
       taskDescription: 'Creates a note-backed task. Natural language schedule text is parsed into its Scheduled field.',
-      targetDescription: 'The containing note receives a stable link to the new task note.',
+      targetDescription: 'Standalone creates only the task note. Choose a parent note to place its stable link there.',
       checkboxLabel: 'Initial status',
       submitLabel: 'Create task note',
     }
@@ -61,6 +64,9 @@ export class CreateTaskModal extends Modal {
   private priorityInput!: HTMLSelectElement;
   private checkboxInput!: HTMLSelectElement;
   private targetFile: TFile | null;
+  private parentMode: CreateTaskParentMode;
+  private todayParentButton: ButtonComponent | null = null;
+  private standaloneParentButton: ButtonComponent | null = null;
   private parsed: ParsedCreateTaskInput = parseCreateTaskInput('');
   private previewEl!: HTMLElement;
   private taskLineEl!: HTMLElement;
@@ -73,6 +79,8 @@ export class CreateTaskModal extends Modal {
     private readonly options: {
       defaultTargetFile: TFile | null;
       defaultTargetLabel: string;
+      defaultParentMode: CreateTaskParentMode;
+      allowStandaloneParent: boolean;
       defaultTimeEstimate: number;
       checkboxOptions: readonly CreateTaskCheckboxOption[];
       defaultCheckboxMarker: string;
@@ -81,7 +89,10 @@ export class CreateTaskModal extends Modal {
     },
   ) {
     super(app);
-    this.targetFile = options.defaultTargetFile;
+    this.parentMode = options.allowStandaloneParent && options.defaultParentMode === 'standalone'
+      ? 'standalone'
+      : 'note';
+    this.targetFile = this.parentMode === 'note' ? options.defaultTargetFile : null;
   }
 
   onOpen(): void {
@@ -113,19 +124,48 @@ export class CreateTaskModal extends Modal {
     this.previewEl = previewWrap.createDiv({ cls: 'tps-gcm-create-task-detected' });
     this.scheduledHintEl = previewWrap.createDiv({ cls: 'tps-gcm-create-task-scheduled-hint' });
 
-    new Setting(contentEl)
-      .setName('Write to')
+    const parentSetting = new Setting(contentEl)
+      .setName(this.options.allowStandaloneParent ? 'Parent' : 'Write to')
       .setDesc(copy.targetDescription)
       .addButton((button) => {
         this.targetEl = button.buttonEl;
         this.renderTargetButton();
+        button.setTooltip(this.options.allowStandaloneParent ? 'Choose parent note' : 'Choose containing note');
         button.onClick(() => {
           new FileSuggestModal(this.app, (file) => {
+            this.parentMode = 'note';
             this.targetFile = file;
             this.renderTargetButton();
           }, { extensions: ['md'] }).open();
         });
       });
+    parentSetting.settingEl.addClass('tps-gcm-create-task-parent');
+    if (this.options.allowStandaloneParent) {
+      parentSetting.addButton((button) => {
+        this.todayParentButton = button;
+        button
+          .setButtonText('Today')
+          .setTooltip("Use today's Daily Note as the parent")
+          .onClick(() => {
+            this.parentMode = 'note';
+            this.targetFile = null;
+            this.renderTargetButton();
+          });
+        this.renderTargetButton();
+      });
+      parentSetting.addButton((button) => {
+        this.standaloneParentButton = button;
+        button
+          .setButtonText('Standalone')
+          .setTooltip('Create without a parent note')
+          .onClick(() => {
+            this.parentMode = 'standalone';
+            this.targetFile = null;
+            this.renderTargetButton();
+          });
+        this.renderTargetButton();
+      });
+    }
 
     new Setting(contentEl)
       .setName(copy.checkboxLabel)
@@ -251,7 +291,18 @@ export class CreateTaskModal extends Modal {
 
   private renderTargetButton(): void {
     if (!this.targetEl) return;
-    this.targetEl.setText(this.targetFile?.path || this.options.defaultTargetLabel || 'Today daily note');
+    const standalone = this.options.allowStandaloneParent && this.parentMode === 'standalone';
+    const today = this.options.allowStandaloneParent && this.parentMode === 'note' && !this.targetFile;
+    this.targetEl.setText(standalone
+      ? 'Choose parent note'
+      : this.targetFile?.path || this.options.defaultTargetLabel || 'Today daily note');
+    this.targetEl.setAttribute('aria-label', standalone
+      ? 'Choose a parent note; current parent is Standalone'
+      : `Choose parent note; current parent is ${this.targetFile?.path || this.options.defaultTargetLabel || 'Today daily note'}`);
+    this.todayParentButton?.setDisabled(today);
+    this.todayParentButton?.buttonEl.setAttribute('aria-pressed', String(today));
+    this.standaloneParentButton?.setDisabled(standalone);
+    this.standaloneParentButton?.buttonEl.setAttribute('aria-pressed', String(standalone));
   }
 
   private async submit(): Promise<void> {
@@ -261,6 +312,7 @@ export class CreateTaskModal extends Modal {
       .find((option) => option.checkboxMarker === checkboxMarker);
     const result: CreateTaskModalResult = {
       createTrackedRecord: this.options.createTrackedRecord,
+      parentMode: this.parentMode,
       title: this.parsed.title || this.titleInput?.getValue?.() || 'Untitled task',
       targetFile: this.targetFile,
       checkboxMarker,

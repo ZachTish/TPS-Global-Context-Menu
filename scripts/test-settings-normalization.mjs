@@ -855,6 +855,41 @@ test('TPS Base write fallback settings default safely and persist every Tasks wo
   );
 });
 
+test('Create task defaults to a configurable standalone parent mode', async () => {
+  const tasksStart = settingsTabSource.indexOf("if (this.activeWorkflowPage === 'tasks')");
+  const tasksEnd = settingsTabSource.indexOf("if (this.activeWorkflowPage === 'child-notes')", tasksStart);
+  const tasksSource = settingsTabSource.slice(tasksStart, tasksEnd);
+  const { normalizeCreateTaskDefaultParentMode } = await importModule('../src/utils/create-task-default-parent.ts');
+
+  assert.equal(normalizeCreateTaskDefaultParentMode('standalone'), 'standalone');
+  assert.equal(normalizeCreateTaskDefaultParentMode('today-daily-note'), 'today-daily-note');
+  assert.equal(normalizeCreateTaskDefaultParentMode('unexpected'), 'standalone');
+  assert.equal(normalizeCreateTaskDefaultParentMode(null), 'standalone');
+
+  assert.match(typesSource, /export type CreateTaskDefaultParentMode = 'standalone' \| 'today-daily-note';/);
+  assert.match(typesSource, /createTaskDefaultParentMode: CreateTaskDefaultParentMode;/);
+  assert.match(constantsSource, /createTaskDefaultParentMode: 'standalone',/);
+  assert.match(mainSource, /this\.settings\.createTaskDefaultParentMode = normalizeCreateTaskDefaultParentMode\(/);
+  assert.match(mainSource, /needsCreateTaskDefaultParentMigration/);
+  assert.match(mainSource, /migration:create-task-default-parent/);
+  assert.equal(
+    (mainSource.match(/this\.settings\.createTaskDefaultParentMode = normalizeCreateTaskDefaultParentMode\(/g) || []).length,
+    2,
+    'load and save both normalize the setting',
+  );
+
+  const parentSettingIndex = tasksSource.indexOf("setName('Create task default parent')");
+  const baseFallbackIndex = tasksSource.indexOf("setName('When a Base has no write target')");
+  assert.ok(parentSettingIndex >= 0 && parentSettingIndex < baseFallbackIndex, 'the command default is the first Tasks workflow control');
+  assert.match(tasksSource, /Create task note starts standalone or adds a stable link in today’s Daily Note/);
+  assert.match(tasksSource, /Legacy checkbox tasks still require a destination note/);
+  assert.match(tasksSource, /addOption\('standalone', 'Standalone \(no parent\)'\)/);
+  assert.match(tasksSource, /addOption\('today-daily-note', 'Today’s Daily Note'\)/);
+  assert.match(tasksSource, /setValue\(this\.plugin\.settings\.createTaskDefaultParentMode\)/);
+  assert.match(tasksSource, /createTaskDefaultParentMode = normalizeCreateTaskDefaultParentMode\(value\);\s*await this\.plugin\.saveSettings\(\);/);
+  assert.match(tasksSource, /setAttribute\('aria-label', 'Create task default parent'\)/);
+});
+
 test('parent link format and notebook navigator smart sort sanitize to one canonical shape', async () => {
   const { sanitizeNotebookNavigatorRuleSettings } = await importModule('../src/services/notebook-navigator-rule-settings.ts');
 

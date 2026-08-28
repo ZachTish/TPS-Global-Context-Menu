@@ -39,15 +39,20 @@ export class CreateTaskService {
       new Notice('Create task is unavailable until Todo has a valid checkbox mapping.');
       return;
     }
-    const defaultTarget = await this.ensureTodayDailyNote();
-    const defaultLabel = defaultTarget?.path || "Today's Daily Note";
+    const createTrackedRecord = this.plugin.nativeRecordService?.isEnabled() === true;
+    const defaultParentMode = createTrackedRecord
+      && this.plugin.settings.createTaskDefaultParentMode !== 'today-daily-note'
+      ? 'standalone'
+      : 'note';
     new CreateTaskModal(this.plugin.app, {
-      defaultTargetFile: defaultTarget,
-      defaultTargetLabel: defaultLabel,
+      defaultTargetFile: null,
+      defaultTargetLabel: "Today's Daily Note",
+      defaultParentMode,
+      allowStandaloneParent: createTrackedRecord,
       defaultTimeEstimate: 30,
       checkboxOptions,
       defaultCheckboxMarker,
-      createTrackedRecord: this.plugin.nativeRecordService?.isEnabled() === true,
+      createTrackedRecord,
       onSubmit: async (result) => {
         await this.createTask(result);
       },
@@ -106,6 +111,57 @@ export class CreateTaskService {
       allDay: result.allDay,
       timeEstimate: result.timeEstimate,
     });
+
+    if (!nativeRecordModeEnabled && result.parentMode === 'standalone') {
+      logger.flowWarn('CreateTask', 'route:standalone-unavailable', { mode: 'legacy' });
+      new Notice('Standalone task notes require Native Markdown records. Choose a containing note and try again.');
+      return null;
+    }
+
+    if (nativeRecordModeEnabled && result.parentMode === 'standalone') {
+      try {
+        const record = await this.plugin.nativeRecordService.createStandaloneTask(
+          taskLine,
+          {
+            kind: 'user',
+            sourcePluginId: 'tps-global-context-menu',
+            surface: 'create-task-modal:standalone-native-task-record',
+          },
+          () => isLinkedSubitemSemanticCheckboxPlanCurrent(
+            this.getConfiguredMappings(),
+            creationPlan,
+            {
+              normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
+              normalizedMappings: true,
+            },
+          ),
+        );
+        try {
+          await this.plugin.openFileInLeaf(
+            record.file,
+            false,
+            () => this.plugin.app.workspace.getLeaf(false),
+            { revealLeaf: true },
+          );
+          new Notice(`Created standalone task note ${record.path}`);
+        } catch (error) {
+          logger.flowWarn('CreateTask', 'standalone-task:open-failed', {
+            recordPath: record.path,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          new Notice(`Created standalone task note ${record.path}, but it could not be opened automatically.`);
+        }
+        return record.file;
+      } catch (error) {
+        logger.flowError('CreateTask', 'standalone-task:create-failed', error);
+        if (error instanceof Error && /checkbox mapping changed/iu.test(error.message)) {
+          new Notice('The selected task checkbox is no longer configured.');
+        } else {
+          new Notice('Unable to create the standalone task note. Check console logs.');
+        }
+        return null;
+      }
+    }
 
     let historyHandle: DirectTaskHistoryHandle | null = null;
     let historyContext: DirectTaskHistoryLogContext | null = null;

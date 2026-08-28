@@ -67,6 +67,7 @@ export type DailyNoteTaskMoveSourceBehavior = 'mark-migrated' | 'remove';
 export type LinkedSubitemCheckboxStyle = 'native' | 'soft-link' | 'accent';
 export type TimeTrackingStorageMode = 'daily-note' | 'source-note' | 'dedicated-note';
 export type TimeTrackingDailyNotePlacement = 'top' | 'bottom';
+export type CreateTaskDefaultParentMode = 'standalone' | 'today-daily-note';
 export type TpsBaseWriteFallbackMode = 'filter-required' | 'today-daily-note' | 'specific-note';
 export type CompletedTaskHidingScope = 'reading-and-live-preview' | 'reading-only';
 export type LinkedContextSortOrder = 'source-asc' | 'source-desc';
@@ -655,6 +656,7 @@ export interface TPSGlobalContextMenuSettings {
   enableItemHistory: boolean;
   itemHistoryRetentionDays: number;
   itemHistoryMaxEntries: number;
+  createTaskDefaultParentMode: CreateTaskDefaultParentMode;
   tpsBaseWriteFallbackMode: TpsBaseWriteFallbackMode;
   tpsBaseWriteFallbackPath: string;
 

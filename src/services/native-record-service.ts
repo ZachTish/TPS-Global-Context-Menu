@@ -1081,8 +1081,20 @@ export class NativeRecordService {
     properties: Record<string, unknown>,
     options: TpsNativeRecordCreateOptions = {},
   ): Promise<TpsNativeRecordHandle> {
+    return this.createRecord(kind, properties, options);
+  }
+
+  private async createRecord(
+    kind: TpsNativeRecordKind,
+    properties: Record<string, unknown>,
+    options: TpsNativeRecordCreateOptions,
+    commitGuard?: () => boolean,
+  ): Promise<TpsNativeRecordHandle> {
     this.assertEnabled();
     this.assertValidStorageProfile();
+    if (commitGuard && !commitGuard()) {
+      throw new Error('Standalone task checkbox mapping changed before record creation.');
+    }
     if (!Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, kind)) {
       throw new Error(`Unsupported TPS native record kind: ${String(kind)}`);
     }
@@ -1141,6 +1153,10 @@ export class NativeRecordService {
       }
       const path = this.availableRecordPath(kind, id, options.fileName);
       await this.ensureParentFolder(path);
+      this.assertEnabled();
+      if (commitGuard && !commitGuard()) {
+        throw new Error('Standalone task checkbox mapping changed before record creation.');
+      }
       this.rebuildIndex();
       if (this.pathsById.has(reservationKey) || this.blockedPathsById.has(reservationKey)) {
         throw new Error(`TPS native record ID already exists: ${id}`);
@@ -1678,14 +1694,27 @@ export class NativeRecordService {
     }
   }
 
-  private buildTaskRecordProperties(task: GcmTaskRecord): Record<string, unknown> {
+  async createStandaloneTask(
+    rawLine: string,
+    cause: FilePropertiesMutationCause = { kind: 'user', surface: 'standalone-task-record-create' },
+    commitGuard?: () => boolean,
+  ): Promise<TpsNativeRecordHandle> {
+    this.assertEnabled();
+    const task = this.plugin.taskApiService.parseLine('', 0, String(rawLine || ''));
+    if (!task) throw new Error('Standalone task line could not be parsed.');
+    return this.createRecord('task', this.buildTaskRecordProperties(task, false), { cause }, commitGuard);
+  }
+
+  private buildTaskRecordProperties(task: GcmTaskRecord, includeSource = true): Record<string, unknown> {
     const properties: Record<string, unknown> = {
       title: task.title,
       status: task.status || 'todo',
       tags: [...task.tags],
-      sourcePath: task.path,
-      sourceLine: task.line,
     };
+    if (includeSource) {
+      properties.sourcePath = task.path;
+      properties.sourceLine = task.line;
+    }
     for (const key of SHARED_TASK_FIELDS) {
       const sourceKey = key === 'recurrenceRule' && !task.fields.recurrenceRule ? 'recurrence' : key;
       const raw = task.fields[sourceKey];

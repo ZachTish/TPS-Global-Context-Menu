@@ -1279,6 +1279,16 @@ export const PLUGIN_STYLES = `
         min-width: min(280px, 52vw);
       }
 
+      .tps-gcm-create-task-parent .setting-item-control {
+        flex-wrap: wrap;
+      }
+
+      .tps-gcm-create-task-parent .setting-item-control button {
+        height: auto;
+        min-height: var(--input-height);
+        white-space: normal;
+      }
+
       .tps-gcm-create-task-preview-wrap,
       .tps-gcm-create-task-line-wrap {
         margin: 12px 0;

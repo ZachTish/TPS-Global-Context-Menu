@@ -126,6 +126,7 @@ import { shouldReuseCustomPropertyPreviewPanel } from './services/custom-propert
 import { ItemHistoryService } from './services/item-history-service';
 import { createLivePreviewBodySelectionExtension } from './services/live-preview-body-selection-service';
 import { normalizeDailyNavDayCount } from './utils/daily-note-nav-days';
+import { normalizeCreateTaskDefaultParentMode } from './utils/create-task-default-parent';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
@@ -2244,6 +2245,14 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.taskHidingExclusionPatterns = String(this.settings.taskHidingExclusionPatterns ?? '').trim();
     this.settings.persistTaskVisibilityStateToFrontmatter = this.settings.persistTaskVisibilityStateToFrontmatter === true;
     this.settings.taskVisibilityStateFrontmatterKey = String(this.settings.taskVisibilityStateFrontmatterKey || DEFAULT_SETTINGS.taskVisibilityStateFrontmatterKey).trim() || DEFAULT_SETTINGS.taskVisibilityStateFrontmatterKey;
+    const persistedCreateTaskDefaultParentMode = loadedSettingsRecord.createTaskDefaultParentMode;
+    this.settings.createTaskDefaultParentMode = normalizeCreateTaskDefaultParentMode(
+      this.settings.createTaskDefaultParentMode,
+    );
+    const needsCreateTaskDefaultParentMigration = Object.prototype.hasOwnProperty.call(
+      loadedSettingsRecord,
+      'createTaskDefaultParentMode',
+    ) && persistedCreateTaskDefaultParentMode !== this.settings.createTaskDefaultParentMode;
     this.settings.tpsBaseWriteFallbackMode = normalizeTpsBaseWriteFallbackMode(this.settings.tpsBaseWriteFallbackMode);
     this.settings.tpsBaseWriteFallbackPath = normalizeTpsBaseWriteNotePath(this.settings.tpsBaseWriteFallbackPath) || '';
     this.settings.defaultStackedPropertiesClosed = this.settings.defaultStackedPropertiesClosed === true;
@@ -2362,6 +2371,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       needsActivityBasePathMigration ||
       needsCheckboxMappingMigration ||
       needsNativeRecordIdentityMigration ||
+      needsCreateTaskDefaultParentMigration ||
       normalizedAuthoritativeHomeSettingKeys.length > 0 ||
       removedRetiredPropertyCount > 0;
     this.settingsPersistence = null;
@@ -2387,6 +2397,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         retiredTagIdentity: nativeRecordStorageConfiguration.retiredTagIdentity,
         legacyAliasCount: this.settings.nativeRecordStorageAliases.filter((profile) => profile.identityMode === 'tag').length,
         noteRewrite: false,
+      });
+    }
+    if (needsCreateTaskDefaultParentMigration) {
+      logger.flow('Settings', 'migration:create-task-default-parent', {
+        mode: this.settings.createTaskDefaultParentMode,
       });
     }
     if (normalizedAuthoritativeHomeSettingKeys.length > 0) {
@@ -2877,6 +2892,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   async saveSettings(): Promise<void> {
     this.settings.parentLinkFormat = normalizeParentLinkFormat(this.settings.parentLinkFormat);
     this.settings.dailyNavDayCount = normalizeDailyNavDayCount(this.settings.dailyNavDayCount);
+    this.settings.createTaskDefaultParentMode = normalizeCreateTaskDefaultParentMode(
+      this.settings.createTaskDefaultParentMode,
+    );
     this.settings.linkedSubitemCheckboxMappings = normalizeLinkedSubitemMappings(
       this.settings.linkedSubitemCheckboxMappings,
       { enforceStrictDefaults: true },

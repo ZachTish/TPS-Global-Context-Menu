@@ -216,6 +216,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   enableItemHistory: true,
   itemHistoryRetentionDays: 90,
   itemHistoryMaxEntries: 25000,
+  createTaskDefaultParentMode: 'standalone',
   tpsBaseWriteFallbackMode: 'today-daily-note',
   tpsBaseWriteFallbackPath: '',
 
