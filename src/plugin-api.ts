@@ -35,6 +35,7 @@ import type {
     ItemHistoryTaskReference,
 } from './services/item-history-service';
 import type { FilePropertiesMutationCause } from './services/file-properties-service';
+import { normalizeEditableNotePreviewRequest } from './utils/editable-note-preview-request';
 
 type ChecklistTaskState = string;
 
@@ -1095,7 +1096,57 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             clear: () => plugin.itemHistoryService.clear(),
         },
         ui: {
+            version: 1,
             shouldForceBaseLinkPreview: () => plugin.settings.enableBasesForcedLinkPreview === true,
+            openEditableNotePreview: async (request: unknown): Promise<boolean> => {
+                const normalized = normalizeEditableNotePreviewRequest(request);
+                if (!normalized) {
+                    logger.flowWarn('EditableNotePreviewApi', 'open:invalid-request');
+                    return false;
+                }
+
+                const ownerWindow = normalized.anchorEl.ownerDocument?.defaultView;
+                if (
+                    !ownerWindow
+                    || !(normalized.anchorEl instanceof ownerWindow.HTMLElement)
+                    || !normalized.anchorEl.isConnected
+                ) {
+                    logger.flowWarn('EditableNotePreviewApi', 'open:invalid-anchor', {
+                        sourcePluginId: normalized.sourcePluginId,
+                    });
+                    return false;
+                }
+
+                const filePath = normalizePath(normalized.filePath);
+                const file = plugin.app.vault.getAbstractFileByPath(filePath);
+                if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'md') {
+                    logger.flowWarn('EditableNotePreviewApi', 'open:file-unavailable', {
+                        sourcePluginId: normalized.sourcePluginId,
+                        path: filePath,
+                    });
+                    return false;
+                }
+
+                try {
+                    const opened = await plugin.persistentMenuManager.showBaseLinkEditablePreview(
+                        file,
+                        normalized.anchorEl,
+                        { focusEditor: normalized.focusEditor },
+                    );
+                    logger.flow('EditableNotePreviewApi', opened ? 'open:success' : 'open:not-opened', {
+                        sourcePluginId: normalized.sourcePluginId,
+                        path: file.path,
+                        focusEditor: normalized.focusEditor,
+                    });
+                    return opened === true;
+                } catch (error) {
+                    logger.flowError('EditableNotePreviewApi', 'open:failed', error, {
+                        sourcePluginId: normalized.sourcePluginId,
+                        path: file.path,
+                    });
+                    return false;
+                }
+            },
         },
         diagnostics: {
             version: 1,

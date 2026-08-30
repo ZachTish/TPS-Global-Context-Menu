@@ -28,6 +28,11 @@ import { resolveTaskScheduledValue } from '../utils/daily-note-task-schedule';
 import * as logger from '../logger';
 import { KeyboardAwareOverlay } from '../utils/mobile-overlay';
 import {
+  composeEditableNotePreviewDocument,
+  normalizeEditableNotePreviewBody,
+  splitEditableNotePreviewDocument,
+} from '../utils/editable-note-preview-document';
+import {
   getLinkedContextRecoveryIdleDelay,
   isLinkedContextSourceChangeRelevant,
   LinkedContextItem,
@@ -177,12 +182,19 @@ export class PersistentMenuManager {
   private baseLinkPreviewEditorEl: HTMLTextAreaElement | null = null;
   private baseLinkPreviewFile: TFile | null = null;
   private baseLinkPreviewLastSavedBody = '';
+  private baseLinkPreviewBodyRevision = '';
   private baseLinkPreviewSaveTimer: number | null = null;
   private baseLinkPreviewRenderTimer: number | null = null;
-  private baseLinkPreviewRenderInFlight = false;
-  private baseLinkPreviewSaveInFlight = false;
+  private baseLinkPreviewRenderInFlightSession: number | null = null;
+  private baseLinkPreviewSaveInFlight: Promise<void> | null = null;
+  private baseLinkPreviewSession = 0;
+  private baseLinkPreviewReadySession: number | null = null;
+  private baseLinkPreviewOpenRequest = 0;
+  private baseLinkPreviewSaveConflictSession: number | null = null;
   private baseLinkPreviewOutsideHandler: ((evt: MouseEvent) => void) | null = null;
   private baseLinkPreviewOverlay: KeyboardAwareOverlay | null = null;
+  private baseLinkPreviewDocument: Document | null = null;
+  private baseLinkPreviewWindow: Window | null = null;
   private viewModeSignatures: WeakMap<MarkdownView, string> = new WeakMap();
   private topPropertiesPlaceholderTimers: Map<MarkdownView, number> = new Map();
   private postTypingStructuralRefreshTimers: Map<string, number> = new Map();
@@ -3474,32 +3486,47 @@ export class PersistentMenuManager {
     this.selectedCalendarPopoverPath = null;
   }
 
-  public async showBaseLinkEditablePreview(file: TFile, anchorEl: HTMLElement): Promise<void> {
-    if (!anchorEl.isConnected) return;
-    const raw = await this.plugin.app.vault.cachedRead(file);
-    if (!anchorEl.isConnected) return;
-    const parts = this.splitMarkdownFrontmatter(raw);
-
+  public async showBaseLinkEditablePreview(
+    file: TFile,
+    anchorEl: HTMLElement,
+    options: { focusEditor?: boolean } = {},
+  ): Promise<boolean> {
+    const openRequest = ++this.baseLinkPreviewOpenRequest;
+    if (!anchorEl.isConnected || file.extension.toLowerCase() !== 'md') return false;
     this.hideTopLinkPreviewCard();
-    this.hideBaseLinkEditablePreview();
+    if (!await this.closeBaseLinkEditablePreview()) return false;
+    if (openRequest !== this.baseLinkPreviewOpenRequest || !anchorEl.isConnected) return false;
+    const raw = await this.plugin.app.vault.cachedRead(file);
+    if (openRequest !== this.baseLinkPreviewOpenRequest || !anchorEl.isConnected) return false;
+    const parts = splitEditableNotePreviewDocument(raw);
+    if (!parts.lineEndingsSupported) {
+      logger.flowWarn('EditableNotePreview', 'card:unsupported-line-endings', { path: file.path });
+      return false;
+    }
+    const session = ++this.baseLinkPreviewSession;
+    this.baseLinkPreviewReadySession = null;
+    this.baseLinkPreviewSaveConflictSession = null;
+    const targetDocument = anchorEl.ownerDocument;
+    const targetWindow = targetDocument.defaultView;
+    if (!targetWindow || !targetDocument.body) return false;
 
-    const popover = document.createElement('div');
+    const popover = targetDocument.createElement('div');
     popover.className = 'tps-gcm-base-link-preview';
     popover.dataset.path = file.path;
     popover.dataset.tpsGcmPreviewStable = 'true';
     popover.style.position = 'fixed';
     popover.style.zIndex = '40';
 
-    const header = document.createElement('div');
+    const header = targetDocument.createElement('div');
     header.className = 'tps-gcm-base-link-preview-header';
 
-    const headerMain = document.createElement('div');
+    const headerMain = targetDocument.createElement('div');
     headerMain.className = 'tps-gcm-base-link-preview-header-main';
 
     const frontmatter = (this.plugin.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, any>;
     const resolvedIcon = this.resolveInlineTitleIconValue(file, frontmatter) || 'file-text';
     const resolvedColor = this.resolveTitleIconColor(frontmatter, file);
-    const iconEl = document.createElement('span');
+    const iconEl = targetDocument.createElement('span');
     iconEl.className = 'tps-gcm-base-link-preview-file-icon';
     iconEl.setAttribute('aria-hidden', 'true');
     if (resolvedColor) {
@@ -3508,31 +3535,50 @@ export class PersistentMenuManager {
     this.renderInlineTitleIcon(iconEl, resolvedIcon, file);
     headerMain.appendChild(iconEl);
 
-    const titleWrap = document.createElement('div');
+    const titleWrap = targetDocument.createElement('div');
     titleWrap.className = 'tps-gcm-base-link-preview-title-wrap';
 
-    const title = document.createElement('div');
+    const title = targetDocument.createElement('div');
     title.className = 'tps-gcm-base-link-preview-title';
     title.textContent = this.getFileDisplayTitle(file);
     titleWrap.appendChild(title);
 
-    const path = document.createElement('div');
+    const path = targetDocument.createElement('div');
     path.className = 'tps-gcm-base-link-preview-path';
     path.textContent = file.path;
     titleWrap.appendChild(path);
     headerMain.appendChild(titleWrap);
     header.appendChild(headerMain);
 
-    const openButton = document.createElement('button');
+    const headerActions = targetDocument.createElement('div');
+    headerActions.className = 'tps-gcm-base-link-preview-header-actions';
+
+    const openButton = targetDocument.createElement('button');
     openButton.type = 'button';
     openButton.className = 'tps-gcm-base-link-preview-open';
     openButton.title = 'Open note';
+    openButton.setAttribute('aria-label', 'Open note');
     setIcon(openButton, 'external-link');
     addSafeClickListener(openButton, () => {
-      this.hideBaseLinkEditablePreview();
-      void this.plugin.openFileInLeaf(file, false, () => this.plugin.app.workspace.getLeaf(false), { revealLeaf: true });
+      void this.hideBaseLinkEditablePreview().then((closed) => (
+        closed
+          ? this.plugin.openFileInLeaf(file, false, () => this.plugin.app.workspace.getLeaf(false), { revealLeaf: true })
+          : false
+      ));
     });
-    header.appendChild(openButton);
+    headerActions.appendChild(openButton);
+
+    const closeButton = targetDocument.createElement('button');
+    closeButton.type = 'button';
+    closeButton.className = 'tps-gcm-base-link-preview-close';
+    closeButton.title = 'Dismiss preview';
+    closeButton.setAttribute('aria-label', 'Dismiss preview');
+    setIcon(closeButton, 'x');
+    addSafeClickListener(closeButton, () => {
+      void this.hideBaseLinkEditablePreview();
+    });
+    headerActions.appendChild(closeButton);
+    header.appendChild(headerActions);
     popover.appendChild(header);
 
     const propertiesPanel = this.plugin.menuController.getPanelBuilder().createStackedPropertiesPanel(file);
@@ -3541,40 +3587,42 @@ export class PersistentMenuManager {
       popover.appendChild(propertiesPanel);
     }
 
-    const bodyScroller = document.createElement('div');
+    const bodyScroller = targetDocument.createElement('div');
     bodyScroller.className = 'tps-gcm-base-link-preview-body markdown-preview-view markdown-rendered';
-    const bodySizer = document.createElement('div');
+    const bodySizer = targetDocument.createElement('div');
     bodySizer.className = 'markdown-preview-sizer markdown-preview-section tps-gcm-base-link-preview-rendered-body';
     bodySizer.dataset.path = file.path;
     bodySizer.dataset.file = file.path;
     bodySizer.tabIndex = 0;
-    bodySizer.contentEditable = 'true';
-    bodySizer.spellcheck = true;
-    bodySizer.setAttribute('role', 'textbox');
-    bodySizer.setAttribute('aria-multiline', 'true');
-    bodySizer.setAttribute('aria-label', 'Edit note body');
+    bodySizer.contentEditable = 'false';
+    bodySizer.spellcheck = false;
+    bodySizer.setAttribute('role', 'button');
+    bodySizer.setAttribute('aria-label', 'Note body preview. Press Enter or click to edit Markdown source.');
     bodyScroller.appendChild(bodySizer);
-    const sourceEditor = document.createElement('textarea');
+    const sourceEditor = targetDocument.createElement('textarea');
     sourceEditor.className = 'tps-gcm-base-link-preview-source-editor';
-    sourceEditor.value = parts.body;
+    sourceEditor.value = normalizeEditableNotePreviewBody(parts.body);
     sourceEditor.spellcheck = true;
     sourceEditor.setAttribute('aria-label', 'Edit note body');
     sourceEditor.style.display = 'none';
     bodyScroller.appendChild(sourceEditor);
     popover.appendChild(bodyScroller);
 
-    const status = document.createElement('div');
+    const status = targetDocument.createElement('div');
     status.className = 'tps-gcm-base-link-preview-status';
-    status.textContent = 'Click again to open';
+    status.textContent = 'Click the body to edit';
     popover.appendChild(status);
 
     this.baseLinkPreviewEl = popover;
     this.baseLinkPreviewBodyEl = bodySizer;
     this.baseLinkPreviewEditorEl = sourceEditor;
     this.baseLinkPreviewFile = file;
-    this.baseLinkPreviewLastSavedBody = parts.body;
+    this.baseLinkPreviewLastSavedBody = normalizeEditableNotePreviewBody(parts.body);
+    this.baseLinkPreviewBodyRevision = parts.body;
+    this.baseLinkPreviewDocument = targetDocument;
+    this.baseLinkPreviewWindow = targetWindow;
 
-    document.body.appendChild(popover);
+    targetDocument.body.appendChild(popover);
     this.baseLinkPreviewOverlay = new KeyboardAwareOverlay(popover, anchorEl, {
       maxWidth: 620,
       maxHeight: 560,
@@ -3584,31 +3632,49 @@ export class PersistentMenuManager {
     const component = new Component();
     component.load();
     this.baseLinkPreviewComponent = component;
-    await MarkdownRenderer.render(this.plugin.app, parts.body || '\n', bodySizer, file.path, component);
+    try {
+      await MarkdownRenderer.render(this.plugin.app, parts.body || '\n', bodySizer, file.path, component);
+    } catch (error) {
+      logger.flowError('EditableNotePreview', 'card:render-failed', error, { path: file.path });
+      if (session === this.baseLinkPreviewSession && this.baseLinkPreviewEl === popover) {
+        await this.closeBaseLinkEditablePreview();
+      } else {
+        component.unload();
+      }
+      return false;
+    }
+    if (
+      session !== this.baseLinkPreviewSession
+      || openRequest !== this.baseLinkPreviewOpenRequest
+      || this.baseLinkPreviewEl !== popover
+      || !popover.isConnected
+      || !anchorEl.isConnected
+    ) {
+      if (session === this.baseLinkPreviewSession && this.baseLinkPreviewEl === popover) {
+        this.teardownBaseLinkEditablePreview(session);
+      }
+      return false;
+    }
+    this.baseLinkPreviewReadySession = session;
     this.baseLinkPreviewOverlay?.schedule();
 
-    bodySizer.addEventListener('keydown', (evt: KeyboardEvent) => {
+    popover.addEventListener('keydown', (evt: KeyboardEvent) => {
+      if (evt.key !== 'Escape' || evt.isComposing) return;
+      evt.preventDefault();
       evt.stopPropagation();
-      if (evt.key === 'Enter') {
-        evt.preventDefault();
-        this.insertEditablePreviewNewLine(bodySizer, evt.shiftKey);
-        status.textContent = 'Unsaved changes';
-        this.scheduleBaseLinkPreviewBodySave(status);
-        return;
-      }
-      if (evt.key === 'Tab') {
-        evt.preventDefault();
-        document.execCommand('insertText', false, '  ');
-        status.textContent = 'Unsaved changes';
-        this.scheduleBaseLinkPreviewBodySave(status);
-      }
+      void this.hideBaseLinkEditablePreview();
+    }, true);
+
+    bodySizer.addEventListener('keydown', (evt: KeyboardEvent) => {
+      if (evt.key !== 'Enter' && evt.key !== ' ') return;
+      evt.preventDefault();
+      evt.stopPropagation();
+      this.activateBaseLinkPreviewSourceEditor();
     });
-    bodySizer.addEventListener('input', () => {
-      status.textContent = 'Unsaved changes';
-      this.scheduleBaseLinkPreviewBodySave(status);
-    });
-    bodySizer.addEventListener('blur', () => {
-      void this.flushBaseLinkPreviewBodySave(status, { preserveActiveBlank: false, renderAfterSave: false });
+    bodySizer.addEventListener('click', (evt: MouseEvent) => {
+      evt.preventDefault();
+      evt.stopPropagation();
+      this.activateBaseLinkPreviewSourceEditor();
     });
     sourceEditor.addEventListener('keydown', (evt: KeyboardEvent) => {
       if (evt.isComposing) return;
@@ -3632,7 +3698,7 @@ export class PersistentMenuManager {
       this.baseLinkPreviewOverlay?.schedule();
     });
     sourceEditor.addEventListener('blur', () => {
-      void this.flushBaseLinkPreviewBodySave(status, { preserveActiveBlank: false, renderAfterSave: true });
+      void this.flushBaseLinkPreviewBodySave(status, { renderAfterSave: true });
     });
 
     this.baseLinkPreviewOutsideHandler = (evt: MouseEvent) => {
@@ -3640,59 +3706,52 @@ export class PersistentMenuManager {
       if (!target) return;
       if (popover.contains(target)) return;
       if (anchorEl.contains(target)) return;
-      if (target instanceof HTMLElement && target.closest('.menu, .modal, .suggestion-container, .prompt, .popover, .hover-popover')) return;
-      this.hideBaseLinkEditablePreview();
+      if (target instanceof targetWindow.HTMLElement && target.closest('.menu, .modal, .suggestion-container, .prompt, .popover, .hover-popover')) return;
+      void this.hideBaseLinkEditablePreview();
     };
-    window.setTimeout(() => {
-      if (this.baseLinkPreviewOutsideHandler) {
-        document.addEventListener('mousedown', this.baseLinkPreviewOutsideHandler, true);
+    targetWindow.setTimeout(() => {
+      if (session === this.baseLinkPreviewSession && this.baseLinkPreviewOutsideHandler) {
+        targetDocument.addEventListener('mousedown', this.baseLinkPreviewOutsideHandler, true);
       }
     }, 0);
-  }
 
-  private splitMarkdownFrontmatter(rawContent: string): { frontmatter: string; body: string } {
-    const raw = String(rawContent || '');
-    if (!raw.startsWith('---')) return { frontmatter: '', body: raw };
-    const end = raw.indexOf('\n---', 3);
-    if (end < 0) return { frontmatter: '', body: raw };
-    const frontmatter = raw.slice(0, end + 4);
-    const body = raw.slice(end + 4).replace(/^\r?\n/, '');
-    return { frontmatter, body };
+    if (options.focusEditor === true && session === this.baseLinkPreviewSession && popover.isConnected) {
+      this.activateBaseLinkPreviewSourceEditor();
+    }
+    logger.flow('EditableNotePreview', 'card:opened', { path: file.path, focusEditor: options.focusEditor === true });
+    return true;
   }
 
   private getEditablePreviewBodyText(): string {
     const editorEl = this.baseLinkPreviewEditorEl;
-    if (editorEl && editorEl.style.display !== 'none') {
-      return editorEl.value.replace(/\u00a0/g, ' ').replace(/\n{3,}/g, '\n\n').trimEnd();
-    }
-    const bodyEl = this.baseLinkPreviewBodyEl;
-    if (!bodyEl) return '';
-    return this.serializeEditablePreviewMarkdown(bodyEl).replace(/\u00a0/g, ' ').replace(/\n{3,}/g, '\n\n').trimEnd();
+    return editorEl
+      ? normalizeEditableNotePreviewBody(editorEl.value)
+      : this.baseLinkPreviewLastSavedBody;
   }
 
   private activateBaseLinkPreviewSourceEditor(): void {
     const previewEl = this.baseLinkPreviewBodyEl;
     const editorEl = this.baseLinkPreviewEditorEl;
     if (!previewEl || !editorEl) return;
-    if (editorEl.style.display !== 'none') return;
-
-    editorEl.value = this.getEditablePreviewBodyText();
-    previewEl.parentElement?.classList.add('is-editing');
-    editorEl.style.display = 'block';
-    window.requestAnimationFrame(() => {
+    if (editorEl.style.display === 'none') {
+      previewEl.parentElement?.classList.add('is-editing');
+      editorEl.style.display = 'block';
+      const statusEl = this.baseLinkPreviewEl?.querySelector<HTMLElement>('.tps-gcm-base-link-preview-status');
+      if (statusEl) statusEl.textContent = 'Changes save automatically';
+      this.baseLinkPreviewOverlay?.schedule();
+    }
+    const session = this.baseLinkPreviewSession;
+    const targetWindow = editorEl.ownerDocument.defaultView ?? window;
+    targetWindow.requestAnimationFrame(() => {
+      if (
+        session !== this.baseLinkPreviewSession
+        || editorEl !== this.baseLinkPreviewEditorEl
+        || !editorEl.isConnected
+      ) return;
       editorEl.focus();
       const end = editorEl.value.length;
       editorEl.setSelectionRange(end, end);
     });
-  }
-
-  private deactivateBaseLinkPreviewSourceEditor(): void {
-    const previewEl = this.baseLinkPreviewBodyEl;
-    const editorEl = this.baseLinkPreviewEditorEl;
-    if (!previewEl || !editorEl) return;
-    editorEl.style.display = 'none';
-    previewEl.parentElement?.classList.remove('is-editing');
-    previewEl.style.display = '';
   }
 
   private handleBaseLinkPreviewEditorEnter(editorEl: HTMLTextAreaElement, evt: KeyboardEvent): void {
@@ -3714,7 +3773,7 @@ export class PersistentMenuManager {
       const removeTo = start;
       editorEl.value = `${editorEl.value.slice(0, removeFrom)}${editorEl.value.slice(end)}`;
       editorEl.setSelectionRange(removeFrom, removeFrom);
-      editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+      editorEl.dispatchEvent(new (editorEl.ownerDocument.defaultView ?? window).Event('input', { bubbles: true }));
       return;
     }
 
@@ -3738,380 +3797,264 @@ export class PersistentMenuManager {
       if (removable > 0) {
         editorEl.value = `${editorEl.value.slice(0, lineStart)}${editorEl.value.slice(lineStart + removable)}`;
         editorEl.setSelectionRange(Math.max(lineStart, start - removable), Math.max(lineStart, end - removable));
-        editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+        editorEl.dispatchEvent(new (editorEl.ownerDocument.defaultView ?? window).Event('input', { bubbles: true }));
       }
       return;
     }
     editorEl.value = `${editorEl.value.slice(0, lineStart)}  ${editorEl.value.slice(lineStart)}`;
     editorEl.setSelectionRange(start + 2, end + 2);
-    editorEl.dispatchEvent(new Event('input', { bubbles: true }));
+    editorEl.dispatchEvent(new (editorEl.ownerDocument.defaultView ?? window).Event('input', { bubbles: true }));
   }
 
   private replaceBaseLinkPreviewEditorSelection(editorEl: HTMLTextAreaElement, text: string, start: number, end: number): void {
     editorEl.value = `${editorEl.value.slice(0, start)}${text}${editorEl.value.slice(end)}`;
     const cursor = start + text.length;
     editorEl.setSelectionRange(cursor, cursor);
-    editorEl.dispatchEvent(new Event('input', { bubbles: true }));
-  }
-
-  private serializeEditablePreviewMarkdown(root: HTMLElement): string {
-    const lines: string[] = [];
-    const direct = Array.from(root.childNodes);
-    const nodes = direct.length > 0 ? direct : [root];
-
-    const textOf = (node: Node): string => String(node.textContent || '').replace(/\s+\n/g, '\n').trim();
-    const walkList = (list: Element, ordered: boolean): void => {
-      Array.from(list.children).forEach((child, index) => {
-        if (!(child instanceof HTMLElement) || child.tagName.toLowerCase() !== 'li') return;
-        const marker = ordered ? `${index + 1}.` : '-';
-        const clone = child.cloneNode(true) as HTMLElement;
-        clone.querySelectorAll('ul, ol').forEach((nested) => nested.remove());
-        const own = textOf(clone);
-        if (own) lines.push(`${marker} ${own}`);
-        child.querySelectorAll(':scope > ul, :scope > ol').forEach((nested) => {
-          const before = lines.length;
-          walkList(nested, nested.tagName.toLowerCase() === 'ol');
-          for (let i = before; i < lines.length; i += 1) {
-            lines[i] = `  ${lines[i]}`;
-          }
-        });
-      });
-    };
-
-    const serializeNode = (node: Node): void => {
-      if (node.nodeType === Node.TEXT_NODE) {
-        const text = textOf(node);
-        if (text) lines.push(text);
-        return;
-      }
-      if (!(node instanceof HTMLElement)) return;
-      const tag = node.tagName.toLowerCase();
-      if (/^h[1-6]$/.test(tag)) {
-        const level = Number(tag.slice(1));
-        const text = textOf(node);
-        if (text) lines.push(`${'#'.repeat(level)} ${text}`);
-        return;
-      }
-      if (tag === 'ul' || tag === 'ol') {
-        walkList(node, tag === 'ol');
-        return;
-      }
-      if (tag === 'blockquote') {
-        const text = textOf(node);
-        if (text) lines.push(text.split('\n').map((line) => `> ${line}`).join('\n'));
-        return;
-      }
-      if (tag === 'pre') {
-        const text = textOf(node);
-        lines.push(`\`\`\`\n${text}\n\`\`\``);
-        return;
-      }
-      if (tag === 'hr') {
-        lines.push('---');
-        return;
-      }
-      if (tag === 'br') {
-        lines.push('');
-        return;
-      }
-      const text = textOf(node);
-      if (text) lines.push(text);
-    };
-
-    nodes.forEach(serializeNode);
-    return lines.join('\n\n');
-  }
-
-  private insertEditablePreviewNewLine(root: HTMLElement, softBreak: boolean): void {
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0 || !root.contains(selection.anchorNode)) {
-      const paragraph = document.createElement('p');
-      paragraph.appendChild(document.createElement('br'));
-      root.appendChild(paragraph);
-      this.placeCaretAtStart(paragraph);
-      return;
-    }
-
-    if (softBreak) {
-      const range = selection.getRangeAt(0);
-      range.deleteContents();
-      const br = document.createElement('br');
-      range.insertNode(br);
-      range.setStartAfter(br);
-      range.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      return;
-    }
-
-    const listItem = this.findEditablePreviewAncestor(root, selection.anchorNode, 'li');
-    if (listItem) {
-      this.insertEditablePreviewListItem(root, listItem);
-      return;
-    }
-
-    const range = selection.getRangeAt(0);
-    range.deleteContents();
-
-    const block = this.findEditablePreviewBlock(root, selection.anchorNode);
-    const paragraph = document.createElement('p');
-    paragraph.appendChild(document.createElement('br'));
-
-    if (block && block.parentElement) {
-      block.parentElement.insertBefore(paragraph, block.nextSibling);
-    } else {
-      root.appendChild(paragraph);
-    }
-    this.placeCaretAtStart(paragraph);
-  }
-
-  private insertEditablePreviewListItem(root: HTMLElement, listItem: HTMLElement): void {
-    const list = listItem.parentElement;
-    if (!list || !['ul', 'ol'].includes(list.tagName.toLowerCase())) {
-      return;
-    }
-
-    const isEmptyItem = String(listItem.textContent || '').trim().length === 0;
-    if (isEmptyItem) {
-      const paragraph = document.createElement('p');
-      paragraph.appendChild(document.createElement('br'));
-      if (list.parentElement) {
-        list.parentElement.insertBefore(paragraph, list.nextSibling);
-      } else {
-        root.appendChild(paragraph);
-      }
-      listItem.remove();
-      if (list.children.length === 0) {
-        list.remove();
-      }
-      this.placeCaretAtStart(paragraph);
-      return;
-    }
-
-    const nextItem = document.createElement('li');
-    nextItem.appendChild(document.createElement('br'));
-    list.insertBefore(nextItem, listItem.nextSibling);
-    this.placeCaretAtStart(nextItem);
-  }
-
-  private findEditablePreviewAncestor(root: HTMLElement, node: Node | null, tagName: string): HTMLElement | null {
-    const normalized = tagName.toLowerCase();
-    let current: Node | null = node;
-    while (current && current !== root) {
-      if (current instanceof HTMLElement && current.tagName.toLowerCase() === normalized) {
-        return current;
-      }
-      current = current.parentNode;
-    }
-    return null;
-  }
-
-  private findEditablePreviewBlock(root: HTMLElement, node: Node | null): HTMLElement | null {
-    let current: Node | null = node;
-    while (current && current !== root) {
-      if (current instanceof HTMLElement && current.parentElement === root) {
-        return current;
-      }
-      current = current.parentNode;
-    }
-    return null;
-  }
-
-  private placeCaretAtStart(el: HTMLElement): void {
-    el.focus();
-    const selection = window.getSelection();
-    if (!selection) return;
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    range.collapse(true);
-    selection.removeAllRanges();
-    selection.addRange(range);
-  }
-
-  private hasTrailingEditablePreviewBlankBlock(root: HTMLElement): boolean {
-    const last = Array.from(root.children).at(-1);
-    if (!(last instanceof HTMLElement)) return false;
-    const tag = last.tagName.toLowerCase();
-    if (['ul', 'ol'].includes(tag)) {
-      const lastItem = Array.from(last.children).at(-1);
-      return lastItem instanceof HTMLElement
-        && lastItem.tagName.toLowerCase() === 'li'
-        && String(lastItem.textContent || '').trim().length === 0;
-    }
-    if (!['p', 'div', 'li'].includes(tag)) return false;
-    return String(last.textContent || '').trim().length === 0;
-  }
-
-  private isEditablePreviewSelectionInBlankBlock(root: HTMLElement): boolean {
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0 || !root.contains(selection.anchorNode)) return false;
-    const listItem = this.findEditablePreviewAncestor(root, selection.anchorNode, 'li');
-    if (listItem && String(listItem.textContent || '').trim().length === 0) {
-      return true;
-    }
-    const block = this.findEditablePreviewBlock(root, selection.anchorNode);
-    if (!block) return false;
-    const tag = block.tagName.toLowerCase();
-    if (!['p', 'div'].includes(tag)) return false;
-    return String(block.textContent || '').trim().length === 0;
+    editorEl.dispatchEvent(new (editorEl.ownerDocument.defaultView ?? window).Event('input', { bubbles: true }));
   }
 
   private scheduleBaseLinkPreviewBodySave(statusEl: HTMLElement): void {
+    const targetWindow = this.baseLinkPreviewWindow ?? window;
     if (this.baseLinkPreviewSaveTimer !== null) {
-      window.clearTimeout(this.baseLinkPreviewSaveTimer);
+      targetWindow.clearTimeout(this.baseLinkPreviewSaveTimer);
     }
-    this.baseLinkPreviewSaveTimer = window.setTimeout(() => {
+    this.baseLinkPreviewSaveTimer = targetWindow.setTimeout(() => {
       void this.flushBaseLinkPreviewBodySave(statusEl);
     }, 2200);
   }
 
   private scheduleBaseLinkPreviewBodyRender(): void {
-    const sourceEditorActive = this.baseLinkPreviewEditorEl?.style.display !== 'none';
-    const focusedInsidePreview =
-      !!this.baseLinkPreviewEl &&
-      document.activeElement instanceof Node &&
-      this.baseLinkPreviewEl.contains(document.activeElement);
-    if (
-      !sourceEditorActive &&
-      this.baseLinkPreviewBodyEl &&
-      (this.hasTrailingEditablePreviewBlankBlock(this.baseLinkPreviewBodyEl) ||
-        this.isEditablePreviewSelectionInBlankBlock(this.baseLinkPreviewBodyEl))
-    ) {
-      return;
-    }
+    const targetWindow = this.baseLinkPreviewWindow ?? window;
     if (this.baseLinkPreviewRenderTimer !== null) {
-      window.clearTimeout(this.baseLinkPreviewRenderTimer);
+      targetWindow.clearTimeout(this.baseLinkPreviewRenderTimer);
     }
-    this.baseLinkPreviewRenderTimer = window.setTimeout(() => {
+    this.baseLinkPreviewRenderTimer = targetWindow.setTimeout(() => {
       void this.renderBaseLinkPreviewBodyFromEditableText();
-    }, sourceEditorActive && focusedInsidePreview ? 1200 : sourceEditorActive ? 450 : focusedInsidePreview ? 1200 : 300);
+    }, this.baseLinkPreviewEditorEl === this.baseLinkPreviewDocument?.activeElement ? 1200 : 300);
   }
 
   private async renderBaseLinkPreviewBodyFromEditableText(): Promise<void> {
     if (this.baseLinkPreviewRenderTimer !== null) {
-      window.clearTimeout(this.baseLinkPreviewRenderTimer);
+      (this.baseLinkPreviewWindow ?? window).clearTimeout(this.baseLinkPreviewRenderTimer);
       this.baseLinkPreviewRenderTimer = null;
     }
     const bodyEl = this.baseLinkPreviewBodyEl;
     const file = this.baseLinkPreviewFile;
+    const session = this.baseLinkPreviewSession;
     if (!bodyEl || !(file instanceof TFile)) return;
-    if (this.baseLinkPreviewRenderInFlight) {
+    if (this.baseLinkPreviewRenderInFlightSession === session) {
       this.scheduleBaseLinkPreviewBodyRender();
       return;
     }
-    this.baseLinkPreviewRenderInFlight = true;
+    this.baseLinkPreviewRenderInFlightSession = session;
     const markdown = this.getEditablePreviewBodyText();
+    const component = new Component();
+    component.load();
+    const staging = bodyEl.ownerDocument.createElement('div');
 
     try {
+      await MarkdownRenderer.render(this.plugin.app, markdown || '\n', staging, file.path, component);
+      if (
+        session !== this.baseLinkPreviewSession
+        || bodyEl !== this.baseLinkPreviewBodyEl
+        || file !== this.baseLinkPreviewFile
+      ) {
+        component.unload();
+        return;
+      }
       this.baseLinkPreviewComponent?.unload();
-      const component = new Component();
-      component.load();
       this.baseLinkPreviewComponent = component;
-      bodyEl.replaceChildren();
-      const sourceEditorActive = this.baseLinkPreviewEditorEl?.style.display !== 'none';
-      await MarkdownRenderer.render(this.plugin.app, markdown || '\n', bodyEl, file.path, component);
-      if (!sourceEditorActive) {
-        this.deactivateBaseLinkPreviewSourceEditor();
-      }
-
-      if (!sourceEditorActive && (document.activeElement === bodyEl || bodyEl.contains(document.activeElement))) {
-        this.focusEditablePreviewEnd(bodyEl);
-      }
+      bodyEl.replaceChildren(...Array.from(staging.childNodes));
+      this.baseLinkPreviewOverlay?.schedule();
+    } catch (error) {
+      component.unload();
+      logger.flowWarn('EditableNotePreview', 'card:rerender-failed', { path: file.path });
     } finally {
-      this.baseLinkPreviewRenderInFlight = false;
+      if (this.baseLinkPreviewRenderInFlightSession === session) {
+        this.baseLinkPreviewRenderInFlightSession = null;
+      }
     }
-  }
-
-  private focusEditablePreviewEnd(el: HTMLElement): void {
-    el.focus();
-    const selection = window.getSelection();
-    if (!selection) return;
-    const range = document.createRange();
-    range.selectNodeContents(el);
-    range.collapse(false);
-    selection.removeAllRanges();
-    selection.addRange(range);
   }
 
   private async flushBaseLinkPreviewBodySave(
     statusEl?: HTMLElement | null,
-    options: { preserveActiveBlank?: boolean; renderAfterSave?: boolean } = {}
-  ): Promise<void> {
+    options: { renderAfterSave?: boolean } = {}
+  ): Promise<boolean> {
+    const session = this.baseLinkPreviewSession;
+    const targetWindow = this.baseLinkPreviewWindow ?? window;
     if (this.baseLinkPreviewSaveTimer !== null) {
-      window.clearTimeout(this.baseLinkPreviewSaveTimer);
+      targetWindow.clearTimeout(this.baseLinkPreviewSaveTimer);
       this.baseLinkPreviewSaveTimer = null;
     }
     if (this.baseLinkPreviewRenderTimer !== null) {
-      window.clearTimeout(this.baseLinkPreviewRenderTimer);
+      targetWindow.clearTimeout(this.baseLinkPreviewRenderTimer);
       this.baseLinkPreviewRenderTimer = null;
     }
 
+    if (this.baseLinkPreviewReadySession !== session) return true;
     const file = this.baseLinkPreviewFile;
-    if (!(file instanceof TFile)) return;
-    if (this.baseLinkPreviewSaveInFlight) {
-      if (statusEl) {
-        statusEl.textContent = 'Saving...';
-        this.scheduleBaseLinkPreviewBodySave(statusEl);
-      }
-      return;
-    }
-
-    const bodyEl = this.baseLinkPreviewBodyEl;
-    const preserveActiveBlank = options.preserveActiveBlank ?? true;
-    const sourceEditorActive = this.baseLinkPreviewEditorEl?.style.display !== 'none';
-    if (!sourceEditorActive && preserveActiveBlank && statusEl && bodyEl && this.isEditablePreviewSelectionInBlankBlock(bodyEl)) {
-      statusEl.textContent = 'Unsaved changes';
-      this.scheduleBaseLinkPreviewBodySave(statusEl);
-      return;
+    if (!(file instanceof TFile)) return true;
+    while (this.baseLinkPreviewSaveInFlight) {
+      if (statusEl && session === this.baseLinkPreviewSession) statusEl.textContent = 'Saving...';
+      await this.baseLinkPreviewSaveInFlight;
+      if (session !== this.baseLinkPreviewSession || this.baseLinkPreviewFile !== file) return true;
     }
 
     const nextBody = this.getEditablePreviewBodyText();
     if (nextBody === this.baseLinkPreviewLastSavedBody) {
-      if (statusEl) statusEl.textContent = 'Saved';
+      if (statusEl && session === this.baseLinkPreviewSession) statusEl.textContent = 'Saved';
       if (options.renderAfterSave) {
         await this.renderBaseLinkPreviewBodyFromEditableText();
       }
-      return;
+      return true;
     }
 
+    const expectedBodyRevision = this.baseLinkPreviewBodyRevision;
+    let conflict = false;
+    let unsupportedLineEndings = false;
+    let saveFailed = false;
+    let nextBodyRevision = expectedBodyRevision;
+    const savePromise = (async (): Promise<void> => {
+      try {
+        await this.plugin.app.vault.process(file, (currentRaw) => {
+          const currentParts = splitEditableNotePreviewDocument(currentRaw);
+          if (!currentParts.lineEndingsSupported) {
+            conflict = true;
+            unsupportedLineEndings = true;
+            return currentRaw;
+          }
+          if (currentParts.body !== expectedBodyRevision) {
+            conflict = true;
+            return currentRaw;
+          }
+          const nextContent = composeEditableNotePreviewDocument(currentParts, nextBody);
+          nextBodyRevision = splitEditableNotePreviewDocument(nextContent).body;
+          return nextContent;
+        });
+        if (
+          session !== this.baseLinkPreviewSession
+          || this.baseLinkPreviewFile !== file
+          || !this.baseLinkPreviewEl?.isConnected
+        ) return;
+        if (conflict) {
+          if (statusEl) {
+            statusEl.textContent = unsupportedLineEndings
+              ? 'Not saved — unsupported line endings'
+              : 'Not saved — note changed elsewhere';
+          }
+          logger.flowWarn(
+            'EditableNotePreview',
+            unsupportedLineEndings ? 'save:unsupported-line-endings' : 'save:body-conflict',
+            { path: file.path },
+          );
+          if (this.baseLinkPreviewSaveConflictSession !== session) {
+            this.baseLinkPreviewSaveConflictSession = session;
+            new Notice(unsupportedLineEndings
+              ? `${file.basename} now has mixed or CR-only line endings; preview edits were not saved.`
+              : `${file.basename} changed elsewhere; preview edits were not saved.`);
+          }
+          return;
+        }
+        this.baseLinkPreviewLastSavedBody = nextBody;
+        this.baseLinkPreviewBodyRevision = nextBodyRevision;
+        this.baseLinkPreviewSaveConflictSession = null;
+        this.topLinkPreviewTextCache.delete(file.path);
+        if (statusEl) statusEl.textContent = 'Saved';
+        logger.flow('EditableNotePreview', 'save:success', { path: file.path });
+        if (!this.isBaseLinkEditablePreviewOpen(file.path)) {
+          void this.refreshMenusForFile(file, true);
+        }
+      } catch (error) {
+        saveFailed = true;
+        logger.flowError('EditableNotePreview', 'save:failed', error, { path: file.path });
+        if (session === this.baseLinkPreviewSession && statusEl) statusEl.textContent = 'Save failed';
+        if (session === this.baseLinkPreviewSession) new Notice(`Failed to save ${file.basename}.`);
+      }
+    })();
+    this.baseLinkPreviewSaveInFlight = savePromise;
     try {
-      this.baseLinkPreviewSaveInFlight = true;
-      const currentRaw = await this.plugin.app.vault.cachedRead(file);
-      const currentParts = this.splitMarkdownFrontmatter(currentRaw);
-      const nextContent = currentParts.frontmatter
-        ? `${currentParts.frontmatter}\n${nextBody}${nextBody ? '\n' : ''}`
-        : `${nextBody}${nextBody ? '\n' : ''}`;
-      await this.plugin.app.vault.modify(file, nextContent);
-      if (this.baseLinkPreviewFile?.path !== file.path || !this.baseLinkPreviewEl?.isConnected) return;
-      this.baseLinkPreviewLastSavedBody = nextBody;
-      this.topLinkPreviewTextCache.delete(file.path);
-      if (statusEl) statusEl.textContent = 'Saved';
-      if (!this.isBaseLinkEditablePreviewOpen(file.path)) {
-        void this.refreshMenusForFile(file, true);
-      }
-      if (options.renderAfterSave) {
-        await this.renderBaseLinkPreviewBodyFromEditableText();
-      }
-    } catch (error) {
-      logger.error('[TPS GCM] Failed saving Base link editable preview:', error);
-      if (statusEl) statusEl.textContent = 'Save failed';
-      new Notice(`Failed to save ${file.basename}.`);
+      await savePromise;
     } finally {
-      this.baseLinkPreviewSaveInFlight = false;
+      if (this.baseLinkPreviewSaveInFlight === savePromise) {
+        this.baseLinkPreviewSaveInFlight = null;
+      }
     }
+
+    const hasNewerInput = (
+      session === this.baseLinkPreviewSession
+      && this.baseLinkPreviewFile === file
+      && this.getEditablePreviewBodyText() !== this.baseLinkPreviewLastSavedBody
+    );
+    if (!conflict && !saveFailed && hasNewerInput && statusEl) {
+      statusEl.textContent = 'Unsaved changes';
+      this.scheduleBaseLinkPreviewBodySave(statusEl);
+    }
+
+    if (
+      options.renderAfterSave
+      && !conflict
+      && session === this.baseLinkPreviewSession
+      && this.baseLinkPreviewFile === file
+    ) {
+      await this.renderBaseLinkPreviewBodyFromEditableText();
+    }
+    return !conflict && !saveFailed;
   }
 
-  public hideBaseLinkEditablePreview(): void {
-    void this.flushBaseLinkPreviewBodySave();
+  public hideBaseLinkEditablePreview(): Promise<boolean> {
+    this.baseLinkPreviewOpenRequest += 1;
+    return this.closeBaseLinkEditablePreview();
+  }
+
+  private async closeBaseLinkEditablePreview(): Promise<boolean> {
+    const session = this.baseLinkPreviewSession;
+    const editorEl = this.baseLinkPreviewEditorEl;
+    if (editorEl) editorEl.readOnly = true;
+    this.baseLinkPreviewEl?.classList.add('is-closing');
+    const statusEl = this.baseLinkPreviewEl?.querySelector<HTMLElement>('.tps-gcm-base-link-preview-status');
+    let safeToClose = await this.flushBaseLinkPreviewBodySave(statusEl, {
+      renderAfterSave: false,
+    });
+    while (
+      safeToClose
+      && session === this.baseLinkPreviewSession
+      && editorEl === this.baseLinkPreviewEditorEl
+      && this.getEditablePreviewBodyText() !== this.baseLinkPreviewLastSavedBody
+    ) {
+      safeToClose = await this.flushBaseLinkPreviewBodySave(statusEl, {
+        renderAfterSave: false,
+      });
+    }
+    if (!safeToClose) {
+      if (session === this.baseLinkPreviewSession && editorEl === this.baseLinkPreviewEditorEl) {
+        editorEl.readOnly = false;
+        this.baseLinkPreviewEl?.classList.remove('is-closing');
+      }
+      return false;
+    }
+    if (session !== this.baseLinkPreviewSession) return true;
+    this.teardownBaseLinkEditablePreview(session);
+    return true;
+  }
+
+  private teardownBaseLinkEditablePreview(session: number): void {
+    if (session !== this.baseLinkPreviewSession) return;
+    const filePath = this.baseLinkPreviewFile?.path || null;
+    const targetDocument = this.baseLinkPreviewDocument ?? document;
+    const targetWindow = this.baseLinkPreviewWindow ?? window;
     this.baseLinkPreviewOverlay?.disconnect();
     this.baseLinkPreviewOverlay = null;
     if (this.baseLinkPreviewOutsideHandler) {
-      document.removeEventListener('mousedown', this.baseLinkPreviewOutsideHandler, true);
+      targetDocument.removeEventListener('mousedown', this.baseLinkPreviewOutsideHandler, true);
       this.baseLinkPreviewOutsideHandler = null;
     }
     if (this.baseLinkPreviewSaveTimer !== null) {
-      window.clearTimeout(this.baseLinkPreviewSaveTimer);
+      targetWindow.clearTimeout(this.baseLinkPreviewSaveTimer);
       this.baseLinkPreviewSaveTimer = null;
+    }
+    if (this.baseLinkPreviewRenderTimer !== null) {
+      targetWindow.clearTimeout(this.baseLinkPreviewRenderTimer);
+      this.baseLinkPreviewRenderTimer = null;
     }
     this.baseLinkPreviewComponent?.unload();
     this.baseLinkPreviewComponent = null;
@@ -4121,8 +4064,33 @@ export class PersistentMenuManager {
     this.baseLinkPreviewEditorEl = null;
     this.baseLinkPreviewFile = null;
     this.baseLinkPreviewLastSavedBody = '';
-    this.baseLinkPreviewRenderInFlight = false;
-    this.baseLinkPreviewSaveInFlight = false;
+    this.baseLinkPreviewBodyRevision = '';
+    this.baseLinkPreviewReadySession = null;
+    this.baseLinkPreviewSaveConflictSession = null;
+    if (this.baseLinkPreviewRenderInFlightSession === session) {
+      this.baseLinkPreviewRenderInFlightSession = null;
+    }
+    this.baseLinkPreviewSaveInFlight = null;
+    this.baseLinkPreviewDocument = null;
+    this.baseLinkPreviewWindow = null;
+    this.baseLinkPreviewSession += 1;
+    if (filePath) logger.flow('EditableNotePreview', 'card:closed', { path: filePath });
+  }
+
+  private async forceCloseBaseLinkEditablePreview(): Promise<void> {
+    this.baseLinkPreviewOpenRequest += 1;
+    const session = this.baseLinkPreviewSession;
+    if (this.baseLinkPreviewEditorEl) this.baseLinkPreviewEditorEl.readOnly = true;
+    const statusEl = this.baseLinkPreviewEl?.querySelector<HTMLElement>('.tps-gcm-base-link-preview-status');
+    try {
+      await this.flushBaseLinkPreviewBodySave(statusEl, { renderAfterSave: false });
+    } catch (error) {
+      logger.flowError('EditableNotePreview', 'detach:flush-failed', error, {
+        path: this.baseLinkPreviewFile?.path || null,
+      });
+    } finally {
+      this.teardownBaseLinkEditablePreview(session);
+    }
   }
 
   public isBaseLinkEditablePreviewOpen(path?: string | null): boolean {
@@ -7454,7 +7422,7 @@ export class PersistentMenuManager {
    */
   detach(): void {
     this.teardownKeyboardDetection();
-    this.hideBaseLinkEditablePreview();
+    void this.forceCloseBaseLinkEditablePreview();
     for (const timerId of this.attachRetryTimers.values()) {
       window.clearTimeout(timerId);
     }

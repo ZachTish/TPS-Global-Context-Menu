@@ -210,10 +210,12 @@ export function computeOverlayPlacement(
 
 export class KeyboardAwareOverlay {
   private readonly timers = new Set<number>();
+  private readonly targetDocument: Document;
+  private readonly targetWindow: Window;
   private readonly repositionHandler = () => this.reposition();
   private readonly focusHandler = () => this.schedule();
   private readonly keyboardShowHandler = (event: Event) => {
-    applyNativeKeyboardShow(sharedNativeKeyboard, event);
+    applyNativeKeyboardShow(sharedNativeKeyboard, event, this.targetWindow);
     this.schedule();
   };
   private readonly keyboardWillHideHandler = () => this.schedule();
@@ -226,18 +228,21 @@ export class KeyboardAwareOverlay {
     private readonly element: HTMLElement,
     private readonly anchor: HTMLElement,
     private readonly options: OverlayPlacementOptions = {},
-  ) {}
+  ) {
+    this.targetDocument = element.ownerDocument;
+    this.targetWindow = this.targetDocument.defaultView ?? window;
+  }
 
   connect(): void {
     this.element.classList.add('tps-keyboard-aware-overlay');
-    window.visualViewport?.addEventListener('resize', this.repositionHandler);
-    window.visualViewport?.addEventListener('scroll', this.repositionHandler);
-    window.addEventListener('resize', this.repositionHandler);
+    this.targetWindow.visualViewport?.addEventListener('resize', this.repositionHandler);
+    this.targetWindow.visualViewport?.addEventListener('scroll', this.repositionHandler);
+    this.targetWindow.addEventListener('resize', this.repositionHandler);
     for (const eventName of NATIVE_KEYBOARD_SHOW_EVENTS) {
-      window.addEventListener(eventName, this.keyboardShowHandler);
+      this.targetWindow.addEventListener(eventName, this.keyboardShowHandler);
     }
-    window.addEventListener('keyboardWillHide', this.keyboardWillHideHandler);
-    window.addEventListener('keyboardDidHide', this.keyboardDidHideHandler);
+    this.targetWindow.addEventListener('keyboardWillHide', this.keyboardWillHideHandler);
+    this.targetWindow.addEventListener('keyboardDidHide', this.keyboardDidHideHandler);
     this.element.addEventListener('focusin', this.focusHandler);
     this.element.addEventListener('focusout', this.focusHandler);
     this.reposition();
@@ -246,7 +251,7 @@ export class KeyboardAwareOverlay {
   schedule(): void {
     this.clearTimers();
     for (const delay of REPOSITION_DELAYS) {
-      this.timers.add(window.setTimeout(() => {
+      this.timers.add(this.targetWindow.setTimeout(() => {
         this.reposition();
       }, delay));
     }
@@ -254,9 +259,9 @@ export class KeyboardAwareOverlay {
 
   reposition(): void {
     if (!this.element.isConnected) return;
-    const viewport = getVisibleViewport(window, sharedNativeKeyboard);
-    const forceCompact = document.body.classList.contains('is-mobile')
-      || document.body.classList.contains('is-phone');
+    const viewport = getVisibleViewport(this.targetWindow, sharedNativeKeyboard);
+    const forceCompact = this.targetDocument.body.classList.contains('is-mobile')
+      || this.targetDocument.body.classList.contains('is-phone');
     const compactBottomSheet = forceCompact && this.options.compactBottomSheet !== false;
     if (!this.anchor.isConnected && !compactBottomSheet) return;
     const anchorRect = this.anchor.isConnected
@@ -283,20 +288,20 @@ export class KeyboardAwareOverlay {
 
   disconnect(): void {
     this.clearTimers();
-    window.visualViewport?.removeEventListener('resize', this.repositionHandler);
-    window.visualViewport?.removeEventListener('scroll', this.repositionHandler);
-    window.removeEventListener('resize', this.repositionHandler);
+    this.targetWindow.visualViewport?.removeEventListener('resize', this.repositionHandler);
+    this.targetWindow.visualViewport?.removeEventListener('scroll', this.repositionHandler);
+    this.targetWindow.removeEventListener('resize', this.repositionHandler);
     for (const eventName of NATIVE_KEYBOARD_SHOW_EVENTS) {
-      window.removeEventListener(eventName, this.keyboardShowHandler);
+      this.targetWindow.removeEventListener(eventName, this.keyboardShowHandler);
     }
-    window.removeEventListener('keyboardWillHide', this.keyboardWillHideHandler);
-    window.removeEventListener('keyboardDidHide', this.keyboardDidHideHandler);
+    this.targetWindow.removeEventListener('keyboardWillHide', this.keyboardWillHideHandler);
+    this.targetWindow.removeEventListener('keyboardDidHide', this.keyboardDidHideHandler);
     this.element.removeEventListener('focusin', this.focusHandler);
     this.element.removeEventListener('focusout', this.focusHandler);
   }
 
   private clearTimers(): void {
-    for (const timer of this.timers) window.clearTimeout(timer);
+    for (const timer of this.timers) this.targetWindow.clearTimeout(timer);
     this.timers.clear();
   }
 }

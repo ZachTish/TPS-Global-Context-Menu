@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.47.0
+
+- GCM now publishes a version-1 `ui.openEditableNotePreview(...)` capability through its existing workspace API handshake. Trusted TPS consumers provide one Markdown path and a connected anchor; GCM validates both and opens its own responsive local editor directly, without depending on Hover Editor or probing another plugin's registry.
+- The card renders a read-only Markdown preview and switches to an authoritative raw-Markdown textarea for editing. Body saves use `Vault.process`, preserve the current frontmatter/BOM/LF-or-CRLF line-ending bytes, fail closed when the body changed elsewhere, and never serialize rendered HTML back over links, tasks, callouts, embeds, or formatting. Mixed or legacy CR-only line endings are declined rather than normalized.
+- Explicit X, Escape, and outside dismissal flush pending edits before closing. Save conflicts and failures keep the card open with the unsaved text; replacement and unload paths are session-guarded, and owner-window placement works in pop-outs as well as the main Obsidian window. Desktop consumers may focus the editor immediately, while mobile can show the preview first and open the keyboard-aware editor on tap.
+- This is an additive public UI capability with no setting, note, record, schema, or command migration. Existing Base-link preview behavior remains compatible, and minimum supported Obsidian remains 1.10.0.
+- Validation passed 9/9 focused editable-preview/mobile checks, 80/80 adjacent preview/overlay checks, the 78/78 pre-pretest contract, and the complete declared suite, followed by the mandatory separate production build. Obsidian 1.13.7 opened exactly one GCM editor and no native Base popover from a real Calendar 0.9.0 toolbar creation, preserved bold Markdown, a wikilink, task syntax, and frontmatter boundaries after dismissal, and retained the exact pre-QA settings, recurrence-session, and Hot Reload hashes. The capability intentionally declines disconnected anchors, incompatible callers, missing or non-Markdown files, and Markdown with mixed or legacy CR-only line endings so consumers can fail open without a partial editor or byte normalization.
+
 ## 1.46.1
 
 - Clicking a tag chip rendered by GCM now opens that tag in **TPS Notebook Navigator** when the TPS fork is installed, instead of sending the click to the co-installed upstream Notebook Navigator.
@@ -1359,6 +1367,8 @@ The supported deterministic subset covers arithmetic/comparison/boolean expressi
 - `Force previews for Base links` and the scoped click-preview entry point are exposed through GCM so Calendar, Kanban, TPS List, and TPS Table use the same full-note behavior.
 - With `Force previews for Base links` enabled, full-note clicks in Calendar, Kanban, TPS List, and TPS Table open an editable hover-style note card on the first click and the note on a repeated click. TPS uses the third-party Hover Editor when available and its existing responsive local editable preview otherwise, including on mobile. Task-body clicks are kept separate and open the exact-line virtual task editor.
 - When the setting is disabled, Calendar/Kanban Base clicks should open/focus notes normally instead of emitting Obsidian `hover-link` preview events.
+- Cooperating plugins can request the local editor explicitly through workspace-delivered `ui.version === 1` and `ui.openEditableNotePreview({ filePath, anchorEl, sourcePluginId, focusEditor })`. This path always uses GCM's local card, never the private Hover Editor API. It accepts connected main-window or pop-out anchors and only Markdown files. The rendered body is read-only; editing uses the raw Markdown textarea so a no-op open/close is byte-preserving and an append cannot flatten existing syntax.
+- The local card's close paths save before teardown. Concurrent external body changes and write failures leave the editor open with its unsaved text rather than overwriting either version. Frontmatter changes may proceed independently because body writes re-read and preserve the current frontmatter inside one atomic `Vault.process` mutation.
 - When scheduling a note-level `scheduled` property, GCM warns if the note contains checkbox tasks scheduled on multiple other days. The write is allowed, but the warning flags likely storage/inbox notes such as calendar task lists.
 
 ## Status Classification

@@ -6861,7 +6861,15 @@ export const PLUGIN_STYLES = `
         line-height: 1.4;
       }
 
-      .tps-gcm-base-link-preview-open {
+      .tps-gcm-base-link-preview-header-actions {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        flex: 0 0 auto;
+      }
+
+      .tps-gcm-base-link-preview-open,
+      .tps-gcm-base-link-preview-close {
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -6876,12 +6884,18 @@ export const PLUGIN_STYLES = `
         cursor: pointer;
       }
 
-      .tps-gcm-base-link-preview-open:hover {
+      .tps-gcm-base-link-preview-open:hover,
+      .tps-gcm-base-link-preview-close:hover,
+      .tps-gcm-base-link-preview-open:focus-visible,
+      .tps-gcm-base-link-preview-close:focus-visible {
         background: var(--background-modifier-hover);
         color: var(--text-normal);
+        outline: 2px solid var(--interactive-accent);
+        outline-offset: 1px;
       }
 
-      .tps-gcm-base-link-preview-open svg {
+      .tps-gcm-base-link-preview-open svg,
+      .tps-gcm-base-link-preview-close svg {
         width: 15px;
         height: 15px;
       }
@@ -6942,7 +6956,7 @@ export const PLUGIN_STYLES = `
         padding: 8px 0 4px;
         border-radius: 0;
         outline: none;
-        cursor: text;
+        cursor: pointer;
       }
 
       .tps-gcm-base-link-preview-body.is-editing .tps-gcm-base-link-preview-rendered-body {
@@ -6976,6 +6990,11 @@ export const PLUGIN_STYLES = `
       .tps-gcm-base-link-preview-source-editor::-webkit-scrollbar {
         width: 0 !important;
         height: 0 !important;
+      }
+
+      .tps-gcm-base-link-preview.is-closing .tps-gcm-base-link-preview-source-editor:read-only {
+        cursor: progress;
+        opacity: 0.72;
       }
 
       .tps-gcm-base-link-preview-status {

@@ -1204,9 +1204,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     const spawnPopover = hoverEditorPlugin?.spawnPopover;
     if (typeof spawnPopover !== 'function') {
       try {
-        await this.persistentMenuManager.showBaseLinkEditablePreview(file, anchorEl);
-        logger.flow('BasesLinkPreview', 'local-editor-open', { path: file.path });
-        return true;
+        const opened = await this.persistentMenuManager.showBaseLinkEditablePreview(file, anchorEl);
+        if (opened) logger.flow('BasesLinkPreview', 'local-editor-open', { path: file.path });
+        return opened;
       } catch (error) {
         logger.warn('Failed to open local editable Base preview', {
           path: file.path,

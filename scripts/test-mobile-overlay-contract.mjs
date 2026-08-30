@@ -27,10 +27,16 @@ test('editable popup cards use the shared keyboard-aware overlay', () => {
   assert.match(taskEditor, /new KeyboardAwareOverlay\(card, anchorEl/);
   assert.match(notePreview, /new KeyboardAwareOverlay\(popover, anchorEl/);
   assert.match(mobileOverlay, /NATIVE_KEYBOARD_SHOW_EVENTS = \['keyboardWillShow', 'keyboardDidShow'\]/);
-  assert.match(mobileOverlay, /window\.addEventListener\('keyboardDidHide', this\.keyboardDidHideHandler\)/);
-  assert.match(mobileOverlay, /window\.removeEventListener\('keyboardDidHide', this\.keyboardDidHideHandler\)/);
+  assert.match(mobileOverlay, /this\.targetWindow\.addEventListener\('keyboardDidHide', this\.keyboardDidHideHandler\)/);
+  assert.match(mobileOverlay, /this\.targetWindow\.removeEventListener\('keyboardDidHide', this\.keyboardDidHideHandler\)/);
   assert.match(mobileOverlay, /getVisibleViewport\(window, sharedNativeKeyboard\)/);
   assert.match(mobileOverlay, /resetNativeKeyboard\(sharedNativeKeyboard\);\s+const root = document\.documentElement\.style/);
+  assert.match(mobileOverlay, /this\.targetDocument = element\.ownerDocument/);
+  assert.match(mobileOverlay, /this\.targetWindow = this\.targetDocument\.defaultView \?\? window/);
+  assert.match(mobileOverlay, /this\.targetWindow\.visualViewport\?\.addEventListener\('resize'/);
+  assert.match(mobileOverlay, /getVisibleViewport\(this\.targetWindow, sharedNativeKeyboard\)/);
+  assert.match(mobileOverlay, /this\.targetDocument\.body\.classList\.contains\('is-mobile'\)/);
+  assert.match(mobileOverlay, /this\.targetWindow\.visualViewport\?\.removeEventListener\('resize'/);
 });
 
 test('existing TPS plugin modal files opt into the shared mobile contract', () => {
