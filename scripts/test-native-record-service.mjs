@@ -2283,6 +2283,84 @@ test('identity plans preflight exact create and ordered update payloads before a
   assert.deepEqual((await racing.service.resolve(racingFile))?.frontmatter.tags, ['hca', 'racing']);
 });
 
+test('identity plans apply a no-rename reidentify at its source path and fail closed on invalid path contracts', async () => {
+  const sourceFor = (id, body) => serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body, frontmatter: {
+      tpsId: id,
+      tpsSchemaVersion: 1,
+      kind: 'calendar-event',
+      title: id,
+      tags: ['hca'],
+    },
+  });
+  const { service, contents, addFile } = createHarness();
+  const stationary = addFile(
+    'Legacy/no-rename.md',
+    sourceFor('calendar-no-rename', 'No-rename body must survive byte-for-byte.\n'),
+  );
+  const renamed = addFile(
+    'Legacy/rename.md',
+    sourceFor('calendar-rename', 'Rename body must also survive.\n'),
+  );
+  const entries = [
+    {
+      operation: 'reidentify',
+      reference: stationary,
+      nextId: 'calendar-no-rename-next',
+      updates: [{ status: 'complete', completedDate: '2026-08-31 13:04:28' }],
+    },
+    {
+      operation: 'reidentify',
+      reference: renamed,
+      nextId: 'calendar-rename-next',
+      fileName: 'Renamed record',
+      updates: [{ status: 'scheduled' }],
+    },
+  ];
+  const plan = await planCurrent(service, entries);
+  assert.deepEqual(plan?.entries.map((entry) => entry.expectedPath), [
+    'Legacy/no-rename.md',
+    '_records/calendar-events/Renamed record.md',
+  ]);
+
+  const applied = await service.applyIdentityChanges(plan, entries);
+  assert.equal(applied.ok, true);
+  assert.equal(applied.failedIndex, null);
+  assert.deepEqual(applied.handles.map((handle) => handle.path), [
+    'Legacy/no-rename.md',
+    '_records/calendar-events/Renamed record.md',
+  ]);
+  const stationaryPersisted = parseNativeRecordDocument(contents.get(stationary));
+  assert.equal(stationaryPersisted?.frontmatter.tpsId, 'calendar-no-rename-next');
+  assert.equal(stationaryPersisted?.frontmatter.status, 'complete');
+  assert.equal(stationaryPersisted?.frontmatter.completedDate, '2026-08-31 13:04:28');
+  assert.equal(stationaryPersisted?.body, 'No-rename body must survive byte-for-byte.\n');
+  assert.equal((await service.resolve('calendar-no-rename-next'))?.path, 'Legacy/no-rename.md');
+  assert.equal(await service.resolve('calendar-no-rename'), null);
+  assert.equal(parseNativeRecordDocument(contents.get(renamed))?.body, 'Rename body must also survive.\n');
+
+  const guarded = addFile(
+    'Legacy/guarded-no-rename.md',
+    sourceFor('calendar-guarded-no-rename', 'Guarded body.\n'),
+  );
+  const guardedBefore = contents.get(guarded);
+  const guardedPlan = await planCurrent(service, [{
+    operation: 'reidentify',
+    reference: guarded,
+    nextId: 'calendar-guarded-no-rename-next',
+    updates: [],
+  }]);
+  assert.equal(await service.reidentify(guarded, 'calendar-guarded-no-rename-next', { kind: 'automation' }, {
+    expectedPath: 'Legacy/wrong-path.md',
+    planToken: guardedPlan.token,
+  }), null);
+  assert.equal(await service.reidentify(guarded, 'calendar-guarded-no-rename-next', { kind: 'automation' }, {
+    expectedPath: guardedPlan.entries[0].expectedPath,
+  }), null);
+  assert.equal(contents.get(guarded), guardedBefore);
+  assert.equal((await service.resolve('calendar-guarded-no-rename'))?.path, 'Legacy/guarded-no-rename.md');
+});
+
 test('identity plans bind collision-resolved rename paths and reject changed path configuration before mutation', async () => {
   const sourceFor = (id) => serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: `${id} body\n`, frontmatter: {

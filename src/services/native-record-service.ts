@@ -2240,11 +2240,13 @@ export class NativeRecordService {
     ) return null;
     let plannedPath = record.path;
     if (options.fileName != null || options.expectedPath != null) {
-      if (options.fileName == null || options.expectedPath == null || options.planToken == null) return null;
-      try {
-        plannedPath = this.availableRecordPath(record.kind, nextId, options.fileName, record.file);
-      } catch {
-        return null;
+      if (options.expectedPath == null || options.planToken == null) return null;
+      if (options.fileName != null) {
+        try {
+          plannedPath = this.availableRecordPath(record.kind, nextId, options.fileName, record.file);
+        } catch {
+          return null;
+        }
       }
       if (normalizePath(plannedPath) !== normalizePath(options.expectedPath)) return null;
     }
@@ -2282,11 +2284,13 @@ export class NativeRecordService {
         && (this.pathsById.has(destinationKey) || this.blockedPathsById.has(destinationKey))
       ) return null;
       if (options.expectedPath != null) {
-        let confirmedPath: string;
-        try {
-          confirmedPath = this.availableRecordPath(record.kind, nextId, options.fileName, record.file);
-        } catch {
-          return null;
+        let confirmedPath = record.path;
+        if (options.fileName != null) {
+          try {
+            confirmedPath = this.availableRecordPath(record.kind, nextId, options.fileName, record.file);
+          } catch {
+            return null;
+          }
         }
         if (normalizePath(confirmedPath) !== normalizePath(options.expectedPath)) return null;
       }

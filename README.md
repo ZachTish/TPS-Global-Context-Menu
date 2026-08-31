@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## 1.48.2
+
+- Snapshot-bound native-record identity plans can now apply a re-identification that intentionally keeps the existing Markdown path. The planned path remains bound to the live source path, while entries that request a readable filename retain the existing collision-aware destination check.
+- This unblocks Controller's all-or-nothing calendar-record migration when a legacy event is outside the currently fetched calendar window and therefore has no rename request. The record can receive its canonical single ID and ordered field cleanup without moving the file, interrupting the batch, or disturbing its Markdown body.
+- Missing plan tokens, changed source paths, stale plans, occupied identities, and mismatched expected paths still fail closed before mutation. This is a backward-compatible correctness fix with no setting, record-schema, command, body, or automatic migration; native schema version 1 and minimum supported Obsidian 1.10.0 are unchanged.
+- Regression coverage exercises a mixed batch whose first entry keeps its path and preserves a completed status/body while a later entry renames, plus wrong-path and missing-token rejection. Validation includes the focused native-record suite, the complete declared suite, TypeScript, a separate production build, and isolated test-vault reload/UI checks; production was not accessed.
+
 ## 1.48.1
 
 - Generic title/filename synchronization now rechecks one authoritative Markdown snapshot at the actual mutation boundary. Valid native records, malformed frontmatter that still contains TPS native identity evidence, and existing run/workflow/workout markers remain workflow-owned even while MetadataCache or GCM's fast index is stale, cold, or unavailable.
