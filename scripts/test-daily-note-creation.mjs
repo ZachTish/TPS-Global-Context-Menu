@@ -2849,3 +2849,167 @@ test('canonical GCM creation creates every parent introduced by a nested date fo
   assert.match(harness.files.get(file.path), /Thursday planning/);
   assert.equal(harness.stats.createCount, 1);
 });
+
+test('generic title synchronization checks workflow ownership only at a real mutation boundary', async () => {
+  const priorWindow = globalThis.window;
+  const invalidMoment = () => ({ isValid: () => false, format: () => '' });
+  invalidMoment.ISO_8601 = Symbol('ISO_8601');
+  globalThis.window = { ...priorWindow, moment: invalidMoment };
+
+  try {
+    const { FileNamingService } = await loadFileNamingService();
+    const file = {
+      __isTestTFile: true,
+      path: 'Inbox/Already matching.md',
+      name: 'Already matching.md',
+      basename: 'Already matching',
+      extension: 'md',
+      parent: { path: 'Inbox' },
+      stat: { ctime: 0, mtime: 0 },
+    };
+    let source = '---\ntitle: Already matching\nkind: note\n---\n';
+    let cachedFrontmatter = { title: 'Already matching', kind: 'note' };
+    let cachedReads = 0;
+    let authoritativeReads = 0;
+    let identityChecks = 0;
+    let renamed = 0;
+    let titleMutations = 0;
+    let authoritativeReadGate = null;
+    let signalAuthoritativeRead = null;
+    let releaseAuthoritativeRead = null;
+
+    const refreshFileIdentity = (path) => {
+      file.path = path;
+      file.name = path.split('/').pop();
+      file.basename = file.name.replace(/\.md$/u, '');
+      const slash = path.lastIndexOf('/');
+      file.parent = { path: slash >= 0 ? path.slice(0, slash) : '/' };
+    };
+    const plugin = {
+      settings: {
+        autoSyncTitleFromFilename: true,
+        enableAutoRename: true,
+        folderExclusions: '',
+        dailyNoteDateFormat: 'YYYY-MM-DD',
+      },
+      registerEvent() {},
+      shouldIgnoreAutoFrontmatterWrite: () => false,
+      nativeRecordService: {
+        isRecordFile: () => false,
+        async hasRecordIdentityEvidence(_file, authoritativeSource) {
+          identityChecks += 1;
+          return /(?:^|\n)tpsId\s*:/u.test(String(authoritativeSource || ''));
+        },
+      },
+      bulkEditService: {
+        shouldSkipNoteLevelRecurrence: async () => false,
+        canMutateFrontmatterSafely: async () => true,
+        runSerializedFrontmatterWrite: async (_file, action) => action(),
+      },
+      frontmatterMutationService: {
+        async process() {
+          titleMutations += 1;
+          return true;
+        },
+      },
+      app: {
+        internalPlugins: { getPluginById: () => null, plugins: {} },
+        plugins: { getPlugin: () => null, plugins: {} },
+        vault: {
+          configDir: '.obsidian',
+          adapter: { async read() { throw new Error('missing Daily Notes settings'); } },
+          getFiles: () => [file],
+          getMarkdownFiles: () => [file],
+          getAbstractFileByPath: (path) => path === file.path ? file : null,
+          getFileByPath: (path) => path === file.path ? file : null,
+          cachedRead: async () => {
+            cachedReads += 1;
+            return source;
+          },
+          read: async () => {
+            authoritativeReads += 1;
+            signalAuthoritativeRead?.();
+            if (authoritativeReadGate) await authoritativeReadGate;
+            return source;
+          },
+          on: () => ({}),
+        },
+        metadataCache: {
+          initialized: true,
+          getFileCache: () => ({ frontmatter: cachedFrontmatter }),
+          on: () => ({}),
+        },
+        fileManager: {
+          async renameFile(_file, nextPath) {
+            renamed += 1;
+            refreshFileIdentity(nextPath);
+          },
+        },
+      },
+    };
+    const service = new FileNamingService(plugin);
+    await service.whenDailyNoteConfigurationReady();
+
+    await service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
+    assert.equal(identityChecks, 0, 'an already-canonical filename needs no authoritative identity read');
+    assert.equal(authoritativeReads, 0);
+
+    refreshFileIdentity('Inbox/Old path.md');
+    source = '---\ntitle: New path\nkind: note\n---\n';
+    cachedFrontmatter = { title: 'New path', kind: 'note' };
+    authoritativeReadGate = new Promise((resolve) => { releaseAuthoritativeRead = resolve; });
+    const authoritativeReadStarted = new Promise((resolve) => { signalAuthoritativeRead = resolve; });
+    const racingRename = service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
+    await authoritativeReadStarted;
+    assert.ok(cachedReads > 0, 'identity is rechecked after the candidate rename has been derived');
+    assert.equal(renamed, 0);
+    source = [
+      '---',
+      'tpsId: workout-became-native',
+      'tpsSchemaVersion: 1',
+      'kind: workout-session',
+      'title: New path',
+      '---',
+      '',
+    ].join('\n');
+    releaseAuthoritativeRead();
+    await racingRename;
+    assert.equal(renamed, 0, 'identity acquired before the mutation boundary prevents the rename');
+
+    authoritativeReadGate = null;
+    signalAuthoritativeRead = null;
+    releaseAuthoritativeRead = null;
+    refreshFileIdentity('Inbox/2026-08-31 - Workout 07.04.md');
+    source = [
+      '---',
+      'kind: workout',
+      'workoutId: workout-legacy',
+      'title: Workout 2026-08-31 07.04',
+      '---',
+      '',
+    ].join('\n');
+    cachedFrontmatter = { kind: 'workout', workoutId: 'workout-legacy', title: 'Workout 2026-08-31 07.04' };
+    const workoutReadBaseline = authoritativeReads;
+    await service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
+    assert.ok(authoritativeReads > workoutReadBaseline, 'Legacy workflow ownership is read from current bytes');
+    assert.equal(renamed, 0, 'a date-first Legacy workout keeps its workflow-owned filename');
+
+    const titleReadBaseline = authoritativeReads;
+    const titleResult = await service.syncTitleFromFilename(file, {
+      force: true,
+      bypassCreationGrace: true,
+    });
+    assert.equal(titleResult, undefined, 'the public title-sync method keeps its void contract');
+    assert.ok(authoritativeReads > titleReadBaseline, 'title writes use the same current-byte ownership boundary');
+    assert.equal(titleMutations, 0, 'Legacy workout identity also blocks filename-derived title writes');
+
+    refreshFileIdentity('Inbox/Ordinary old name.md');
+    source = '---\ntitle: Ordinary new name\nkind: note\n---\n';
+    cachedFrontmatter = { title: 'Ordinary new name', kind: 'note' };
+    await service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
+    assert.equal(renamed, 1, 'ordinary notes retain title-derived renaming');
+    assert.equal(file.path, 'Inbox/Ordinary new name.md');
+  } finally {
+    globalThis.window = priorWindow;
+  }
+});

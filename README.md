@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 1.48.1
+
+- Generic title/filename synchronization now rechecks one authoritative Markdown snapshot at the actual mutation boundary. Valid native records, malformed frontmatter that still contains TPS native identity evidence, and existing run/workflow/workout markers remain workflow-owned even while MetadataCache or GCM's fast index is stale, cold, or unavailable.
+- This also makes Health's date-first Legacy standalone workout filenames durable: GCM no longer rewrites a `kind: workout` path or its saved display title as an ordinary note. Native ownership still comes only from the configured current/readable identity profiles, never from a filename shape.
+- The authoritative read occurs only after GCM has derived a real title or filename change. Already-matching notes incur no extra source read, and ordinary notes retain their existing title-derived rename behavior.
+- This is a backward-compatible correctness fix with no setting, record-schema, path, command, body, or identity migration. Existing custom filenames remain untouched, native schema version 1 is unchanged, and minimum supported Obsidian remains 1.10.0.
+- Validation passed the 121/121 focused naming/native-record checks, the complete declared suite with zero failures, TypeScript, and the mandatory separate production build. Obsidian 1.13.7 reloaded the isolated test vault with GCM 1.48.1 and Health 0.30.0, displayed both exact versions in Community Plugins, and rendered GCM's settings surface without changing its disabled rule-application state. Mutation-boundary behavior is covered by executable stale-cache, cache-loss, Legacy workout, ordinary-note, and race regressions; production was not accessed.
+
 ## 1.48.0
 
 - Public `nativeRecords` API version 5 adds authoritative `list(...)`/`snapshot(...)`, snapshot-bound `planIdentityChanges(...)`, one locked `applyIdentityChanges(...)` batch, and guarded `canReidentify(...)`/`reidentify(...)` operations. A trusted TPS workflow can discover files that MetadataCache has not indexed yet, preview GCM's authoritative destination paths, and replace one native record's stable ID without rewriting its body or disturbing unrelated frontmatter.
@@ -1026,6 +1034,7 @@ Reusable note and task context menu surfaces for the vault, plus inline note chr
 - The note inline title displays frontmatter `title` in rendered modes, and clicking the title inside a Markdown note opens GCM's title edit modal directly. This click path does not depend on a delayed title-render refresh, so newly opened notes can still be renamed from the title immediately.
 - Note context menus and the persistent-panel options menu expose one clickable `Title: <display name>` row. Link syntax is unwrapped for presentation, the editor writes frontmatter `title`, and—when auto-rename is enabled—`FileNamingService` derives the physical filename from `title` plus `scheduled` while Obsidian retains link ownership.
 - Daily Notes are the intentional exception to title-derived filenames: Core, persisted, and Periodic Notes paths keep their configured date filename while preserving a nonblank template/user `title` or `Title`. Daily Note kind/type/tag markers provide the same protection, and only a missing or blank title receives a filename-derived fallback.
+- Native-record and marked process/run/workout filenames are owned by the workflow that created them. At a real generic title/filename mutation boundary, GCM checks one authoritative source snapshot and fails closed when current bytes are unreadable, native identity survives a stale/cold/malformed cache, or the existing workflow markers identify a process run. It does not derive ownership from the basename.
 - When `scheduled` is removed from a note, auto-rename treats the persisted frontmatter as intentionally unscheduled even if Obsidian's metadata cache still has the old value, so the next title/filename sync removes the stale scheduled date marker from the filename.
 - Title and filename maintenance is handled by the live title-sync services and settings-backed repair paths rather than extra command-palette maintenance actions.
 - Raw filename moves/renames should remain limited to folder moves, archive/unarchive, duplicate/create flows, and the auto-rename service.

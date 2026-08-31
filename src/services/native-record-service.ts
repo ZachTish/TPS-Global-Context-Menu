@@ -1169,6 +1169,29 @@ export class NativeRecordService {
     return this.inspect(cached) !== null || this.idsByPath.has(file.path);
   }
 
+  /**
+   * Protect workflow-owned filenames even while MetadataCache is cold or the
+   * record's YAML is malformed. Generic title synchronization must fail closed
+   * when authoritative source still contains native-record identity evidence.
+   */
+  async hasRecordIdentityEvidence(file: unknown, authoritativeSource?: string): Promise<boolean> {
+    if (!(file instanceof TFile) || file.extension.toLocaleLowerCase() !== 'md') return false;
+    if (this.isRecordFile(file)) return true;
+    const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
+    if (cached && this.hasNativeIdentityMarker(cached)) return true;
+    let source = authoritativeSource;
+    if (source === undefined) {
+      try {
+        source = await this.readVaultSource(file);
+      } catch {
+        return true;
+      }
+    }
+    const parsed = parseNativeRecordDocument(source);
+    if (parsed) return this.hasNativeIdentityMarker(parsed.frontmatter);
+    return this.malformedSourceHasNativeIdentityEvidence(source);
+  }
+
   async create(
     kind: TpsNativeRecordKind,
     properties: Record<string, unknown>,

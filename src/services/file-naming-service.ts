@@ -987,8 +987,12 @@ export class FileNamingService {
                     logger.warn(`[TPS GCM] Skipping title sync due to malformed frontmatter: ${targetFile.path}`);
                     return "skipped";
                 }
+                let changed = false;
                 await this.plugin.bulkEditService.runSerializedFrontmatterWrite(targetFile, async () => {
-                    await this.plugin.frontmatterMutationService.process(targetFile, (frontmatter) => {
+                    const currentFile = this.getLiveFile(targetFile);
+                    if (!currentFile) return;
+                    if (await this.hasWorkflowOwnedFilenameEvidence(currentFile)) return;
+                    changed = await this.plugin.frontmatterMutationService.process(currentFile, (frontmatter) => {
                         const existingTitleKeys = Object.keys(frontmatter).filter(
                             (key) => key.trim().toLowerCase() === 'title',
                         );
@@ -1003,7 +1007,7 @@ export class FileNamingService {
                         this.addMeaningfulAliases(frontmatter, [currentTitle, rawBasename], nextTitle);
                     });
                 });
-                return "updated";
+                return changed ? "updated" : "skipped";
             }
             return "skipped";
         } catch (error) {
@@ -1104,9 +1108,14 @@ export class FileNamingService {
 
         // Rename the file
         try {
-            const previousBasename = liveFile.basename;
-            const previousPath = liveFile.path;
-            await this.plugin.app.fileManager.renameFile(liveFile, expectedPath);
+            const currentFile = this.getLiveFile(liveFile);
+            if (!currentFile) return;
+            if (await this.hasWorkflowOwnedFilenameEvidence(currentFile)) return;
+            const finalFile = this.getLiveFile(currentFile);
+            if (!finalFile) return;
+            const previousBasename = finalFile.basename;
+            const previousPath = finalFile.path;
+            await this.plugin.app.fileManager.renameFile(finalFile, expectedPath);
             logger.log(`[TPS GCM] Renamed file from "${previousBasename}" to "${expectedBasename}" (${previousPath} -> ${expectedPath})`);
         } catch (error) {
             if (this.isLikelyMissingFileError(error)) return;
@@ -1273,13 +1282,18 @@ export class FileNamingService {
     }
 
     private async getPersistedFrontmatterStringValues(file: TFile, keys: string[]): Promise<Map<string, string>> {
-        const values = new Map<string, string>();
         let content = '';
         try {
             content = await this.plugin.app.vault.cachedRead(file);
         } catch {
-            return values;
+            return new Map<string, string>();
         }
+
+        return this.getFrontmatterStringValuesFromSource(content, keys);
+    }
+
+    private getFrontmatterStringValuesFromSource(content: string, keys: string[]): Map<string, string> {
+        const values = new Map<string, string>();
 
         const normalized = String(content || '').replace(/\r\n/g, '\n');
         const body = normalized.startsWith('\uFEFF') ? normalized.slice(1) : normalized;
@@ -1300,6 +1314,32 @@ export class FileNamingService {
             values.set(normalizedKey, quoted ? quoted[2] : rawValue);
         }
         return values;
+    }
+
+    private async hasWorkflowOwnedFilenameEvidence(file: TFile): Promise<boolean> {
+        let content = '';
+        try {
+            const vault = this.plugin.app.vault as typeof this.plugin.app.vault & {
+                read?: (target: TFile) => Promise<string>;
+            };
+            content = await (typeof vault.read === 'function' ? vault.read(file) : vault.cachedRead(file));
+        } catch {
+            // A filename mutation is optional. If current bytes cannot be read,
+            // keep the existing path instead of guessing that workflow ownership
+            // is absent.
+            return true;
+        }
+
+        if (await this.plugin.nativeRecordService?.hasRecordIdentityEvidence(file, content)) return true;
+
+        const values = this.getFrontmatterStringValuesFromSource(content, [
+            'runKind',
+            'workflowKind',
+            'kind',
+            'runType',
+            'workflowType',
+        ]);
+        return this.isProcessRunFrontmatter(Object.fromEntries(values));
     }
 
     private getFrontmatterStringValueCaseInsensitive(frontmatter: Record<string, any>, key: string): string {

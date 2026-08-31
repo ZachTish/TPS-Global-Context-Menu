@@ -2862,7 +2862,73 @@ test('only task lines with an authored scheduled or due value cross the native-r
 
 test('ordinary note auto-naming never overrides workflow-owned native record filenames', () => {
   assert.match(fileNamingSource, /nativeRecordService\?\.isRecordFile\(file\)/u);
+  assert.equal(
+    (fileNamingSource.match(/hasWorkflowOwnedFilenameEvidence\(currentFile\)/gu) || []).length,
+    2,
+    'title-to-filename and filename-to-title synchronization both recheck authoritative identity evidence',
+  );
+  assert.match(
+    fileNamingSource,
+    /nativeRecordService\?\.hasRecordIdentityEvidence\(file, content\)/u,
+    'the mutation-boundary guard reuses one authoritative source snapshot',
+  );
   assert.match(fileNamingSource, /Native-record filenames are owned by their creating workflow/u);
+});
+
+test('native filename protection survives a cold cache and malformed frontmatter', async () => {
+  const { service, plugin, contents, metadata, addFile } = createHarness('native-records', { root: '/', layout: 'flat-root' });
+  const validSource = [
+    '---',
+    'tpsId: workout-cold-cache',
+    'tpsSchemaVersion: 1',
+    'kind: workout-session',
+    'title: Workout 2026-08-31 07.04',
+    'createdDate: "2026-08-31T12:04:50.628Z"',
+    'modifiedDate: "2026-08-31T12:04:50.628Z"',
+    '---',
+    '',
+  ].join('\n');
+  const valid = addFile('2026-08-31 - Workout 07.04.md', validSource);
+  metadata.delete(valid);
+  assert.equal(service.isRecordFile(valid), false, 'the fast cache/index check intentionally starts cold');
+  assert.equal(await service.hasRecordIdentityEvidence(valid), true);
+
+  const staleCache = addFile('2026-08-31 - Stale-cache workout.md', validSource);
+  metadata.set(staleCache, { title: 'Previously ordinary' });
+  assert.equal(service.isRecordFile(staleCache), false, 'stale ordinary cache contains no native marker');
+  assert.equal(
+    await service.hasRecordIdentityEvidence(staleCache),
+    true,
+    'negative cache evidence never overrides authoritative native-record bytes',
+  );
+
+  const malformedSource = [
+    '---',
+    'tpsId: workout-malformed',
+    'tpsSchemaVersion: 1',
+    'kind: workout-session',
+    'title: Workout 2026-08-31 07.04',
+    'icon: file-text',
+    'icon: file-text',
+    '!tps-test-invalid-yaml!',
+    '---',
+    '',
+  ].join('\n');
+  const malformed = addFile('Workout 2026-08-31 07.04.md', malformedSource);
+  assert.equal(parseNativeRecordDocument(malformedSource), null, 'malformed YAML keeps MetadataCache unavailable');
+  assert.equal(await service.hasRecordIdentityEvidence(malformed), true, 'raw identity evidence still protects the workflow filename');
+
+  const indexedThenMalformed = addFile('2026-08-31 - Indexed workout.md', validSource);
+  plugin.app.metadataCache.emit('changed', indexedThenMalformed, '', { frontmatter: parseNativeRecordDocument(validSource).frontmatter });
+  assert.equal(service.isRecordFile(indexedThenMalformed), true);
+  contents.set(indexedThenMalformed, malformedSource);
+  metadata.delete(indexedThenMalformed);
+  plugin.app.metadataCache.emit('changed', indexedThenMalformed, '', { frontmatter: undefined });
+  assert.equal(service.isRecordFile(indexedThenMalformed), false, 'the malformed cache event clears the fast identity index');
+  assert.equal(await service.hasRecordIdentityEvidence(indexedThenMalformed), true, 'authoritative bytes retain protection after index loss');
+
+  const ordinaryMalformed = addFile('Ordinary malformed.md', '---\ntitle: Ordinary\nicon: one\nicon: two\n---\n');
+  assert.equal(await service.hasRecordIdentityEvidence(ordinaryMalformed), false);
 });
 
 test('legacy mode rejects new record creation and leaves existing behavior opt-in', async () => {
