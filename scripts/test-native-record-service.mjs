@@ -23,6 +23,9 @@ function parseYamlScalar(raw) {
 function parseYamlForNativeRecordTest(source) {
   const text = String(source || '').trim();
   if (!text) return {};
+  if (text.includes('!tps-test-invalid-yaml!')) throw new Error('synthetic invalid YAML');
+  if (/^\?\s+tpsId\s*$/mu.test(text)) throw new Error('synthetic explicit-key YAML rejection');
+  if (/^-\s+tpsId\s*:/mu.test(text)) return [];
   if (text.startsWith('{')) return JSON.parse(text);
   const result = {};
   let listKey = null;
@@ -197,6 +200,7 @@ function createHarness(mode = 'native-records', options = {}) {
   const events = [];
   const indexed = [];
   const vaultEventHandlers = new Map();
+  const metadataEventHandlers = new Map();
   const root = new TFolder('');
   entries.set('', root);
 
@@ -238,11 +242,15 @@ function createHarness(mode = 'native-records', options = {}) {
       return file;
     },
     cachedRead: async (file) => contents.get(file) || '',
+    read: async (file) => contents.get(file) || '',
     process: async (file, processor) => {
       const next = processor(contents.get(file) || '');
       contents.set(file, next);
       const parsed = parseNativeRecordDocument(next);
       if (parsed) metadata.set(file, parsed.frontmatter);
+      if (options.emitModifyOnProcess) {
+        for (const handler of vaultEventHandlers.get('modify') || []) handler(file);
+      }
       return next;
     },
     rename: async (file, nextPath) => {
@@ -258,6 +266,9 @@ function createHarness(mode = 'native-records', options = {}) {
       handlers.push(handler);
       vaultEventHandlers.set(eventName, handlers);
       return {};
+    },
+    emit: (eventName, ...args) => {
+      for (const handler of vaultEventHandlers.get(eventName) || []) handler(...args);
     },
   };
   const plugin = {
@@ -281,7 +292,15 @@ function createHarness(mode = 'native-records', options = {}) {
       vault,
       metadataCache: {
         getFileCache: (file) => ({ frontmatter: metadata.get(file) }),
-        on: () => ({}),
+        on: (eventName, handler) => {
+          const handlers = metadataEventHandlers.get(eventName) || [];
+          handlers.push(handler);
+          metadataEventHandlers.set(eventName, handlers);
+          return {};
+        },
+        emit: (eventName, ...args) => {
+          for (const handler of metadataEventHandlers.get(eventName) || []) handler(...args);
+        },
       },
       fileManager: {
         generateMarkdownLink: (file, _sourcePath, _subpath, alias) => `[[${file.path.replace(/\.md$/u, '')}|${alias}]]`,
@@ -300,6 +319,10 @@ function createHarness(mode = 'native-records', options = {}) {
   const service = new NativeRecordService(plugin);
   service.setup();
   return { service, plugin, vault, entries, contents, metadata, events, indexed, addFile };
+}
+
+async function planCurrent(service, entries) {
+  return service.planIdentityChanges(entries, await service.snapshot());
 }
 
 test('native record envelope and path helpers are deterministic', () => {
@@ -380,7 +403,7 @@ test('a configured tag profile is retained only for reads while every new record
     calories: 420,
   }, { id: 'food:one' });
   const parsed = parseNativeRecordDocument(contents.get(created.file));
-  assert.equal(service.version, 4);
+  assert.equal(service.version, 5);
   assert.equal(service.getStorageProfile().identityMode, 'property');
   assert.equal(parsed.frontmatter.tpsId, 'food:one');
   assert.equal(parsed.frontmatter.tpsSchemaVersion, 1);
@@ -705,7 +728,7 @@ test('a valid current writer preserves dormant partial alias fields and owns tim
     createdPropertyKey: 'legacyCreated',
     modifiedPropertyKey: 'legacyModified',
   };
-  const { service, contents, addFile } = createHarness('native-records', {
+  const { service, vault, contents, addFile } = createHarness('native-records', {
     storageAliases: [legacyProfile],
   });
   const dormant = addFile('_records/tasks/task-dormant-current.md', serializeNativeRecordDocument({
@@ -753,6 +776,7 @@ test('a valid current writer preserves dormant partial alias fields and owns tim
       legacyCreated: '2026-08-24T18:12:13.456Z', legacyModified: '2026-08-25T18:12:13.456Z',
     },
   }));
+  vault.emit('modify', partialUpdate);
   const timestampUpdated = await service.update(partialUpdate, { status: 'done' });
   assert.equal(timestampUpdated?.frontmatter.createdDate, '2026-08-24T18:12:13.456Z');
   assert.equal(parseNativeRecordDocument(contents.get(partialUpdate)).frontmatter.createdDate, '2026-08-24T18:12:13.456Z');
@@ -869,7 +893,7 @@ test('legacy property identity in tags is recovered only without a valid current
     createdPropertyKey: '',
     modifiedPropertyKey: '',
   };
-  const { service, contents, addFile } = createHarness('native-records', {
+  const { service, vault, contents, addFile } = createHarness('native-records', {
     storageAliases: [legacyTagsIdentityProfile, ambiguousTagsTitleProfile],
   });
 
@@ -912,6 +936,7 @@ test('legacy property identity in tags is recovered only without a valid current
     },
   }));
   const ambiguousBefore = contents.get(ambiguous);
+  vault.emit('modify', legacyForUpdate);
 
   assert.equal(service.inspect(parseNativeRecordDocument(contents.get(legacyForUpdate)).frontmatter)?.id, 'task-tags-update');
   const updated = await service.update(legacyForUpdate, { status: 'done' });
@@ -1635,6 +1660,917 @@ test('updating a legacy tag record adopts property identity without reserializin
   assert.equal(events.filter((event) => event.type === 'explicit').length, 1);
 });
 
+test('reidentify atomically replaces property identity while preserving path, source, body, and business fields', async () => {
+  const { service, contents, events, indexed, addFile } = createHarness();
+  const original = [
+    '\uFEFF---\r\n',
+    'tpsId: calendar-old\r\n',
+    'tpsSchemaVersion: 1\r\n',
+    'kind: calendar-event\r\n',
+    'title: "Provider: planning"\r\n',
+    '# producer-owned placement and spelling must survive\r\n',
+    'scheduled: 2026-10-02T14:00:00.000Z\r\n',
+    'providerPayload: "Keep: exact"\r\n',
+    'createdDate: 2026-08-27T12:00:00.000Z\r\n',
+    'modifiedDate: 2026-08-27T12:00:00.000Z\r\n',
+    'tags:\r\n',
+    '  - hca\r\n',
+    '---\r\n',
+    'Human body with [[links]], tasks, and --- remains exact.\r\n',
+  ].join('');
+  const file = addFile('_records/calendar-events/readable-event.md', original);
+
+  const result = await service.reidentify('calendar-old', 'calendar:v1:source:occurrence', {
+    kind: 'user',
+    surface: 'calendar-identity-migration',
+    sourcePluginId: 'tps-controller',
+  });
+  const output = contents.get(file);
+
+  assert.equal(result?.id, 'calendar:v1:source:occurrence');
+  assert.equal(result?.path, file.path);
+  assert.equal(await service.resolve('calendar-old'), null);
+  assert.equal((await service.resolve('calendar:v1:source:occurrence'))?.path, file.path);
+  assert.match(output, /^tpsId: "?calendar:v1:source:occurrence"?\r$/mu);
+  assert.match(output, /^scheduled: 2026-10-02T14:00:00.000Z\r$/mu);
+  assert.match(output, /^providerPayload: "Keep: exact"\r$/mu);
+  assert.match(output, /^# producer-owned placement and spelling must survive\r$/mu);
+  assert.match(output, /^  - hca\r$/mu);
+  assert.ok(output.endsWith('Human body with [[links]], tasks, and --- remains exact.\r\n'));
+  assert.equal(indexed.length, 1);
+  assert.deepEqual(events, [
+    {
+      type: 'files',
+      paths: [file.path],
+      details: { sourcePluginId: 'tps-controller' },
+    },
+    {
+      type: 'explicit',
+      paths: [file.path],
+      details: { sourcePluginId: 'tps-controller', source: 'calendar-identity-migration' },
+    },
+  ]);
+});
+
+test('reidentify adopts recognized tag identity and retains ordinary tags and body bytes', async () => {
+  const { service, contents, addFile } = createHarness();
+  const file = addFile('_records/calendar-events/legacy-tag-event.md', [
+    '---\n',
+    'kind: calendar-event\n',
+    'title: Legacy tagged event\n',
+    'tags:\n',
+    '  - hca\n',
+    '  - tps/record/v1/calendar-event/calendar-old-tag\n',
+    'location: Conference room\n',
+    '---\n',
+    'Legacy event notes stay here.\n',
+  ].join(''));
+
+  assert.equal(await service.canApplyIdentityPlan([{
+    operation: 'reidentify',
+    reference: file,
+    nextId: 'calendar:v1:source:tagged',
+    updates: [{ tags: ['hca'] }],
+  }]), true);
+  const result = await service.reidentify('calendar-old-tag', 'calendar:v1:source:tagged');
+  const parsed = parseNativeRecordDocument(contents.get(file));
+
+  assert.equal(result?.id, 'calendar:v1:source:tagged');
+  assert.equal(parsed.frontmatter.tpsId, 'calendar:v1:source:tagged');
+  assert.equal(parsed.frontmatter.tpsSchemaVersion, 1);
+  assert.equal(parsed.frontmatter.kind, 'calendar-event');
+  assert.equal(parsed.frontmatter.title, 'Legacy tagged event');
+  assert.equal(parsed.frontmatter.location, 'Conference room');
+  assert.deepEqual(parsed.frontmatter.tags, ['hca']);
+  assert.equal(parsed.body, 'Legacy event notes stay here.\n');
+  assert.equal(await service.resolve('calendar-old-tag'), null);
+  assert.equal((await service.resolve('calendar:v1:source:tagged'))?.path, file.path);
+});
+
+test('a reidentified record can be cleaned up immediately while MetadataCache still reports the old ID', async () => {
+  const { service, plugin, contents, addFile } = createHarness();
+  const file = addFile('_records/calendar-events/stale-cache-event.md', serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: 'Body stays.\n', frontmatter: {
+      tpsId: 'calendar-stale-old',
+      tpsSchemaVersion: 1,
+      kind: 'calendar-event',
+      title: 'Stale cache event',
+      legacyOccurrenceKey: 'provider:occurrence',
+    },
+  }));
+  const staleFrontmatter = parseNativeRecordDocument(contents.get(file)).frontmatter;
+  plugin.app.metadataCache.getFileCache = (candidate) => ({
+    frontmatter: candidate === file
+      ? staleFrontmatter
+      : parseNativeRecordDocument(contents.get(candidate) || '')?.frontmatter,
+  });
+
+  assert.equal(
+    (await service.reidentify('calendar-stale-old', 'calendar:v1:source:stale'))?.id,
+    'calendar:v1:source:stale',
+  );
+  assert.equal((await service.resolve('calendar:v1:source:stale'))?.id, 'calendar:v1:source:stale');
+  assert.equal((await service.resolve(file))?.id, 'calendar:v1:source:stale');
+  assert.equal((await service.resolve(file.path))?.id, 'calendar:v1:source:stale');
+  assert.equal((await service.resolve({ path: file.path }))?.id, 'calendar:v1:source:stale');
+  plugin.app.metadataCache.emit('changed', file, '', { frontmatter: staleFrontmatter });
+  assert.equal((await service.resolve(file))?.id, 'calendar:v1:source:stale');
+  const cleaned = await service.update(file.path, {
+    legacyOccurrenceKey: null,
+    status: 'scheduled',
+  });
+  const parsed = parseNativeRecordDocument(contents.get(file));
+
+  assert.equal(cleaned?.id, 'calendar:v1:source:stale');
+  assert.equal(parsed.frontmatter.tpsId, 'calendar:v1:source:stale');
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'legacyOccurrenceKey'), false);
+  assert.equal(parsed.frontmatter.status, 'scheduled');
+  assert.equal(parsed.body, 'Body stays.\n');
+});
+
+test('reidentify fails closed for duplicate sources and occupied or blocked destinations', async () => {
+  const { service, contents, events, indexed, addFile } = createHarness();
+  const addRecord = (path, id, title) => addFile(path, serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: `${title} body\n`, frontmatter: {
+      tpsId: id,
+      tpsSchemaVersion: 1,
+      kind: 'calendar-event',
+      title,
+    },
+  }));
+  const source = addRecord('_records/calendar-events/source.md', 'calendar-source', 'Source');
+  const occupied = addRecord('_records/calendar-events/occupied.md', 'calendar-occupied', 'Occupied');
+  const duplicateOne = addRecord('_records/calendar-events/duplicate-one.md', 'calendar-duplicate', 'Duplicate one');
+  const duplicateTwo = addRecord('_records/calendar-events/duplicate-two.md', 'CALENDAR-DUPLICATE', 'Duplicate two');
+  const blocked = addFile('_records/calendar-events/blocked.md', serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: 'Blocked body\n', frontmatter: {
+      tpsId: 'calendar-blocked',
+      tpsSchemaVersion: 9,
+      kind: 'calendar-event',
+      title: 'Blocked evidence',
+    },
+  }));
+  const before = new Map([source, occupied, duplicateOne, duplicateTwo, blocked].map((file) => [file, contents.get(file)]));
+
+  assert.equal(await service.canCreateIdentity('calendar-new'), true);
+  assert.equal(await service.canCreateIdentity('CALENDAR-OCCUPIED'), false);
+  assert.equal(await service.canCreateIdentity('calendar-blocked'), false);
+  assert.equal(await service.canCreateIdentity(''), false);
+  assert.equal(await service.canApplyIdentityPlan([
+    { operation: 'reidentify', reference: 'calendar-source', nextId: 'calendar-new', updates: [] },
+    { operation: 'create', nextId: 'calendar-fresh', kind: 'calendar-event', properties: { title: 'Fresh' } },
+  ]), true);
+  assert.equal(await service.canApplyIdentityPlan([
+    { operation: 'reidentify', reference: 'calendar-source', nextId: 'calendar-new', updates: [] },
+    { operation: 'create', nextId: 'CALENDAR-NEW', kind: 'calendar-event', properties: { title: 'Fresh' } },
+  ]), false);
+  assert.equal(await service.canApplyIdentityPlan([
+    { operation: 'create', nextId: 'calendar-occupied', kind: 'calendar-event', properties: { title: 'Occupied' } },
+  ]), false);
+  assert.equal(await service.canApplyIdentityPlan([
+    { operation: 'create', nextId: 'calendar-fresh-without-properties', kind: 'calendar-event' },
+  ]), false);
+  assert.equal(await service.canApplyIdentityPlan([
+    { operation: 'reidentify', reference: 'calendar-source', nextId: 'calendar-first', updates: [] },
+    { operation: 'reidentify', reference: source.path, nextId: 'calendar-second', updates: [] },
+  ]), false);
+  await assert.rejects(
+    () => service.list(),
+    /identity conflicts must be resolved/u,
+  );
+  assert.equal(await service.canReidentify('calendar-source', 'calendar-new'), true);
+  assert.equal(await service.canReidentify('calendar-source', 'CALENDAR-SOURCE'), true);
+  assert.equal(await service.canReidentify('calendar-source', 'CALENDAR-OCCUPIED'), false);
+  assert.equal(await service.canReidentify('calendar-source', 'calendar-blocked'), false);
+  assert.equal(await service.canReidentify({ path: source.path, id: 'calendar-stale-source' }, 'calendar-new'), false);
+  assert.equal(await service.canReidentify('calendar-duplicate', 'calendar-new'), false);
+  assert.equal(await service.canReidentify('calendar-missing', 'calendar-new'), false);
+  assert.equal(await service.canReidentify('calendar-source', ''), false);
+  assert.equal(await service.reidentify('calendar-source', 'CALENDAR-OCCUPIED'), null);
+  assert.equal(await service.reidentify('calendar-source', 'calendar-blocked'), null);
+  assert.equal(await service.reidentify({ path: source.path, id: 'calendar-stale-source' }, 'calendar-new'), null);
+  assert.equal(await service.reidentify('calendar-duplicate', 'calendar-new'), null);
+  assert.equal(await service.reidentify('calendar-missing', 'calendar-new'), null);
+  for (const [file, content] of before) assert.equal(contents.get(file), content);
+  assert.equal(events.length, 0);
+  assert.equal(indexed.length, 0);
+});
+
+test('reidentify preflight matches source-writer eligibility and sees uncached on-disk destinations', async () => {
+  const addRecordSource = (id, newline = '\n', body = 'Body\n') => serializeNativeRecordDocument({
+    bom: '', newline, closer: '---', body, frontmatter: {
+      tpsId: id,
+      tpsSchemaVersion: 1,
+      kind: 'calendar-event',
+      title: id,
+    },
+  });
+
+  {
+    const { service, contents, metadata, addFile } = createHarness();
+    const source = addFile('_records/calendar-events/source.md', addRecordSource('calendar-source'));
+    const destination = addFile('_records/calendar-events/uncached.md', addRecordSource('calendar-uncached'));
+    metadata.delete(destination);
+    const before = contents.get(source);
+    for (const reference of [source, source.path, { path: source.path, id: 'calendar-source' }]) {
+      assert.equal(await service.canReidentify(reference, 'CALENDAR-UNCACHED'), false);
+    }
+    assert.equal(await service.canApplyIdentityPlan([{
+      operation: 'reidentify',
+      reference: source,
+      nextId: 'CALENDAR-UNCACHED',
+      updates: [],
+    }]), false);
+    assert.equal(await service.canCreateIdentity('CALENDAR-UNCACHED'), false);
+    assert.equal(await service.canReidentify('calendar-source', 'CALENDAR-UNCACHED'), false);
+    assert.equal(await service.reidentify('calendar-source', 'CALENDAR-UNCACHED'), null);
+    assert.equal(contents.get(source), before);
+  }
+
+  {
+    const { service, vault, contents, metadata, addFile } = createHarness();
+    const source = addFile('_records/calendar-events/source.md', addRecordSource('calendar-source'));
+    const destination = addFile('_records/calendar-events/destination.md', addRecordSource('calendar-before-edit'));
+    assert.equal(await service.canReidentify(source, 'calendar-after-edit'), true);
+    const pathsBefore = [...vault.getMarkdownFiles()].map((file) => file.path).sort();
+
+    contents.set(destination, addRecordSource('calendar-after-edit'));
+    metadata.set(destination, parseNativeRecordDocument(addRecordSource('calendar-before-edit')).frontmatter);
+    vault.emit('modify', destination);
+
+    assert.equal(await service.canCreateIdentity('CALENDAR-AFTER-EDIT'), false);
+    assert.deepEqual(
+      (await service.list('calendar-event')).map((record) => record.id).sort(),
+      ['calendar-after-edit', 'calendar-source'],
+    );
+    assert.equal((await service.list('task')).length, 0);
+    assert.equal(await service.canReidentify(source.path, 'CALENDAR-AFTER-EDIT'), false);
+    assert.equal(await service.canApplyIdentityPlan([{
+      operation: 'reidentify',
+      reference: { path: source.path, id: 'calendar-source' },
+      nextId: 'CALENDAR-AFTER-EDIT',
+      updates: [],
+    }]), false);
+    assert.equal(await service.reidentify(source, 'CALENDAR-AFTER-EDIT'), null);
+    await assert.rejects(
+      () => service.create('calendar-event', { title: 'Must not duplicate' }, { id: 'CALENDAR-AFTER-EDIT' }),
+      /already exists/u,
+    );
+    assert.deepEqual([...vault.getMarkdownFiles()].map((file) => file.path).sort(), pathsBefore);
+  }
+
+  {
+    const { service, vault, contents, addFile } = createHarness();
+    addFile('_records/calendar-events/source.md', addRecordSource('calendar-source'));
+    const destination = addFile('_records/calendar-events/destination.md', addRecordSource('calendar-before-edit'));
+    const originalRead = vault.read;
+    let releaseFirstRead;
+    let signalFirstRead;
+    const firstReadStarted = new Promise((resolve) => { signalFirstRead = resolve; });
+    const firstReadRelease = new Promise((resolve) => { releaseFirstRead = resolve; });
+    let delayed = false;
+    vault.read = async (file) => {
+      if (!delayed) {
+        delayed = true;
+        signalFirstRead();
+        await firstReadRelease;
+      }
+      return originalRead(file);
+    };
+
+    const firstPreflight = service.canCreateIdentity('calendar-after-edit');
+    await firstReadStarted;
+    contents.set(destination, addRecordSource('calendar-after-edit'));
+    vault.emit('modify', destination);
+    const secondPreflight = service.canCreateIdentity('CALENDAR-AFTER-EDIT');
+    await service.resolve('calendar-not-present');
+    releaseFirstRead();
+
+    assert.deepEqual(await Promise.all([firstPreflight, secondPreflight]), [false, false]);
+    assert.deepEqual(
+      (await service.list()).map((record) => record.id).sort(),
+      ['calendar-after-edit', 'calendar-source'],
+    );
+  }
+
+  {
+    const { service, vault, metadata, addFile } = createHarness();
+    const source = addFile('_records/calendar-events/source.md', addRecordSource('calendar-source'));
+    const unreadable = addFile('_records/calendar-events/unreadable.md', addRecordSource('calendar-unreadable'));
+    metadata.delete(unreadable);
+    const originalRead = vault.read;
+    vault.read = async (file) => {
+      if (file === unreadable) throw new Error('synthetic read failure');
+      return originalRead(file);
+    };
+    const pathsBefore = [...vault.getMarkdownFiles()].map((file) => file.path).sort();
+
+    await assert.rejects(() => service.list(), /Unable to authoritatively read/u);
+    await assert.rejects(() => service.canCreateIdentity('calendar-unreadable'), /Unable to authoritatively read/u);
+    await assert.rejects(
+      () => service.canApplyIdentityPlan([{
+        operation: 'reidentify',
+        reference: source,
+        nextId: 'calendar-unreadable',
+        updates: [],
+      }]),
+      /Unable to authoritatively read/u,
+    );
+    await assert.rejects(
+      () => service.create('calendar-event', { title: 'Must not create' }, { id: 'calendar-unreadable' }),
+      /Unable to authoritatively read/u,
+    );
+    assert.deepEqual([...vault.getMarkdownFiles()].map((file) => file.path).sort(), pathsBefore);
+  }
+
+  {
+    const { service, vault, addFile } = createHarness();
+    addFile('_records/calendar-events/malformed-identity.md', [
+      '---',
+      '{broken',
+      'tpsId: calendar-malformed',
+      'tpsSchemaVersion: 1',
+      'kind: calendar-event',
+      '---',
+      'Body stays.',
+    ].join('\n'));
+    const pathsBefore = [...vault.getMarkdownFiles()].map((file) => file.path).sort();
+
+    await assert.rejects(() => service.snapshot(), /Malformed native-record identity evidence/u);
+    await assert.rejects(() => service.canCreateIdentity('calendar-malformed'), /Malformed native-record identity evidence/u);
+    await assert.rejects(
+      () => service.canApplyIdentityPlan([{ operation: 'create', nextId: 'calendar-canonical', kind: 'calendar-event', properties: { title: 'Canonical' } }]),
+      /Malformed native-record identity evidence/u,
+    );
+    await assert.rejects(
+      () => service.create('calendar-event', { title: 'Must not create' }, { id: 'calendar-canonical' }),
+      /Malformed native-record identity evidence/u,
+    );
+    assert.deepEqual([...vault.getMarkdownFiles()].map((file) => file.path).sort(), pathsBefore);
+  }
+
+  for (const [name, malformedFrontmatter] of [
+    ['flow', '{tpsId: calendar-flow-malformed, tpsSchemaVersion: 1, kind: calendar-event,'],
+    ['indented', '  tpsId: calendar-indented-malformed\n  tpsSchemaVersion: 1\n!tps-test-invalid-yaml!'],
+    ['root-sequence', '- tpsId: calendar-root-sequence-malformed\n  tpsSchemaVersion: 1'],
+    ['explicit-key', '? tpsId\n: calendar-explicit-key-malformed'],
+  ]) {
+    const { service, vault, contents, addFile } = createHarness();
+    const malformed = addFile(`_records/calendar-events/${name}-malformed.md`, [
+      '---',
+      malformedFrontmatter,
+      '---',
+      'Body stays.',
+    ].join('\n'));
+    const before = contents.get(malformed);
+    const pathsBefore = [...vault.getMarkdownFiles()].map((file) => file.path).sort();
+
+    await assert.rejects(() => service.list(), /identity evidence/u);
+    await assert.rejects(() => service.canCreateIdentity(`calendar-${name}-new`), /identity evidence/u);
+    await assert.rejects(() => service.canApplyIdentityPlan([{
+      operation: 'create',
+      nextId: `calendar-${name}-new`,
+      kind: 'calendar-event',
+      properties: { title: 'Must not create' },
+    }]), /identity evidence/u);
+    await assert.rejects(
+      () => service.create('calendar-event', { title: 'Must not create' }, { id: `calendar-${name}-new` }),
+      /identity evidence/u,
+    );
+    assert.equal(contents.get(malformed), before);
+    assert.deepEqual([...vault.getMarkdownFiles()].map((file) => file.path).sort(), pathsBefore);
+  }
+
+  {
+    const { service, vault, addFile } = createHarness();
+    addFile('_records/calendar-events/existing.md', addRecordSource('calendar-existing'));
+    const snapshot = await service.snapshot();
+    const late = addFile('_records/calendar-events/late-legacy.md', addRecordSource('calendar-legacy-old'));
+    vault.emit('create', late);
+
+    assert.equal(await service.canApplyIdentityPlan([{
+      operation: 'create',
+      nextId: 'calendar-canonical-new',
+      kind: 'calendar-event',
+      properties: { title: 'Canonical' },
+    }], snapshot.token), false);
+  }
+
+  {
+    const { service, vault, contents, metadata, addFile } = createHarness();
+    const clean = addFile('_records/calendar-events/clean.md', addRecordSource('calendar-clean'));
+    const staleSource = addRecordSource('calendar-duplicate-business-key');
+    const duplicateBusinessKeySource = serializeNativeRecordDocument({
+      bom: '', newline: '\n', closer: '---', body: 'Body stays.\n', frontmatter: {
+        tpsId: 'calendar-duplicate-business-key',
+        tpsSchemaVersion: 1,
+        kind: 'calendar-event',
+        title: 'Duplicate business key',
+        calendarId: 'calendar-one',
+        CalendarId: 'calendar-two',
+      },
+    });
+    const duplicate = addFile('_records/calendar-events/duplicate-business-key.md', staleSource);
+    const staleFrontmatter = parseNativeRecordDocument(staleSource).frontmatter;
+    metadata.set(duplicate, staleFrontmatter);
+    contents.set(duplicate, duplicateBusinessKeySource);
+    const cachedRead = vault.cachedRead;
+    vault.cachedRead = async (file) => file === duplicate ? staleSource : cachedRead(file);
+    vault.emit('modify', duplicate);
+    const before = new Map([clean, duplicate].map((file) => [file, contents.get(file)]));
+
+    assert.equal(await service.canApplyIdentityPlan([
+      {
+        operation: 'reidentify',
+        reference: clean,
+        nextId: 'calendar-clean-next',
+        updates: [{ status: 'scheduled' }],
+      },
+      {
+        operation: 'reidentify',
+        reference: duplicate,
+        nextId: 'calendar-duplicate-business-key-next',
+        updates: [{ calendarId: null }],
+      },
+    ]), false);
+    for (const [file, source] of before) assert.equal(contents.get(file), source);
+  }
+
+  {
+    const { service, plugin, contents, events, indexed, addFile } = createHarness();
+    const clean = addFile(
+      '_records/calendar-events/flow-plan-clean.md',
+      addRecordSource('calendar-flow-plan-clean'),
+    );
+    const flow = addFile('_records/calendar-events/flow-plan-later.md', [
+      '---',
+      '{"tpsId":"calendar-flow-plan-later","tpsSchemaVersion":1,"kind":"calendar-event","title":"Flow event","calendarId":"calendar-one"}',
+      '---',
+      'Flow body stays.',
+      '',
+    ].join('\n'));
+    const before = new Map([clean, flow].map((file) => [file, contents.get(file)]));
+    const flowOwnedKeys = [
+      'tpsId',
+      'tpsSchemaVersion',
+      'kind',
+      'title',
+      'createdDate',
+      'modifiedDate',
+      'tags',
+      'calendarId',
+    ];
+
+    assert.equal(await service.canApplyIdentityPlan([
+      {
+        operation: 'reidentify',
+        reference: clean,
+        nextId: 'calendar-flow-plan-clean-next',
+        updates: [{ status: 'scheduled' }],
+      },
+      {
+        operation: 'reidentify',
+        reference: flow,
+        nextId: 'calendar-flow-plan-later-next',
+        updates: [{ calendarId: null }],
+      },
+    ]), false);
+    assert.equal(
+      await plugin.frontmatterMutationService.canProcessOwnedKeysPreservingSource(flow, flowOwnedKeys),
+      false,
+    );
+    assert.equal(await plugin.frontmatterMutationService.processOwnedKeysPreservingSource(
+      flow,
+      flowOwnedKeys,
+      (frontmatter) => { frontmatter.calendarId = 'calendar-two'; },
+    ), false);
+    for (const [file, source] of before) assert.equal(contents.get(file), source);
+    assert.equal(events.length, 0);
+    assert.equal(indexed.length, 0);
+  }
+
+  {
+    const { service, contents, addFile } = createHarness();
+    const source = addFile('_records/calendar-events/bare-cr.md', addRecordSource(
+      'calendar-bare-cr',
+      '\r',
+      'Bare CR body\r',
+    ));
+    const before = contents.get(source);
+    assert.equal(await service.canReidentify('calendar-bare-cr', 'calendar-bare-cr-next'), false);
+    assert.equal(await service.reidentify('calendar-bare-cr', 'calendar-bare-cr-next'), null);
+    assert.equal(contents.get(source), before);
+  }
+
+  {
+    const { service, contents, addFile } = createHarness();
+    const source = addFile('_records/calendar-events/duplicate-frontmatter.md', [
+      addRecordSource('calendar-double-frontmatter', '\n', ''),
+      '---\nsecond: block\n---\n',
+    ].join(''));
+    const before = contents.get(source);
+    assert.equal(await service.canReidentify('calendar-double-frontmatter', 'calendar-double-frontmatter-next'), false);
+    assert.equal(await service.reidentify('calendar-double-frontmatter', 'calendar-double-frontmatter-next'), null);
+    assert.equal(contents.get(source), before);
+  }
+});
+
+test('identity plans preflight exact create and ordered update payloads before any writes', async () => {
+  const sourceFor = (id, tags = ['hca']) => serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: `${id} body\n`, frontmatter: {
+      tpsId: id,
+      tpsSchemaVersion: 1,
+      kind: 'calendar-event',
+      title: id,
+      tags,
+    },
+  });
+  const { service, contents, events, indexed, addFile } = createHarness();
+  const first = addFile('_records/calendar-events/payload-first.md', sourceFor('calendar-payload-first'));
+  const second = addFile('_records/calendar-events/payload-second.md', sourceFor('calendar-payload-second'));
+  const before = new Map([first, second].map((file) => [file, contents.get(file)]));
+
+  assert.equal(await service.canApplyIdentityPlan([
+    {
+      operation: 'reidentify',
+      reference: first,
+      nextId: 'calendar-payload-first-next',
+      updates: [{ title: 'First title' }, { title: 'Final title', status: 'scheduled' }],
+    },
+    {
+      operation: 'create',
+      nextId: 'calendar-payload-invalid-create',
+      kind: 'calendar-event',
+      properties: {
+        title: 'Invalid create',
+        tags: ['hca', 'tps/record/v1/calendar-event/calendar-other-owner'],
+      },
+    },
+  ]), false);
+  assert.equal(await service.canApplyIdentityPlan([
+    {
+      operation: 'reidentify',
+      reference: first,
+      nextId: 'calendar-payload-first-next',
+      updates: [{ status: 'scheduled' }],
+    },
+    {
+      operation: 'reidentify',
+      reference: second,
+      nextId: 'calendar-payload-second-next',
+      updates: [{ tags: ['hca', 'tps/record/v1/calendar-event/calendar-other-owner'] }],
+    },
+  ]), false);
+  for (const [file, source] of before) assert.equal(contents.get(file), source);
+  assert.equal(events.length, 0);
+  assert.equal(indexed.length, 0);
+
+  const configured = createHarness('native-records', { titlePropertyKey: 'eventTitle' });
+  assert.equal(await configured.service.canApplyIdentityPlan([{
+    operation: 'create',
+    nextId: 'calendar-storage-collision',
+    kind: 'calendar-event',
+    properties: { title: 'Canonical title', eventTitle: 'Business title' },
+  }]), false);
+  await assert.rejects(
+    () => configured.service.create('calendar-event', {
+      title: 'Canonical title',
+      eventTitle: 'Business title',
+    }, { id: 'calendar-storage-collision' }),
+    /collides with system storage/u,
+  );
+
+  const stale = createHarness();
+  const staleFile = stale.addFile('_records/calendar-events/stale-baseline.md', sourceFor('calendar-stale-baseline'));
+  const staleSnapshot = await stale.service.snapshot();
+  assert.deepEqual(staleSnapshot.records[0].frontmatter.tags, ['hca']);
+  assert.equal((await stale.service.update(staleFile, { tags: ['hca', 'concurrent'] }))?.id, 'calendar-stale-baseline');
+  assert.equal(await stale.service.planIdentityChanges([{
+    operation: 'reidentify',
+    reference: staleFile,
+    nextId: 'calendar-stale-baseline-next',
+    updates: [{ tags: ['hca'] }],
+  }], staleSnapshot), null);
+  assert.deepEqual((await stale.service.resolve(staleFile))?.frontmatter.tags, ['hca', 'concurrent']);
+
+  const racing = createHarness();
+  const racingFile = racing.addFile('_records/calendar-events/racing-baseline.md', sourceFor('calendar-racing-baseline'));
+  const racingSnapshot = await racing.service.snapshot();
+  const originalRead = racing.vault.read;
+  let signalRead;
+  let releaseRead;
+  let delayedRead = false;
+  const readStarted = new Promise((resolve) => { signalRead = resolve; });
+  const readRelease = new Promise((resolve) => { releaseRead = resolve; });
+  racing.vault.read = async (file) => {
+    if (!delayedRead) {
+      delayedRead = true;
+      signalRead();
+      await readRelease;
+    }
+    return originalRead(file);
+  };
+  const racingPlan = racing.service.planIdentityChanges([{
+    operation: 'reidentify',
+    reference: racingFile,
+    nextId: 'calendar-racing-baseline-next',
+    updates: [{ tags: ['hca'] }],
+  }], racingSnapshot);
+  await readStarted;
+  assert.equal((await racing.service.update(racingFile, { tags: ['hca', 'racing'] }))?.id, 'calendar-racing-baseline');
+  releaseRead();
+  assert.equal(await racingPlan, null);
+  assert.deepEqual((await racing.service.resolve(racingFile))?.frontmatter.tags, ['hca', 'racing']);
+});
+
+test('identity plans bind collision-resolved rename paths and reject changed path configuration before mutation', async () => {
+  const sourceFor = (id) => serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: `${id} body\n`, frontmatter: {
+      tpsId: id,
+      tpsSchemaVersion: 1,
+      kind: 'calendar-event',
+      title: id,
+    },
+  });
+  const { service, plugin, contents, addFile } = createHarness();
+  const first = addFile('Legacy/first.md', sourceFor('calendar-path-first'));
+  const second = addFile('Legacy/second.md', sourceFor('calendar-path-second'));
+  addFile('_records/calendar-events/Readable.md', '# unrelated collision\n');
+  const snapshot = await service.snapshot();
+  const entries = [
+    {
+      operation: 'reidentify',
+      reference: first,
+      nextId: 'calendar-path-first-next',
+      fileName: 'Readable',
+      updates: [{ title: '[[ _records/calendar-events/Readable (2)|Readable ]]' }],
+    },
+    {
+      operation: 'reidentify',
+      reference: second,
+      nextId: 'calendar-path-second-next',
+      fileName: 'Second readable',
+      updates: [],
+    },
+  ];
+  const plan = await service.planIdentityChanges(entries, snapshot);
+  assert.deepEqual(plan?.entries.map((entry) => entry.expectedPath), [
+    '_records/calendar-events/Readable (2).md',
+    '_records/calendar-events/Second readable.md',
+  ]);
+  assert.equal((await service.reidentify(first, entries[0].nextId, { kind: 'automation' }, {
+    fileName: entries[0].fileName,
+    expectedPath: plan.entries[0].expectedPath,
+    planToken: plan.token,
+  }))?.path, '_records/calendar-events/Readable (2).md');
+  assert.equal((await service.reidentify(second, entries[1].nextId, { kind: 'automation' }, {
+    fileName: entries[1].fileName,
+    expectedPath: plan.entries[1].expectedPath,
+    planToken: plan.token,
+  }))?.path, '_records/calendar-events/Second readable.md');
+
+  const sameIdPlan = await planCurrent(service, [{
+    operation: 'reidentify',
+    reference: 'calendar-path-second-next',
+    nextId: 'calendar-path-second-next',
+    fileName: 'Same identity rename',
+    updates: [],
+  }]);
+  assert.equal((await service.reidentify('calendar-path-second-next', 'calendar-path-second-next', { kind: 'automation' }, {
+    fileName: 'Same identity rename',
+    expectedPath: sameIdPlan.entries[0].expectedPath,
+    planToken: sameIdPlan.token,
+  }))?.path, '_records/calendar-events/Same identity rename.md');
+
+  const guarded = addFile('Legacy/guarded.md', sourceFor('calendar-path-guarded'));
+  plugin.app.vault.emit('create', guarded);
+  const guardedBefore = contents.get(guarded);
+  const guardedPlan = await planCurrent(service, [{
+    operation: 'reidentify',
+    reference: guarded,
+    nextId: 'calendar-path-guarded-next',
+    fileName: 'Guarded',
+    updates: [],
+  }]);
+  plugin.settings.nativeRecordRootPath = 'Changed root';
+  assert.equal(await service.reidentify(guarded, 'calendar-path-guarded-next', { kind: 'automation' }, {
+    fileName: 'Guarded',
+    expectedPath: guardedPlan.entries[0].expectedPath,
+    planToken: guardedPlan.token,
+  }), null);
+  assert.equal(contents.get(guarded), guardedBefore);
+
+  const flat = createHarness('native-records', { root: 'Flat records', layout: 'flat-root' });
+  const flatSource = flat.addFile('Legacy/flat.md', sourceFor('calendar-flat'));
+  const flatPlan = await planCurrent(flat.service, [{
+    operation: 'reidentify',
+    reference: flatSource,
+    nextId: 'calendar-flat-next',
+    fileName: 'Flat readable',
+    updates: [],
+  }]);
+  assert.equal(flatPlan?.entries[0].expectedPath, 'Flat records/Flat readable.md');
+
+  const batch = createHarness();
+  const batchFirst = batch.addFile('Legacy/batch-first.md', sourceFor('calendar-batch-first'));
+  const batchSecond = batch.addFile('Legacy/batch-second.md', sourceFor('calendar-batch-second'));
+  const sameNameEntries = [
+    { operation: 'reidentify', reference: batchFirst, nextId: 'calendar-batch-first-next', fileName: 'Shared', updates: [] },
+    { operation: 'reidentify', reference: batchSecond, nextId: 'calendar-batch-second-next', fileName: 'Shared', updates: [] },
+    { operation: 'create', nextId: 'calendar-batch-create', kind: 'calendar-event', fileName: 'Shared', properties: { title: 'Created' } },
+  ];
+  const sameNamePlan = await planCurrent(batch.service, sameNameEntries);
+  assert.deepEqual(sameNamePlan?.entries.map((entry) => entry.expectedPath), [
+    '_records/calendar-events/Shared.md',
+    '_records/calendar-events/Shared (2).md',
+    '_records/calendar-events/Shared (3).md',
+  ]);
+  assert.deepEqual((await batch.service.applyIdentityChanges(sameNamePlan, sameNameEntries)).handles.map((handle) => handle.path), [
+    '_records/calendar-events/Shared.md',
+    '_records/calendar-events/Shared (2).md',
+    '_records/calendar-events/Shared (3).md',
+  ]);
+
+  const vacated = createHarness();
+  const vacating = vacated.addFile('_records/calendar-events/Vacated.md', sourceFor('calendar-vacating'));
+  const follower = vacated.addFile('Legacy/follower.md', sourceFor('calendar-follower'));
+  const vacatedPlan = await planCurrent(vacated.service, [
+    { operation: 'reidentify', reference: vacating, nextId: 'calendar-vacating-next', fileName: 'Moved', updates: [] },
+    { operation: 'reidentify', reference: follower, nextId: 'calendar-follower-next', fileName: 'Vacated', updates: [] },
+  ]);
+  assert.deepEqual(vacatedPlan?.entries.map((entry) => entry.expectedPath), [
+    '_records/calendar-events/Moved.md',
+    '_records/calendar-events/Vacated.md',
+  ]);
+
+  for (const interference of ['create-path', 'update-source']) {
+    const concurrent = createHarness();
+    const concurrentFirst = concurrent.addFile('Legacy/concurrent-first.md', sourceFor('calendar-concurrent-first'));
+    const concurrentSecond = concurrent.addFile('Legacy/concurrent-second.md', sourceFor('calendar-concurrent-second'));
+    const concurrentEntries = [
+      { operation: 'reidentify', reference: concurrentFirst, nextId: 'calendar-concurrent-first-next', fileName: 'First planned', updates: [] },
+      { operation: 'reidentify', reference: concurrentSecond, nextId: 'calendar-concurrent-second-next', fileName: 'Later planned', updates: [{ tags: ['planned'] }] },
+    ];
+    const concurrentPlan = await planCurrent(concurrent.service, concurrentEntries);
+    const firstBefore = concurrent.contents.get(concurrentFirst);
+    if (interference === 'create-path') {
+      await concurrent.service.create('calendar-event', { title: 'Unrelated' }, {
+        id: 'calendar-unrelated-create', fileName: 'Later planned',
+      });
+    } else {
+      assert.equal((await concurrent.service.update(concurrentSecond, { tags: ['concurrent'] }))?.id, 'calendar-concurrent-second');
+    }
+    assert.equal((await concurrent.service.applyIdentityChanges(concurrentPlan, concurrentEntries)).ok, false);
+    assert.equal(concurrent.contents.get(concurrentFirst), firstBefore);
+    assert.equal(await concurrent.service.resolve('calendar-concurrent-first-next'), null);
+  }
+
+  const raced = createHarness();
+  const racedFirst = raced.addFile('Legacy/raced-first.md', sourceFor('calendar-raced-first'));
+  const racedSecond = raced.addFile('Legacy/raced-second.md', sourceFor('calendar-raced-second'));
+  const racedEntries = [
+    { operation: 'reidentify', reference: racedFirst, nextId: 'calendar-raced-first-next', fileName: 'Raced first', updates: [] },
+    { operation: 'reidentify', reference: racedSecond, nextId: 'calendar-raced-second-next', fileName: 'Raced second', updates: [{ tags: ['planned'] }] },
+  ];
+  const racedPlan = await planCurrent(raced.service, racedEntries);
+  const racedFirstBefore = raced.contents.get(racedFirst);
+  const originalProcess = raced.vault.process;
+  let releaseProcess;
+  let signalProcess;
+  const processStarted = new Promise((resolve) => { signalProcess = resolve; });
+  const processRelease = new Promise((resolve) => { releaseProcess = resolve; });
+  raced.vault.process = async (file, processor) => {
+    if (file === racedSecond) {
+      signalProcess();
+      await processRelease;
+    }
+    return originalProcess(file, processor);
+  };
+  const unrelatedUpdate = raced.service.update(racedSecond, { tags: ['concurrent'] });
+  await processStarted;
+  const racedApply = raced.service.applyIdentityChanges(racedPlan, racedEntries);
+  releaseProcess();
+  assert.equal((await unrelatedUpdate)?.id, 'calendar-raced-second');
+  assert.equal((await racedApply).ok, false);
+  assert.equal(raced.contents.get(racedFirst), racedFirstBefore);
+  assert.equal(await raced.service.resolve('calendar-raced-first-next'), null);
+
+  const migrating = createHarness();
+  const migrationFirst = migrating.addFile('_records/calendar-events/migration-first.md', sourceFor('calendar-migration-first'));
+  const migrationSecond = migrating.addFile('_records/calendar-events/migration-second.md', sourceFor('calendar-migration-second'));
+  const migrationEntries = [
+    { operation: 'reidentify', reference: migrationFirst, nextId: 'calendar-migration-first-next', fileName: 'Migration first', updates: [] },
+    { operation: 'reidentify', reference: migrationSecond, nextId: 'calendar-migration-second-next', fileName: 'Migration second', updates: [] },
+  ];
+  const migrationPlan = await planCurrent(migrating.service, migrationEntries);
+  const migrationFirstBefore = migrating.contents.get(migrationFirst);
+  const migrationProcess = migrating.vault.process;
+  let releaseMigration;
+  let signalMigration;
+  const migrationStarted = new Promise((resolve) => { signalMigration = resolve; });
+  const migrationRelease = new Promise((resolve) => { releaseMigration = resolve; });
+  let pausedMigration = false;
+  migrating.vault.process = async (file, processor) => {
+    if (!pausedMigration) {
+      pausedMigration = true;
+      signalMigration();
+      await migrationRelease;
+    }
+    return migrationProcess(file, processor);
+  };
+  const storageMigration = migrating.service.migrateStorageProfile();
+  await migrationStarted;
+  const migrationApply = migrating.service.applyIdentityChanges(migrationPlan, migrationEntries);
+  releaseMigration();
+  await storageMigration;
+  assert.equal((await migrationApply).ok, false);
+  assert.equal(parseNativeRecordDocument(migrating.contents.get(migrationFirst)).frontmatter.tpsId, 'calendar-migration-first');
+  assert.equal(await migrating.service.resolve('calendar-migration-first-next'), null);
+
+  const externalRace = createHarness();
+  const externalFirst = externalRace.addFile('Legacy/external-first.md', sourceFor('calendar-external-first'));
+  const externalSecond = externalRace.addFile('Legacy/external-second.md', sourceFor('calendar-external-second'));
+  const unrelatedFile = externalRace.addFile('Unrelated.md', '# unrelated\n');
+  const externalEntries = [
+    { operation: 'reidentify', reference: externalFirst, nextId: 'calendar-external-first-next', fileName: 'External first', updates: [] },
+    { operation: 'reidentify', reference: externalSecond, nextId: 'calendar-external-second-next', fileName: 'External second', updates: [] },
+  ];
+  const externalPlan = await planCurrent(externalRace.service, externalEntries);
+  const externalRename = externalRace.plugin.app.fileManager.renameFile;
+  let injectedExternalModify = false;
+  externalRace.plugin.app.fileManager.renameFile = async (file, path) => {
+    await externalRename(file, path);
+    if (!injectedExternalModify) {
+      injectedExternalModify = true;
+      externalRace.vault.emit('modify', unrelatedFile);
+    }
+  };
+  const partial = await externalRace.service.applyIdentityChanges(externalPlan, externalEntries);
+  assert.equal(partial.ok, false);
+  assert.equal(partial.failedIndex, 1);
+  assert.deepEqual(partial.handles.map((handle) => handle.id), ['calendar-external-first-next']);
+  assert.equal((await externalRace.service.resolve('calendar-external-first-next'))?.path, '_records/calendar-events/External first.md');
+  assert.equal(await externalRace.service.resolve('calendar-external-second-next'), null);
+});
+
+test('internal identity writes keep one authoritative scan across a planned batch', async () => {
+  const sourceFor = (id) => serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: `${id} body\n`, frontmatter: {
+      tpsId: id,
+      tpsSchemaVersion: 1,
+      kind: 'calendar-event',
+      title: id,
+    },
+  });
+  const { service, vault, addFile } = createHarness('native-records', { emitModifyOnProcess: true });
+  const first = addFile('_records/calendar-events/first.md', sourceFor('calendar-first'));
+  const second = addFile('_records/calendar-events/second.md', sourceFor('calendar-second'));
+  const originalRead = vault.read;
+  let reads = 0;
+  vault.read = async (file) => {
+    reads += 1;
+    return originalRead(file);
+  };
+
+  const snapshot = await service.snapshot();
+  assert.equal(await service.canApplyIdentityPlan([
+    { operation: 'reidentify', reference: first, nextId: 'calendar-first-next', updates: [] },
+    { operation: 'reidentify', reference: second, nextId: 'calendar-second-next', updates: [] },
+  ], snapshot.token), true);
+  assert.equal((await service.reidentify(first, 'calendar-first-next'))?.id, 'calendar-first-next');
+  assert.equal((await service.reidentify(second, 'calendar-second-next'))?.id, 'calendar-second-next');
+  assert.equal(reads, 8);
+});
+
+test('reidentify revalidates the old ID inside the write transaction', async () => {
+  const { service, plugin, vault, contents, events, indexed } = createHarness();
+  const record = await service.create('calendar-event', { title: 'CAS event' }, {
+    id: 'calendar-before-cas',
+    now: new Date('2026-08-27T12:00:00.000Z'),
+  });
+  const sourcePreservingWriter = plugin.frontmatterMutationService.processOwnedKeysPreservingSource
+    .bind(plugin.frontmatterMutationService);
+  let injected = false;
+  plugin.frontmatterMutationService.processOwnedKeysPreservingSource = async (...args) => {
+    if (!injected) {
+      injected = true;
+      await vault.process(record.file, (source) => source.replace(
+        /^tpsId: calendar-before-cas$/mu,
+        'tpsId: calendar-changed-elsewhere',
+      ));
+    }
+    return sourcePreservingWriter(...args);
+  };
+  const eventCount = events.length;
+  const indexCount = indexed.length;
+
+  assert.equal(await service.reidentify('calendar-before-cas', 'calendar-after-cas'), null);
+  assert.match(contents.get(record.file), /^tpsId: calendar-changed-elsewhere$/mu);
+  assert.doesNotMatch(contents.get(record.file), /calendar-after-cas/u);
+  assert.equal(events.length, eventCount);
+  assert.equal(indexed.length, indexCount);
+});
+
 test('invalid detached update candidates cannot change bytes, timestamps, events, or indexes', async () => {
   const { service, contents, events, indexed } = createHarness();
   const created = await service.create('task', {
@@ -1680,7 +2616,10 @@ test('native record create, update, archive, and asset paths preserve typed valu
   assert.equal(created.frontmatter.calories, 640);
   assert.deepEqual(created.frontmatter.tags, ['food', 'lunch']);
 
-  const updated = await service.update(created.file, { calories: 700, tpsId: 'forbidden', kind: 'asset' });
+  const beforeInvalidUpdate = contents.get(created.file);
+  assert.equal(await service.update(created.file, { calories: 700, tpsId: 'forbidden', kind: 'asset' }), null);
+  assert.equal(contents.get(created.file), beforeInvalidUpdate);
+  const updated = await service.update(created.file, { calories: 700 });
   assert.equal(updated?.id, 'food-1');
   assert.equal(updated?.kind, 'food-entry');
   assert.equal(updated?.frontmatter.calories, 700);
@@ -2010,7 +2949,8 @@ test('native profile is explicit, default-off, and removes legacy active paths o
 });
 
 test('public GCM API exposes versioned generic and task record contracts', () => {
-  assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,1800}rename:[\s\S]{0,800}archive:/u);
+  assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
+  assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 5;/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);
   assert.match(apiSource, /const taskRecordsApi = \{[\s\S]{0,200}version: 1[\s\S]{0,500}promote:[\s\S]{0,900}resolve:/u);
   assert.match(apiSource, /nativeRecords: nativeRecordsApi,[\s\S]{0,100}taskRecords: taskRecordsApi/u);

@@ -209,6 +209,7 @@ function makeFixture(initialContent = pocRecord) {
     },
     app: {
       vault: {
+        read: async () => content,
         cachedRead: async () => content,
         process: async (_file, updater) => {
           activeProcesses += 1;
@@ -220,6 +221,7 @@ function makeFixture(initialContent = pocRecord) {
           return content;
         },
         getFileByPath: () => file,
+        getMarkdownFiles: () => [file],
       },
       metadataCache: {
         getFileCache: () => ({ tags: [] }),

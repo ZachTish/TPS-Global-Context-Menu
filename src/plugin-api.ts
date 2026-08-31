@@ -754,11 +754,41 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             plugin.nativeRecordService.resolveAsset(source),
         resolve: (reference: Parameters<typeof plugin.nativeRecordService.resolve>[0]) =>
             plugin.nativeRecordService.resolve(reference),
+        list: (kind?: Parameters<typeof plugin.nativeRecordService.list>[0]) =>
+            plugin.nativeRecordService.list(kind),
+        snapshot: (kind?: Parameters<typeof plugin.nativeRecordService.snapshot>[0]) =>
+            plugin.nativeRecordService.snapshot(kind),
         update: (
             reference: Parameters<typeof plugin.nativeRecordService.update>[0],
             updates: Parameters<typeof plugin.nativeRecordService.update>[1],
             cause?: Parameters<typeof plugin.nativeRecordService.update>[2],
         ) => plugin.nativeRecordService.update(reference, updates, publicMutationCause(cause)),
+        canCreateIdentity: (
+            nextId: Parameters<typeof plugin.nativeRecordService.canCreateIdentity>[0],
+        ) => plugin.nativeRecordService.canCreateIdentity(nextId),
+        canApplyIdentityPlan: (
+            entries: Parameters<typeof plugin.nativeRecordService.canApplyIdentityPlan>[0],
+            snapshotToken?: Parameters<typeof plugin.nativeRecordService.canApplyIdentityPlan>[1],
+        ) => plugin.nativeRecordService.canApplyIdentityPlan(entries, snapshotToken),
+        planIdentityChanges: (
+            entries: Parameters<typeof plugin.nativeRecordService.planIdentityChanges>[0],
+            snapshot: Parameters<typeof plugin.nativeRecordService.planIdentityChanges>[1],
+        ) => plugin.nativeRecordService.planIdentityChanges(entries, snapshot),
+        applyIdentityChanges: (
+            plannedBatch: Parameters<typeof plugin.nativeRecordService.applyIdentityChanges>[0],
+            entries: Parameters<typeof plugin.nativeRecordService.applyIdentityChanges>[1],
+            cause?: Parameters<typeof plugin.nativeRecordService.applyIdentityChanges>[2],
+        ) => plugin.nativeRecordService.applyIdentityChanges(plannedBatch, entries, publicMutationCause(cause)),
+        canReidentify: (
+            reference: Parameters<typeof plugin.nativeRecordService.canReidentify>[0],
+            nextId: Parameters<typeof plugin.nativeRecordService.canReidentify>[1],
+        ) => plugin.nativeRecordService.canReidentify(reference, nextId),
+        reidentify: (
+            reference: Parameters<typeof plugin.nativeRecordService.reidentify>[0],
+            nextId: Parameters<typeof plugin.nativeRecordService.reidentify>[1],
+            cause?: Parameters<typeof plugin.nativeRecordService.reidentify>[2],
+            options?: Parameters<typeof plugin.nativeRecordService.reidentify>[3],
+        ) => plugin.nativeRecordService.reidentify(reference, nextId, publicMutationCause(cause), options),
         rename: (
             reference: Parameters<typeof plugin.nativeRecordService.rename>[0],
             fileName: Parameters<typeof plugin.nativeRecordService.rename>[1],

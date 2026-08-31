@@ -157,6 +157,40 @@ export class FrontmatterMutationService {
    * process(): automation-owned presentation fields must not reserialize a
    * native record's identity, timestamps, tags, key order, comments, or body.
    */
+  async canProcessOwnedKeysPreservingSource(
+    file: TFile,
+    ownedKeys: string[],
+    mutator?: SynchronousFrontmatterMutator,
+  ): Promise<boolean> {
+    if (!(file instanceof TFile)) return false;
+    if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
+    if (file.extension.toLowerCase() !== 'md') return false;
+    const keys = this.normalizeOwnedKeys(ownedKeys);
+    if (keys.length === 0) return false;
+
+    try {
+      const vault = this.plugin.app.vault as typeof this.plugin.app.vault & {
+        read?: (target: TFile) => Promise<string>;
+      };
+      const raw = String(await (
+        typeof vault.read === 'function' ? vault.read(file) : vault.cachedRead(file)
+      ) || '');
+      if (/\r(?!\n)/u.test(raw)) return false;
+      const parsed = this.parseFrontmatterDocument(
+        raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n'),
+      );
+      if (parsed.ok !== true) return false;
+      if (
+        this.findDuplicateOwnedSourceKey(raw, keys)
+        || !this.canRewriteOwnedFrontmatterSource(raw, parsed.frontmatter, keys)
+      ) return false;
+      if (!mutator) return true;
+      return this.canApplyOwnedMutatorDryRun(raw, parsed.frontmatter, keys, mutator);
+    } catch {
+      return false;
+    }
+  }
+
   async processOwnedKeysPreservingSource(
     file: TFile,
     ownedKeys: string[],
@@ -197,6 +231,14 @@ export class FrontmatterMutationService {
           logger.warn('[TPS GCM] Refusing ambiguous source-preserving frontmatter write', {
             file: file.path,
             duplicateOwnedKey,
+            ownedKeys: keys,
+          });
+          return raw;
+        }
+        if (!this.canRewriteOwnedFrontmatterSource(raw, parsed.frontmatter, keys)) {
+          this.warnMalformed(file, 'unsupported-owned-key-source-layout');
+          logger.warn('[TPS GCM] Refusing source-preserving write whose parsed owned keys do not map to rewritable source', {
+            file: file.path,
             ownedKeys: keys,
           });
           return raw;
@@ -469,6 +511,107 @@ export class FrontmatterMutationService {
       counts.set(folded, count);
     }
     return null;
+  }
+
+  private canRewriteOwnedFrontmatterSource(
+    rawContent: string,
+    frontmatter: FrontmatterRecord,
+    ownedKeys: string[],
+  ): boolean {
+    const source = rawContent.startsWith('\uFEFF') ? rawContent.slice(1) : rawContent;
+    const openStart = this.findSourceFrontmatterStart(source);
+    const spans: SourceKeySpan[] = [];
+    if (openStart >= 0) {
+      const openingLineEnd = source.indexOf('\n', openStart);
+      if (openingLineEnd < 0) return false;
+      const blockStart = openingLineEnd + 1;
+      const closeStart = this.findSourceFrontmatterClose(source, blockStart);
+      if (closeStart < 0) return false;
+      spans.push(...this.findSourceKeySpans(source, blockStart, closeStart));
+    }
+
+    const spansByKey = new Map<string, SourceKeySpan[]>();
+    for (const span of spans) {
+      const folded = casefold(span.key);
+      const matches = spansByKey.get(folded) || [];
+      matches.push(span);
+      spansByKey.set(folded, matches);
+    }
+
+    const dryRunMutations: OwnedSourceMutation[] = [];
+    const dryRunValues = new Map<string, string>();
+    for (const requestedKey of ownedKeys) {
+      const actualKey = findKeyCaseInsensitive(frontmatter, requestedKey);
+      if (!actualKey) continue;
+      const matchingSpans = spansByKey.get(casefold(actualKey)) || [];
+      if (matchingSpans.length !== 1) return false;
+      const marker = `__tps_owned_write_value_${dryRunValues.size + 1}__`;
+      dryRunValues.set(actualKey, marker);
+      dryRunMutations.push({ sourceKey: actualKey, remove: false, value: marker });
+    }
+
+    const occupiedKeys = new Set([
+      ...Object.keys(frontmatter).map(casefold),
+      ...spans.map((span) => casefold(span.key)),
+    ]);
+    let probeKey = '__tps_owned_write_preflight__';
+    for (let suffix = 2; occupiedKeys.has(casefold(probeKey)); suffix += 1) {
+      probeKey = `__tps_owned_write_preflight_${suffix}__`;
+    }
+    const probeValue = '__tps_owned_write_probe__';
+    dryRunMutations.push({ sourceKey: probeKey, remove: false, value: probeValue });
+
+    const rewritten = this.rewriteOwnedFrontmatterSource(rawContent, dryRunMutations);
+    if (rewritten === rawContent) return false;
+    const parsedDryRun = this.parseFrontmatterDocument(
+      rewritten.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n'),
+    );
+    if (parsedDryRun.ok !== true) return false;
+    for (const [key, marker] of dryRunValues) {
+      const persistedKey = findKeyCaseInsensitive(parsedDryRun.frontmatter, key);
+      if (!persistedKey || parsedDryRun.frontmatter[persistedKey] !== marker) return false;
+    }
+    const persistedProbeKey = findKeyCaseInsensitive(parsedDryRun.frontmatter, probeKey);
+    return Boolean(
+      persistedProbeKey
+      && parsedDryRun.frontmatter[persistedProbeKey] === probeValue
+    );
+  }
+
+  private canApplyOwnedMutatorDryRun(
+    rawContent: string,
+    parsedFrontmatter: FrontmatterRecord,
+    ownedKeys: string[],
+    mutator: SynchronousFrontmatterMutator,
+  ): boolean {
+    const candidate = { ...parsedFrontmatter };
+    const before = this.snapshotOwnedValues(candidate, ownedKeys);
+    try {
+      mutator(candidate);
+    } catch {
+      return false;
+    }
+    const mutations = this.collectOwnedMutations(before, candidate, ownedKeys);
+    if (mutations.length === 0) return true;
+    const rewritten = this.rewriteOwnedFrontmatterSource(rawContent, mutations);
+    if (rewritten === rawContent) return false;
+    const validation = this.validateNextContent(rewritten);
+    if (validation.ok !== true) return false;
+    const parsed = this.parseFrontmatterDocument(
+      rewritten.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n'),
+    );
+    if (parsed.ok !== true) return false;
+    for (const key of ownedKeys) {
+      const expectedKey = findKeyCaseInsensitive(candidate, key);
+      const actualKey = findKeyCaseInsensitive(parsed.frontmatter, key);
+      if (!expectedKey && !actualKey) continue;
+      if (!expectedKey || !actualKey) return false;
+      if (
+        this.ownedValueSignature(candidate[expectedKey])
+        !== this.ownedValueSignature(parsed.frontmatter[actualKey])
+      ) return false;
+    }
+    return true;
   }
 
   private rewriteOwnedFrontmatterSource(rawContent: string, mutations: OwnedSourceMutation[]): string {

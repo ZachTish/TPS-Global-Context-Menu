@@ -92,6 +92,8 @@ export interface TpsNativeRecordCreateOptions {
   id?: string;
   now?: Date;
   fileName?: string;
+  expectedPath?: string;
+  planToken?: number;
   cause?: FilePropertiesMutationCause;
 }
 
@@ -105,6 +107,51 @@ export interface TpsTaskPromotionResult {
 }
 
 type NativeRecordReference = string | TFile | { path?: string; id?: string; tpsId?: string };
+
+export type TpsNativeRecordIdentityPlanEntry =
+  | {
+    operation: 'create';
+    nextId: string;
+    kind: TpsNativeRecordKind;
+    properties: Record<string, unknown>;
+    fileName?: string;
+  }
+  | {
+    operation: 'reidentify';
+    nextId: string;
+    reference: NativeRecordReference;
+    updates: readonly Record<string, unknown>[];
+    fileName?: string;
+  };
+
+export interface TpsNativeRecordIdentityPlan {
+  token: number;
+  revision: number;
+  entries: Array<{
+    operation: TpsNativeRecordIdentityPlanEntry['operation'];
+    nextId: string;
+    expectedPath: string | null;
+  }>;
+}
+
+export interface TpsNativeRecordIdentityApplyResult {
+  ok: boolean;
+  handles: TpsNativeRecordHandle[];
+  failedIndex: number | null;
+  error?: string;
+}
+
+export interface TpsNativeRecordReidentifyOptions {
+  fileName?: string;
+  expectedPath?: string;
+  planToken?: number;
+}
+
+export interface TpsNativeRecordSnapshot {
+  token: number;
+  revision: number;
+  records: TpsNativeRecordHandle[];
+}
 
 interface ParsedNativeRecordDocument {
   bom: string;
@@ -934,6 +981,24 @@ export function parseNativeRecordDocument(content: string): ParsedNativeRecordDo
   }
 }
 
+function openingFrontmatterSource(content: string): string | null {
+  const source = String(content || '').replace(/^\uFEFF/u, '');
+  const lines = source.split(/\r\n|\n|\r/u);
+  if (!/^---[\t ]*$/u.test(String(lines[0] || ''))) return null;
+  let closerIndex = lines.length;
+  for (let index = 1; index < lines.length; index += 1) {
+    if (/^(---|\.\.\.)[\t ]*$/u.test(String(lines[index] || ''))) {
+      closerIndex = index;
+      break;
+    }
+  }
+  return lines.slice(1, closerIndex).join('\n');
+}
+
+function escapeRegexLiteral(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
 export function serializeNativeRecordDocument(document: ParsedNativeRecordDocument): string {
   const yaml = stringifyYaml(document.frontmatter).trimEnd();
   const body = String(document.body || '');
@@ -959,7 +1024,7 @@ export function isNativeRecordEnvelope(value: unknown): value is TpsNativeRecord
  * legacy companion note.
  */
 export class NativeRecordService {
-  readonly version = 4;
+  readonly version = 5;
   private setupComplete = false;
   private readonly newlyCreatedFiles = new WeakSet<TFile>();
   private readonly draftEligibilityTimers = new WeakMap<TFile, ReturnType<typeof setTimeout>>();
@@ -971,6 +1036,15 @@ export class NativeRecordService {
   private readonly blockedPathsById = new Map<string, Set<string>>();
   private readonly assetPathsBySourcePath = new Map<string, Set<string>>();
   private readonly inFlightCreateIds = new Set<string>();
+  private readonly inFlightReidentifyIds = new Set<string>();
+  private readonly internalIdentityWritesByPath = new Map<string, number>();
+  private identitySourceGeneration = 0;
+  private authoritativeIdentityGeneration = -1;
+  private authoritativeIdentityRefresh: Promise<void> | null = null;
+  private nativePlanMutationLock: symbol | null = null;
+  private nativeMutationRevision = 0;
+  private activeNativeWrites = 0;
+  private readonly nativeWriteDrainWaiters = new Set<() => void>();
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
@@ -979,11 +1053,18 @@ export class NativeRecordService {
     this.setupComplete = true;
     this.rebuildIndex();
     this.plugin.registerEvent(this.plugin.app.metadataCache.on('changed', (file, _data, cache) => {
-      this.indexFile(file, cache?.frontmatter);
+      // A delayed cache event can still contain the pre-write identity after a
+      // source-preserving internal mutation. Keep the exact authoritative
+      // index while its generation is current; external Vault events invalidate
+      // that generation before cache data is accepted again.
+      if (this.authoritativeIdentityGeneration !== this.identitySourceGeneration) {
+        this.indexFile(file, cache?.frontmatter);
+      }
       if (this.newlyCreatedFiles.has(file)) void this.adoptNewTaskDraft(file);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('create', (file) => {
       if (!(file instanceof TFile)) return;
+      if (!this.isInternalIdentityWrite(file.path)) this.identitySourceGeneration += 1;
       this.newlyCreatedFiles.add(file);
       const timer = globalThis.setTimeout(() => {
         this.newlyCreatedFiles.delete(file);
@@ -994,10 +1075,22 @@ export class NativeRecordService {
       this.indexFile(file);
       void this.adoptNewTaskDraft(file);
     }));
+    this.plugin.registerEvent(this.plugin.app.vault.on('modify', (file) => {
+      if (file instanceof TFile && !this.isInternalIdentityWrite(file.path)) {
+        this.identitySourceGeneration += 1;
+      }
+    }));
     this.plugin.registerEvent(this.plugin.app.vault.on('delete', (file) => {
-      if (file instanceof TFile) this.removePath(file.path);
+      if (!(file instanceof TFile)) return;
+      if (!this.isInternalIdentityWrite(file.path)) this.identitySourceGeneration += 1;
+      this.removePath(file.path);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('rename', (file, oldPath) => {
+      if (
+        file instanceof TFile
+        && !this.isInternalIdentityWrite(oldPath)
+        && !this.isInternalIdentityWrite(file.path)
+      ) this.identitySourceGeneration += 1;
       void this.handleRecordRename(file, oldPath);
     }));
   }
@@ -1089,7 +1182,11 @@ export class NativeRecordService {
     properties: Record<string, unknown>,
     options: TpsNativeRecordCreateOptions,
     commitGuard?: () => boolean,
+    internalPlanKey?: symbol,
   ): Promise<TpsNativeRecordHandle> {
+    if (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock) {
+      throw new Error('TPS native-record identity plan is currently being applied.');
+    }
     this.assertEnabled();
     this.assertValidStorageProfile();
     if (commitGuard && !commitGuard()) {
@@ -1103,63 +1200,48 @@ export class NativeRecordService {
     const id = String(options.id || this.generateId(kind)).trim();
     if (!id) throw new Error('TPS native record ID is required.');
     const reservationKey = this.idKey(id);
-    if (this.inFlightCreateIds.has(reservationKey)) {
+    if (
+      this.inFlightCreateIds.has(reservationKey)
+      || this.inFlightReidentifyIds.has(reservationKey)
+    ) {
       throw new Error(`TPS native record ID creation is already in progress: ${id}`);
     }
     this.inFlightCreateIds.add(reservationKey);
     try {
-      this.rebuildIndex();
+      await this.refreshIdentityIndexFromVaultSource();
+      if (
+        options.planToken != null
+        && (!Number.isSafeInteger(options.planToken) || options.planToken !== this.identitySourceGeneration)
+      ) throw new Error('TPS native record identity plan is stale.');
       if (this.pathsById.has(reservationKey) || this.blockedPathsById.has(reservationKey)) {
         throw new Error(`TPS native record ID already exists: ${id}`);
       }
 
-      const title = String(properties.title || '').replace(/\s+/gu, ' ').trim();
-      if (!title) throw new Error('TPS native records require a title.');
-      const userProperties = this.copyUserProperties(properties);
-      const frontmatter: TpsNativeRecordEnvelope = {
-        ...userProperties,
-        tpsId: id,
-        tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
-        kind,
-        title,
-        createdDate: timestamp,
-        modifiedDate: timestamp,
-      };
-      const writeProfile = this.getStorageProfile();
-      const readableProfiles = this.getReadableStorageProfiles();
-      const preliminaryFrontmatter = applyEnvelopeToRawFrontmatter(
-        userProperties,
-        frontmatter,
-        writeProfile,
-        [],
-      );
-      const preliminaryMatch = preliminaryFrontmatter
-        ? inspectNativeRecordMatchSet(preliminaryFrontmatter, readableProfiles, writeProfile)
-        : null;
-      const persistedFrontmatter = preliminaryFrontmatter && preliminaryMatch
-        ? applyEnvelopeToRawFrontmatter(
-          preliminaryFrontmatter,
-          preliminaryMatch.inspection.frontmatter,
-          writeProfile,
-          preliminaryMatch.matchedProfiles,
-          preliminaryMatch.recognizedIdentityTagProfiles,
-        )
-        : null;
-      const persistedInspection = persistedFrontmatter
-        ? inspectNativeRecordMatchSet(persistedFrontmatter, readableProfiles, writeProfile)?.inspection
-        : null;
-      if (!persistedInspection || persistedInspection.id !== id || persistedInspection.kind !== kind) {
-        throw new Error('TPS native record properties contain conflicting or invalid storage identity evidence.');
-      }
+      const prepared = this.prepareCreateCandidate(kind, properties, id, timestamp);
+      const { persistedFrontmatter, persistedInspection } = prepared;
       const path = this.availableRecordPath(kind, id, options.fileName);
+      if (
+        options.expectedPath != null
+        && normalizePath(path) !== normalizePath(options.expectedPath)
+      ) throw new Error('TPS native record planned path is no longer available.');
       await this.ensureParentFolder(path);
       this.assertEnabled();
       if (commitGuard && !commitGuard()) {
         throw new Error('Standalone task checkbox mapping changed before record creation.');
       }
-      this.rebuildIndex();
+      await this.refreshIdentityIndexFromVaultSource();
+      if (
+        options.planToken != null
+        && options.planToken !== this.identitySourceGeneration
+      ) throw new Error('TPS native record identity plan is stale.');
       if (this.pathsById.has(reservationKey) || this.blockedPathsById.has(reservationKey)) {
         throw new Error(`TPS native record ID already exists: ${id}`);
+      }
+      if (options.expectedPath != null) {
+        const confirmedPath = this.availableRecordPath(kind, id, options.fileName);
+        if (normalizePath(confirmedPath) !== normalizePath(options.expectedPath)) {
+          throw new Error('TPS native record planned path is no longer available.');
+        }
       }
       const content = serializeNativeRecordDocument({
         bom: '',
@@ -1168,7 +1250,9 @@ export class NativeRecordService {
         body: '',
         frontmatter: persistedFrontmatter,
       });
-      const file = await this.plugin.app.vault.create(path, content);
+      const file = await this.withInternalIdentityWrite([path], () => (
+        this.plugin.app.vault.create(path, content)
+      ), internalPlanKey);
       const persistedEnvelope = persistedInspection.frontmatter;
       this.indexFile(file, persistedFrontmatter);
       this.plugin.entityIndexService?.upsertFile(file, persistedEnvelope);
@@ -1184,7 +1268,9 @@ export class NativeRecordService {
     reference: NativeRecordReference,
     fileName: string,
     cause?: FilePropertiesMutationCause,
+    internalPlanKey?: symbol,
   ): Promise<TpsNativeRecordHandle | null> {
+    if (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock) return null;
     this.assertEnabled();
     const record = await this.resolve(reference);
     if (!record) return null;
@@ -1196,13 +1282,15 @@ export class NativeRecordService {
     if (nextPath === record.file.path) return record;
     const oldPath = record.file.path;
     await this.ensureParentFolder(nextPath);
-    this.rebuildIndex();
+    await this.refreshIdentityIndexFromVaultSource();
     if (!this.recordsByPath.has(oldPath)) {
       this.indexFile(record.file, record.frontmatter);
     }
     if (!this.hasUniquePathOwnership(record.id, oldPath)) return null;
     if (this.plugin.app.vault.getFileByPath(oldPath) !== record.file) return null;
-    await this.plugin.app.fileManager.renameFile(record.file, nextPath);
+    await this.withInternalIdentityWrite([oldPath, nextPath], () => (
+      this.plugin.app.fileManager.renameFile(record.file, nextPath)
+    ), internalPlanKey);
     this.removePath(oldPath);
     this.indexFile(record.file, record.frontmatter);
     this.notify([oldPath, record.file.path], cause, 'native-record-rename');
@@ -1271,12 +1359,26 @@ export class NativeRecordService {
           ? this.plugin.app.vault.getFileByPath(normalizePath(String(reference.path)))
           : null;
     if (directFile instanceof TFile) {
-      const directRecord = await this.readHandle(directFile);
-      if (!directRecord) return null;
-      this.rebuildIndex();
-      if (!this.recordsByPath.has(directRecord.path)) {
-        this.indexFile(directFile, directRecord.frontmatter);
+      const referenceId = (
+        reference
+        && typeof reference === 'object'
+        && !(reference instanceof TFile)
+      ) ? String(reference.id || reference.tpsId || '').trim() : '';
+      if (this.authoritativeIdentityGeneration === this.identitySourceGeneration) {
+        const indexedRecord = this.recordsByPath.get(directFile.path);
+        if (
+          !indexedRecord
+          || (referenceId && this.idKey(referenceId) !== this.idKey(indexedRecord.tpsId))
+          || !this.hasUniquePathOwnership(indexedRecord.tpsId, directFile.path)
+        ) return null;
+        return this.toHandle(directFile, indexedRecord);
       }
+      const indexedId = this.idsByPath.get(directFile.path) || '';
+      if (this.authoritativeIdentityGeneration !== this.identitySourceGeneration) {
+        this.rebuildIndex();
+      }
+      const directRecord = await this.readHandle(directFile, referenceId || indexedId);
+      if (!directRecord) return null;
       return this.hasUniquePathOwnership(directRecord.id, directRecord.path)
         ? directRecord
         : null;
@@ -1298,15 +1400,25 @@ export class NativeRecordService {
     if (!candidates || candidates.size !== 1) return null;
     const [path] = candidates;
     const file = this.plugin.app.vault.getFileByPath(path);
-    return file instanceof TFile ? this.readHandle(file) : null;
+    if (file instanceof TFile && this.authoritativeIdentityGeneration === this.identitySourceGeneration) {
+      const indexedRecord = this.recordsByPath.get(path);
+      return indexedRecord && this.hasUniquePathOwnership(indexedRecord.tpsId, path)
+        ? this.toHandle(file, indexedRecord)
+        : null;
+    }
+    return file instanceof TFile ? this.readHandle(file, id) : null;
   }
 
   async update(
     reference: NativeRecordReference,
     updates: Record<string, unknown>,
     cause: FilePropertiesMutationCause = { kind: 'user' },
+    internalPlanKey?: symbol,
   ): Promise<TpsNativeRecordHandle | null> {
+    if (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock) return null;
     this.assertValidStorageProfile();
+    if (!this.isUpdatePayloadShapeSafe(updates)) return null;
+    await this.refreshIdentityIndexFromVaultSource();
     const record = await this.resolve(reference);
     if (!record) return null;
     if (!this.hasUniquePathOwnership(record.id, record.path)) {
@@ -1324,12 +1436,15 @@ export class NativeRecordService {
     let nextEnvelope: TpsNativeRecordEnvelope | null = null;
     let persistedFrontmatter: Record<string, unknown> | null = null;
     let mutationAccepted = false;
-    const changed = await this.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(
-      record.file,
-      ownedKeys,
-      (frontmatter) => {
-        this.rebuildIndex();
-        if (!this.recordsByPath.has(record.path)) this.indexFile(record.file, frontmatter);
+    const changed = await this.withInternalIdentityWrite([record.path], () => (
+      this.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(
+        record.file,
+        ownedKeys,
+        (frontmatter) => {
+        // MetadataCache can lag a preceding source-preserving mutation (for
+        // example, reidentify followed immediately by cleanup). Reindex the
+        // authoritative Vault.process frontmatter before checking ownership.
+        this.indexFile(record.file, frontmatter);
         const matchSet = inspectNativeRecordMatchSet(frontmatter, readableProfiles, writeProfile);
         const inspection = matchSet?.inspection;
         if (!matchSet || !inspection || inspection.id !== record.id || inspection.kind !== record.kind) return;
@@ -1461,16 +1576,796 @@ export class NativeRecordService {
         mutationAccepted = true;
         persistedFrontmatter = candidateFrontmatter;
         nextEnvelope = persistedMatch.inspection.frontmatter;
-      }, cause, {
-        emitEvents: false,
-        updateEntityIndex: false,
-      });
+        }, cause, {
+          emitEvents: false,
+          updateEntityIndex: false,
+        })
+    ), internalPlanKey);
     if (!mutationAccepted) return null;
     if (!changed || !nextEnvelope || !persistedFrontmatter) return this.resolve(record.file);
     this.indexFile(record.file, persistedFrontmatter);
     this.plugin.entityIndexService?.upsertFile(record.file, nextEnvelope);
     this.notify([record.file.path], cause, 'native-record-update');
     return this.toHandle(record.file, nextEnvelope);
+  }
+
+  /**
+   * Checks the global native-record identity namespace without creating a
+   * record. Consumers use this while planning a multi-record reconciliation.
+   */
+  async canCreateIdentity(nextIdValue: string): Promise<boolean> {
+    if (!this.isEnabled()) return false;
+    if (validateNativeRecordStorageProfile(this.getStorageProfile()).length > 0) return false;
+    const nextId = String(nextIdValue || '').trim();
+    if (!nextId) return false;
+    await this.refreshIdentityIndexFromVaultSource();
+    const destinationKey = this.idKey(nextId);
+    return !this.inFlightCreateIds.has(destinationKey)
+      && !this.inFlightReidentifyIds.has(destinationKey)
+      && !this.pathsById.has(destinationKey)
+      && !this.blockedPathsById.has(destinationKey);
+  }
+
+  /**
+   * Lists uniquely owned native records from one authoritative Markdown scan.
+   * Consumers use this at reconciliation boundaries where MetadataCache may
+   * not yet represent files that arrived through Sync.
+   */
+  async list(kind?: TpsNativeRecordKind): Promise<TpsNativeRecordHandle[]> {
+    return (await this.snapshot(kind)).records;
+  }
+
+  /**
+   * Returns the authoritative record list with a short-lived generation token.
+   * A caller can bind a later identity-plan preflight to this exact discovery
+   * snapshot so files arriving between discovery and planning fail closed.
+   */
+  async snapshot(kind?: TpsNativeRecordKind): Promise<TpsNativeRecordSnapshot> {
+    if (!this.isEnabled()) return { token: this.identitySourceGeneration, revision: this.nativeMutationRevision, records: [] };
+    if (validateNativeRecordStorageProfile(this.getStorageProfile()).length > 0) {
+      return { token: this.identitySourceGeneration, revision: this.nativeMutationRevision, records: [] };
+    }
+    if (kind != null && !Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, kind)) {
+      return { token: this.identitySourceGeneration, revision: this.nativeMutationRevision, records: [] };
+    }
+    let snapshotRevision = this.nativeMutationRevision;
+    while (true) {
+      snapshotRevision = this.nativeMutationRevision;
+      await this.refreshIdentityIndexFromVaultSource();
+      if (snapshotRevision === this.nativeMutationRevision) break;
+    }
+    if (
+      this.blockedIdentityEvidencePaths.size > 0
+      || [...this.pathsById.values()].some((paths) => paths.size !== 1)
+    ) {
+      throw new Error('TPS native-record identity conflicts must be resolved before records can be listed.');
+    }
+    const records: TpsNativeRecordHandle[] = [];
+    for (const [path, frontmatter] of [...this.recordsByPath.entries()].sort(([left], [right]) => (
+      left.localeCompare(right)
+    ))) {
+      if (kind && frontmatter.kind !== kind) continue;
+      if (!this.hasUniquePathOwnership(frontmatter.tpsId, path)) continue;
+      const file = this.plugin.app.vault.getFileByPath(path);
+      if (file instanceof TFile) records.push(this.toHandle(file, frontmatter));
+    }
+    return { token: this.identitySourceGeneration, revision: snapshotRevision, records };
+  }
+
+  /**
+   * Preflights a complete identity plan against one authoritative vault scan.
+   * Planned destination IDs are globally unique and no Markdown is changed.
+   */
+  async canApplyIdentityPlan(
+    entries: readonly TpsNativeRecordIdentityPlanEntry[],
+    snapshotToken?: number,
+  ): Promise<boolean> {
+    if (!this.isEnabled()) return false;
+    if (validateNativeRecordStorageProfile(this.getStorageProfile()).length > 0) return false;
+    if (!Array.isArray(entries)) return false;
+    await this.refreshIdentityIndexFromVaultSource();
+    if (
+      snapshotToken != null
+      && (!Number.isSafeInteger(snapshotToken) || snapshotToken !== this.identitySourceGeneration)
+    ) return false;
+    const plannedDestinations = new Set<string>();
+    const plannedSources = new Set<string>();
+    for (const entry of entries) {
+      const operation = entry?.operation;
+      const nextId = String(entry?.nextId || '').trim();
+      const destinationKey = this.idKey(nextId);
+      if (!nextId || plannedDestinations.has(destinationKey)) return false;
+      plannedDestinations.add(destinationKey);
+      if (operation === 'create') {
+        if (
+          !Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, entry.kind)
+          || !entry.properties
+          || typeof entry.properties !== 'object'
+          || Array.isArray(entry.properties)
+        ) return false;
+        try {
+          const prepared = this.prepareCreateCandidate(
+            entry.kind,
+            entry.properties,
+            nextId,
+            '2000-01-01T00:00:00.000Z',
+          );
+          const serialized = serializeNativeRecordDocument({
+            bom: '',
+            newline: '\n',
+            closer: '---',
+            body: '',
+            frontmatter: prepared.persistedFrontmatter,
+          });
+          const reparsed = parseNativeRecordDocument(serialized);
+          const inspection = reparsed ? this.inspect(reparsed.frontmatter) : null;
+          if (!inspection || inspection.id !== nextId || inspection.kind !== entry.kind) return false;
+        } catch {
+          return false;
+        }
+        if (
+          this.inFlightCreateIds.has(destinationKey)
+          || this.inFlightReidentifyIds.has(destinationKey)
+          || this.pathsById.has(destinationKey)
+          || this.blockedPathsById.has(destinationKey)
+        ) return false;
+        continue;
+      }
+      const source = operation === 'reidentify' && entry.reference != null
+        ? await this.resolve(entry.reference)
+        : null;
+      if (
+        operation !== 'reidentify'
+        || entry.reference == null
+        || !Array.isArray(entry.updates)
+        || entry.updates.some((updates) => (
+          !updates || typeof updates !== 'object' || Array.isArray(updates)
+        ))
+        || !source
+        || plannedSources.has(source.path)
+        || !await this.canReidentifyAgainstCurrentIndex(entry.reference, nextId, entry.updates)
+      ) return false;
+      plannedSources.add(source.path);
+    }
+    return this.authoritativeIdentityGeneration === this.identitySourceGeneration
+      && (snapshotToken == null || snapshotToken === this.identitySourceGeneration);
+  }
+
+  async planIdentityChanges(
+    entries: readonly TpsNativeRecordIdentityPlanEntry[],
+    snapshot: Pick<TpsNativeRecordSnapshot, 'token' | 'revision'>,
+  ): Promise<TpsNativeRecordIdentityPlan | null> {
+    if (
+      !snapshot
+      || snapshot.token !== this.identitySourceGeneration
+      || snapshot.revision !== this.nativeMutationRevision
+      || !await this.canApplyIdentityPlan(entries, snapshot.token)
+    ) return null;
+    const token = this.identitySourceGeneration;
+    const plannedEntries: TpsNativeRecordIdentityPlan['entries'] = [];
+    const occupiedPaths = new Set(
+      this.plugin.app.vault.getMarkdownFiles().map((file) => normalizePath(file.path)),
+    );
+    for (const entry of entries) {
+      if (entry.operation === 'create') {
+        let expectedPath: string;
+        try {
+          expectedPath = this.availablePlannedRecordPath(
+            entry.kind,
+            entry.nextId,
+            entry.fileName,
+            occupiedPaths,
+          );
+        } catch {
+          return null;
+        }
+        occupiedPaths.add(normalizePath(expectedPath));
+        plannedEntries.push({ operation: entry.operation, nextId: entry.nextId, expectedPath });
+        continue;
+      }
+      const source = await this.resolve(entry.reference);
+      if (!source) return null;
+      let expectedPath = source.path;
+      if (entry.fileName != null) {
+        try {
+          occupiedPaths.delete(normalizePath(source.path));
+          expectedPath = this.availablePlannedRecordPath(
+            source.kind,
+            entry.nextId,
+            entry.fileName,
+            occupiedPaths,
+          );
+        } catch {
+          return null;
+        }
+      }
+      occupiedPaths.add(normalizePath(expectedPath));
+      plannedEntries.push({ operation: entry.operation, nextId: entry.nextId, expectedPath });
+    }
+    if (
+      token !== this.identitySourceGeneration
+      || snapshot.revision !== this.nativeMutationRevision
+    ) return null;
+    return { token, revision: snapshot.revision, entries: plannedEntries };
+  }
+
+  async applyIdentityChanges(
+    plannedBatch: TpsNativeRecordIdentityPlan,
+    entries: readonly TpsNativeRecordIdentityPlanEntry[],
+    cause: FilePropertiesMutationCause = { kind: 'automation' },
+  ): Promise<TpsNativeRecordIdentityApplyResult> {
+    const failed = (handles: TpsNativeRecordHandle[], failedIndex: number | null, error: string) => ({
+      ok: false, handles, failedIndex, error,
+    });
+    if (this.nativePlanMutationLock) return failed([], null, 'native-mutation-locked');
+    if (
+      !plannedBatch
+      || !Number.isSafeInteger(plannedBatch.token)
+      || plannedBatch.token !== this.identitySourceGeneration
+      || plannedBatch.revision !== this.nativeMutationRevision
+    ) return failed([], null, 'stale-plan');
+    await this.waitForNativeWriteDrain();
+    if (
+      this.nativePlanMutationLock
+      || plannedBatch.token !== this.identitySourceGeneration
+      || plannedBatch.revision !== this.nativeMutationRevision
+    ) return failed([], null, 'stale-plan');
+    const key = Symbol('tps-native-identity-plan');
+    this.nativePlanMutationLock = key;
+    const handles: TpsNativeRecordHandle[] = [];
+    let currentIndex: number | null = null;
+    try {
+      const confirmed = await this.planIdentityChanges(entries, plannedBatch);
+      if (
+        !confirmed
+        || confirmed.entries.length !== plannedBatch.entries.length
+        || confirmed.entries.some((entry, index) => (
+          entry.operation !== plannedBatch.entries[index]?.operation
+          || this.idKey(entry.nextId) !== this.idKey(plannedBatch.entries[index]?.nextId || '')
+          || normalizePath(entry.expectedPath || '') !== normalizePath(plannedBatch.entries[index]?.expectedPath || '')
+        ))
+      ) return failed([], null, 'plan-revalidation-failed');
+      for (let index = 0; index < entries.length; index += 1) {
+        currentIndex = index;
+        const entry = entries[index];
+        const expectedPath = confirmed.entries[index]?.expectedPath || undefined;
+        if (entry.operation === 'create') {
+          handles.push(await this.createRecord(entry.kind, entry.properties, {
+            id: entry.nextId,
+            fileName: entry.fileName,
+            expectedPath,
+            planToken: plannedBatch.token,
+            cause,
+          }, undefined, key));
+          continue;
+        }
+        let handle = await this.reidentify(entry.reference, entry.nextId, cause, {
+          fileName: entry.fileName,
+          expectedPath,
+          planToken: plannedBatch.token,
+        }, key);
+        if (!handle) return failed(handles, index, 'reidentify-failed');
+        for (const updates of entry.updates) {
+          handle = await this.update(handle.file, updates, cause, key);
+          if (!handle) return failed(handles, index, 'update-failed');
+        }
+        handles.push(handle);
+      }
+      return { ok: true, handles, failedIndex: null };
+    } catch (error) {
+      return failed(handles, currentIndex, error instanceof Error ? error.message : String(error));
+    } finally {
+      this.nativePlanMutationLock = null;
+      this.nativeMutationRevision += 1;
+    }
+  }
+
+  /**
+   * Performs the same source/destination ownership checks as reidentify
+   * without changing Markdown or reserving the destination. Cross-plugin
+   * migrations can preflight a complete mapping before the first write.
+   */
+  async canReidentify(
+    reference: NativeRecordReference,
+    nextIdValue: string,
+  ): Promise<boolean> {
+    if (!this.isEnabled()) return false;
+    if (validateNativeRecordStorageProfile(this.getStorageProfile()).length > 0) return false;
+    const nextId = String(nextIdValue || '').trim();
+    if (!nextId) return false;
+    await this.refreshIdentityIndexFromVaultSource();
+    return this.canReidentifyAgainstCurrentIndex(reference, nextId);
+  }
+
+  private async canReidentifyAgainstCurrentIndex(
+    reference: NativeRecordReference,
+    nextId: string,
+    updates: readonly Record<string, unknown>[] = [],
+  ): Promise<boolean> {
+    const record = await this.resolve(reference);
+    if (!record) return false;
+    const expectedReferenceId = (
+      reference
+      && typeof reference === 'object'
+      && !(reference instanceof TFile)
+    ) ? String(reference.id || reference.tpsId || '').trim() : '';
+    if (
+      expectedReferenceId
+      && this.idKey(expectedReferenceId) !== this.idKey(record.id)
+    ) return false;
+
+    let parsed: ParsedNativeRecordDocument | null = null;
+    try {
+      parsed = parseNativeRecordDocument(await this.readVaultSource(record.file));
+    } catch {
+      return false;
+    }
+    const inspection = parsed ? this.inspect(parsed.frontmatter) : null;
+    if (
+      !parsed
+      || !inspection
+      || inspection.id !== record.id
+      || inspection.kind !== record.kind
+    ) return false;
+
+    this.indexFile(record.file, parsed.frontmatter);
+    if (!this.hasUniquePathOwnership(record.id, record.path)) return false;
+
+    if (!await this.canApplyPlannedRecordMutations(record, parsed.frontmatter, nextId, updates)) return false;
+
+    const sourceKey = this.idKey(record.id);
+    const destinationKey = this.idKey(nextId);
+    return !this.inFlightCreateIds.has(destinationKey)
+      && !this.inFlightReidentifyIds.has(destinationKey)
+      && (
+        destinationKey === sourceKey
+        || (!this.pathsById.has(destinationKey) && !this.blockedPathsById.has(destinationKey))
+      );
+  }
+
+  private async canApplyPlannedRecordMutations(
+    record: TpsNativeRecordHandle,
+    rawFrontmatter: Record<string, unknown>,
+    nextId: string,
+    updates: readonly Record<string, unknown>[],
+  ): Promise<boolean> {
+    let currentFrontmatter = { ...rawFrontmatter };
+    let currentRecord: TpsNativeRecordHandle = {
+      ...record,
+      frontmatter: { ...record.frontmatter },
+    };
+    const cumulativeOwnedKeys: string[] = [];
+    const stages: Array<{ frontmatter: Record<string, unknown>; ownedKeys: string[] }> = [];
+    const timestamp = '2000-01-01T00:00:00.000Z';
+
+    if (record.id !== nextId) {
+      const reidentified = this.prepareReidentifyCandidate(
+        currentFrontmatter,
+        currentRecord,
+        nextId,
+        timestamp,
+      );
+      if (!reidentified) return false;
+      currentFrontmatter = reidentified.frontmatter;
+      currentRecord = {
+        ...currentRecord,
+        id: nextId,
+        frontmatter: reidentified.envelope,
+      };
+      cumulativeOwnedKeys.push(...reidentified.ownedKeys);
+      stages.push({
+        frontmatter: currentFrontmatter,
+        ownedKeys: this.uniquePropertyKeys([...cumulativeOwnedKeys]),
+      });
+    }
+
+    for (const payload of updates) {
+      const updated = this.prepareUpdateCandidate(
+        currentFrontmatter,
+        currentRecord,
+        payload,
+        timestamp,
+      );
+      if (!updated) return false;
+      currentFrontmatter = updated.frontmatter;
+      currentRecord = {
+        ...currentRecord,
+        frontmatter: updated.envelope,
+      };
+      cumulativeOwnedKeys.push(...updated.ownedKeys);
+      stages.push({
+        frontmatter: currentFrontmatter,
+        ownedKeys: this.uniquePropertyKeys([...cumulativeOwnedKeys]),
+      });
+    }
+
+    for (const stage of stages) {
+      const accepted = await this.plugin.frontmatterMutationService.canProcessOwnedKeysPreservingSource(
+        record.file,
+        stage.ownedKeys,
+        (frontmatter) => {
+          for (const key of stage.ownedKeys) {
+            const candidateKey = findKeyCaseInsensitive(stage.frontmatter, key);
+            if (!candidateKey) {
+              deleteValueCaseInsensitive(frontmatter, key);
+              continue;
+            }
+            setValueCaseInsensitive(frontmatter, candidateKey, stage.frontmatter[candidateKey]);
+          }
+        },
+      );
+      if (!accepted) return false;
+    }
+    return true;
+  }
+
+  private prepareReidentifyCandidate(
+    rawFrontmatter: Record<string, unknown>,
+    record: TpsNativeRecordHandle,
+    nextId: string,
+    timestamp: string,
+  ): {
+    frontmatter: Record<string, unknown>;
+    envelope: TpsNativeRecordEnvelope;
+    ownedKeys: string[];
+  } | null {
+    const writeProfile = this.getStorageProfile();
+    const readableProfiles = this.getReadableStorageProfiles();
+    const ownedKeys = this.uniquePropertyKeys([
+      ...storageKeys(writeProfile),
+      ...readableProfiles.flatMap(storageKeys),
+      'tags',
+    ]);
+    const matchSet = inspectNativeRecordMatchSet(rawFrontmatter, readableProfiles, writeProfile);
+    const inspection = matchSet?.inspection;
+    if (!matchSet || !inspection || inspection.id !== record.id || inspection.kind !== record.kind) return null;
+    const canonical = { ...inspection.frontmatter };
+    setValueCaseInsensitive(canonical, 'tpsId', nextId);
+    setValueCaseInsensitive(canonical, 'modifiedDate', timestamp);
+    const desired = applyEnvelopeToRawFrontmatter(
+      rawFrontmatter,
+      canonical,
+      writeProfile,
+      matchSet.matchedProfiles,
+      matchSet.recognizedIdentityTagProfiles,
+    );
+    if (!desired) return null;
+    const candidate = { ...rawFrontmatter };
+    for (const key of ownedKeys) {
+      const desiredKey = findKeyCaseInsensitive(desired, key);
+      if (!desiredKey) deleteValueCaseInsensitive(candidate, key);
+      else setValueCaseInsensitive(candidate, desiredKey, desired[desiredKey]);
+    }
+    const persisted = inspectNativeRecordMatchSet(candidate, readableProfiles, writeProfile)?.inspection;
+    if (!persisted || persisted.id !== nextId || persisted.kind !== record.kind) return null;
+    return { frontmatter: candidate, envelope: persisted.frontmatter, ownedKeys };
+  }
+
+  private prepareUpdateCandidate(
+    rawFrontmatter: Record<string, unknown>,
+    record: TpsNativeRecordHandle,
+    updates: Record<string, unknown>,
+    timestamp: string,
+  ): {
+    frontmatter: Record<string, unknown>;
+    envelope: TpsNativeRecordEnvelope;
+    ownedKeys: string[];
+  } | null {
+    if (!this.isUpdatePayloadShapeSafe(updates)) return null;
+    const writeProfile = this.getStorageProfile();
+    const readableProfiles = this.getReadableStorageProfiles();
+
+    const matchSet = inspectNativeRecordMatchSet(rawFrontmatter, readableProfiles, writeProfile);
+    const inspection = matchSet?.inspection;
+    if (!matchSet || !inspection || inspection.id !== record.id || inspection.kind !== record.kind) return null;
+    const canonical = { ...inspection.frontmatter };
+    const keysToSynchronize: string[] = [
+      writeProfile.identityPropertyKey,
+      writeProfile.schemaPropertyKey,
+    ];
+    for (const [key, value] of Object.entries(updates)) {
+      const folded = key.trim().toLocaleLowerCase();
+      if (folded === 'title') {
+        if (value != null) {
+          setValueCaseInsensitive(canonical, 'title', String(value).replace(/\s+/gu, ' ').trim());
+          keysToSynchronize.push(writeProfile.titlePropertyKey);
+        }
+        continue;
+      }
+      if (value === undefined || value === null) deleteValueCaseInsensitive(canonical, key);
+      else setValueCaseInsensitive(canonical, key, value);
+      keysToSynchronize.push(key);
+    }
+    setValueCaseInsensitive(canonical, 'modifiedDate', timestamp);
+    if (writeProfile.modifiedPropertyKey) keysToSynchronize.push(writeProfile.modifiedPropertyKey);
+
+    const desired = applyEnvelopeToRawFrontmatter(
+      rawFrontmatter,
+      canonical,
+      writeProfile,
+      matchSet.matchedProfiles,
+      matchSet.recognizedIdentityTagProfiles,
+    );
+    if (!desired) return null;
+    const currentWriteKeys = new Set(storageKeys(writeProfile).map((key) => key.toLocaleLowerCase()));
+    for (const matchedProfile of matchSet.matchedProfiles) {
+      for (const legacyKey of storageKeys(matchedProfile)) {
+        if (!currentWriteKeys.has(legacyKey.toLocaleLowerCase())) keysToSynchronize.push(legacyKey);
+      }
+    }
+    for (const requiredKey of [writeProfile.kindPropertyKey, writeProfile.titlePropertyKey]) {
+      const currentKey = findKeyCaseInsensitive(rawFrontmatter, requiredKey);
+      const desiredKey = findKeyCaseInsensitive(desired, requiredKey);
+      if (!currentKey || !desiredKey || String(rawFrontmatter[currentKey] ?? '').trim() !== String(desired[desiredKey] ?? '').trim()) {
+        keysToSynchronize.push(requiredKey);
+      }
+    }
+    if (writeProfile.createdPropertyKey) {
+      const currentKey = findKeyCaseInsensitive(rawFrontmatter, writeProfile.createdPropertyKey);
+      const desiredKey = findKeyCaseInsensitive(desired, writeProfile.createdPropertyKey);
+      if (!currentKey || (!stringifyReadableStorageValue(rawFrontmatter[currentKey]).trim()
+        && Boolean(desiredKey && stringifyReadableStorageValue(desired[desiredKey]).trim()))) {
+        keysToSynchronize.push(writeProfile.createdPropertyKey);
+      }
+    }
+    const currentTagsKey = findKeyCaseInsensitive(rawFrontmatter, 'tags');
+    const desiredTagsKey = findKeyCaseInsensitive(desired, 'tags');
+    const currentTags = currentTagsKey ? readTagValues(rawFrontmatter[currentTagsKey]) : [];
+    const desiredTags = desiredTagsKey ? readTagValues(desired[desiredTagsKey]) : [];
+    if (currentTags.length !== desiredTags.length || currentTags.some((tag, index) => tag !== desiredTags[index])) {
+      keysToSynchronize.push('tags');
+    }
+
+    let synchronizedKeys = this.uniquePropertyKeys(keysToSynchronize);
+    const candidate = { ...rawFrontmatter };
+    for (const key of synchronizedKeys) {
+      const desiredKey = findKeyCaseInsensitive(desired, key);
+      if (!desiredKey) deleteValueCaseInsensitive(candidate, key);
+      else setValueCaseInsensitive(candidate, desiredKey, desired[desiredKey]);
+    }
+    const candidateMatch = inspectNativeRecordMatchSet(candidate, readableProfiles, writeProfile);
+    if (!candidateMatch) return null;
+    const reconciled = applyEnvelopeToRawFrontmatter(
+      candidate,
+      candidateMatch.inspection.frontmatter,
+      writeProfile,
+      candidateMatch.matchedProfiles,
+      candidateMatch.recognizedIdentityTagProfiles,
+    );
+    if (!reconciled) return null;
+    const reconciliationKeys: string[] = [];
+    for (const matchedProfile of candidateMatch.matchedProfiles) {
+      for (const legacyKey of storageKeys(matchedProfile)) {
+        if (!currentWriteKeys.has(legacyKey.toLocaleLowerCase())) reconciliationKeys.push(legacyKey);
+      }
+    }
+    const candidateTagsKey = findKeyCaseInsensitive(candidate, 'tags');
+    const reconciledTagsKey = findKeyCaseInsensitive(reconciled, 'tags');
+    const candidateTags = candidateTagsKey ? readTagValues(candidate[candidateTagsKey]) : [];
+    const reconciledTags = reconciledTagsKey ? readTagValues(reconciled[reconciledTagsKey]) : [];
+    if (candidateTags.length !== reconciledTags.length || candidateTags.some((tag, index) => tag !== reconciledTags[index])) {
+      reconciliationKeys.push('tags');
+    }
+    synchronizedKeys = this.uniquePropertyKeys([...synchronizedKeys, ...reconciliationKeys]);
+    for (const key of reconciliationKeys) {
+      const reconciledKey = findKeyCaseInsensitive(reconciled, key);
+      if (!reconciledKey) deleteValueCaseInsensitive(candidate, key);
+      else setValueCaseInsensitive(candidate, reconciledKey, reconciled[reconciledKey]);
+    }
+    const persisted = inspectNativeRecordMatchSet(candidate, readableProfiles, writeProfile)?.inspection;
+    if (!persisted) return null;
+    const ownedKeys = this.uniquePropertyKeys([
+      ...storageKeys(writeProfile),
+      ...readableProfiles.flatMap(storageKeys),
+      'tags',
+      ...Object.keys(updates),
+    ]);
+    return { frontmatter: candidate, envelope: persisted.frontmatter, ownedKeys };
+  }
+
+  private isUpdatePayloadShapeSafe(updates: Record<string, unknown>): boolean {
+    if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return false;
+    const protectedKeys = new Set(
+      storageKeys(this.getStorageProfile()).map((key) => key.toLocaleLowerCase()),
+    );
+    const seen = new Set<string>();
+    for (const key of Object.keys(updates)) {
+      const folded = key.trim().toLocaleLowerCase();
+      if (!folded || seen.has(folded)) return false;
+      seen.add(folded);
+      if (folded === 'title') continue;
+      if (CANONICAL_ENVELOPE_KEYS.has(folded) || protectedKeys.has(folded)) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Atomically replaces one uniquely owned native-record ID without changing
+   * the record path, body, or workflow-owned business properties. The old ID
+   * is revalidated inside the source-preserving Vault.process transaction, and
+   * the destination ID is reserved across files so concurrent TPS callers
+   * cannot both claim it.
+   */
+  async reidentify(
+    reference: NativeRecordReference,
+    nextIdValue: string,
+    cause: FilePropertiesMutationCause = { kind: 'automation' },
+    options: TpsNativeRecordReidentifyOptions = {},
+    internalPlanKey?: symbol,
+  ): Promise<TpsNativeRecordHandle | null> {
+    if (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock) return null;
+    this.assertEnabled();
+    this.assertValidStorageProfile();
+    const nextId = String(nextIdValue || '').trim();
+    if (!nextId) return null;
+
+    if (options.planToken != null) {
+      await this.refreshIdentityIndexFromVaultSource();
+      if (!Number.isSafeInteger(options.planToken) || options.planToken !== this.identitySourceGeneration) return null;
+    }
+
+    const record = await this.resolve(reference);
+    if (!record) return null;
+    const expectedReferenceId = (
+      reference
+      && typeof reference === 'object'
+      && !(reference instanceof TFile)
+    ) ? String(reference.id || reference.tpsId || '').trim() : '';
+    if (
+      expectedReferenceId
+      && this.idKey(expectedReferenceId) !== this.idKey(record.id)
+    ) return null;
+    let plannedPath = record.path;
+    if (options.fileName != null || options.expectedPath != null) {
+      if (options.fileName == null || options.expectedPath == null || options.planToken == null) return null;
+      try {
+        plannedPath = this.availableRecordPath(record.kind, nextId, options.fileName, record.file);
+      } catch {
+        return null;
+      }
+      if (normalizePath(plannedPath) !== normalizePath(options.expectedPath)) return null;
+    }
+    if (record.id === nextId) {
+      if (plannedPath === record.path) return record;
+      return this.rename(record.file, options.fileName!, cause, internalPlanKey);
+    }
+
+    const writeProfile = this.getStorageProfile();
+    const readableProfiles = this.getReadableStorageProfiles();
+    const ownedKeys = this.uniquePropertyKeys([
+      ...storageKeys(writeProfile),
+      ...readableProfiles.flatMap(storageKeys),
+      'tags',
+    ]);
+    if (!await this.plugin.frontmatterMutationService.canProcessOwnedKeysPreservingSource(
+      record.file,
+      ownedKeys,
+    )) return null;
+
+    const sourceKey = this.idKey(record.id);
+    const destinationKey = this.idKey(nextId);
+    if (
+      this.inFlightReidentifyIds.has(destinationKey)
+      || this.inFlightCreateIds.has(destinationKey)
+    ) return null;
+    this.inFlightReidentifyIds.add(destinationKey);
+
+    try {
+      await this.refreshIdentityIndexFromVaultSource();
+      if (options.planToken != null && options.planToken !== this.identitySourceGeneration) return null;
+      if (!this.hasUniquePathOwnership(record.id, record.path)) return null;
+      if (
+        destinationKey !== sourceKey
+        && (this.pathsById.has(destinationKey) || this.blockedPathsById.has(destinationKey))
+      ) return null;
+      if (options.expectedPath != null) {
+        let confirmedPath: string;
+        try {
+          confirmedPath = this.availableRecordPath(record.kind, nextId, options.fileName, record.file);
+        } catch {
+          return null;
+        }
+        if (normalizePath(confirmedPath) !== normalizePath(options.expectedPath)) return null;
+      }
+
+      let nextEnvelope: TpsNativeRecordEnvelope | null = null;
+      let persistedFrontmatter: Record<string, unknown> | null = null;
+      let mutationAccepted = false;
+      const changed = await this.withInternalIdentityWrite([record.path], () => (
+        this.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(
+          record.file,
+          ownedKeys,
+          (frontmatter) => {
+          // MetadataCache may lag the authoritative Vault.process content. Index
+          // that exact content before repeating both sides of the ownership CAS.
+          this.indexFile(record.file, frontmatter);
+          const matchSet = inspectNativeRecordMatchSet(frontmatter, readableProfiles, writeProfile);
+          const inspection = matchSet?.inspection;
+          if (!matchSet || !inspection || inspection.id !== record.id || inspection.kind !== record.kind) return;
+          if (!this.hasUniquePathOwnership(inspection.id, record.path)) return;
+          if (
+            destinationKey !== sourceKey
+            && (this.pathsById.has(destinationKey) || this.blockedPathsById.has(destinationKey))
+          ) return;
+
+          const canonical = { ...inspection.frontmatter };
+          setValueCaseInsensitive(canonical, 'tpsId', nextId);
+          setValueCaseInsensitive(canonical, 'modifiedDate', new Date().toISOString());
+          const desired = applyEnvelopeToRawFrontmatter(
+            frontmatter,
+            canonical,
+            writeProfile,
+            matchSet.matchedProfiles,
+            matchSet.recognizedIdentityTagProfiles,
+          );
+          if (!desired) return;
+
+          const candidateFrontmatter = { ...frontmatter };
+          for (const ownedKey of ownedKeys) {
+            const desiredKey = findKeyCaseInsensitive(desired, ownedKey);
+            if (!desiredKey) {
+              deleteValueCaseInsensitive(candidateFrontmatter, ownedKey);
+              continue;
+            }
+            setValueCaseInsensitive(candidateFrontmatter, desiredKey, desired[desiredKey]);
+          }
+          const persistedMatch = inspectNativeRecordMatchSet(
+            candidateFrontmatter,
+            readableProfiles,
+            writeProfile,
+          );
+          if (
+            !persistedMatch
+            || persistedMatch.inspection.id !== nextId
+            || persistedMatch.inspection.kind !== record.kind
+          ) return;
+
+          for (const ownedKey of ownedKeys) {
+            const candidateKey = findKeyCaseInsensitive(candidateFrontmatter, ownedKey);
+            if (!candidateKey) {
+              deleteValueCaseInsensitive(frontmatter, ownedKey);
+              continue;
+            }
+            setValueCaseInsensitive(frontmatter, candidateKey, candidateFrontmatter[candidateKey]);
+          }
+          mutationAccepted = true;
+          persistedFrontmatter = candidateFrontmatter;
+          nextEnvelope = persistedMatch.inspection.frontmatter;
+          },
+          cause,
+          {
+            emitEvents: false,
+            updateEntityIndex: false,
+          },
+        )
+      ), internalPlanKey);
+      if (!mutationAccepted || !changed || !nextEnvelope || !persistedFrontmatter) return null;
+
+      this.indexFile(record.file, persistedFrontmatter);
+      this.plugin.entityIndexService?.upsertFile(record.file, nextEnvelope);
+      if (plannedPath !== record.file.path) {
+        const oldPath = record.file.path;
+        await this.ensureParentFolder(plannedPath);
+        if (this.plugin.app.vault.getFileByPath(oldPath) !== record.file) return null;
+        const occupied = this.plugin.app.vault.getAbstractFileByPath(plannedPath);
+        if (occupied && occupied !== record.file) return null;
+        await this.withInternalIdentityWrite([oldPath, plannedPath], () => (
+          this.plugin.app.fileManager.renameFile(record.file, plannedPath)
+        ), internalPlanKey);
+        this.removePath(oldPath);
+        this.indexFile(record.file, persistedFrontmatter);
+      }
+      this.notify([...new Set([record.path, record.file.path])], cause, 'native-record-reidentify');
+      logger.flow('NativeRecords', 'reidentify:done', {
+        kind: record.kind,
+        priorId: record.id,
+        id: nextId,
+        path: record.path,
+      });
+      return this.toHandle(record.file, nextEnvelope);
+    } finally {
+      this.inFlightReidentifyIds.delete(destinationKey);
+    }
   }
 
   archive(
@@ -1494,6 +2389,23 @@ export class NativeRecordService {
   }
 
   async migrateStorageProfile(): Promise<TpsNativeRecordStorageMigrationResult> {
+    await this.waitForNativeWriteDrain();
+    if (this.nativePlanMutationLock) {
+      return { inspected: 0, updated: 0, skipped: 0, failed: 1 };
+    }
+    const key = Symbol('tps-native-storage-migration');
+    this.nativePlanMutationLock = key;
+    try {
+      return await this.migrateStorageProfileLocked(key);
+    } finally {
+      this.nativePlanMutationLock = null;
+      this.nativeMutationRevision += 1;
+    }
+  }
+
+  private async migrateStorageProfileLocked(
+    internalPlanKey: symbol,
+  ): Promise<TpsNativeRecordStorageMigrationResult> {
     this.assertEnabled();
     this.assertValidStorageProfile();
     this.rebuildIndex();
@@ -1535,7 +2447,7 @@ export class NativeRecordService {
       const state: { outcome: 'updated' | 'skipped' | 'failed' } = { outcome: 'failed' };
       let persisted: Record<string, unknown> | null = null;
       try {
-        await this.plugin.app.vault.process(file, (content) => {
+        await this.withInternalIdentityWrite([file.path], () => this.plugin.app.vault.process(file, (content) => {
           const parsed = parseNativeRecordDocument(content);
           const matchSet = parsed
             ? inspectNativeRecordMatchSet(parsed.frontmatter, readableProfiles, profile)
@@ -1558,7 +2470,7 @@ export class NativeRecordService {
           persisted = parsed.frontmatter;
           state.outcome = next === content ? 'skipped' : 'updated';
           return next;
-        });
+        }), internalPlanKey);
       } catch (error) {
         logger.flowError('NativeRecords', 'storage-profile:migrate-failed', error, { path });
       }
@@ -1777,6 +2689,79 @@ export class NativeRecordService {
     return copied;
   }
 
+  private prepareCreateCandidate(
+    kind: TpsNativeRecordKind,
+    properties: Record<string, unknown>,
+    id: string,
+    timestamp: string,
+  ): {
+    persistedFrontmatter: Record<string, unknown>;
+    persistedInspection: TpsNativeRecordInspection;
+  } {
+    if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
+      throw new Error('TPS native record properties must be an object.');
+    }
+    if (!Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, kind)) {
+      throw new Error(`Unsupported TPS native record kind: ${String(kind)}`);
+    }
+    const title = String(properties.title || '').replace(/\s+/gu, ' ').trim();
+    if (!title) throw new Error('TPS native records require a title.');
+
+    const protectedKeys = new Set(
+      storageKeys(this.getStorageProfile()).map((key) => key.toLocaleLowerCase()),
+    );
+    const seenPayloadKeys = new Set<string>();
+    for (const key of Object.keys(properties)) {
+      const folded = key.trim().toLocaleLowerCase();
+      if (!folded || seenPayloadKeys.has(folded)) {
+        throw new Error('TPS native record properties contain duplicate or blank keys.');
+      }
+      seenPayloadKeys.add(folded);
+      if (folded === 'title') continue;
+      if (CANONICAL_ENVELOPE_KEYS.has(folded) || protectedKeys.has(folded)) {
+        throw new Error(`TPS native record property collides with system storage: ${key}`);
+      }
+    }
+
+    const userProperties = this.copyUserProperties(properties);
+    const frontmatter: TpsNativeRecordEnvelope = {
+      ...userProperties,
+      tpsId: id,
+      tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
+      kind,
+      title,
+      createdDate: timestamp,
+      modifiedDate: timestamp,
+    };
+    const writeProfile = this.getStorageProfile();
+    const readableProfiles = this.getReadableStorageProfiles();
+    const preliminaryFrontmatter = applyEnvelopeToRawFrontmatter(
+      userProperties,
+      frontmatter,
+      writeProfile,
+      [],
+    );
+    const preliminaryMatch = preliminaryFrontmatter
+      ? inspectNativeRecordMatchSet(preliminaryFrontmatter, readableProfiles, writeProfile)
+      : null;
+    const persistedFrontmatter = preliminaryFrontmatter && preliminaryMatch
+      ? applyEnvelopeToRawFrontmatter(
+        preliminaryFrontmatter,
+        preliminaryMatch.inspection.frontmatter,
+        writeProfile,
+        preliminaryMatch.matchedProfiles,
+        preliminaryMatch.recognizedIdentityTagProfiles,
+      )
+      : null;
+    const persistedInspection = persistedFrontmatter
+      ? inspectNativeRecordMatchSet(persistedFrontmatter, readableProfiles, writeProfile)?.inspection
+      : null;
+    if (!persistedFrontmatter || !persistedInspection || persistedInspection.id !== id || persistedInspection.kind !== kind) {
+      throw new Error('TPS native record properties contain conflicting or invalid storage identity evidence.');
+    }
+    return { persistedFrontmatter, persistedInspection };
+  }
+
   /**
    * Core Bases creates a new Markdown file beside the Base, then materializes
    * positive property filters into its frontmatter. In the native TPS profile,
@@ -1826,43 +2811,45 @@ export class NativeRecordService {
     await this.ensureParentFolder(canonicalPath);
 
     let adopted: TpsNativeRecordEnvelope | null = null;
-    await this.plugin.app.vault.process(file, (content) => {
-      if (content !== originalContent) return content;
-      const parsed = parseNativeRecordDocument(content);
-      if (!parsed || parsed.body.trim().length > 0) return content;
-      if (this.hasNativeIdentityMarker(parsed.frontmatter)) return content;
-      const parsedKind = readValueCaseInsensitive(parsed.frontmatter, profile.kindPropertyKey);
-      if (typeof parsedKind !== 'string'
-        || parsedKind.trim().toLocaleLowerCase() !== 'task') return content;
-      const status = String(parsed.frontmatter.status || '').trim();
-      const canonical: TpsNativeRecordEnvelope = {
-        ...parsed.frontmatter,
-        tpsId: id,
-        tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
-        kind: 'task',
-        title,
-        createdDate: now,
-        modifiedDate: now,
-        status: status || 'todo',
-      };
-      const persistedFrontmatter = applyEnvelopeToRawFrontmatter(
-        parsed.frontmatter,
-        canonical,
-        profile,
-        [],
-      );
-      const inspection = persistedFrontmatter ? this.inspect(persistedFrontmatter) : null;
-      if (!persistedFrontmatter || !inspection || inspection.id !== id || inspection.kind !== 'task') {
-        return content;
+    await this.withInternalIdentityWrite([originalPath, canonicalPath], async () => {
+      await this.plugin.app.vault.process(file, (content) => {
+        if (content !== originalContent) return content;
+        const parsed = parseNativeRecordDocument(content);
+        if (!parsed || parsed.body.trim().length > 0) return content;
+        if (this.hasNativeIdentityMarker(parsed.frontmatter)) return content;
+        const parsedKind = readValueCaseInsensitive(parsed.frontmatter, profile.kindPropertyKey);
+        if (typeof parsedKind !== 'string'
+          || parsedKind.trim().toLocaleLowerCase() !== 'task') return content;
+        const status = String(parsed.frontmatter.status || '').trim();
+        const canonical: TpsNativeRecordEnvelope = {
+          ...parsed.frontmatter,
+          tpsId: id,
+          tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
+          kind: 'task',
+          title,
+          createdDate: now,
+          modifiedDate: now,
+          status: status || 'todo',
+        };
+        const persistedFrontmatter = applyEnvelopeToRawFrontmatter(
+          parsed.frontmatter,
+          canonical,
+          profile,
+          [],
+        );
+        const inspection = persistedFrontmatter ? this.inspect(persistedFrontmatter) : null;
+        if (!persistedFrontmatter || !inspection || inspection.id !== id || inspection.kind !== 'task') {
+          return content;
+        }
+        parsed.frontmatter = persistedFrontmatter;
+        adopted = inspection.frontmatter;
+        return serializeNativeRecordDocument(parsed);
+      });
+      if (adopted && this.plugin.app.vault.getFileByPath(originalPath) === file) {
+        await this.plugin.app.vault.rename(file, canonicalPath);
       }
-      parsed.frontmatter = persistedFrontmatter;
-      adopted = inspection.frontmatter;
-      return serializeNativeRecordDocument(parsed);
     });
     if (!adopted) return;
-    if (this.plugin.app.vault.getFileByPath(originalPath) !== file) return;
-
-    await this.plugin.app.vault.rename(file, canonicalPath);
     this.newlyCreatedFiles.delete(file);
     const timer = this.draftEligibilityTimers.get(file);
     if (timer != null) globalThis.clearTimeout(timer);
@@ -1877,19 +2864,34 @@ export class NativeRecordService {
     });
   }
 
-  private async readHandle(file: TFile): Promise<TpsNativeRecordHandle | null> {
+  private async readHandle(
+    file: TFile,
+    expectedId = '',
+  ): Promise<TpsNativeRecordHandle | null> {
+    const expectedKey = this.idKey(expectedId) || this.idsByPath.get(file.path) || '';
     const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
     const cachedInspection = this.inspect(cached);
-    if (cachedInspection) return this.toHandle(file, cachedInspection.frontmatter);
+    if (
+      cachedInspection
+      && (!expectedKey || this.idKey(cachedInspection.id) === expectedKey)
+    ) return this.toHandle(file, cachedInspection.frontmatter);
     try {
       const parsed = parseNativeRecordDocument(await this.plugin.app.vault.cachedRead(file));
       const inspection = parsed ? this.inspect(parsed.frontmatter) : null;
       if (!inspection) return null;
       this.indexFile(file, parsed.frontmatter);
+      if (expectedKey && this.idKey(inspection.id) !== expectedKey) return null;
       return this.toHandle(file, inspection.frontmatter);
     } catch {
       return null;
     }
+  }
+
+  private async readVaultSource(file: TFile): Promise<string> {
+    const vault = this.plugin.app.vault as typeof this.plugin.app.vault & {
+      read?: (target: TFile) => Promise<string>;
+    };
+    return typeof vault.read === 'function' ? vault.read(file) : vault.cachedRead(file);
   }
 
   private toHandle(file: TFile, frontmatter: TpsNativeRecordEnvelope): TpsNativeRecordHandle {
@@ -1903,18 +2905,108 @@ export class NativeRecordService {
   }
 
   private rebuildIndex(): void {
+    this.authoritativeIdentityGeneration = -1;
     const vault = this.plugin.app.vault as typeof this.plugin.app.vault & {
       getMarkdownFiles?: () => TFile[];
     };
     if (typeof vault.getMarkdownFiles !== 'function') return;
     const markdownFiles = vault.getMarkdownFiles();
+    this.clearIdentityIndex();
+    for (const file of markdownFiles) this.indexFile(file);
+  }
+
+  private clearIdentityIndex(): void {
     this.idsByPath.clear();
     this.pathsById.clear();
     this.recordsByPath.clear();
     this.blockedIdentityEvidencePaths.clear();
     this.blockedPathsById.clear();
     this.assetPathsBySourcePath.clear();
-    for (const file of markdownFiles) this.indexFile(file);
+  }
+
+  /**
+   * MetadataCache can lag files arriving through Sync. Re-identification is a
+   * rare migration boundary, so refresh every parseable Markdown envelope from
+   * authoritative Vault bytes before reserving a destination ID.
+   */
+  private async refreshIdentityIndexFromVaultSource(): Promise<void> {
+    if (this.authoritativeIdentityGeneration === this.identitySourceGeneration) return;
+    if (!this.authoritativeIdentityRefresh) {
+      this.authoritativeIdentityRefresh = this.refreshIdentityIndexUntilStable();
+    }
+    const refresh = this.authoritativeIdentityRefresh;
+    try {
+      await refresh;
+    } finally {
+      if (this.authoritativeIdentityRefresh === refresh) this.authoritativeIdentityRefresh = null;
+    }
+    if (this.authoritativeIdentityGeneration !== this.identitySourceGeneration) {
+      await this.refreshIdentityIndexFromVaultSource();
+    }
+  }
+
+  private async refreshIdentityIndexUntilStable(): Promise<void> {
+    const vault = this.plugin.app.vault as typeof this.plugin.app.vault & {
+      getMarkdownFiles?: () => TFile[];
+    };
+    while (this.authoritativeIdentityGeneration !== this.identitySourceGeneration) {
+      const generation = this.identitySourceGeneration;
+      if (typeof vault.getMarkdownFiles !== 'function') {
+        this.authoritativeIdentityGeneration = generation;
+        return;
+      }
+      const snapshot: Array<[TFile, Record<string, unknown> | null]> = [];
+      for (const file of vault.getMarkdownFiles()) {
+        try {
+          const source = await this.readVaultSource(file);
+          const parsed = parseNativeRecordDocument(source);
+          if (!parsed && this.malformedSourceHasNativeIdentityEvidence(source)) {
+            throw new Error(`Malformed native-record identity evidence: ${file.path}`);
+          }
+          snapshot.push([file, parsed?.frontmatter || null]);
+        } catch (error) {
+          if (error instanceof Error && error.message.startsWith('Malformed native-record identity evidence:')) {
+            throw error;
+          }
+          throw new Error(`Unable to authoritatively read native-record candidate: ${file.path}`);
+        }
+      }
+      if (generation !== this.identitySourceGeneration) continue;
+      this.clearIdentityIndex();
+      for (const [file, frontmatter] of snapshot) {
+        if (frontmatter) this.indexFile(file, frontmatter);
+      }
+      this.authoritativeIdentityGeneration = generation;
+    }
+  }
+
+  private malformedSourceHasNativeIdentityEvidence(source: string): boolean {
+    const frontmatterSource = openingFrontmatterSource(source);
+    if (frontmatterSource == null) return false;
+    const propertyKeys = new Set<string>();
+    const tagPrefixes = new Set<string>();
+    for (const profile of this.getReadableStorageProfiles()) {
+      if (profile.identityMode === 'property') {
+        propertyKeys.add(profile.identityPropertyKey);
+        propertyKeys.add(profile.schemaPropertyKey);
+      } else {
+        tagPrefixes.add(profile.identityTagPrefix);
+      }
+    }
+    for (const key of propertyKeys) {
+      if (!key) continue;
+      const escaped = escapeRegexLiteral(key);
+      if (new RegExp(
+        `(?:^|[\\n,{])\\s*(?:-\\s+|\\?\\s+)?(?:["']?)${escaped}(?:["']?)\\s*(?::|\\n\\s*:)`,
+        'iu',
+      ).test(frontmatterSource)) return true;
+    }
+    for (const prefix of tagPrefixes) {
+      const normalized = String(prefix || '').replace(/^#|\/+$/gu, '');
+      if (!normalized) continue;
+      if (new RegExp(`${escapeRegexLiteral(normalized)}/v1/`, 'iu').test(frontmatterSource)) return true;
+    }
+    return false;
   }
 
   private indexFile(file: TFile, frontmatter?: Record<string, unknown> | null): void {
@@ -2057,8 +3149,69 @@ export class NativeRecordService {
     throw new Error(`Unable to allocate a unique TPS native record filename for ${preferred}.`);
   }
 
+  private availablePlannedRecordPath(
+    kind: TpsNativeRecordKind,
+    id: string,
+    fileName: string | undefined,
+    occupiedPaths: ReadonlySet<string>,
+  ): string {
+    const preferred = buildNativeRecordPath(this.getRootPath(), kind, id, this.getLayout(), fileName);
+    if (!occupiedPaths.has(normalizePath(preferred))) return preferred;
+    if (!fileName) throw new Error(`TPS native record path already exists: ${preferred}`);
+    const dot = preferred.toLocaleLowerCase().endsWith('.md') ? preferred.length - 3 : preferred.length;
+    const stem = preferred.slice(0, dot);
+    const extension = preferred.slice(dot);
+    for (let suffix = 2; suffix <= 999; suffix += 1) {
+      const candidate = `${stem} (${suffix})${extension}`;
+      if (!occupiedPaths.has(normalizePath(candidate))) return candidate;
+    }
+    throw new Error(`Unable to allocate a unique TPS native record filename for ${preferred}.`);
+  }
+
   private idKey(id: string): string {
     return String(id || '').trim().toLocaleLowerCase();
+  }
+
+  private isInternalIdentityWrite(path: string): boolean {
+    return (this.internalIdentityWritesByPath.get(normalizePath(path)) || 0) > 0;
+  }
+
+  private async withInternalIdentityWrite<T>(
+    paths: readonly string[],
+    operation: () => Promise<T>,
+    internalPlanKey?: symbol,
+  ): Promise<T> {
+    if (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock) {
+      throw new Error('TPS native-record identity plan is currently being applied.');
+    }
+    this.activeNativeWrites += 1;
+    let completed = false;
+    const normalizedPaths = [...new Set(paths.map((path) => normalizePath(path)).filter(Boolean))];
+    for (const path of normalizedPaths) {
+      this.internalIdentityWritesByPath.set(path, (this.internalIdentityWritesByPath.get(path) || 0) + 1);
+    }
+    try {
+      const result = await operation();
+      completed = true;
+      return result;
+    } finally {
+      for (const path of normalizedPaths) {
+        const remaining = (this.internalIdentityWritesByPath.get(path) || 1) - 1;
+        if (remaining > 0) this.internalIdentityWritesByPath.set(path, remaining);
+        else this.internalIdentityWritesByPath.delete(path);
+      }
+      if (completed && !this.nativePlanMutationLock) this.nativeMutationRevision += 1;
+      this.activeNativeWrites -= 1;
+      if (this.activeNativeWrites === 0) {
+        for (const resolve of this.nativeWriteDrainWaiters) resolve();
+        this.nativeWriteDrainWaiters.clear();
+      }
+    }
+  }
+
+  private async waitForNativeWriteDrain(): Promise<void> {
+    if (this.activeNativeWrites === 0) return;
+    await new Promise<void>((resolve) => this.nativeWriteDrainWaiters.add(resolve));
   }
 
   private uniquePropertyKeys(keys: string[]): string[] {
@@ -2129,6 +3282,7 @@ export class NativeRecordService {
   }
 
   private notify(paths: string[], cause: FilePropertiesMutationCause | undefined, source: string): void {
+    if (!this.nativePlanMutationLock) this.nativeMutationRevision += 1;
     const sourcePluginId = String(cause?.sourcePluginId || this.plugin.manifest.id);
     this.plugin.eventService.emitFilesUpdated(paths, { sourcePluginId });
     if (cause?.kind !== 'automation') {
