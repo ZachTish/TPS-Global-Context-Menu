@@ -1291,7 +1291,7 @@ test('obsolete settings are removed from active GCM settings and writes', () => 
   assert.doesNotMatch(settingsTabSource, /Seed new subitem visual metadata|Use native properties under title/);
   assert.doesNotMatch(settingsTabSource, /Bases Icon Fields|Write Bases icon fields/);
   assert.match(subitemCreationSource, /return parentFile\.parent\?\.path \|\| '\/'/);
-  assert.match(subitemCreationSource, /options\?\.seedVisualMetadata === true/);
+  assert.doesNotMatch(subitemCreationSource, /seedVisualMetadata|resolveNewSubitemIconDefaults|frontmatterLines\.push\(`(?:icon|iconColor|color):/u);
   assert.doesNotMatch(notebookRuleSettingsSource, /writeBasesIconFields|basesIconMarkdownField|basesIconUriField/);
   assert.doesNotMatch(notebookRuleServiceSource, /iconDisplay|iconDisplayUri/);
 });

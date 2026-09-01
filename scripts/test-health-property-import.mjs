@@ -56,6 +56,76 @@ test('import adds Health fields with separate food and rollup scopes', () => {
     { key: 'consumedCalories', value: '', operator: 'exists' },
   ]);
   assert.equal(result.properties[2].scopeMode, 'all');
+  assert.equal(result.properties[1].showInContextMenu, false);
+  assert.equal(result.properties[2].showInContextMenu, false);
+});
+
+test('import keeps every definition but defaults only actionable scoped fields into the context menu', () => {
+  const nativeRecords = [
+    'status',
+    'priority',
+    'scheduled',
+    'due',
+    'tags',
+    'parents',
+    'quantity',
+    'unit',
+    'calories',
+    'protein',
+    'activityMinutes',
+  ].map((key) => ({
+    id: `record-${key}`,
+    key,
+    label: key,
+    type: key === 'tags' || key === 'parents' ? 'list' : 'text',
+    scope: { mode: 'any', kinds: ['activity-entry'] },
+  }));
+  nativeRecords.push({
+    id: 'record-unscoped-quantity',
+    key: 'unscopedQuantity',
+    label: 'Unscoped quantity',
+    type: 'number',
+    scope: { mode: 'any' },
+  });
+
+  const result = importHealthPropertyCatalog([], {
+    version: 2,
+    food: [],
+    dailyRollups: [],
+    nativeRecords,
+  });
+
+  assert.equal(result.properties.length, nativeRecords.length);
+  const visibleKeys = result.properties
+    .filter((property) => property.showInContextMenu)
+    .map((property) => property.key);
+  assert.deepEqual(visibleKeys, [
+    'status',
+    'priority',
+    'scheduled',
+    'due',
+    'tags',
+    'parents',
+    'quantity',
+    'unit',
+  ]);
+  assert.equal(result.properties.find((property) => property.key === 'calories').showInContextMenu, false);
+  assert.equal(result.properties.find((property) => property.key === 'activityMinutes').showInContextMenu, false);
+});
+
+test('quantity and unit are context actions only when the imported definition has a real scope', () => {
+  const result = importHealthPropertyCatalog([], {
+    version: 2,
+    food: [],
+    dailyRollups: [],
+    nativeRecords: [
+      { id: 'quantity', key: 'quantity', label: 'Quantity', type: 'number', scope: { mode: 'any' } },
+      { id: 'unit', key: 'unit', label: 'Unit', type: 'text', scope: { mode: 'any', kinds: ['food-entry'] } },
+    ],
+  });
+
+  assert.equal(result.properties.find((property) => property.key === 'quantity').showInContextMenu, false);
+  assert.equal(result.properties.find((property) => property.key === 'unit').showInContextMenu, true);
 });
 
 test('re-import refreshes matching keys without duplicates and retires stale imported fields', () => {
@@ -74,6 +144,35 @@ test('re-import refreshes matching keys without duplicates and retires stale imp
   assert.equal(second.updated, 2);
   assert.equal(second.removed, 0);
   assert.deepEqual(second.properties, first.properties);
+});
+
+test('explicit refresh applies catalog defaults to imported fields but preserves user-owned overrides', () => {
+  const result = importHealthPropertyCatalog([
+    {
+      id: 'health-import-food-calories',
+      key: 'calories',
+      showInContextMenu: true,
+    },
+    {
+      id: 'user-activity-minutes',
+      key: 'activityMinutes',
+      showInContextMenu: true,
+    },
+  ], {
+    version: 2,
+    food: [{
+      id: 'calories', key: 'calories', label: 'Calories', type: 'number',
+      scope: { mode: 'any', kinds: ['food-entry'] },
+    }],
+    dailyRollups: [],
+    nativeRecords: [{
+      id: 'activity-minutes', key: 'activityMinutes', label: 'Activity minutes', type: 'number',
+      scope: { mode: 'any', kinds: ['activity-entry'] },
+    }],
+  });
+
+  assert.equal(result.properties.find((property) => property.key === 'calories').showInContextMenu, false);
+  assert.equal(result.properties.find((property) => property.key === 'activityMinutes').showInContextMenu, true);
 });
 
 test('version 2 native record fields merge kind scopes with an existing task field', () => {

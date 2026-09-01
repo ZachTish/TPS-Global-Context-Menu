@@ -1900,7 +1900,7 @@ export class PanelBuilder {
         label.textContent = normalized ? this.formatStatusLabel(normalized) : 'No Status';
         setIcon(icon, normalized ? this.getStatusIcon(normalized) : 'circle');
       }, options, async (files) => {
-        // Apply GCM-owned Notebook Navigator rules to update icon/color outputs.
+        // Re-evaluate GCM-owned semantic tag rules after the authored status changes.
         for (const file of files) {
           await applyNotebookNavigatorRulesToFile(this.plugin, file);
         }

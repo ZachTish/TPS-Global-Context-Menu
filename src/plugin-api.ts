@@ -499,7 +499,6 @@ export async function promoteChecklistItemToChild(
                 getDefaultSubitemFolderPath(plugin, rootFile),
                 {
                     seedParentTags: true,
-                    seedVisualMetadata: false,
                     insertParentBodyLink: false,
                     requireNewFile: true,
                     initialWorkflowStatus: currentPlan.targetStatus,
@@ -799,6 +798,18 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             cause?: Parameters<typeof plugin.nativeRecordService.archive>[1],
         ) => plugin.nativeRecordService.archive(reference, publicMutationCause(cause)),
         migrateStorageProfile: () => plugin.nativeRecordService.migrateStorageProfile(),
+    };
+    const notebookNavigatorPresentationApi = {
+        version: 1,
+        ensure: (files: readonly (TFile | string)[] | TFile | string) =>
+            plugin.notebookNavigatorRuleService.ensureNotebookNavigatorPresentation(files),
+        get: (file: TFile | string) =>
+            plugin.notebookNavigatorRuleService.getNotebookNavigatorPresentation(file),
+        getRevision: () =>
+            plugin.notebookNavigatorRuleService.getNotebookNavigatorPresentationRevision(),
+        onChanged: (
+            listener: Parameters<typeof plugin.notebookNavigatorRuleService.onNotebookNavigatorPresentationChanged>[0],
+        ) => plugin.notebookNavigatorRuleService.onNotebookNavigatorPresentationChanged(listener),
     };
     const taskRecordsApi = {
         version: 1,
@@ -1113,6 +1124,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         taskCheckboxes: taskCheckboxesApi,
         tasks: plugin.taskApiService,
         nativeRecords: nativeRecordsApi,
+        notebookNavigatorPresentation: notebookNavigatorPresentationApi,
         taskRecords: taskRecordsApi,
         templates: templatesApi,
         history: {
@@ -1215,7 +1227,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         /** True if a value represents an all-day (date-only) event. */
         isAllDayValue: (value: unknown, fm?: Record<string, unknown>) =>
             services.schedule.isAllDayValue(value, fm),
-        /** Cycle status through GCM-owned status options, then apply NN visual/sort/tag rules. */
+        /** Cycle status, invalidate virtual Navigator presentation, and re-evaluate semantic tag rules. */
         cycleFileStatus: async (file: TFile) => {
             if (!plugin.notebookNavigatorRuleService.canApplyToFile(file)) return false;
             const statusKey = services.status.getStatusPropertyKey();
@@ -1290,12 +1302,14 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             promoteChecklistItemToChild(plugin, rootFile, input),
         promoteChecklistItem: (rootFile: TFile, input: ChecklistPromotionInput) =>
             promoteChecklistItemToChild(plugin, rootFile, input),
+        /** Compatibility mutation helper: invalidates presentation and applies semantic tags only. */
         applyNotebookNavigatorRulesToFile: (file: TFile, options?: Record<string, unknown>) =>
             plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
                 reason: String(options?.reason || 'gcm-api-file'),
                 force: options?.force === true,
                 bypassCreationGrace: options?.bypassCreationGrace === true,
             }),
+        /** Compatibility bulk helper: invalidates presentation and applies semantic tags only. */
         applyNotebookNavigatorRulesToAllFiles: (options?: Record<string, unknown>) =>
             plugin.notebookNavigatorRuleService.applyRulesToAllFiles({
                 reason: String(options?.reason || 'gcm-api-all'),

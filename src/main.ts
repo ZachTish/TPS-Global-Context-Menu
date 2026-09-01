@@ -639,6 +639,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.nativeRecordService.setup();
     this.templateIdentityService = new TemplateIdentityService(this);
     this.sharedServices = createSharedServices(this);
+    this.notebookNavigatorRuleService.setupPresentationProjection();
     this.registerEditorExtension(createLivePreviewBodySelectionExtension());
     this.registerEditorExtension(this.linkedSubitemCheckboxService.getEditorExtension());
     this.registerEditorExtension(this.hideCompletedCheckboxesService.getEditorExtension());
@@ -2751,7 +2752,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       bypassCreationGrace: true,
     });
     if (showNotice) {
-      new Notice(noteChanged ? 'Notebook Navigator rules applied.' : 'No Notebook Navigator note rule changes.');
+      new Notice(noteChanged ? 'Semantic tag rules applied.' : 'No semantic tag changes.');
     }
     return noteChanged;
   }
@@ -2763,7 +2764,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       bypassCreationGrace: true,
     });
     if (!silent) {
-      new Notice(`GCM processed Notebook Navigator rules, updated ${changed} files.`);
+      new Notice(`GCM processed semantic tag rules, updated ${changed} files.`);
     }
     return changed;
   }
@@ -2918,6 +2919,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       this.stopArchiveTagAutomation();
     }
     await this.persistSettingsSnapshot();
+    this.notebookNavigatorRuleService?.invalidateNotebookNavigatorPresentation();
     this.tpsNotebookNavigatorMenuBridge?.refresh();
     this.overlayRenderingService?.invalidate({
       reason: 'settings-save',

@@ -3013,3 +3013,127 @@ test('generic title synchronization checks workflow ownership only at a real mut
     globalThis.window = priorWindow;
   }
 });
+
+test('timestamp sync rejects native identity evidence acquired at the source-preserving mutation boundary', async () => {
+  const priorWindow = globalThis.window;
+  const timestampMoment = () => ({
+    isValid: () => true,
+    format: () => '2026-08-31 12:34:56',
+    valueOf: () => Date.now(),
+  });
+  timestampMoment.ISO_8601 = Symbol('ISO_8601');
+  globalThis.window = { ...priorWindow, moment: timestampMoment };
+
+  try {
+    const { FileNamingService } = await loadFileNamingService();
+    const cases = [
+      {
+        label: 'valid native record',
+        boundaryFrontmatter: { tpsId: 'task-valid-race', kind: 'task', title: 'Timestamp race' },
+        expectedWrites: 0,
+      },
+      {
+        label: 'incomplete native identity',
+        boundaryFrontmatter: { tpsId: '', title: 'Timestamp race' },
+        expectedWrites: 0,
+      },
+      {
+        label: 'ordinary note',
+        boundaryFrontmatter: { title: 'Timestamp race' },
+        expectedWrites: 1,
+      },
+    ];
+
+    for (const testCase of cases) {
+      const file = {
+        __isTestTFile: true,
+        path: `Inbox/${testCase.label}.md`,
+        name: `${testCase.label}.md`,
+        basename: testCase.label,
+        extension: 'md',
+        parent: { path: 'Inbox' },
+        stat: { ctime: 1_777_777_777_000, mtime: 1_777_777_888_000 },
+      };
+      const initialSource = '---\ntitle: Timestamp race\n---\n';
+      let boundaryFrontmatter = { title: 'Timestamp race' };
+      let ownedKeys = [];
+      let cause = null;
+      let writes = 0;
+      let legacyProcessCalls = 0;
+      const plugin = {
+        manifest: { id: 'tps-global-context-menu' },
+        settings: {
+          autoSyncFileTimestamps: true,
+          dateCreatedFrontmatterKey: 'createdDate',
+          dateModifiedFrontmatterKey: 'modifiedDate',
+          fileTimestampFormat: 'YYYY-MM-DD HH:mm:ss',
+          dailyNoteDateFormat: 'YYYY-MM-DD',
+        },
+        registerEvent() {},
+        shouldIgnoreAutoFrontmatterWrite: () => false,
+        nativeRecordService: {
+          hasRecordIdentityEvidenceInFrontmatter(frontmatter) {
+            return Object.keys(frontmatter || {}).some((key) => (
+              ['tpsid', 'tpsschemaversion'].includes(key.toLowerCase())
+            ));
+          },
+        },
+        bulkEditService: {
+          canMutateFrontmatterSafely: async () => true,
+          async runSerializedFrontmatterWrite(_file, action) {
+            // Identity appears after every cache/source preflight. The callback
+            // below is the current-byte mutation boundary and must recheck it.
+            boundaryFrontmatter = { ...testCase.boundaryFrontmatter };
+            await action();
+          },
+        },
+        frontmatterMutationService: {
+          async processOwnedKeysPreservingSource(_file, keys, mutator, mutationCause) {
+            ownedKeys = [...keys];
+            cause = mutationCause;
+            const before = JSON.stringify(boundaryFrontmatter);
+            mutator(boundaryFrontmatter);
+            const changed = JSON.stringify(boundaryFrontmatter) !== before;
+            if (changed) writes += 1;
+            return changed;
+          },
+          async process() {
+            legacyProcessCalls += 1;
+            throw new Error('timestamp automation must use the atomic source-preserving writer');
+          },
+        },
+        app: {
+          internalPlugins: { getPluginById: () => null, plugins: {} },
+          plugins: { getPlugin: () => null, plugins: {} },
+          vault: {
+            configDir: '.obsidian',
+            adapter: { async read() { throw new Error('missing Daily Notes settings'); } },
+            getFiles: () => [file],
+            getMarkdownFiles: () => [file],
+            getAbstractFileByPath: (path) => path === file.path ? file : null,
+            cachedRead: async () => initialSource,
+            on: () => ({}),
+          },
+          metadataCache: {
+            initialized: true,
+            getFileCache: () => ({ frontmatter: { title: 'Timestamp race' } }),
+            on: () => ({}),
+          },
+        },
+      };
+
+      const service = new FileNamingService(plugin);
+      await service.whenDailyNoteConfigurationReady();
+      await service.syncFileTimestamps(file, { reason: 'modify', force: true });
+
+      assert.deepEqual(ownedKeys, ['createdDate', 'modifiedDate'], testCase.label);
+      assert.equal(cause?.surface, 'file-timestamp-sync', testCase.label);
+      assert.equal(legacyProcessCalls, 0, testCase.label);
+      assert.equal(writes, testCase.expectedWrites, testCase.label);
+      assert.equal(Object.hasOwn(boundaryFrontmatter, 'createdDate'), testCase.expectedWrites === 1, testCase.label);
+      assert.equal(Object.hasOwn(boundaryFrontmatter, 'modifiedDate'), testCase.expectedWrites === 1, testCase.label);
+    }
+  } finally {
+    globalThis.window = priorWindow;
+  }
+});

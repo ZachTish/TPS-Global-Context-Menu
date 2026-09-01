@@ -680,9 +680,12 @@ test('legacy tag identity settings resolve to a property writer and retain the e
   assert.equal(resolved.requiresSettingsMigration, true);
   assert.equal(resolved.configuredProfile.identityMode, 'tag');
   assert.equal(resolved.writeProfile.identityMode, 'property');
-  assert.equal(resolved.writeProfile.identityPropertyKey, 'stableRecordId');
-  assert.equal(resolved.writeProfile.schemaPropertyKey, 'recordSchema');
+  assert.equal(resolved.writeProfile.identityPropertyKey, 'tpsId');
+  assert.equal(resolved.writeProfile.schemaPropertyKey, '');
   assert.equal(resolved.writeProfile.kindPropertyKey, 'kind');
+  assert.equal(resolved.writeProfile.titlePropertyKey, 'title');
+  assert.equal(resolved.writeProfile.createdPropertyKey, '');
+  assert.equal(resolved.writeProfile.modifiedPropertyKey, '');
   assert.deepEqual(resolved.readAliases[0], configuredTagProfile);
   assert.deepEqual(resolved.readAliases[1], existingPropertyAlias);
 });
@@ -782,34 +785,23 @@ test('sanitized native record aliases replace the raw persisted alias array', as
   assert.equal(disk.unrelatedSetting, 'preserve');
 });
 
-test('native record settings expose property identity only and explain legacy consolidation', () => {
+test('native record settings explain the fixed canonical envelope without exposing storage-key editors', () => {
   const nativeSettingsStart = settingsTabSource.indexOf("diagnostics.createEl('h4', { text: 'Native record properties' })");
   const nativeSettingsEnd = settingsTabSource.indexOf("diagnostics.createEl('h4', { text: 'Template identity' })", nativeSettingsStart);
   const nativeSettingsSource = settingsTabSource.slice(nativeSettingsStart, nativeSettingsEnd);
 
   assert.ok(nativeSettingsStart >= 0 && nativeSettingsEnd > nativeSettingsStart);
-  assert.match(nativeSettingsSource, /setName\('Record identity storage'\)/);
-  assert.match(nativeSettingsSource, /Generated records always store their stable ID and schema version in properties/);
+  assert.match(nativeSettingsSource, /setName\('Canonical record envelope'\)/);
+  assert.match(nativeSettingsSource, /one system identity \(tpsId\) plus kind and title/);
+  assert.match(nativeSettingsSource, /Schema and file timestamps remain available virtually through the API/);
   assert.doesNotMatch(nativeSettingsSource, /setName\('Store record identity as'\)/);
   assert.doesNotMatch(nativeSettingsSource, /addOption\('tag', 'Tag'\)/);
   assert.doesNotMatch(nativeSettingsSource, /setName\('Identity tag prefix'\)/);
-  assert.match(nativeSettingsSource, /nativeRecordKindPropertyKey = value\.trim\(\) \|\| 'kind';/);
+  assert.doesNotMatch(nativeSettingsSource, /nativeRecordIdentityPropertyKey|nativeRecordSchemaPropertyKey/);
+  assert.doesNotMatch(nativeSettingsSource, /nativeRecordKindPropertyKey|nativeRecordTitlePropertyKey/);
+  assert.doesNotMatch(nativeSettingsSource, /nativeRecordCreatedPropertyKey|nativeRecordModifiedPropertyKey/);
   assert.match(nativeSettingsSource, /Legacy readers stay enabled for records that arrive later through Sync/);
-  assert.match(
-    nativeSettingsSource,
-    /rememberNativeRecordProfileOnFocus[\s\S]*inputEl\.addEventListener\('focus',[\s\S]*rememberCurrentStorageProfile\(\)/,
-    'the pre-edit profile is captured once when a property editor receives focus',
-  );
-  assert.equal(
-    (nativeSettingsSource.match(/rememberNativeRecordProfileOnFocus\(text\);/g) ?? []).length,
-    6,
-    'every native storage property editor must bind the focus transaction',
-  );
-  assert.doesNotMatch(
-    nativeSettingsSource,
-    /\.onChange\(async \(value\) => \{\s*this\.plugin\.nativeRecordService\.rememberCurrentStorageProfile\(\)/,
-    'intermediate keystrokes must not create storage-profile aliases',
-  );
+  assert.match(nativeSettingsSource, /setButtonText\('Consolidate records'\)/);
 });
 
 test('TPS Base write fallback settings default safely and persist every Tasks workflow choice', () => {
@@ -1132,12 +1124,12 @@ test('settings use shallow routed pages with responsive, accessible selectors', 
   const frontmatterStart = settingsTabSource.indexOf('private renderNotebookNavigatorRules');
   const frontmatterEnd = settingsTabSource.indexOf('private renderRuleOverviewCard', frontmatterStart);
   const frontmatterSource = settingsTabSource.slice(frontmatterStart, frontmatterEnd);
-  assert.match(frontmatterSource, /id: 'sort', label: 'Sort buckets'/);
-  assert.match(frontmatterSource, /id: 'tags', label: 'Tag rules'/);
+  assert.match(frontmatterSource, /id: 'sort', label: 'Virtual sort'/);
+  assert.match(frontmatterSource, /id: 'tags', label: 'Semantic tags'/);
   assert.match(frontmatterSource, /id: 'icon-color', label: 'Icon \+ color'/);
   assert.match(frontmatterSource, /if \(this\.activeFrontmatterEditor === 'sort'\)/);
   assert.equal((frontmatterSource.match(/this\.createTrackedSection\(/g) || []).length, 1);
-  assert.match(frontmatterSource, /'Advanced rule settings'/);
+  assert.match(frontmatterSource, /'Automation and safeguards'/);
 
   for (const workflow of ['home-daily', 'tasks', 'child-notes', 'recurrence', 'time-tracking']) {
     assert.match(settingsTabSource, new RegExp(`id: '${workflow}', label:`));

@@ -35,14 +35,14 @@ export class BucketSectionRenderer {
         const section = container.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-section" });
         section.id = "tps-gcm-settings-frontmatter-rules-sort-buckets";
 
-        section.createEl("h3", { text: "Smart Sort Buckets" });
+        section.createEl("h3", { text: "Virtual Sort Buckets" });
         section.createEl("p", {
             cls: "setting-item-description",
-            text: "Define buckets to group and sort notes. Files match the first bucket whose conditions they meet."
+            text: "Generate a transient property value that Notebook Navigator can use for property sorting or grouping. No sort key is written to a note."
         });
         section.createEl("div", {
             cls: "tps-gcm-settings-frontmatter-rules-callout",
-            text: "Buckets are evaluated top-to-bottom. Within each bucket, notes are sorted by the defined criteria."
+            text: "Buckets are evaluated top-to-bottom. The first matching bucket wins, and its criteria form the virtual value used by Navigator."
         });
 
         const smartSort = plugin.settings.notebookNavigatorRules.smartSort;
@@ -55,33 +55,22 @@ export class BucketSectionRenderer {
             cls: "setting-item-description",
             text: preview
                 ? sortKey
-                    ? `Active note sort output: ${sortField} = ${sortKey}${sortMatched && sortBucketName ? ` (${sortBucketName})` : sortMatched ? "" : " (no bucket matched)"}`
-                    : "Active note sort output: not written"
-                : "Active note sort output: unavailable"
+                    ? `Active note virtual sort: ${sortField} = ${sortKey}${sortMatched && sortBucketName ? ` (${sortBucketName})` : sortMatched ? "" : " (no bucket matched)"}`
+                    : "Active note virtual sort: no generated value"
+                : "Active note virtual sort: unavailable"
         });
 
         new Setting(section)
-            .setName("Enable smart sort key")
-            .setDesc("Ask GCM to write the computed sort key to frontmatter.")
+            .setName("Enable virtual sort")
+            .setDesc("Expose the computed value through the Notebook Navigator presentation API.")
             .addToggle((toggle) => {
                 toggle
                     .setValue(smartSort.enabled)
                     .onChange(async (value) => {
                         smartSort.enabled = value;
                         await plugin.saveSettings();
-                        await plugin.applyRulesToActiveFile(false);
                         refresh();
                     });
-            });
-
-        new Setting(section)
-            .setName("Sort key field")
-            .setDesc("Frontmatter key GCM uses for the computed sort key.")
-            .addText((text) => {
-                text.setPlaceholder("sort");
-                bindCommittedText(text, smartSort.field, async (value) => {
-                    smartSort.field = value.trim().replace(/\s+/g, "") || "sort";
-                }, false, true);
             });
 
         new Setting(section)
@@ -92,7 +81,7 @@ export class BucketSectionRenderer {
                 bindCommittedText(text, smartSort.separator, async (value) => {
                     const trimmed = value.trim();
                     smartSort.separator = trimmed.slice(0, 3) || "_";
-                }, false, true);
+                });
             });
 
         new Setting(section)
@@ -104,7 +93,6 @@ export class BucketSectionRenderer {
                     .onChange(async (value) => {
                         smartSort.appendBasename = value;
                         await plugin.saveSettings();
-                        await plugin.applyRulesToActiveFile(false);
                         refresh();
                     });
             });
@@ -122,21 +110,6 @@ export class BucketSectionRenderer {
                             ? "children-under-parent"
                             : "none";
                         await plugin.saveSettings();
-                        await plugin.applyRulesToActiveFile(false);
-                        refresh();
-                    });
-            });
-
-        new Setting(section)
-            .setName("Clear key with no buckets")
-            .setDesc("Remove the sort field only when no enabled buckets exist. Unmatched notes otherwise receive a fallback category after every bucket.")
-            .addToggle((toggle) => {
-                toggle
-                    .setValue(smartSort.clearWhenNoMatch)
-                    .onChange(async (value) => {
-                        smartSort.clearWhenNoMatch = value;
-                        await plugin.saveSettings();
-                        await plugin.applyRulesToActiveFile(false);
                         refresh();
                     });
             });
@@ -149,13 +122,6 @@ export class BucketSectionRenderer {
             await plugin.saveSettings();
             refresh();
         }, true);
-        this.createActionButton(toolbar, "Apply active note", async () => {
-            await plugin.applyRulesToActiveFile(true);
-        });
-        this.createActionButton(toolbar, "Apply all notes", async () => {
-            await plugin.applyRulesToAllFiles(true);
-        });
-
         if (smartSort.buckets.length === 0) {
             section.createEl("p", {
                 cls: "setting-item-description",
@@ -286,7 +252,6 @@ export class BucketSectionRenderer {
                         }
                         live.enabled = value;
                         await plugin.saveSettings();
-                        await plugin.applyRulesToActiveFile(false);
                         refresh();
                     });
             });
@@ -324,7 +289,6 @@ export class BucketSectionRenderer {
                         }
                         live.match = normalizeRuleMatchMode(value);
                         await plugin.saveSettings();
-                        await plugin.applyRulesToActiveFile(false);
                     });
             });
 
@@ -352,7 +316,6 @@ export class BucketSectionRenderer {
                         this.ensureBucketConditions(live).push(createDefaultCondition());
                         live.match = normalizeRuleMatchMode(live.match);
                         await plugin.saveSettings();
-                        await plugin.applyRulesToActiveFile(false);
                         refresh();
                     });
             });
@@ -396,7 +359,6 @@ export class BucketSectionRenderer {
                     liveCondition.operator = "contains";
                 }
                 await plugin.saveSettings();
-                await plugin.applyRulesToActiveFile(false);
                 refresh();
             })();
         });
@@ -447,7 +409,6 @@ export class BucketSectionRenderer {
                 }
 
                 await plugin.saveSettings();
-                await plugin.applyRulesToActiveFile(false);
                 refresh();
             })();
         });
@@ -474,7 +435,6 @@ export class BucketSectionRenderer {
                     }
                     liveCondition.field = fieldInput.value.trim();
                     await plugin.saveSettings();
-                    await plugin.applyRulesToActiveFile(false);
                 })();
             });
         }
@@ -501,7 +461,6 @@ export class BucketSectionRenderer {
                     }
                     liveCondition.value = valueInput.value;
                     await plugin.saveSettings();
-                    await plugin.applyRulesToActiveFile(false);
                 })();
             });
         }
@@ -519,7 +478,6 @@ export class BucketSectionRenderer {
                 }
                 live.conditions = this.ensureBucketConditions(live).filter((_, idx) => idx !== conditionIndex);
                 await plugin.saveSettings();
-                await plugin.applyRulesToActiveFile(false);
                 refresh();
             })();
         });
@@ -561,7 +519,6 @@ export class BucketSectionRenderer {
                         }
                         this.ensureSortCriteria(live).push(createDefaultSortCriteria());
                         await plugin.saveSettings();
-                        await plugin.applyRulesToActiveFile(false);
                         refresh();
                     });
             });
@@ -592,7 +549,6 @@ export class BucketSectionRenderer {
                     const criteria = this.ensureSortCriteria(live);
                     [criteria[criterionIndex - 1], criteria[criterionIndex]] = [criteria[criterionIndex], criteria[criterionIndex - 1]];
                     await plugin.saveSettings();
-                    await plugin.applyRulesToActiveFile(false);
                     refresh();
                 })();
             });
@@ -610,7 +566,6 @@ export class BucketSectionRenderer {
                     const criteria = this.ensureSortCriteria(live);
                     [criteria[criterionIndex + 1], criteria[criterionIndex]] = [criteria[criterionIndex], criteria[criterionIndex + 1]];
                     await plugin.saveSettings();
-                    await plugin.applyRulesToActiveFile(false);
                     refresh();
                 })();
             });
@@ -626,7 +581,6 @@ export class BucketSectionRenderer {
                 }
                 live.sortCriteria = this.ensureSortCriteria(live).filter((_, idx) => idx !== criterionIndex);
                 await plugin.saveSettings();
-                await plugin.applyRulesToActiveFile(false);
                 refresh();
             })();
         });
@@ -655,7 +609,6 @@ export class BucketSectionRenderer {
                     liveCriterion.field = "";
                 }
                 await plugin.saveSettings();
-                await plugin.applyRulesToActiveFile(false);
                 refresh();
             })();
         });
@@ -693,7 +646,6 @@ export class BucketSectionRenderer {
                     }
                     liveCriterion.type = typeSelect.value as any;
                     await plugin.saveSettings();
-                    await plugin.applyRulesToActiveFile(false);
                     refresh();
                 })();
             });
@@ -721,7 +673,6 @@ export class BucketSectionRenderer {
                     }
                     liveCriterion.field = fieldInput.value.trim();
                     await plugin.saveSettings();
-                    await plugin.applyRulesToActiveFile(false);
                 })();
             });
         }
@@ -744,7 +695,6 @@ export class BucketSectionRenderer {
                 }
                 liveCriterion.direction = directionSelect.value as any;
                 await plugin.saveSettings();
-                await plugin.applyRulesToActiveFile(false);
             })();
         });
 
@@ -767,7 +717,6 @@ export class BucketSectionRenderer {
                     }
                     liveCriterion.missingValuePlacement = missingSelect.value as any;
                     await plugin.saveSettings();
-                    await plugin.applyRulesToActiveFile(false);
                 })();
             });
 
@@ -792,7 +741,6 @@ export class BucketSectionRenderer {
                     }
                     liveCriterion.mappings = parseMappings(mappingInput.value);
                     await plugin.saveSettings();
-                    await plugin.applyRulesToActiveFile(false);
                 })();
             });
         }
@@ -811,7 +759,6 @@ export class BucketSectionRenderer {
                     }
                     liveCriterion.mappings = parseMappings(PRIORITY_MAPPING);
                     await plugin.saveSettings();
-                    await plugin.applyRulesToActiveFile(false);
                     refresh();
                 });
             }
@@ -827,7 +774,6 @@ export class BucketSectionRenderer {
                     }
                     liveCriterion.mappings = parseMappings(STATUS_MAPPING);
                     await plugin.saveSettings();
-                    await plugin.applyRulesToActiveFile(false);
                     refresh();
                 });
             }
@@ -846,7 +792,6 @@ export class BucketSectionRenderer {
                     void (async () => {
                         bucket.enabled = !bucket.enabled;
                         await plugin.saveSettings();
-                        await plugin.applyRulesToAllFiles(true);
                         refresh();
                     })();
                 });
@@ -865,7 +810,6 @@ export class BucketSectionRenderer {
                         const buckets = plugin.settings.notebookNavigatorRules.smartSort.buckets;
                         [buckets[index - 1], buckets[index]] = [buckets[index], buckets[index - 1]];
                         await plugin.saveSettings();
-                        await plugin.applyRulesToAllFiles(true);
                         refresh();
                     })();
                 });
@@ -882,7 +826,6 @@ export class BucketSectionRenderer {
                         const buckets = plugin.settings.notebookNavigatorRules.smartSort.buckets;
                         [buckets[index + 1], buckets[index]] = [buckets[index], buckets[index + 1]];
                         await plugin.saveSettings();
-                        await plugin.applyRulesToAllFiles(true);
                         refresh();
                     })();
                 });
@@ -926,7 +869,6 @@ export class BucketSectionRenderer {
                             selectedBucketId = plugin.settings.notebookNavigatorRules.smartSort.buckets[0]?.id ?? null;
                         }
                         await plugin.saveSettings();
-                        await plugin.applyRulesToAllFiles(true);
                         refresh();
                     })();
                 });

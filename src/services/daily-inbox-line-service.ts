@@ -191,7 +191,6 @@ export class DailyInboxLineService {
         getDefaultSubitemFolderPath(this.plugin, context.file),
         {
           seedParentTags: false,
-          seedVisualMetadata: false,
           insertParentBodyLink: false,
           inheritParentTemporalMetadata: false,
           saveFolderPath: false,

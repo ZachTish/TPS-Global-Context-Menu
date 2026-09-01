@@ -258,6 +258,7 @@ function makeFixture(initialContent = pocRecord) {
     file,
     plugin,
     getContent: () => content,
+    setContent: (nextContent) => { content = String(nextContent || ''); },
     getMaxActiveProcesses: () => maxActiveProcesses,
     updates,
     indexed,
@@ -270,19 +271,17 @@ function stripManagedLines(source) {
 
 function stripNativeUpdateLines(source) {
   return source
-    .replace(/^(?:title|modifiedDate|tpsId|tpsSchemaVersion):[^\r\n]*(?:\r?\n)/gmu, '')
+    .replace(/^(?:title|createdDate|modifiedDate|tpsId|tpsSchemaVersion):[^\r\n]*(?:\r?\n)/gmu, '')
     .replace(/^  - tps\/record\/v1\/calendar-event\/calendar-3rv0kr(?:\r?\n)/gmu, '');
 }
 
-test('Notebook Navigator visual rules preserve POC native-record YAML and body source', async () => {
+test('matched Notebook Navigator visual and sort rules never enter a YAML mutation path', async () => {
   const fixture = makeFixture();
   const service = new NotebookNavigatorRuleService(fixture.plugin);
-  const mutationService = fixture.plugin.frontmatterMutationService;
-  const originalWriter = mutationService.processOwnedKeysPreservingSource.bind(mutationService);
-  let ownedKeys = [];
-  mutationService.processOwnedKeysPreservingSource = async (file, keys, mutator, cause) => {
-    ownedKeys = [...keys];
-    return originalWriter(file, keys, mutator, cause);
+  let mutationCalls = 0;
+  fixture.plugin.frontmatterMutationService.processOwnedKeysPreservingSource = async () => {
+    mutationCalls += 1;
+    throw new Error('visual and sort projection must not invoke a frontmatter writer');
   };
 
   const changed = await service.applyRulesToFile(fixture.file, {
@@ -291,26 +290,11 @@ test('Notebook Navigator visual rules preserve POC native-record YAML and body s
     bypassCreationGrace: true,
   });
 
-  const output = fixture.getContent();
-  assert.equal(changed, true);
-  assert.deepEqual(new Set(ownedKeys), new Set(['icon', 'color', 'sort']));
-  assert.equal(stripManagedLines(output), pocRecord);
-  assert.match(output, /^icon: calendar-clock\r$/mu);
-  assert.match(output, /^color: "#3b82f6"\r$/mu);
-  assert.match(output, /^sort: /mu);
-  assert.match(output, /^scheduled: 2026-09-01T14:30:00Z\r$/mu);
-  assert.match(output, /^due: 2026-09-01T10:15:00-05:00\r$/mu);
-  assert.match(output, /^eventDate: 2026-09-01\r$/mu);
-  assert.match(output, /^  - calendar-event\r$/mu);
-  assert.ok(output.endsWith('Human note with --- and scheduled: text.\r\n'));
-  assert.equal(fixture.updates.length, 1);
-  assert.equal(fixture.indexed.length, 1);
-
-  const parsedRecord = parseNativeRecordDocument(output);
-  assert.ok(parsedRecord, 'the post-mutation Markdown must remain parseable as a native record document');
-  const inspection = new NativeRecordService(fixture.plugin).inspect(parsedRecord.frontmatter);
-  assert.equal(inspection?.id, 'calendar-3rv0kr');
-  assert.equal(inspection?.kind, 'calendar-event');
+  assert.equal(changed, false);
+  assert.equal(mutationCalls, 0);
+  assert.equal(fixture.getContent(), pocRecord);
+  assert.equal(fixture.updates.length, 0);
+  assert.equal(fixture.indexed.length, 0);
 });
 
 test('native architecture retains blank-title cleanup and hide-tag automation for ordinary Markdown notes', async () => {
@@ -345,13 +329,14 @@ test('native architecture retains blank-title cleanup and hide-tag automation fo
     bypassCreationGrace: true,
   });
 
-  const expectedWithoutSort = source
+  const expected = source
     .replace('title: Ordinary Note\r\n', '')
     .replace('tags:\r\n  - keep\r\n', 'tags:\r\n  - keep\r\n  - hidden\r\n');
   const output = fixture.getContent();
   assert.equal(changed, true);
-  assert.equal(stripManagedLines(output), expectedWithoutSort);
+  assert.equal(output, expected);
   assert.doesNotMatch(output, /^title:/mu);
+  assert.doesNotMatch(output, /^(?:icon|color|sort):/mu);
   assert.match(output, /^  - keep\r$/mu);
   assert.match(output, /^  - hidden\r$/mu);
   assert.match(output, /^producerTimestamp: 2026-08-25T18:12:13\.456Z\r$/mu);
@@ -392,12 +377,87 @@ test('native architecture protects proven native-record title and tags from Note
   });
 
   const output = fixture.getContent();
-  assert.equal(changed, true, 'the owned smart-sort field still updates');
-  assert.equal(stripManagedLines(output), source);
+  assert.equal(changed, false, 'native records reject semantic tag and title-repair mutations');
+  assert.equal(output, source);
   assert.match(output, /^title: Native Protected\r$/mu);
   assert.match(output, /^  - keep\r$/mu);
   assert.match(output, /^  - tps\/record\/v1\/task\/native-protected\r$/mu);
   assert.doesNotMatch(output, /^  - hidden\r$/mu);
+  assert.equal(fixture.updates.length, 0);
+  assert.equal(fixture.indexed.length, 0);
+});
+
+test('Notebook Navigator semantic automation rechecks ambiguous native identity at the atomic mutation boundary', async () => {
+  const initialSource = [
+    '---\n',
+    'title: Race Note\n',
+    'tags:\n',
+    '  - keep\n',
+    '---\n',
+  ].join('');
+  const cases = [
+    {
+      label: 'valid identity acquired after preflight',
+      identityLines: ['tpsId: task-raced-valid\n', 'kind: task\n'],
+    },
+    {
+      label: 'incomplete identity acquired after preflight',
+      identityLines: ['tpsId:\n'],
+    },
+    {
+      label: 'malformed schema evidence acquired after preflight',
+      identityLines: ['tpsSchemaVersion: not-a-version\n'],
+    },
+  ];
+
+  for (const testCase of cases) {
+    const fixture = makeFixture(initialSource);
+    Object.assign(fixture.file, {
+      path: 'Race Note.md',
+      name: 'Race Note.md',
+      basename: 'Race Note',
+    });
+    fixture.plugin.settings.notebookNavigatorRules.hideRules = [{
+      id: 'hide-race-note',
+      name: 'Hide race note',
+      enabled: true,
+      tagName: 'hidden',
+      mode: 'add',
+      match: 'all',
+      conditions: [{ source: 'tag', field: '', operator: 'contains', value: 'keep' }],
+    }];
+    const boundarySource = [
+      '---\n',
+      ...testCase.identityLines,
+      'title: Race Note\n',
+      'tags:\n',
+      '  - keep\n',
+      '---\n',
+    ].join('');
+    const sourcePreservingWriter = fixture.plugin.frontmatterMutationService
+      .processOwnedKeysPreservingSource
+      .bind(fixture.plugin.frontmatterMutationService);
+    let boundaryCalls = 0;
+    fixture.plugin.frontmatterMutationService.processOwnedKeysPreservingSource = async (...args) => {
+      boundaryCalls += 1;
+      fixture.setContent(boundarySource);
+      return sourcePreservingWriter(...args);
+    };
+
+    const changed = await new NotebookNavigatorRuleService(fixture.plugin).applyRulesToFile(fixture.file, {
+      reason: 'create',
+      force: true,
+      bypassCreationGrace: true,
+    });
+
+    assert.equal(boundaryCalls, 1, testCase.label);
+    assert.equal(changed, false, testCase.label);
+    assert.equal(fixture.getContent(), boundarySource, testCase.label);
+    assert.match(fixture.getContent(), /^title: Race Note$/mu, testCase.label);
+    assert.doesNotMatch(fixture.getContent(), /^  - hidden$/mu, testCase.label);
+    assert.equal(fixture.updates.length, 0, testCase.label);
+    assert.equal(fixture.indexed.length, 0, testCase.label);
+  }
 });
 
 test('legacy architecture still protects a proven native record from Notebook Navigator automation', async () => {
@@ -614,12 +674,12 @@ test('nativeRecords.update migrates legacy identity through owned fields and pre
   assert.equal(stripNativeUpdateLines(output), stripNativeUpdateLines(pocRecord));
   assert.doesNotMatch(output, /^  - tps\/record\/v1\/calendar-event\/calendar-3rv0kr\r$/mu);
   assert.match(output, /^tpsId: calendar-3rv0kr\r$/mu);
-  assert.match(output, /^tpsSchemaVersion: 1\r$/mu);
+  assert.doesNotMatch(output, /^tpsSchemaVersion:/mu);
   assert.match(output, /^  - calendar-event\r$/mu);
   assert.match(output, /^  - work\r$/mu);
   assert.match(output, /^title: "\[\[Calendar Events\/2026-09-01\/Calendar event--calendar-3rv0kr\|Daily Standup: Platform sync\]\]"\r$/mu);
-  assert.match(output, /^modifiedDate: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\r$/mu);
-  assert.match(output, /^createdDate: 2026-08-25T18:12:13\.456Z\r$/mu);
+  assert.doesNotMatch(output, /^modifiedDate:/mu);
+  assert.doesNotMatch(output, /^createdDate:/mu);
   assert.match(output, /^scheduled: 2026-09-01T14:30:00Z\r$/mu);
   assert.match(output, /^due: 2026-09-01T10:15:00-05:00\r$/mu);
   assert.ok(output.endsWith('Human note with --- and scheduled: text.\r\n'));

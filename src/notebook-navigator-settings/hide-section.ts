@@ -29,10 +29,10 @@ export class HideSectionRenderer {
         const section = container.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-section" });
         section.id = "tps-gcm-settings-frontmatter-rules-tag-rules";
 
-        section.createEl("h3", { text: "Tag Rules" });
+        section.createEl("h3", { text: "Semantic Tag Rules" });
         section.createEl("p", {
             cls: "setting-item-description",
-            text: "Automatically add or remove frontmatter tags, including hide/archive/status tags, based on rule criteria."
+            text: "Deliberately add or remove authored YAML tags, including hide, archive, or status tags, when rule criteria match. This is the only Navigator-rule workflow that writes ordinary note metadata."
         });
 
         new Setting(section)
@@ -59,7 +59,7 @@ export class HideSectionRenderer {
             await persistRuleChange(false);
             refresh();
         }, true);
-        this.createActionButton(toolbar, "Apply active note", async () => {
+        this.createActionButton(toolbar, "Apply tags to active note", async () => {
             await plugin.applyRulesToActiveFile(true);
         });
 

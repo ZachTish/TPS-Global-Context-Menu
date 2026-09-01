@@ -17,6 +17,14 @@ const ruleSettingsSource = readFileSync(
   new URL('../src/notebook-navigator-settings/rules-section.ts', import.meta.url),
   'utf8',
 );
+const hideSettingsSource = readFileSync(
+  new URL('../src/notebook-navigator-settings/hide-section.ts', import.meta.url),
+  'utf8',
+);
+const settingsTabSource = readFileSync(
+  new URL('../src/settings-tab.ts', import.meta.url),
+  'utf8',
+);
 const registerEventsSource = readFileSync(
   new URL('../src/events/register-events.ts', import.meta.url),
   'utf8',
@@ -230,7 +238,7 @@ test('sort keys use enabled bucket order and keep unmatched notes after every ma
   assert.ok(holding.key < unmatched.key);
 });
 
-test('sort writer preserves the unmatched fallback even with the legacy clear toggle', () => {
+test('virtual sort preserves the unmatched fallback even with the legacy clear toggle', () => {
   const service = new NotebookNavigatorRuleService({ app });
   const enabledSettings = {
     smartSort: {
@@ -261,7 +269,7 @@ test('sort writer preserves the unmatched fallback even with the legacy clear to
   assert.equal(noEnabledBuckets, null, 'the legacy clear toggle remains meaningful only with no enabled buckets');
 });
 
-test('note-open visual rules run locally without taking controller-owned sort and hide writes', () => {
+test('visual and sort rules are projection-only while semantic mutations stay narrowly owned', () => {
   const fileOpenGate = sourceBlock(
     registerEventsSource,
     "plugin.app.workspace.on('file-open'",
@@ -272,18 +280,23 @@ test('note-open visual rules run locally without taking controller-owned sort an
     'async applyRulesToFile(',
     'markUserEdited(',
   );
+  const projectionBlock = sourceBlock(
+    serviceSource,
+    'private async computePresentation(',
+    'private applyPresentationScalar(',
+  );
 
   assert.match(fileOpenGate, /shouldAutoApplyOnFileOpen\(\)/u);
-  assert.doesNotMatch(
-    fileOpenGate.match(/if \(file instanceof TFile\)[\s\S]*?scheduleApply\(file,[\s\S]*?\}\);/u)?.[0] || '',
-    /canRunBackgroundAutomation/u,
-  );
-  assert.match(serviceSource, /options\.reason === 'file-open'\s*\? 75/u);
+  assert.match(serviceSource, /shouldAutoApplyOnFileOpen\(\): boolean \{[\s\S]{0,260}return false;/u);
   assert.match(serviceSource, /requiresControllerAutomation\(options\.reason\)/u);
-  assert.match(serviceSource, /reason !== 'file-open'/u);
-  assert.match(applyBlock, /if \(options\.reason !== 'file-open'\) \{[\s\S]*computeSortKey[\s\S]*applyHideTagMutations/u);
-  assert.match(applyBlock, /applyScalarMutation\(frontmatter, iconField/u);
-  assert.match(applyBlock, /applyScalarMutation\(frontmatter, colorField/u);
+  assert.match(applyBlock, /options\.reason === 'create'/u);
+  assert.match(applyBlock, /hasEnabledHideRules\(settings\)/u);
+  assert.match(applyBlock, /ownedKeys\.push\('title'\)/u);
+  assert.match(applyBlock, /ownedKeys\.push\('tags'\)/u);
+  assert.doesNotMatch(applyBlock, /resolveVisualOutputs|computeSortKey|iconField|colorField|sortField|applyPresentationScalar/u);
+  assert.match(projectionBlock, /resolveVisualOutputs/u);
+  assert.match(projectionBlock, /computeSortKey/u);
+  assert.match(projectionBlock, /applyPresentationScalar/u);
   assert.match(applyBlock, /kind:\s*'automation'[\s\S]{0,160}surface:\s*'notebook-navigator-rules'/u);
 });
 
@@ -359,12 +372,35 @@ test('sort condition groups survive settings sanitization', () => {
   }]);
 });
 
-test('settings expose repair actions and reconcile structural ordering changes once', () => {
-  assert.match(bucketSettingsSource, /"Apply all notes"[\s\S]*?applyRulesToAllFiles\(true\)/u);
-  assert.match(bucketSettingsSource, /"Move up"[\s\S]*?applyRulesToAllFiles\(true\)/u);
-  assert.match(bucketSettingsSource, /"Move down"[\s\S]*?applyRulesToAllFiles\(true\)/u);
-  assert.match(ruleSettingsSource, /"Move up"[\s\S]*?applyRulesToAllFiles\(true\)/u);
-  assert.match(ruleSettingsSource, /"Move down"[\s\S]*?applyRulesToAllFiles\(true\)/u);
+test('retired presentation destination controls remain persisted compatibility inputs', () => {
+  const sanitized = sanitizeNotebookNavigatorRuleSettings({
+    frontmatterIconField: 'navigatorIcon',
+    frontmatterColorField: 'navigatorColor',
+    clearIconWhenNoMatch: true,
+    clearColorWhenNoMatch: true,
+    smartSort: {
+      field: 'navigatorSort',
+      clearWhenNoMatch: true,
+    },
+  });
+
+  assert.equal(sanitized.frontmatterIconField, 'navigatorIcon');
+  assert.equal(sanitized.frontmatterColorField, 'navigatorColor');
+  assert.equal(sanitized.clearIconWhenNoMatch, true);
+  assert.equal(sanitized.clearColorWhenNoMatch, true);
+  assert.equal(sanitized.smartSort.field, 'navigatorSort');
+  assert.equal(sanitized.smartSort.clearWhenNoMatch, true);
+});
+
+test('settings expose virtual presentation without visual write controls', () => {
+  assert.match(bucketSettingsSource, /Virtual Sort Buckets/u);
+  assert.match(bucketSettingsSource, /No sort key is written to a note/u);
+  assert.match(ruleSettingsSource, /Generate virtual icon and color values/u);
+  assert.doesNotMatch(bucketSettingsSource, /applyRulesTo(?:ActiveFile|AllFiles)|Sort key field|Clear key with no buckets/u);
+  assert.doesNotMatch(ruleSettingsSource, /applyRulesTo(?:ActiveFile|AllFiles)/u);
+  assert.doesNotMatch(settingsTabSource, /\.setName\('Icon field'\)|\.setName\('Color field'\)|\.setName\('Clear icon when no match'\)|\.setName\('Clear color when no match'\)|\.setName\('Auto-apply on file open'\)/u);
+  assert.match(settingsTabSource, /Apply semantic tag rules/u);
+  assert.match(hideSettingsSource, /Apply tags to active note[\s\S]*?applyRulesToActiveFile\(true\)/u);
   assert.match(ruleSettingsSource, /activePreview\?\.iconRuleId === rule\.id/u);
   assert.match(serviceSource, /ctime:\s*file\.stat\.ctime/u);
   assert.match(serviceSource, /mtime:\s*file\.stat\.mtime/u);
@@ -379,7 +415,7 @@ test('adding or duplicating a bucket does not sweep the vault before configurati
   const addBlock = sourceBlock(
     bucketSettingsSource,
     'this.createActionButton(toolbar, "+ Add bucket"',
-    'this.createActionButton(toolbar, "Apply active note"',
+    'if (smartSort.buckets.length === 0)',
   );
   const duplicateBlock = sourceBlock(
     bucketSettingsSource,

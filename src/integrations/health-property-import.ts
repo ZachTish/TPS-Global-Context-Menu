@@ -66,6 +66,32 @@ export interface HealthPropertyImportResult<T> {
 
 export const HEALTH_PROPERTY_IMPORT_ID_PREFIX = 'health-import-';
 
+const DEFAULT_CONTEXT_MENU_KEYS = new Set([
+  'status',
+  'priority',
+  'scheduled',
+  'due',
+  'tags',
+  'parents',
+]);
+
+const SCOPED_CONTEXT_MENU_KEYS = new Set(['quantity', 'unit']);
+
+function hasPropertyScope(entry: HealthPropertyCatalogEntry): boolean {
+  return Boolean(
+    entry.scope.kinds?.length
+    || entry.scope.tags?.length
+    || entry.scope.paths?.length
+    || entry.scope.properties?.length,
+  );
+}
+
+function showInContextMenuByDefault(entry: HealthPropertyCatalogEntry): boolean {
+  const key = normalizedKey(entry.key);
+  return DEFAULT_CONTEXT_MENU_KEYS.has(key)
+    || (SCOPED_CONTEXT_MENU_KEYS.has(key) && hasPropertyScope(entry));
+}
+
 function importedProperty(section: 'food' | 'rollup' | 'native', entry: HealthPropertyCatalogEntry): ImportedHealthProperty {
   const property: ImportedHealthProperty = {
     id: `${HEALTH_PROPERTY_IMPORT_ID_PREFIX}${section}-${entry.id}`,
@@ -74,7 +100,7 @@ function importedProperty(section: 'food' | 'rollup' | 'native', entry: HealthPr
     type: entry.type,
     icon: entry.icon,
     showInCollapsed: true,
-    showInContextMenu: true,
+    showInContextMenu: showInContextMenuByDefault(entry),
     allowInlineSet: false,
     showWhen: section === 'native' ? 'always' : 'populated',
     inlineShowWhen: section === 'native' ? 'always' : 'populated',
@@ -129,6 +155,7 @@ function mergeDesiredProperties(properties: ImportedHealthProperty[]): ImportedH
       scopePaths: unionStrings(existing.scopePaths, property.scopePaths),
       scopeProperties: unionConditions(existing.scopeProperties, property.scopeProperties),
       scopeMode: 'any',
+      showInContextMenu: existing.showInContextMenu || property.showInContextMenu,
       showWhen: existing.showWhen === 'always' || property.showWhen === 'always' ? 'always' : 'populated',
       inlineShowWhen: existing.inlineShowWhen === 'always' || property.inlineShowWhen === 'always' ? 'always' : 'populated',
       contextMenuShowWhen: existing.contextMenuShowWhen === 'always' || property.contextMenuShowWhen === 'always' ? 'always' : 'populated',

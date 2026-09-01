@@ -38,7 +38,6 @@ import { runDailyNoteHomeSettingTransaction } from './services/daily-note-home-s
 import {
   normalizeNativeRecordLayout,
   normalizeNativeRecordRoot,
-  normalizeNativeRecordStorageProfile,
 } from './services/native-record-service';
 import { importHealthPropertyCatalog } from './integrations/health-property-import';
 import { installTaskRecordProperties } from './integrations/task-property-install';
@@ -245,7 +244,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           id: 'rules-fields',
           label: 'Rules & fields',
           summary: `${ruleCount} rules · ${(settings.properties || []).length} fields`,
-          description: 'Frontmatter rules, custom fields, and view-mode rules.',
+          description: 'Navigator presentation, semantic tags, custom fields, and view-mode rules.',
         },
         {
           id: 'menus-surfaces',
@@ -288,7 +287,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       [
         {
           id: 'frontmatter',
-          label: 'Frontmatter rules',
+          label: 'Navigator rules',
           summary: `${rules.smartSort.buckets.length + rules.hideRules.length + rules.rules.length} configured`,
         },
         {
@@ -474,8 +473,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     root.dataset.tpsSettingsRoute = 'frontmatter-rules';
 
     new Setting(root)
-      .setName('Enable rule application')
-      .setDesc('Allow GCM to write configured frontmatter rule outputs to markdown files.')
+      .setName('Enable Navigator rules')
+      .setDesc('Provide generated icon, color, and sort values through the virtual presentation API. Semantic tag rules remain an explicit frontmatter automation workflow.')
       .addToggle((toggle) => toggle.setValue(settings.enabled).onChange(async (value) => {
         settings.enabled = value;
         await this.plugin.saveSettings();
@@ -485,20 +484,20 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     if (!settings.enabled) {
       root.createEl('p', {
         cls: 'tps-gcm-settings-callout',
-        text: 'Rule application is off. You can still build and review rules below; turn it on when you are ready for GCM to write their outputs.',
+        text: 'Navigator rules are off. You can still build and review them below; generated presentation values and semantic tag automation remain inactive until this is enabled.',
       });
     }
 
     const overview = root.createDiv({ cls: 'tps-gcm-settings-frontmatter-rules-overview-grid' });
-    this.renderRuleOverviewCard(overview, 'Sort', `${settings.smartSort.buckets.length} buckets`, settings.smartSort.enabled ? 'Writes ordered sort keys.' : 'Disabled');
-    this.renderRuleOverviewCard(overview, 'Tags', `${settings.hideRules.length} rules`, settings.autoRemoveHiddenWhenNoMatch ? 'Managed tags auto-clean.' : 'Manual tags preserved.');
-    this.renderRuleOverviewCard(overview, 'Icon + Color', `${settings.rules.length} rules`, 'First matching icon and color win.');
+    this.renderRuleOverviewCard(overview, 'Sort', `${settings.smartSort.buckets.length} buckets`, settings.smartSort.enabled ? 'Virtual sort is enabled.' : 'Disabled');
+    this.renderRuleOverviewCard(overview, 'Tags', `${settings.hideRules.length} rules`, settings.autoRemoveHiddenWhenNoMatch ? 'Semantic YAML tags auto-clean.' : 'Unmatched YAML tags are preserved.');
+    this.renderRuleOverviewCard(overview, 'Icon + Color', `${settings.rules.length} rules`, 'Virtual values; authored appearance wins.');
 
     this.renderRouteButtons<FrontmatterEditorId>(
       root,
       [
-        { id: 'sort', label: 'Sort buckets', summary: `${settings.smartSort.buckets.length}` },
-        { id: 'tags', label: 'Tag rules', summary: `${settings.hideRules.length}` },
+        { id: 'sort', label: 'Virtual sort', summary: `${settings.smartSort.buckets.length}` },
+        { id: 'tags', label: 'Semantic tags', summary: `${settings.hideRules.length}` },
         { id: 'icon-color', label: 'Icon + color', summary: `${settings.rules.length}` },
       ],
       this.activeFrontmatterEditor,
@@ -507,7 +506,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         this.redisplayPreservingRouteFocus(id);
       },
       'tps-gcm-settings-subnav tps-gcm-settings-subnav--rule-kind',
-      'Frontmatter rule editor',
+      'Navigator presentation and tag rule editor',
     );
 
     const sectionContext: SettingsSectionContext = {
@@ -527,38 +526,30 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
     const advanced = this.createTrackedSection(
       root,
-      'Advanced rule settings',
-      'Automatic triggers, output field names, cleanup, exclusions, and general frontmatter writes.',
+      'Automation and safeguards',
+      'Control semantic tag automation, rule exclusions, and separate general note-maintenance workflows.',
       false,
     );
 
     new Setting(advanced)
-      .setName('Auto-apply on file open')
-      .setDesc('Evaluate and apply rules when a markdown file becomes active.')
-      .addToggle((toggle) => toggle.setValue(settings.autoApplyOnFileOpen).onChange(async (value) => {
-        settings.autoApplyOnFileOpen = value;
-        await this.plugin.saveSettings();
-      }));
-
-    new Setting(advanced)
-      .setName('Auto-apply on metadata change')
-      .setDesc('Evaluate and apply rules after frontmatter changes.')
+      .setName('Apply semantic tags after metadata changes')
+      .setDesc('Re-evaluate enabled tag rules after note metadata changes. Virtual icon, color, and sort values refresh independently without writing YAML.')
       .addToggle((toggle) => toggle.setValue(settings.autoApplyOnMetadataChange).onChange(async (value) => {
         settings.autoApplyOnMetadataChange = value;
         await this.plugin.saveSettings();
       }));
 
     new Setting(advanced)
-      .setName('Startup vault scan')
-      .setDesc('Scan markdown files once after startup.')
+      .setName('Apply semantic tags at startup')
+      .setDesc('Scan eligible Markdown notes once after startup when at least one semantic tag rule is enabled.')
       .addToggle((toggle) => toggle.setValue(settings.applyOnStartup).onChange(async (value) => {
         settings.applyOnStartup = value;
         await this.plugin.saveSettings();
       }));
 
     new Setting(advanced)
-      .setName('Metadata debounce (ms)')
-      .setDesc('Debounce for metadata-change rule application.')
+      .setName('Semantic tag debounce (ms)')
+      .setDesc('Delay before applying semantic tag rules after a metadata change.')
       .addText((text) => {
         text.setPlaceholder('350');
         this.bindNotebookNavigatorCommittedText(text, String(settings.metadataDebounceMs), async (value) => {
@@ -568,12 +559,12 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       });
 
     new Setting(advanced)
-      .setName('Manual apply')
-      .setDesc('Apply configured frontmatter rules immediately through GCM.')
-      .addButton((button) => button.setButtonText('Active file').onClick(async () => {
+      .setName('Apply semantic tag rules')
+      .setDesc('Deliberately add or remove only the YAML tags configured in Tag rules.')
+      .addButton((button) => button.setButtonText('Active note').onClick(async () => {
         await this.plugin.applyRulesToActiveFile(true);
       }))
-      .addButton((button) => button.setButtonText('All markdown files').onClick(async () => {
+      .addButton((button) => button.setButtonText('All Markdown notes').onClick(async () => {
         await this.plugin.applyRulesToAllFiles(false);
       }));
 
@@ -581,59 +572,21 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     const previewText = preview
       ? [
         `Active file: ${String(preview.filePath || '')}`,
-        `Icon: ${preview.icon ? `${String(preview.iconField)} = ${String(preview.icon)}` : '(no matching icon rule)'}`,
-        `Color: ${preview.color ? `${String(preview.colorField)} = ${String(preview.color)}` : '(no matching color rule)'}`,
-        `Sort: ${preview.sortKey ? `${String(preview.sortField)} = ${String(preview.sortKey)}${preview.sortMatched === false ? ' (no bucket matched)' : ''}` : '(not written)'}`,
-        `Tags: +${(preview.tagsAdded as string[] | undefined)?.join(', ') || 'none'} / -${(preview.tagsRemoved as string[] | undefined)?.join(', ') || 'none'}`,
+        `Virtual icon: ${preview.icon ? `${String(preview.iconField)} = ${String(preview.icon)}` : '(no matching icon rule)'}`,
+        `Virtual color: ${preview.color ? `${String(preview.colorField)} = ${String(preview.color)}` : '(no matching color rule)'}`,
+        `Virtual sort: ${preview.sortKey ? `${String(preview.sortField)} = ${String(preview.sortKey)}${preview.sortMatched === false ? ' (no bucket matched)' : ''}` : '(no generated sort value)'}`,
+        `YAML tags: +${(preview.tagsAdded as string[] | undefined)?.join(', ') || 'none'} / -${(preview.tagsRemoved as string[] | undefined)?.join(', ') || 'none'}`,
       ].join('\n')
-      : 'Active file preview unavailable. Open a markdown note to inspect rule outputs.';
+      : 'Active file preview unavailable. Open a Markdown note to inspect virtual presentation and semantic tag results.';
     const previewBox = advanced.createEl('pre', {
       cls: 'tps-gcm-settings-frontmatter-rules-preview',
       text: previewText,
     });
-    previewBox.setAttr('aria-label', 'Active file rule output preview');
+    previewBox.setAttr('aria-label', 'Active file virtual presentation and semantic tag preview');
 
     new Setting(advanced)
-      .setName('Icon field')
-      .setDesc('Frontmatter key GCM uses to store icon value.')
-      .addText((text) => {
-        text.setPlaceholder('icon');
-        this.bindNotebookNavigatorCommittedText(text, settings.frontmatterIconField, async (value) => {
-          settings.frontmatterIconField = value.trim().replace(/\s+/g, '') || 'icon';
-        }, false, true);
-      });
-
-    new Setting(advanced)
-      .setName('Color field')
-      .setDesc('Frontmatter key GCM uses to store color value.')
-      .addText((text) => {
-        text.setPlaceholder('color');
-        this.bindNotebookNavigatorCommittedText(text, settings.frontmatterColorField, async (value) => {
-          settings.frontmatterColorField = value.trim().replace(/\s+/g, '') || 'color';
-        }, false, true);
-      });
-
-    new Setting(advanced)
-      .setName('Clear icon when no match')
-      .setDesc('Remove the icon field when no icon rule matches.')
-      .addToggle((toggle) => toggle.setValue(settings.clearIconWhenNoMatch).onChange(async (value) => {
-        settings.clearIconWhenNoMatch = value;
-        await this.plugin.saveSettings();
-        await this.plugin.applyRulesToActiveFile(false);
-      }));
-
-    new Setting(advanced)
-      .setName('Clear color when no match')
-      .setDesc('Remove the color field when no color rule matches.')
-      .addToggle((toggle) => toggle.setValue(settings.clearColorWhenNoMatch).onChange(async (value) => {
-        settings.clearColorWhenNoMatch = value;
-        await this.plugin.saveSettings();
-        await this.plugin.applyRulesToActiveFile(false);
-      }));
-
-    new Setting(advanced)
-      .setName('Rule write exclusions')
-      .setDesc('Skip icon/color/sort/tag rule writes for matching files. One pattern per line; supports exact paths, folder prefixes, wildcards (*), name:<basename>, and re:<regex>.')
+      .setName('Rule exclusions')
+      .setDesc('Skip virtual presentation and semantic tag automation for matching files. One pattern per line; supports exact paths, folder prefixes, wildcards (*), name:<basename>, and re:<regex>.')
       .addTextArea((text) => {
         text
           .setValue(settings.frontmatterWriteExclusions || '')
@@ -687,8 +640,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }));
     new Setting(advanced)
-      .setName('Apply rules on subitem create')
-      .setDesc('Immediately apply configured frontmatter rules after GCM creates a subitem.')
+      .setName('Apply semantic tags on subitem create')
+      .setDesc('Immediately run enabled semantic tag rules after GCM creates a subitem. Virtual presentation does not require this setting.')
       .addToggle(t => t.setValue(this.plugin.settings.applyNotebookNavigatorRulesOnSubitemCreate).onChange(async v => { this.plugin.settings.applyNotebookNavigatorRulesOnSubitemCreate = v; await this.plugin.saveSettings(); }));
     new Setting(advanced)
       .setName('Global auto-write exclusions')
@@ -758,7 +711,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       ownershipNote.setText(
         [
           hasController ? 'TPS Controller owns orchestration and runtime scheduling.' : '',
-          'GCM owns shared TPS concepts, contracts, event helpers, menu behavior, note interaction, and frontmatter rule semantics.'
+          'GCM owns shared TPS concepts, contracts, event helpers, menu behavior, note interaction, and Navigator presentation/tag rule semantics.'
         ].filter(Boolean).join(' ')
       );
     }
@@ -766,7 +719,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     this.renderSettingsHub(containerEl);
 
     const activePage = this.activeSettingsPage === 'rules-fields'
-      ? this.createSettingsPage(containerEl, 'rules-fields', 'Rules & fields', 'Configure frontmatter automation, reusable custom fields, and view-mode rules.')
+      ? this.createSettingsPage(containerEl, 'rules-fields', 'Rules & fields', 'Configure virtual Navigator presentation, semantic tag automation, reusable custom fields, and view-mode rules.')
       : this.activeSettingsPage === 'menus-surfaces'
         ? this.createSettingsPage(containerEl, 'menus-surfaces', 'Menus & surfaces', 'Choose where GCM appears and how note links and inline controls behave.')
         : this.activeSettingsPage === 'workflows'
@@ -2315,7 +2268,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
       new Setting(diagnostics)
         .setName('Native record root')
-        .setDesc('Vault-relative destination for generated task, calendar, food, activity, workout, and asset records. Enter / for the vault root. This remains editable before native mode is enabled.')
+        .setDesc('Vault-relative destination for newly generated task, calendar, Health log/definition, workflow, time-entry, and asset records. Existing records are never moved by this setting. Enter / for the vault root.')
         .addText((text) => text
           .setPlaceholder('_records')
           .setValue(this.plugin.settings.nativeRecordRootPath || '/')
@@ -2338,91 +2291,13 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
       diagnostics.createEl('h4', { text: 'Native record properties' });
 
-      const rememberNativeRecordProfileOnFocus = (text: TextComponent): void => {
-        text.inputEl.addEventListener('focus', () => {
-          this.plugin.nativeRecordService.rememberCurrentStorageProfile();
-        });
-      };
-
       new Setting(diagnostics)
-        .setName('Record identity storage')
-        .setDesc('Generated records always store their stable ID and schema version in properties. Previously generated tag identities remain readable through saved compatibility profiles until you consolidate them below.');
-
-      new Setting(diagnostics)
-        .setName('Identity property names')
-        .setDesc('Choose the frontmatter property names used for every generated record’s stable ID and schema version.')
-        .addText((text) => {
-          rememberNativeRecordProfileOnFocus(text);
-          text.setPlaceholder('tpsId')
-            .setValue(this.plugin.settings.nativeRecordIdentityPropertyKey || '')
-            .onChange(async (value) => {
-            this.plugin.settings.nativeRecordIdentityPropertyKey = normalizeNativeRecordStorageProfile({
-              identityPropertyKey: value,
-            }).identityPropertyKey;
-            await this.plugin.saveSettings();
-            });
-        })
-        .addText((text) => {
-          rememberNativeRecordProfileOnFocus(text);
-          text.setPlaceholder('tpsSchemaVersion')
-            .setValue(this.plugin.settings.nativeRecordSchemaPropertyKey || '')
-            .onChange(async (value) => {
-            this.plugin.settings.nativeRecordSchemaPropertyKey = normalizeNativeRecordStorageProfile({
-              schemaPropertyKey: value,
-            }).schemaPropertyKey;
-            await this.plugin.saveSettings();
-            });
-        });
-
-      new Setting(diagnostics)
-        .setName('Kind and title properties')
-        .setDesc('Choose the required frontmatter property names used for each record’s kind and display title.')
-        .addText((text) => {
-          rememberNativeRecordProfileOnFocus(text);
-          text.setPlaceholder('kind')
-            .setValue(this.plugin.settings.nativeRecordKindPropertyKey || '')
-            .onChange(async (value) => {
-            this.plugin.settings.nativeRecordKindPropertyKey = value.trim() || 'kind';
-            await this.plugin.saveSettings();
-            });
-        })
-        .addText((text) => {
-          rememberNativeRecordProfileOnFocus(text);
-          text.setPlaceholder('title')
-            .setValue(this.plugin.settings.nativeRecordTitlePropertyKey || '')
-            .onChange(async (value) => {
-            this.plugin.settings.nativeRecordTitlePropertyKey = normalizeNativeRecordStorageProfile({
-              titlePropertyKey: value,
-            }).titlePropertyKey;
-            await this.plugin.saveSettings();
-            });
-        });
-
-      new Setting(diagnostics)
-        .setName('Timestamp properties')
-        .setDesc('Choose the frontmatter names used for creation and modification timestamps. Leave either blank to stop writing that timestamp field on newly created or consolidated records.')
-        .addText((text) => {
-          rememberNativeRecordProfileOnFocus(text);
-          text.setPlaceholder('createdDate (blank disables)')
-            .setValue(this.plugin.settings.nativeRecordCreatedPropertyKey || '')
-            .onChange(async (value) => {
-            this.plugin.settings.nativeRecordCreatedPropertyKey = value.trim();
-            await this.plugin.saveSettings();
-            });
-        })
-        .addText((text) => {
-          rememberNativeRecordProfileOnFocus(text);
-          text.setPlaceholder('modifiedDate (blank disables)')
-            .setValue(this.plugin.settings.nativeRecordModifiedPropertyKey || '')
-            .onChange(async (value) => {
-            this.plugin.settings.nativeRecordModifiedPropertyKey = value.trim();
-            await this.plugin.saveSettings();
-            });
-        });
+        .setName('Canonical record envelope')
+        .setDesc('New and consolidated native records store one system identity (tpsId) plus kind and title. Schema and file timestamps remain available virtually through the API, while saved custom property names and legacy identity tags remain read-only migration aliases.');
 
       new Setting(diagnostics)
         .setName('Consolidate native record storage')
-        .setDesc('Replace recognized legacy identity tags with the current ID, schema, kind, and title properties. User properties, ordinary tags, bodies, stable IDs, and filenames are preserved. Legacy readers stay enabled for records that arrive later through Sync, and records that cannot be proven unique fail closed.')
+        .setDesc('Rewrite recognized legacy identities to tpsId, kind, and title. User properties, ordinary tags, bodies, stable IDs, paths, and filenames are preserved. Legacy readers stay enabled for records that arrive later through Sync, and records that cannot be proven globally unique fail closed.')
         .addButton((button) => button
           .setButtonText('Consolidate records')
           .onClick(async () => {

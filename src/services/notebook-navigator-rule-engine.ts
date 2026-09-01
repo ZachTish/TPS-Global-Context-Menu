@@ -436,7 +436,7 @@ export class RuleEngine {
 
     // Handle other types
     if (first) {
-      // If sorting by update/modified time, prevent infinite write loops by using day precision only
+      // Keep modified-time grouping stable within a local day instead of reordering on every edit.
       if (
         criteria.source === "date-modified" ||
         (criteria.source === "frontmatter" &&
@@ -1172,8 +1172,7 @@ export class RuleEngine {
 
     const result = this.formatSortTimestamp(timestamp);
 
-    // If sorting by update/modified time, prevent infinite write loops by using day precision only
-    // Writing the sort key updates the modified time, which triggers re-evaluation, which creates a new sort key (if using seconds), which triggers write...
+    // Keep modified-time grouping stable within a local day instead of reordering on every edit.
     if (source === "date-modified" || field.includes("modified") || field.includes("updated")) {
       return result.substring(0, 10); // YYYY-MM-DD
     }

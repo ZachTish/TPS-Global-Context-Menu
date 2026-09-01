@@ -40,36 +40,168 @@ type RelationshipLineageNode = {
   tags: string[];
 };
 
+export type NotebookNavigatorPresentationEntry = Readonly<{
+  filePath: string;
+  values: Readonly<Record<string, string>>;
+}>;
+
+export type NotebookNavigatorPresentationListener = (revision: number) => void;
+
+type PresentationCacheValue = NotebookNavigatorPresentationEntry | null;
+
+type ComputedPresentation = {
+  value: PresentationCacheValue;
+  dependencyPaths: string[];
+};
+
 /**
- * GCM-owned writer for Notebook Navigator rule outputs.
+ * GCM-owned Notebook Navigator rule engine.
  *
- * Rule configuration, evaluation, and note/frontmatter mutations for icon,
- * color, sort, and hide tags happen here.
+ * Icon, color, and sort are transient presentation values. They are projected
+ * through the public API and never persisted in a note. Hide rules remain an
+ * explicit semantic-tag workflow, and create-time title repair remains a
+ * separate note mutation.
  */
 export class NotebookNavigatorRuleService {
   private readonly timers = new Map<string, number>();
   private readonly recentUserEditAtByPath = new Map<string, number>();
   private readonly ruleEngine: RuleEngine;
+  private readonly presentationCache = new Map<string, PresentationCacheValue>();
+  private readonly presentationDependenciesByPath = new Map<string, Set<string>>();
+  private readonly presentationDependentsByPath = new Map<string, Set<string>>();
+  private readonly presentationListeners = new Set<NotebookNavigatorPresentationListener>();
+  private readonly presentationPendingByPath = new Map<string, Promise<void>>();
+  private readonly presentationGenerationByPath = new Map<string, number>();
+  private presentationRevision = 0;
+  private presentationGeneration = 0;
+  private presentationNotificationQueued = false;
+  private presentationSetup = false;
+  private presentationMidnightTimer: number | null = null;
+  private disposed = false;
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {
     this.ruleEngine = new RuleEngine(plugin.app);
   }
 
+  /**
+   * Start the read-only Notebook Navigator presentation cache. The cache is
+   * deliberately separate from the existing frontmatter writer: consumers can
+   * request projected values without causing a vault mutation.
+   */
+  setupPresentationProjection(): void {
+    if (this.presentationSetup || this.disposed) return;
+    this.presentationSetup = true;
+
+    this.plugin.registerEvent(this.plugin.app.metadataCache.on('changed', (file) => {
+      this.invalidatePresentationFiles([this.resolvePresentationSourceFile(file)]);
+    }));
+    this.plugin.registerEvent(this.plugin.app.metadataCache.on('resolved', () => {
+      this.invalidateNotebookNavigatorPresentation();
+    }));
+    this.plugin.registerEvent(this.plugin.app.vault.on('modify', (file) => {
+      this.invalidatePresentationFiles([this.resolvePresentationSourceFile(file)]);
+    }));
+    this.plugin.registerEvent(this.plugin.app.vault.on('create', () => {
+      // A newly created file can resolve a previously unresolved parent link.
+      this.invalidateNotebookNavigatorPresentation();
+    }));
+    this.plugin.registerEvent(this.plugin.app.vault.on('delete', () => {
+      // Deletion can change previously ambiguous or unresolved parent links.
+      this.invalidateNotebookNavigatorPresentation();
+    }));
+    this.plugin.registerEvent(this.plugin.app.vault.on('rename', () => {
+      // Rename can both invalidate resolved ancestors and resolve new ones.
+      this.invalidateNotebookNavigatorPresentation();
+    }));
+    this.plugin.register(this.plugin.eventService.onFilesUpdated((paths) => {
+      this.invalidatePresentationPaths(paths);
+    }));
+
+    this.schedulePresentationMidnightInvalidation();
+  }
+
+  async ensureNotebookNavigatorPresentation(
+    files: readonly (TFile | string)[] | TFile | string,
+  ): Promise<void> {
+    if (this.disposed) return;
+    const requested = Array.isArray(files) ? files : [files];
+    const unique = new Map<string, TFile | null>();
+    for (const reference of requested) {
+      const resolved = this.resolvePresentationReference(reference);
+      if (!resolved.path || unique.has(resolved.path)) continue;
+      unique.set(resolved.path, resolved.file);
+    }
+
+    await Promise.all(Array.from(unique, async ([path, file]) => {
+      if (this.presentationCache.has(path)) return;
+      const existing = this.presentationPendingByPath.get(path);
+      if (existing) {
+        await existing;
+        return;
+      }
+      const pending = this.preparePresentationPath(path, file)
+        .finally(() => {
+          if (this.presentationPendingByPath.get(path) === pending) {
+            this.presentationPendingByPath.delete(path);
+          }
+        });
+      this.presentationPendingByPath.set(path, pending);
+      await pending;
+    }));
+  }
+
+  getNotebookNavigatorPresentation(
+    reference: TFile | string,
+  ): NotebookNavigatorPresentationEntry | null | undefined {
+    const path = this.presentationPath(reference);
+    if (!path || !this.presentationCache.has(path)) return undefined;
+    return this.presentationCache.get(path);
+  }
+
+  getNotebookNavigatorPresentationRevision(): number {
+    return this.presentationRevision;
+  }
+
+  onNotebookNavigatorPresentationChanged(
+    listener: NotebookNavigatorPresentationListener,
+  ): () => void {
+    if (this.disposed || typeof listener !== 'function') return () => {};
+    this.presentationListeners.add(listener);
+    return () => {
+      this.presentationListeners.delete(listener);
+    };
+  }
+
+  /** Clear all prepared values and notify consumers that they must ensure again. */
+  invalidateNotebookNavigatorPresentation(): void {
+    if (this.disposed) return;
+    const hasPreparedOrPending = this.presentationCache.size > 0 || this.presentationPendingByPath.size > 0;
+    this.clearAllPresentationEntries();
+    if (!hasPreparedOrPending) return;
+    this.presentationGeneration += 1;
+    this.publishPresentationChanged();
+  }
+
   shouldAutoApplyOnFileOpen(): boolean {
-    const settings = this.getSettings();
-    return !!settings?.enabled && settings.autoApplyOnFileOpen !== false;
+    // Visual rules are invalidated by the presentation cache listeners. There
+    // is no note mutation that belongs on the latency-sensitive file-open path.
+    return false;
   }
 
   shouldAutoApplyOnMetadataChange(): boolean {
     if (!this.plugin.canRunBackgroundAutomation()) return false;
     const settings = this.getSettings();
-    return !!settings?.enabled && settings.autoApplyOnMetadataChange !== false;
+    return !!settings?.enabled
+      && settings.autoApplyOnMetadataChange !== false
+      && this.hasEnabledHideRules(settings);
   }
 
   shouldApplyOnStartup(): boolean {
     if (!this.plugin.canRunBackgroundAutomation()) return false;
     const settings = this.getSettings();
-    return !!settings?.enabled && settings.applyOnStartup !== false;
+    return !!settings?.enabled
+      && settings.applyOnStartup !== false
+      && this.hasEnabledHideRules(settings);
   }
 
   getMetadataDebounceMs(): number {
@@ -90,6 +222,7 @@ export class NotebookNavigatorRuleService {
 
   scheduleApply(file: TFile, options: ApplyOptions = {}): void {
     if (!this.canApplyToFile(file)) return;
+    this.invalidatePresentationPaths([file.path]);
     if (!this.canUseExistingPropertyStorage(file)) return;
     if (this.requiresControllerAutomation(options.reason) && !this.plugin.canRunBackgroundAutomation()) return;
     const delay = options.reason === 'metadata-change'
@@ -115,7 +248,9 @@ export class NotebookNavigatorRuleService {
   }
 
   async applyRulesToAllFiles(options: ApplyOptions = {}): Promise<number> {
+    this.invalidateNotebookNavigatorPresentation();
     if (!this.isReady()) return 0;
+    if (!this.hasEnabledHideRules(this.getSettings())) return 0;
     let changed = 0;
     for (const file of this.getRuleCandidateFiles()) {
       if (await this.applyRulesToFile(file, {
@@ -131,6 +266,7 @@ export class NotebookNavigatorRuleService {
 
   async applyRulesToFile(file: TFile, options: ApplyOptions = {}): Promise<boolean> {
     if (!this.canApplyToFile(file)) return false;
+    this.invalidatePresentationPaths([file.path]);
     if (!this.canUseExistingPropertyStorage(file)) return false;
     if (!this.isReady()) return false;
     if (this.requiresControllerAutomation(options.reason) && !this.plugin.canRunBackgroundAutomation()) return false;
@@ -139,15 +275,11 @@ export class NotebookNavigatorRuleService {
     const settings = this.getSettings();
     const ruleEngine = this.getRuleEngine();
     if (!settings || !ruleEngine) return false;
-    const iconField = this.getIconField(settings);
-    const colorField = this.getColorField(settings);
     const canMutateGeneratedTitle = options.reason === 'create';
     const canMutateHideTags = options.reason !== 'file-open'
-      && (settings.hideRules || []).some((rule: any) => rule?.enabled && this.normalizeTag(rule?.tagName || 'hide'));
-    const ownedKeys = [iconField, colorField];
-    if (options.reason !== 'file-open' && settings.smartSort?.enabled) {
-      ownedKeys.push(settings.smartSort?.field || 'sort');
-    }
+      && this.hasEnabledHideRules(settings);
+    if (!canMutateGeneratedTitle && !canMutateHideTags) return false;
+    const ownedKeys: string[] = [];
     if (canMutateGeneratedTitle) ownedKeys.push('title');
     if (canMutateHideTags) ownedKeys.push('tags');
 
@@ -156,52 +288,15 @@ export class NotebookNavigatorRuleService {
     const changed = await this.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(file, ownedKeys, (frontmatter) => {
       const context = this.buildRuleContext(file, frontmatter, body);
       // A record remains a record while the global architecture setting is temporarily
-      // switched to Legacy. Protect proven record-owned fields from unrelated visual
-      // automation based on the document identity itself, not the current write mode.
-      const nativeRecordInspection = this.plugin.nativeRecordService?.inspect(frontmatter) || null;
-      const isNativeRecord = !!nativeRecordInspection;
-      const nativeRecordProtectedKeys = nativeRecordInspection
-        ? this.getNativeRecordProtectedKeys(nativeRecordInspection)
-        : null;
-      const canMutateDestination = (key: string): boolean => (
-        !nativeRecordProtectedKeys?.has(String(key || '').trim().toLowerCase())
-      );
-      if (canMutateGeneratedTitle && !isNativeRecord) {
+      // switched to Legacy. Semantic tag and title repair must respect the document
+      // identity itself, not the current write mode.
+      const hasNativeRecordIdentityEvidence = this.plugin.nativeRecordService
+        ?.hasRecordIdentityEvidenceInFrontmatter(frontmatter) === true;
+      if (canMutateGeneratedTitle && !hasNativeRecordIdentityEvidence) {
         this.removeGeneratedBlankNoteTitle(file, frontmatter, body, options);
       }
-      const visualOutputs = ruleEngine.resolveVisualOutputs(settings.rules || [], context);
-      const desiredIcon = visualOutputs?.icon?.matched
-        ? String(visualOutputs.icon.value || '').trim()
-        : settings.clearIconWhenNoMatch ? null : undefined;
-      const desiredColor = visualOutputs?.color?.matched
-        ? this.normalizeNoteColorValue(String(visualOutputs.color.value || '').trim())
-        : settings.clearColorWhenNoMatch ? null : undefined;
-
-      if (iconField.toLowerCase() === colorField.toLowerCase()) {
-        if (canMutateDestination(iconField)) {
-          this.applyScalarMutation(frontmatter, iconField, desiredIcon !== undefined ? desiredIcon : desiredColor);
-        }
-      } else {
-        if (canMutateDestination(iconField)) {
-          this.applyScalarMutation(frontmatter, iconField, desiredIcon);
-        }
-        if (canMutateDestination(colorField)) {
-          this.applyScalarMutation(frontmatter, colorField, desiredColor);
-        }
-      }
-
-      // Opening a note is a latency-sensitive, device-local visual refresh.
-      // Controller-owned sweeps and metadata automation retain sort/hide writes.
-      if (options.reason !== 'file-open') {
-        const sortKey = this.computeSortKey(ruleEngine, settings, context);
-        const sortField = settings.smartSort?.field || 'sort';
-        if (sortKey !== undefined && canMutateDestination(sortField)) {
-          this.applyScalarMutation(frontmatter, sortField, sortKey);
-        }
-
-        if (canMutateHideTags && !isNativeRecord) {
-          this.applyHideTagMutations(ruleEngine, settings, context, frontmatter);
-        }
+      if (canMutateHideTags && !hasNativeRecordIdentityEvidence) {
+        this.applyHideTagMutations(ruleEngine, settings, context, frontmatter);
       }
     }, {
       kind: 'automation',
@@ -216,12 +311,19 @@ export class NotebookNavigatorRuleService {
     });
 
     if (changed) {
+      this.invalidatePresentationPaths([file.path]);
       logger.debug('[TPS GCM] Applied Notebook Navigator rules', {
         file: file.path,
         reason: options.reason || 'gcm-rule-apply',
       });
     }
     return changed;
+  }
+
+  private hasEnabledHideRules(settings: any): boolean {
+    return (settings?.hideRules || []).some((rule: any) => (
+      rule?.enabled && this.normalizeTag(rule?.tagName || 'hide')
+    ));
   }
 
   private getNativeRecordProtectedKeys(inspection: any): Set<string> {
@@ -323,9 +425,279 @@ export class NotebookNavigatorRuleService {
     return this.ruleEngine.resolveVisualOutputs(settings.rules || [], context);
   }
 
+  private async preparePresentationPath(path: string, initialFile: TFile | null): Promise<void> {
+    // If a file changes during the async body read, recompute against the new
+    // generation instead of publishing a stale projection.
+    for (let attempt = 0; attempt < 3 && !this.disposed; attempt += 1) {
+      const generation = this.presentationGeneration;
+      const pathGeneration = this.presentationGenerationByPath.get(path) ?? 0;
+      const liveFile = attempt === 0 && initialFile?.path === path
+        ? initialFile
+        : this.resolvePresentationReference(path).file;
+      let computed: ComputedPresentation;
+      try {
+        computed = liveFile
+          ? await this.computePresentation(liveFile)
+          : { value: null, dependencyPaths: [] };
+      } catch (error) {
+        logger.warn('[TPS GCM] Failed preparing Notebook Navigator presentation', { file: path, error });
+        computed = { value: null, dependencyPaths: [] };
+      }
+      if (this.disposed) return;
+      if (
+        generation !== this.presentationGeneration
+        || pathGeneration !== (this.presentationGenerationByPath.get(path) ?? 0)
+      ) continue;
+      if (liveFile && this.presentationPath(liveFile) !== path) return;
+      this.presentationCache.set(path, computed.value);
+      this.replacePresentationDependencies(path, computed.dependencyPaths);
+      return;
+    }
+  }
+
+  private async computePresentation(file: TFile): Promise<ComputedPresentation> {
+    if (!this.canApplyToFile(file) || !this.canUseExistingPropertyStorage(file)) {
+      return { value: null, dependencyPaths: [] };
+    }
+    const settings = this.getSettings();
+    if (!settings?.enabled) return { value: null, dependencyPaths: [] };
+    if (this.shouldIgnore(file, {
+      reason: 'presentation',
+      force: true,
+      bypassCreationGrace: true,
+    })) {
+      return { value: null, dependencyPaths: [] };
+    }
+
+    const body = await this.readBody(file);
+    // Preserve the established projection precedence: sort evaluates after
+    // generated visual values on this in-memory clone. No YAML mutation occurs.
+    const frontmatter = { ...(this.getFrontmatterForFile(file) ?? {}) };
+    const context = this.buildRuleContext(file, frontmatter, body);
+    const visualOutputs = this.ruleEngine.resolveVisualOutputs(settings.rules || [], context);
+    const desiredIcon = visualOutputs?.icon?.matched
+      ? String(visualOutputs.icon.value || '').trim()
+      : settings.clearIconWhenNoMatch ? null : undefined;
+    const desiredColor = visualOutputs?.color?.matched
+      ? this.normalizeNoteColorValue(String(visualOutputs.color.value || '').trim())
+      : settings.clearColorWhenNoMatch ? null : undefined;
+    const iconField = this.getIconField(settings);
+    const colorField = this.getColorField(settings);
+    const nativeRecordInspection = this.plugin.nativeRecordService?.inspect(frontmatter) || null;
+    const nativeRecordProtectedKeys = nativeRecordInspection
+      ? this.getNativeRecordProtectedKeys(nativeRecordInspection)
+      : null;
+    const canProjectDestination = (key: string): boolean => (
+      !nativeRecordProtectedKeys?.has(String(key || '').trim().toLowerCase())
+      && !this.isProtectedKey(key)
+    );
+    const projected = new Map<string, { key: string; value: string }>();
+
+    if (iconField.toLowerCase() === colorField.toLowerCase()) {
+      if (canProjectDestination(iconField)) {
+        this.applyPresentationScalar(
+          projected,
+          frontmatter,
+          iconField,
+          desiredIcon !== undefined ? desiredIcon : desiredColor,
+        );
+      }
+    } else {
+      if (canProjectDestination(iconField)) {
+        this.applyPresentationScalar(projected, frontmatter, iconField, desiredIcon);
+      }
+      if (canProjectDestination(colorField)) {
+        this.applyPresentationScalar(projected, frontmatter, colorField, desiredColor);
+      }
+    }
+
+    const sortField = String(settings.smartSort?.field || 'sort').trim() || 'sort';
+    const sortContext = this.buildRuleContext(file, frontmatter, body);
+    const sortKey = this.computeSortKey(this.ruleEngine, settings, sortContext);
+    if (sortKey !== undefined && canProjectDestination(sortField)) {
+      this.applyPresentationScalar(projected, frontmatter, sortField, sortKey);
+    }
+
+    const dependencyPaths = this.collectPresentationDependencyPaths(file.path, sortContext);
+    if (projected.size === 0) return { value: null, dependencyPaths };
+    const values: Record<string, string> = {};
+    for (const entry of projected.values()) values[entry.key] = entry.value;
+    return {
+      value: Object.freeze({
+        filePath: file.path,
+        values: Object.freeze(values),
+      }),
+      dependencyPaths,
+    };
+  }
+
+  private applyPresentationScalar(
+    projected: Map<string, { key: string; value: string }>,
+    frontmatter: Record<string, unknown>,
+    key: string,
+    desired: string | null | undefined,
+  ): void {
+    const cleanKey = String(key || '').trim();
+    if (!cleanKey || desired === undefined) return;
+    const normalized = cleanKey.toLowerCase();
+    if (desired === null || !String(desired).trim()) {
+      deleteValueCaseInsensitive(frontmatter, cleanKey);
+      projected.delete(normalized);
+      return;
+    }
+    const value = String(desired).trim();
+    setValueCaseInsensitive(frontmatter, cleanKey, value);
+    projected.set(normalized, { key: cleanKey, value });
+  }
+
+  private collectPresentationDependencyPaths(filePath: string, context: RuleContext): string[] {
+    const dependencies = new Set<string>();
+    const add = (path: unknown): void => {
+      const normalized = this.presentationPath(String(path || ''));
+      if (normalized && normalized !== filePath) dependencies.add(normalized);
+    };
+    add(context.parent?.file?.path);
+    for (const node of context.relationshipLineage || []) add(node.file?.path);
+    return Array.from(dependencies);
+  }
+
+  private replacePresentationDependencies(path: string, dependencyPaths: string[]): void {
+    this.removePresentationDependencies(path);
+    const dependencies = new Set(dependencyPaths.filter((dependency) => dependency && dependency !== path));
+    if (dependencies.size === 0) return;
+    this.presentationDependenciesByPath.set(path, dependencies);
+    for (const dependency of dependencies) {
+      const dependents = this.presentationDependentsByPath.get(dependency) ?? new Set<string>();
+      dependents.add(path);
+      this.presentationDependentsByPath.set(dependency, dependents);
+    }
+  }
+
+  private removePresentationDependencies(path: string): void {
+    const dependencies = this.presentationDependenciesByPath.get(path);
+    if (!dependencies) return;
+    this.presentationDependenciesByPath.delete(path);
+    for (const dependency of dependencies) {
+      const dependents = this.presentationDependentsByPath.get(dependency);
+      if (!dependents) continue;
+      dependents.delete(path);
+      if (dependents.size === 0) this.presentationDependentsByPath.delete(dependency);
+    }
+  }
+
+  private clearPresentationEntry(path: string): void {
+    this.presentationCache.delete(path);
+    this.removePresentationDependencies(path);
+  }
+
+  private clearAllPresentationEntries(): void {
+    this.presentationCache.clear();
+    this.presentationDependenciesByPath.clear();
+    this.presentationDependentsByPath.clear();
+  }
+
+  private invalidatePresentationFiles(files: Array<TFile | null>): void {
+    const paths = files
+      .filter((file): file is TFile => file instanceof TFile)
+      .map((file) => file.path);
+    if (paths.length > 0) this.invalidatePresentationPaths(paths);
+  }
+
+  private invalidatePresentationPaths(paths: string[]): void {
+    if (this.disposed) return;
+    const queue = paths.map((path) => this.presentationPath(path)).filter(Boolean);
+    const affected = new Set<string>();
+    while (queue.length > 0) {
+      const path = queue.shift()!;
+      if (affected.has(path)) continue;
+      affected.add(path);
+      for (const dependent of this.presentationDependentsByPath.get(path) || []) {
+        queue.push(dependent);
+      }
+    }
+    const hasPreparedOrPending = Array.from(affected).some((path) => (
+      this.presentationCache.has(path) || this.presentationPendingByPath.has(path)
+    ));
+    for (const path of affected) this.clearPresentationEntry(path);
+    if (!hasPreparedOrPending) return;
+    for (const path of affected) {
+      this.presentationGenerationByPath.set(
+        path,
+        (this.presentationGenerationByPath.get(path) ?? 0) + 1,
+      );
+    }
+    this.publishPresentationChanged();
+  }
+
+  private resolvePresentationSourceFile(file: unknown): TFile | null {
+    if (!(file instanceof TFile)) return null;
+    if (!this.plugin.filePropertiesService?.isCompanionFile(file)) return file;
+    const source = this.plugin.filePropertiesService.getSourceFileForCompanion(file);
+    return source instanceof TFile ? source : null;
+  }
+
+  private resolvePresentationReference(reference: TFile | string): { path: string; file: TFile | null } {
+    const path = this.presentationPath(reference);
+    if (!path) return { path: '', file: null };
+    if (reference instanceof TFile && this.presentationPath(reference.path) === path) {
+      return { path, file: reference };
+    }
+    const file = this.plugin.app.vault.getFileByPath?.(path)
+      ?? this.plugin.app.vault.getAbstractFileByPath?.(path)
+      ?? null;
+    return { path, file: file instanceof TFile ? file : null };
+  }
+
+  private presentationPath(reference: TFile | string): string {
+    const raw = reference instanceof TFile ? reference.path : String(reference || '');
+    const trimmed = raw.trim();
+    return trimmed ? normalizePath(trimmed).replace(/^\/+/, '') : '';
+  }
+
+  private publishPresentationChanged(): void {
+    this.presentationRevision += 1;
+    if (this.presentationNotificationQueued) return;
+    this.presentationNotificationQueued = true;
+    void Promise.resolve().then(() => {
+      this.presentationNotificationQueued = false;
+      if (this.disposed) return;
+      const revision = this.presentationRevision;
+      for (const listener of Array.from(this.presentationListeners)) {
+        try {
+          listener(revision);
+        } catch (error) {
+          logger.warn('[TPS GCM] Notebook Navigator presentation listener failed', { error });
+        }
+      }
+    });
+  }
+
+  private schedulePresentationMidnightInvalidation(): void {
+    if (this.disposed) return;
+    if (this.presentationMidnightTimer !== null) window.clearTimeout(this.presentationMidnightTimer);
+    const now = new Date();
+    const nextMidnight = new Date(now);
+    nextMidnight.setHours(24, 0, 0, 25);
+    const delay = Math.max(1000, nextMidnight.getTime() - now.getTime());
+    this.presentationMidnightTimer = window.setTimeout(() => {
+      this.presentationMidnightTimer = null;
+      this.invalidateNotebookNavigatorPresentation();
+      this.schedulePresentationMidnightInvalidation();
+    }, delay);
+  }
+
   dispose(): void {
+    this.disposed = true;
     for (const timer of this.timers.values()) window.clearTimeout(timer);
     this.timers.clear();
+    if (this.presentationMidnightTimer !== null) {
+      window.clearTimeout(this.presentationMidnightTimer);
+      this.presentationMidnightTimer = null;
+    }
+    this.clearAllPresentationEntries();
+    this.presentationPendingByPath.clear();
+    this.presentationGenerationByPath.clear();
+    this.presentationListeners.clear();
   }
 
   private isReady(): boolean {
@@ -686,21 +1058,6 @@ export class NotebookNavigatorRuleService {
     if (Array.isArray(value)) return value.map((entry) => this.normalizeTag(entry)).filter(Boolean);
     if (typeof value === 'string') return value.split(/[\s,]+/).map((entry) => this.normalizeTag(entry)).filter(Boolean);
     return [];
-  }
-
-  private applyScalarMutation(frontmatter: Record<string, unknown>, key: string, desired: string | null | undefined): void {
-    const cleanKey = String(key || '').trim();
-    if (!cleanKey || this.isProtectedKey(cleanKey)) return;
-    if (desired === undefined) return;
-    if (desired === null || String(desired).trim() === '') {
-      deleteValueCaseInsensitive(frontmatter, cleanKey);
-      return;
-    }
-    setValueCaseInsensitive(frontmatter, cleanKey, String(desired).trim());
-  }
-
-  private normalizeStoredColorValue(value: string): string {
-    return String(value || '').trim().replace(/^#/, '');
   }
 
   private normalizeNoteColorValue(value: string): string {

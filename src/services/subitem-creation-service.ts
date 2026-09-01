@@ -6,14 +6,9 @@ import { mergeNormalizedTags, parseTagInput } from '../utils/tag-utils';
 import { currentCompletedDateStamp } from '../utils/completed-date-utils';
 import * as logger from '../logger';
 import { parseDailyNoteFileDate } from '../utils/daily-note-task-schedule';
-import {
-  isFilePropertiesCompanionPath,
-  isFilePropertiesCompanionRecord,
-} from './file-properties-service';
 
 export interface CreateSubitemOptions {
   seedParentTags?: boolean;
-  seedVisualMetadata?: boolean;
   insertParentBodyLink?: boolean;
   inheritParentTemporalMetadata?: boolean;
   saveFolderPath?: boolean;
@@ -115,7 +110,6 @@ export async function createSubitemForParentWithTitle(
     targetPath,
   ).replace(/"/g, '\\"');
   const seedParentTags = options?.seedParentTags ?? true;
-  const seedVisualMetadata = options?.seedVisualMetadata === true;
 
   let isDailyNoteParent = false;
   let dailyNoteDateStr = '';
@@ -154,19 +148,6 @@ export async function createSubitemForParentWithTitle(
   if (options?.saveFolderPath === true || (options?.saveFolderPath !== false && plugin.settings.autoSaveFolderPath)) {
     frontmatterLines.push(`folderPath: "${(folderPath || '/').replace(/"/g, '\\"')}"`);
   }
-  if (seedVisualMetadata) {
-    const iconDefaults = resolveNewSubitemIconDefaults(plugin.app, parentFile, folderPath);
-    if (iconDefaults.icon) {
-      frontmatterLines.push(`icon: "${iconDefaults.icon.replace(/"/g, '\\"')}"`);
-    }
-    if (iconDefaults.iconColor) {
-      const escapedColor = iconDefaults.iconColor.replace(/"/g, '\\"');
-      frontmatterLines.push(`iconColor: "${escapedColor}"`);
-      // Use color as an alias for iconColor to support both fields
-      frontmatterLines.push(`color: "${escapedColor}"`);
-    }
-  }
-
   const parentFrontmatter = plugin.parentLinkResolutionService.getLogicalFrontmatter(parentFile);
   
   const beforeInheritedKeys = new Set(
@@ -361,70 +342,6 @@ async function mergeParentTagsIntoSubitem(
   } catch (error) {
     logger.warn('[TPS GCM] Failed merging parent tags into subitem:', file.path, error);
   }
-}
-
-function resolveNewSubitemIconDefaults(app: App, parentFile: TFile, folderPath: string): { icon: string; iconColor: string } {
-  const fromParent = resolveIconDefaultsFromFile(app, parentFile);
-  const fromFolder = resolveIconDefaultsFromFolder(app, folderPath);
-  return {
-    icon: fromParent.icon || fromFolder.icon,
-    iconColor: fromParent.iconColor || fromFolder.iconColor,
-  };
-}
-
-function resolveIconDefaultsFromFile(app: App, file: TFile): { icon: string; iconColor: string } {
-  const cache = app.metadataCache.getFileCache(file);
-  const fm = (cache?.frontmatter || {}) as Record<string, any>;
-  const icon = readFrontmatterStringCaseInsensitive(fm, ['icon']);
-  const iconColor = readFrontmatterStringCaseInsensitive(fm, ['iconColor', 'color', 'accentColor', 'accent']);
-  return { icon, iconColor };
-}
-
-function resolveIconDefaultsFromFolder(app: App, folderPath: string): { icon: string; iconColor: string } {
-  const normalizedFolder = normalizePath((folderPath || '').trim());
-  const folderFiles = app.vault.getMarkdownFiles().filter((file) => {
-    if ((file.parent?.path || '') !== normalizedFolder) return false;
-    const frontmatter = app.metadataCache.getFileCache(file)?.frontmatter;
-    return !isFilePropertiesCompanionPath(file.path)
-      && !isFilePropertiesCompanionRecord(frontmatter);
-  });
-  const iconCounts = new Map<string, number>();
-  const colorCounts = new Map<string, number>();
-
-  for (const file of folderFiles) {
-    const { icon, iconColor } = resolveIconDefaultsFromFile(app, file);
-    if (icon) iconCounts.set(icon, (iconCounts.get(icon) || 0) + 1);
-    if (iconColor) colorCounts.set(iconColor, (colorCounts.get(iconColor) || 0) + 1);
-  }
-
-  const pickMostCommon = (counts: Map<string, number>): string => {
-    let best = '';
-    let bestCount = -1;
-    for (const [value, count] of counts.entries()) {
-      if (count > bestCount) {
-        best = value;
-        bestCount = count;
-      }
-    }
-    return best;
-  };
-
-  return {
-    icon: pickMostCommon(iconCounts),
-    iconColor: pickMostCommon(colorCounts),
-  };
-}
-
-function readFrontmatterStringCaseInsensitive(frontmatter: Record<string, any> | null | undefined, keys: string[]): string {
-  if (!frontmatter || typeof frontmatter !== 'object') return '';
-  for (const key of keys) {
-    const value = getFrontmatterValueCaseInsensitive(frontmatter, key);
-    if (typeof value === 'string') {
-      const trimmed = value.trim();
-      if (trimmed) return trimmed;
-    }
-  }
-  return '';
 }
 
 function getFrontmatterValueCaseInsensitive(frontmatter: Record<string, any> | null | undefined, key: string): any {

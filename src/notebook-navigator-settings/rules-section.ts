@@ -40,7 +40,7 @@ export class RulesSectionRenderer {
     section.createEl("h3", { text: "Icon + Color Rules" });
     section.createEl("p", {
       cls: "setting-item-description",
-      text: "Set the icon and color outputs. The first matching rule with an icon wins for icon, and the first matching rule with a color wins for color."
+      text: "Generate virtual icon and color values for Notebook Navigator. Authored appearance metadata stays authoritative; among generated values, the first matching icon and first matching color win independently."
     });
 
     const toolbar = section.createDiv({ cls: "tps-gcm-settings-frontmatter-rules-toolbar" });
@@ -51,13 +51,6 @@ export class RulesSectionRenderer {
       await persistRuleChange(false);
       refresh();
     }, true);
-    this.createActionButton(toolbar, "Apply active note", async () => {
-      await plugin.applyRulesToActiveFile(true);
-    });
-    this.createActionButton(toolbar, "Apply all notes", async () => {
-      await plugin.applyRulesToAllFiles(true);
-    });
-
     if (plugin.settings.notebookNavigatorRules.rules.length === 0) {
       section.createEl("p", {
         cls: "setting-item-description",
@@ -240,7 +233,6 @@ export class RulesSectionRenderer {
             }
             live.enabled = value;
             await persistRuleChange(false);
-            await plugin.applyRulesToAllFiles(true);
             refresh();
           });
       });
@@ -327,7 +319,7 @@ export class RulesSectionRenderer {
             }
             live.icon = value.trim();
             updateIconPreview(live.icon);
-            await persistRuleChange(true);
+            await persistRuleChange(false);
             refresh();
           });
       })
@@ -339,7 +331,7 @@ export class RulesSectionRenderer {
             return;
           }
           live.icon = value.trim();
-        }, false, true);
+        });
         text.inputEl.addEventListener("input", (event) => {
           const next = (event.target as HTMLInputElement | null)?.value ?? "";
           updateIconPreview(next);
@@ -393,7 +385,7 @@ export class RulesSectionRenderer {
             }
             live.color = value.trim();
             updateColorPreview(live.color);
-            await persistRuleChange(true);
+            await persistRuleChange(false);
           });
       })
       .addText((text) => {
@@ -412,7 +404,7 @@ export class RulesSectionRenderer {
               pickerEl.value = pickerColor;
             }
           }
-        }, false, true);
+        });
         text.inputEl.addEventListener("input", (event) => {
           const next = (event.target as HTMLInputElement | null)?.value ?? "";
           updateColorPreview(next);
@@ -455,7 +447,7 @@ export class RulesSectionRenderer {
               return;
             }
             live.operator = normalizeOperator(value);
-            await persistRuleChange(true);
+            await persistRuleChange(false);
           });
       });
 
@@ -505,7 +497,7 @@ export class RulesSectionRenderer {
               return;
             }
             live.match = normalizeRuleMatchMode(value);
-            await persistRuleChange(true);
+            await persistRuleChange(false);
           });
       });
 
@@ -575,7 +567,7 @@ export class RulesSectionRenderer {
           liveCondition.value = "";
         }
 
-        void persistRuleChange(true).then(() => refresh());
+        void persistRuleChange(false).then(() => refresh());
       });
 
       if (conditionSourceHasField(condition.source)) {
@@ -678,7 +670,6 @@ export class RulesSectionRenderer {
             }
             live.enabled = !live.enabled;
             await persistRuleChange(false);
-            await plugin.applyRulesToAllFiles(true);
             refresh();
           })();
         });
@@ -695,7 +686,6 @@ export class RulesSectionRenderer {
             const rules = plugin.settings.notebookNavigatorRules.rules;
             [rules[index - 1], rules[index]] = [rules[index], rules[index - 1]];
             await persistRuleChange(false);
-            await plugin.applyRulesToAllFiles(true);
             refresh();
           })();
         });
@@ -711,7 +701,6 @@ export class RulesSectionRenderer {
             const rules = plugin.settings.notebookNavigatorRules.rules;
             [rules[index + 1], rules[index]] = [rules[index], rules[index + 1]];
             await persistRuleChange(false);
-            await plugin.applyRulesToAllFiles(true);
             refresh();
           })();
         });
@@ -756,7 +745,6 @@ export class RulesSectionRenderer {
               selectedRuleId = plugin.settings.notebookNavigatorRules.rules[0]?.id ?? null;
             }
             await persistRuleChange(false);
-            await plugin.applyRulesToAllFiles(true);
             refresh();
           })();
         });
@@ -791,7 +779,7 @@ export class RulesSectionRenderer {
               return;
             }
             live.icon = option.value.trim();
-            await persistRuleChange(true);
+            await persistRuleChange(false);
             refresh();
           })();
         });
@@ -817,7 +805,7 @@ export class RulesSectionRenderer {
               return;
             }
             live.color = color;
-            await persistRuleChange(true);
+            await persistRuleChange(false);
             refresh();
           })();
         });

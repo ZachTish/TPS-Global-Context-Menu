@@ -171,6 +171,7 @@ globalThis.window ??= { setTimeout, clearTimeout };
 const {
   DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE,
   DEFAULT_NATIVE_RECORD_STORAGE_PROFILE,
+  LEGACY_NATIVE_RECORD_PROPERTY_PROFILE,
   FrontmatterMutationService,
   NativeRecordService,
   TFile,
@@ -221,6 +222,8 @@ function createHarness(mode = 'native-records', options = {}) {
     const parent = normalized.includes('/') ? normalized.slice(0, normalized.lastIndexOf('/')) : '';
     if (parent) ensureFolder(parent);
     const file = new TFile(normalized);
+    const timestamp = Date.now();
+    file.stat = { ctime: timestamp, mtime: timestamp, size: String(content || '').length };
     entries.set(normalized, file);
     contents.set(file, String(content || ''));
     const parsed = parseNativeRecordDocument(String(content || ''));
@@ -246,6 +249,8 @@ function createHarness(mode = 'native-records', options = {}) {
     process: async (file, processor) => {
       const next = processor(contents.get(file) || '');
       contents.set(file, next);
+      file.stat.mtime = Date.now();
+      file.stat.size = next.length;
       const parsed = parseNativeRecordDocument(next);
       if (parsed) metadata.set(file, parsed.frontmatter);
       if (options.emitModifyOnProcess) {
@@ -386,7 +391,108 @@ test('flat-root layout creates every native record directly in the configured de
   assert.equal(food.path, 'food-root.md');
 });
 
-test('a configured tag profile is retained only for reads while every new record writes property identity', async () => {
+test('canonical writes persist only tpsId, kind, and title while API projections retain virtual schema and file timestamps', async () => {
+  const { service, contents } = createHarness();
+  const created = await service.create('task', {
+    title: 'Canonical task',
+    status: 'todo',
+  }, { id: 'task-canonical-envelope' });
+  const raw = parseNativeRecordDocument(contents.get(created.file)).frontmatter;
+
+  assert.deepEqual(
+    Object.keys(raw).filter((key) => [
+      'tpsId',
+      'tpsSchemaVersion',
+      'kind',
+      'title',
+      'createdDate',
+      'modifiedDate',
+    ].includes(key)).sort(),
+    ['kind', 'title', 'tpsId'],
+  );
+  const inspection = service.inspect(raw);
+  assert.equal(inspection?.schemaVersion, 1);
+  assert.equal(inspection?.frontmatter.tpsSchemaVersion, 1);
+  assert.equal(inspection?.frontmatter.createdDate, '');
+  assert.equal(inspection?.frontmatter.modifiedDate, '');
+
+  const resolved = await service.resolve(created.file);
+  assert.equal(resolved?.frontmatter.tpsSchemaVersion, 1);
+  assert.equal(resolved?.frontmatter.createdDate, new Date(created.file.stat.ctime).toISOString());
+  assert.equal(resolved?.frontmatter.modifiedDate, new Date(created.file.stat.mtime).toISOString());
+  assert.equal(resolved?.frontmatter.status, 'todo');
+});
+
+test('the built-in six-field property profile remains readable and consolidates in place', async () => {
+  const { service, contents, addFile } = createHarness();
+  const legacy = addFile('Imported/Legacy event.md', serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: 'Legacy body\n', frontmatter: {
+      tpsId: 'calendar-legacy-property',
+      tpsSchemaVersion: 1,
+      kind: 'calendar-event',
+      title: 'Legacy event',
+      createdDate: '2026-08-20T10:00:00.000Z',
+      modifiedDate: '2026-08-21T10:00:00.000Z',
+      status: 'scheduled',
+    },
+  }));
+  assert.equal(service.inspect(parseNativeRecordDocument(contents.get(legacy)).frontmatter)?.id, 'calendar-legacy-property');
+
+  const result = await service.migrateStorageProfile();
+  assert.deepEqual(result, { inspected: 1, updated: 1, skipped: 0, failed: 0 });
+  assert.equal(legacy.path, 'Imported/Legacy event.md');
+  const raw = parseNativeRecordDocument(contents.get(legacy)).frontmatter;
+  assert.deepEqual(raw, {
+    status: 'scheduled',
+    tpsId: 'calendar-legacy-property',
+    kind: 'calendar-event',
+    title: 'Legacy event',
+  });
+  const projected = service.inspect(raw)?.frontmatter;
+  assert.equal(projected?.tpsSchemaVersion, 1);
+  assert.equal(projected?.createdDate, '');
+  assert.equal(projected?.modifiedDate, '');
+});
+
+test('TPS definition kinds share the global tpsId namespace without relocating existing notes', async () => {
+  const { service, vault, entries, contents, addFile } = createHarness();
+  const folderByKind = new Map([
+    ['food', 'foods'],
+    ['exercise', 'exercises'],
+    ['recipe', 'recipes'],
+    ['workout-plan', 'workout-plans'],
+    ['workflow', 'workflows'],
+    ['time-entry', 'time-entries'],
+  ]);
+  for (const [kind, folder] of folderByKind) {
+    const record = await service.create(kind, { title: `${kind} definition` }, { id: `${kind}-definition` });
+    assert.equal(record.path, `_records/${folder}/${kind}-definition.md`);
+  }
+
+  const existing = addFile('Definitions/Foods/Apple.md', serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: 'Definition body\n', frontmatter: {
+      tpsId: 'food-existing-global',
+      kind: 'food',
+      title: 'Apple',
+      servingSize: 1,
+    },
+  }));
+  vault.emit('create', existing);
+  assert.equal(await service.canCreateIdentity('FOOD-EXISTING-GLOBAL'), false);
+  await assert.rejects(
+    service.create('recipe', { title: 'Collision' }, { id: 'food-existing-global' }),
+    /already exists/u,
+  );
+
+  const beforePath = existing.path;
+  const migration = await service.migrateStorageProfile();
+  assert.equal(migration.failed, 0);
+  assert.equal(existing.path, beforePath);
+  assert.equal(entries.get(beforePath), existing);
+  assert.equal(parseNativeRecordDocument(contents.get(existing)).frontmatter.servingSize, 1);
+});
+
+test('configured legacy tag storage remains read-only while new records use only the canonical envelope', async () => {
   const { service, contents } = createHarness('native-records', {
     root: '/',
     layout: 'flat-root',
@@ -403,16 +509,16 @@ test('a configured tag profile is retained only for reads while every new record
     calories: 420,
   }, { id: 'food:one' });
   const parsed = parseNativeRecordDocument(contents.get(created.file));
-  assert.equal(service.version, 5);
-  assert.equal(service.getStorageProfile().identityMode, 'property');
+  assert.equal(service.version, 6);
+  assert.deepEqual(service.getStorageProfile(), DEFAULT_NATIVE_RECORD_STORAGE_PROFILE);
   assert.equal(parsed.frontmatter.tpsId, 'food:one');
-  assert.equal(parsed.frontmatter.tpsSchemaVersion, 1);
-  assert.equal(Object.hasOwn(parsed.frontmatter, 'kind'), false);
-  assert.equal(Object.hasOwn(parsed.frontmatter, 'title'), false);
+  assert.equal(parsed.frontmatter.kind, 'food-entry');
+  assert.equal(parsed.frontmatter.title, 'Tagged lunch');
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'tpsSchemaVersion'), false);
   assert.equal(Object.hasOwn(parsed.frontmatter, 'createdDate'), false);
   assert.equal(Object.hasOwn(parsed.frontmatter, 'modifiedDate'), false);
-  assert.equal(parsed.frontmatter.recordType, 'food-entry');
-  assert.equal(parsed.frontmatter.name, 'Tagged lunch');
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'recordType'), false);
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'name'), false);
   assert.deepEqual(parsed.frontmatter.tags, ['lunch', 'favorite']);
   assert.equal(parsed.frontmatter.tags.some((tag) => tag.startsWith('my/records/')), false);
   assert.equal(service.inspect(parsed.frontmatter)?.id, 'food:one');
@@ -421,7 +527,7 @@ test('a configured tag profile is retained only for reads while every new record
   const updated = await service.update(created.file, { title: 'Updated lunch', calories: 500 });
   assert.equal(updated?.frontmatter.title, 'Updated lunch');
   const updatedRaw = parseNativeRecordDocument(contents.get(created.file)).frontmatter;
-  assert.equal(updatedRaw.name, 'Updated lunch');
+  assert.equal(updatedRaw.title, 'Updated lunch');
   assert.equal(updatedRaw.calories, 500);
   assert.equal(Object.hasOwn(updatedRaw, 'modifiedDate'), false);
   assert.equal(service.inspect({
@@ -431,7 +537,7 @@ test('a configured tag profile is retained only for reads while every new record
   })?.id, 'food-old');
 });
 
-test('writable storage resolution retires tag writers, keeps their exact reader, and repairs a blank kind key', () => {
+test('writable storage resolution freezes canonical keys and retains a valid tag profile only for reads', () => {
   const configured = {
     ...DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE,
     identityTagPrefix: 'custom/items',
@@ -442,13 +548,11 @@ test('writable storage resolution retires tag writers, keeps their exact reader,
   assert.equal(resolved.retiredTagIdentity, true);
   assert.equal(resolved.requiresSettingsMigration, true);
   assert.equal(resolved.configuredProfile.identityMode, 'tag');
-  assert.equal(resolved.writeProfile.identityMode, 'property');
-  assert.equal(resolved.writeProfile.kindPropertyKey, 'kind');
-  assert.equal(resolved.writeProfile.titlePropertyKey, 'name');
+  assert.deepEqual(resolved.writeProfile, DEFAULT_NATIVE_RECORD_STORAGE_PROFILE);
   assert.deepEqual(resolved.readAliases, [resolved.configuredProfile]);
 });
 
-test('tag retirement repairs property-key collisions that were irrelevant to the legacy tag reader', () => {
+test('tag profiles keep property-only collisions as legacy read evidence without altering canonical writes', () => {
   const configured = {
     ...DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE,
     identityPropertyKey: 'name',
@@ -458,16 +562,12 @@ test('tag retirement repairs property-key collisions that were irrelevant to the
   };
   const resolved = resolveWritableNativeRecordStorageConfiguration(configured);
 
-  assert.equal(resolved.writeProfile.identityMode, 'property');
-  assert.equal(resolved.writeProfile.titlePropertyKey, 'name');
-  assert.equal(resolved.writeProfile.kindPropertyKey, 'recordKind');
-  assert.equal(resolved.writeProfile.identityPropertyKey, 'tpsId');
-  assert.equal(resolved.writeProfile.schemaPropertyKey, 'tpsSchemaVersion');
+  assert.deepEqual(resolved.writeProfile, DEFAULT_NATIVE_RECORD_STORAGE_PROFILE);
   assert.equal(resolved.requiresSettingsMigration, true);
   assert.deepEqual(resolved.readAliases, [resolved.configuredProfile]);
 });
 
-test('property writer repair makes every required system key unique and preserves disabled timestamps', () => {
+test('legacy property customization is demoted to a read alias while the writer stays canonical', () => {
   const resolved = resolveWritableNativeRecordStorageConfiguration({
     identityMode: 'property',
     identityPropertyKey: 'name',
@@ -478,17 +578,8 @@ test('property writer repair makes every required system key unique and preserve
     modifiedPropertyKey: '',
     identityTagPrefix: 'tps/record',
   });
-  const keys = [
-    resolved.writeProfile.identityPropertyKey,
-    resolved.writeProfile.schemaPropertyKey,
-    resolved.writeProfile.kindPropertyKey,
-    resolved.writeProfile.titlePropertyKey,
-    resolved.writeProfile.createdPropertyKey,
-  ];
-
-  assert.equal(new Set(keys.map((key) => key.toLowerCase())).size, keys.length);
-  assert.equal(resolved.writeProfile.titlePropertyKey, 'name');
-  assert.equal(resolved.writeProfile.modifiedPropertyKey, '');
+  assert.deepEqual(resolved.writeProfile, DEFAULT_NATIVE_RECORD_STORAGE_PROFILE);
+  assert.deepEqual(resolved.readAliases, []);
   assert.equal(resolved.requiresSettingsMigration, true);
 });
 
@@ -561,7 +652,7 @@ test('tag aliases and the active pre-edit profile outrank capped older property 
   assert.equal(fullCapPlugin.settings.nativeRecordStorageAliases[12].identityMode, 'property');
 });
 
-test('property writer reserves tags across every system-key repair and retains valid prior mappings for reads', () => {
+test('the canonical writer never consumes tags while valid prior mappings remain readable aliases', () => {
   const systemKeys = [
     'identityPropertyKey',
     'schemaPropertyKey',
@@ -583,21 +674,17 @@ test('property writer reserves tags across every system-key repair and retains v
       [systemKey]: 'tags',
     };
     const resolved = resolveWritableNativeRecordStorageConfiguration(configured);
-    const writableKeys = [
-      resolved.writeProfile.identityPropertyKey,
-      resolved.writeProfile.schemaPropertyKey,
-      resolved.writeProfile.kindPropertyKey,
-      resolved.writeProfile.titlePropertyKey,
-      resolved.writeProfile.createdPropertyKey,
-      resolved.writeProfile.modifiedPropertyKey,
-    ];
-    assert.equal(writableKeys.some((key) => key.toLowerCase() === 'tags'), false, systemKey);
-    assert.equal(new Set(writableKeys.map((key) => key.toLowerCase())).size, writableKeys.length, systemKey);
+    assert.deepEqual(resolved.writeProfile, DEFAULT_NATIVE_RECORD_STORAGE_PROFILE, systemKey);
     assert.equal(resolved.requiresSettingsMigration, true, systemKey);
     assert.deepEqual(resolved.readAliases, [resolved.configuredProfile], systemKey);
   }
 
-  const { service } = createHarness('native-records', { identityPropertyKey: 'tags' });
+  const { service } = createHarness('native-records', {
+    identityPropertyKey: 'tags',
+    schemaPropertyKey: 'tpsSchemaVersion',
+    createdPropertyKey: 'createdDate',
+    modifiedPropertyKey: 'modifiedDate',
+  });
   assert.equal(service.inspect({
     tags: 'task-legacy-tags-property',
     tpsSchemaVersion: 1,
@@ -622,7 +709,7 @@ test('even a fully collided legacy configuration writes safe properties without 
   const raw = parseNativeRecordDocument(contents.get(created.file)).frontmatter;
   assert.deepEqual(raw.tags, ['food', 'lunch']);
   assert.equal(raw.tpsId, 'food-safe');
-  assert.equal(raw.tpsSchemaVersion, 1);
+  assert.equal(Object.hasOwn(raw, 'tpsSchemaVersion'), false);
   assert.equal(raw.kind, 'food-entry');
   assert.equal(raw.title, 'Safe lunch');
 });
@@ -707,12 +794,12 @@ test('only exact matched aliases own cleanup keys across create, update, and con
   assert.equal(currentRaw.name, 'User-owned display name');
   const legacyRaw = parseNativeRecordDocument(contents.get(legacy)).frontmatter;
   assert.equal(legacyRaw.tpsId, 'task-matched-legacy');
-  assert.equal(legacyRaw.tpsSchemaVersion, 1);
   assert.equal(legacyRaw.kind, 'task');
   assert.equal(legacyRaw.title, 'Matched legacy title');
-  assert.equal(legacyRaw.createdDate, '2026-08-25T10:00:00.123Z');
-  assert.equal(legacyRaw.modifiedDate, '2026-08-25T10:00:00.456Z');
   assert.equal(legacyRaw.producerField, 'preserve me');
+  for (const key of ['tpsSchemaVersion', 'createdDate', 'modifiedDate']) {
+    assert.equal(Object.hasOwn(legacyRaw, key), false, key);
+  }
   for (const key of ['LegacyId', 'LegacySchema', 'LegacyKind', 'Name', 'LegacyCreated', 'LegacyModified']) {
     assert.equal(Object.hasOwn(legacyRaw, key), false, key);
   }
@@ -778,8 +865,10 @@ test('a valid current writer preserves dormant partial alias fields and owns tim
   }));
   vault.emit('modify', partialUpdate);
   const timestampUpdated = await service.update(partialUpdate, { status: 'done' });
-  assert.equal(timestampUpdated?.frontmatter.createdDate, '2026-08-24T18:12:13.456Z');
-  assert.equal(parseNativeRecordDocument(contents.get(partialUpdate)).frontmatter.createdDate, '2026-08-24T18:12:13.456Z');
+  assert.equal(timestampUpdated?.frontmatter.createdDate, new Date(partialUpdate.stat.ctime).toISOString());
+  assert.equal(timestampUpdated?.frontmatter.modifiedDate, new Date(partialUpdate.stat.mtime).toISOString());
+  assert.equal(Object.hasOwn(parseNativeRecordDocument(contents.get(partialUpdate)).frontmatter, 'createdDate'), false);
+  assert.equal(Object.hasOwn(parseNativeRecordDocument(contents.get(partialUpdate)).frontmatter, 'modifiedDate'), false);
 
   const authoritative = addFile('_records/tasks/task-authoritative-timestamps.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
@@ -793,8 +882,8 @@ test('a valid current writer preserves dormant partial alias fields and owns tim
       externalSchema: 1,
       externalKind: 'task',
       externalTitle: 'Old alias title',
-      legacyCreated: '2025-01-01T00:00:00.000Z',
-      legacyModified: '2025-01-02T00:00:00.000Z',
+      legacyCreated: '2026-08-27T08:00:00.000Z',
+      legacyModified: '2026-08-27T09:00:00.000Z',
     },
   }));
   assert.equal(service.inspect(parseNativeRecordDocument(contents.get(authoritative)).frontmatter)?.frontmatter.createdDate, '2026-08-27T08:00:00.000Z');
@@ -802,11 +891,12 @@ test('a valid current writer preserves dormant partial alias fields and owns tim
   const result = await service.migrateStorageProfile();
   assert.equal(result.failed, 0);
   const fallbackRaw = parseNativeRecordDocument(contents.get(partiallyMigrated)).frontmatter;
-  assert.equal(fallbackRaw.createdDate, '2026-08-25T18:12:13.456Z');
-  assert.equal(fallbackRaw.modifiedDate, '2026-08-26T18:12:13.456Z');
   const authoritativeRaw = parseNativeRecordDocument(contents.get(authoritative)).frontmatter;
-  assert.equal(authoritativeRaw.createdDate, '2026-08-27T08:00:00.000Z');
-  assert.equal(authoritativeRaw.modifiedDate, '2026-08-27T09:00:00.000Z');
+  for (const raw of [fallbackRaw, authoritativeRaw]) {
+    assert.equal(Object.hasOwn(raw, 'tpsSchemaVersion'), false);
+    assert.equal(Object.hasOwn(raw, 'createdDate'), false);
+    assert.equal(Object.hasOwn(raw, 'modifiedDate'), false);
+  }
   assert.equal(parseNativeRecordDocument(contents.get(dormant)).frontmatter.externalId, 'provider-user-value');
 });
 
@@ -1283,6 +1373,12 @@ test('case-variant duplicate storage keys block inspect, update, and consolidati
   const before = contents.get(duplicate);
 
   assert.equal(service.inspect(parseNativeRecordDocument(before).frontmatter), null);
+  assert.equal(await service.canCreateIdentity('TASK-CASE-DUPLICATE'), false);
+  assert.equal(await service.canCreateIdentity('TASK-SHADOW'), false);
+  await assert.rejects(
+    () => service.create('task', { title: 'Shadow collision' }, { id: 'TASK-SHADOW' }),
+    /already exists/u,
+  );
   assert.equal(await service.update(duplicate, { status: 'done' }), null);
   assert.equal(contents.get(duplicate), before);
   assert.equal(events.length, 0);
@@ -1290,6 +1386,32 @@ test('case-variant duplicate storage keys block inspect, update, and consolidati
   const result = await service.migrateStorageProfile();
   assert.deepEqual(result, { inspected: 1, updated: 0, skipped: 0, failed: 1 });
   assert.equal(contents.get(duplicate), before);
+});
+
+test('every case-variant tags value reserves its legacy identity evidence', async () => {
+  const { service, contents, events, indexed, addFile } = createHarness();
+  const duplicate = addFile('_records/tasks/task-case-tag-duplicate.md', serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: 'Duplicate tag body', frontmatter: {
+      kind: 'task',
+      title: 'Case tag duplicate',
+      tags: ['todo', 'tps/record/v1/task/task-tag-first'],
+      Tags: ['tps/record/v1/task/task-tag-shadow'],
+    },
+  }));
+  const before = contents.get(duplicate);
+
+  assert.equal(service.inspect(parseNativeRecordDocument(before).frontmatter), null);
+  assert.equal(await service.canCreateIdentity('TASK-TAG-FIRST'), false);
+  assert.equal(await service.canCreateIdentity('TASK-TAG-SHADOW'), false);
+  await assert.rejects(
+    () => service.create('task', { title: 'Tag shadow collision' }, { id: 'TASK-TAG-SHADOW' }),
+    /already exists/u,
+  );
+  const result = await service.migrateStorageProfile();
+  assert.deepEqual(result, { inspected: 1, updated: 0, skipped: 0, failed: 1 });
+  assert.equal(contents.get(duplicate), before);
+  assert.equal(events.length, 0);
+  assert.equal(indexed.length, 0);
 });
 
 test('valid property identity cannot mask malformed or multiple reserved legacy tag evidence', async () => {
@@ -1549,7 +1671,7 @@ test('storage migration removes only legacy identity tags and keeps aliases for 
     createdPropertyKey: '',
     modifiedPropertyKey: '',
   };
-  const { service, plugin, contents, addFile } = createHarness('native-records', {
+  const { service, plugin, vault, contents, addFile } = createHarness('native-records', {
     storageAliases: [legacyProfile],
   });
   const created = addFile('_records/calendar-events/calendar-event-1.md', serializeNativeRecordDocument({
@@ -1572,7 +1694,7 @@ test('storage migration removes only legacy identity tags and keeps aliases for 
   const migrated = parseNativeRecordDocument(contents.get(created));
   const raw = migrated.frontmatter;
   assert.equal(raw.tpsId, 'calendar-event-1');
-  assert.equal(raw.tpsSchemaVersion, 1);
+  assert.equal(Object.hasOwn(raw, 'tpsSchemaVersion'), false);
   assert.equal(raw.kind, 'calendar-event');
   assert.equal(raw.title, 'Migration event');
   assert.deepEqual(raw.tags, ['calendar', 'important']);
@@ -1600,6 +1722,7 @@ test('storage migration removes only legacy identity tags and keeps aliases for 
       tags: ['calendar', 'tishos/item/v1/calendar-event/calendar-event-late'],
     },
   }));
+  vault.emit('create', late);
   assert.equal((await service.resolve('calendar-event-late'))?.path, late.path);
 });
 
@@ -1643,7 +1766,7 @@ test('updating a legacy tag record adopts property identity without reserializin
   assert.deepEqual(updated?.frontmatter.tags, ['todo', 'important']);
   assert.equal(stripOwnedSource(output), stripOwnedSource(original));
   assert.match(output, /^tpsId: task-source-preserved\r$/mu);
-  assert.match(output, /^tpsSchemaVersion: 1\r$/mu);
+  assert.doesNotMatch(output, /^tpsSchemaVersion:/mu);
   assert.match(output, /^title: Updated source task\r$/mu);
   assert.match(output, /^status: done\r$/mu);
   assert.match(output, /^  - todo\r$/mu);
@@ -1737,7 +1860,7 @@ test('reidentify adopts recognized tag identity and retains ordinary tags and bo
 
   assert.equal(result?.id, 'calendar:v1:source:tagged');
   assert.equal(parsed.frontmatter.tpsId, 'calendar:v1:source:tagged');
-  assert.equal(parsed.frontmatter.tpsSchemaVersion, 1);
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'tpsSchemaVersion'), false);
   assert.equal(parsed.frontmatter.kind, 'calendar-event');
   assert.equal(parsed.frontmatter.title, 'Legacy tagged event');
   assert.equal(parsed.frontmatter.location, 'Conference room');
@@ -1856,6 +1979,45 @@ test('reidentify fails closed for duplicate sources and occupied or blocked dest
   assert.equal(indexed.length, 0);
 });
 
+test('resolve refreshes stale identity state from Vault bytes and rejects every duplicate reference form', async () => {
+  const sourceFor = (id) => serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: `${id} body\n`, frontmatter: {
+      tpsId: id,
+      kind: 'calendar-event',
+      title: id,
+    },
+  });
+  const { service, vault, contents, addFile } = createHarness();
+  const owner = addFile(
+    '_records/calendar-events/resolve-owner.md',
+    sourceFor('calendar-resolve-owner'),
+  );
+  const changed = addFile(
+    '_records/calendar-events/resolve-changed.md',
+    sourceFor('calendar-resolve-before'),
+  );
+  await service.snapshot();
+  const originalRead = vault.read;
+  let authoritativeReads = 0;
+  vault.read = async (file) => {
+    authoritativeReads += 1;
+    return originalRead(file);
+  };
+  assert.equal(await service.resolve('calendar-not-present'), null);
+  assert.equal(authoritativeReads, 0, 'a current authoritative index does not rescan for a missing ID');
+
+  contents.set(changed, sourceFor('CALENDAR-RESOLVE-OWNER'));
+  vault.emit('modify', changed);
+
+  assert.equal(await service.resolve('calendar-resolve-owner'), null);
+  assert.equal(authoritativeReads, 2, 'one stale generation performs one complete authoritative refresh');
+  assert.equal(await service.resolve(owner), null);
+  assert.equal(await service.resolve({ path: owner.path, id: 'calendar-resolve-owner' }), null);
+  assert.equal(await service.resolve(changed), null);
+  assert.equal(authoritativeReads, 2, 'subsequent ambiguous resolves reuse the current authoritative index');
+  await assert.rejects(() => service.snapshot(), /identity conflicts must be resolved/u);
+});
+
 test('reidentify preflight matches source-writer eligibility and sees uncached on-disk destinations', async () => {
   const addRecordSource = (id, newline = '\n', body = 'Body\n') => serializeNativeRecordDocument({
     bom: '', newline, closer: '---', body, frontmatter: {
@@ -1943,9 +2105,10 @@ test('reidentify preflight matches source-writer eligibility and sees uncached o
     contents.set(destination, addRecordSource('calendar-after-edit'));
     vault.emit('modify', destination);
     const secondPreflight = service.canCreateIdentity('CALENDAR-AFTER-EDIT');
-    await service.resolve('calendar-not-present');
+    const missingResolve = service.resolve('calendar-not-present');
     releaseFirstRead();
 
+    assert.equal(await missingResolve, null);
     assert.deepEqual(await Promise.all([firstPreflight, secondPreflight]), [false, false]);
     assert.deepEqual(
       (await service.list()).map((record) => record.id).sort(),
@@ -2231,14 +2394,13 @@ test('identity plans preflight exact create and ordered update payloads before a
     nextId: 'calendar-storage-collision',
     kind: 'calendar-event',
     properties: { title: 'Canonical title', eventTitle: 'Business title' },
-  }]), false);
-  await assert.rejects(
-    () => configured.service.create('calendar-event', {
-      title: 'Canonical title',
-      eventTitle: 'Business title',
-    }, { id: 'calendar-storage-collision' }),
-    /collides with system storage/u,
-  );
+  }]), true);
+  const configuredRecord = await configured.service.create('calendar-event', {
+    title: 'Canonical title',
+    eventTitle: 'Business title',
+  }, { id: 'calendar-storage-collision' });
+  assert.equal(configuredRecord.frontmatter.title, 'Canonical title');
+  assert.equal(configuredRecord.frontmatter.eventTitle, 'Business title');
 
   const stale = createHarness();
   const staleFile = stale.addFile('_records/calendar-events/stale-baseline.md', sourceFor('calendar-stale-baseline'));
@@ -2283,6 +2445,87 @@ test('identity plans preflight exact create and ordered update payloads before a
   assert.deepEqual((await racing.service.resolve(racingFile))?.frontmatter.tags, ['hca', 'racing']);
 });
 
+test('identity plans bind create kind and reidentify source path plus current ID', async () => {
+  const sourceFor = (id) => serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: `${id} body\n`, frontmatter: {
+      tpsId: id,
+      kind: 'calendar-event',
+      title: id,
+    },
+  });
+  const reidentify = createHarness();
+  const first = reidentify.addFile(
+    '_records/calendar-events/plan-source-first.md',
+    sourceFor('calendar-plan-source-first'),
+  );
+  const second = reidentify.addFile(
+    '_records/calendar-events/plan-source-second.md',
+    sourceFor('calendar-plan-source-second'),
+  );
+  const beforeFirst = reidentify.contents.get(first);
+  const beforeSecond = reidentify.contents.get(second);
+  const plannedEntries = [{
+    operation: 'reidentify',
+    reference: first,
+    nextId: 'calendar-plan-bound-next',
+    fileName: 'Bound target',
+    updates: [],
+  }];
+  const plan = await planCurrent(reidentify.service, plannedEntries);
+  assert.deepEqual(plan?.entries, [{
+    operation: 'reidentify',
+    nextId: 'calendar-plan-bound-next',
+    expectedPath: '_records/calendar-events/Bound target.md',
+    sourcePath: first.path,
+    currentId: 'calendar-plan-source-first',
+  }]);
+
+  const substituted = await reidentify.service.applyIdentityChanges(plan, [{
+    ...plannedEntries[0],
+    reference: second,
+  }]);
+  assert.deepEqual(substituted, {
+    ok: false,
+    handles: [],
+    failedIndex: null,
+    error: 'plan-revalidation-failed',
+  });
+  assert.equal(reidentify.contents.get(first), beforeFirst);
+  assert.equal(reidentify.contents.get(second), beforeSecond);
+  assert.equal(reidentify.events.length, 0);
+  assert.equal(reidentify.indexed.length, 0);
+
+  const create = createHarness('native-records', { root: '/', layout: 'flat-root' });
+  const createEntries = [{
+    operation: 'create',
+    nextId: 'plan-bound-create',
+    kind: 'task',
+    fileName: 'Bound create',
+    properties: { title: 'Bound create' },
+  }];
+  const createPlan = await planCurrent(create.service, createEntries);
+  assert.deepEqual(createPlan?.entries, [{
+    operation: 'create',
+    nextId: 'plan-bound-create',
+    expectedPath: 'Bound create.md',
+    kind: 'task',
+  }]);
+
+  const changedKind = await create.service.applyIdentityChanges(createPlan, [{
+    ...createEntries[0],
+    kind: 'calendar-event',
+  }]);
+  assert.deepEqual(changedKind, {
+    ok: false,
+    handles: [],
+    failedIndex: null,
+    error: 'plan-revalidation-failed',
+  });
+  assert.equal(create.vault.getFileByPath('Bound create.md'), null);
+  assert.equal(create.events.length, 0);
+  assert.equal(create.indexed.length, 0);
+});
+
 test('identity plans apply a no-rename reidentify at its source path and fail closed on invalid path contracts', async () => {
   const sourceFor = (id, body) => serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body, frontmatter: {
@@ -2293,7 +2536,7 @@ test('identity plans apply a no-rename reidentify at its source path and fail cl
       tags: ['hca'],
     },
   });
-  const { service, contents, addFile } = createHarness();
+  const { service, vault, contents, addFile } = createHarness();
   const stationary = addFile(
     'Legacy/no-rename.md',
     sourceFor('calendar-no-rename', 'No-rename body must survive byte-for-byte.\n'),
@@ -2343,6 +2586,7 @@ test('identity plans apply a no-rename reidentify at its source path and fail cl
     'Legacy/guarded-no-rename.md',
     sourceFor('calendar-guarded-no-rename', 'Guarded body.\n'),
   );
+  vault.emit('create', guarded);
   const guardedBefore = contents.get(guarded);
   const guardedPlan = await planCurrent(service, [{
     operation: 'reidentify',
@@ -2677,7 +2921,7 @@ test('invalid detached update candidates cannot change bytes, timestamps, events
   assert.equal(events.length, 0);
   assert.equal(indexed.length, 0);
   const raw = parseNativeRecordDocument(contents.get(created.file)).frontmatter;
-  assert.equal(raw.modifiedDate, '2026-08-27T12:00:00.000Z');
+  assert.equal(Object.hasOwn(raw, 'modifiedDate'), false);
   assert.equal(raw.title, 'Valid task');
   assert.deepEqual(raw.tags, ['todo']);
 });
@@ -2768,7 +3012,7 @@ test('a new empty task draft created by core Bases is adopted into the canonical
   assert.equal(parsed?.frontmatter.title, 'Untitled');
   assert.equal(parsed?.frontmatter.status, 'todo');
   assert.equal(parsed?.frontmatter.name, 'Draft producer name');
-  assert.equal(parsed?.frontmatter.tpsSchemaVersion, 1);
+  assert.equal(Object.hasOwn(parsed?.frontmatter || {}, 'tpsSchemaVersion'), false);
   assert.match(String(parsed?.frontmatter.tpsId), /^task-/u);
   assert.equal((await service.resolve(String(parsed?.frontmatter.tpsId)))?.path, draft.path);
   assert.ok(events.some((event) => event.type === 'explicit'
@@ -3005,6 +3249,27 @@ test('native filename protection survives a cold cache and malformed frontmatter
   assert.equal(service.isRecordFile(indexedThenMalformed), false, 'the malformed cache event clears the fast identity index');
   assert.equal(await service.hasRecordIdentityEvidence(indexedThenMalformed), true, 'authoritative bytes retain protection after index loss');
 
+  assert.equal(
+    service.hasRecordIdentityEvidenceInFrontmatter(parseNativeRecordDocument(validSource).frontmatter),
+    true,
+    'the synchronous mutation-boundary classifier recognizes a valid record',
+  );
+  assert.equal(
+    service.hasRecordIdentityEvidenceInFrontmatter({ tpsId: '' }),
+    true,
+    'the mutation-boundary classifier fails closed for an incomplete identity property',
+  );
+  assert.equal(
+    service.hasRecordIdentityEvidenceInFrontmatter({ tpsSchemaVersion: 'not-a-version' }),
+    true,
+    'the mutation-boundary classifier fails closed for malformed schema-only evidence',
+  );
+  assert.equal(
+    service.hasRecordIdentityEvidenceInFrontmatter({ title: 'Ordinary note' }),
+    false,
+    'ordinary frontmatter remains eligible for generic automation',
+  );
+
   const ordinaryMalformed = addFile('Ordinary malformed.md', '---\ntitle: Ordinary\nicon: one\nicon: two\n---\n');
   assert.equal(await service.hasRecordIdentityEvidence(ordinaryMalformed), false);
 });
@@ -3094,7 +3359,7 @@ test('native profile is explicit, default-off, and removes legacy active paths o
 
 test('public GCM API exposes versioned generic and task record contracts', () => {
   assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
-  assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 5;/u);
+  assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 6;/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);
   assert.match(apiSource, /const taskRecordsApi = \{[\s\S]{0,200}version: 1[\s\S]{0,500}promote:[\s\S]{0,900}resolve:/u);
   assert.match(apiSource, /nativeRecords: nativeRecordsApi,[\s\S]{0,100}taskRecords: taskRecordsApi/u);

@@ -697,15 +697,26 @@ export class FileNamingService {
 
         if (existingCreated === createdValue && existingModified === modifiedValue) return;
 
+        let changed = false;
         this.rememberRecentTimestampWrite(liveFile.path);
         try {
             await this.plugin.bulkEditService.runSerializedFrontmatterWrite(liveFile, async () => {
-                await this.plugin.frontmatterMutationService.process(liveFile, (frontmatter) => {
-                    this.setFrontmatterValueCaseInsensitive(frontmatter, createdKey, createdValue);
-                    this.setFrontmatterValueCaseInsensitive(frontmatter, modifiedKey, modifiedValue);
-                });
+                changed = await this.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(
+                    liveFile,
+                    [createdKey, modifiedKey],
+                    (frontmatter) => {
+                        if (this.plugin.nativeRecordService?.hasRecordIdentityEvidenceInFrontmatter(frontmatter)) return;
+                        this.setFrontmatterValueCaseInsensitive(frontmatter, createdKey, createdValue);
+                        this.setFrontmatterValueCaseInsensitive(frontmatter, modifiedKey, modifiedValue);
+                    },
+                    {
+                        kind: 'automation',
+                        sourcePluginId: this.plugin.manifest.id,
+                        surface: 'file-timestamp-sync',
+                    },
+                );
             });
-            if (fingerprint) {
+            if (changed && fingerprint) {
                 this.rememberTimestampWriteState(liveFile.path, fingerprint, modifiedValue);
             }
         } catch (error) {
