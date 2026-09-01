@@ -59,8 +59,14 @@ type PendingDailyNoteReconciliation = {
 const pendingDailyNoteReconciliations = new WeakMap<object, Map<string, PendingDailyNoteReconciliation>>();
 const dailyNoteCandidateIndexes = new WeakMap<object, Map<string, DailyNoteCandidateIndex>>();
 const dirtyDailyNoteCandidatePaths = new WeakMap<object, Map<string, number>>();
+const blockedDailyNoteCandidatePaths = new WeakMap<object, Set<string>>();
 const liveDailyNoteCandidateOverrides = new WeakMap<object, Map<string, LiveDailyNoteCandidateOverride>>();
 const dailyNoteCandidateMutationGenerations = new WeakMap<object, number>();
+type BackgroundDailyNoteCandidateRefresh = {
+  promise: Promise<boolean>;
+  replayRequested: boolean;
+};
+const backgroundDailyNoteCandidateRefreshes = new WeakMap<object, BackgroundDailyNoteCandidateRefresh>();
 type DailyNoteConfigurationOverride = {
   folder: string;
   format: string;
@@ -310,6 +316,38 @@ export function findExistingDailyNoteForIsoDate(app: App, settings: unknown, iso
   if (!wanted) return null;
   const result = resolveExistingDailyNoteCandidate(app, settings, wanted);
   return result.status === 'found' ? result.file : null;
+}
+
+/**
+ * Returns only the exact configured Daily Note target, without consulting
+ * legacy identity or performing reconciliation. This read-only fallback is
+ * safe while current-byte candidate refresh is still pending: it can open an
+ * already-existing canonical file, but it can never prove absence, move a
+ * legacy note, or authorize creation.
+ */
+export function findCanonicalDailyNoteForIsoDate(app: App, settings: unknown, isoDate: string): TFile | null {
+  const wanted = normalizeDailyNoteIsoDate(isoDate);
+  if (!wanted) return null;
+  const canonicalPath = getDailyNotePathForIsoDate(app, settings, wanted);
+  if (!canonicalPath) return null;
+  const canonical = app.vault.getAbstractFileByPath(canonicalPath);
+  if (!(canonical instanceof TFile) || isManagedFilePropertiesCompanion(app, canonical)) return null;
+
+  const cache = app.metadataCache.getFileCache(canonical);
+  // A non-empty file without a cache entry can still contain authoritative
+  // non-Daily frontmatter, so cold observational lookup must wait. A zero-byte
+  // file cannot hide such identity and remains safe to open immediately.
+  if (!cache && canonical.stat?.size !== 0) return null;
+
+  const identity = analyzeDailyNoteFile(
+    app,
+    settings,
+    canonical,
+    cache?.frontmatter && typeof cache.frontmatter === 'object'
+      ? cache.frontmatter as Record<string, unknown>
+      : null,
+  ).identity;
+  return identity?.isoDate === wanted ? canonical : null;
 }
 
 /**
@@ -813,6 +851,16 @@ async function ensureDailyNoteTargetFolder(app: App, targetPath: string): Promis
   return true;
 }
 
+/**
+ * Obsidian can legitimately omit CachedMetadata for a zero-byte Markdown
+ * file because there is nothing to parse. The file stat is authoritative in
+ * that case: no hidden frontmatter can change Daily Note identity. A missing
+ * cache for any non-empty file must still be treated as unresolved.
+ */
+export function isMarkdownMetadataEntrySettled(app: App, file: TFile): boolean {
+  return file.stat?.size === 0 || app.metadataCache.getFileCache(file) != null;
+}
+
 async function waitForDailyNoteMetadataCache(app: App): Promise<'ready' | 'refreshed' | 'blocked'> {
   const metadataCache = (app as any)?.metadataCache;
   if (!metadataCache?.getFileCache || !app.vault?.getMarkdownFiles) return 'ready';
@@ -823,14 +871,14 @@ async function waitForDailyNoteMetadataCache(app: App): Promise<'ready' | 'refre
   }
   if (metadataCache.initialized === false) return 'blocked';
 
-  let unresolved = app.vault.getMarkdownFiles().filter((file) => metadataCache.getFileCache(file) == null);
+  let unresolved = app.vault.getMarkdownFiles().filter((file) => !isMarkdownMetadataEntrySettled(app, file));
   if (unresolved.length === 0) return waitedForInitialization ? 'refreshed' : 'ready';
 
   while (unresolved.length > 0 && Date.now() < deadline) {
     await new Promise<void>((resolve) => setTimeout(resolve, 25));
     unresolved = unresolved.filter((file) => {
       const live = app.vault.getAbstractFileByPath(file.path);
-      return live instanceof TFile && metadataCache.getFileCache(live) == null;
+      return live instanceof TFile && !isMarkdownMetadataEntrySettled(app, live);
     });
   }
   return unresolved.length === 0 ? 'refreshed' : 'blocked';
@@ -864,6 +912,7 @@ export function markDailyNoteCandidatePathDirty(app: App, fileOrPath: FileLike |
   const generation = (dailyNoteCandidateMutationGenerations.get(appKey) || 0) + 1;
   dailyNoteCandidateMutationGenerations.set(appKey, generation);
   dirty.set(path, generation);
+  blockedDailyNoteCandidatePaths.get(appKey)?.delete(path);
   liveDailyNoteCandidateOverrides.get(appKey)?.delete(path);
   invalidateDailyNoteCandidateIndex(app);
 }
@@ -892,8 +941,22 @@ async function refreshDirtyDailyNoteCandidatePaths(
   settings: unknown,
 ): Promise<'ready' | 'blocked'> {
   const appKey = app as object;
+  let blocked = blockedDailyNoteCandidatePaths.get(appKey);
+  if (blocked) {
+    const currentOverrides = liveDailyNoteCandidateOverrides.get(appKey);
+    for (const path of blocked) {
+      const file = app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile && file.extension.toLowerCase() === 'md') continue;
+      blocked.delete(path);
+      currentOverrides?.delete(path);
+    }
+    if (blocked.size === 0) {
+      blockedDailyNoteCandidatePaths.delete(appKey);
+      blocked = undefined;
+    }
+  }
   const dirty = dirtyDailyNoteCandidatePaths.get(appKey);
-  if (!dirty || dirty.size === 0) return 'ready';
+  if (!dirty || dirty.size === 0) return blocked && blocked.size > 0 ? 'blocked' : 'ready';
   let overrides = liveDailyNoteCandidateOverrides.get(appKey);
   if (!overrides) {
     overrides = new Map<string, LiveDailyNoteCandidateOverride>();
@@ -910,6 +973,7 @@ async function refreshDirtyDailyNoteCandidatePaths(
     if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'md') {
       if (dirty.get(path) === generation) {
         dirty.delete(path);
+        blocked?.delete(path);
         overrides.delete(path);
       }
       changed = true;
@@ -927,7 +991,23 @@ async function refreshDirtyDailyNoteCandidatePaths(
       continue;
     }
     const inspected = inspectRawFrontmatter(current);
-    if (inspected.status === 'invalid') return 'blocked';
+    if (inspected.status === 'invalid') {
+      if (!blocked) {
+        blocked = new Set<string>();
+        blockedDailyNoteCandidatePaths.set(appKey, blocked);
+      }
+      // A stable malformed source is a mutation-safety blocker, not an
+      // indexing operation that can eventually finish. Publish a path-only
+      // observational override and drain this generation so unrelated
+      // canonical Daily Notes remain readable. Reconciliation remains
+      // fail-closed below while any malformed source exists.
+      overrides.set(path, { file, frontmatter: null });
+      blocked.add(path);
+      dirty.delete(path);
+      changed = true;
+      continue;
+    }
+    blocked?.delete(path);
     overrides.set(path, {
       file,
       frontmatter: inspected.frontmatter,
@@ -936,8 +1016,12 @@ async function refreshDirtyDailyNoteCandidatePaths(
     changed = true;
   }
   if (dirty.size > 0) return 'blocked';
+  if (blocked?.size === 0) {
+    blockedDailyNoteCandidatePaths.delete(appKey);
+    blocked = undefined;
+  }
   if (changed) invalidateDailyNoteCandidateIndex(app);
-  return 'ready';
+  return blocked && blocked.size > 0 ? 'blocked' : 'ready';
 }
 
 /**
@@ -946,11 +1030,61 @@ async function refreshDirtyDailyNoteCandidatePaths(
  * metadata notification can trigger recovery without ever clearing a newer
  * write. The live override remains authoritative until the next vault event.
  */
-export async function refreshPendingDailyNoteCandidatePaths(
+async function runBackgroundDailyNoteCandidateRefresh(
+  app: App,
+  settings: unknown,
+  state: BackgroundDailyNoteCandidateRefresh,
+): Promise<boolean> {
+  const appKey = app as object;
+  try {
+    while (true) {
+      state.replayRequested = false;
+      const dirtyBefore = dirtyDailyNoteCandidatePaths.get(appKey)?.size || 0;
+      const result = await refreshDirtyDailyNoteCandidatePaths(app, settings);
+      const dirtyAfter = dirtyDailyNoteCandidatePaths.get(appKey)?.size || 0;
+
+      if (dirtyAfter === 0) return result === 'ready';
+
+      // A bounded pass may yield with work remaining in a large vault. Keep
+      // the single owner moving while it drains paths. Metadata callbacks
+      // arriving during the pass request one trailing replay, including when
+      // a generation landed in the zero-dirty completion window.
+      if (dirtyAfter < dirtyBefore || state.replayRequested) continue;
+      return false;
+    }
+  } finally {
+    // Delete ownership before the promise settles. A callback arriving after
+    // this synchronous cleanup creates a fresh worker instead of joining an
+    // already-completed promise and losing its trailing generation.
+    if (backgroundDailyNoteCandidateRefreshes.get(appKey) === state) {
+      backgroundDailyNoteCandidateRefreshes.delete(appKey);
+    }
+  }
+}
+
+/**
+ * Serializes metadata-event refresh floods per vault. Mutation reconciliation
+ * intentionally bypasses this wrapper and continues to call the fail-closed
+ * refresh function directly.
+ */
+export function refreshPendingDailyNoteCandidatePaths(
   app: App,
   settings: unknown,
 ): Promise<boolean> {
-  return (await refreshDirtyDailyNoteCandidatePaths(app, settings)) === 'ready';
+  const appKey = app as object;
+  const pending = backgroundDailyNoteCandidateRefreshes.get(appKey);
+  if (pending) {
+    pending.replayRequested = true;
+    return pending.promise;
+  }
+
+  const state: BackgroundDailyNoteCandidateRefresh = {
+    promise: Promise.resolve(false),
+    replayRequested: true,
+  };
+  backgroundDailyNoteCandidateRefreshes.set(appKey, state);
+  state.promise = runBackgroundDailyNoteCandidateRefresh(app, settings, state);
+  return state.promise;
 }
 
 function logDailyNoteReconciliationBlocked(reason: string, isoDate: string, candidateCount: number): void {

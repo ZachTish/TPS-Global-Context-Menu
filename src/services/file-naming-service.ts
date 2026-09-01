@@ -6,6 +6,7 @@ import {
     clearDailyNoteConfigurationOverride,
     hasPendingDailyNoteCandidatePathRefresh,
     invalidateDailyNoteCandidateIndex,
+    isMarkdownMetadataEntrySettled,
     markDailyNoteCandidateMetadataReady,
     markDailyNoteCandidatePathDirty,
     parseDailyNoteFileDate,
@@ -40,9 +41,14 @@ export class FileNamingService {
     private dailyNoteMetadataRefreshPending = false;
     private dailyNoteMetadataRefreshEpoch = 0;
     private dailyNoteMetadataReadyNotificationPending = false;
+    private dailyNoteMetadataGlobalResolutionObserved = false;
 
     constructor(plugin: TPSGlobalContextMenuPlugin) {
         this.plugin = plugin;
+        // A hot-reloaded plugin may attach after the public `resolved` event.
+        // Obsidian's initialized flag is authoritative for that startup case.
+        this.dailyNoteMetadataGlobalResolutionObserved =
+            (this.plugin.app as any)?.metadataCache?.initialized === true;
         this.registerDailyNoteIndexInvalidation();
         this.dailyNoteConfigurationReady = this.loadPersistedDailyNoteConfiguration()
             .finally(() => {
@@ -60,19 +66,39 @@ export class FileNamingService {
 
     public isDailyNoteMetadataCacheReady(): boolean {
         const metadataCache = (this.plugin.app as any)?.metadataCache;
+        if (metadataCache?.initialized === false) {
+            // A full metadata rebuild invalidates any resolution observed by a
+            // prior generation. Wait for the next global `resolved` event.
+            this.dailyNoteMetadataGlobalResolutionObserved = false;
+            this.dailyNoteMetadataReady = false;
+        }
         if (
             this.dailyNoteMetadataRefreshPending
             || metadataCache?.initialized === false
             || hasPendingDailyNoteCandidatePathRefresh(this.plugin.app)
-        ) return false;
+        ) {
+            // A provider consumer has now observed the API's temporary
+            // cold-index state. Arm one readiness reannouncement so that the
+            // first metadata completion which makes identity readable causes
+            // that consumer to retry without polling or reloading the plugin.
+            this.dailyNoteMetadataReadyNotificationPending = true;
+            return false;
+        }
         if (this.dailyNoteMetadataReady) return true;
+        if (this.dailyNoteMetadataGlobalResolutionObserved) {
+            this.dailyNoteMetadataReady = true;
+            return true;
+        }
         const getMarkdownFiles = (this.plugin.app.vault as any)?.getMarkdownFiles;
         if (typeof metadataCache?.getFileCache !== 'function' || typeof getMarkdownFiles !== 'function') {
             this.dailyNoteMetadataReady = true;
             return true;
         }
         this.dailyNoteMetadataReady = getMarkdownFiles.call(this.plugin.app.vault)
-            .every((file: TFile) => metadataCache.getFileCache(file) != null);
+            .every((file: TFile) => isMarkdownMetadataEntrySettled(this.plugin.app, file));
+        if (!this.dailyNoteMetadataReady) {
+            this.dailyNoteMetadataReadyNotificationPending = true;
+        }
         return this.dailyNoteMetadataReady;
     }
 
@@ -109,6 +135,13 @@ export class FileNamingService {
         for (const event of ['changed', 'deleted', 'resolve', 'resolved']) {
             const ref = (this.plugin.app.metadataCache as any)?.on?.(event, async (file?: unknown) => {
                 const refreshEpoch = ++this.dailyNoteMetadataRefreshEpoch;
+                if (event === 'resolved') {
+                    // Public MetadataCache contract: every file has completed
+                    // resolution. Some empty files still intentionally have
+                    // no CachedMetadata entry, so this event is stronger than
+                    // scanning getFileCache() for universal non-null values.
+                    this.dailyNoteMetadataGlobalResolutionObserved = true;
+                }
                 if (file instanceof TFile) {
                     markDailyNoteCandidateMetadataReady(this.plugin.app, file);
                 } else if (event === 'resolved') {
@@ -124,12 +157,13 @@ export class FileNamingService {
                 // The refresh result itself may be an older failed read while
                 // another owner (or mutation reconciliation) already drained
                 // the same generation. Current dirty state is authoritative.
-                const identityReady = !hasPendingDailyNoteCandidatePathRefresh(this.plugin.app);
-                if (identityReady) {
+                const dirtyPathsReady = !hasPendingDailyNoteCandidatePathRefresh(this.plugin.app);
+                if (dirtyPathsReady) {
                     // Any completion can prove readiness after draining the
                     // live generation, even if a newer callback failed first.
                     this.dailyNoteMetadataRefreshPending = false;
-                    if (this.dailyNoteMetadataReadyNotificationPending) {
+                    const identityReady = this.isDailyNoteMetadataCacheReady();
+                    if (identityReady && this.dailyNoteMetadataReadyNotificationPending) {
                         this.dailyNoteMetadataReadyNotificationPending = false;
                         // Consumers cache provider readiness. Re-announce the
                         // same API once current-byte identity is observable.
@@ -227,15 +261,32 @@ export class FileNamingService {
         const core = this.getCoreDailyNoteOptions();
         const persistedTemplate = String(this.persistedDailyNoteConfiguration?.template || '').trim();
         const runtimeSignatureAfterRead = core ? this.getCoreDailyNoteRuntimeSignature(core) : null;
+        const runtimeFolder = normalizePath(String(core?.folder || '').trim()).replace(/^\/+|\/+$/g, '');
+        const runtimeFormat = String(core?.format || '').trim() || 'YYYY-MM-DD';
+        const runtimeTemplate = String(core?.template || '').trim();
+        const persistedHasPathConfiguration = Boolean(
+            this.persistedDailyNoteConfiguration
+            && (
+                typeof this.persistedDailyNoteConfiguration.folder === 'string'
+                || typeof this.persistedDailyNoteConfiguration.format === 'string'
+            ),
+        );
+        const coreHasExactStartupPlaceholder =
+            runtimeFolder === ''
+            && runtimeFormat === 'YYYY-MM-DD'
+            && runtimeTemplate === '';
         if (
             core
-            && !String(core.template || '').trim()
-            && persistedTemplate
+            && !runtimeTemplate
+            && (persistedTemplate || (persistedHasPathConfiguration && coreHasExactStartupPlaceholder))
             && runtimeSignatureBeforeRead === runtimeSignatureAfterRead
         ) {
-            // Recovery is bound to the exact incomplete startup snapshot. Once
-            // Core publishes any different signature, a later blank template
-            // is intentional live state and must not resurrect persisted data.
+            // Recovery is bound to the exact incomplete startup snapshot.
+            // Core's root/YYYY-MM-DD/blank placeholder must recover a saved
+            // folder and format even when the user intentionally has no Daily
+            // Notes template. Once Core publishes any different signature, a
+            // later blank template is intentional live state and must not
+            // resurrect persisted data.
             this.persistedRecoveryRuntimeSignature = runtimeSignatureAfterRead;
         }
         this.refreshDailyNoteConfigurationSnapshot();
@@ -260,8 +311,6 @@ export class FileNamingService {
         const runtimeSignature = core ? this.getCoreDailyNoteRuntimeSignature(core) : null;
         const recoverPersistedStartupSnapshot = Boolean(
             core
-            && !runtimeTemplate
-            && persistedTemplate
             && this.persistedRecoveryRuntimeSignature
             && runtimeSignature === this.persistedRecoveryRuntimeSignature,
         );

@@ -14,6 +14,7 @@ import {
 import { TPS_EVENTS, TPS_LEGACY_EVENTS } from './tps-contracts';
 import {
     dailyNoteTaskScheduleInheritanceEnabled,
+    findCanonicalDailyNoteForIsoDate,
     findExistingDailyNoteForIsoDate,
     getDailyNotePathForIsoDate,
     normalizeExpectedDailyNotePath,
@@ -975,9 +976,20 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         dailyNotes: {
             version: 4,
             findForIsoDate: (isoDate: string) => {
-                if (!dailyNoteIdentityReady()) return null;
+                if (!refreshDailyNoteConfiguration()) return null;
                 const normalized = normalizeDailyNoteIsoDate(isoDate);
-                return normalized ? findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, normalized) : null;
+                if (!normalized) return null;
+                // The configured canonical path is always safe to observe:
+                // returning that existing file performs no mutation and
+                // prevents an unrelated malformed or duplicate legacy note
+                // from hiding the user's real Core Daily Note. Legacy lookup
+                // still waits for complete identity, and every create/rename
+                // path retains the stricter reconciliation contract.
+                const canonical = findCanonicalDailyNoteForIsoDate(plugin.app, plugin.settings, normalized);
+                if (canonical) return canonical;
+                return dailyNoteIdentityReady()
+                    ? findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, normalized)
+                    : null;
             },
             dateForFile: (file: Pick<TFile, 'path' | 'basename'>) =>
                 dailyNoteIdentityReady()

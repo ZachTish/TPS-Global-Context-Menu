@@ -684,6 +684,193 @@ test('candidate lookup scans once across dates and invalidates after a vault cha
   assert.equal(harness.markdownScanCount, 2);
 });
 
+test('zero-byte canonical Daily Notes do not wait for an impossible metadata entry', async () => {
+  const path = 'Inbox/Daily/2026-08-25.md';
+  const harness = createHarness(
+    [{ path, content: '' }],
+    { folder: 'Inbox/Daily', format: 'YYYY-MM-DD' },
+  );
+  const file = harness.files.get(path);
+  file.stat = { ctime: 1, mtime: 1, size: 0 };
+  harness.app.metadataCache.initialized = true;
+  harness.app.metadataCache.getFileCache = () => null;
+
+  assert.equal(identity.isMarkdownMetadataEntrySettled(harness.app, file), true);
+  assert.deepEqual(
+    await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'),
+    { status: 'found', file },
+  );
+  assert.deepEqual(harness.renames, []);
+});
+
+test('blocked identity can read only the exact canonical Daily Note without authorizing legacy mutation', () => {
+  const canonicalPath = 'Inbox/Daily/2026-08-25.md';
+  const legacyPath = 'Legacy 2026-08-26.md';
+  const harness = createHarness(
+    [
+      { path: canonicalPath, content: '' },
+      { path: legacyPath, frontmatter: { kind: 'dailynote', scheduled: '2026-08-26' } },
+    ],
+    { folder: 'Inbox/Daily', format: 'YYYY-MM-DD' },
+  );
+
+  assert.equal(
+    identity.findCanonicalDailyNoteForIsoDate(harness.app, {}, '2026-08-25'),
+    harness.files.get(canonicalPath),
+  );
+  assert.equal(
+    identity.findCanonicalDailyNoteForIsoDate(harness.app, {}, '2026-08-26'),
+    null,
+    'the read-only fallback must not surface or migrate a legacy candidate',
+  );
+  assert.equal(identity.findCanonicalDailyNoteForIsoDate(harness.app, {}, 'not-a-date'), null);
+  assert.deepEqual(harness.renames, []);
+});
+
+test('canonical read fallback rejects authoritative non-Daily identity and unresolved non-empty bytes', () => {
+  const canonicalPath = 'Inbox/Daily/2026-08-25.md';
+  const harness = createHarness(
+    [{ path: canonicalPath, frontmatter: { kind: 'project' } }],
+    { folder: 'Inbox/Daily', format: 'YYYY-MM-DD' },
+  );
+  const file = harness.files.get(canonicalPath);
+  file.stat = { ctime: 1, mtime: 1, size: 20 };
+
+  assert.equal(
+    identity.findCanonicalDailyNoteForIsoDate(harness.app, {}, '2026-08-25'),
+    null,
+    'an authoritative non-Daily kind must veto the configured path',
+  );
+
+  harness.frontmatter.set(canonicalPath, {});
+  harness.app.metadataCache.getFileCache = () => null;
+  assert.equal(
+    identity.findCanonicalDailyNoteForIsoDate(harness.app, {}, '2026-08-25'),
+    null,
+    'a non-empty canonical file without current cached metadata must wait',
+  );
+
+  file.stat = { ctime: 1, mtime: 1, size: 0 };
+  assert.equal(
+    identity.findCanonicalDailyNoteForIsoDate(harness.app, {}, '2026-08-25'),
+    file,
+    'a zero-byte canonical file cannot conceal non-Daily frontmatter',
+  );
+  assert.deepEqual(harness.renames, []);
+});
+
+test('unrelated malformed notes settle observational identity while reconciliation stays fail-closed', async () => {
+  const dailyPath = 'Inbox/Daily/2026-08-25.md';
+  const malformedPath = '_archive/TPS Linter Unsafe YAML QA.md';
+  const harness = createHarness(
+    [
+      { path: dailyPath, content: '' },
+      { path: malformedPath, frontmatter: { kind: 'project' }, content: '---\nkind: project\n' },
+    ],
+    { folder: 'Inbox/Daily', format: 'YYYY-MM-DD' },
+  );
+  const dailyFile = harness.files.get(dailyPath);
+  const malformedFile = harness.files.get(malformedPath);
+  identity.markDailyNoteCandidatePathDirty(harness.app, malformedFile);
+
+  assert.equal(await identity.refreshPendingDailyNoteCandidatePaths(harness.app, {}), false);
+  assert.equal(
+    identity.hasPendingDailyNoteCandidatePathRefresh(harness.app),
+    false,
+    'stable malformed bytes must not masquerade as indexing work forever',
+  );
+  assert.equal(
+    identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'),
+    dailyFile,
+    'an unrelated malformed source must not hide an existing canonical Daily Note',
+  );
+  assert.deepEqual(
+    await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'),
+    { status: 'blocked', file: null, reason: 'dirty-source-unresolved' },
+    'mutation reconciliation must remain fail-closed while malformed identity evidence exists',
+  );
+
+  harness.contents.set(malformedPath, '---\nkind: project\n---\nRepaired');
+  identity.markDailyNoteCandidatePathDirty(harness.app, malformedFile);
+  assert.equal(await identity.refreshPendingDailyNoteCandidatePaths(harness.app, {}), true);
+  assert.deepEqual(
+    await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'),
+    { status: 'found', file: dailyFile },
+  );
+});
+
+test('background metadata floods share one worker and replay bounded progress through zero dirty', async () => {
+  const entries = Array.from({ length: 48 }, (_, index) => ({
+    path: `Inbox/Startup ${String(index).padStart(2, '0')}.md`,
+    content: `Startup ${index}`,
+  }));
+  let activeReads = 0;
+  let maxConcurrentReads = 0;
+  let firstReadReleased = false;
+  let signalFirstReadStarted;
+  let releaseFirstRead;
+  const firstReadStarted = new Promise((resolve) => { signalFirstReadStarted = resolve; });
+  const firstReadGate = new Promise((resolve) => { releaseFirstRead = resolve; });
+  const harness = createHarness(entries, {
+    async onRead() {
+      activeReads += 1;
+      maxConcurrentReads = Math.max(maxConcurrentReads, activeReads);
+      try {
+        if (!firstReadReleased) {
+          firstReadReleased = true;
+          signalFirstReadStarted();
+          await firstReadGate;
+        }
+      } finally {
+        activeReads -= 1;
+      }
+    },
+  });
+  const files = Array.from(harness.files.values());
+  for (const file of files.slice(0, -1)) {
+    identity.markDailyNoteCandidatePathDirty(harness.app, file);
+  }
+
+  const originalNow = Date.now;
+  let fakeNow = 0;
+  Date.now = () => {
+    fakeNow += 1_500;
+    return fakeNow;
+  };
+  try {
+    const owner = identity.refreshPendingDailyNoteCandidatePaths(harness.app, {});
+    const joined = Array.from({ length: 2_048 }, () =>
+      identity.refreshPendingDailyNoteCandidatePaths(harness.app, {}));
+    assert.ok(joined.every((promise) => promise === owner), 'every overlapping callback must join one promise');
+
+    await firstReadStarted;
+    identity.markDailyNoteCandidatePathDirty(harness.app, files.at(-1));
+    const trailing = identity.refreshPendingDailyNoteCandidatePaths(harness.app, {});
+    assert.equal(trailing, owner, 'a generation arriving mid-pass must request replay on the same owner');
+    releaseFirstRead();
+
+    const results = await Promise.all([owner, ...joined, trailing]);
+    assert.ok(results.every(Boolean));
+    assert.equal(identity.hasPendingDailyNoteCandidatePathRefresh(harness.app), false);
+    assert.equal(maxConcurrentReads, 1, 'background refreshes must never reread the vault concurrently');
+    assert.equal(
+      harness.vaultReadCount,
+      files.length,
+      'bounded passes must continue making progress without rereading drained generations',
+    );
+    const afterSettlement = identity.refreshPendingDailyNoteCandidatePaths(harness.app, {});
+    assert.notEqual(
+      afterSettlement,
+      owner,
+      'ownership must clear before settlement so a later callback cannot join a completed worker',
+    );
+    assert.equal(await afterSettlement, true);
+  } finally {
+    releaseFirstRead?.();
+    Date.now = originalNow;
+  }
+});
+
 test('async reconciliation waits for unresolved metadata before proving absence', async () => {
   const harness = createHarness([
     {
@@ -764,12 +951,15 @@ test('Daily Note classification consumers use the hardened shared path', () => {
   const noteOperationSource = readFileSync(new URL('../src/services/note-operation-service.ts', import.meta.url), 'utf8');
   const dailyNoteScheduleSource = readFileSync(new URL('../src/utils/daily-note-task-schedule.ts', import.meta.url), 'utf8');
   const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  const findForIsoDateSource = apiSource.match(/findForIsoDate:[\s\S]*?dateForFile:/u)?.[0] || '';
 
   assert.match(apiSource, /dailyNotes:\s*\{[\s\S]{0,120}version:\s*4/u);
-  assert.match(apiSource, /findForIsoDate:[\s\S]{0,180}normalizeDailyNoteIsoDate\(isoDate\)[\s\S]{0,180}findExistingDailyNoteForIsoDate/u);
+  assert.match(findForIsoDateSource, /findCanonicalDailyNoteForIsoDate/u);
+  assert.match(findForIsoDateSource, /if \(canonical\) return canonical/u);
+  assert.match(findForIsoDateSource, /dailyNoteIdentityReady\(\)/u);
+  assert.match(findForIsoDateSource, /findExistingDailyNoteForIsoDate/u);
   assert.match(apiSource, /dateForFile:\s*\(file: Pick<TFile, 'path' \| 'basename'>\) =>[\s\S]{0,160}normalizeDailyNoteIsoDate\(parseDailyNoteFileDate/u);
   assert.match(apiSource, /pathForIsoDate:[\s\S]{0,180}normalizeDailyNoteIsoDate\(isoDate\)/u);
-  assert.match(apiSource, /dailyNoteIdentityReady\(\)[\s\S]{0,180}return null/u);
   assert.match(apiSource, /refreshDailyNoteConfiguration\(\)[\s\S]{0,180}getDailyNotePathForIsoDate/u);
   assert.match(apiSource, /ensureForIsoDate: async[\s\S]{0,900}expectedPath[\s\S]{0,900}whenDailyNoteConfigurationReady\(\)/u);
   assert.match(apiSource, /ensure:expected-path-mismatch[\s\S]{0,500}noteOperationService\.ensureDailyNote/u);

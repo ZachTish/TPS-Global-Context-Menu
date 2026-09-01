@@ -83,7 +83,7 @@ async function loadFileNamingService() {
     stdin: {
       contents: [
         "export * from './src/services/file-naming-service.ts';",
-        "export { findExistingDailyNoteForIsoDate, parseDailyNoteFileDate } from './src/utils/daily-note-task-schedule.ts';",
+        "export { findExistingDailyNoteForIsoDate, getDailyNotePathForIsoDate, parseDailyNoteFileDate } from './src/utils/daily-note-task-schedule.ts';",
       ].join('\n'),
       resolveDir: fileURLToPath(new URL('..', import.meta.url)),
       sourcefile: 'file-naming-test-entry.ts',
@@ -836,7 +836,7 @@ test('Daily Note move classification awaits persisted settings and honors Period
     },
   };
   try {
-    const { FileNamingService } = await loadFileNamingService();
+    const { FileNamingService, getDailyNotePathForIsoDate } = await loadFileNamingService();
     const createPlugin = ({ persisted, periodic, core = null, beforePersistedRead }) => ({
       settings: { dailyNoteDateFormat: '' },
       app: {
@@ -941,6 +941,34 @@ test('Daily Note move classification awaits persisted settings and honors Period
       source: 'core',
     }, 'a later intentional blank Core template must not revive the startup snapshot');
 
+    const templateLessStartupCore = { folder: '', format: 'YYYY-MM-DD', template: '' };
+    const templateLessStartupService = new FileNamingService(createPlugin({
+      persisted: { folder: 'Inbox/Daily', format: 'YYYY-MM-DD' },
+      periodic: null,
+      core: templateLessStartupCore,
+    }));
+    await templateLessStartupService.whenDailyNoteConfigurationReady();
+    assert.deepEqual(templateLessStartupService.getDailyNoteConfigurationSnapshot(), {
+      folder: 'Inbox/Daily',
+      format: 'YYYY-MM-DD',
+      template: '',
+      source: 'persisted-recovery',
+    });
+    assert.equal(
+      getDailyNotePathForIsoDate(templateLessStartupService.plugin.app, templateLessStartupService.plugin.settings, '2026-08-25'),
+      'Inbox/Daily/2026-08-25.md',
+      'template-less startup recovery must publish the persisted canonical path instead of Core\'s temporary root path',
+    );
+    assert.equal(await templateLessStartupService.isDailyNoteFile(testFile('Inbox/Daily/2026-08-25.md')), true);
+    assert.equal(await templateLessStartupService.isDailyNoteFile(testFile('2026-08-25.md')), false);
+    templateLessStartupCore.folder = 'Inbox/Daily';
+    assert.deepEqual(templateLessStartupService.getDailyNoteConfigurationSnapshot(), {
+      folder: 'Inbox/Daily',
+      format: 'YYYY-MM-DD',
+      template: '',
+      source: 'core',
+    });
+
     let releasePersistedRead;
     const persistedReadGate = new Promise((resolve) => { releasePersistedRead = resolve; });
     const racingCore = { folder: '', format: '', template: '' };
@@ -985,6 +1013,7 @@ test('metadata refresh blocks only sync identity reads while the ready configura
     const metadataEvents = new Map();
     const registered = [];
     let apiReadyNotifications = 0;
+    let markdownMetadataReady = false;
     let overlapReadScenario = null;
     let overlapReadCount = 0;
     let olderReadStarted;
@@ -1002,6 +1031,21 @@ test('metadata refresh blocks only sync identity reads while the ready configura
       path: 'Journal/2026-08-25.md',
       basename: '2026-08-25',
       extension: 'md',
+      stat: { size: 96 },
+    };
+    const emptyMarkdownFile = {
+      __isTestTFile: true,
+      path: 'Journal/2026-08-26.md',
+      basename: '2026-08-26',
+      extension: 'md',
+      stat: { size: 0 },
+    };
+    const malformedMarkdownFile = {
+      __isTestTFile: true,
+      path: '_archive/TPS Linter Unsafe YAML QA.md',
+      basename: 'TPS Linter Unsafe YAML QA',
+      extension: 'md',
+      stat: { size: 24 },
     };
     const attachmentFile = {
       __isTestTFile: true,
@@ -1029,9 +1073,15 @@ test('metadata refresh blocks only sync identity reads while the ready configura
         vault: {
           configDir: '.obsidian',
           getFiles: () => [],
-          getMarkdownFiles: () => [markdownFile],
-          getAbstractFileByPath: (path) => path === markdownFile.path ? markdownFile : null,
+          getMarkdownFiles: () => [markdownFile, emptyMarkdownFile, malformedMarkdownFile],
+          getAbstractFileByPath: (path) => {
+            if (path === markdownFile.path) return markdownFile;
+            if (path === emptyMarkdownFile.path) return emptyMarkdownFile;
+            if (path === malformedMarkdownFile.path) return malformedMarkdownFile;
+            return null;
+          },
           async read(file) {
+            if (file === malformedMarkdownFile) return '---\nkind: project\n';
             assert.equal(file, markdownFile);
             if (overlapReadScenario) {
               overlapReadCount += 1;
@@ -1041,8 +1091,6 @@ test('metadata refresh blocks only sync identity reads while the ready configura
                 if (overlapReadScenario === 'older-fails-last') {
                   throw new Error('older background read failed after the newer refresh');
                 }
-              } else if (overlapReadScenario === 'newer-fails-first') {
-                throw new Error('newer background read failed before the older refresh');
               }
             }
             return '---\nkind: dailynote\nscheduled: 2026-08-25 00:00:00\n---\nLive Daily Note';
@@ -1055,8 +1103,12 @@ test('metadata refresh blocks only sync identity reads while the ready configura
           },
         },
         metadataCache: {
-          initialized: true,
-          getFileCache: () => ({ frontmatter: { kind: 'project' } }),
+          initialized: false,
+          getFileCache: (file) => {
+            if (file === emptyMarkdownFile) return null;
+            if (file === malformedMarkdownFile) return { frontmatter: { kind: 'project' } };
+            return markdownMetadataReady ? { frontmatter: { kind: 'project' } } : null;
+          },
           on(event, callback) {
             const ref = { event, callback };
             metadataEvents.set(event, ref);
@@ -1067,6 +1119,43 @@ test('metadata refresh blocks only sync identity reads while the ready configura
     };
     const service = new FileNamingService(plugin);
     await service.whenDailyNoteConfigurationReady();
+    assert.equal(service.isDailyNoteMetadataCacheReady(), false);
+    assert.equal(
+      service.isDailyNoteMetadataCacheReady(),
+      false,
+      'repeated consumer reads during cold indexing must remain blocked',
+    );
+    assert.equal(apiReadyNotifications, 0);
+    plugin.app.metadataCache.initialized = true;
+    await metadataEvents.get('resolve').callback(markdownFile);
+    assert.equal(
+      apiReadyNotifications,
+      0,
+      'one resolved file must not announce identity while another metadata lookup is still incomplete',
+    );
+    assert.equal(service.isDailyNoteMetadataCacheReady(), false);
+    vaultEvents.get('modify').callback(malformedMarkdownFile);
+    await metadataEvents.get('resolved').callback();
+    assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+    assert.equal(
+      apiReadyNotifications,
+      1,
+      'the all-files resolved event must reannounce the API despite empty cacheless and unrelated malformed notes',
+    );
+    assert.equal(
+      findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, '2026-08-26'),
+      emptyMarkdownFile,
+      'a zero-byte canonical Daily Note must remain discoverable without CachedMetadata',
+    );
+    markdownMetadataReady = true;
+    await metadataEvents.get('resolved').callback();
+    assert.equal(
+      apiReadyNotifications,
+      1,
+      'resolved must not reannounce again without another consumer-observed blocked state',
+    );
+
+    apiReadyNotifications = 0;
     assert.equal(service.isDailyNoteMetadataCacheReady(), true);
     assert.equal(service.getDailyNoteConfigurationSnapshot()?.folder, 'Journal');
 
@@ -1113,38 +1202,62 @@ test('metadata refresh blocks only sync identity reads while the ready configura
     const olderRefresh = metadataEvents.get('changed').callback(markdownFile);
     await olderReadStarted;
     const newerRefresh = metadataEvents.get('changed').callback(markdownFile);
-    await newerRefresh;
+    assert.equal(
+      overlapReadCount,
+      1,
+      'overlapping metadata callbacks must join the active background reader',
+    );
+    releaseOlderRead();
+    await Promise.all([olderRefresh, newerRefresh]);
     assert.equal(service.isDailyNoteMetadataCacheReady(), true);
-    assert.equal(apiReadyNotifications, 2, 'the newer successful owner must publish readiness once');
-    releaseOlderRead();
-    await olderRefresh;
     assert.equal(
-      service.isDailyNoteMetadataCacheReady(),
-      true,
-      'an older failed callback must not re-block identity after the newer owner drained dirty state',
+      overlapReadCount,
+      2,
+      'a trailing callback must replay the failed pass on the same serialized worker',
     );
-    assert.equal(apiReadyNotifications, 2, 'the superseded callback must not publish duplicate readiness');
+    assert.equal(apiReadyNotifications, 2, 'the serialized recovery must publish readiness exactly once');
 
-    configureOverlapRead('newer-fails-first');
+    configureOverlapRead('duplicate-joins');
     vaultEvents.get('modify').callback(markdownFile);
-    const olderSuccess = metadataEvents.get('changed').callback(markdownFile);
+    const refreshOwner = metadataEvents.get('changed').callback(markdownFile);
     await olderReadStarted;
-    const newerFailure = metadataEvents.get('changed').callback(markdownFile);
-    await newerFailure;
-    assert.equal(service.isDailyNoteMetadataCacheReady(), false);
-    assert.equal(apiReadyNotifications, 2);
+    const duplicateRefresh = metadataEvents.get('changed').callback(markdownFile);
     releaseOlderRead();
-    await olderSuccess;
+    await Promise.all([refreshOwner, duplicateRefresh]);
     assert.equal(
       service.isDailyNoteMetadataCacheReady(),
       true,
-      'an older successful drain must recover identity after the newer callback failed first',
+      'a duplicate callback must share the successful owner without leaving readiness blocked',
     );
-    assert.equal(apiReadyNotifications, 3, 'the recovered generation must publish readiness exactly once');
+    assert.equal(overlapReadCount, 1, 'a duplicate callback with no newer dirty generation must not reread bytes');
+    assert.equal(apiReadyNotifications, 3, 'the shared successful generation must publish readiness exactly once');
     assert.ok(registered.length >= 8, 'all vault/metadata listeners must be lifecycle-owned');
 
+    markdownMetadataReady = false;
+    const hotReloadedService = new FileNamingService(plugin);
+    await hotReloadedService.whenDailyNoteConfigurationReady();
+    assert.equal(
+      hotReloadedService.isDailyNoteMetadataCacheReady(),
+      true,
+      'a hot reload after MetadataCache initialization must not wait for an already-fired resolved event',
+    );
+    plugin.app.metadataCache.initialized = false;
+    assert.equal(hotReloadedService.isDailyNoteMetadataCacheReady(), false);
+    plugin.app.metadataCache.initialized = true;
+    assert.equal(
+      hotReloadedService.isDailyNoteMetadataCacheReady(),
+      false,
+      'a new metadata generation must clear the hot-reload readiness snapshot until it settles',
+    );
+    await metadataEvents.get('resolved').callback();
+    assert.equal(hotReloadedService.isDailyNoteMetadataCacheReady(), true);
+
     const apiSource = readFileSync(new URL('../src/plugin-api.ts', import.meta.url), 'utf8');
-    assert.match(apiSource, /findForIsoDate:[\s\S]{0,180}dailyNoteIdentityReady\(\)/u);
+    const findForIsoDateSource = apiSource.match(/findForIsoDate:[\s\S]*?dateForFile:/u)?.[0] || '';
+    assert.match(findForIsoDateSource, /findCanonicalDailyNoteForIsoDate/u);
+    assert.match(findForIsoDateSource, /if \(canonical\) return canonical/u);
+    assert.match(findForIsoDateSource, /dailyNoteIdentityReady\(\)/u);
+    assert.match(findForIsoDateSource, /findExistingDailyNoteForIsoDate/u);
     assert.match(apiSource, /dateForFile:[\s\S]{0,180}dailyNoteIdentityReady\(\)/u);
     assert.match(apiSource, /getTaskSchedulePolicy:[\s\S]{0,220}dailyNoteIdentityReady\(\)/u);
     assert.match(apiSource, /pathForIsoDate:[\s\S]{0,160}refreshDailyNoteConfiguration\(\)/u);
