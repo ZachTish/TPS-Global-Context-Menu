@@ -829,6 +829,14 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         version: plugin.templateIdentityService.version,
         getMode: () => plugin.templateIdentityService.getMode(),
         matches: (file: TFile) => plugin.templateIdentityService.matches(file),
+        canAutomaticallyMutate: (file: TFile) =>
+            plugin.templateIdentityService.canAutomaticallyMutate(file),
+        canAutomaticallyMutateSource: (source: string) =>
+            plugin.templateIdentityService.canAutomaticallyMutateSource(source),
+        canAutomaticallyMutateFrontmatter: (frontmatter: unknown) =>
+            plugin.templateIdentityService.canAutomaticallyMutateFrontmatter(frontmatter),
+        prepareInstanceSource: (source: string) =>
+            plugin.templateIdentityService.prepareInstanceSource(source),
         list: () => plugin.templateIdentityService.list(),
     };
 

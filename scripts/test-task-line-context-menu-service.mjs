@@ -1653,7 +1653,7 @@ test('daily note creation reconciles strict legacy paths before creating duplica
   assert.match(dailyNoteScheduleSource, /export function getDailyNoteScheduledValueForIsoDate/);
   assert.match(noteOperationSource, /reconcileExistingDailyNoteForIsoDate\([\s\S]{0,180}this\.app,[\s\S]{0,180}this\.plugin\.settings,[\s\S]{0,180}isoDate/);
   assert.match(noteOperationSource, /resolution\.status === 'blocked'[\s\S]{0,220}return null/);
-  assert.match(noteOperationSource, /if \(createdByThisCall\) \{[\s\S]{0,600}normalizeCreatedDailyNote\(/);
+  assert.match(noteOperationSource, /if \(createdByThisCall\) \{[\s\S]{0,900}normalizeCreatedDailyNote\(/);
   assert.match(noteOperationSource, /existingDailyNote instanceof TFile[\s\S]{0,180}settleExistingDailyNoteIfPending/);
   assert.match(noteOperationSource, /getDailyNoteScheduledValueForIsoDate\(isoDate\)/);
   assert.match(dailyNavSource, /noteOperationService\.ensureDailyNote\(`\$\{isoDate\} 00:00:00`\)/);

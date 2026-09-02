@@ -4,6 +4,10 @@ import { reconcileTaskStatusLine } from '../utils/task-status-checkbox-reconcile
 import { getLinkedSubitemCompleteMarkers } from '../utils/linked-subitem-mapping';
 import type { LinkedSubitemCheckboxMapping } from '../types';
 import { scanMarkdownDocumentLines } from '../utils/markdown-document-lines';
+import {
+  canAutomaticallyMutateTemplateFile,
+  canAutomaticallyMutateTemplateSource,
+} from '../utils/template-protection';
 
 const RECONCILE_DELAY_MS = 1200;
 const EDITOR_QUIET_FALLBACK_MS = 1600;
@@ -60,6 +64,7 @@ export class TaskStatusCheckboxReconcileService extends Component {
   async reconcileFileNow(file: TFile): Promise<number> {
     if (!this.isMarkdownFile(file)) return 0;
     if (this.filesBeingProcessed.has(file.path)) return 0;
+    if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) return 0;
 
     const statusKey = this.getStatusKey();
     const mappings = this.plugin.settings.linkedSubitemCheckboxMappings || [];
@@ -72,6 +77,7 @@ export class TaskStatusCheckboxReconcileService extends Component {
     this.filesBeingProcessed.add(file.path);
     try {
       await this.plugin.app.vault.process(file, (data) => {
+        if (!canAutomaticallyMutateTemplateSource(data, this.plugin.settings)) return data;
         const newline = data.includes('\r\n') ? '\r\n' : data.includes('\r') ? '\r' : '\n';
         const endsWithNewline = /(?:\r\n|\n|\r)$/u.test(data);
         const documentLines = scanMarkdownDocumentLines(data);

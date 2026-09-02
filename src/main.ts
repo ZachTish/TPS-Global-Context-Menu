@@ -2111,8 +2111,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.nativeRecordStorageAliases = nativeRecordStorageConfiguration.readAliases;
     this.settings.templateIdentificationMode = loaded?.templateIdentificationMode === 'tag'
       || loaded?.templateIdentificationMode === 'property'
+      || loaded?.templateIdentificationMode === 'templater-folder'
       ? loaded.templateIdentificationMode
-      : 'templater-folder';
+      : DEFAULT_SETTINGS.templateIdentificationMode;
     this.settings.templateIdentificationTag = String(
       loaded?.templateIdentificationTag ?? DEFAULT_SETTINGS.templateIdentificationTag,
     ).trim().replace(/^#+/, '');

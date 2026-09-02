@@ -21,6 +21,7 @@ import {
 import { parseStringListInput } from '../utils/list-utils';
 import { joinContent, splitContent } from '../utils/task-block-move';
 import { parseTaskLine, readInlineFieldValue } from '../utils/task-line-metadata';
+import { canAutomaticallyMutateTemplateSource } from '../utils/template-protection';
 
 export const TPS_NATIVE_RECORD_SCHEMA_VERSION = 1;
 export const DEFAULT_NATIVE_RECORD_ROOT = '_records';
@@ -2831,6 +2832,7 @@ export class NativeRecordService {
 
     const originalPath = file.path;
     const originalContent = await this.plugin.app.vault.cachedRead(file);
+    if (!canAutomaticallyMutateTemplateSource(originalContent, this.plugin.settings)) return;
     const original = parseNativeRecordDocument(originalContent);
     if (!original || original.body.trim().length > 0) return;
     if (this.hasNativeIdentityMarker(original.frontmatter)) return;
@@ -2852,6 +2854,7 @@ export class NativeRecordService {
     await this.withInternalIdentityWrite([originalPath, canonicalPath], async () => {
       await this.plugin.app.vault.process(file, (content) => {
         if (content !== originalContent) return content;
+        if (!canAutomaticallyMutateTemplateSource(content, this.plugin.settings)) return content;
         const parsed = parseNativeRecordDocument(content);
         if (!parsed || parsed.body.trim().length > 0) return content;
         if (this.hasNativeIdentityMarker(parsed.frontmatter)) return content;

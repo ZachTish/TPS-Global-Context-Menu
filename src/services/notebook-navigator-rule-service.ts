@@ -2,6 +2,10 @@ import { TFile, normalizePath, setIcon } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import * as logger from '../logger';
 import { deleteValueCaseInsensitive, findKeyCaseInsensitive, setValueCaseInsensitive } from '../core';
+import {
+  canAutomaticallyMutateTemplateFile,
+  canAutomaticallyMutateTemplateFrontmatter,
+} from '../utils/template-protection';
 import { RuleEngine } from './notebook-navigator-rule-engine';
 
 type ApplyOptions = {
@@ -271,6 +275,11 @@ export class NotebookNavigatorRuleService {
     if (!this.isReady()) return false;
     if (this.requiresControllerAutomation(options.reason) && !this.plugin.canRunBackgroundAutomation()) return false;
     if (this.shouldIgnore(file, options)) return false;
+    const isAutomaticMutation = this.isAutomaticMutationReason(options.reason);
+    if (
+      isAutomaticMutation
+      && !(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))
+    ) return false;
 
     const settings = this.getSettings();
     const ruleEngine = this.getRuleEngine();
@@ -286,6 +295,10 @@ export class NotebookNavigatorRuleService {
     const started = performance.now();
     const body = await this.readBody(file);
     const changed = await this.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(file, ownedKeys, (frontmatter) => {
+      if (
+        isAutomaticMutation
+        && !canAutomaticallyMutateTemplateFrontmatter(frontmatter, this.plugin.settings)
+      ) return;
       const context = this.buildRuleContext(file, frontmatter, body);
       // A record remains a record while the global architecture setting is temporarily
       // switched to Legacy. Semantic tag and title repair must respect the document
@@ -770,6 +783,15 @@ export class NotebookNavigatorRuleService {
 
   private isAutomaticReason(reason: string | undefined): boolean {
     return reason === 'file-open' || reason === 'metadata-change' || !reason;
+  }
+
+  private isAutomaticMutationReason(reason: string | undefined): boolean {
+    return this.isAutomaticReason(reason)
+      || reason === 'create'
+      || reason === 'rename'
+      || reason === 'gcm-startup-auto'
+      || reason === 'gcm-created-daily-note'
+      || reason === 'gcm-subitem-create';
   }
 
   private requiresControllerAutomation(reason: string | undefined): boolean {

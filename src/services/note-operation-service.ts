@@ -6,6 +6,11 @@ import { getDailyNoteScheduledValueForIsoDate, getIsoDateFromScheduledValue, has
 import type { CustomProperty } from "../types";
 import { propertyUsesEntityOptions } from "../utils/property-option-source";
 import { applyCoreDailyNoteTemplateVariables, ensureDailyNoteTitleFallback } from "../utils/daily-note-creation";
+import {
+    canAutomaticallyMutateTemplateFile,
+    inspectTemplateProtectionSource,
+    stripTemplateProtectionTagFromSource,
+} from "../utils/template-protection";
 import { isFilePropertiesCompanionRecord } from "./file-properties-service";
 
 type HeaderTarget = {
@@ -77,6 +82,7 @@ export class NoteOperationService {
     public async populateDailyNoteWithScheduledItems(dailyNote: TFile): Promise<void> {
         await this.plugin.fileNamingService.whenDailyNoteConfigurationReady();
         if (!this.plugin.fileNamingService.getDailyNoteConfigurationSnapshot()) return;
+        if (!(await canAutomaticallyMutateTemplateFile(this.app.vault, dailyNote, this.plugin.settings))) return;
         const dailyNoteDateStr = parseDailyNoteFileDate(this.app, this.plugin.settings, dailyNote);
         if (!dailyNoteDateStr) return;
 
@@ -115,6 +121,7 @@ export class NoteOperationService {
         let modified = false;
 
         for (const childFile of scheduledFiles) {
+            if (!(await canAutomaticallyMutateTemplateFile(this.app.vault, dailyNote, this.plugin.settings))) return;
             const result = await this.plugin.subitemRelationshipSyncService.insertBodyLinkForChildWorkflow(
                 dailyNote,
                 childFile,
@@ -1044,6 +1051,7 @@ export class NoteOperationService {
         } else {
             content = `---\ntitle: ${JSON.stringify(titleValue)}\ntags: [dailynote]\n---\n\n${content}`;
         }
+        content = stripTemplateProtectionTagFromSource(content, this.plugin.settings);
 
         // Template/folder work above can yield long enough for Sync or another
         // plugin to create a legacy Daily Note. Reconcile once more at the
@@ -1145,6 +1153,11 @@ export class NoteOperationService {
                 return null;
             }
 
+            if (!(await this.stripTemplateMarkerFromInstantiatedDailyNote(created))) {
+                await this.markIncompleteOwnedDailyNote(created);
+                return null;
+            }
+
             await this.normalizeCreatedDailyNote(
                 created,
                 titleValue,
@@ -1192,6 +1205,30 @@ export class NoteOperationService {
         });
 
         return created;
+    }
+
+    private async stripTemplateMarkerFromInstantiatedDailyNote(file: TFile): Promise<boolean> {
+        const vault = this.app.vault as typeof this.app.vault & {
+            process?: (target: TFile, processor: (source: string) => string) => Promise<unknown>;
+        };
+        if (typeof vault.process !== 'function') return false;
+        let safe = false;
+        try {
+            await vault.process(file, (source) => {
+                const inspection = inspectTemplateProtectionSource(source, this.plugin.settings);
+                safe = inspection !== 'unsafe';
+                return safe
+                    ? stripTemplateProtectionTagFromSource(source, this.plugin.settings)
+                    : source;
+            });
+            return safe;
+        } catch (error) {
+            logger.warn('Failed stripping the template marker from a created Daily Note', {
+                file: file.path,
+                error,
+            });
+            return false;
+        }
     }
 
     private async settleConfirmedDailyNoteCollision(
@@ -1899,6 +1936,21 @@ export class NoteOperationService {
                 }
 
                 try {
+                    // The scheduled/startup sweep is background automation. Read
+                    // the live bytes immediately before the rename so a template
+                    // marker added after candidate collection still protects the
+                    // source. An explicitly invoked manual sweep keeps its prior
+                    // user-directed semantics.
+                    if (
+                        reason !== "manual"
+                        && !(await canAutomaticallyMutateTemplateFile(
+                            this.app.vault,
+                            liveFile,
+                            this.plugin.settings,
+                        ))
+                    ) {
+                        continue;
+                    }
                     const targetPath = this.getUniqueArchiveTargetPath(liveFile, targetArchiveFolder);
                     await this.app.fileManager.renameFile(liveFile, targetPath);
                     archived += 1;

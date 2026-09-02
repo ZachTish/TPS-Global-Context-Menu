@@ -13,6 +13,10 @@ import {
     refreshPendingDailyNoteCandidatePaths,
     registerDailyNoteConfigurationOverride,
 } from '../utils/daily-note-task-schedule';
+import {
+    canAutomaticallyMutateTemplateFile,
+    canAutomaticallyMutateTemplateFrontmatter,
+} from '../utils/template-protection';
 
 export type DailyNoteConfigurationSnapshot = {
     folder: string;
@@ -486,6 +490,7 @@ export class FileNamingService {
         if (!(await this.isDailyNoteFile(file))) return false;
         const expectedDate = this.parseDailyNoteBasenameToIso(file.basename);
         if (!expectedDate) return false;
+        if (!(await this.canAutomaticallyMutateTemplateSource(file))) return false;
         const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
         if (this.isProcessRunFrontmatter(frontmatter)) return false;
         const expectedScheduled = `${expectedDate} 00:00:00`;
@@ -494,6 +499,7 @@ export class FileNamingService {
         let changed = false;
         await this.plugin.bulkEditService.runSerializedFrontmatterWrite(file, async () => {
             await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
+                if (!this.canAutomaticallyMutateTemplateFrontmatter(frontmatter)) return;
                 const currentRaw = String(frontmatter.scheduled ?? '').trim();
                 const currentIso = this.parseScheduledToIso(currentRaw);
                 if (currentIso === expectedDate && currentRaw === expectedScheduled) return;
@@ -620,6 +626,7 @@ export class FileNamingService {
         if (!this.shouldProcess(file, options)) return;
         const liveFile = this.getLiveFile(file);
         if (!liveFile || !this.shouldProcess(liveFile, options)) return;
+        if (!(await this.canAutomaticallyMutateTemplateSource(liveFile))) return;
         const lockKey = liveFile.path;
         const skipFrontmatterWrites = this.shouldSkipAutoFrontmatterWrite(liveFile);
 
@@ -701,6 +708,7 @@ export class FileNamingService {
         if (!(file instanceof TFile) || file.extension !== 'md') return;
         const liveFile = this.getLiveFile(file);
         if (!liveFile || liveFile.extension !== 'md') return;
+        if (!(await this.canAutomaticallyMutateTemplateSource(liveFile))) return;
         if (!options.force && this.hasRecentTimestampWrite(liveFile.path)) return;
         if (this.shouldSkipAutoFrontmatterWrite(liveFile)) return;
         if (!(await this.plugin.bulkEditService.canMutateFrontmatterSafely(liveFile))) {
@@ -754,6 +762,7 @@ export class FileNamingService {
                     liveFile,
                     [createdKey, modifiedKey],
                     (frontmatter) => {
+                        if (!this.canAutomaticallyMutateTemplateFrontmatter(frontmatter)) return;
                         if (this.plugin.nativeRecordService?.hasRecordIdentityEvidenceInFrontmatter(frontmatter)) return;
                         this.setFrontmatterValueCaseInsensitive(frontmatter, createdKey, createdValue);
                         this.setFrontmatterValueCaseInsensitive(frontmatter, modifiedKey, modifiedValue);
@@ -823,6 +832,10 @@ export class FileNamingService {
             logger.debug(`[FILE-DRAG] No live file found`);
             return;
         }
+        if (!(await this.canAutomaticallyMutateTemplateSource(liveFile))) {
+            logger.debug(`[FILE-DRAG] Template source protection active, skipping`);
+            return;
+        }
         if (this.shouldSkipAutoFrontmatterWrite(liveFile)) {
             logger.debug(`[FILE-DRAG] Skipping frontmatter write`);
             return;
@@ -858,6 +871,7 @@ export class FileNamingService {
             logger.debug(`[FILE-DRAG] Writing folderPath to frontmatter: ${currentFolder}`);
             await this.plugin.bulkEditService.runSerializedFrontmatterWrite(liveFile, async () => {
                 await this.plugin.frontmatterMutationService.process(liveFile, (frontmatter) => {
+                    if (!this.canAutomaticallyMutateTemplateFrontmatter(frontmatter)) return;
                     frontmatter.folderPath = currentFolder;
                     for (const key of Object.keys(frontmatter)) {
                         const normalized = String(key || '').trim().toLowerCase();
@@ -1051,8 +1065,10 @@ export class FileNamingService {
                 await this.plugin.bulkEditService.runSerializedFrontmatterWrite(targetFile, async () => {
                     const currentFile = this.getLiveFile(targetFile);
                     if (!currentFile) return;
+                    if (!(await this.canAutomaticallyMutateTemplateSource(currentFile))) return;
                     if (await this.hasWorkflowOwnedFilenameEvidence(currentFile)) return;
                     changed = await this.plugin.frontmatterMutationService.process(currentFile, (frontmatter) => {
+                        if (!this.canAutomaticallyMutateTemplateFrontmatter(frontmatter)) return;
                         const existingTitleKeys = Object.keys(frontmatter).filter(
                             (key) => key.trim().toLowerCase() === 'title',
                         );
@@ -1173,6 +1189,7 @@ export class FileNamingService {
             if (await this.hasWorkflowOwnedFilenameEvidence(currentFile)) return;
             const finalFile = this.getLiveFile(currentFile);
             if (!finalFile) return;
+            if (!(await this.canAutomaticallyMutateTemplateSource(finalFile))) return;
             const previousBasename = finalFile.basename;
             const previousPath = finalFile.path;
             await this.plugin.app.fileManager.renameFile(finalFile, expectedPath);
@@ -1206,6 +1223,11 @@ export class FileNamingService {
         // Native-record filenames are owned by their creating workflow (or by
         // the user). Keep generic note auto-naming out of that contract.
         if (this.plugin.nativeRecordService?.isRecordFile(file)) return false;
+
+        // Metadata cache is only a fast rejection. Every automatic mutation
+        // path also rechecks current bytes at its write/rename boundary.
+        const cachedFrontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
+        if (!this.canAutomaticallyMutateTemplateFrontmatter(cachedFrontmatter || {})) return false;
 
         // Grace period for newly created files to allow other plugins (TPS-Controller, Templater) to finish initialization
         const age = Date.now() - file.stat.ctime;
@@ -1265,6 +1287,14 @@ export class FileNamingService {
 
     private shouldSkipAutoFrontmatterWrite(file: TFile): boolean {
         return this.plugin.shouldIgnoreAutoFrontmatterWrite(file);
+    }
+
+    private canAutomaticallyMutateTemplateFrontmatter(frontmatter: unknown): boolean {
+        return canAutomaticallyMutateTemplateFrontmatter(frontmatter, this.plugin.settings);
+    }
+
+    private async canAutomaticallyMutateTemplateSource(file: TFile): Promise<boolean> {
+        return canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings);
     }
 
     private hasRecentFolderPathWrite(path: string, value: string): boolean {

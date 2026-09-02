@@ -55,6 +55,18 @@ async function loadRegisterEvents() {
                   export class MarkdownView {}
                   export class WorkspaceLeaf {}
                   export const Platform = { isMobile: false };
+                  export function normalizePath(value) {
+                    return String(value ?? '')
+                      .replace(/\\\\/g, '/')
+                      .replace(/\\/{2,}/g, '/')
+                      .replace(/^\\.\\//, '');
+                  }
+                  export function moment(value) {
+                    return {
+                      isValid() { return false; },
+                      format() { return String(value ?? ''); },
+                    };
+                  }
                   export function debounce(callback, wait, immediate) {
                     let timer = null;
                     return function (...args) {

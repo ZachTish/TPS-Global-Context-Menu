@@ -253,6 +253,7 @@ function createChildWorkflowLinkHarness(SubitemRelationshipSyncService, TFile, o
     settings: {
       linkedSubitemCheckboxMappings: options.mappings ?? standardMappings(),
       linkedSubitemDefaultOpenState: options.defaultOpenState ?? '[ ]',
+      templateIdentificationTag: 'template',
     },
     sharedServices: {
       status: {
@@ -285,6 +286,7 @@ function createChildWorkflowLinkHarness(SubitemRelationshipSyncService, TFile, o
     options.beforeMutation?.({
       plugin,
       setChildFrontmatter: (next) => { childFrontmatter = next; },
+      setParentContent: (next) => { parentContent = String(next); },
     });
     const lines = parentContent.split('\n');
     const changed = await mutator(lines, parentContent);
@@ -452,6 +454,33 @@ test('child workflow body links abort without a write when mapping authority cha
   assert.equal(result.blockedReason, 'workflow-changed');
   assert.equal(harness.getParentContent(), '');
   assert.deepEqual(harness.counts, { mutations: 1, writes: 0 });
+});
+
+test('derived body links recheck live template protection at the body mutation boundary', async () => {
+  const { SubitemRelationshipSyncService, TFile } = await servicesPromise;
+
+  for (const currentParentSource of [
+    '---\ntags: [template]\n---\n',
+    '---\ntags: [template\n',
+  ]) {
+    const harness = createChildWorkflowLinkHarness(SubitemRelationshipSyncService, TFile, {
+      frontmatter: { status: 'todo' },
+      parentContent: '',
+      beforeMutation: ({ setParentContent }) => {
+        setParentContent(currentParentSource);
+      },
+    });
+
+    const result = await harness.service.insertBodyLinkForChildWorkflow(
+      harness.parentFile,
+      harness.childFile,
+    );
+
+    assert.equal(result.changed, false);
+    assert.equal(result.blockedReason, null);
+    assert.equal(harness.getParentContent(), currentParentSource);
+    assert.deepEqual(harness.counts, { mutations: 1, writes: 0 });
+  }
 });
 
 test('configured-open statusless links reject a fallback row with an authoritative done status', async () => {

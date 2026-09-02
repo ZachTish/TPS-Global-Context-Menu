@@ -1314,6 +1314,55 @@ test('canonical GCM creation inserts the template once and preserves its readabl
   assert.equal(harness.stats.nativeProcessFrontMatterCalls, 0, 'daily-note normalization must stay on the owned mutation service');
 });
 
+test('canonical Daily Note instances never inherit the configured template tag', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      const slash = path.lastIndexOf('/');
+      this.parent = { path: slash >= 0 ? path.slice(0, slash) : '/' };
+    }
+  }
+  const templateContent = [
+    '---',
+    'title: "{{date:dddd}} planning"',
+    'tags: [before, template, template/example, after]',
+    'kind: dailynote',
+    'scheduled: "{{date}} 00:00:00"',
+    '---',
+    '',
+    '#template remains body content',
+    '',
+    '<% daily-body %>',
+    '',
+  ].join('\n');
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templateContent,
+    templaterAutoTrigger: true,
+    templaterTransform(content) {
+      return content
+        .replace('tags: [before, template/example, after]', 'tags: [before, template, template/example, after]')
+        .replace('<% daily-body %>', 'Templater body');
+    },
+  });
+  harness.plugin.settings.templateIdentificationTag = 'template';
+  const service = new NoteOperationService(harness.plugin);
+
+  const created = await service.ensureDailyNote('2026-07-28 00:00:00');
+  assert.ok(created);
+  assert.equal(harness.files.get('Templates/Daily.md'), templateContent, 'the template source remains byte-identical');
+  const output = harness.files.get(created.path);
+  assert.doesNotMatch(output, /(?:^|[\[,\s])template(?:[\],\s]|$)/imu, 'the exact marker is stripped again after Templater');
+  assert.match(output, /before/u);
+  assert.match(output, /template\/example/u);
+  assert.match(output, /after/u);
+  assert.match(output, /#template remains body content/u);
+  assert.match(output, /Templater body/u);
+});
+
 test('canonical GCM creation fails closed when legacy Daily Note identity is ambiguous', async () => {
   installDailyNoteMoment();
   const { NoteOperationService } = await loadNoteOperationService();
@@ -3122,6 +3171,19 @@ test('generic title synchronization checks workflow ownership only at a real mut
     await service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
     assert.equal(renamed, 1, 'ordinary notes retain title-derived renaming');
     assert.equal(file.path, 'Inbox/Ordinary new name.md');
+
+    refreshFileIdentity('Inbox/Blueprint old name.md');
+    source = '---\ntitle: Blueprint new name\ntags: [template]\nkind: note\n---\n';
+    cachedFrontmatter = { title: 'Blueprint new name', kind: 'note' };
+    await service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
+    assert.equal(renamed, 1, 'current source bytes protect a template even when metadata cache is stale');
+    assert.equal(file.path, 'Inbox/Blueprint old name.md');
+
+    const templateTitleMutations = titleMutations;
+    source = '---\ntitle: Stale title\ntags: [template]\nkind: note\n---\n';
+    cachedFrontmatter = { title: 'Stale title', kind: 'note' };
+    await service.syncTitleFromFilename(file, { force: true, bypassCreationGrace: true });
+    assert.equal(titleMutations, templateTitleMutations, 'filename-derived title repair also protects template sources');
   } finally {
     globalThis.window = priorWindow;
   }

@@ -43,6 +43,11 @@ async function importCleanupHarness() {
       classifyDeletedMarkdownLink,
       createDeletedMarkdownLinkContext,
     } from './src/utils/deleted-link-cleanup.ts';
+    import {
+      canAutomaticallyMutateTemplateFile,
+      canAutomaticallyMutateTemplateFrontmatter,
+      canAutomaticallyMutateTemplateSource,
+    } from './src/utils/template-protection.ts';
 
     export class TFile {
       constructor(path) {
@@ -131,6 +136,7 @@ function createFixture(TFile, definitions, options = {}) {
         },
         process: async (file, mutator) => {
           processedBodyPaths.push(file.path);
+          options.beforeBodyProcess?.(file, bodies, logicalFrontmatter);
           const current = bodies.get(file.path) ?? "";
           const next = await mutator(current);
           bodies.set(file.path, next);
@@ -155,6 +161,7 @@ function createFixture(TFile, definitions, options = {}) {
     },
     frontmatterMutationService: {
       process: async (file, mutator) => {
+        options.beforeFrontmatterProcess?.(file, bodies, logicalFrontmatter);
         const current = logicalFrontmatter.get(file.path) ?? {};
         const before = JSON.stringify(current);
         await mutator(current);
@@ -227,7 +234,8 @@ test("GCM deletion cleanup is serialized, logical-target aware, and atomically r
   assert.match(runSource, /getLogicalFrontmatter\(file\)/u);
   assert.match(runSource, /frontmatterMutationService\.process\(file,/u);
   assert.match(runSource, /const values = Array\.isArray\(raw\) \? raw : \(raw != null \? \[raw\] : \[\]\)/u);
-  assert.match(runSource, /if \(file\.extension\?\.toLowerCase\(\) !== 'md'\)/u);
+  assert.match(runSource, /const isMarkdown = file\.extension\?\.toLowerCase\(\) === 'md'/u);
+  assert.match(runSource, /if \(!isMarkdown\)/u);
   assert.doesNotMatch(runSource, /getMarkdownFiles\(\)/u);
   assert.match(runSource, /classifyDeletedMarkdownLink\(linkValue, sourcePath, matchContext\)/);
   assert.match(runSource, /if \(preflight\.length !== lines\.length\) \{[\s\S]*?vault\.process\(file, \(current\) =>/);
@@ -301,7 +309,11 @@ test("deleting a PDF parent unlinks Markdown and PDF children while preserving o
     childOf: ["[[Assets/Keep.pdf]]"],
   });
   assert.equal(fixture.bodies.get("Notes/Markdown Child.md"), "- [ ] [[Assets/Keep.pdf]]");
-  assert.deepEqual(fixture.readPaths, ["Notes/Markdown Child.md"]);
+  assert.deepEqual(
+    fixture.readPaths,
+    ["Notes/Markdown Child.md", "Notes/Markdown Child.md"],
+    "Markdown cleanup reads current bytes once for template protection and once for body preflight",
+  );
   assert.deepEqual(fixture.processedBodyPaths, ["Notes/Markdown Child.md"]);
   assert.equal(fixture.readPaths.includes("Documents/PDF Child.pdf"), false);
   assert.equal(fixture.mutatedPaths.some((path) => path.startsWith("_assets/TPS File Properties/")), false);
@@ -331,4 +343,86 @@ test("cleanup preserves an explicit suffix link that resolves to a different liv
   assert.deepEqual(service.notifiedPaths, []);
   assert.equal(result.touchedFiles, 0);
   assert.equal(result.removedReferences, 0);
+});
+
+test("automatic deleted-link cleanup leaves tagged template notes byte-identical", async () => {
+  const { DeletedLinkCleanupHarness, TFile } = await importCleanupHarness();
+  const protectedSource = [
+    "---",
+    "tags: [template, keep]",
+    "childOf: '[[Parents/Deleted]]'",
+    "---",
+    "- [ ] [[Parents/Deleted]]",
+  ].join("\n");
+  const fixture = createFixture(TFile, [
+    {
+      path: "Templates/Protected.md",
+      frontmatter: { tags: ["template", "keep"], childOf: ["[[Parents/Deleted]]"] },
+      body: protectedSource,
+    },
+    {
+      path: "Notes/Ordinary.md",
+      frontmatter: { childOf: ["[[Parents/Deleted]]"] },
+      body: "- [ ] [[Parents/Deleted]]",
+    },
+  ]);
+  const service = new DeletedLinkCleanupHarness(fixture.plugin);
+
+  const result = await service.cleanupLinksForDeletedFile("Parents/Deleted.md");
+
+  assert.deepEqual(fixture.logicalFrontmatter.get("Templates/Protected.md"), {
+    tags: ["template", "keep"],
+    childOf: ["[[Parents/Deleted]]"],
+  });
+  assert.equal(fixture.bodies.get("Templates/Protected.md"), protectedSource);
+  assert.equal(fixture.mutatedPaths.includes("Templates/Protected.md"), false);
+  assert.equal(fixture.processedBodyPaths.includes("Templates/Protected.md"), false);
+  assert.deepEqual(fixture.logicalFrontmatter.get("Notes/Ordinary.md"), {});
+  assert.equal(fixture.bodies.get("Notes/Ordinary.md"), "");
+  assert.equal(result.touchedFiles, 1);
+});
+
+test("deleted-link cleanup rechecks template protection at frontmatter and body mutation boundaries", async () => {
+  const { DeletedLinkCleanupHarness, TFile } = await importCleanupHarness();
+  const frontmatterRace = createFixture(TFile, [{
+    path: "Notes/Frontmatter race.md",
+    frontmatter: { childOf: ["[[Parents/Deleted]]"] },
+    body: "---\ntags: [keep]\nchildOf: '[[Parents/Deleted]]'\n---\n",
+  }], {
+    beforeFrontmatterProcess(file, bodies, logicalFrontmatter) {
+      bodies.set(file.path, bodies.get(file.path).replace("tags: [keep]", "tags: [template, keep]"));
+      logicalFrontmatter.set(file.path, {
+        tags: ["template", "keep"],
+        childOf: ["[[Parents/Deleted]]"],
+      });
+    },
+  });
+  const frontmatterService = new DeletedLinkCleanupHarness(frontmatterRace.plugin);
+
+  await frontmatterService.cleanupLinksForDeletedFile("Parents/Deleted.md");
+
+  assert.deepEqual(frontmatterRace.logicalFrontmatter.get("Notes/Frontmatter race.md"), {
+    tags: ["template", "keep"],
+    childOf: ["[[Parents/Deleted]]"],
+  });
+  assert.equal(frontmatterRace.mutatedPaths.length, 0);
+
+  const initialBody = "---\ntags: [keep]\n---\n- [ ] [[Parents/Deleted]]";
+  const protectedBody = "---\ntags: [template, keep]\n---\n- [ ] [[Parents/Deleted]]";
+  const bodyRace = createFixture(TFile, [{
+    path: "Notes/Body race.md",
+    frontmatter: { tags: ["keep"] },
+    body: initialBody,
+  }], {
+    beforeBodyProcess(file, bodies) {
+      bodies.set(file.path, protectedBody);
+    },
+  });
+  const bodyService = new DeletedLinkCleanupHarness(bodyRace.plugin);
+
+  await bodyService.cleanupLinksForDeletedFile("Parents/Deleted.md");
+
+  assert.equal(bodyRace.bodies.get("Notes/Body race.md"), protectedBody);
+  assert.deepEqual(bodyRace.processedBodyPaths, ["Notes/Body race.md"]);
+  assert.deepEqual(bodyService.notifiedPaths, []);
 });

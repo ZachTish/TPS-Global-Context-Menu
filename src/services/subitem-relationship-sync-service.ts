@@ -11,6 +11,7 @@ import {
   resolveLinkedSubitemSemanticCheckboxPlanForStatus,
   type LinkedSubitemSemanticCheckboxPlan,
 } from '../utils/linked-subitem-mapping';
+import { canAutomaticallyMutateTemplateSource } from '../utils/template-protection';
 import * as logger from '../logger';
 
 export type ChildWorkflowCheckboxResolution = {
@@ -339,6 +340,17 @@ export class SubitemRelationshipSyncService {
 
     let guardBlocked: 'ignored' | 'workflow-changed' | null = null;
     const changed = await this.mutateMarkdownBody(parentFile, async (lines, raw) => {
+      // The open editor is authoritative at the body mutation boundary. A Daily
+      // Note can gain template protection after its caller's earlier vault
+      // preflight, so reclassify these exact bytes and fail closed on protected
+      // or ambiguous frontmatter before inserting any derived body link.
+      if (!canAutomaticallyMutateTemplateSource(raw, this.plugin.settings)) {
+        logger.flow('SubitemRelationship', 'body-link:template-protected', {
+          parentPath: parentFile.path,
+          childPath: childFile.path,
+        });
+        return false;
+      }
       if (isIgnored()) {
         guardBlocked = 'ignored';
         return false;

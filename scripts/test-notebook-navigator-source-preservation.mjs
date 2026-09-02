@@ -342,6 +342,62 @@ test('native architecture retains blank-title cleanup and hide-tag automation fo
   assert.match(output, /^producerTimestamp: 2026-08-25T18:12:13\.456Z\r$/mu);
 });
 
+test('automatic Notebook Navigator semantic writes preserve tagged template sources while explicit apply remains available', async () => {
+  const source = [
+    '---\n',
+    'title: Tagged Template\n',
+    'tags:\n',
+    '  - keep\n',
+    '  - template\n',
+    '---\n',
+  ].join('');
+  const fixture = makeFixture(source);
+  Object.assign(fixture.file, {
+    path: 'Templates/Tagged Template.md',
+    name: 'Tagged Template.md',
+    basename: 'Tagged Template',
+  });
+  fixture.plugin.settings.templateIdentificationTag = 'template';
+  fixture.plugin.settings.notebookNavigatorRules.hideRules = [{
+    id: 'hide-tagged-template',
+    name: 'Hide tagged template',
+    enabled: true,
+    tagName: 'hidden',
+    mode: 'add',
+    match: 'all',
+    conditions: [{ source: 'tag', field: '', operator: 'contains', value: 'keep' }],
+  }];
+
+  let mutationCalls = 0;
+  const writer = fixture.plugin.frontmatterMutationService.processOwnedKeysPreservingSource
+    .bind(fixture.plugin.frontmatterMutationService);
+  fixture.plugin.frontmatterMutationService.processOwnedKeysPreservingSource = async (...args) => {
+    mutationCalls += 1;
+    return writer(...args);
+  };
+
+  const automaticChanged = await new NotebookNavigatorRuleService(fixture.plugin).applyRulesToFile(fixture.file, {
+    reason: 'create',
+    force: true,
+    bypassCreationGrace: true,
+  });
+
+  assert.equal(automaticChanged, false);
+  assert.equal(mutationCalls, 0, 'automatic protection rejects the source before entering the writer');
+  assert.equal(fixture.getContent(), source);
+
+  const explicitChanged = await new NotebookNavigatorRuleService(fixture.plugin).applyRulesToFile(fixture.file, {
+    reason: 'gcm-manual-active',
+    force: true,
+    bypassCreationGrace: true,
+  });
+
+  assert.equal(explicitChanged, true, 'an explicit user apply is not blocked');
+  assert.equal(mutationCalls, 1);
+  assert.match(fixture.getContent(), /^  - template$/mu);
+  assert.match(fixture.getContent(), /^  - hidden$/mu);
+});
+
 test('native architecture protects proven native-record title and tags from Notebook Navigator automation', async () => {
   const source = [
     '\uFEFF---\r\n',

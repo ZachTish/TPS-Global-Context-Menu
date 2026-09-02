@@ -179,6 +179,8 @@ test('task reconciliation is registered and keeps completedDate independent of s
   assert.match(serviceSource, /data\.includes\('\\r'\) \? '\\r' : '\\n'/);
   assert.match(serviceSource, /getCompleteMarkers\(mappings\)/);
   assert.match(serviceSource, /syncStatusToCheckbox: this\.isStatusSyncEnabled\(\)/);
+  assert.match(serviceSource, /canAutomaticallyMutateTemplateFile\(this\.plugin\.app\.vault, file, this\.plugin\.settings\)/);
+  assert.match(serviceSource, /canAutomaticallyMutateTemplateSource\(data, this\.plugin\.settings\)/);
   assert.doesNotMatch(serviceSource, /scheduleFile[\s\S]{0,180}if \(!this\.isStatusSyncEnabled\(\)\) return/);
   assert.match(mainSource, /new TaskStatusCheckboxReconcileService\(this\)/);
   assert.match(mainSource, /this\.addChild\(this\.taskStatusCheckboxReconcileService\)/);

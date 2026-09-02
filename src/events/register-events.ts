@@ -13,6 +13,11 @@ import {
     wasChecklistCompletionPromptRecentlyHandled,
 } from '../handlers/checklist-handler';
 import { getViewMode, isStrictSourceMode } from '../services/leaf-resolver';
+import {
+    canAutomaticallyMutateTemplateFile,
+    canAutomaticallyMutateTemplateFrontmatter,
+} from '../utils/template-protection';
+import { DailyNoteTemplateInstanceCleanupService } from '../services/daily-note-template-instance-cleanup-service';
 
 /**
  * Registers all workspace and vault event listeners on the given plugin instance.
@@ -29,6 +34,8 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     const lastKnownStatusByPath = new Map<string, string>();
     const checklistCompletionGuardTimers = new Map<string, number>();
     const checklistCompletionGuard = new ChecklistHandler(plugin.app);
+    const dailyNoteTemplateInstanceCleanup = new DailyNoteTemplateInstanceCleanupService(plugin);
+    plugin.register(() => dailyNoteTemplateInstanceCleanup.dispose());
 
     const readConfiguredStatus = (frontmatter: Record<string, any> | null | undefined): string => {
         if (!frontmatter || typeof frontmatter !== 'object') return '';
@@ -45,9 +52,11 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     };
 
     const writeConfiguredStatus = async (file: TFile, status: string): Promise<void> => {
+        if (!(await canAutomaticallyMutateTemplateFile(plugin.app.vault, file, plugin.settings))) return;
         markChecklistCompletionPromptHandled(file);
         const statusKey = plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status';
         await plugin.frontmatterMutationService.process(file, (frontmatter) => {
+            if (!canAutomaticallyMutateTemplateFrontmatter(frontmatter, plugin.settings)) return;
             const actualKey = Object.keys(frontmatter).find((key) => key.toLowerCase() === String(statusKey).toLowerCase()) || statusKey;
             const completedDateKey = Object.keys(frontmatter).find((key) => key.toLowerCase() === 'completeddate');
             if (status) {
@@ -78,6 +87,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             checklistCompletionGuardTimers.delete(file.path);
             const liveFile = plugin.app.vault.getFileByPath(file.path);
             if (!(liveFile instanceof TFile)) return;
+            if (!(await canAutomaticallyMutateTemplateFile(plugin.app.vault, liveFile, plugin.settings))) return;
             const liveStatus = readConfiguredStatus(plugin.app.metadataCache.getFileCache(liveFile)?.frontmatter as Record<string, any> | undefined);
             if (!isChecklistCompletionStatus(liveStatus)) return;
             const incompleteItems = await checklistCompletionGuard.scanChecklistItems(liveFile);
@@ -461,12 +471,14 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     const reconcileCompletedDate = async (file: TFile, doneStatuses: Set<string>): Promise<boolean> => {
         if (!plugin.canRunBackgroundAutomation()) return false;
         if (!file || file.extension !== 'md') return false;
+        if (!(await canAutomaticallyMutateTemplateFile(plugin.app.vault, file, plugin.settings))) return false;
 
         const cache = plugin.app.metadataCache.getFileCache(file);
         const fm = (cache?.frontmatter || {}) as Record<string, any>;
         if (!getCompletedDateSyncAction(fm, doneStatuses)) return false;
 
         return await plugin.frontmatterMutationService.process(file, (frontmatter) => {
+            if (!canAutomaticallyMutateTemplateFrontmatter(frontmatter, plugin.settings)) return;
             const action = getCompletedDateSyncAction(frontmatter, doneStatuses);
             if (action === 'set') {
                 setCompletedDateValue(frontmatter, getCompletedDateValue(frontmatter) || undefined);
@@ -734,6 +746,42 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
         window.setTimeout(callback, 1200);
     };
 
+    const scheduleCreatedFileAutomation = (file: TFile): void => {
+        if (!plugin.canRunBackgroundAutomation()) return;
+        plugin.notebookNavigatorRuleService.scheduleApply(file, {
+            reason: 'create',
+            force: true,
+        });
+        window.setTimeout(() => {
+            if (!plugin.canRunBackgroundAutomation()) return;
+            const liveFile = plugin.app.vault.getFileByPath(file.path);
+            if (!(liveFile instanceof TFile) || liveFile !== file) return;
+            void plugin.notebookNavigatorRuleService.applyRulesToFile(liveFile, {
+                reason: 'create',
+                force: true,
+                bypassCreationGrace: true,
+            });
+        }, 3800);
+        if (file.extension !== 'md') return;
+        window.setTimeout(() => {
+            if (!plugin.canRunBackgroundAutomation()) return;
+            const liveFile = plugin.app.vault.getFileByPath(file.path);
+            if (!(liveFile instanceof TFile) || liveFile !== file) return;
+            if (plugin.settings.autoSyncTitleFromFilename) {
+                void plugin.fileNamingService.syncTitleFromFilename(liveFile, {
+                    force: true,
+                    onlyIfMissing: true,
+                    onlyIfHasFrontmatter: true,
+                    bypassCreationGrace: true,
+                });
+            }
+            void plugin.fileNamingService.syncFileTimestamps(liveFile, {
+                reason: 'create',
+                force: true,
+            });
+        }, 1500);
+    };
+
     plugin.registerEvent(
         plugin.app.vault.on('create', (file) => {
             if (file instanceof TFile && plugin.filePropertiesService?.isCompanionFile(file)) return;
@@ -745,39 +793,24 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                     });
                 });
             }
-            if (file instanceof TFile && plugin.canRunBackgroundAutomation()) {
-                plugin.notebookNavigatorRuleService.scheduleApply(file, {
-                    reason: 'create',
-                    force: true,
-                });
-                window.setTimeout(() => {
-                    if (!plugin.canRunBackgroundAutomation()) return;
-                    const liveFile = plugin.app.vault.getFileByPath(file.path);
-                    if (!(liveFile instanceof TFile)) return;
-                    void plugin.notebookNavigatorRuleService.applyRulesToFile(liveFile, {
-                        reason: 'create',
-                        force: true,
-                        bypassCreationGrace: true,
-                    });
-                }, 3800);
+            if (!(file instanceof TFile)) return;
+            if (file.extension !== 'md') {
+                scheduleCreatedFileAutomation(file);
+                return;
             }
-            if (file instanceof TFile && file.extension === 'md') {
-                setTimeout(() => {
-                    if (!plugin.canRunBackgroundAutomation()) return;
-                    if (plugin.settings.autoSyncTitleFromFilename) {
-                        plugin.fileNamingService.syncTitleFromFilename(file, {
-                            force: true,
-                            onlyIfMissing: true,
-                            onlyIfHasFrontmatter: true,
-                            bypassCreationGrace: true,
-                        });
-                    }
-                    void plugin.fileNamingService.syncFileTimestamps(file, {
-                        reason: 'create',
-                        force: true,
-                    });
-                }, 1500);
-            }
+            // Gate the ordinary post-create writers behind the one safe
+            // template-instance exception. A configured Daily Note may be
+            // created empty and filled by Core/Periodic Notes or Templater a
+            // moment later; running automatic writers first would race those
+            // bytes or leave the inherited protection marker in place forever.
+            dailyNoteTemplateInstanceCleanup.schedule(file, (result) => {
+                const liveFile = result.file;
+                if (!(liveFile instanceof TFile)) return;
+                if (result.status === 'stripped') {
+                    plugin.eventService.emitFilesUpdated([liveFile.path]);
+                }
+                scheduleCreatedFileAutomation(liveFile);
+            });
         }),
     );
 

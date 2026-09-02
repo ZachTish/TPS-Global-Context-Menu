@@ -2316,12 +2316,12 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
       new Setting(diagnostics)
         .setName('Identify TPS templates by')
-        .setDesc('Controls template discovery in TPS pickers. Exact template paths remain valid. The folder option follows Templater; tag and property modes work in a folderless vault.')
+        .setDesc('Controls template discovery in TPS pickers. The template tag also protects source notes from automatic TPS rewrites; instantiated notes do not keep it. Exact template paths remain valid.')
         .addDropdown((dropdown) => dropdown
           .addOption('templater-folder', 'Templater folder')
-          .addOption('tag', 'Tag')
+          .addOption('tag', 'Tag (recommended)')
           .addOption('property', 'Property key and value')
-          .setValue(this.plugin.settings.templateIdentificationMode || 'templater-folder')
+          .setValue(this.plugin.settings.templateIdentificationMode || 'tag')
           .onChange(async (value) => {
             this.plugin.settings.templateIdentificationMode = value === 'tag' || value === 'property'
               ? value
@@ -2332,9 +2332,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
       new Setting(diagnostics)
         .setName('Template tag')
-        .setDesc('Used when template identity is Tag. Enter the tag without #. This remains editable in every mode.')
+        .setDesc('Exact top-level tag used for template discovery and automatic-write protection. Enter it without #. This remains editable in every mode.')
         .addText((text) => text
-          .setPlaceholder('tps-template')
+          .setPlaceholder('template')
           .setValue(this.plugin.settings.templateIdentificationTag || '')
           .onChange(async (value) => {
             this.plugin.settings.templateIdentificationTag = value.trim().replace(/^#+/, '');

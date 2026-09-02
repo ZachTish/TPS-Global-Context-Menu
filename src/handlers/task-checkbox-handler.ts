@@ -34,6 +34,10 @@ import {
     type DirectTaskHistoryLocation,
     type DirectTaskHistoryLogContext,
 } from '../utils/direct-task-history';
+import {
+    canAutomaticallyMutateTemplateFile,
+    canAutomaticallyMutateTemplateFrontmatter,
+} from '../utils/template-protection';
 
 type TaskCheckboxContext = {
     file: TFile;
@@ -653,6 +657,7 @@ export class TaskCheckboxHandler {
 
     private async updateChecklistPropertyForFile(file: TFile, filePath = file.path): Promise<void> {
         if (this.plugin.filePropertiesService?.isCompanionFile(file)) return;
+        if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) return;
         const propKey = this.plugin.settings.checklistCompletionPropertyKey?.trim();
         if (!propKey) return;
 
@@ -676,6 +681,7 @@ export class TaskCheckboxHandler {
         try {
             await this.plugin.bulkEditService.runSerializedFrontmatterWrite(file, async () => {
                 await this.plugin.frontmatterMutationService.process(file, (fm) => {
+                    if (!canAutomaticallyMutateTemplateFrontmatter(fm, this.plugin.settings)) return;
                     fm[propKey] = hasOpenChecklistItem;
                 });
             });

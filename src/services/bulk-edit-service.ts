@@ -28,6 +28,14 @@ import { ParentLinkHandler } from '../handlers/parent-link-handler';
 import { buildParentFrontmatterLinkValue, buildParentLinkValue, linkValueMatchesFile, extractLinkTarget, resolveLinkValueToFile } from '../handlers/parent-link-format';
 import { reconcileExistingDailyNoteForIsoDate } from '../utils/daily-note-task-schedule';
 import {
+    canAutomaticallyMutateTemplateFile,
+    canAutomaticallyMutateTemplateFrontmatter,
+    canAutomaticallyMutateTemplateSource,
+    inspectTemplateProtectionSource,
+    removeTemplateProtectionTagFromFrontmatter,
+    stripTemplateProtectionTagFromSource,
+} from '../utils/template-protection';
+import {
     classifyDeletedMarkdownLink,
     createDeletedMarkdownLinkContext,
 } from '../utils/deleted-link-cleanup';
@@ -220,21 +228,45 @@ export class BulkEditService {
             .replace(/\{\{title\}\}/g, title);
     }
 
-    private async buildDailyNoteContent(date: Date, path: string): Promise<string> {
+    private async buildDailyNoteContent(date: Date, path: string): Promise<string | null> {
         const { template } = await this.getDailyNoteSettings();
         const title = path.split("/").pop()?.replace(/\.md$/i, "") || window.moment(date).format("YYYY-MM-DD");
         const templateFile = template ? this.resolveDailyNoteTemplateFile(template) : null;
         if (templateFile instanceof TFile) {
             try {
-                return this.applyDailyNoteTemplateVariables(await this.plugin.app.vault.read(templateFile), date, title);
+                const templateSource = this.sanitizeRecurrenceInstanceSource(
+                    await this.plugin.app.vault.read(templateFile),
+                    templateFile,
+                    'daily-note recurrence template',
+                );
+                if (templateSource === null) return null;
+                const content = this.applyDailyNoteTemplateVariables(
+                    templateSource,
+                    date,
+                    title,
+                );
+                return this.sanitizeRecurrenceInstanceSource(
+                    content,
+                    templateFile,
+                    'daily-note recurrence template',
+                );
             } catch (error) {
                 logger.warn("[TPS GCM] Failed reading Daily Notes template for recurrence:", error);
+                return null;
             }
+        }
+        if (template) {
+            logger.warn('[TPS GCM] Configured Daily Notes template is unavailable for recurrence:', template);
+            return null;
         }
         return `---\ntitle: ${title}\nscheduled: ${window.moment(date).format("YYYY-MM-DD")} 00:00:00\n---\n`;
     }
 
     private async createNextDailyNoteRecurrenceInstance(file: TFile, frontmatter: any, nextDate: Date, recurrenceRule: string): Promise<boolean> {
+        if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) {
+            logger.warn('[TPS GCM] Skipping automatic Daily Note recurrence for a protected or unsafe source:', file.path);
+            return false;
+        }
         const newFilePath = await this.getDailyNotePath(nextDate);
         const newFileName = newFilePath.split("/").pop() || newFilePath;
         const newScheduled = window.moment(nextDate).format("YYYY-MM-DD 00:00:00");
@@ -255,7 +287,20 @@ export class BulkEditService {
             ? existingResolution.file
             : null;
         if (this.hasGeneratedRecurrence(frontmatter, newScheduled) && existingDailyNote instanceof TFile) {
-            return true;
+            return await this.isVerifiedRecurrenceInstance(existingDailyNote, 'existing daily-note recurrence');
+        }
+
+        // Resolve, transform, and sanitize the configured Daily Notes template
+        // before acquiring durable generation state when a note still needs to be
+        // created. An unsafe/unreadable template therefore creates neither a note
+        // nor an in-flight recurrence record.
+        const content = existingDailyNote instanceof TFile
+            ? null
+            : await this.buildDailyNoteContent(nextDate, newFilePath);
+        if (!(existingDailyNote instanceof TFile) && content === null) return false;
+        if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) {
+            logger.warn('[TPS GCM] Daily Note recurrence source became protected before generation:', file.path);
+            return false;
         }
         const chainId = "daily-notes";
         const recurrenceOpKey = this.buildRecurrenceOpKey(chainId, newScheduled);
@@ -263,12 +308,15 @@ export class BulkEditService {
         const opStatus = await this.beginRecurrenceOp(recurrenceOpKey, newFilePath);
         if (opStatus !== "acquired") {
             if (await this.plugin.app.vault.adapter.exists(newFilePath)) {
+                if (!(await this.isVerifiedRecurrenceInstancePath(newFilePath, 'existing daily-note recurrence'))) {
+                    return false;
+                }
                 await this.completeRecurrenceOp(recurrenceOpKey, newFilePath);
                 await this.markRecurrenceGenerated(file, newScheduled);
                 return true;
             }
             logger.log("[TPS GCM] Daily-note recurrence operation already in flight for", newFilePath, "- status:", opStatus);
-            return true;
+            return false;
         }
 
         try {
@@ -289,6 +337,10 @@ export class BulkEditService {
                 ? beforeCreateResolution.file
                 : null;
             if (existingBeforeCreate instanceof TFile) {
+                if (!(await this.isVerifiedRecurrenceInstance(existingBeforeCreate, 'existing daily-note recurrence'))) {
+                    await this.failRecurrenceOp(recurrenceOpKey);
+                    return false;
+                }
                 await this.completeRecurrenceOp(recurrenceOpKey, newFilePath);
                 await this.markRecurrenceGenerated(file, newScheduled);
                 new Notice(`Next daily note already exists: ${existingBeforeCreate.basename}.md`);
@@ -300,11 +352,18 @@ export class BulkEditService {
                 await this.plugin.app.vault.createFolder(folder);
             }
 
-            const content = await this.buildDailyNoteContent(nextDate, newFilePath);
+            if (content === null) {
+                await this.failRecurrenceOp(recurrenceOpKey);
+                return false;
+            }
             const newFile = await this.plugin.app.vault.create(newFilePath, content);
-            if (!(newFile instanceof TFile)) return false;
+            if (!(newFile instanceof TFile)) {
+                await this.failRecurrenceOp(recurrenceOpKey);
+                return false;
+            }
 
             await this.plugin.frontmatterMutationService.process(newFile, (fm) => {
+                removeTemplateProtectionTagFromFrontmatter(fm, this.plugin.settings);
                 this.setFrontmatterValueCaseInsensitive(fm, "scheduled", newScheduled);
                 this.setFrontmatterValueCaseInsensitive(fm, "recurrenceRule", recurrenceRule);
                 this.deleteFrontmatterValueCaseInsensitive(fm, "recurrence");
@@ -318,6 +377,11 @@ export class BulkEditService {
                     }
                 }
             });
+
+            if (!(await this.isVerifiedRecurrenceInstance(newFile, 'daily-note recurrence creation'))) {
+                await this.failRecurrenceOp(recurrenceOpKey);
+                return false;
+            }
 
             await this.completeRecurrenceOp(recurrenceOpKey, newFilePath);
             await this.markRecurrenceGenerated(file, newScheduled);
@@ -341,12 +405,73 @@ export class BulkEditService {
     }
 
     private async markRecurrenceGenerated(file: TFile, scheduledValue: string): Promise<void> {
+        if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) return;
         if (!(await this.canMutateFrontmatterSafely(file))) return;
         await this.runSerializedFrontmatterWrite(file, async () => {
             await this.plugin.frontmatterMutationService.process(file, (fm) => {
+                if (!canAutomaticallyMutateTemplateFrontmatter(fm, this.plugin.settings)) return;
                 this.setFrontmatterValueCaseInsensitive(fm, this.recurrenceLastGeneratedKey, scheduledValue);
             });
         });
+    }
+
+    private sanitizeRecurrenceInstanceSource(source: string, file: TFile, context: string): string | null {
+        const sourceState = inspectTemplateProtectionSource(source, this.plugin.settings);
+        if (sourceState === 'unsafe') {
+            logger.warn(`[TPS GCM] Skipping ${context}: source template protection could not be verified`, {
+                file: file.path,
+            });
+            return null;
+        }
+
+        const instanceSource = stripTemplateProtectionTagFromSource(source, this.plugin.settings);
+        if (inspectTemplateProtectionSource(instanceSource, this.plugin.settings) !== 'unprotected') {
+            logger.warn(`[TPS GCM] Skipping ${context}: source template marker could not be removed safely`, {
+                file: file.path,
+            });
+            return null;
+        }
+        return instanceSource;
+    }
+
+    private async readRecurrenceInstanceSource(file: TFile, context: string): Promise<string | null> {
+        try {
+            return this.sanitizeRecurrenceInstanceSource(
+                await this.plugin.app.vault.read(file),
+                file,
+                context,
+            );
+        } catch (error) {
+            logger.warn(`[TPS GCM] Skipping ${context}: source could not be read`, {
+                file: file.path,
+                error,
+            });
+            return null;
+        }
+    }
+
+    private async isVerifiedRecurrenceInstance(file: TFile, context: string): Promise<boolean> {
+        try {
+            const source = await this.plugin.app.vault.read(file);
+            const verified = inspectTemplateProtectionSource(source, this.plugin.settings) === 'unprotected';
+            if (!verified) {
+                logger.warn(`[TPS GCM] ${context} did not produce a safely untagged recurrence instance`, {
+                    file: file.path,
+                });
+            }
+            return verified;
+        } catch (error) {
+            logger.warn(`[TPS GCM] Could not verify ${context} output`, {
+                file: file.path,
+                error,
+            });
+            return false;
+        }
+    }
+
+    private async isVerifiedRecurrenceInstancePath(path: string, context: string): Promise<boolean> {
+        const file = this.plugin.app.vault.getAbstractFileByPath(normalizePath(path));
+        return file instanceof TFile && await this.isVerifiedRecurrenceInstance(file, context);
     }
 
     private async loadRecurrenceOpState(): Promise<void> {
@@ -1833,12 +1958,17 @@ export class BulkEditService {
             return false;
         }
 
-        const content = await this.plugin.app.vault.read(templateFile);
+        const content = await this.readRecurrenceInstanceSource(
+            templateFile,
+            'recurrence-template bootstrap',
+        );
+        if (content === null) return false;
         const created = await this.plugin.app.vault.create(newFilePath, content);
         if (!(created instanceof TFile)) return false;
 
         const scheduled = window.moment(firstOccurrence).format('YYYY-MM-DD HH:mm:ss');
         await this.plugin.frontmatterMutationService.process(created, (fmw) => {
+            removeTemplateProtectionTagFromFrontmatter(fmw, this.plugin.settings);
             this.setFrontmatterValueCaseInsensitive(fmw, 'scheduled', scheduled);
             this.setFrontmatterValueCaseInsensitive(
                 fmw,
@@ -1849,6 +1979,10 @@ export class BulkEditService {
             this.deleteFrontmatterValueCaseInsensitive(fmw, 'completedDate');
             this.deleteWorkflowStatusValue(fmw);
         });
+
+        if (!(await this.isVerifiedRecurrenceInstance(created, 'recurrence-template bootstrap'))) {
+            return false;
+        }
 
         logger.log(`[TPS GCM] Bootstrapped recurring series from template ${templateFile.path} -> ${created.path}`);
         return true;
@@ -1881,6 +2015,10 @@ export class BulkEditService {
 
     async createNextRecurrenceInstance(file: TFile, frontmatter: any, carryStatus?: string | null): Promise<boolean> {
         if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
+        if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) {
+            logger.warn('[TPS GCM] Skipping automatic recurrence creation for a protected or unsafe source:', file.path);
+            return false;
+        }
         if (this.recurrenceCreationInProgress.has(file.path)) {
             logger.warn('[TPS GCM] Recurrence creation already in progress:', file.path);
             return true;
@@ -1946,10 +2084,29 @@ export class BulkEditService {
                 }
             }
 
+            // Capture and sanitize the clone bytes before acquiring the durable
+            // generation lock. Unsafe YAML fails closed without creating either a
+            // note or recurrence operation state, while a protected series template
+            // remains read-only and contributes an untagged instance body.
+            if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) {
+                logger.warn('[TPS GCM] Recurrence source became protected before instance creation:', file.path);
+                return false;
+            }
+            const content = await this.readRecurrenceInstanceSource(
+                contentSource,
+                'recurrence instance creation',
+            );
+            if (content === null) return false;
+
             const chainId = this.resolveRecurrenceChainId(file, frontmatter, recurrenceRule);
             const parentPath = file.parent?.path || '';
             const trackerGeneratedPath = isTrackerRecurrence ? this.getGeneratedTrackerPath(frontmatter) : null;
-            if (trackerGeneratedPath && await this.plugin.app.vault.adapter.exists(trackerGeneratedPath)) return true;
+            if (trackerGeneratedPath && await this.plugin.app.vault.adapter.exists(trackerGeneratedPath)) {
+                return await this.isVerifiedRecurrenceInstancePath(
+                    trackerGeneratedPath,
+                    'existing tracker recurrence',
+                );
+            }
 
             const dateStr = nextDate ? window.moment(nextDate).format(this.getDailyNoteDateFormat()) : '';
             const newFileName = isTrackerRecurrence
@@ -1959,18 +2116,29 @@ export class BulkEditService {
                 ? normalizePath(parentPath ? `${parentPath}/${newFileName}` : newFileName)
                 : normalizePath(parentPath ? `${parentPath}/${newFileName}` : newFileName);
             const newScheduled = nextDate ? window.moment(nextDate).format('YYYY-MM-DD HH:mm:ss') : this.buildTrackerGeneratedValue(newFilePath);
-            if (!isTrackerRecurrence && this.hasGeneratedRecurrence(frontmatter, newScheduled) && await this.plugin.app.vault.adapter.exists(newFilePath)) return true;
+            if (!isTrackerRecurrence && this.hasGeneratedRecurrence(frontmatter, newScheduled) && await this.plugin.app.vault.adapter.exists(newFilePath)) {
+                return await this.isVerifiedRecurrenceInstancePath(
+                    newFilePath,
+                    'existing recurrence',
+                );
+            }
             const recurrenceOpKey = this.buildRecurrenceOpKey(chainId, newScheduled);
 
             const opStatus = await this.beginRecurrenceOp(recurrenceOpKey, newFilePath);
             if (opStatus !== 'acquired') {
                 const opTarget = this.getRecurrenceOpTarget(recurrenceOpKey);
                 if (opTarget && await this.plugin.app.vault.adapter.exists(opTarget)) {
+                    if (!(await this.isVerifiedRecurrenceInstancePath(opTarget, 'existing recurrence'))) {
+                        return false;
+                    }
                     logger.log('[TPS GCM] Next recurrence already created at', opTarget);
                     await this.markRecurrenceGenerated(file, newScheduled);
                     return true;
                 }
                 if (await this.plugin.app.vault.adapter.exists(newFilePath)) {
+                    if (!(await this.isVerifiedRecurrenceInstancePath(newFilePath, 'existing recurrence'))) {
+                        return false;
+                    }
                     logger.log('[TPS GCM] Next recurrence already exists at', newFilePath);
                     await this.completeRecurrenceOp(recurrenceOpKey, newFilePath);
                     await this.markRecurrenceGenerated(file, newScheduled);
@@ -1982,6 +2150,10 @@ export class BulkEditService {
             }
 
             if (await this.plugin.app.vault.adapter.exists(newFilePath)) {
+                if (!(await this.isVerifiedRecurrenceInstancePath(newFilePath, 'existing recurrence'))) {
+                    await this.failRecurrenceOp(recurrenceOpKey);
+                    return false;
+                }
                 logger.warn('[TPS GCM] Next recurrence already exists, skipping creation:', newFilePath);
                 await this.completeRecurrenceOp(recurrenceOpKey, newFilePath);
                 await this.markRecurrenceGenerated(file, newScheduled);
@@ -1989,7 +2161,6 @@ export class BulkEditService {
                 return true;
             }
 
-            const content = await this.plugin.app.vault.read(contentSource);
             const newFile = await this.plugin.app.vault.create(newFilePath, content);
 
             if (!(newFile instanceof TFile)) {
@@ -2011,6 +2182,7 @@ export class BulkEditService {
             }
 
             await this.plugin.frontmatterMutationService.process(newFile, (fm) => {
+                removeTemplateProtectionTagFromFrontmatter(fm, this.plugin.settings);
                 if (isTrackerRecurrence) {
                     this.deleteFrontmatterValueCaseInsensitive(fm, 'scheduled');
                 } else {
@@ -2058,6 +2230,11 @@ export class BulkEditService {
                     }
                 }
             });
+
+            if (!(await this.isVerifiedRecurrenceInstance(newFile, 'recurrence instance creation'))) {
+                await this.failRecurrenceOp(recurrenceOpKey);
+                return false;
+            }
 
             await this.completeRecurrenceOp(recurrenceOpKey, newFilePath);
             await this.markRecurrenceGenerated(file, newScheduled);
@@ -2114,9 +2291,13 @@ export class BulkEditService {
         ]);
         SKIP_KEYS.add(this.getWorkflowStatusKey().toLowerCase());
 
-        // Build propagatable update set from the template's frontmatter
+        // Build propagatable update set from the template's frontmatter. A source
+        // template marker identifies the blueprint itself and never propagates to
+        // its instances; every other user tag remains eligible for propagation.
+        const propagatableFrontmatter: Record<string, any> = { ...templateFm };
+        removeTemplateProtectionTagFromFrontmatter(propagatableFrontmatter, this.plugin.settings);
         const updates: Record<string, any> = {};
-        for (const [key, value] of Object.entries(templateFm)) {
+        for (const [key, value] of Object.entries(propagatableFrontmatter)) {
             if (!SKIP_KEYS.has(key.toLowerCase())) {
                 updates[key] = value;
             }
@@ -2189,16 +2370,61 @@ export class BulkEditService {
 
                 if (!fm) continue;
 
+                // Classify the current on-disk bytes before any helper that may
+                // normalize or write frontmatter. Startup healing is automatic:
+                // protected notes are immutable and ambiguous YAML fails closed.
+                let templateProtectionState: ReturnType<typeof inspectTemplateProtectionSource>;
+                try {
+                    const source = await this.plugin.app.vault.read(file);
+                    templateProtectionState = inspectTemplateProtectionSource(source, this.plugin.settings);
+                } catch (error) {
+                    logger.warn('[TPS GCM] Skipping startup recurrence check because current source could not be read', {
+                        file: file.path,
+                        error,
+                    });
+                    continue;
+                }
+                if (templateProtectionState === 'unsafe') {
+                    logger.warn('[TPS GCM] Skipping startup recurrence check for unsafe frontmatter', {
+                        file: file.path,
+                    });
+                    continue;
+                }
+
                 const recurrenceInfo = this.resolveRecurrenceInfo(file, fm);
                 if (!recurrenceInfo.rule) continue;
+
+                const isRecurrenceTemplateCandidate = this.isFileInRecurrenceTemplateFolder(file)
+                    && (this.isRecurrenceTemplateFrontmatter(fm) || !fm.scheduled);
+
+                if (templateProtectionState === 'protected') {
+                    // A protected recurrence blueprint may be read solely to
+                    // bootstrap its first instance. Every other startup branch,
+                    // including create-next, relink, and generation-state writes,
+                    // must leave the source completely untouched.
+                    if (
+                        isRecurrenceTemplateCandidate
+                        && !(await this.isConfiguredDailyNoteTemplate(file))
+                        && !(await this.shouldSkipNoteLevelRecurrence(file, fm.scheduled))
+                    ) {
+                        const bootstrapped = await this.bootstrapTemplateInstanceFromToday(file, fm);
+                        if (bootstrapped) createdCount++;
+                    }
+                    continue;
+                }
+
                 if (await this.isConfiguredDailyNoteTemplate(file)) continue;
                 if (await this.shouldSkipNoteLevelRecurrence(file, fm.scheduled)) continue;
 
-                if (this.isFileInRecurrenceTemplateFolder(file) && (this.isRecurrenceTemplateFrontmatter(fm) || !fm.scheduled)) {
+                if (isRecurrenceTemplateCandidate) {
                     if (!this.isRecurrenceTemplateFrontmatter(fm)) {
-                        if (await this.canMutateFrontmatterSafely(file)) {
+                        if (
+                            await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings)
+                            && await this.canMutateFrontmatterSafely(file)
+                        ) {
                             await this.runSerializedFrontmatterWrite(file, async () => {
                                 await this.plugin.frontmatterMutationService.process(file, (fmw) => {
+                                    if (!canAutomaticallyMutateTemplateFrontmatter(fmw, this.plugin.settings)) return;
                                     this.markRecurrenceTemplate(fmw);
                                     this.deleteFrontmatterValueCaseInsensitive(fmw, 'scheduled');
                                     this.deleteWorkflowStatusValue(fmw);
@@ -2257,6 +2483,7 @@ export class BulkEditService {
                     return true;
                 });
                 for (const file of deduped) {
+                    if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) continue;
                     const cache = this.plugin.app.metadataCache.getFileCache(file);
                     const fm = cache?.frontmatter;
                     if (await this.isDailyNoteRecurrenceDirectFile(file, fm?.scheduled)) continue;
@@ -2272,9 +2499,11 @@ export class BulkEditService {
             if (needsRelink.length > 0) {
                 for (const row of needsRelink) {
                     const { file, templateFile, seriesBaseName } = row;
+                    if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) continue;
                     if (!(await this.canMutateFrontmatterSafely(file))) continue;
                     await this.runSerializedFrontmatterWrite(file, async () => {
                         await this.plugin.frontmatterMutationService.process(file, (fmw) => {
+                            if (!canAutomaticallyMutateTemplateFrontmatter(fmw, this.plugin.settings)) return;
                             this.setFrontmatterValueCaseInsensitive(
                                 fmw,
                                 'recurrenceTemplate',
@@ -2863,6 +3092,17 @@ export class BulkEditService {
         });
         const touchedFiles: TFile[] = [];
         for (const file of files) {
+            const isMarkdown = file.extension?.toLowerCase() === 'md';
+            if (
+                isMarkdown
+                && !(await canAutomaticallyMutateTemplateFile(
+                    this.plugin.app.vault,
+                    file,
+                    this.plugin.settings,
+                ))
+            ) {
+                continue;
+            }
             const fm = this.plugin.parentLinkResolutionService.getLogicalFrontmatter(file);
             const hasPk = Object.keys(fm).some((key) => parentKeys.includes(key.toLowerCase()));
             const hasAk = !!fm && Object.keys(fm).some(k => k.toLowerCase() === attachmentsKey.toLowerCase());
@@ -2872,6 +3112,10 @@ export class BulkEditService {
             if (hasPk || hasAk) {
                 try {
                     await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
+                        if (
+                            isMarkdown
+                            && !canAutomaticallyMutateTemplateFrontmatter(frontmatter, this.plugin.settings)
+                        ) return;
                         // Parent fields may be scalar or arrays. Remove only the
                         // deleted member and preserve unrelated parents.
                         for (const configuredParentKey of parentKeys) {
@@ -2906,12 +3150,13 @@ export class BulkEditService {
             }
 
             let bodyChanged = false;
-            if (file.extension?.toLowerCase() !== 'md') {
+            if (!isMarkdown) {
                 if (frontmatterChanged) touchedFiles.push(file);
                 continue;
             }
             try {
                 const raw = await this.plugin.app.vault.cachedRead(file);
+                if (!canAutomaticallyMutateTemplateSource(raw, this.plugin.settings)) continue;
                 const lines = raw.split('\n');
                 const preflightRemovedReferences = new Set<string>();
                 const preflight = lines.filter((line) => {
@@ -2923,6 +3168,7 @@ export class BulkEditService {
                 if (preflight.length !== lines.length) {
                     const bodyRemovedReferences = new Set<string>();
                     await this.plugin.app.vault.process(file, (current) => {
+                        if (!canAutomaticallyMutateTemplateSource(current, this.plugin.settings)) return current;
                         const currentLines = current.split('\n');
                         const filtered = currentLines.filter((line) => {
                             const parsed = this.plugin.bodySubitemLinkService.parseLine(line);
