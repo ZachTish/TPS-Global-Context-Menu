@@ -31,6 +31,123 @@ type ParsedTagField = {
 const DEFAULT_TEMPLATE_PROTECTION_TAG = 'template';
 const VALID_TEMPLATE_TAG_PATTERN = /^[\p{L}\p{N}_/-]+$/u;
 
+function resolveAutomaticMutationExclusionSource(settingsOrPatterns: unknown): string {
+  if (typeof settingsOrPatterns === 'string') return settingsOrPatterns;
+  if (!settingsOrPatterns || typeof settingsOrPatterns !== 'object') return '';
+  const record = settingsOrPatterns as Record<string, unknown>;
+  return String(record.frontmatterAutoWriteExclusions ?? '');
+}
+
+export function parseAutomaticMutationExclusionPatterns(settingsOrPatterns: unknown): string[] {
+  const raw = resolveAutomaticMutationExclusionSource(settingsOrPatterns);
+  if (!raw.trim()) return [];
+  return raw
+    .split(/\r?\n|,/u)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+/**
+ * Return the exact YAML tag represented by an exclusion pattern. `tag:` is
+ * the canonical spelling; a leading `#` is also unambiguous in this setting.
+ */
+export function parseAutomaticMutationTagExclusion(rawPattern: unknown): string | null {
+  const pattern = String(rawPattern ?? '').trim();
+  const lower = pattern.toLocaleLowerCase();
+  const rawTag = lower.startsWith('tag:')
+    ? pattern.slice(4).trim()
+    : pattern.startsWith('#')
+      ? pattern.slice(1).trim()
+      : '';
+  if (!rawTag) return null;
+  const normalized = normalizeTemplateProtectionTag(rawTag);
+  return normalized || null;
+}
+
+export function getAutomaticMutationTagExclusions(settingsOrPatterns: unknown): string[] {
+  return Array.from(new Set(
+    parseAutomaticMutationExclusionPatterns(settingsOrPatterns)
+      .map((pattern) => parseAutomaticMutationTagExclusion(pattern))
+      .filter((tag): tag is string => Boolean(tag)),
+  ));
+}
+
+export function updateAutomaticMutationTagExclusion(
+  settingsOrPatterns: unknown,
+  rawTag: unknown,
+  shouldExclude: boolean,
+): string {
+  const source = resolveAutomaticMutationExclusionSource(settingsOrPatterns);
+  const tag = normalizeTemplateProtectionTag(rawTag);
+  if (!tag) return source;
+  const filtered = parseAutomaticMutationExclusionPatterns(source).filter((pattern) =>
+    parseAutomaticMutationTagExclusion(pattern) !== tag);
+  if (shouldExclude) filtered.push(`tag:${tag}`);
+  return filtered.join('\n');
+}
+
+function normalizeAutomaticMutationPath(value: unknown): string {
+  const segments = String(value ?? '')
+    .trim()
+    .replace(/\\/gu, '/')
+    .split('/');
+  const normalized: string[] = [];
+  for (const segment of segments) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') {
+      normalized.pop();
+      continue;
+    }
+    normalized.push(segment);
+  }
+  return normalized.join('/').toLocaleLowerCase();
+}
+
+function matchesAutomaticMutationWildcard(pattern: string, value: string): boolean {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/gu, '\\$&');
+  return new RegExp(`^${escaped.replace(/\*/gu, '.*')}$`, 'i').test(value);
+}
+
+/** Preserve the existing path/name/regex exclusion language. */
+export function matchesAutomaticMutationPathExclusion(
+  pathValue: unknown,
+  basenameValue: unknown,
+  rawPattern: unknown,
+): boolean {
+  const pattern = String(rawPattern ?? '').trim();
+  if (!pattern) return false;
+  const lower = pattern.toLocaleLowerCase();
+  if (lower.startsWith('tag:') || pattern.startsWith('#')) return false;
+
+  const path = normalizeAutomaticMutationPath(pathValue);
+  const basename = normalizeAutomaticMutationPath(basenameValue);
+  if (lower.startsWith('re:')) {
+    const source = pattern.slice(3).trim();
+    if (!source) return false;
+    try {
+      const regex = new RegExp(source, 'i');
+      return regex.test(path) || regex.test(basename);
+    } catch {
+      return false;
+    }
+  }
+  if (lower.startsWith('name:')) {
+    const target = normalizeAutomaticMutationPath(pattern.slice(5));
+    return Boolean(target) && matchesAutomaticMutationWildcard(target, basename);
+  }
+
+  const rawTarget = lower.startsWith('path:') ? pattern.slice(5).trim() : pattern;
+  const hasTrailingSlash = /[\\/]$/u.test(rawTarget);
+  const target = normalizeAutomaticMutationPath(rawTarget);
+  if (!target) return false;
+  if (target.includes('*')) {
+    return matchesAutomaticMutationWildcard(target, path)
+      || matchesAutomaticMutationWildcard(target, basename);
+  }
+  if (hasTrailingSlash) return path === target || path.startsWith(`${target}/`);
+  return path === target || path.startsWith(`${target}/`) || basename === target;
+}
+
 export function normalizeTemplateProtectionTag(value: unknown): string {
   const normalized = String(value ?? '')
     .trim()
@@ -87,9 +204,25 @@ export function inspectTemplateProtectionFrontmatter(
 
 export function canAutomaticallyMutateTemplateFrontmatter(
   frontmatter: unknown,
-  settingsOrMarker: unknown,
+  settingsOrPatterns: unknown,
 ): boolean {
-  return inspectTemplateProtectionFrontmatter(frontmatter, settingsOrMarker) === 'unprotected';
+  return inspectAutomaticMutationTagExclusionsFrontmatter(frontmatter, settingsOrPatterns) === 'unprotected';
+}
+
+export function inspectAutomaticMutationTagExclusionsFrontmatter(
+  frontmatter: unknown,
+  settingsOrPatterns: unknown,
+): TemplateProtectionInspection {
+  const markers = getAutomaticMutationTagExclusions(settingsOrPatterns);
+  if (markers.length === 0) return 'unprotected';
+  if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) return 'unsafe';
+  let sawUnsafe = false;
+  for (const marker of markers) {
+    const state = inspectTemplateProtectionFrontmatter(frontmatter, marker);
+    if (state === 'protected') return 'protected';
+    if (state === 'unsafe') sawUnsafe = true;
+  }
+  return sawUnsafe ? 'unsafe' : 'unprotected';
 }
 
 export function removeTemplateProtectionTagFromFrontmatter(
@@ -425,8 +558,23 @@ export function inspectTemplateProtectionSource(
   return parseTemplateTagField(String(source ?? ''), marker).state;
 }
 
-export function canAutomaticallyMutateTemplateSource(source: string, settingsOrMarker: unknown): boolean {
-  return inspectTemplateProtectionSource(source, settingsOrMarker) === 'unprotected';
+export function inspectAutomaticMutationTagExclusionsSource(
+  source: string,
+  settingsOrPatterns: unknown,
+): TemplateProtectionInspection {
+  const markers = getAutomaticMutationTagExclusions(settingsOrPatterns);
+  if (markers.length === 0) return 'unprotected';
+  let sawUnsafe = false;
+  for (const marker of markers) {
+    const state = inspectTemplateProtectionSource(source, marker);
+    if (state === 'protected') return 'protected';
+    if (state === 'unsafe') sawUnsafe = true;
+  }
+  return sawUnsafe ? 'unsafe' : 'unprotected';
+}
+
+export function canAutomaticallyMutateTemplateSource(source: string, settingsOrPatterns: unknown): boolean {
+  return inspectAutomaticMutationTagExclusionsSource(source, settingsOrPatterns) === 'unprotected';
 }
 
 function removeLineRanges(source: string, lines: SourceLine[], indexes: Set<number>): string {
@@ -507,8 +655,39 @@ export async function canAutomaticallyMutateTemplateFile(
     cachedRead?: (file: unknown) => Promise<string>;
   } | null | undefined,
   file: unknown,
-  settingsOrMarker: unknown,
+  settingsOrPatterns: unknown,
 ): Promise<boolean> {
+  return canAutomaticallyMutateFileWithExclusions(vault, file, settingsOrPatterns);
+}
+
+export function canAutomaticallyMutatePathWithExclusions(
+  file: unknown,
+  settingsOrPatterns: unknown,
+): boolean {
+  const patterns = parseAutomaticMutationExclusionPatterns(settingsOrPatterns);
+  if (patterns.length === 0) return true;
+  const record = file && typeof file === 'object'
+    ? file as Record<string, unknown>
+    : {};
+  const path = String(record.path ?? '');
+  const name = String(record.name ?? path.split('/').pop() ?? '');
+  const basename = String(record.basename ?? name.replace(/\.[^.]+$/u, ''));
+  return !patterns.some((pattern) => matchesAutomaticMutationPathExclusion(path, basename, pattern));
+}
+
+export async function canAutomaticallyMutateFileWithExclusions(
+  vault: {
+    read?: (file: unknown) => Promise<string>;
+    cachedRead?: (file: unknown) => Promise<string>;
+  } | null | undefined,
+  file: unknown,
+  settingsOrPatterns: unknown,
+): Promise<boolean> {
+  const patterns = parseAutomaticMutationExclusionPatterns(settingsOrPatterns);
+  if (patterns.length === 0) return true;
+  if (!canAutomaticallyMutatePathWithExclusions(file, patterns.join('\n'))) return false;
+  if (getAutomaticMutationTagExclusions(patterns.join('\n')).length === 0) return true;
+
   const read = typeof vault?.read === 'function'
     ? vault.read.bind(vault)
     : typeof vault?.cachedRead === 'function'
@@ -517,7 +696,7 @@ export async function canAutomaticallyMutateTemplateFile(
   if (!read) return false;
   try {
     const source = await read(file);
-    return canAutomaticallyMutateTemplateSource(source, settingsOrMarker);
+    return canAutomaticallyMutateTemplateSource(source, patterns.join('\n'));
   } catch {
     return false;
   }

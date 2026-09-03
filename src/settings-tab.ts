@@ -33,6 +33,7 @@ import {
 } from './utils/linked-subitem-mapping';
 import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { FileSuggestModal } from './modals/FileSuggestModal';
+import { TagSuggestModal } from './modals/TagSuggestModal';
 import * as logger from './logger';
 import { runDailyNoteHomeSettingTransaction } from './services/daily-note-home-setting-transaction';
 import {
@@ -50,6 +51,11 @@ import {
 } from './base-query-guide';
 import { normalizeDailyNavDayCount } from './utils/daily-note-nav-days';
 import { normalizeCreateTaskDefaultParentMode } from './utils/create-task-default-parent';
+import { collectKnownVaultTags } from './utils/known-tags';
+import {
+  getAutomaticMutationTagExclusions,
+  updateAutomaticMutationTagExclusion,
+} from './utils/template-protection';
 
 const NN_TEXT_COMMIT_DEBOUNCE_MS = 300;
 export const LEGACY_GCM_NOTEBOOK_NAVIGATOR_RULE_SETTINGS_STYLE_ID = 'tps-gcm-notebook-navigator-rule-settings-style';
@@ -586,11 +592,11 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
     new Setting(advanced)
       .setName('Rule exclusions')
-      .setDesc('Skip virtual presentation and semantic tag automation for matching files. One pattern per line; supports exact paths, folder prefixes, wildcards (*), name:<basename>, and re:<regex>.')
+      .setDesc('Skip virtual presentation and semantic tag automation for matching files. One pattern per line; supports exact paths, folder prefixes, wildcards (*), name:<basename>, re:<regex>, and exact YAML tags with tag:<tag> (or #<tag>).')
       .addTextArea((text) => {
         text
           .setValue(settings.frontmatterWriteExclusions || '')
-          .setPlaceholder('System/Templates/\nSystem/*\nname:daily-template\nre:^System/')
+          .setPlaceholder('System/Templates/\ntag:template\nname:daily-template\nre:^System/')
           .onChange(async (value) => {
             settings.frontmatterWriteExclusions = value;
             await this.plugin.saveSettings();
@@ -644,11 +650,38 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       .setDesc('Immediately run enabled semantic tag rules after GCM creates a subitem. Virtual presentation does not require this setting.')
       .addToggle(t => t.setValue(this.plugin.settings.applyNotebookNavigatorRulesOnSubitemCreate).onChange(async v => { this.plugin.settings.applyNotebookNavigatorRulesOnSubitemCreate = v; await this.plugin.saveSettings(); }));
     new Setting(advanced)
+      .setName('Excluded tags')
+      .setDesc('Choose an exact top-level YAML tag whose notes should not be changed by automatic TPS maintenance. Choosing an already selected tag removes it; paths and advanced patterns remain editable below.')
+      .addButton((button) => button
+        .setButtonText('Choose tags')
+        .onClick(() => {
+          const excludedTags = getAutomaticMutationTagExclusions(
+            this.plugin.settings.frontmatterAutoWriteExclusions,
+          );
+          new TagSuggestModal(this.app, [
+            ...collectKnownVaultTags(this.app),
+            ...excludedTags,
+            this.plugin.settings.templateIdentificationTag || '',
+          ], async (tag, selected) => {
+            this.plugin.settings.frontmatterAutoWriteExclusions = updateAutomaticMutationTagExclusion(
+              this.plugin.settings.frontmatterAutoWriteExclusions,
+              tag,
+              !selected,
+            );
+            await this.plugin.saveSettings();
+            this.display();
+          }, {
+            title: 'Choose auto-write exclusion tag',
+            placeholder: 'Search vault tags…',
+            selectedTags: excludedTags,
+          }).open();
+        }));
+    new Setting(advanced)
       .setName('Global auto-write exclusions')
-      .setDesc('Skip non-rule automatic frontmatter writes such as title, folderPath, timestamps, and daily-note repairs.')
+      .setDesc('Skip automatic TPS note mutations such as title, folderPath, timestamps, recurrence maintenance, status reconciliation, and daily-note repairs. The tag chooser writes exact tag:<tag> entries here. You can also enter paths, folder prefixes, wildcards (*), name:<basename>, re:<regex>, or #<tag>. Manual Navigator rule application remains available.')
       .addTextArea(t => t
         .setValue(this.plugin.settings.frontmatterAutoWriteExclusions || '')
-        .setPlaceholder('Templates/\nTemplates/*.md\nname:daily-template')
+        .setPlaceholder('Templates/\nTemplates/*.md\ntag:template\nname:daily-template')
         .onChange(async v => {
           this.plugin.settings.frontmatterAutoWriteExclusions = v;
           await this.plugin.saveSettings();
@@ -2316,7 +2349,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
       new Setting(diagnostics)
         .setName('Identify TPS templates by')
-        .setDesc('Controls template discovery in TPS pickers. The template tag also protects source notes from automatic TPS rewrites; instantiated notes do not keep it. Exact template paths remain valid.')
+        .setDesc('Controls template discovery in TPS pickers. GCM-owned Daily Note and note-level recurrence instances do not keep the configured identity tag. To protect template sources from automatic TPS rewrites, add an explicit tag:<tag>, path, name, or regex entry under Global auto-write exclusions.')
         .addDropdown((dropdown) => dropdown
           .addOption('templater-folder', 'Templater folder')
           .addOption('tag', 'Tag (recommended)')
@@ -2332,7 +2365,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
       new Setting(diagnostics)
         .setName('Template tag')
-        .setDesc('Exact top-level tag used for template discovery and automatic-write protection. Enter it without #. This remains editable in every mode.')
+        .setDesc('Exact top-level tag used for template discovery and removed from GCM-owned Daily Note and note-level recurrence instances. Enter it without #. This tag does not implicitly protect the source from automatic writes; configure that separately under Global auto-write exclusions.')
         .addText((text) => text
           .setPlaceholder('template')
           .setValue(this.plugin.settings.templateIdentificationTag || '')

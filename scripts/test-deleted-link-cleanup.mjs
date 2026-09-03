@@ -125,7 +125,10 @@ function createFixture(TFile, definitions, options = {}) {
   const refreshedPaths = [];
 
   const plugin = {
-    settings: { parentLinkFrontmatterKey: "childOf" },
+    settings: {
+      parentLinkFrontmatterKey: "childOf",
+      frontmatterAutoWriteExclusions: "tag:template",
+    },
     app: {
       vault: {
         getAbstractFileByPath: (path) => byPath.get(path) ?? null,
@@ -312,7 +315,7 @@ test("deleting a PDF parent unlinks Markdown and PDF children while preserving o
   assert.deepEqual(
     fixture.readPaths,
     ["Notes/Markdown Child.md", "Notes/Markdown Child.md"],
-    "Markdown cleanup reads current bytes once for template protection and once for body preflight",
+    "Markdown cleanup reads current bytes once for automatic exclusions and once for body preflight",
   );
   assert.deepEqual(fixture.processedBodyPaths, ["Notes/Markdown Child.md"]);
   assert.equal(fixture.readPaths.includes("Documents/PDF Child.pdf"), false);
@@ -345,7 +348,7 @@ test("cleanup preserves an explicit suffix link that resolves to a different liv
   assert.equal(result.removedReferences, 0);
 });
 
-test("automatic deleted-link cleanup leaves tagged template notes byte-identical", async () => {
+test("automatic deleted-link cleanup leaves explicitly tag-excluded notes byte-identical", async () => {
   const { DeletedLinkCleanupHarness, TFile } = await importCleanupHarness();
   const protectedSource = [
     "---",
@@ -382,7 +385,7 @@ test("automatic deleted-link cleanup leaves tagged template notes byte-identical
   assert.equal(result.touchedFiles, 1);
 });
 
-test("deleted-link cleanup rechecks template protection at frontmatter and body mutation boundaries", async () => {
+test("deleted-link cleanup rechecks explicit exclusions at frontmatter and body mutation boundaries", async () => {
   const { DeletedLinkCleanupHarness, TFile } = await importCleanupHarness();
   const frontmatterRace = createFixture(TFile, [{
     path: "Notes/Frontmatter race.md",

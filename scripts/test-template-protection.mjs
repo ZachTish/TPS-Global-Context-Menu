@@ -139,7 +139,7 @@ function makeFile(TFile, path) {
   return file;
 }
 
-test('template protection recognizes only the exact top-level YAML tag marker', async () => {
+test('template identity recognizes only the exact top-level YAML tag marker', async () => {
   const {
     inspectTemplateProtectionFrontmatter,
     inspectTemplateProtectionSource,
@@ -156,7 +156,7 @@ test('template protection recognizes only the exact top-level YAML tag marker', 
   assert.equal(
     inspectTemplateProtectionSource('---\ntags: [template/example, keep]\n---\n#template\n', 'template'),
     'unprotected',
-    'nested and body tags are not source-protection markers',
+    'nested and body tags are not source identity markers',
   );
   assert.equal(
     inspectTemplateProtectionSource('Body only\n\n#template\n', 'template'),
@@ -218,19 +218,65 @@ test('instance sanitization removes only the configured marker and preserves sou
   assert.deepEqual(frontmatter, { title: 'Instance', tags: ['before', 'template/example', 'after'] });
 });
 
-test('automatic file protection reads current bytes and fails closed when they cannot be verified', async () => {
-  const { canAutomaticallyMutateTemplateFile } = await importUtility();
+test('automatic-write exclusions preserve path rules and add exact authoritative tag rules', async () => {
+  const {
+    canAutomaticallyMutateTemplateFile,
+    canAutomaticallyMutateTemplateFrontmatter,
+    canAutomaticallyMutateTemplateSource,
+    matchesAutomaticMutationPathExclusion,
+    parseAutomaticMutationTagExclusion,
+    updateAutomaticMutationTagExclusion,
+  } = await importUtility();
   let source = '---\ntags: keep\n---\n';
   const vault = { read: async () => source };
+  const file = { path: 'Templates/Daily.md', name: 'Daily.md', basename: 'Daily' };
 
-  assert.equal(await canAutomaticallyMutateTemplateFile(vault, {}, 'template'), true);
+  assert.equal(await canAutomaticallyMutateTemplateFile(vault, file, { templateIdentificationTag: 'template' }), true, 'template identity alone does not exclude');
+  assert.equal(await canAutomaticallyMutateTemplateFile({}, file, ''), true, 'no tag rule needs no source read');
+  assert.equal(await canAutomaticallyMutateTemplateFile({}, file, 'path:Templates/'), false);
+  assert.equal(await canAutomaticallyMutateTemplateFile({}, file, 'path:Templates\\'), false, 'Windows separators retain path exclusion semantics');
+  assert.equal(await canAutomaticallyMutateTemplateFile({}, file, 'path:./Templates//'), false, 'redundant path segments retain exclusion semantics');
+  assert.equal(await canAutomaticallyMutateTemplateFile({}, file, 'name:Daily'), false);
+  assert.equal(await canAutomaticallyMutateTemplateFile({}, file, 're:^Templates/'), false);
+  assert.equal(matchesAutomaticMutationPathExclusion(file.path, file.basename, 'Templates/*.md'), true);
+  assert.equal(matchesAutomaticMutationPathExclusion(file.path, file.basename, 'tag:template'), false);
+  assert.equal(parseAutomaticMutationTagExclusion('tag:#Template'), 'template');
+  assert.equal(parseAutomaticMutationTagExclusion('#Project/Template'), 'project/template');
+  const addedByTagChooser = updateAutomaticMutationTagExclusion(
+    'Templates/, tag:template/example\nname:Daily',
+    '#Template',
+    true,
+  );
+  assert.deepEqual(addedByTagChooser.split('\n'), [
+    'Templates/',
+    'tag:template/example',
+    'name:Daily',
+    'tag:template',
+  ]);
+  assert.equal(updateAutomaticMutationTagExclusion(addedByTagChooser, 'TEMPLATE', false), [
+    'Templates/',
+    'tag:template/example',
+    'name:Daily',
+  ].join('\n'));
+  assert.equal(
+    updateAutomaticMutationTagExclusion('Templates/', 'not a tag', true),
+    'Templates/',
+  );
+
+  const explicitTagRule = { frontmatterAutoWriteExclusions: 'tag:template' };
+  assert.equal(await canAutomaticallyMutateTemplateFile(vault, file, explicitTagRule), true);
   source = '---\ntags: template\n---\n';
-  assert.equal(await canAutomaticallyMutateTemplateFile(vault, {}, 'template'), false);
-  assert.equal(await canAutomaticallyMutateTemplateFile({ read: async () => { throw new Error('offline'); } }, {}, 'template'), false);
-  assert.equal(await canAutomaticallyMutateTemplateFile({}, {}, 'template'), false);
+  assert.equal(await canAutomaticallyMutateTemplateFile(vault, file, explicitTagRule), false);
+  assert.equal(canAutomaticallyMutateTemplateSource(source, explicitTagRule), false);
+  assert.equal(canAutomaticallyMutateTemplateFrontmatter({ tags: ['template'] }, explicitTagRule), false);
+  assert.equal(canAutomaticallyMutateTemplateFrontmatter({ tags: ['template/example'] }, explicitTagRule), true, 'tag matching is exact');
+  assert.equal(canAutomaticallyMutateTemplateSource('---\ntags: [template/example]\n---\n', '#template'), true);
+  assert.equal(canAutomaticallyMutateTemplateSource('---\ntags:\n  value: template\n---\n', '#template'), false, 'ambiguous tag evidence fails closed');
+  assert.equal(await canAutomaticallyMutateTemplateFile({ read: async () => { throw new Error('offline'); } }, file, explicitTagRule), false);
+  assert.equal(await canAutomaticallyMutateTemplateFile({}, file, explicitTagRule), false);
 });
 
-test('background archive sweeps skip protected templates while a manual sweep remains explicit', async () => {
+test('background archive sweeps honor explicit tag exclusions while a manual sweep remains explicit', async () => {
   const { ArchiveSweepHarness, TFile } = await importArchiveSweepHarness();
   const run = async (reason) => {
     const protectedFile = new TFile('Templates/Daily.md');
@@ -242,7 +288,11 @@ test('background archive sweeps skip protected templates while a manual sweep re
     ]);
     const renamed = [];
     const plugin = {
-      settings: { archiveTag: 'archive', templateIdentificationTag: 'template' },
+      settings: {
+        archiveTag: 'archive',
+        templateIdentificationTag: 'template',
+        frontmatterAutoWriteExclusions: 'tag:template',
+      },
       getArchiveFolderPath: () => '_archive',
       filePropertiesService: { isCompanionFile: () => false },
       runQueuedMove: async (_files, callback) => callback(),
@@ -274,7 +324,7 @@ test('background archive sweeps skip protected templates while a manual sweep re
   assert.equal(manual.result.archived, 2);
 });
 
-test('automatic background writers recheck template protection at their mutation boundaries', () => {
+test('automatic background writers recheck explicit exclusions at their mutation boundaries', () => {
   const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
   const navigatorRules = read('src/services/notebook-navigator-rule-service.ts');
   const checkboxHandler = read('src/handlers/task-checkbox-handler.ts');
@@ -286,7 +336,7 @@ test('automatic background writers recheck template protection at their mutation
 
   assert.match(
     navigatorRules,
-    /isAutomaticMutation[\s\S]{0,240}canAutomaticallyMutateTemplateFile[\s\S]{0,900}canAutomaticallyMutateTemplateFrontmatter/u,
+    /isAutomaticMutation[\s\S]{0,400}passesRuleExclusionPreflight\([\s\S]{0,180}frontmatterAutoWriteExclusions[\s\S]{0,1200}canAutomaticallyMutateTemplateFrontmatter/u,
   );
   assert.match(navigatorRules, /reason === 'gcm-startup-auto'/u);
   assert.match(
@@ -312,7 +362,7 @@ test('automatic background writers recheck template protection at their mutation
   assert.match(
     noteOperations,
     /sweepArchiveTaggedFiles[\s\S]{0,2200}reason !== "manual"[\s\S]{0,260}canAutomaticallyMutateTemplateFile[\s\S]{0,500}renameFile/u,
-    'background archive sweeps recheck current template-protection bytes while manual sweeps remain explicit',
+    'background archive sweeps recheck current exclusion evidence while manual sweeps remain explicit',
   );
   assert.match(
     bulkEdit,
@@ -387,7 +437,7 @@ test('recurrence instances and propagation remove only the configured source-tem
   assert.match(startupHealing, /canAutomaticallyMutateTemplateFrontmatter\(fmw, this\.plugin\.settings\)/u);
 });
 
-test('startup recurrence healing does not touch protected or unsafe recurring notes outside the template folder', async () => {
+test('startup recurrence healing does not treat template identity as a global ignore outside the template folder', async () => {
   const { BulkEditService } = await importBulkEditService();
   const TFile = globalThis.__TpsTemplateProtectionTFile;
   const protectedFile = makeFile(TFile, 'Inbox/Protected recurrence.md');
@@ -426,6 +476,7 @@ test('startup recurrence healing does not touch protected or unsafe recurring no
       },
     },
     filePropertiesService: { isCompanionFile: () => false },
+    fileNamingService: { isDailyNoteFile: async () => false },
     frontmatterMutationService: {
       process: async () => { frontmatterWrites += 1; },
     },
@@ -438,7 +489,7 @@ test('startup recurrence healing does not touch protected or unsafe recurring no
 
   await service.checkMissingRecurrences();
 
-  assert.equal(createNextCalls, 0);
+  assert.equal(createNextCalls, 1, 'safe template identity is not an implicit exclusion, while ambiguous YAML remains fail-closed');
   assert.equal(frontmatterWrites, 0);
   assert.equal(recurrenceStateWrites, 0);
   assert.equal(sources.get(protectedFile.path).includes('tags: [template]'), true);

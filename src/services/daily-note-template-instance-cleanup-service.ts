@@ -111,8 +111,8 @@ export function resolveConfiguredDailyNoteTemplateFile(
 }
 
 /**
- * Handles the one creation-time exception to template protection: an exact
- * configured Daily Note instance inherits the source marker, then loses only
+ * Handles creation-time template identity cleanup: an exact configured Daily
+ * Note instance inherits the source marker, then loses only
  * that marker once Core Daily Notes/Periodic Notes and Templater have settled.
  * No existing-file sweep is performed.
  */

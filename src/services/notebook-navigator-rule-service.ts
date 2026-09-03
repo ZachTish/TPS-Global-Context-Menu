@@ -3,8 +3,10 @@ import type TPSGlobalContextMenuPlugin from '../main';
 import * as logger from '../logger';
 import { deleteValueCaseInsensitive, findKeyCaseInsensitive, setValueCaseInsensitive } from '../core';
 import {
-  canAutomaticallyMutateTemplateFile,
+  canAutomaticallyMutateFileWithExclusions,
+  canAutomaticallyMutatePathWithExclusions,
   canAutomaticallyMutateTemplateFrontmatter,
+  matchesAutomaticMutationPathExclusion,
 } from '../utils/template-protection';
 import { RuleEngine } from './notebook-navigator-rule-engine';
 
@@ -275,15 +277,19 @@ export class NotebookNavigatorRuleService {
     if (!this.isReady()) return false;
     if (this.requiresControllerAutomation(options.reason) && !this.plugin.canRunBackgroundAutomation()) return false;
     if (this.shouldIgnore(file, options)) return false;
-    const isAutomaticMutation = this.isAutomaticMutationReason(options.reason);
-    if (
-      isAutomaticMutation
-      && !(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))
-    ) return false;
-
     const settings = this.getSettings();
     const ruleEngine = this.getRuleEngine();
     if (!settings || !ruleEngine) return false;
+    if (!(await this.passesRuleExclusionPreflight(file, settings.frontmatterWriteExclusions))) return false;
+    const isAutomaticMutation = this.isAutomaticMutationReason(options.reason);
+    if (
+      isAutomaticMutation
+      && !(await this.passesRuleExclusionPreflight(
+        file,
+        this.plugin.settings.frontmatterAutoWriteExclusions,
+      ))
+    ) return false;
+
     const canMutateGeneratedTitle = options.reason === 'create';
     const canMutateHideTags = options.reason !== 'file-open'
       && this.hasEnabledHideRules(settings);
@@ -295,6 +301,10 @@ export class NotebookNavigatorRuleService {
     const started = performance.now();
     const body = await this.readBody(file);
     const changed = await this.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(file, ownedKeys, (frontmatter) => {
+      if (!canAutomaticallyMutateTemplateFrontmatter(
+        frontmatter,
+        settings.frontmatterWriteExclusions,
+      )) return;
       if (
         isAutomaticMutation
         && !canAutomaticallyMutateTemplateFrontmatter(frontmatter, this.plugin.settings)
@@ -434,6 +444,7 @@ export class NotebookNavigatorRuleService {
     if (!settings?.enabled) return null;
     if (this.shouldIgnore(file, { force: true, bypassCreationGrace: true })) return null;
     const frontmatter = frontmatterOverride ?? this.getFrontmatterForFile(file) ?? {};
+    if (!canAutomaticallyMutateTemplateFrontmatter(frontmatter, settings.frontmatterWriteExclusions)) return null;
     const context = this.buildRuleContext(file, frontmatter, '');
     return this.ruleEngine.resolveVisualOutputs(settings.rules || [], context);
   }
@@ -474,6 +485,9 @@ export class NotebookNavigatorRuleService {
     }
     const settings = this.getSettings();
     if (!settings?.enabled) return { value: null, dependencyPaths: [] };
+    if (!(await this.passesRuleExclusionPreflight(file, settings.frontmatterWriteExclusions))) {
+      return { value: null, dependencyPaths: [] };
+    }
     if (this.shouldIgnore(file, {
       reason: 'presentation',
       force: true,
@@ -486,6 +500,12 @@ export class NotebookNavigatorRuleService {
     // Preserve the established projection precedence: sort evaluates after
     // generated visual values on this in-memory clone. No YAML mutation occurs.
     const frontmatter = { ...(this.getFrontmatterForFile(file) ?? {}) };
+    if (!canAutomaticallyMutateTemplateFrontmatter(
+      frontmatter,
+      settings.frontmatterWriteExclusions,
+    )) {
+      return { value: null, dependencyPaths: [] };
+    }
     const context = this.buildRuleContext(file, frontmatter, body);
     const visualOutputs = this.ruleEngine.resolveVisualOutputs(settings.rules || [], context);
     const desiredIcon = visualOutputs?.icon?.matched
@@ -781,6 +801,21 @@ export class NotebookNavigatorRuleService {
     return this.plugin.app.workspace.getActiveFile()?.path === file.path;
   }
 
+  private async passesRuleExclusionPreflight(file: TFile, patterns: string): Promise<boolean> {
+    if (!canAutomaticallyMutatePathWithExclusions(file, patterns)) return false;
+    if (file.extension?.toLowerCase() !== 'md') {
+      return canAutomaticallyMutateTemplateFrontmatter(
+        this.getFrontmatterForFile(file),
+        patterns,
+      );
+    }
+    return canAutomaticallyMutateFileWithExclusions(
+      this.plugin.app.vault,
+      file,
+      patterns,
+    );
+  }
+
   private isAutomaticReason(reason: string | undefined): boolean {
     return reason === 'file-open' || reason === 'metadata-change' || !reason;
   }
@@ -839,29 +874,7 @@ export class NotebookNavigatorRuleService {
   }
 
   private matchesExclusion(path: string, basename: string, rawPattern: string): boolean {
-    const pattern = String(rawPattern || '').trim();
-    if (!pattern) return false;
-    const lower = pattern.toLowerCase();
-    if (lower.startsWith('re:')) {
-      try {
-        const regex = new RegExp(pattern.slice(3).trim(), 'i');
-        return regex.test(path) || regex.test(basename);
-      } catch {
-        return false;
-      }
-    }
-    if (lower.startsWith('name:')) {
-      return this.matchesWildcard(pattern.slice(5).trim().toLowerCase(), basename);
-    }
-    const target = this.normalizeComparablePath(lower.startsWith('path:') ? pattern.slice(5) : pattern);
-    if (!target) return false;
-    if (target.includes('*')) return this.matchesWildcard(target, path) || this.matchesWildcard(target, basename);
-    return path === target || path.startsWith(`${target}/`) || basename === target;
-  }
-
-  private matchesWildcard(pattern: string, value: string): boolean {
-    const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
-    return new RegExp(`^${escaped.replace(/\*/g, '.*')}$`, 'i').test(value);
+    return matchesAutomaticMutationPathExclusion(path, basename, rawPattern);
   }
 
   private normalizeComparablePath(value: string): string {

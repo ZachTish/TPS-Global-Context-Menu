@@ -3,6 +3,7 @@ import type TPSGlobalContextMenuPlugin from '../main';
 import type { TpsTemplateIdentificationMode, TpsTemplatePropertyMatch } from '../types';
 import {
   canAutomaticallyMutateTemplateFile,
+  canAutomaticallyMutateTemplateFrontmatter,
   canAutomaticallyMutateTemplateSource,
   inspectTemplateProtectionFrontmatter,
   inspectTemplateProtectionSource,
@@ -51,37 +52,27 @@ export class TemplateIdentityService {
   }
 
   /**
-   * Mutation-boundary contract for other TPS plugins. Tag identity is checked
-   * against current Vault bytes and fails closed when those bytes cannot be
-   * verified; the path/property compatibility modes retain their established
-   * identity semantics.
+   * Mutation-boundary contract for other TPS plugins. Template identity and
+   * automatic-write permission are deliberately separate: only the explicit
+   * Global auto-write exclusions can deny this operation.
    */
   async canAutomaticallyMutate(file: TFile): Promise<boolean> {
     if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'md') return false;
-    if (this.getMode() === 'tag') {
-      return canAutomaticallyMutateTemplateFile(
-        this.plugin.app.vault,
-        file,
-        this.plugin.settings,
-      );
-    }
-    return !this.matches(file);
+    return canAutomaticallyMutateTemplateFile(
+      this.plugin.app.vault,
+      file,
+      this.plugin.settings,
+    );
   }
 
   /** Current-source recheck for consumers already inside an atomic raw write. */
   canAutomaticallyMutateSource(source: string): boolean {
-    if (this.getMode() !== 'tag') return true;
     return canAutomaticallyMutateTemplateSource(source, this.plugin.settings);
   }
 
   /** Parsed-frontmatter recheck for consumers inside processFrontMatter. */
   canAutomaticallyMutateFrontmatter(frontmatter: unknown): boolean {
-    const mode = this.getMode();
-    if (mode === 'tag') {
-      return inspectTemplateProtectionFrontmatter(frontmatter, this.plugin.settings) === 'unprotected';
-    }
-    if (mode === 'property') return !this.matchesPropertyFrontmatter(frontmatter);
-    return true;
+    return canAutomaticallyMutateTemplateFrontmatter(frontmatter, this.plugin.settings);
   }
 
   /**

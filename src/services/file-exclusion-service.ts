@@ -1,4 +1,8 @@
 import { TFile } from 'obsidian';
+import {
+    matchesAutomaticMutationPathExclusion,
+    parseAutomaticMutationExclusionPatterns,
+} from '../utils/template-protection';
 
 /**
  * Determines whether a file should be excluded from automatic frontmatter writes.
@@ -24,57 +28,15 @@ export class AutoFrontmatterExclusionService {
         normalizedBasename: string,
         rawPattern: string,
     ): boolean {
-        const pattern = String(rawPattern || '').trim();
-        if (!pattern) return false;
-        const asLower = pattern.toLowerCase();
-
-        if (asLower.startsWith('re:')) {
-            const source = pattern.slice(3).trim();
-            if (!source) return false;
-            try {
-                const regex = new RegExp(source, 'i');
-                return regex.test(normalizedPath) || regex.test(normalizedBasename);
-            } catch {
-                return false;
-            }
-        }
-
-        if (asLower.startsWith('name:')) {
-            const target = this.normalizePath(pattern.slice(5));
-            if (!target) return false;
-            return this.matchesWildcard(target, normalizedBasename);
-        }
-
-        const pathTarget = asLower.startsWith('path:') ? pattern.slice(5).trim() : pattern;
-        const hasTrailingSlash = /[\/\\]$/.test(pathTarget);
-        const normalizedTarget = this.normalizePath(pathTarget);
-        if (!normalizedTarget) return false;
-
-        if (normalizedTarget.includes('*')) {
-            return (
-                this.matchesWildcard(normalizedTarget, normalizedPath) ||
-                this.matchesWildcard(normalizedTarget, normalizedBasename)
-            );
-        }
-
-        if (hasTrailingSlash) {
-            return normalizedPath === normalizedTarget || normalizedPath.startsWith(`${normalizedTarget}/`);
-        }
-
-        return (
-            normalizedPath === normalizedTarget ||
-            normalizedPath.startsWith(`${normalizedTarget}/`) ||
-            normalizedBasename === normalizedTarget
+        return matchesAutomaticMutationPathExclusion(
+            normalizedPath,
+            normalizedBasename,
+            rawPattern,
         );
     }
 
     private parsePatterns(): string[] {
-        const raw = String(this.getExclusionPatterns() || '');
-        if (!raw.trim()) return [];
-        return raw
-            .split(/\r?\n|,/)
-            .map((entry) => entry.trim())
-            .filter(Boolean);
+        return parseAutomaticMutationExclusionPatterns(this.getExclusionPatterns());
     }
 
     private normalizePath(value: string): string {
@@ -85,9 +47,4 @@ export class AutoFrontmatterExclusionService {
             .toLowerCase();
     }
 
-    private matchesWildcard(pattern: string, value: string): boolean {
-        const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&');
-        const regex = new RegExp(`^${escaped.replace(/\*/g, '.*')}$`, 'i');
-        return regex.test(value);
-    }
 }

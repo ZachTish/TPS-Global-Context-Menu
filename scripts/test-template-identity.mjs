@@ -142,7 +142,7 @@ test('an empty or unavailable Templater folder never classifies the whole vault 
   assert.equal(service.getMode(), 'tag', 'missing saved mode uses the safe Tag default');
 });
 
-test('template mutation capabilities check current tag bytes and fail closed when they cannot be read', async () => {
+test('template identity is separate from explicit automatic-write exclusions in every mode', async () => {
   const { TemplateIdentityService, TFile } = await importHarness();
   const settings = {
     templateIdentificationMode: 'tag',
@@ -166,13 +166,30 @@ test('template mutation capabilities check current tag bytes and fail closed whe
   const service = new TemplateIdentityService(plugin);
 
   assert.equal(service.version, 1, 'additive mutation capabilities preserve the public v1 identity contract');
+  assert.equal(service.matches(plugin.byPath.get('Protected.md')), true, 'the marker still identifies the source as a template');
+  assert.equal(await service.canAutomaticallyMutate(plugin.byPath.get('Protected.md')), true, 'identity alone is not an ignore rule');
+  assert.equal(await service.canAutomaticallyMutate(plugin.byPath.get('Unreadable.md')), true, 'without tag exclusions no source read is required');
+  assert.equal(service.canAutomaticallyMutateSource('---\ntags: [template]\n---\n'), true);
+  assert.equal(service.canAutomaticallyMutateFrontmatter({ tags: ['template'] }), true);
+
+  settings.frontmatterAutoWriteExclusions = 'tag:template';
   assert.equal(await service.canAutomaticallyMutate(plugin.byPath.get('Protected.md')), false);
   assert.equal(await service.canAutomaticallyMutate(plugin.byPath.get('Ordinary.md')), true);
-  assert.equal(await service.canAutomaticallyMutate(plugin.byPath.get('Unreadable.md')), false);
+  assert.equal(await service.canAutomaticallyMutate(plugin.byPath.get('Unreadable.md')), false, 'an explicit tag exclusion fails closed when current bytes cannot be read');
   assert.equal(service.canAutomaticallyMutateSource('---\ntags: [template]\n---\n'), false);
   assert.equal(service.canAutomaticallyMutateSource('---\ntags: [ordinary]\n---\n'), true);
   assert.equal(service.canAutomaticallyMutateFrontmatter({ tags: ['template'] }), false);
   assert.equal(service.canAutomaticallyMutateFrontmatter({ tags: ['ordinary'] }), true);
+
+  settings.templateIdentificationMode = 'property';
+  settings.templateIdentificationPropertyKey = 'tags';
+  settings.templateIdentificationPropertyValue = 'template';
+  settings.templateIdentificationPropertyMatch = 'equals';
+  assert.equal(await service.canAutomaticallyMutate(plugin.byPath.get('Protected.md')), false, 'permission remains exclusion-driven in Property mode');
+  settings.frontmatterAutoWriteExclusions = '';
+  assert.equal(await service.canAutomaticallyMutate(plugin.byPath.get('Protected.md')), true);
+
+  settings.templateIdentificationMode = 'tag';
   assert.equal(
     service.prepareInstanceSource('---\ntags: [template, keep]\n---\n#template\n'),
     '---\ntags: [ keep]\n---\n#template\n',

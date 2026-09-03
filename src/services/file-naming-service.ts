@@ -833,7 +833,7 @@ export class FileNamingService {
             return;
         }
         if (!(await this.canAutomaticallyMutateTemplateSource(liveFile))) {
-            logger.debug(`[FILE-DRAG] Template source protection active, skipping`);
+            logger.debug(`[FILE-DRAG] Global auto-write exclusion matched or could not be verified, skipping`);
             return;
         }
         if (this.shouldSkipAutoFrontmatterWrite(liveFile)) {
@@ -1007,9 +1007,6 @@ export class FileNamingService {
             if (await this.isDailyNoteFile(liveFile)) return "skipped";
             if (await this.plugin.bulkEditService.shouldSkipNoteLevelRecurrence(liveFile, scheduled)) return "skipped";
 
-            // Avoid writing clearly-stale template-derived titles
-            if (rawBasename.toLowerCase().includes('template')) return "skipped";
-
             const scheduledDate = scheduled ? window.moment(scheduled) : null;
             let nextTitle = scheduledDate?.isValid?.()
                 ? this.stripKnownDateMarker(rawBasename, scheduledDate)
@@ -1043,7 +1040,7 @@ export class FileNamingService {
                 ?? this.getFrontmatterStringValueCaseInsensitive(fm, 'title')
             ).trim();
             if (!currentTitle && await this.isBlankGeneratedUntitledNote(liveFile, rawBasename)) return "skipped";
-            const templateDerivedTitle = this.isTemplateDerivedTitle(currentTitle, rawBasename);
+            const templateDerivedTitle = this.isTemplateDerivedTitle(currentTitle);
             if (options.onlyIfMissing && currentTitle && !templateDerivedTitle) {
                 return "skipped";
             }
@@ -1123,12 +1120,6 @@ export class FileNamingService {
 
         const title = String(rawTitle ?? '');
         if (!title.trim()) return;
-
-        // Skip if title looks like a template name (stale cache data)
-        // This prevents renaming newly created files with the template's title
-        if (title.toLowerCase().includes('template')) {
-            return;
-        }
 
         // Daily Note filename ownership is granted only by the unified strict
         // classifier, including its non-Daily kind vetoes.
@@ -1549,7 +1540,7 @@ export class FileNamingService {
         return (hash >>> 0).toString(36);
     }
 
-    private isTemplateDerivedTitle(currentTitle: string, basename: string): boolean {
+    private isTemplateDerivedTitle(currentTitle: string): boolean {
         const title = String(currentTitle || '').trim();
         if (!title) return true;
 
@@ -1558,11 +1549,6 @@ export class FileNamingService {
         }
 
         const normalizedTitle = this.normalizeBasenameForCompare(title);
-        const normalizedBasename = this.normalizeBasenameForCompare(basename);
-        if (normalizedTitle.includes('template') && !normalizedBasename.includes('template')) {
-            return true;
-        }
-
         if (normalizedTitle === 'untitled' || normalizedTitle === 'new note') {
             return true;
         }

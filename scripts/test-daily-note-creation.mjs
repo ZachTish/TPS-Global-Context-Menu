@@ -3051,6 +3051,7 @@ test('generic title synchronization checks workflow ownership only at a real mut
       settings: {
         autoSyncTitleFromFilename: true,
         enableAutoRename: true,
+        frontmatterAutoWriteExclusions: '',
         folderExclusions: '',
         dailyNoteDateFormat: 'YYYY-MM-DD',
       },
@@ -3173,17 +3174,26 @@ test('generic title synchronization checks workflow ownership only at a real mut
     assert.equal(file.path, 'Inbox/Ordinary new name.md');
 
     refreshFileIdentity('Inbox/Blueprint old name.md');
-    source = '---\ntitle: Blueprint new name\ntags: [template]\nkind: note\n---\n';
-    cachedFrontmatter = { title: 'Blueprint new name', kind: 'note' };
+    source = '---\ntitle: Blueprint Template new name\ntags: [template]\nkind: note\n---\n';
+    cachedFrontmatter = { title: 'Blueprint Template new name', kind: 'note' };
     await service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
-    assert.equal(renamed, 1, 'current source bytes protect a template even when metadata cache is stale');
-    assert.equal(file.path, 'Inbox/Blueprint old name.md');
+    assert.equal(renamed, 2, 'neither template identity nor the English word template is an implicit filename exclusion');
+    assert.equal(file.path, 'Inbox/Blueprint Template new name.md');
 
     const templateTitleMutations = titleMutations;
+    refreshFileIdentity('Inbox/Ordinary Template Draft.md');
     source = '---\ntitle: Stale title\ntags: [template]\nkind: note\n---\n';
     cachedFrontmatter = { title: 'Stale title', kind: 'note' };
     await service.syncTitleFromFilename(file, { force: true, bypassCreationGrace: true });
-    assert.equal(titleMutations, templateTitleMutations, 'filename-derived title repair also protects template sources');
+    assert.ok(titleMutations > templateTitleMutations, 'a basename containing template can still drive title synchronization');
+
+    plugin.settings.frontmatterAutoWriteExclusions = 'tag:template';
+    refreshFileIdentity('Inbox/Explicitly excluded old name.md');
+    source = '---\ntitle: Explicitly excluded new name\ntags: [template]\nkind: note\n---\n';
+    cachedFrontmatter = { title: 'Explicitly excluded new name', kind: 'note' };
+    await service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
+    assert.equal(renamed, 2, 'an explicit exact tag exclusion blocks the automatic rename');
+    assert.equal(file.path, 'Inbox/Explicitly excluded old name.md');
   } finally {
     globalThis.window = priorWindow;
   }

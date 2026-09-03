@@ -798,11 +798,11 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 scheduleCreatedFileAutomation(file);
                 return;
             }
-            // Gate the ordinary post-create writers behind the one safe
-            // template-instance exception. A configured Daily Note may be
+            // Gate the ordinary post-create writers behind template-instance
+            // identity cleanup. A configured Daily Note may be
             // created empty and filled by Core/Periodic Notes or Templater a
             // moment later; running automatic writers first would race those
-            // bytes or leave the inherited protection marker in place forever.
+            // bytes or leave the inherited identity marker in place forever.
             dailyNoteTemplateInstanceCleanup.schedule(file, (result) => {
                 const liveFile = result.file;
                 if (!(liveFile instanceof TFile)) return;

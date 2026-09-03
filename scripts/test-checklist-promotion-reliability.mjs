@@ -254,6 +254,7 @@ function createChildWorkflowLinkHarness(SubitemRelationshipSyncService, TFile, o
       linkedSubitemCheckboxMappings: options.mappings ?? standardMappings(),
       linkedSubitemDefaultOpenState: options.defaultOpenState ?? '[ ]',
       templateIdentificationTag: 'template',
+      frontmatterAutoWriteExclusions: options.frontmatterAutoWriteExclusions ?? '',
     },
     sharedServices: {
       status: {
@@ -264,6 +265,9 @@ function createChildWorkflowLinkHarness(SubitemRelationshipSyncService, TFile, o
       },
     },
     app: {
+      vault: {
+        read: async (file) => file === parentFile ? parentContent : '',
+      },
       metadataCache: {
         getFileCache: () => ({ frontmatter: childFrontmatter }),
         fileToLinktext: (file) => file.path.replace(/\.md$/u, ''),
@@ -456,7 +460,7 @@ test('child workflow body links abort without a write when mapping authority cha
   assert.deepEqual(harness.counts, { mutations: 1, writes: 0 });
 });
 
-test('derived body links recheck live template protection at the body mutation boundary', async () => {
+test('derived body links recheck explicit tag exclusions at the body mutation boundary', async () => {
   const { SubitemRelationshipSyncService, TFile } = await servicesPromise;
 
   for (const currentParentSource of [
@@ -466,6 +470,7 @@ test('derived body links recheck live template protection at the body mutation b
     const harness = createChildWorkflowLinkHarness(SubitemRelationshipSyncService, TFile, {
       frontmatter: { status: 'todo' },
       parentContent: '',
+      frontmatterAutoWriteExclusions: 'tag:template',
       beforeMutation: ({ setParentContent }) => {
         setParentContent(currentParentSource);
       },
@@ -481,6 +486,23 @@ test('derived body links recheck live template protection at the body mutation b
     assert.equal(harness.getParentContent(), currentParentSource);
     assert.deepEqual(harness.counts, { mutations: 1, writes: 0 });
   }
+});
+
+test('derived body links honor path-based Global auto-write exclusions before mutation', async () => {
+  const { SubitemRelationshipSyncService, TFile } = await servicesPromise;
+  const harness = createChildWorkflowLinkHarness(SubitemRelationshipSyncService, TFile, {
+    frontmatter: { status: 'todo' },
+    frontmatterAutoWriteExclusions: 'path:Parent.md',
+  });
+
+  const result = await harness.service.insertBodyLinkForChildWorkflow(
+    harness.parentFile,
+    harness.childFile,
+  );
+
+  assert.equal(result.changed, false);
+  assert.equal(result.blockedReason, null);
+  assert.deepEqual(harness.counts, { mutations: 0, writes: 0 });
 });
 
 test('configured-open statusless links reject a fallback row with an authoritative done status', async () => {

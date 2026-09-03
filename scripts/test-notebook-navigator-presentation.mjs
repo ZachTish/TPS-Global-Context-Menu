@@ -96,16 +96,19 @@ function makeFixture() {
   const parent = makeFile('Notes/Parent.md');
   const child = makeFile('Notes/Child.md');
   const unrelated = makeFile('Notes/Unrelated.md');
-  const files = new Map([parent, child, unrelated].map((file) => [file.path, file]));
+  const asset = makeFile('Assets/Template.pdf');
+  const files = new Map([parent, child, unrelated, asset].map((file) => [file.path, file]));
   const frontmatter = new Map([
     [parent.path, { status: 'focus' }],
     [child.path, { parent: '[[Parent]]' }],
     [unrelated.path, {}],
+    [asset.path, { status: 'focus', tags: ['template'] }],
   ]);
   const bodies = new Map([
     [parent.path, 'Parent body'],
     [child.path, 'ordinary body'],
     [unrelated.path, 'Unrelated body'],
+    [asset.path, '%PDF-test'],
   ]);
   const reads = new Map();
   const deferredReads = new Map();
@@ -166,6 +169,7 @@ function makeFixture() {
       },
       async cachedRead(file) {
         reads.set(file.path, (reads.get(file.path) ?? 0) + 1);
+        if (file === asset) throw new Error('binary property targets must not be read as Markdown');
         const captured = bodies.get(file.path) ?? '';
         const deferred = deferredReads.get(file.path);
         if (deferred) {
@@ -205,8 +209,9 @@ function makeFixture() {
     canRunBackgroundAutomation: () => true,
     filePropertiesService: {
       isCompanionFile: () => false,
-      isPropertyTarget: () => false,
-      hasCompanion: () => false,
+      isPropertyTarget: (file) => file === asset,
+      hasCompanion: (file) => file === asset,
+      read: (file) => frontmatter.get(file.path) ?? {},
     },
     parentLinkResolutionService: {
       getParentsForChild(file) {
@@ -238,6 +243,7 @@ function makeFixture() {
     parent,
     child,
     unrelated,
+    asset,
     frontmatter,
     bodies,
     reads,
@@ -368,6 +374,31 @@ test('presentation cache is read-only, collision-accurate, body-aware, and depen
   service.invalidateNotebookNavigatorPresentation();
   await Promise.resolve();
   assert.equal(revisions.length, revisionCount, 'onChanged must return a working unsubscribe');
+});
+
+test('presentation cache applies exact Rule tag exclusions to non-Markdown property targets', async (t) => {
+  const fixture = makeFixture();
+  fixture.settings.notebookNavigatorRules.rules = [{
+    ...visualRule(),
+    id: 'focused-property-target',
+    conditions: [{ source: 'frontmatter', field: 'status', operator: 'is', value: 'focus' }],
+  }];
+  fixture.settings.notebookNavigatorRules.smartSort.enabled = false;
+  const service = new NotebookNavigatorRuleService(fixture.plugin);
+  service.setupPresentationProjection();
+  t.after(() => service.dispose());
+
+  await service.ensureNotebookNavigatorPresentation([fixture.asset]);
+  assert.deepEqual(service.getNotebookNavigatorPresentation(fixture.asset), {
+    filePath: fixture.asset.path,
+    values: { icon: 'alert-triangle', color: '#ff0000' },
+  });
+  assert.equal(fixture.reads.get(fixture.asset.path) ?? 0, 0);
+
+  fixture.settings.notebookNavigatorRules.frontmatterWriteExclusions = 'tag:template';
+  service.invalidateNotebookNavigatorPresentation();
+  await service.ensureNotebookNavigatorPresentation([fixture.asset]);
+  assert.equal(service.getNotebookNavigatorPresentation(fixture.asset), null);
 });
 
 test('plugin wires the exact top-level notebookNavigatorPresentation v1 contract and lifecycle', () => {

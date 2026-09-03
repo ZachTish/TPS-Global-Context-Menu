@@ -264,7 +264,7 @@ export class BulkEditService {
 
     private async createNextDailyNoteRecurrenceInstance(file: TFile, frontmatter: any, nextDate: Date, recurrenceRule: string): Promise<boolean> {
         if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) {
-            logger.warn('[TPS GCM] Skipping automatic Daily Note recurrence for a protected or unsafe source:', file.path);
+            logger.warn('[TPS GCM] Skipping automatic Daily Note recurrence for an excluded or unverifiable source:', file.path);
             return false;
         }
         const newFilePath = await this.getDailyNotePath(nextDate);
@@ -299,7 +299,7 @@ export class BulkEditService {
             : await this.buildDailyNoteContent(nextDate, newFilePath);
         if (!(existingDailyNote instanceof TFile) && content === null) return false;
         if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) {
-            logger.warn('[TPS GCM] Daily Note recurrence source became protected before generation:', file.path);
+            logger.warn('[TPS GCM] Daily Note recurrence source became excluded or unverifiable before generation:', file.path);
             return false;
         }
         const chainId = "daily-notes";
@@ -418,7 +418,7 @@ export class BulkEditService {
     private sanitizeRecurrenceInstanceSource(source: string, file: TFile, context: string): string | null {
         const sourceState = inspectTemplateProtectionSource(source, this.plugin.settings);
         if (sourceState === 'unsafe') {
-            logger.warn(`[TPS GCM] Skipping ${context}: source template protection could not be verified`, {
+            logger.warn(`[TPS GCM] Skipping ${context}: source template identity could not be verified`, {
                 file: file.path,
             });
             return null;
@@ -2016,7 +2016,7 @@ export class BulkEditService {
     async createNextRecurrenceInstance(file: TFile, frontmatter: any, carryStatus?: string | null): Promise<boolean> {
         if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
         if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) {
-            logger.warn('[TPS GCM] Skipping automatic recurrence creation for a protected or unsafe source:', file.path);
+            logger.warn('[TPS GCM] Skipping automatic recurrence creation for an excluded or unverifiable source:', file.path);
             return false;
         }
         if (this.recurrenceCreationInProgress.has(file.path)) {
@@ -2086,10 +2086,10 @@ export class BulkEditService {
 
             // Capture and sanitize the clone bytes before acquiring the durable
             // generation lock. Unsafe YAML fails closed without creating either a
-            // note or recurrence operation state, while a protected series template
-            // remains read-only and contributes an untagged instance body.
+            // note or recurrence operation state, while a series template remains
+            // read-only and contributes an untagged instance body.
             if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) {
-                logger.warn('[TPS GCM] Recurrence source became protected before instance creation:', file.path);
+                logger.warn('[TPS GCM] Recurrence source became excluded or unverifiable before instance creation:', file.path);
                 return false;
             }
             const content = await this.readRecurrenceInstanceSource(
@@ -2370,9 +2370,10 @@ export class BulkEditService {
 
                 if (!fm) continue;
 
-                // Classify the current on-disk bytes before any helper that may
-                // normalize or write frontmatter. Startup healing is automatic:
-                // protected notes are immutable and ambiguous YAML fails closed.
+                // Classify template identity from current bytes for the narrow
+                // recurrence-blueprint bootstrap path. Identity alone does not
+                // grant automatic-write protection; those mutation boundaries
+                // use the explicit Global auto-write exclusions below.
                 let templateProtectionState: ReturnType<typeof inspectTemplateProtectionSource>;
                 try {
                     const source = await this.plugin.app.vault.read(file);
@@ -2384,6 +2385,12 @@ export class BulkEditService {
                     });
                     continue;
                 }
+                const recurrenceInfo = this.resolveRecurrenceInfo(file, fm);
+                if (!recurrenceInfo.rule) continue;
+
+                const isRecurrenceTemplateCandidate = this.isFileInRecurrenceTemplateFolder(file)
+                    && (this.isRecurrenceTemplateFrontmatter(fm) || !fm.scheduled);
+
                 if (templateProtectionState === 'unsafe') {
                     logger.warn('[TPS GCM] Skipping startup recurrence check for unsafe frontmatter', {
                         file: file.path,
@@ -2391,20 +2398,12 @@ export class BulkEditService {
                     continue;
                 }
 
-                const recurrenceInfo = this.resolveRecurrenceInfo(file, fm);
-                if (!recurrenceInfo.rule) continue;
-
-                const isRecurrenceTemplateCandidate = this.isFileInRecurrenceTemplateFolder(file)
-                    && (this.isRecurrenceTemplateFrontmatter(fm) || !fm.scheduled);
-
-                if (templateProtectionState === 'protected') {
-                    // A protected recurrence blueprint may be read solely to
-                    // bootstrap its first instance. Every other startup branch,
-                    // including create-next, relink, and generation-state writes,
-                    // must leave the source completely untouched.
+                if (isRecurrenceTemplateCandidate && templateProtectionState === 'protected') {
+                    // An identified recurrence blueprint may be read solely to
+                    // bootstrap its first instance. This is template selection,
+                    // not an implicit prohibition on unrelated note mutations.
                     if (
-                        isRecurrenceTemplateCandidate
-                        && !(await this.isConfiguredDailyNoteTemplate(file))
+                        !(await this.isConfiguredDailyNoteTemplate(file))
                         && !(await this.shouldSkipNoteLevelRecurrence(file, fm.scheduled))
                     ) {
                         const bootstrapped = await this.bootstrapTemplateInstanceFromToday(file, fm);

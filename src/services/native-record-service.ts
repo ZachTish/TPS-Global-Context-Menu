@@ -21,7 +21,11 @@ import {
 import { parseStringListInput } from '../utils/list-utils';
 import { joinContent, splitContent } from '../utils/task-block-move';
 import { parseTaskLine, readInlineFieldValue } from '../utils/task-line-metadata';
-import { canAutomaticallyMutateTemplateSource } from '../utils/template-protection';
+import {
+  canAutomaticallyMutatePathWithExclusions,
+  canAutomaticallyMutateTemplateFile,
+  canAutomaticallyMutateTemplateSource,
+} from '../utils/template-protection';
 
 export const TPS_NATIVE_RECORD_SCHEMA_VERSION = 1;
 export const DEFAULT_NATIVE_RECORD_ROOT = '_records';
@@ -71,7 +75,8 @@ export type TpsNativeRecordKind =
   | 'workout-plan'
   | 'workflow'
   | 'time-entry'
-  | 'asset';
+  | 'asset'
+  | (string & {});
 
 export interface TpsNativeRecordEnvelope extends Record<string, unknown> {
   tpsId: string;
@@ -188,7 +193,7 @@ interface ParsedNativeRecordDocument {
   frontmatter: Record<string, unknown>;
 }
 
-const RECORD_FOLDER_BY_KIND: Record<TpsNativeRecordKind, string> = {
+const RECORD_FOLDER_BY_KIND: Record<string, string> = {
   task: 'tasks',
   'calendar-event': 'calendar-events',
   'food-entry': 'food-entries',
@@ -203,6 +208,19 @@ const RECORD_FOLDER_BY_KIND: Record<TpsNativeRecordKind, string> = {
   'time-entry': 'time-entries',
   asset: 'assets',
 };
+
+export function isValidNativeRecordKind(value: unknown): value is TpsNativeRecordKind {
+  return typeof value === 'string'
+    && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(value);
+}
+
+function nativeRecordFolder(kind: TpsNativeRecordKind): string {
+  if (!isValidNativeRecordKind(kind)) throw new Error(`Unsupported TPS native record kind: ${String(kind)}`);
+  const normalized = kind;
+  return Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, normalized)
+    ? RECORD_FOLDER_BY_KIND[normalized]
+    : `${normalized}-records`;
+}
 
 const CANONICAL_ENVELOPE_KEYS = new Set([
   'tpsid',
@@ -434,7 +452,7 @@ function parseLegacyIdentityTagEvidence(
   if (slash < 1 || slash === remainder.length - 1 || remainder.indexOf('/', slash + 1) >= 0) return null;
   const kind = remainder.slice(0, slash);
   const encodedId = remainder.slice(slash + 1);
-  if (!Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, kind)) return null;
+  if (!isValidNativeRecordKind(kind)) return null;
   if (!/^[A-Za-z0-9_-]+$/u.test(encodedId) && !/^hex-(?:[0-9a-f]{2})+$/iu.test(encodedId)) return null;
   const decodedId = encodedId.startsWith('hex-') ? decodeIdentityTagSegment(encodedId) : '';
   const seen = new Set<string>();
@@ -539,7 +557,7 @@ function inspectWithProfile(
     if (kind && authoredKind && kind !== authoredKind) return null;
     kind = kind || authoredKind;
   }
-  if (!Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, kind)) return null;
+  if (!isValidNativeRecordKind(kind)) return null;
   const title = stringifyReadableStorageValue(
     readValueCaseInsensitive(raw, profile.titlePropertyKey),
   ).trim();
@@ -925,7 +943,7 @@ export function buildNativeRecordPath(
   if (!safeId) throw new Error('Native record ID cannot be represented as a filename.');
   const normalizedRoot = normalizeNativeRecordRoot(root);
   const segments = [normalizedRoot];
-  if (normalizeNativeRecordLayout(layout) === 'kind-folders') segments.push(RECORD_FOLDER_BY_KIND[kind]);
+  if (normalizeNativeRecordLayout(layout) === 'kind-folders') segments.push(nativeRecordFolder(kind));
   segments.push(`${safeId}.md`);
   return normalizePath(segments.filter(Boolean).join('/'));
 }
@@ -1006,7 +1024,7 @@ export function isNativeRecordEnvelope(value: unknown): value is TpsNativeRecord
     && typeof record.tpsId === 'string'
     && record.tpsId.trim().length > 0
     && typeof record.kind === 'string'
-    && Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, record.kind)
+    && isValidNativeRecordKind(record.kind)
     && typeof record.title === 'string'
     && typeof record.createdDate === 'string'
     && typeof record.modifiedDate === 'string';
@@ -1215,7 +1233,7 @@ export class NativeRecordService {
     if (commitGuard && !commitGuard()) {
       throw new Error('Standalone task checkbox mapping changed before record creation.');
     }
-    if (!Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, kind)) {
+    if (!isValidNativeRecordKind(kind)) {
       throw new Error(`Unsupported TPS native record kind: ${String(kind)}`);
     }
     const now = options.now instanceof Date ? options.now : new Date();
@@ -1639,7 +1657,7 @@ export class NativeRecordService {
     if (validateNativeRecordStorageProfile(this.getStorageProfile()).length > 0) {
       return { token: this.identitySourceGeneration, revision: this.nativeMutationRevision, records: [] };
     }
-    if (kind != null && !Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, kind)) {
+    if (kind != null && !isValidNativeRecordKind(kind)) {
       return { token: this.identitySourceGeneration, revision: this.nativeMutationRevision, records: [] };
     }
     let snapshotRevision = this.nativeMutationRevision;
@@ -1692,7 +1710,7 @@ export class NativeRecordService {
       plannedDestinations.add(destinationKey);
       if (operation === 'create') {
         if (
-          !Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, entry.kind)
+          !isValidNativeRecordKind(entry.kind)
           || !entry.properties
           || typeof entry.properties !== 'object'
           || Array.isArray(entry.properties)
@@ -2740,7 +2758,7 @@ export class NativeRecordService {
     if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
       throw new Error('TPS native record properties must be an object.');
     }
-    if (!Object.prototype.hasOwnProperty.call(RECORD_FOLDER_BY_KIND, kind)) {
+    if (!isValidNativeRecordKind(kind)) {
       throw new Error(`Unsupported TPS native record kind: ${String(kind)}`);
     }
     const title = String(properties.title || '').replace(/\s+/gu, ' ').trim();
@@ -2829,6 +2847,11 @@ export class NativeRecordService {
     if (!this.isEnabled() || !this.newlyCreatedFiles.has(file)) return;
     if (file.extension.toLocaleLowerCase() !== 'md') return;
     if (this.plugin.app.vault.getFileByPath(file.path) !== file) return;
+    if (!(await canAutomaticallyMutateTemplateFile(
+      this.plugin.app.vault,
+      file,
+      this.plugin.settings,
+    ))) return;
 
     const originalPath = file.path;
     const originalContent = await this.plugin.app.vault.cachedRead(file);
@@ -2854,6 +2877,7 @@ export class NativeRecordService {
     await this.withInternalIdentityWrite([originalPath, canonicalPath], async () => {
       await this.plugin.app.vault.process(file, (content) => {
         if (content !== originalContent) return content;
+        if (!canAutomaticallyMutatePathWithExclusions(file, this.plugin.settings)) return content;
         if (!canAutomaticallyMutateTemplateSource(content, this.plugin.settings)) return content;
         const parsed = parseNativeRecordDocument(content);
         if (!parsed || parsed.body.trim().length > 0) return content;
@@ -3285,7 +3309,7 @@ export class NativeRecordService {
   }
 
   private generateId(kind: TpsNativeRecordKind): string {
-    const prefix = RECORD_FOLDER_BY_KIND[kind].replace(/-entries$|-sessions$|-exercises$|s$/gu, '');
+    const prefix = nativeRecordFolder(kind).replace(/-records$|-entries$|-sessions$|-exercises$|s$/gu, '');
     const uuid = typeof globalThis.crypto?.randomUUID === 'function'
       ? globalThis.crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;

@@ -178,6 +178,7 @@ const {
   TFolder,
   TPS_NATIVE_RECORD_SCHEMA_VERSION,
   buildNativeRecordPath,
+  isValidNativeRecordKind,
   isNativeRecordEnvelope,
   normalizeNativeRecordRoot,
   parseNativeRecordDocument,
@@ -290,6 +291,7 @@ function createHarness(mode = 'native-records', options = {}) {
       nativeRecordCreatedPropertyKey: options.createdPropertyKey,
       nativeRecordModifiedPropertyKey: options.modifiedPropertyKey,
       nativeRecordStorageAliases: options.storageAliases || [],
+      frontmatterAutoWriteExclusions: options.frontmatterAutoWriteExclusions || '',
     },
     manifest: { id: 'tps-global-context-menu' },
     registerEvent: () => {},
@@ -336,6 +338,15 @@ test('native record envelope and path helpers are deterministic', () => {
   assert.equal(buildNativeRecordPath('_records', 'calendar-event', 'event:one'), '_records/calendar-events/event-one.md');
   assert.equal(buildNativeRecordPath('/', 'calendar-event', 'event:one', 'flat-root'), 'event-one.md');
   assert.equal(buildNativeRecordPath('/', 'calendar-event', 'event:one', 'flat-root', '2026-08-25 - Standup.md'), '2026-08-25 - Standup.md');
+  assert.equal(buildNativeRecordPath('_records', 'nutrition-log', 'nutrition:one'), '_records/nutrition-log-records/nutrition-one.md');
+  assert.equal(buildNativeRecordPath('_records', 'constructor', 'constructor:one'), '_records/constructor-records/constructor-one.md');
+  assert.throws(() => buildNativeRecordPath('_records', true, 'boolean:one'), /Unsupported TPS native record kind/u);
+  assert.equal(isValidNativeRecordKind('nutrition-log'), true);
+  assert.equal(isValidNativeRecordKind('Nutrition log'), false);
+  assert.equal(isValidNativeRecordKind(' nutrition-log'), false);
+  assert.equal(isValidNativeRecordKind('nutrition-log '), false);
+  assert.equal(isValidNativeRecordKind(true), false);
+  assert.equal(isValidNativeRecordKind(null), false);
   const envelope = {
     tpsId: 'task-1',
     tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
@@ -351,6 +362,30 @@ test('native record envelope and path helpers are deterministic', () => {
   assert.equal(parsed?.newline, '\r\n');
   assert.equal(parsed?.closer, '...');
   assert.equal(parsed?.body, 'notes');
+});
+
+test('custom native record kinds retain the same atomic envelope contract', async () => {
+  const { service } = createHarness();
+  await assert.rejects(
+    () => service.create(' nutrition-log', { title: 'Invalid' }, { id: 'invalid-kind' }),
+    /Unsupported TPS native record kind/u,
+  );
+  await assert.rejects(
+    () => service.create('nutrition-log ', { title: 'Invalid' }, { id: 'invalid-kind' }),
+    /Unsupported TPS native record kind/u,
+  );
+  const created = await service.create('nutrition-log', { title: 'Lunch' }, { id: 'nutrition-log-one' });
+  assert.equal(created.kind, 'nutrition-log');
+  assert.equal(created.path, '_records/nutrition-log-records/nutrition-log-one.md');
+  assert.equal(service.inspect(created.frontmatter)?.kind, 'nutrition-log');
+  assert.equal((await service.resolve(created.id))?.kind, 'nutrition-log');
+  assert.deepEqual((await service.list('nutrition-log')).map((record) => record.id), [created.id]);
+  const updated = await service.update(created.id, { calories: 640 });
+  assert.equal(updated?.frontmatter.calories, 640);
+  const renamed = await service.rename(created.id, 'Lunch log');
+  assert.equal(renamed?.path, '_records/nutrition-log-records/Lunch log.md');
+  const archived = await service.archive(created.id);
+  assert.equal(archived?.frontmatter.archived, true);
 });
 
 test('frontmatter fences must be column-zero and indented scalar markers survive consolidation', async () => {
@@ -3036,6 +3071,43 @@ test('native draft adoption never absorbs existing, non-task, enveloped, or body
   }
 });
 
+test('native draft adoption honors explicit Global path and tag exclusions', async () => {
+  for (const fixture of [
+    {
+      exclusions: 'path:Excluded/',
+      path: 'Excluded/Path draft.md',
+      tags: ['keep'],
+    },
+    {
+      exclusions: 'tag:template',
+      path: 'Tagged draft.md',
+      tags: ['template', 'keep'],
+    },
+  ]) {
+    const { vault, contents } = createHarness('native-records', {
+      frontmatterAutoWriteExclusions: fixture.exclusions,
+    });
+    const draft = await vault.create(fixture.path, serializeNativeRecordDocument({
+      bom: '',
+      newline: '\n',
+      closer: '---',
+      body: '',
+      frontmatter: {
+        kind: 'task',
+        title: 'Excluded draft',
+        tags: fixture.tags,
+      },
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(draft.path, fixture.path);
+    const parsed = parseNativeRecordDocument(contents.get(draft));
+    assert.equal(Object.hasOwn(parsed?.frontmatter || {}, 'tpsId'), false);
+    assert.deepEqual(parsed?.frontmatter.tags, fixture.tags);
+  }
+});
+
 test('native record identity remains resolvable after a user or plugin rename', async () => {
   const { service, vault, entries } = createHarness();
   const created = await service.create('calendar-event', {
@@ -3358,6 +3430,7 @@ test('native profile is explicit, default-off, and removes legacy active paths o
 });
 
 test('public GCM API exposes versioned generic and task record contracts', () => {
+  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true \}\)/u);
   assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
   assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 6;/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);

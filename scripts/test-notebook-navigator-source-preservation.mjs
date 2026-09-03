@@ -173,6 +173,7 @@ function makeFixture(initialContent = pocRecord) {
       properties: [],
       enableActivityLog: false,
       enableAutoRename: false,
+      frontmatterAutoWriteExclusions: '',
       notebookNavigatorRules: {
         enabled: true,
         frontmatterWriteExclusions: '',
@@ -342,7 +343,7 @@ test('native architecture retains blank-title cleanup and hide-tag automation fo
   assert.match(output, /^producerTimestamp: 2026-08-25T18:12:13\.456Z\r$/mu);
 });
 
-test('automatic Notebook Navigator semantic writes preserve tagged template sources while explicit apply remains available', async () => {
+test('Global tag exclusions block automatic Navigator writes while explicit apply remains available', async () => {
   const source = [
     '---\n',
     'title: Tagged Template\n',
@@ -358,6 +359,7 @@ test('automatic Notebook Navigator semantic writes preserve tagged template sour
     basename: 'Tagged Template',
   });
   fixture.plugin.settings.templateIdentificationTag = 'template';
+  fixture.plugin.settings.frontmatterAutoWriteExclusions = 'tag:template';
   fixture.plugin.settings.notebookNavigatorRules.hideRules = [{
     id: 'hide-tagged-template',
     name: 'Hide tagged template',
@@ -396,6 +398,104 @@ test('automatic Notebook Navigator semantic writes preserve tagged template sour
   assert.equal(mutationCalls, 1);
   assert.match(fixture.getContent(), /^  - template$/mu);
   assert.match(fixture.getContent(), /^  - hidden$/mu);
+});
+
+test('Global tag exclusions inspect non-Markdown companion properties without reading binary bytes', async () => {
+  const fixture = makeFixture('binary-payload-that-must-not-be-read');
+  Object.assign(fixture.file, {
+    path: 'Documents/Tagged Template.pdf',
+    name: 'Tagged Template.pdf',
+    basename: 'Tagged Template',
+    extension: 'pdf',
+  });
+  let logicalFrontmatter = {
+    title: 'Tagged Template',
+    tags: ['keep', 'template'],
+  };
+  let binaryReadCalls = 0;
+  let companionMutationCalls = 0;
+  fixture.plugin.app.vault.read = async () => {
+    binaryReadCalls += 1;
+    throw new Error('binary source must not be read as Markdown');
+  };
+  fixture.plugin.app.vault.cachedRead = fixture.plugin.app.vault.read;
+  fixture.plugin.filePropertiesService = {
+    isCompanionFile: () => false,
+    isPropertyTarget: (file) => file === fixture.file,
+    hasCompanion: (file) => file === fixture.file,
+    read: (file) => file === fixture.file ? logicalFrontmatter : null,
+    process: async (file, mutator) => {
+      if (file !== fixture.file) return false;
+      companionMutationCalls += 1;
+      const next = structuredClone(logicalFrontmatter);
+      mutator(next);
+      const changed = JSON.stringify(next) !== JSON.stringify(logicalFrontmatter);
+      logicalFrontmatter = next;
+      return changed;
+    },
+  };
+  fixture.plugin.settings.frontmatterAutoWriteExclusions = 'tag:template';
+  fixture.plugin.settings.notebookNavigatorRules.hideRules = [{
+    id: 'hide-tagged-pdf',
+    name: 'Hide tagged PDF',
+    enabled: true,
+    tagName: 'hidden',
+    mode: 'add',
+    match: 'all',
+    conditions: [{ source: 'tag', field: '', operator: 'contains', value: 'keep' }],
+  }];
+
+  const changed = await new NotebookNavigatorRuleService(fixture.plugin).applyRulesToFile(fixture.file, {
+    reason: 'create',
+    force: true,
+    bypassCreationGrace: true,
+  });
+
+  assert.equal(changed, false);
+  assert.equal(binaryReadCalls, 0);
+  assert.equal(companionMutationCalls, 0);
+  assert.deepEqual(logicalFrontmatter.tags, ['keep', 'template']);
+});
+
+test('Rule tag exclusions use exact current YAML tags for automatic and deliberate rule applies', async () => {
+  const source = [
+    '---\n',
+    'title: Template word is ordinary\n',
+    'tags: [keep, template]\n',
+    '---\n',
+  ].join('');
+  const fixture = makeFixture(source);
+  fixture.plugin.settings.templateIdentificationMode = 'tag';
+  fixture.plugin.settings.templateIdentificationTag = 'template';
+  fixture.plugin.settings.notebookNavigatorRules.frontmatterWriteExclusions = '#template';
+  fixture.plugin.settings.notebookNavigatorRules.hideRules = [{
+    id: 'hide-tagged-note',
+    name: 'Hide tagged note',
+    enabled: true,
+    tagName: 'hidden',
+    mode: 'add',
+    match: 'all',
+    conditions: [{ source: 'tag', field: '', operator: 'contains', value: 'keep' }],
+  }];
+
+  for (const reason of ['create', 'gcm-manual-active']) {
+    const changed = await new NotebookNavigatorRuleService(fixture.plugin).applyRulesToFile(fixture.file, {
+      reason,
+      force: true,
+      bypassCreationGrace: true,
+    });
+    assert.equal(changed, false);
+    assert.equal(fixture.getContent(), source);
+  }
+
+  fixture.plugin.settings.notebookNavigatorRules.frontmatterWriteExclusions = 'tag:template/example';
+  const exactNonMatch = await new NotebookNavigatorRuleService(fixture.plugin).applyRulesToFile(fixture.file, {
+    reason: 'create',
+    force: true,
+    bypassCreationGrace: true,
+  });
+  assert.equal(exactNonMatch, true, 'a namespaced tag exclusion does not match its parent tag');
+  assert.match(fixture.getContent(), /hidden/u);
 });
 
 test('native architecture protects proven native-record title and tags from Notebook Navigator automation', async () => {

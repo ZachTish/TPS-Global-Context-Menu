@@ -1130,6 +1130,11 @@ test('settings use shallow routed pages with responsive, accessible selectors', 
   assert.match(frontmatterSource, /if \(this\.activeFrontmatterEditor === 'sort'\)/);
   assert.equal((frontmatterSource.match(/this\.createTrackedSection\(/g) || []).length, 1);
   assert.match(frontmatterSource, /'Automation and safeguards'/);
+  assert.match(frontmatterSource, /setName\('Excluded tags'\)/);
+  assert.match(frontmatterSource, /new TagSuggestModal\(this\.app/);
+  assert.match(frontmatterSource, /collectKnownVaultTags\(this\.app\)/);
+  assert.match(frontmatterSource, /updateAutomaticMutationTagExclusion\(/);
+  assert.match(frontmatterSource, /selectedTags: excludedTags/);
 
   for (const workflow of ['home-daily', 'tasks', 'child-notes', 'recurrence', 'time-tracking']) {
     assert.match(settingsTabSource, new RegExp(`id: '${workflow}', label:`));
