@@ -4,7 +4,8 @@ import * as logger from '../logger';
 import { casefold, deleteValueCaseInsensitive, findKeyCaseInsensitive, setValueCaseInsensitive } from '../core';
 import { getCompatibleMarkdownViewFromLeaf, getViewMode, pickBestMarkdownLeaf } from './leaf-resolver';
 import { normalizeTagList } from '../utils/tag-utils';
-import { normalizeCompletedDateValue } from '../utils/completed-date-utils';
+import { currentCompletedDateStamp, normalizeCompletedDateValue } from '../utils/completed-date-utils';
+import { normalizeObsidianDateTimeValue } from '../utils/obsidian-date-time';
 import type { FilePropertiesMutationCause } from './file-properties-service';
 
 type FrontmatterRecord = Record<string, unknown>;
@@ -83,7 +84,7 @@ export class FrontmatterMutationService {
       const before = stringifyYaml(this.sortFrontmatter(frontmatter)).trimEnd();
       await mutator(frontmatter);
       this.normalizeTagValues(frontmatter);
-      this.normalizeDateTimeValues(frontmatter);
+      this.normalizeDateTimeValues(frontmatter, originalFrontmatter);
       this.removeEmptyValuesChangedByMutation(frontmatter, originalFrontmatter);
       this.appendActivityEntryIfNeeded(frontmatter, originalFrontmatter);
       const mutatedTitle = readFrontmatterString(frontmatter, 'title').trim();
@@ -1209,7 +1210,7 @@ export class FrontmatterMutationService {
     return value === undefined || value === null || (Array.isArray(value) && value.length === 0);
   }
 
-  private normalizeDateTimeValues(frontmatter: FrontmatterRecord): void {
+  private normalizeDateTimeValues(frontmatter: FrontmatterRecord, originalFrontmatter: FrontmatterRecord): void {
     const configuredDateKeys = (this.plugin.settings.properties || [])
       .filter((property) => String(property?.type || '').toLowerCase() === 'datetime')
       .map((property) => String(property?.key || '').trim())
@@ -1218,6 +1219,9 @@ export class FrontmatterMutationService {
 
     for (const [key, value] of Object.entries(frontmatter)) {
       if (!dateKeys.has(casefold(key))) continue;
+      // An unrelated status/property edit does not own existing date fields.
+      if (Object.prototype.hasOwnProperty.call(originalFrontmatter, key)
+        && Object.is(value, originalFrontmatter[key])) continue;
       if (casefold(key) === 'completeddate') {
         const normalized = normalizeObsidianDateTimeValue(normalizeCompletedDateValue(value));
         if (normalized) {
@@ -1356,11 +1360,7 @@ export class FrontmatterMutationService {
   }
 
   private currentActivityTimestamp(): string {
-    const momentFactory = (window as any)?.moment;
-    if (typeof momentFactory === 'function') {
-      return momentFactory().format('YYYY-MM-DDTHH:mm:ss');
-    }
-    return new Date().toISOString().slice(0, 19);
+    return currentCompletedDateStamp();
   }
 
   private normalizeList(value: unknown): string[] {
@@ -1451,45 +1451,6 @@ export class FrontmatterMutationService {
     const detail = error instanceof Error ? error.message : error == null ? '' : String(error);
     logger.warn(`[TPS GCM] Skipping malformed frontmatter mutation for ${file.path} (${reason})${detail ? `: ${detail}` : ''}`);
   }
-}
-
-function normalizeObsidianDateTimeValue(value: unknown): string {
-  if (value instanceof Date && !Number.isNaN(value.getTime())) {
-    return formatLocalIsoDateTime(value);
-  }
-  const trimmed = String(value || '').trim();
-  if (!trimmed) return '';
-  if (/<%[\s\S]*%>/.test(trimmed) || /\{\{[\s\S]*\}\}/.test(trimmed)) return trimmed;
-
-  const dateOnly = trimmed.match(/^(\d{4}-\d{2}-\d{2})$/);
-  if (dateOnly) return `${dateOnly[1]} 00:00:00`;
-
-  const dateTime = trimmed.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/);
-  if (dateTime) {
-    return `${dateTime[1]} ${dateTime[2].padStart(2, '0')}:${dateTime[3]}:${dateTime[4] ?? '00'}`;
-  }
-
-  const momentFactory = (window as any)?.moment;
-  if (typeof momentFactory === 'function') {
-    const parsed = momentFactory(trimmed, [
-      'YYYY-MM-DDTHH:mm:ss',
-      'YYYY-MM-DDTHH:mm',
-      'YYYY-MM-DD HH:mm:ss',
-      'YYYY-MM-DD HH:mm',
-      'YYYY-MM-DD',
-      'ddd, MMM D YYYY h:mma',
-      'ddd, MMM D YYYY h.mm a',
-      'ddd, MMM D YYYY h.mmA',
-      'ddd, MMM D YYYY',
-      'MMM D, YYYY h:mma',
-      'MMM D, YYYY h:mm A',
-      'MMM D, YYYY',
-    ], true);
-    if (parsed?.isValid?.()) {
-      return parsed.format('YYYY-MM-DD HH:mm:ss');
-    }
-  }
-  return trimmed;
 }
 
 function formatLocalIsoDateTime(value: Date): string {

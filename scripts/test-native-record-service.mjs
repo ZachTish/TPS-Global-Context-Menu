@@ -178,6 +178,7 @@ const {
   TFolder,
   TPS_NATIVE_RECORD_SCHEMA_VERSION,
   buildNativeRecordPath,
+  isCanonicalCalendarRecordId,
   isValidNativeRecordKind,
   isNativeRecordEnvelope,
   normalizeNativeRecordRoot,
@@ -386,6 +387,148 @@ test('custom native record kinds retain the same atomic envelope contract', asyn
   assert.equal(renamed?.path, '_records/nutrition-log-records/Lunch log.md');
   const archived = await service.archive(created.id);
   assert.equal(archived?.frontmatter.archived, true);
+});
+
+const calendarId = (suffix = '0') => `calendar:v1:abcdefghijklmnop:abcdefghijklmnopqrstuvwxyz${suffix}`;
+
+test('calendar template authority requires the exact canonical ID grammar', async () => {
+  assert.equal(isCanonicalCalendarRecordId(calendarId()), true);
+  for (const id of [
+    null, true, '', ` ${calendarId()}`, `${calendarId()} `,
+    calendarId().replace('calendar:', 'Calendar:'),
+    calendarId().replace(':v1:', ':v2:'),
+    calendarId().replace('abcdefghijklmnop:', 'abcdefghijklmno:'),
+    calendarId().slice(0, -1), `${calendarId()}x`,
+    calendarId().replace('abcdefghijklmnop', 'abcdefghijklmno!'),
+  ]) assert.equal(isCanonicalCalendarRecordId(id), false, String(id));
+
+  const { service, entries } = createHarness();
+  for (const kind of ['task', 'food-entry', 'nutrition-log', 'asset']) {
+    await assert.rejects(service.create(kind, { title: 'Wrong route' }, { id: calendarId() }), /calendar-event structural route/u);
+  }
+  for (const id of ['calendar:v1:scope:digest', calendarId().slice(0, -1), `${calendarId()}x`]) {
+    assert.equal(service.inspect({ tpsId: id, title: 'No public kind' }), null);
+    await assert.rejects(service.create('calendar-event', { title: 'Invalid', kind: 'Team meeting' }, { id }), /collides with system storage/u);
+    await assert.rejects(service.create('calendar-event', { title: 'Invalid' }, { id, body: 'Body' }), /canonical calendar record ID/u);
+  }
+  await assert.rejects(service.create('calendar-event', { title: 'Copied ID', tpsId: 'template-id' }, { id: calendarId() }), /collides with system storage/u);
+  await assert.rejects(service.create('calendar-event', { title: 'Invalid body' }, { id: calendarId(), body: null }), /canonical calendar record ID/u);
+  await assert.rejects(service.create('calendar-event', { title: 'Invalid kind', kind: ['meeting'] }, { id: calendarId() }), /kind must be a string/u);
+  await assert.rejects(service.create('task', { title: 'Unchanged task contract' }, { id: 'task-body', body: 'Body' }), /canonical calendar record ID/u);
+  assert.equal([...entries.values()].filter((entry) => entry instanceof TFile).length, 0);
+});
+
+test('canonical calendar creation stores no inferred public kind and writes the template body atomically', async () => {
+  const { service, vault, contents } = createHarness();
+  const body = 'User template content\n\n- [ ] Agenda\n';
+  let creationSource;
+  const create = vault.create;
+  vault.create = async (path, source) => { creationSource = source; return create(path, source); };
+  const record = await service.create('calendar-event', {
+    title: 'Calendar occurrence', status: 'scheduled', scheduled: '2026-09-03T09:00:00-05:00',
+  }, { id: calendarId(), body });
+  const parsed = parseNativeRecordDocument(contents.get(record.file));
+  assert.equal(record.kind, 'calendar-event');
+  assert.equal(Object.hasOwn(record.frontmatter, 'kind'), false);
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'kind'), false);
+  assert.equal(parsed.body, body);
+  assert.equal(creationSource, contents.get(record.file), 'body is present in the sole create call, not a second write');
+  assert.equal(service.inspect(parsed.frontmatter)?.kind, 'calendar-event');
+  assert.equal(Object.hasOwn(service.inspect(parsed.frontmatter).frontmatter, 'kind'), false);
+  assert.equal(isNativeRecordEnvelope(record.frontmatter), true);
+  assert.equal((await service.resolve(record.id))?.kind, 'calendar-event');
+  assert.deepEqual((await service.list('calendar-event')).map((item) => item.id), [record.id]);
+  assert.deepEqual(await service.list('task'), []);
+  const updated = await service.update(record.id, { status: 'complete' });
+  assert.equal(updated?.frontmatter.status, 'complete');
+  assert.equal(Object.hasOwn(updated.frontmatter, 'kind'), false);
+  assert.equal(parseNativeRecordDocument(contents.get(record.file)).body, body);
+  const reidentified = await service.reidentify(record.id, calendarId('1'));
+  assert.equal(reidentified?.kind, 'calendar-event');
+  assert.equal(Object.hasOwn(reidentified.frontmatter, 'kind'), false);
+  assert.equal(Object.hasOwn(parseNativeRecordDocument(contents.get(record.file)).frontmatter, 'kind'), false);
+  assert.equal(await service.canReidentify(reidentified.id, 'calendar-no-structural-authority'), false);
+  const nullKind = await service.create('calendar-event', { title: 'Null means omitted', kind: null }, { id: calendarId('2') });
+  assert.equal(Object.hasOwn(nullKind.frontmatter, 'kind'), false);
+});
+
+test('canonical calendar records preserve authored business kind casing across reads, sync, and identity plans', async () => {
+  const { service, vault, contents } = createHarness('native-records', { emitModifyOnProcess: true });
+  const body = 'Keep my notes.\n';
+  const record = await service.create('calendar-event', {
+    title: 'Project review', Kind: 'Team meeting', status: 'complete',
+  }, { id: calendarId(), body });
+  assert.equal(record.kind, 'calendar-event');
+  assert.equal(record.frontmatter.Kind, 'Team meeting');
+  assert.equal(Object.hasOwn(record.frontmatter, 'kind'), false);
+  assert.deepEqual(await service.list('Team meeting'), []);
+  assert.equal((await service.resolve(record.file))?.frontmatter.Kind, 'Team meeting');
+  assert.equal((await service.update(record.id, { scheduled: '2026-09-04T10:00:00-05:00' }))?.frontmatter.Kind, 'Team meeting');
+  assert.equal(await service.update(record.id, { kind: 'calendar-event' }), null, 'sync cannot replace the authored kind');
+  await vault.process(record.file, (source) => source.replace('Kind: Team meeting', 'Kind: task'));
+  assert.equal((await service.resolve(record.file))?.frontmatter.Kind, 'task');
+  assert.deepEqual(await service.list('task'), [], 'business kind never changes structural task routing');
+  const entries = [{ operation: 'reidentify', reference: record.id, nextId: calendarId('1'), updates: [{ location: 'Room 1' }] }];
+  const plan = await planCurrent(service, entries);
+  assert.ok(plan);
+  const result = await service.applyIdentityChanges(plan, entries);
+  assert.equal(result.ok, true);
+  assert.equal(result.handles[0].kind, 'calendar-event');
+  assert.equal(result.handles[0].frontmatter.Kind, 'task');
+  const parsed = parseNativeRecordDocument(contents.get(record.file));
+  assert.equal(parsed.frontmatter.Kind, 'task');
+  assert.equal(Object.hasOwn(parsed.frontmatter, 'kind'), false);
+  assert.equal(parsed.body, body);
+  assert.equal(parsed.frontmatter.status, 'complete');
+});
+
+test('calendar identity adoption preserves an existing public kind and rejects noncalendar structural conversion', async () => {
+  const { service, contents } = createHarness();
+  const legacy = await service.create('calendar-event', { title: 'Existing event' }, { id: 'calendar-legacy' });
+  const adopted = await service.reidentify(legacy.id, calendarId());
+  assert.equal(adopted?.frontmatter.kind, 'calendar-event');
+  assert.equal(parseNativeRecordDocument(contents.get(legacy.file)).frontmatter.kind, 'calendar-event');
+  const task = await service.create('task', { title: 'Task stays task' }, { id: 'task-stays-task' });
+  const before = contents.get(task.file);
+  assert.equal(await service.canReidentify(task.id, calendarId('1')), false);
+  assert.equal(await service.reidentify(task.id, calendarId('1')), null);
+  assert.equal(contents.get(task.file), before);
+});
+
+test('calendar template create plans bind the exact body before any mutation', async () => {
+  const { service, contents, entries: files } = createHarness();
+  const entries = [{ operation: 'create', nextId: calendarId(), kind: 'calendar-event', properties: {
+    title: 'Planned occurrence', kind: 'Client meeting',
+  }, body: 'Approved body\n' }];
+  assert.equal(await service.canApplyIdentityPlan(entries), true);
+  const plan = await planCurrent(service, entries);
+  assert.equal(plan.entries[0].body, entries[0].body);
+  const substituted = await service.applyIdentityChanges(plan, [{ ...entries[0], body: 'Different body\n' }]);
+  assert.equal(substituted.ok, false);
+  assert.equal([...files.values()].filter((entry) => entry instanceof TFile).length, 0);
+  const confirmedPlan = await planCurrent(service, entries);
+  const result = await service.applyIdentityChanges(confirmedPlan, entries);
+  assert.equal(result.ok, true);
+  assert.equal(result.handles[0].frontmatter.kind, 'Client meeting');
+  assert.equal(parseNativeRecordDocument(contents.get(result.handles[0].file)).body, entries[0].body);
+});
+
+test('canonical calendar IDs retain global duplicate protection regardless of public kind or ID case', async () => {
+  const { service, vault, addFile } = createHarness();
+  const first = await service.create('calendar-event', { title: 'First' }, { id: calendarId() });
+  const duplicate = addFile('Inbox/duplicate.md', serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
+      tpsId: calendarId().toUpperCase(), kind: 'task', title: 'Conflicting note',
+    },
+  }));
+  vault.emit('create', duplicate);
+  assert.equal(await service.canCreateIdentity(calendarId()), false);
+  assert.equal(await service.resolve(first.id), null);
+  assert.equal(await service.resolve(first.file), null);
+  assert.equal(await service.resolve(duplicate), null);
+  await assert.rejects(service.list('calendar-event'), /identity conflicts must be resolved/u);
+  await assert.rejects(service.create('calendar-event', { title: 'Third', kind: 'Another business kind' }, { id: calendarId() }), /already exists/u);
+  assert.equal(await service.canApplyIdentityPlan([{ operation: 'create', nextId: calendarId(), kind: 'calendar-event', properties: { title: 'Planned duplicate' } }]), false);
 });
 
 test('frontmatter fences must be column-zero and indented scalar markers survive consolidation', async () => {
@@ -3430,7 +3573,7 @@ test('native profile is explicit, default-off, and removes legacy active paths o
 });
 
 test('public GCM API exposes versioned generic and task record contracts', () => {
-  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true \}\)/u);
+  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true \}\)/u);
   assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
   assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 6;/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);

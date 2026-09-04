@@ -1,6 +1,27 @@
+/** undefined means legacy/free-text input; null means an invalid complete date. */
+export function parseCompleteScheduleDateMillis(input: unknown): number | null | undefined {
+  if (input instanceof Date) return Number.isFinite(input.getTime()) ? input.getTime() : null;
+  if (typeof input !== 'string') return undefined;
+  const match = input.trim().match(/^(\d{4})-(\d{2})-(\d{2})(?:[Tt ](\d{1,2}):(\d{2})(?::(\d{2})(\.\d+)?)?([Zz]|[+-]\d{2}(?::?\d{2})?)?)?$/);
+  if (!match) return undefined;
+  const [, year, month, day, hour = '00', minute = '00', second = '00', fraction = '', offset = ''] = match;
+  const calendarDate = new Date(0);
+  calendarDate.setUTCFullYear(Number(year), Number(month) - 1, Number(day));
+  if (calendarDate.getUTCFullYear() !== Number(year)
+    || calendarDate.getUTCMonth() !== Number(month) - 1
+    || calendarDate.getUTCDate() !== Number(day)
+    || Number(hour) > 24 || Number(minute) > 59 || Number(second) > 59
+    || (Number(hour) === 24 && (Number(minute) !== 0 || Number(second) !== 0 || Number(fraction) !== 0))) return null;
+  const normalizedOffset = /^[Zz]$/.test(offset) ? 'Z' : /^[+-]\d{2}$/.test(offset) ? `${offset}:00` : offset;
+  // Date-only and zone-less values stay local. Zoned values retain the exact
+  // instant instead of having their seconds/offset removed by prefix parsing.
+  const timestamp = new Date(`${year}-${month}-${day}T${hour.padStart(2, '0')}:${minute}:${second}${fraction}${normalizedOffset}`).getTime();
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
 export class SharedScheduleService {
   private getMoment(): any {
-    return (window as any).moment;
+    return typeof window === 'undefined' ? undefined : (window as any).moment;
   }
 
   parseDate(input: unknown): Date | null {
@@ -12,8 +33,12 @@ export class SharedScheduleService {
     if (input == null) return null;
     let raw = Array.isArray(input) ? input[0] : input;
     if (raw == null) return null;
+    const completeInput = parseCompleteScheduleDateMillis(raw);
+    if (completeInput !== undefined) return completeInput;
     raw = String(raw).replace(/[\[\]]/g, '').trim();
     if (!raw) return null;
+    const completeRaw = parseCompleteScheduleDateMillis(raw);
+    if (completeRaw !== undefined) return completeRaw;
 
     const rangeSplit = String(raw).split(/\s+[-–]\s+/);
     if (rangeSplit.length > 1) {
@@ -22,6 +47,9 @@ export class SharedScheduleService {
       const compactMatch = String(raw).match(/(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2}:\d{2})/);
       if (compactMatch) raw = compactMatch[1];
     }
+
+    const completeRangeStart = parseCompleteScheduleDateMillis(raw);
+    if (completeRangeStart !== undefined) return completeRangeStart;
 
     const dateTimeMatch = String(raw).match(/(\d{4}-\d{2}-\d{2})(?:[ T](\d{1,2}:\d{2}(?:\s*[AP]M?)?))?/i);
     if (dateTimeMatch) raw = dateTimeMatch[0];
@@ -65,8 +93,12 @@ export class SharedScheduleService {
   parseTimeRange(input: unknown): { start: number | null; end: number | null } {
     if (input == null) return { start: null, end: null };
     let raw = Array.isArray(input) ? input[0] : input;
+    const completeInput = parseCompleteScheduleDateMillis(raw);
+    if (completeInput !== undefined) return { start: completeInput, end: null };
     raw = String(raw ?? '').replace(/[\[\]]/g, '').trim();
     if (!raw) return { start: null, end: null };
+    const completeRaw = parseCompleteScheduleDateMillis(raw);
+    if (completeRaw !== undefined) return { start: completeRaw, end: null };
 
     let startRaw = raw;
     let endRaw: string | null = null;

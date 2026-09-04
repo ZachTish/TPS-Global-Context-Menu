@@ -935,11 +935,29 @@ test('non-Markdown parents create Markdown children from logical tags and tempor
     assert.equal(created?.path, `Created ${extension}.md`);
     assert.match(createdContent, new RegExp(`childOf:\\n  - "\\[\\[Reference/Parent\\.${extension}\\]\\]"`, 'u'));
     assert.match(createdContent, /scheduled: 2026-08-15 09:30:00/u);
-    assert.match(createdContent, /due: 2026-08-16/u);
+    assert.match(createdContent, /^due: 2026-08-16$/mu);
     assert.match(createdContent, /allDay: true/u);
     assert.match(createdContent, /tags: \["project"\]/u);
     assert.doesNotMatch(createdContent, /skip/u);
     assert.equal(bodyLinkCalls, 0);
+
+    logicalParent.scheduled = '2026-09-03';
+    delete logicalParent.allDay;
+    const inheritedDateOnly = await createSubitemForParentWithTitle(plugin, parentFile, 'Inherited all-day', '/', {
+      targetPath: `Inherited all-day ${extension}.md`, suppressCreatedNotice: true,
+    });
+    assert.ok(inheritedDateOnly);
+    assert.match(createdContent, /^scheduled: 2026-09-03$/mu, 'date-only inheritance must not introduce a time');
+    assert.doesNotMatch(createdContent, /^allDay:/mu, 'date-only semantics do not require an extra property');
+
+    for (const initialScheduled of ['2026-09-04', '2026-09-03T16:00:42.123Z', '2026-09-03T11:00:42.123-05:00']) {
+      const initial = await createSubitemForParentWithTitle(plugin, parentFile, 'Initial schedule', '/', {
+        targetPath: `Initial schedule ${files.size} ${extension}.md`,
+        initialScheduled, inheritParentTemporalMetadata: false, suppressCreatedNotice: true,
+      });
+      assert.ok(initial);
+      assert.equal(createdContent.split('\n').find((line) => line.startsWith('scheduled: ')), `scheduled: ${initialScheduled}`);
+    }
   }
 });
 

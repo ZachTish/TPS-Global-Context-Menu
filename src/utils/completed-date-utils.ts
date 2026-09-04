@@ -1,11 +1,11 @@
 import { findKeyCaseInsensitive, setValueCaseInsensitive } from '../core';
 
 export function currentCompletedDateStamp(): string {
-  const momentFactory = (window as any)?.moment;
+  const momentFactory = typeof window === 'undefined' ? undefined : (window as any).moment;
   if (typeof momentFactory === 'function') {
     return momentFactory().format('YYYY-MM-DDTHH:mm:ss');
   }
-  return new Date().toISOString().slice(0, 19);
+  return new Date().toISOString();
 }
 
 export function getCompletedDateValue(frontmatter: Record<string, unknown> | null | undefined): string {

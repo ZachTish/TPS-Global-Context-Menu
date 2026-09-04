@@ -272,6 +272,28 @@ async function loadFormulaService() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
+test('TPS List property chips show zoned schedules at the same local time as Calendar', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  const previousTimezone = process.env.TZ;
+  process.env.TZ = 'America/Chicago';
+  try {
+    const local = new Date('2026-09-03T16:00:42.123Z');
+    const expected = `${local.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}, ${local.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}`;
+    for (const input of [local, local.toISOString(), '2026-09-03T11:00:42.123-05:00', '2026-09-03 11:00:42.123']) {
+      assert.equal(view.formatCardPropertyValue(input), expected);
+    }
+    assert.equal(view.formatCardPropertyValue('2026-09-03'), local.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }));
+    assert.equal(view.formatCardPropertyValue('2026-02-30T11:00:00Z'), '2026-02-30T11:00:00Z');
+    assert.equal(view.formatCardPropertyValue('2026-09-03 11:00 meeting'), expected, 'legacy date-prefixed card values retain their existing readable fallback');
+    assert.equal(view.formatCardPropertyValue('2026-09-03 meeting at 11:00'), local.toLocaleDateString(undefined, { month: 'short', day: 'numeric' }), 'a later free-text time is not promoted into the legacy date prefix');
+    assert.equal(view.formatCardPropertyValue('ordinary text'), 'ordinary text');
+  } finally {
+    if (previousTimezone === undefined) delete process.env.TZ;
+    else process.env.TZ = previousTimezone;
+  }
+});
+
 test('GCM is the sole TPS List source and runtime owner', () => {
   assert.match(
     viewSource,

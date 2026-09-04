@@ -6,7 +6,7 @@ import { RemoveHiddenSubitemsModal } from '../modals/remove-hidden-subitems-moda
 import { checkAndPromptForUnresolvedSubitems } from '../services/unresolved-subitem-modal';
 import type { BodySubitemLink } from '../services/subitem-types';
 import * as logger from '../logger';
-import { getCompletedDateValue, setCompletedDateValue } from '../utils/completed-date-utils';
+import { currentCompletedDateStamp, getCompletedDateValue, setCompletedDateValue } from '../utils/completed-date-utils';
 import {
     ChecklistHandler,
     markChecklistCompletionPromptHandled,
@@ -65,9 +65,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 delete frontmatter[actualKey];
             }
             if (isChecklistCompletionStatus(status)) {
-                const now = (window as any).moment
-                    ? (window as any).moment().format('YYYY-MM-DD HH:mm:ss')
-                    : new Date().toISOString().replace('T', ' ').slice(0, 19);
+                const now = currentCompletedDateStamp();
                 frontmatter[completedDateKey || 'completedDate'] = frontmatter[completedDateKey || 'completedDate'] || now;
             } else if (completedDateKey) {
                 delete frontmatter[completedDateKey];

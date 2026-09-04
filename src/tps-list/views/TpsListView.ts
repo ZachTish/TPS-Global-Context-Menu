@@ -50,6 +50,7 @@ import { resolveBulletLineSourceTarget } from '../bullet-line-source-target';
 import { requestLineItemDelete } from '../../services/line-item-delete-service';
 import { TextInputModal } from '../../modals/text-input-modal';
 import { ScheduledModal } from '../../modals/scheduled-modal';
+import { parseCompleteScheduleDateMillis } from '../../services/shared/schedule-service';
 import { RecurrenceModal } from '../../modals/recurrence-modal';
 import { TagSuggestModal } from '../../modals/TagSuggestModal';
 import { getPlainDisplayTitle } from '../../utils/display-title';
@@ -6186,20 +6187,23 @@ export class TpsListView extends BasesView {
     const raw = String(value).trim();
     if (!raw) return '';
     if (raw.toLowerCase() === 'null' || raw.toLowerCase() === 'undefined') return '';
-    const dateTime = raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/);
-    if (dateTime) {
-      const year = Number(dateTime[1]);
-      const month = Number(dateTime[2]) - 1;
-      const day = Number(dateTime[3]);
-      const hours = dateTime[4] === undefined ? 0 : Number(dateTime[4]);
-      const minutes = dateTime[5] === undefined ? 0 : Number(dateTime[5]);
-      const date = new Date(year, month, day, hours, minutes);
-      if (!Number.isNaN(date.getTime())) {
-        const datePart = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-        if (dateTime[4] === undefined) return datePart;
-        const timePart = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
-        return `${datePart}, ${timePart}`;
-      }
+    const completeDateMillis = parseCompleteScheduleDateMillis(value);
+    const legacyDate = completeDateMillis === undefined
+      ? raw.match(/^(\d{4})-(\d{2})-(\d{2})(?:[ T](\d{1,2}):(\d{2}))?/)
+      : null;
+    const date = typeof completeDateMillis === 'number'
+      ? new Date(completeDateMillis)
+      : legacyDate
+        ? new Date(Number(legacyDate[1]), Number(legacyDate[2]) - 1, Number(legacyDate[3]), Number(legacyDate[4] || 0), Number(legacyDate[5] || 0))
+        : null;
+    if (date && !Number.isNaN(date.getTime())) {
+      const datePart = date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+      const hasTime = legacyDate
+        ? legacyDate[4] !== undefined
+        : value instanceof Date || /[Tt ]\d{1,2}:\d{2}/.test(raw);
+      if (!hasTime) return datePart;
+      const timePart = date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
+      return `${datePart}, ${timePart}`;
     }
     return raw.length > 42 ? `${raw.slice(0, 39)}...` : raw;
   }

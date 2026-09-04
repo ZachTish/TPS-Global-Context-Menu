@@ -729,7 +729,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
     };
     const nativeRecordsApi = {
         version: plugin.nativeRecordService.version,
-        capabilities: Object.freeze({ customKinds: true }),
+        capabilities: Object.freeze({ customKinds: true, calendarTemplateRecords: true }),
         getMode: () => plugin.nativeRecordService.getMode(),
         isEnabled: () => plugin.nativeRecordService.isEnabled(),
         getRootPath: () => plugin.nativeRecordService.getRootPath(),

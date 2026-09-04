@@ -4,6 +4,7 @@ import { buildParentFrontmatterLinkValue } from '../handlers/parent-link-format'
 import { CreateSubitemModal } from '../modals/create-subitem-modal';
 import { mergeNormalizedTags, parseTagInput } from '../utils/tag-utils';
 import { currentCompletedDateStamp } from '../utils/completed-date-utils';
+import { normalizeObsidianDateTimeValue } from '../utils/obsidian-date-time';
 import * as logger from '../logger';
 import { parseDailyNoteFileDate } from '../utils/daily-note-task-schedule';
 
@@ -421,7 +422,11 @@ function serializeSimpleYamlProperty(key: string, value: any): string {
   if (typeof value === 'string') {
     const trimmed = value.trim();
     if (!trimmed) return '';
-    if (isDateLikeFrontmatterKey(key)) return normalizeObsidianDateTimeValue(trimmed);
+    if (isDateLikeFrontmatterKey(key)) {
+      // A bare inherited/initial date is an all-day value, not local midnight.
+      if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return trimmed;
+      return normalizeObsidianDateTimeValue(trimmed);
+    }
     return `"${trimmed.replace(/"/g, '\\"')}"`;
   }
   return '';
@@ -431,13 +436,4 @@ function isDateLikeFrontmatterKey(key: string): boolean {
   return ['scheduled', 'due', 'date', 'start', 'end', 'remindersnooze'].includes(
     String(key || '').trim().toLowerCase().replace(/[\s_-]+/g, ''),
   );
-}
-
-function normalizeObsidianDateTimeValue(value: string): string {
-  const trimmed = value.trim();
-  const dateTime = trimmed.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/);
-  if (dateTime) {
-    return `${dateTime[1]} ${dateTime[2].padStart(2, '0')}:${dateTime[3]}:${dateTime[4] ?? '00'}`;
-  }
-  return trimmed;
 }

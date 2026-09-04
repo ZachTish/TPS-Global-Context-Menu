@@ -270,6 +270,32 @@ function stripManagedLines(source) {
   return source.replace(/^(?:icon|color|sort):[^\r\n]*(?:\r?\n)/gmu, '');
 }
 
+test('a status-only general property edit preserves zoned schedule instants and untouched local dates', async () => {
+  const fixture = makeFixture([
+    '---',
+    'title: Timezone regression',
+    'status: scheduled',
+    'scheduled: "2026-09-03T16:00:00.000Z"',
+    'end: "2026-09-03T11:30:00-05:00"',
+    'date: 2026-09-03',
+    'due: 2026-09-04 9:00',
+    '---',
+    'Keep this body.',
+  ].join('\n'));
+  fixture.plugin.app.vault.modify = async (_file, nextContent) => fixture.setContent(nextContent);
+  const changed = await fixture.plugin.frontmatterMutationService.process(fixture.file, (frontmatter) => {
+    frontmatter.status = 'complete';
+  });
+  assert.equal(changed, true);
+  const content = fixture.getContent();
+  assert.match(content, /^status: complete$/mu);
+  assert.match(content, /^scheduled: 2026-09-03T16:00:00\.000Z$/mu);
+  assert.match(content, /^end: 2026-09-03T11:30:00-05:00$/mu);
+  assert.match(content, /^date: 2026-09-03$/mu);
+  assert.match(content, /^due: 2026-09-04 9:00$/mu);
+  assert.match(content, /Keep this body\.$/u);
+});
+
 function stripNativeUpdateLines(source) {
   return source
     .replace(/^(?:title|createdDate|modifiedDate|tpsId|tpsSchemaVersion):[^\r\n]*(?:\r?\n)/gmu, '')

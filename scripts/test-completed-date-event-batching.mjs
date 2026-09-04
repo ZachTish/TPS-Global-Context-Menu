@@ -121,6 +121,7 @@ async function loadRegisterEvents() {
                     const source = Array.isArray(frontmatter[key]) ? frontmatter[key] : [frontmatter[key]];
                     return source.map((value) => String(value ?? '').trim()).filter(Boolean).at(-1) || '';
                   }
+                  export function currentCompletedDateStamp() { return '2026-07-30T12:34:56'; }
                   export function setCompletedDateValue(frontmatter, stamp = '2026-07-30T12:34:56') {
                     const key = findKey(frontmatter) || 'completedDate';
                     const value = String(stamp || '').trim();

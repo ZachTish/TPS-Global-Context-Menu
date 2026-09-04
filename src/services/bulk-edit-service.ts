@@ -23,6 +23,7 @@ import {
 import { propertyUsesEntityOptions } from '../utils/property-option-source';
 import { stripDateSuffix } from '../utils/date-suffix-utils';
 import { setCompletedDateValue } from '../utils/completed-date-utils';
+import { normalizeObsidianDateTimeValue } from '../utils/obsidian-date-time';
 import { ChecklistHandler } from '../handlers/checklist-handler';
 import { ParentLinkHandler } from '../handlers/parent-link-handler';
 import { buildParentFrontmatterLinkValue, buildParentLinkValue, linkValueMatchesFile, extractLinkTarget, resolveLinkValueToFile } from '../handlers/parent-link-format';
@@ -3208,14 +3209,4 @@ export class BulkEditService {
         });
         return result;
     }
-}
-
-function normalizeObsidianDateTimeValue(value: string | null): string {
-    const trimmed = String(value || '').trim();
-    if (!trimmed) return '';
-    const dateTime = trimmed.match(/^(\d{4}-\d{2}-\d{2})[ T](\d{1,2}):(\d{2})(?::(\d{2}))?/);
-    if (dateTime) {
-        return `${dateTime[1]} ${dateTime[2].padStart(2, '0')}:${dateTime[3]}:${dateTime[4] ?? '00'}`;
-    }
-    return trimmed;
 }

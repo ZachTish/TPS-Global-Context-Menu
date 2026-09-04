@@ -81,7 +81,8 @@ export type TpsNativeRecordKind =
 export interface TpsNativeRecordEnvelope extends Record<string, unknown> {
   tpsId: string;
   tpsSchemaVersion: number;
-  kind: TpsNativeRecordKind;
+  /** Canonical calendar records keep this optional, user-owned business value. */
+  kind?: unknown;
   title: string;
   createdDate: string;
   modifiedDate: string;
@@ -117,6 +118,8 @@ export interface TpsNativeRecordCreateOptions {
   expectedPath?: string;
   planToken?: number;
   cause?: FilePropertiesMutationCause;
+  /** Exact template body; supported only for canonical Controller calendar IDs. */
+  body?: string;
 }
 
 export interface TpsTaskPromotionResult {
@@ -137,6 +140,7 @@ export type TpsNativeRecordIdentityPlanEntry =
     kind: TpsNativeRecordKind;
     properties: Record<string, unknown>;
     fileName?: string;
+    body?: string;
   }
   | {
     operation: 'reidentify';
@@ -155,6 +159,7 @@ export interface TpsNativeRecordIdentityPlan {
       nextId: string;
       expectedPath: string | null;
       kind: TpsNativeRecordKind;
+      body?: string;
     }
     | {
       operation: 'reidentify';
@@ -212,6 +217,17 @@ const RECORD_FOLDER_BY_KIND: Record<string, string> = {
 export function isValidNativeRecordKind(value: unknown): value is TpsNativeRecordKind {
   return typeof value === 'string'
     && /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(value);
+}
+
+/** Same privacy-safe ID grammar owned by Controller's calendar-record-identity. */
+export function isCanonicalCalendarRecordId(value: unknown): value is string {
+  return typeof value === 'string'
+    && /^calendar:v1:[A-Za-z0-9_-]{16}:[A-Za-z0-9_-]{27}$/u.test(value);
+}
+
+function nativeRecordStructuralKind(envelope: Record<string, unknown>): TpsNativeRecordKind | null {
+  if (isCanonicalCalendarRecordId(envelope.tpsId)) return 'calendar-event';
+  return isValidNativeRecordKind(envelope.kind) ? envelope.kind : null;
 }
 
 function nativeRecordFolder(kind: TpsNativeRecordKind): string {
@@ -550,7 +566,12 @@ function inspectWithProfile(
       : '';
   }
   if (schemaVersion !== TPS_NATIVE_RECORD_SCHEMA_VERSION || !id) return null;
-  if (profile.kindPropertyKey) {
+  const canonicalCalendar = isCanonicalCalendarRecordId(id);
+  if (canonicalCalendar) {
+    // A legacy identity tag is still identity evidence, not a business field.
+    if (profile.identityMode === 'tag' && kind !== 'calendar-event') return null;
+    kind = 'calendar-event';
+  } else if (profile.kindPropertyKey) {
     const authoredKind = stringifyReadableStorageValue(
       readValueCaseInsensitive(raw, profile.kindPropertyKey),
     ).trim();
@@ -571,7 +592,7 @@ function inspectWithProfile(
   const frontmatter = { ...raw } as TpsNativeRecordEnvelope;
   setValueCaseInsensitive(frontmatter, 'tpsId', id);
   setValueCaseInsensitive(frontmatter, 'tpsSchemaVersion', schemaVersion);
-  setValueCaseInsensitive(frontmatter, 'kind', kind as TpsNativeRecordKind);
+  if (!canonicalCalendar) setValueCaseInsensitive(frontmatter, 'kind', kind as TpsNativeRecordKind);
   setValueCaseInsensitive(frontmatter, 'title', title);
   setValueCaseInsensitive(frontmatter, 'createdDate', createdDate);
   setValueCaseInsensitive(frontmatter, 'modifiedDate', modifiedDate);
@@ -893,7 +914,12 @@ function applyEnvelopeToRawFrontmatter(
 
   next[profile.identityPropertyKey] = envelope.tpsId;
   if (profile.schemaPropertyKey) next[profile.schemaPropertyKey] = envelope.tpsSchemaVersion;
-  if (profile.kindPropertyKey) next[profile.kindPropertyKey] = envelope.kind;
+  if (isCanonicalCalendarRecordId(envelope.tpsId)) {
+    // Structural calendar routing comes only from tpsId. Never materialize it
+    // into the template/user-owned public kind, including during re-identify.
+    const publicKindKey = findKeyCaseInsensitive(raw, 'kind');
+    if (publicKindKey) next[publicKindKey] = raw[publicKindKey];
+  } else if (profile.kindPropertyKey) next[profile.kindPropertyKey] = envelope.kind;
   next[profile.titlePropertyKey] = envelope.title;
   if (profile.createdPropertyKey) next[profile.createdPropertyKey] = envelope.createdDate;
   if (profile.modifiedPropertyKey) next[profile.modifiedPropertyKey] = envelope.modifiedDate;
@@ -1023,8 +1049,7 @@ export function isNativeRecordEnvelope(value: unknown): value is TpsNativeRecord
   return Number(record.tpsSchemaVersion) === TPS_NATIVE_RECORD_SCHEMA_VERSION
     && typeof record.tpsId === 'string'
     && record.tpsId.trim().length > 0
-    && typeof record.kind === 'string'
-    && isValidNativeRecordKind(record.kind)
+    && nativeRecordStructuralKind(record) !== null
     && typeof record.title === 'string'
     && typeof record.createdDate === 'string'
     && typeof record.modifiedDate === 'string';
@@ -1258,8 +1283,8 @@ export class NativeRecordService {
         throw new Error(`TPS native record ID already exists: ${id}`);
       }
 
-      const prepared = this.prepareCreateCandidate(kind, properties, id, timestamp);
-      const { persistedFrontmatter, persistedInspection } = prepared;
+      const prepared = this.prepareCreateCandidate(kind, properties, id, timestamp, options.body);
+      const { persistedFrontmatter, persistedInspection, body } = prepared;
       const path = this.availableRecordPath(kind, id, options.fileName);
       if (
         options.expectedPath != null
@@ -1288,7 +1313,7 @@ export class NativeRecordService {
         bom: '',
         newline: '\n',
         closer: '---',
-        body: '',
+        body,
         frontmatter: persistedFrontmatter,
       });
       const file = await this.withInternalIdentityWrite([path], () => (
@@ -1378,7 +1403,7 @@ export class NativeRecordService {
     const [path] = paths;
     const file = this.plugin.app.vault.getFileByPath(path);
     const frontmatter = this.recordsByPath.get(path);
-    return file instanceof TFile && frontmatter?.kind === 'asset'
+    return file instanceof TFile && frontmatter && nativeRecordStructuralKind(frontmatter) === 'asset'
       ? this.toHandle(file, frontmatter)
       : null;
   }
@@ -1676,7 +1701,7 @@ export class NativeRecordService {
     for (const [path, frontmatter] of [...this.recordsByPath.entries()].sort(([left], [right]) => (
       left.localeCompare(right)
     ))) {
-      if (kind && frontmatter.kind !== kind) continue;
+      if (kind && nativeRecordStructuralKind(frontmatter) !== kind) continue;
       if (!this.hasUniquePathOwnership(frontmatter.tpsId, path)) continue;
       const file = this.plugin.app.vault.getFileByPath(path);
       if (file instanceof TFile) records.push(this.toHandle(file, frontmatter));
@@ -1721,12 +1746,13 @@ export class NativeRecordService {
             entry.properties,
             nextId,
             '2000-01-01T00:00:00.000Z',
+            entry.body,
           );
           const serialized = serializeNativeRecordDocument({
             bom: '',
             newline: '\n',
             closer: '---',
-            body: '',
+            body: prepared.body,
             frontmatter: prepared.persistedFrontmatter,
           });
           const reparsed = parseNativeRecordDocument(serialized);
@@ -1797,6 +1823,7 @@ export class NativeRecordService {
           nextId: entry.nextId,
           expectedPath,
           kind: entry.kind,
+          ...(entry.body !== undefined ? { body: entry.body } : {}),
         });
         continue;
       }
@@ -1871,7 +1898,9 @@ export class NativeRecordService {
             || normalizePath(entry.expectedPath || '') !== normalizePath(planned.expectedPath || '')
           ) return true;
           if (entry.operation === 'create') {
-            return planned.operation !== 'create' || entry.kind !== planned.kind;
+            return planned.operation !== 'create'
+              || entry.kind !== planned.kind
+              || entry.body !== planned.body;
           }
           return planned.operation !== 'reidentify'
             || normalizePath(entry.sourcePath) !== normalizePath(planned.sourcePath)
@@ -1889,6 +1918,7 @@ export class NativeRecordService {
             expectedPath,
             planToken: plannedBatch.token,
             cause,
+            body: entry.body,
           }, undefined, key));
           continue;
         }
@@ -2552,7 +2582,7 @@ export class NativeRecordService {
 
   async normalizeTaskRecordIdentities(): Promise<{ inspected: number; updated: number; skipped: number }> {
     const records = [...this.recordsByPath.entries()]
-      .filter(([, frontmatter]) => frontmatter.kind === 'task')
+      .filter(([, frontmatter]) => nativeRecordStructuralKind(frontmatter) === 'task')
       .sort(([left], [right]) => left.localeCompare(right));
     let updated = 0;
     let skipped = 0;
@@ -2728,13 +2758,20 @@ export class NativeRecordService {
     return replaced;
   }
 
-  private copyUserProperties(properties: Record<string, unknown>): Record<string, unknown> {
+  private copyUserProperties(
+    properties: Record<string, unknown>,
+    calendarTemplateRecord = false,
+  ): Record<string, unknown> {
     const copied: Record<string, unknown> = {};
     const protectedKeys = new Set(
       storageKeys(this.getStorageProfile()).map((key) => key.toLocaleLowerCase()),
     );
     for (const [key, value] of Object.entries(properties || {})) {
       const normalizedKey = key.trim().toLocaleLowerCase();
+      if (calendarTemplateRecord && normalizedKey === 'kind') {
+        if (value != null) copied[key] = value;
+        continue;
+      }
       if (!key.trim() || CANONICAL_ENVELOPE_KEYS.has(normalizedKey) || protectedKeys.has(normalizedKey)) continue;
       if (normalizedKey === 'tags') {
         const tags = readTagValues(value);
@@ -2751,15 +2788,24 @@ export class NativeRecordService {
     properties: Record<string, unknown>,
     id: string,
     timestamp: string,
+    templateBody?: string,
   ): {
     persistedFrontmatter: Record<string, unknown>;
     persistedInspection: TpsNativeRecordInspection;
+    body: string;
   } {
     if (!properties || typeof properties !== 'object' || Array.isArray(properties)) {
       throw new Error('TPS native record properties must be an object.');
     }
     if (!isValidNativeRecordKind(kind)) {
       throw new Error(`Unsupported TPS native record kind: ${String(kind)}`);
+    }
+    const calendarTemplateRecord = isCanonicalCalendarRecordId(id);
+    if (calendarTemplateRecord && kind !== 'calendar-event') {
+      throw new Error('Canonical calendar IDs require the calendar-event structural route.');
+    }
+    if (templateBody !== undefined && (!calendarTemplateRecord || typeof templateBody !== 'string')) {
+      throw new Error('Native record template bodies require a canonical calendar record ID.');
     }
     const title = String(properties.title || '').replace(/\s+/gu, ' ').trim();
     if (!title) throw new Error('TPS native records require a title.');
@@ -2775,17 +2821,23 @@ export class NativeRecordService {
       }
       seenPayloadKeys.add(folded);
       if (folded === 'title') continue;
+      if (calendarTemplateRecord && folded === 'kind') {
+        if (properties[key] != null && typeof properties[key] !== 'string') {
+          throw new Error('Calendar template kind must be a string when provided.');
+        }
+        continue;
+      }
       if (CANONICAL_ENVELOPE_KEYS.has(folded) || protectedKeys.has(folded)) {
         throw new Error(`TPS native record property collides with system storage: ${key}`);
       }
     }
 
-    const userProperties = this.copyUserProperties(properties);
+    const userProperties = this.copyUserProperties(properties, calendarTemplateRecord);
     const frontmatter: TpsNativeRecordEnvelope = {
       ...userProperties,
       tpsId: id,
       tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
-      kind,
+      ...(!calendarTemplateRecord ? { kind } : {}),
       title,
       createdDate: timestamp,
       modifiedDate: timestamp,
@@ -2816,7 +2868,7 @@ export class NativeRecordService {
     if (!persistedFrontmatter || !persistedInspection || persistedInspection.id !== id || persistedInspection.kind !== kind) {
       throw new Error('TPS native record properties contain conflicting or invalid storage identity evidence.');
     }
-    return { persistedFrontmatter, persistedInspection };
+    return { persistedFrontmatter, persistedInspection, body: templateBody ?? '' };
   }
 
   /**
@@ -2937,6 +2989,8 @@ export class NativeRecordService {
   }
 
   private toHandle(file: TFile, frontmatter: TpsNativeRecordEnvelope): TpsNativeRecordHandle {
+    const kind = nativeRecordStructuralKind(frontmatter);
+    if (!kind) throw new Error('Native record has no verified structural kind.');
     const projectedFrontmatter = { ...frontmatter };
     const createdTimestamp = Number(file.stat?.ctime);
     const modifiedTimestamp = Number(file.stat?.mtime);
@@ -2950,7 +3004,7 @@ export class NativeRecordService {
       file,
       path: file.path,
       id: projectedFrontmatter.tpsId,
-      kind: projectedFrontmatter.kind,
+      kind,
       frontmatter: projectedFrontmatter,
     };
   }
@@ -3120,7 +3174,7 @@ export class NativeRecordService {
     const paths = this.pathsById.get(id) || new Set<string>();
     paths.add(file.path);
     this.pathsById.set(id, paths);
-    if (resolvedEnvelope.kind === 'asset') {
+    if (nativeRecordStructuralKind(resolvedEnvelope) === 'asset') {
       const sourcePath = normalizePath(String(resolvedEnvelope.sourcePath || '').trim());
       if (sourcePath) {
         const assetPaths = this.assetPathsBySourcePath.get(sourcePath) || new Set<string>();
@@ -3138,7 +3192,7 @@ export class NativeRecordService {
       paths.delete(path);
       if (paths.size === 0) this.blockedPathsById.delete(id);
     }
-    if (prior?.kind === 'asset') {
+    if (prior && nativeRecordStructuralKind(prior) === 'asset') {
       const sourcePath = normalizePath(String(prior.sourcePath || '').trim());
       const assetPaths = this.assetPathsBySourcePath.get(sourcePath);
       assetPaths?.delete(path);
@@ -3178,7 +3232,7 @@ export class NativeRecordService {
     this.indexFile(file, envelope);
     logger.flow('NativeRecords', 'path:changed', {
       recordId: envelope.tpsId,
-      recordKind: envelope.kind,
+      recordKind: nativeRecordStructuralKind(envelope),
       oldPath,
       path: file.path,
     });
