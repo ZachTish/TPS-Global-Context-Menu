@@ -1130,7 +1130,7 @@ export class TpsListView extends BasesView {
     oneBasedLine: number,
     expectedRawLine: string,
   ): boolean {
-    const service = this.getGcmPlugin()?.homeCaptureService || this.getGcmApi()?.homeCaptureService;
+    const service = this.getGcmPlugin()?.lineEditorService || this.getGcmApi()?.lineEditorService;
     if (typeof service?.openLineEditor !== 'function') return false;
     event.preventDefault();
     event.stopPropagation();
@@ -3492,7 +3492,6 @@ export class TpsListView extends BasesView {
         line: targetLine + 1,
         reason: 'matched-view-has-no-editor',
       });
-      this.getGcmPlugin()?.dailyNoteHomeService?.allowLivePreview?.(leaf, file.path);
       await leaf.setViewState({
         type: 'markdown',
         active: true,
@@ -3507,7 +3506,6 @@ export class TpsListView extends BasesView {
         line: targetLine + 1,
       });
       leaf = this.app.workspace.getLeaf('tab');
-      this.getGcmPlugin()?.dailyNoteHomeService?.allowLivePreview?.(leaf, file.path);
       await leaf.openFile(file, { active: true, state: { mode: 'source' } } as any);
       this.app.workspace.setActiveLeaf(leaf, { focus: true } as any);
       this.app.workspace.revealLeaf(leaf);

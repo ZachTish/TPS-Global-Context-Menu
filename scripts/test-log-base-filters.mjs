@@ -103,7 +103,7 @@ test('TPS Table preserves nested any/all/not semantics', async () => {
   assert.equal(evaluateLogBaseFilterNode({ and: [{ or: ['food == "watermelon"', 'food == "eggs"'] }, { not: 'file.path.startsWith("Archive/")' }] }, context), true);
 });
 
-test('Home context tokens work without changing standalone filter behavior', async () => {
+test('Base owner context tokens work without changing standalone filter behavior', async () => {
   const { evaluateLogBaseFilterNode } = await loadModule();
   assert.equal(evaluateLogBaseFilterNode('completedDate >= this.scheduled', context), true);
   assert.equal(evaluateLogBaseFilterNode('completedDate < this.scheduled', context), false);
@@ -358,10 +358,8 @@ test('TPS Table loadEntries excludes unevaluable rows and records a visible fail
   view.getEffectiveBaseFilterRoots = async () => ['protein approximately 6'];
   view.getBaseFile = () => null;
   view.getViewName = () => 'Safety';
-  view.getHomeContextDate = () => null;
   view.getLineCreateContextPath = () => null;
   view.lineMatches = () => true;
-  view.lineMatchesHomeDateContext = () => true;
   view.sortEntries = (entries) => entries;
 
   assert.deepEqual(await view.loadEntries(), []);
@@ -411,9 +409,7 @@ test('filterless lineFilterKey Tables discover matching lines when native Base r
   };
   view.getEffectiveBaseFilterRoots = async () => [];
   view.getBaseFile = () => null;
-  view.getHomeContextDate = () => null;
   view.getLineCreateContextPath = () => null;
-  view.lineMatchesHomeDateContext = () => true;
   view.sortEntries = (entries) => entries;
 
   const entries = await view.loadEntries();
@@ -519,9 +515,7 @@ test('TPS Table exposes clean heading titles, levels, and raw tags as synthesize
     },
   };
   view.getEffectiveBaseFilterRoots = async () => [{ and: ['kind == "header"', 'tags.contains(qa-heading)'] }];
-  view.lineMatchesHomeDateContext = () => true;
   view.sortEntries = (entries) => entries;
-  view.getHomeContextDate = () => '';
 
   const entries = await view.loadEntries();
   assert.equal(entries.length, 1);
@@ -604,9 +598,7 @@ test('TPS Table excludes frontmatter and fenced-code examples from synthesized r
   view.getEffectiveBaseFilterRoots = async () => [{
     or: ['kind == "task"', 'kind == "bullet"', 'kind == "heading"', 'kind == "project"'],
   }];
-  view.getHomeContextDate = () => null;
   view.lineMatches = () => true;
-  view.lineMatchesHomeDateContext = () => true;
   view.sortEntries = (entries) => entries;
   view.compiledFormulaSet = tpsBaseFormulaService.compile({
     structural_task: 'kind == "task" && checkboxState == "[ ]" && task.checkboxState == "[ ]"',
@@ -892,9 +884,7 @@ test('TPS Table task tag filters use exact task-tag membership across aliases an
     },
   };
   view.getEffectiveBaseFilterRoots = async () => filterRoots;
-  view.getHomeContextDate = () => null;
   view.lineMatches = () => true;
-  view.lineMatchesHomeDateContext = () => true;
   view.sortEntries = (entries) => entries;
 
   const select = async (tagFilter) => {
@@ -1106,10 +1096,8 @@ test('TPS Table loadEntries keeps task query aliases out of inferred display col
       frontmatter: {},
     },
   });
-  view.lineMatchesHomeDateContext = () => true;
   view.sortEntries = (entries) => entries;
   view.getConfiguredColumnKeys = () => [];
-  view.isHomeFoodSummary = () => false;
 
   const entries = await view.loadEntries();
   assert.equal(entries.length, 2);
@@ -1296,9 +1284,7 @@ test('TPS Table ignores serialized Obsidian query state while loading persisted 
     },
   };
   view.getBaseFile = () => baseFile;
-  view.getHomeContextDate = () => null;
   view.getLineCreateContextPath = () => null;
-  view.lineMatchesHomeDateContext = () => true;
   view.sortEntries = (entries) => entries;
 
   const roots = await view.getEffectiveBaseFilterRoots();
@@ -1490,8 +1476,6 @@ test('TPS Table formulas drive synthesized-row filters, columns, sorting, groupi
   }, 'table-formula-integration');
   view.config = { lineFilterAnyKeys: ['points'], lineFilterKeys: [] };
   view.getEffectiveBaseFilterRoots = async () => ['formula.visible'];
-  view.lineMatchesHomeDateContext = () => true;
-  view.getHomeContextDate = () => null;
   view.getBaseFile = () => null;
   view.getLineCreateContextPath = () => null;
   view.sortEntries = (entries) => entries;

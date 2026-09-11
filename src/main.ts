@@ -9,7 +9,7 @@ import {
   createDefaultSortBucket,
   createDefaultSortSegment,
 } from './types';
-import { DEFAULT_SETTINGS, HOME_DAILY_NOTE_FEED_BASE_PATH } from './constants';
+import { DEFAULT_SETTINGS } from './constants';
 import { PLUGIN_STYLES } from './plugin-styles';
 import { MenuController } from './menu/menu-controller';
 import { PersistentMenuManager } from './menu/persistent-menu-manager';
@@ -20,7 +20,6 @@ import { RecurrenceService } from './services/recurrence-service';
 import { FileNamingService } from './services/file-naming-service';
 import { AutoFrontmatterExclusionService } from './services/file-exclusion-service';
 import { ViewModeManager } from './handlers/view-mode-manager';
-import { DailyNoteHomeService } from './services/daily-note-home-service';
 import { DailyNoteNavManager } from './handlers/daily-note-nav-manager';
 import { TaskCheckboxHandler } from './handlers/task-checkbox-handler';
 import { ContextTargetService } from './services/context-target-service';
@@ -72,15 +71,9 @@ import { NoteTitleRenderService } from './services/note-title-render-service';
 import { VirtualBaseEmbedService } from './services/virtual-base-embed-service';
 import { HeadingCollapseOnOpenService } from './services/heading-collapse-on-open-service';
 import { FoldExpansionContextMenuService } from './services/fold-expansion-context-menu-service';
-import { HomeCaptureService } from './services/home-capture-service';
+import { LineEditorService } from './services/line-editor-service';
+import { RETIRED_HOME_SETTING_KEYS, restoreRetiredHomeTabs } from './services/retired-home-migration';
 import { BaseLineEditProtocolService } from './services/base-line-edit-protocol-service';
-import {
-  HOME_ADD_TASK_COMMAND_ID,
-  HOME_CAPTURE_COMMAND_ID,
-  HomeComponentActionService,
-} from './services/home-component-action-service';
-import { normalizeHomeComponentActions } from './services/home-component-action-core';
-import { TPS_HOME_VIEW_TYPE, TpsHomeView } from './views/home-view';
 import { TPS_TABLE_VIEW_TYPE, TpsTableView } from './views/log-base-view';
 import { TPS_LIST_VIEW_TYPE, createTpsListView, createTpsListViewOptions } from './views/tps-list-bridge-view';
 import { BaseRowIndexService } from './services/base-row-index-service';
@@ -130,13 +123,6 @@ import { normalizeCreateTaskDefaultParentMode } from './utils/create-task-defaul
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
 const DEFAULT_INLINE_PROPERTY_DENY_KEYS = new Set(['title', 'parent', 'parentof', 'folderpath']);
-const AUTHORITATIVE_HOME_SETTING_KEYS: readonly (keyof TPSGlobalContextMenuSettings)[] = [
-  'enableDailyNoteHome',
-  'homeCalendarBasePath',
-  'homeFoodBasePath',
-  'homeWorkoutBasePath',
-  'homeOpenTasksBasePath',
-];
 const CUSTOM_PROPERTY_TYPES = new Set([
   'text',
   'number',
@@ -345,7 +331,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   recurrenceService: RecurrenceService;
   fileNamingService: FileNamingService;
   viewModeManager: ViewModeManager;
-  dailyNoteHomeService: DailyNoteHomeService;
   dailyNoteNavManager: DailyNoteNavManager;
   contextTargetService: ContextTargetService;
   noteOperationService: NoteOperationService;
@@ -390,9 +375,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   virtualBaseEmbedService: VirtualBaseEmbedService;
   headingCollapseOnOpenService: HeadingCollapseOnOpenService;
   foldExpansionContextMenuService: FoldExpansionContextMenuService;
-  homeCaptureService: HomeCaptureService;
+  lineEditorService: LineEditorService;
   baseLineEditProtocolService: BaseLineEditProtocolService;
-  homeComponentActionService: HomeComponentActionService;
   archiveFileService: ArchiveFileService;
   tpsNotebookNavigatorMenuBridge: TpsNotebookNavigatorMenuBridge;
   sharedServices: GcmSharedServices;
@@ -472,30 +456,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       .sort((left, right) => (left.order ?? 100) - (right.order ?? 100));
   }
 
-  async openHomeView(): Promise<void> {
-    let homeLeaf: WorkspaceLeaf | null = null;
-    let created = false;
-    this.app.workspace.iterateAllLeaves((leaf) => {
-      if (!homeLeaf && leaf.view instanceof TpsHomeView && !leaf.view.isDailyNoteBacked()) {
-        homeLeaf = leaf;
-      }
-    });
-
-    if (!homeLeaf) {
-      homeLeaf = this.app.workspace.getLeaf('tab' as any);
-      created = true;
-      await homeLeaf.setViewState({ type: TPS_HOME_VIEW_TYPE, active: true });
-    }
-
-    this.app.workspace.setActiveLeaf(homeLeaf, { focus: true });
-    if (!created && homeLeaf.view instanceof TpsHomeView) {
-      await homeLeaf.view.render();
-    }
-    logger.flow('HomeView', 'open-command', {
-      route: created ? 'created' : 'reused',
-      refreshed: !created,
-    });
-  }
 
   private emitGcmApiChanged(available: boolean): void {
     const api = available ? (this as any).api ?? null : null;
@@ -532,8 +492,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     installDateContainsPolyfill();
     this.register(installVisibleViewportContract());
-    this.homeComponentActionService = new HomeComponentActionService(this);
-    this.registerView(TPS_HOME_VIEW_TYPE, (leaf) => new TpsHomeView(leaf, this));
     if (!this.usesNativeRecordArchitecture()) {
       this.registerBasesView(TPS_TABLE_VIEW_TYPE, {
         name: 'TPS Table',
@@ -622,16 +580,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.headingCollapseOnOpenService = new HeadingCollapseOnOpenService(this);
     this.addChild(this.headingCollapseOnOpenService);
     this.foldExpansionContextMenuService = new FoldExpansionContextMenuService(this);
-    this.homeCaptureService = new HomeCaptureService(this);
+    this.lineEditorService = new LineEditorService(this);
     this.baseLineEditProtocolService = new BaseLineEditProtocolService(this);
     if (!this.usesNativeRecordArchitecture()) this.baseLineEditProtocolService.register();
     this.archiveFileService = new ArchiveFileService(this);
-    this.register(this.homeComponentActionService.register(HOME_CAPTURE_COMMAND_ID, (context) => (
-      this.homeCaptureService.openCaptureModalForContext(context)
-    )));
-    this.register(this.homeComponentActionService.register(HOME_ADD_TASK_COMMAND_ID, (context) => (
-      this.homeCaptureService.openCaptureModalForContext(context, { task: true })
-    )));
     this.addChild(this.foldExpansionContextMenuService);
     this.linkedSubitemCheckboxService = new LinkedSubitemCheckboxService(this);
     this.frontmatterMutationService = new FrontmatterMutationService(this);
@@ -672,8 +624,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.persistentMenuManager = new PersistentMenuManager(this);
     this.viewModeManager = new ViewModeManager(this);
     this.addChild(this.viewModeManager);
-    this.dailyNoteHomeService = new DailyNoteHomeService(this);
-    this.addChild(this.dailyNoteHomeService);
     this.dailyNoteNavManager = new DailyNoteNavManager(this);
     this.addChild(this.dailyNoteNavManager);
 
@@ -869,6 +819,13 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.installBasesPreviewPropertiesBridge();
 
     registerGcmCommands(this);
+    let retirementActive = true;
+    this.register(() => { retirementActive = false; });
+    this.app.workspace.onLayoutReady(() => {
+      if (!retirementActive) return;
+      void restoreRetiredHomeTabs(this.app, () => retirementActive)
+        .catch((error) => logger.flowError('RetiredHome', 'restore-failed', error));
+    });
   }
 
   private registerInteractionHandlers(): void {
@@ -912,7 +869,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       activation: evt instanceof KeyboardEvent ? `key:${evt.key}` : 'pointer',
       targetText: target.textContent?.trim().slice(0, 80) || null,
       contextPath: listRoot.dataset.tpsContextPath || null,
-      homeComponent: listRoot.closest<HTMLElement>('.tps-home-panel')?.dataset.tpsHomeComponentKey || null,
     });
     try {
       await view.createFileForView();
@@ -949,7 +905,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     logger.flow('TpsTableView', 'native-create-click:owned-view', {
       targetText: target.textContent?.trim().slice(0, 80) || null,
       basePath: tableRoot.dataset.tpsBasePath || null,
-      homeComponent: tableRoot.closest<HTMLElement>('.tps-home-panel')?.dataset.tpsHomeComponentKey || null,
       route: hasCommandOverride ? 'command-override' : 'filter-default',
     });
     if (typeof view.hasCreateCommandOverride === 'function' && !view.hasCreateCommandOverride()) {
@@ -973,8 +928,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   private getTpsBaseNativeCreateScope(target: Element, rootSelector: string): HTMLElement | null {
     const boundedOwner = target.closest<HTMLElement>([
-      '.tps-home-panel',
-      '.tps-home-base-host',
       '.internal-embed',
       '.markdown-embed',
       '.cm-embed-block',
@@ -2041,13 +1994,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       enableShiftClickCancel?: boolean;
       archiveFolder?: string;
     } | null;
-    const hadRetiredHomeCaptureHeadingSettings = Boolean(
-      loaded && (
-        Object.prototype.hasOwnProperty.call(loaded, 'homeCaptureAddHeading') ||
-        Object.prototype.hasOwnProperty.call(loaded, 'homeCaptureHeading')
-      ),
-    );
-    const needsActivityBasePathMigration = String(loaded?.homeWorkoutBasePath || '').trim().toLowerCase() === 'workout log.base';
     let notebookNavigatorRulePayload = this.resolveNotebookNavigatorRuleSettingsPayload(loaded);
     if (!notebookNavigatorRulePayload) {
       notebookNavigatorRulePayload = this.resolveNotebookNavigatorRuleSettingsPayload(
@@ -2055,6 +2001,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       );
     }
     const loadedSettingsRecord = (loaded ?? {}) as SettingsRecord;
+    const hadRetiredHomeSettings = RETIRED_HOME_SETTING_KEYS.some((key) => Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key));
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
     this.settings.dataArchitectureMode = loaded?.dataArchitectureMode === 'native-records'
       ? 'native-records'
@@ -2145,11 +2092,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         nativeRecordStorageAliases: originalStorageValue('nativeRecordStorageAliases', []),
       });
     }
-    for (const key of AUTHORITATIVE_HOME_SETTING_KEYS) {
-      if (!Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key)) {
-        delete preNormalizationSettings[key];
-      }
-    }
     this.stripLegacySettingsFields(this.settings as unknown as Record<string, unknown>);
     const normalizedProperties = this.normalizeCustomProperties(this.settings.properties);
     this.settings.properties = this.removeRetiredBundledCustomProperties(normalizedProperties);
@@ -2215,30 +2157,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.parentChildIgnoreFrontmatterValue = String(this.settings.parentChildIgnoreFrontmatterValue ?? '').trim();
     this.settings.enableBasesForcedLinkPreview = this.settings.enableBasesForcedLinkPreview === true;
     this.settings.collapseHeadingsOnOpen = this.settings.collapseHeadingsOnOpen === true;
-    this.settings.enableDailyNoteHome = this.settings.enableDailyNoteHome !== false;
-    this.settings.homeComponents = this.normalizeHomeComponents(this.settings.homeComponents);
-    this.settings.homeComponentLayouts = this.normalizeHomeComponentLayouts(this.settings.homeComponentLayouts);
-    this.settings.homeComponentActions = normalizeHomeComponentActions(this.settings.homeComponentActions);
-    this.settings.homeCalendarBasePath =
-      typeof this.settings.homeCalendarBasePath === 'string' && this.settings.homeCalendarBasePath.trim()
-        ? normalizePath(this.settings.homeCalendarBasePath.trim())
-        : DEFAULT_SETTINGS.homeCalendarBasePath;
-    this.settings.homeFoodBasePath =
-      typeof this.settings.homeFoodBasePath === 'string' && this.settings.homeFoodBasePath.trim()
-        ? normalizePath(this.settings.homeFoodBasePath.trim())
-        : DEFAULT_SETTINGS.homeFoodBasePath;
-    const configuredActivityBasePath = typeof this.settings.homeWorkoutBasePath === 'string'
-      ? normalizePath(this.settings.homeWorkoutBasePath.trim())
-      : '';
-    this.settings.homeWorkoutBasePath = !configuredActivityBasePath || configuredActivityBasePath.toLowerCase() === 'workout log.base'
-      ? DEFAULT_SETTINGS.homeWorkoutBasePath
-      : configuredActivityBasePath;
-    this.settings.homeOpenTasksBasePath =
-      typeof this.settings.homeOpenTasksBasePath === 'string' && this.settings.homeOpenTasksBasePath.trim()
-        ? normalizePath(this.settings.homeOpenTasksBasePath.trim())
-        : DEFAULT_SETTINGS.homeOpenTasksBasePath;
-    this.settings.homeCaptureInsertPosition =
-      this.settings.homeCaptureInsertPosition === 'top' ? 'top' : 'bottom';
+
     this.settings.hideCompletedCheckboxes = this.settings.hideCompletedCheckboxes === true;
     this.settings.completedTaskHidingScope = this.settings.completedTaskHidingScope === 'reading-only'
       ? 'reading-only'
@@ -2364,17 +2283,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         action: 'preserved-for-manual-repair',
       });
     }
-    const normalizedAuthoritativeHomeSettingKeys = AUTHORITATIVE_HOME_SETTING_KEYS.filter((key) =>
-      !Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key)
-      || loadedSettingsRecord[key] !== this.settings[key],
-    );
     const needsSettingsMigration =
-      hadRetiredHomeCaptureHeadingSettings ||
-      needsActivityBasePathMigration ||
+      hadRetiredHomeSettings ||
       needsCheckboxMappingMigration ||
       needsNativeRecordIdentityMigration ||
       needsCreateTaskDefaultParentMigration ||
-      normalizedAuthoritativeHomeSettingKeys.length > 0 ||
       removedRetiredPropertyCount > 0;
     this.settingsPersistence = null;
     this.ensureSettingsPersistence(
@@ -2383,12 +2296,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         : this.settings as unknown as SettingsRecord,
     );
     if (needsSettingsMigration) await this.persistSettingsSnapshot();
-    if (hadRetiredHomeCaptureHeadingSettings) {
-      logger.flow('Settings', 'migration:removed-home-capture-heading');
-    }
-    if (needsActivityBasePathMigration) {
-      logger.flow('Settings', 'migration:activity-base-path');
-    }
     if (needsCheckboxMappingMigration) {
       logger.flow('Settings', 'migration:checkbox-status-mappings', {
         count: this.settings.linkedSubitemCheckboxMappings.length,
@@ -2406,103 +2313,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         mode: this.settings.createTaskDefaultParentMode,
       });
     }
-    if (normalizedAuthoritativeHomeSettingKeys.length > 0) {
-      logger.flow('Settings', 'migration:authoritative-home-settings', {
-        count: normalizedAuthoritativeHomeSettingKeys.length,
-      });
-    }
     if (removedRetiredPropertyCount > 0) {
       logger.flow('Settings', 'migration:removed-retired-bundled-properties', {
         count: removedRetiredPropertyCount,
       });
     }
-  }
-
-  private normalizeHomeComponents(components: unknown): TPSGlobalContextMenuSettings['homeComponents'] {
-    const allowed = new Set([
-      'quick-capture',
-      'calendar',
-      'food-tracker',
-      'workout-tracker',
-      'open-unscheduled-tasks',
-    ]);
-    const source = Array.isArray(components) && components.length > 0
-      ? components
-      : DEFAULT_SETTINGS.homeComponents;
-    const seen = new Set<string>();
-    const normalized: TPSGlobalContextMenuSettings['homeComponents'] = [];
-    for (const value of source) {
-      let component: TPSGlobalContextMenuSettings['homeComponents'][number] | null = null;
-      if (typeof value === 'string') {
-        const trimmed = value.trim();
-        if (trimmed === 'quick-capture') {
-          component = { type: 'base', path: HOME_DAILY_NOTE_FEED_BASE_PATH };
-        } else if (allowed.has(trimmed)) {
-          component = trimmed as TPSGlobalContextMenuSettings['homeComponents'][number];
-        } else if (trimmed.toLowerCase().endsWith('.base')) {
-          component = { type: 'base', path: normalizePath(trimmed).replace(/^\/+/, '') };
-        }
-      } else if (
-        value &&
-        typeof value === 'object' &&
-        (value as { type?: unknown }).type === 'base'
-      ) {
-        const path = normalizePath(String((value as { path?: unknown }).path || '').trim()).replace(/^\/+/, '');
-        if (path) component = { type: 'base', path };
-      } else if (
-        value &&
-        typeof value === 'object' &&
-        (value as { type?: unknown }).type === 'command'
-      ) {
-        const commandId = String((value as { commandId?: unknown }).commandId || '').trim();
-        const title = String((value as { title?: unknown }).title || '').trim();
-        const icon = String((value as { icon?: unknown }).icon || '').trim();
-        if (commandId) {
-          component = {
-            type: 'command',
-            commandId,
-            ...(title ? { title } : {}),
-            ...(icon ? { icon } : {}),
-          };
-        }
-      }
-      if (!component) continue;
-      const key = typeof component === 'string'
-        ? component
-        : component.type === 'base'
-          ? `base:${component.path.toLowerCase()}`
-          : `command:${component.commandId.toLowerCase()}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      normalized.push(component);
-    }
-    return normalized.length > 0 ? normalized : [...DEFAULT_SETTINGS.homeComponents];
-  }
-
-  private normalizeHomeComponentLayouts(value: unknown): TPSGlobalContextMenuSettings['homeComponentLayouts'] {
-    if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
-    const normalized: TPSGlobalContextMenuSettings['homeComponentLayouts'] = {};
-    for (const [rawKey, rawLayout] of Object.entries(value as Record<string, unknown>)) {
-      const key = String(rawKey || '').trim();
-      if (!key || !rawLayout || typeof rawLayout !== 'object' || Array.isArray(rawLayout)) continue;
-      const source = rawLayout as Record<string, unknown>;
-      const height = this.normalizeHomeLayoutNumber(source.height, 220, 1200);
-      const capturePreviewHeight = this.normalizeHomeLayoutNumber(source.capturePreviewHeight, 120, 900);
-      const span: 2 | undefined = Number(source.span) === 2 ? 2 : undefined;
-      const layout: TPSGlobalContextMenuSettings['homeComponentLayouts'][string] = {
-        ...(height != null ? { height } : {}),
-        ...(span ? { span } : {}),
-        ...(capturePreviewHeight != null ? { capturePreviewHeight } : {}),
-      };
-      if (Object.keys(layout).length > 0) normalized[key] = layout;
-    }
-    return normalized;
-  }
-
-  private normalizeHomeLayoutNumber(value: unknown, min: number, max: number): number | undefined {
-    const parsed = Number(value);
-    if (!Number.isFinite(parsed)) return undefined;
-    return Math.max(min, Math.min(max, Math.round(parsed)));
   }
 
   private normalizeCustomProperties(properties: unknown): TPSGlobalContextMenuSettings['properties'] {
@@ -2721,8 +2536,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     delete record.typeSystemLimits;
     delete record.defaultSubtypePropertyKey;
     delete record.subtypeTemplateTag;
-    delete record.homeCaptureAddHeading;
-    delete record.homeCaptureHeading;
+    for (const key of RETIRED_HOME_SETTING_KEYS) delete record[key];
   }
 
   createDefaultRule(): IconColorRule {

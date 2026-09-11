@@ -508,15 +508,6 @@ export interface TPSGlobalContextMenuSettings {
   enableCanvasOpenGuard: boolean;
   enableBasesForcedLinkPreview: boolean;
   collapseHeadingsOnOpen: boolean;
-  enableDailyNoteHome: boolean;
-  homeComponents: HomeComponentId[];
-  homeComponentLayouts: Record<string, HomeComponentLayout>;
-  homeComponentActions: HomeComponentActionMap;
-  homeCalendarBasePath: string;
-  homeFoodBasePath: string;
-  homeWorkoutBasePath: string;
-  homeOpenTasksBasePath: string;
-  homeCaptureInsertPosition: HomeCaptureInsertPosition;
   hideCompletedCheckboxes: boolean;
   completedTaskHidingScope: CompletedTaskHidingScope;
   hideAllTaskLinesInReadingMode: boolean;
@@ -735,38 +726,6 @@ export interface BuildPanelOptions {
   recurrenceRoot?: HTMLElement | null;
   closeAfterRecurrence?: boolean;
 }
-
-export type HomeBuiltInComponentId = 'quick-capture' | 'calendar' | 'food-tracker' | 'workout-tracker' | 'open-unscheduled-tasks';
-export type HomeBaseComponent = { type: 'base'; path: string };
-export type HomeCommandComponent = { type: 'command'; commandId: string; title?: string; icon?: string };
-export type HomeComponentId = HomeBuiltInComponentId | HomeBaseComponent | HomeCommandComponent;
-export interface HomeComponentLayout {
-  height?: number;
-  span?: 1 | 2;
-  capturePreviewHeight?: number;
-}
-export type HomeComponentActionTarget = 'home-note' | 'workspace';
-export interface HomeComponentAction {
-  id: string;
-  commandId: string;
-  label?: string;
-  icon?: string;
-  target: HomeComponentActionTarget;
-}
-export type HomeComponentActionMap = Record<string, HomeComponentAction[]>;
-export interface HomeActionContext {
-  source: 'tps-home';
-  dateIso: string;
-  dailyNotePath: string;
-  componentId: string;
-  basePath?: string;
-}
-export interface HomeActionProvider {
-  version?: number;
-  canHandle(commandId: string): boolean;
-  execute(commandId: string, context: HomeActionContext): void | boolean | Promise<void | boolean>;
-}
-export type HomeCaptureInsertPosition = 'top' | 'bottom';
 
 /**
  * Recurrence rule button option

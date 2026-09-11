@@ -976,12 +976,6 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             version: 1,
             register: (action: any) => plugin.registerExternalAction(action),
         },
-        homeActions: {
-            version: 1,
-            register: (commandId: string, handler: any) => plugin.homeComponentActionService.register(commandId, handler),
-            canExecute: (action: any) => plugin.homeComponentActionService.canExecute(action),
-            execute: (action: any, context: any) => plugin.homeComponentActionService.execute(action, context),
-        },
         dailyNotes: {
             version: 4,
             findForIsoDate: (isoDate: string) => {

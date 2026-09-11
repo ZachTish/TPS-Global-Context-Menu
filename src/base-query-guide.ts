@@ -93,7 +93,7 @@ export const BASE_QUERY_GUIDE_SECTIONS: BaseQueryGuideSection[] = [
   },
   {
     title: 'Context and dynamic variables',
-    description: 'Values supplied by the Base location, Home, a formula, or a list/summary expression.',
+    description: 'Values supplied by the Base location, a formula, or a list/summary expression.',
     defaultOpen: true,
     entries: [
       {
@@ -104,7 +104,7 @@ export const BASE_QUERY_GUIDE_SECTIONS: BaseQueryGuideSection[] = [
       {
         expression: 'this.file.path',
         appliesTo: 'Native Bases + TPS List',
-        description: 'The current context file path. In TPS Home this is replaced with the selected Daily Note path before the Base renders.',
+        description: 'The current context file path.',
       },
       {
         expression: 'this.file.name',
@@ -260,7 +260,6 @@ export const BASE_QUERY_GUIDE_SECTIONS: BaseQueryGuideSection[] = [
       { expression: 'file.ext / file.extension', appliesTo: 'TPS Table', description: 'Extension of the source file.' },
       { expression: 'file.tags', appliesTo: 'TPS Table', description: 'Tags collected for the source file.' },
       { expression: 'file.<frontmatter-key>', appliesTo: 'TPS Table', description: 'Any frontmatter property on the source file.' },
-      { expression: 'this.scheduled / this.date', appliesTo: 'TPS Table in Home', description: 'The selected Home date supplied as query context.' },
     ],
   },
   {
@@ -282,7 +281,6 @@ export const BASE_QUERY_GUIDE_SECTIONS: BaseQueryGuideSection[] = [
 ];
 
 export const BASE_QUERY_GUIDE_GOTCHAS = [
-  'In TPS Home, this.file.path is the selected Daily Note—not Daily Note Feed.base and not whichever Markdown tab happened to be active.',
   'TPS List kind is a GCM structural selector: task, bullet, note, h1 through h6, plus header/heading as aliases for every Markdown heading level. Use note.kind when you mean frontmatter named kind.',
   'TPS List exposes whole-note, checkbox-task, plain-bullet, and Markdown-heading rows. Ordinary paragraphs are not standalone rows.',
   'Heading filters are display-only. They never make + New create a heading; keep task or bullet first in the active-view or/any branch to choose the creation route.',

@@ -3,7 +3,6 @@ import TPSGlobalContextMenuPlugin from '../main';
 import * as logger from '../logger';
 import { TpsListView, type TpsListHost } from '../tps-list/views/TpsListView';
 import { DEFAULT_SETTINGS } from '../tps-list/settings';
-import { getCurrentBaseEmbedRenderContext, takePendingBaseEmbedRenderContext } from './base-embed-context';
 
 export const TPS_LIST_VIEW_TYPE = 'tps-list';
 
@@ -72,13 +71,7 @@ export function createTpsListView(controller: QueryController, containerEl: HTML
 }
 
 function inheritBaseEmbedContext(containerEl: HTMLElement): void {
-  const renderContext = getCurrentBaseEmbedRenderContext() || takePendingBaseEmbedRenderContext(TPS_LIST_VIEW_TYPE);
-  if (renderContext) {
-    containerEl.dataset.tpsBasePath = renderContext.path;
-    containerEl.dataset.tpsBaseDefinition = renderContext.definition;
-    if (renderContext.sourcePath) containerEl.dataset.tpsContextPath = renderContext.sourcePath;
-    return;
-  }
+
   const host = containerEl.closest<HTMLElement>('[data-tps-base-path], [data-tps-base-definition]');
   if (!host) return;
   if (host.dataset.tpsBasePath) containerEl.dataset.tpsBasePath = host.dataset.tpsBasePath;

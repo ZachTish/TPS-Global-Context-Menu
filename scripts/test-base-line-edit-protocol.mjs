@@ -13,7 +13,7 @@ const serviceSource = readFileSync(
   'utf8',
 );
 const homeCaptureSource = readFileSync(
-  new URL('../src/services/home-capture-service.ts', import.meta.url),
+  new URL('../src/services/line-editor-service.ts', import.meta.url),
   'utf8',
 );
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
@@ -125,7 +125,7 @@ function createHarness({
         },
       },
     },
-    homeCaptureService: {
+    lineEditorService: {
       async openLineEditor(file, line, options) {
         sequence.push('open-modal');
         modalCalls.push({ file, line, options });
@@ -349,8 +349,8 @@ test('route logging is redacted and the editor rechecks the digest before any Sa
   assert.match(homeCaptureSource, /MAX_BASE_LINE_SOURCE_BYTES/u);
   assert.match(homeCaptureSource, /resolveUniqueBaseLineFingerprint\([\s\S]*?this\.expectedFingerprint/u);
   assert.match(homeCaptureSource, /await this\.plugin\.app\.vault\.read\(this\.file\)[\s\S]*?await this\.plugin\.app\.vault\.process/u);
-  assert.match(homeCaptureSource, /replaceHomeCaptureRangeIfUnchanged/u);
+  assert.match(homeCaptureSource, /replaceLineRangeIfUnchanged/u);
   assert.match(mainSource, /new BaseLineEditProtocolService\(this\)[\s\S]*?baseLineEditProtocolService\.register\(\)/u);
   assert.doesNotMatch(serviceSource, /logger\.flowError/u);
-  assert.match(homeCaptureSource, /if \(this\.redactDiagnostics\)[\s\S]*?logger\.flowWarn\('HomeCapture', 'line-editor:digest-check-failed'/u);
+  assert.match(homeCaptureSource, /if \(this\.redactDiagnostics\)[\s\S]*?logger\.flowWarn\('LineEditor', 'line-editor:digest-check-failed'/u);
 });

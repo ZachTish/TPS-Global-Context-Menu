@@ -212,7 +212,6 @@ export class ContextTargetService {
 
     isManualContextInterceptTarget(target: HTMLElement | null): boolean {
         if (!target) return false;
-        if (target.closest('.tps-home-panel')) return false;
         if (target.closest('[data-tps-calendar-context-owner="true"]')) return false;
         if (target.closest('[data-tps-task-context="true"], [data-tps-line-context="true"]')) return false;
         if (this.isNativeMenuManagedTarget(target)) return false;

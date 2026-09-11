@@ -138,9 +138,7 @@ test('TPS List and Table selections expose typed batch properties and cross-plug
   assert.match(pluginStylesSource, /\.tps-gcm-pointer-drag-preview\s*\{[\s\S]{0,500}pointer-events:\s*none/u);
 });
 
-test('Home Daily Note tasks use standard task interactions while the capture editor stays isolated', () => {
-  assert.doesNotMatch(serviceSource, /'\.tps-home-capture-preview-body'/);
-  assert.match(serviceSource, /isTaskInteractionBoundary[\s\S]*\.tps-home-native-capture-editor/);
+test('Markdown tasks retain their standard task interactions', () => {
   assert.match(serviceSource, /closest\('\.markdown-reading-view, \.markdown-preview-view, \.markdown-rendered'\)/);
   assert.match(serviceSource, /querySelectorAll<HTMLElement>\('\[data-task-path\]\[data-task-line\]'\)/);
 });

@@ -344,7 +344,7 @@ test('checkbox mapping load migration uses legacy statuses and persists one cano
   assert.match(mainSource, /statuses: legacyCanceled\.length > 0 \? legacyCanceled : \['wont-do'\]/u);
   assert.match(mainSource, /normalizeLinkedSubitemMappings\(mappingSource, \{[\s\S]{0,100}enforceStrictDefaults: true/u);
   assert.match(mainSource, /const needsCheckboxMappingMigration = Boolean\(loaded\)/u);
-  assert.match(mainSource, /needsActivityBasePathMigration \|\|[\s\S]{0,120}needsCheckboxMappingMigration \|\|/u);
+  assert.match(mainSource, /hadRetiredHomeSettings \|\|[\s\S]{0,120}needsCheckboxMappingMigration \|\|/u);
   assert.doesNotMatch(mainSource, /getStrictLinkedSubitemMappings|normalizeStrictLinkedSubitemMappings/u);
 });
 
@@ -385,41 +385,6 @@ test('settings persistence merges only locally changed keys into the newest disk
   });
   assert.equal(disk.settingA, 'mobile-newer');
   assert.equal(disk.lastArchiveTagSweepDate, '2026-07-21');
-});
-
-test('authoritative Home defaults persist before an unrelated setting save', async () => {
-  const {
-    reconcilePersistedSettingsInPlace,
-    SettingsPersistenceCoordinator,
-  } = await importModule('../src/settings-persistence.ts');
-  const homeDefaults = {
-    enableDailyNoteHome: true,
-    homeCalendarBasePath: 'home-schedule.base',
-    homeFoodBasePath: 'Food Log.base',
-    homeWorkoutBasePath: 'Activity Log.base',
-    homeOpenTasksBasePath: 'Open Unscheduled Tasks.base',
-  };
-  let disk = { unrelatedSetting: 'old' };
-  const live = { ...structuredClone(disk), ...homeDefaults };
-  const coordinator = new SettingsPersistenceCoordinator(
-    async () => structuredClone(disk),
-    async (next) => {
-      disk = structuredClone(next);
-    },
-    (requested, persisted) => {
-      reconcilePersistedSettingsInPlace(live, requested, persisted);
-    },
-  );
-  coordinator.setBaseline({ unrelatedSetting: 'old' });
-
-  await coordinator.request(live);
-  assert.deepEqual(disk, { unrelatedSetting: 'old', ...homeDefaults });
-  assert.deepEqual(live, disk);
-
-  live.unrelatedSetting = 'new';
-  await coordinator.request(live);
-  assert.deepEqual(disk, { unrelatedSetting: 'new', ...homeDefaults });
-  assert.deepEqual(live, disk);
 });
 
 test('settings persistence keeps rendered custom-property references live across sequential saves', async () => {
@@ -728,7 +693,7 @@ test('tag identity retirement uses serialized settings persistence without rewri
   assert.equal(disk.unrelatedSetting, 'changed-concurrently');
 
   const loadSettingsStart = mainSource.indexOf('async loadSettings(): Promise<void>');
-  const loadSettingsEnd = mainSource.indexOf('private normalizeHomeComponents(', loadSettingsStart);
+  const loadSettingsEnd = mainSource.indexOf('private normalizeCustomProperties(', loadSettingsStart);
   const loadSettingsSource = mainSource.slice(loadSettingsStart, loadSettingsEnd);
   assert.ok(loadSettingsStart >= 0 && loadSettingsEnd > loadSettingsStart);
   assert.match(loadSettingsSource, /resolveWritableNativeRecordStorageConfiguration\([\s\S]{0,180}loaded\?\.nativeRecordStorageAliases/);
@@ -949,16 +914,13 @@ test('obsolete type-profile settings are stripped without removing record or fol
   assert.match(constantsSource, /\{ id: 'type', label: 'Folder', key: 'folderPath', type: 'folder'/);
 });
 
-test('retired bundled properties migrate once without rewriting saved Home actions', () => {
+test('retired bundled properties migrate once', () => {
   assert.match(mainSource, /const normalizedProperties = this\.normalizeCustomProperties\(this\.settings\.properties\);/);
   assert.match(mainSource, /this\.settings\.properties = this\.removeRetiredBundledCustomProperties\(normalizedProperties\);/);
   assert.match(mainSource, /!id\.startsWith\('tps-health-'\) && !LEGACY_HEALTH_CUSTOM_PROPERTY_IDS\.has\(id\)/);
   assert.match(mainSource, /const needsSettingsMigration =[\s\S]{0,320}removedRetiredPropertyCount > 0;/);
   assert.match(mainSource, /needsSettingsMigration[\s\S]{0,180}preNormalizationSettings[\s\S]{0,180}if \(needsSettingsMigration\) await this\.persistSettingsSnapshot\(\);/);
   assert.match(mainSource, /migration:removed-retired-bundled-properties'[\s\S]{0,120}count: removedRetiredPropertyCount/);
-  assert.match(mainSource, /this\.settings\.homeComponentActions = normalizeHomeComponentActions\(this\.settings\.homeComponentActions\);/);
-  assert.doesNotMatch(mainSource, /const activityActions = this\.settings\.homeComponentActions/);
-  assert.doesNotMatch(mainSource, /this\.settings\.homeComponentActions\['workout-tracker'\]\s*=/);
 });
 
 test('optional inline and context surfaces default to the lean off state', () => {
@@ -975,7 +937,6 @@ test('optional inline and context surfaces default to the lean off state', () =>
     assert.match(constantsSource, new RegExp(`${key}: false`));
   }
   assert.match(typesSource, /DEFAULT_NOTEBOOK_NAVIGATOR_RULE_SETTINGS[\s\S]{0,120}enabled: false,[\s\S]{0,80}autoApplyOnFileOpen: false/);
-  assert.match(constantsSource, /homeComponents:\s*\[\s*\{ type: 'base', path: HOME_DAILY_NOTE_FEED_BASE_PATH \},\s*'calendar',\s*'open-unscheduled-tasks',\s*\]/);
   assert.doesNotMatch(constantsSource, /commandId: 'tps-health:/);
   assert.match(mainSource, /this\.settings = Object\.assign\(\{\}, DEFAULT_SETTINGS, loaded \?\? \{\}\);/);
 });
@@ -1136,7 +1097,7 @@ test('settings use shallow routed pages with responsive, accessible selectors', 
   assert.match(frontmatterSource, /updateAutomaticMutationTagExclusion\(/);
   assert.match(frontmatterSource, /selectedTags: excludedTags/);
 
-  for (const workflow of ['home-daily', 'tasks', 'child-notes', 'recurrence', 'time-tracking']) {
+  for (const workflow of ['daily-notes', 'tasks', 'child-notes', 'recurrence', 'time-tracking']) {
     assert.match(settingsTabSource, new RegExp(`id: '${workflow}', label:`));
     assert.match(displaySource, new RegExp(`this\\.activeWorkflowPage === '${workflow}'`));
   }
@@ -1151,38 +1112,6 @@ test('settings use shallow routed pages with responsive, accessible selectors', 
   assert.match(stylesSource, /\.tps-gcm-viewmode-condition-row\s*\{[\s\S]*grid-template-columns:/);
   assert.match(stylesSource, /@media \(max-width: 700px\)[\s\S]*\.tps-gcm-viewmode-condition-row[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.doesNotMatch(stylesSource, /(?:^|\n)\.tps-settings-(?:hub|subnav|route|page|editor|callout)/);
-});
-
-test('TPS Home settings keep Base ownership in Home edit mode and expose the Daily Note toggle', () => {
-  assert.match(mainSource, /homeCalendarBasePath =\s*typeof this\.settings\.homeCalendarBasePath === 'string'/);
-  assert.doesNotMatch(settingsTabSource, /setName\('Home (?:calendar|food|activity|open tasks) Base path'\)/);
-  assert.match(constantsSource, /enableDailyNoteHome:\s*true/);
-  assert.match(mainSource, /this\.settings\.enableDailyNoteHome = this\.settings\.enableDailyNoteHome !== false/);
-  assert.match(mainSource, /AUTHORITATIVE_HOME_SETTING_KEYS[\s\S]*'homeOpenTasksBasePath'/);
-  assert.match(mainSource, /if \(!Object\.prototype\.hasOwnProperty\.call\(loadedSettingsRecord, key\)\) \{\s*delete preNormalizationSettings\[key\]/);
-  assert.match(mainSource, /normalizedAuthoritativeHomeSettingKeys\.length > 0/);
-  assert.match(mainSource, /migration:authoritative-home-settings/);
-  assert.match(settingsTabSource, /setName\('Use TPS Home for Daily Notes'\)/);
-  assert.match(settingsTabSource, /runDailyNoteHomeSettingTransaction\(\{/);
-  assert.match(settingsTabSource, /const generation = \+\+this\.dailyNoteHomeToggleGeneration/);
-  assert.match(settingsTabSource, /const previousValue = this\.plugin\.settings\.enableDailyNoteHome !== false/);
-  assert.match(settingsTabSource, /applyEnabled: \(enabled\) => service\?\.setEnabled\(enabled\)/);
-  assert.match(settingsTabSource, /setSetting: \(enabled\) => \{\s*this\.plugin\.settings\.enableDailyNoteHome = enabled/);
-  assert.match(settingsTabSource, /isCurrent: \(\) => generation === this\.dailyNoteHomeToggleGeneration/);
-  assert.match(settingsTabSource, /isAvailable: \(\) => service\?\.isAvailable\(\) \?\? true/);
-  assert.match(settingsTabSource, /toggle\.setValue\(result\.effectiveValue\)/);
-  assert.doesNotMatch(settingsTabSource, /if \(value === previous\) return/);
-  assert.match(mainSource, /homeCaptureInsertPosition === 'top' \? 'top' : 'bottom'/);
-  assert.match(mainSource, /delete record\.homeCaptureAddHeading/);
-  assert.match(mainSource, /delete record\.homeCaptureHeading/);
-  assert.doesNotMatch(typesSource, /homeCaptureAddHeading|homeCaptureHeading/);
-  assert.match(mainSource, /homeComponentLayouts = this\.normalizeHomeComponentLayouts\(this\.settings\.homeComponentLayouts\)/);
-  assert.match(mainSource, /private normalizeHomeComponentLayouts\(value: unknown\)/);
-  assert.match(mainSource, /this\.normalizeHomeLayoutNumber\(source\.height, 220, 1200\)/);
-  assert.match(mainSource, /this\.normalizeHomeLayoutNumber\(source\.capturePreviewHeight, 120, 900\)/);
-  assert.match(settingsTabSource, /setName\('Home capture position'\)/);
-  assert.match(settingsTabSource, /\.addOption\('bottom', 'Bottom of note'\)/);
-  assert.doesNotMatch(settingsTabSource, /setName\('Home capture heading'\)/);
 });
 
 test('archive action uses Controller two-stage source folder and moves files immediately', () => {

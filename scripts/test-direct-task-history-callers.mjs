@@ -992,47 +992,6 @@ test('inline editor changes remain unjournaled until a durable vault write can b
   assert.doesNotMatch(nextLine, /tpsId::/u);
 });
 
-test('Home selected-task history ignores unchanged saves and commits changed lines from saved content', async () => {
-  const { TpsHomeView } = await loadBundledModule('../src/views/home-view.ts', 'direct-history-home');
-  const view = Object.create(TpsHomeView.prototype);
-  const events = [];
-  view.plugin = { itemHistoryService: createHistoryRecorder(events) };
-  const file = { path: 'Inbox/Home selected task.md' };
-  const before = '- [ ] Selected task [priority:: low]';
-
-  const unchanged = await TpsHomeView.prototype.beginHomeTaskHistory.call(
-    view,
-    file,
-    'update',
-    before,
-    before,
-    0,
-    'home-quick-capture-mobile',
-  );
-  assert.deepEqual(unchanged, []);
-  assert.deepEqual(events, []);
-
-  const next = '- [ ] Selected task [priority:: high]';
-  const intents = await TpsHomeView.prototype.beginHomeTaskHistory.call(
-    view,
-    file,
-    'update',
-    before,
-    next,
-    0,
-    'home-quick-capture-desktop',
-  );
-  const ensured = TpsHomeView.prototype.applyHomeTaskHistoryIdentities.call(view, next, intents);
-  await TpsHomeView.prototype.commitHomeTaskHistory.call(view, intents, ensured);
-
-  assert.equal(ensured, `${next} [tpsId:: history-id]`);
-  assert.deepEqual(events.map((event) => event.type), ['begin', 'ensure', 'commit']);
-  assert.equal(events[0].input.cause.surface, 'home-quick-capture-desktop');
-  assert.equal(events.at(-1).input.after.rawLine, ensured);
-  assert.equal(events.at(-1).input.after.lineNumber, 0);
-  assert.equal(events.at(-1).input.sourceDisposition, 'retained');
-});
-
 test('line-item deletion commits task history after the atomic delete and ignores bullets', async () => {
   const { performLineItemDelete } = await loadBundledModule(
     '../src/services/line-item-delete-service.ts',

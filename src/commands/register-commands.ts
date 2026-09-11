@@ -9,46 +9,6 @@ import * as logger from '../logger';
  */
 export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
     plugin.addCommand({
-        id: 'open-home',
-        name: 'Open TPS Home',
-        callback: async () => {
-            await plugin.openHomeView();
-        },
-    });
-
-    plugin.addCommand({
-        id: 'home-quick-capture',
-        name: "Capture: Today's Daily Note",
-        callback: () => {
-            void plugin.homeCaptureService.openCaptureModal();
-        },
-    });
-
-    plugin.addCommand({
-        id: 'capture-to-current-note',
-        name: 'Capture: Current note',
-        callback: () => {
-            void plugin.homeCaptureService.openCaptureModalForCurrentNote();
-        },
-    });
-
-    plugin.addCommand({
-        id: 'capture-to-home-note',
-        name: 'Home: Capture to selected Daily Note',
-        callback: () => {
-            void plugin.homeCaptureService.openCaptureModal();
-        },
-    });
-
-    plugin.addCommand({
-        id: 'add-task-to-home-note',
-        name: 'Home: Add task to selected Daily Note',
-        callback: () => {
-            void plugin.homeCaptureService.openCaptureModal(undefined, { task: true });
-        },
-    });
-
-    plugin.addCommand({
         id: 'create-task',
         name: 'Create task',
         callback: () => {

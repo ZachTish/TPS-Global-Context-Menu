@@ -8,8 +8,6 @@ const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf
 const listSource = readFileSync(new URL('../src/tps-list/views/TpsListView.ts', import.meta.url), 'utf8');
 const tableSource = readFileSync(new URL('../src/views/log-base-view.ts', import.meta.url), 'utf8');
 const ownerSource = readFileSync(new URL('../src/views/native-base-create-owner.ts', import.meta.url), 'utf8');
-const constantsSource = readFileSync(new URL('../src/constants.ts', import.meta.url), 'utf8');
-const dailyFeedSource = readFileSync(new URL('./fixtures/Daily Note Feed.base', import.meta.url), 'utf8');
 
 class FakeElement {
   constructor(tagName = 'div', options = {}) {
@@ -147,17 +145,14 @@ test('nested SVG plus taps claim only the final item-create control in Base chro
   }
 });
 
-test('Daily Note Feed declares its selected note as the explicit task sink', () => {
-  assert.match(constantsSource, /file\.path == this\.file\.path\s+    - task\.path == this\.file\.path/);
-  assert.match(dailyFeedSource, /file\.path == this\.file\.path\s+    - task\.path == this\.file\.path/);
+test('TPS List respects the explicit task sink and ordered creation defaults', () => {
   assert.match(listSource, /resolveKanbanRootTaskTargetPath\(defaults\.targetPath/);
   assert.match(listSource, /for \(const root of \[\.\.\.roots\]\.reverse\(\)\)/);
   assert.match(listSource, /mergePriorityTaskCreationDefaults\(defaults, structured\)/);
   assert.match(listSource, /targetPath: higherPriority\.targetPathSpecified === true\s+\? higherPriority\.targetPath \?\? null\s+: lowerPriority\.targetPath \?\? null/);
 });
 
-test('native TPS List ownership cannot leak across neighboring Home components', () => {
-  assert.match(mainSource, /'\.tps-home-panel'/);
+test('native TPS List ownership cannot leak across neighboring Base components', () => {
   assert.match(mainSource, /const boundedOwner = target\.closest<HTMLElement>/);
   assert.match(mainSource, /getVisibleTpsBaseCreateRoot\(boundedOwner, rootSelector\) \? boundedOwner : null/);
   assert.match(mainSource, /getVisibleTpsBaseCreateRoot\(leaf, rootSelector\) \? leaf : null/);

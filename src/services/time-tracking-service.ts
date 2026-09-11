@@ -1616,7 +1616,6 @@ export class TimeTrackingService {
       const leaf = this.plugin.findOpenLeafForFile(resolved.file) ?? this.plugin.app.workspace.getLeaf(false);
       if (!leaf) return false;
       const currentState = leaf.getViewState?.();
-      this.plugin.dailyNoteHomeService.allowLivePreview(leaf, resolved.file.path);
       await leaf.setViewState({
         type: 'markdown',
         active: true,

@@ -25,14 +25,12 @@ import {
   visibleLineText,
 } from './log-line-utils';
 import { getPlainDisplayTitle } from '../utils/display-title';
-import { resolveHomeFoodLineDateKey } from './home-food-date';
 import { composeEffectiveFilterRoots, extractFilterRootCandidates, extractPersistedFilterRoots } from '../tps-list/base-filter-roots';
 import {
   evaluateLogBaseFilterRoots,
   type LogBaseFilterContext,
   type LogBaseFilterFailure,
 } from './log-base-filter';
-import { getCurrentBaseEmbedRenderContext, takePendingBaseEmbedRenderContext } from './base-embed-context';
 import { calculateTpsTableTotals, normalizeTotalsRowPosition, type TpsTableTotalsRowPosition } from './log-base-totals';
 import { getOrderedSelectionRange, toggleOrderedSelection } from '../utils/ordered-selection';
 import { hashSelectionIdentity } from '../utils/selection-identity';
@@ -341,12 +339,7 @@ export class TpsTableView extends BasesView {
     this.containerEl = containerEl;
     this.containerEl.removeClass('tps-list-scroll');
     delete (this.containerEl as any).__tpsListView;
-    const renderContext = getCurrentBaseEmbedRenderContext() || takePendingBaseEmbedRenderContext(TPS_TABLE_VIEW_TYPE);
-    if (renderContext) {
-      this.containerEl.dataset.tpsBasePath = renderContext.path;
-      this.containerEl.dataset.tpsBaseDefinition = renderContext.definition;
-      if (renderContext.sourcePath) this.containerEl.dataset.tpsContextPath = renderContext.sourcePath;
-    }
+
     this.containerEl.addClass('tps-log-base');
     (this.containerEl as any).__tpsTableView = this;
     this.refreshCoordinator = new TpsBaseRefreshCoordinator(() => void this.render(), 280);
@@ -788,7 +781,7 @@ export class TpsTableView extends BasesView {
   private resolveLineCreateToken(value: string): string {
     const raw = String(value || '').trim();
     if (/^this\.file\.path$/iu.test(raw)) return this.getLineCreateContextPath() || '';
-    if (/^this\.(?:scheduled|date)$/iu.test(raw)) return this.getHomeContextDate() || '';
+    if (/^this\.(?:scheduled|date)$/iu.test(raw)) return '';
     return raw;
   }
 
@@ -1099,7 +1092,6 @@ export class TpsTableView extends BasesView {
           failedClosedFilterRows += 1;
           continue;
         }
-        if (!this.lineMatchesHomeDateContext(fields, file)) continue;
         entries.push({
           id: `${file.path}:${index}`,
           selectionId: getLogEntrySelectionId(file.path, index, line, fields),
@@ -1447,10 +1439,8 @@ export class TpsTableView extends BasesView {
           contextFile,
         )
       : (contextCache?.frontmatter || {}) as Record<string, unknown>;
-    const contextDate = this.getHomeContextDate();
     const thisValue: Record<string, unknown> = {
       ...contextFrontmatter,
-      ...(contextDate ? { scheduled: contextDate, date: contextDate } : {}),
       ...(contextFile instanceof TFile ? {
         file: {
           path: contextFile.path,
@@ -1555,7 +1545,7 @@ export class TpsTableView extends BasesView {
     return {
       fields: filterFields,
       configuredProperties: this.plugin.settings?.properties || [],
-      contextDate,
+      contextDate: null,
       rowKind,
       title,
       rawLine: line,
@@ -1614,47 +1604,6 @@ export class TpsTableView extends BasesView {
       : this.plugin.app.vault.getMarkdownFiles();
   }
 
-  private lineMatchesHomeDateContext(fields: Record<string, string>, file: TFile): boolean {
-    const host = this.containerEl.closest<HTMLElement>('[data-tps-home-food-date], [data-tps-home-activity-date]');
-    const contextDate = host?.dataset.tpsHomeFoodDate || host?.dataset.tpsHomeActivityDate || '';
-    if (!contextDate) return true;
-    const isActivity = Boolean(host?.dataset.tpsHomeActivityDate);
-    const lineDate = isActivity
-      ? this.normalizeDateKey(fields.completeddate || fields.startedat || fields.workoutdate || '')
-        || file.path.match(/\d{4}-\d{2}-\d{2}/)?.[0]
-        || null
-      : resolveHomeFoodLineDateKey(fields, file.path);
-    const matches = lineDate === contextDate;
-    if (!matches) {
-      logger.flow('TpsTableView', 'home-date-filter:skip-line', {
-        kind: isActivity ? 'activity' : 'food',
-        contextDate,
-        lineDate,
-        path: file.path,
-      });
-    }
-    return matches;
-  }
-
-  private getHomeContextDate(): string | null {
-    const host = this.containerEl?.closest<HTMLElement>('[data-tps-context-source="home"][data-tps-context-date], [data-tps-context-source="home"][data-tps-context-scheduled]');
-    if (!host) return null;
-    return this.normalizeDateKey(host.dataset.tpsContextDate || host.dataset.tpsContextScheduled || '');
-  }
-
-  private normalizeDateKey(value: unknown): string | null {
-    const raw = String(value || '').trim();
-    if (!raw) return null;
-    const direct = raw.match(/\d{4}-\d{2}-\d{2}/)?.[0];
-    if (direct) return direct;
-    const moment = (window as any).moment;
-    if (typeof moment === 'function') {
-      const parsed = moment(raw, ['YYYY-MM-DD', 'YYYY-MM-DD HH:mm:ss', 'YYYY-MM-DDTHH:mm:ss.SSSZ', 'MM/DD/YYYY', 'MMM D YYYY', 'ddd, MMM D YYYY'], true);
-      if (parsed?.isValid?.()) return parsed.format('YYYY-MM-DD');
-    }
-    return null;
-  }
-
   private lineMatches(fields: Record<string, string>): boolean {
     const any = this.getLineFilterAnyKeys();
     if (any.length && !any.some((key) => fields[normalizeInlineKey(key)] != null)) return false;
@@ -1681,22 +1630,12 @@ export class TpsTableView extends BasesView {
   private getColumns(entries: LogLineEntry[]): LogTableColumn[] {
     const configured = this.getConfiguredColumnKeys();
     const keys = configured.length ? configured : inferColumnKeys(entries);
-    if (this.isHomeFoodSummary()) {
-      const labels: Record<string, string> = { food: 'Food', cal: 'Cal', protein: 'P', carbs: 'C', fat: 'F' };
-      return ['food', 'cal', 'protein', 'carbs', 'fat']
-        .filter((key) => keys.some((candidate) => normalizeInlineKey(candidate) === key))
-        .map((key) => ({ key, label: labels[key] }));
-    }
     if (configured.length) return keys.map((key) => ({ key, label: labelForKey(key) }));
     return [
       ...keys.map((key) => ({ key, label: labelForKey(key) })),
       { key: 'source', label: 'Source' },
       { key: 'line', label: 'Line' },
     ];
-  }
-
-  private isHomeFoodSummary(): boolean {
-    return Boolean(this.containerEl.closest('.tps-home-component-food-tracker'));
   }
 
   private getColumnWidth(column: LogTableColumn): number {
@@ -3525,7 +3464,6 @@ export class TpsTableView extends BasesView {
   async runCreateCommandOverride(): Promise<boolean> {
     const command = this.getCreateCommandOverride();
     if (!command) return false;
-    if (this.runHomeScopedFoodLogCommand(command.id)) return true;
     const commands = (this.plugin.app as any)?.commands;
     if (typeof commands?.executeCommandById !== 'function') return false;
     try {
@@ -3550,35 +3488,6 @@ export class TpsTableView extends BasesView {
       new Notice(`Command failed: ${command.name}`);
       return true;
     }
-  }
-
-  private runHomeScopedFoodLogCommand(commandId: string): boolean {
-    if (String(commandId || '').trim() !== 'tps-health:log-food') return false;
-    const contextDate = this.getHomeContextDate();
-    if (!contextDate) return false;
-    const appAny = this.plugin.app as any;
-    const healthCandidates = [
-      appAny.tpsHealth,
-      appAny.plugins?.getPlugin?.('tps-health'),
-      appAny.plugins?.plugins?.['tps-health'],
-      appAny.plugins?.getPlugin?.('TPS-health (Dev)'),
-      appAny.plugins?.plugins?.['TPS-health (Dev)'],
-    ];
-    const health = healthCandidates.find((candidate) => typeof candidate?.openFoodLogger === 'function');
-    if (!health) return false;
-    const moment = (window as any).moment;
-    const selected = typeof moment === 'function' ? moment(contextDate, 'YYYY-MM-DD', true) : null;
-    const current = typeof moment === 'function' ? moment().startOf('day') : null;
-    const dateContext = {
-      dateIso: contextDate,
-      label: selected?.isValid?.() ? selected.format('ddd, MMM D YYYY') : contextDate,
-      isToday: Boolean(selected?.isValid?.() && current?.isValid?.() && selected.isSame(current, 'day')),
-      foodLogTarget: 'daily-note',
-      focusAfterLog: false,
-    };
-    health.openFoodLogger(dateContext);
-    logger.flow('TpsTableView', 'create-command:home-food-log', { commandId, dateIso: contextDate });
-    return true;
   }
 
   private openEntryContextMenu(evt: MouseEvent, entry: LogLineEntry, row: HTMLElement, columns: LogTableColumn[]): void {

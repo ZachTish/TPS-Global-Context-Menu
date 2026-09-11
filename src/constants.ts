@@ -2,28 +2,6 @@ import { DEFAULT_NOTEBOOK_NAVIGATOR_RULE_SETTINGS, TPSGlobalContextMenuSettings 
 import { MIGRATED_TASK_STATUS } from './constants/task-migration';
 import { DEFAULT_LINKED_SUBITEM_MAPPINGS } from './utils/linked-subitem-mapping';
 
-export const HOME_DAILY_NOTE_FEED_BASE_PATH = 'Daily Note Feed.base';
-export const HOME_DAILY_NOTE_FEED_BASE_CONTENT = `model:
-  version: 1
-  kind: Table
-  columns: []
-pluginVersion: 1.0.0
-filters:
-  and:
-    - file.path == this.file.path
-    - task.path == this.file.path
-views:
-  - type: tps-list
-    name: Daily note
-    createAction: default
-    filters:
-      or:
-        - kind == "task"
-        - kind == "bullet"
-    order:
-      - title
-`;
-
 export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   dataArchitectureMode: 'legacy',
   nativeRecordRootPath: '_records',
@@ -54,29 +32,6 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   enableCanvasOpenGuard: false,
   enableBasesForcedLinkPreview: false,
   collapseHeadingsOnOpen: false,
-  enableDailyNoteHome: true,
-  homeComponents: [
-    { type: 'base', path: HOME_DAILY_NOTE_FEED_BASE_PATH },
-    'calendar',
-    'open-unscheduled-tasks',
-  ],
-  homeComponentLayouts: {},
-  homeComponentActions: {
-    'base:daily note feed.base': [
-      {
-        id: 'capture',
-        commandId: 'tps-global-context-menu:capture-to-home-note',
-        label: 'Capture',
-        icon: 'send',
-        target: 'home-note',
-      },
-    ],
-  },
-  homeCalendarBasePath: 'home-schedule.base',
-  homeFoodBasePath: 'Food Log.base',
-  homeWorkoutBasePath: 'Activity Log.base',
-  homeOpenTasksBasePath: 'Open Unscheduled Tasks.base',
-  homeCaptureInsertPosition: 'bottom',
   hideCompletedCheckboxes: false,
   completedTaskHidingScope: 'reading-and-live-preview',
   hideAllTaskLinesInReadingMode: false,

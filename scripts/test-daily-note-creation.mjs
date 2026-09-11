@@ -727,7 +727,7 @@ test('Daily Note path identity preserves slash-containing date formats', () => {
   );
 });
 
-test('nested Daily Note paths remain recognizable for Home and inherited task scheduling', async () => {
+test('nested Daily Note paths remain recognizable for inherited task scheduling', async () => {
   const { parseDailyNoteFileDate } = await loadDailyNoteTaskSchedule();
   const app = {
     internalPlugins: {
@@ -758,11 +758,9 @@ test('nested Daily Note paths remain recognizable for Home and inherited task sc
 
 test('all active GCM Daily Note creation routes use the canonical creator', () => {
   const noteOperationSource = readFileSync(new URL('../src/services/note-operation-service.ts', import.meta.url), 'utf8');
-  const homeCaptureSource = readFileSync(new URL('../src/services/home-capture-service.ts', import.meta.url), 'utf8');
   const dailyNavSource = readFileSync(new URL('../src/handlers/daily-note-nav-manager.ts', import.meta.url), 'utf8');
   const timeTrackingSource = readFileSync(new URL('../src/services/time-tracking-service.ts', import.meta.url), 'utf8');
   const createTaskSource = readFileSync(new URL('../src/services/create-task-service.ts', import.meta.url), 'utf8');
-  const homeViewSource = readFileSync(new URL('../src/views/home-view.ts', import.meta.url), 'utf8');
   const fileNamingSource = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
 
   assert.match(noteOperationSource, /pendingDailyNoteEnsures/u);
@@ -779,19 +777,12 @@ test('all active GCM Daily Note creation routes use the canonical creator', () =
   assert.match(noteOperationSource, /ensureDailyNoteTitleFallback\(fm, titleValue\)/u);
   assert.doesNotMatch(noteOperationSource, /fm\.title\s*=\s*titleValue/u);
 
-  assert.match(homeCaptureSource, /noteOperationService\.ensureDailyNote\(`\$\{isoDate\} 00:00:00`\)/u);
-  assert.doesNotMatch(
-    homeCaptureSource.match(/private async ensureDailyNote\(date: any\): Promise<TFile> \{([\s\S]*?)\n  \}/u)?.[1] ?? '',
-    /vault\.create/u,
-  );
   assert.match(dailyNavSource, /return this\.plugin\.noteOperationService\.ensureDailyNote\(`\$\{isoDate\} 00:00:00`\)/u);
   assert.doesNotMatch(dailyNavSource, /fm\.title\s*=\s*titleValue/u);
   assert.match(timeTrackingSource, /private async ensureDailyNoteForDate\(date: Date\): Promise<TFile>/u);
   assert.match(timeTrackingSource, /noteOperationService\.ensureDailyNote\(`\$\{isoDate\} 00:00:00`\)/u);
   assert.match(createTaskSource, /openCreateTaskModalWithCanonicalTarget/u);
   assert.doesNotMatch(createTaskSource, /getTodayDailyNoteIfExists/u);
-  assert.match(homeViewSource, /quick-capture:daily-note-unavailable/u);
-  assert.match(homeViewSource, /base:daily-note-unavailable/u);
 });
 
 test('Daily Note kind identity receives the title and filename sync exception', () => {

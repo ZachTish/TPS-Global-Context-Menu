@@ -115,7 +115,7 @@ export class BaseLineEditProtocolService {
         version: 1,
         relocated: resolution.relocated,
       });
-      const saved = await this.plugin.homeCaptureService.openLineEditor(sourceFile, resolution.zeroBasedLine, {
+      const saved = await this.plugin.lineEditorService.openLineEditor(sourceFile, resolution.zeroBasedLine, {
         expectedFingerprint: params.fingerprint,
         redactDiagnostics: true,
       });

@@ -1218,10 +1218,7 @@ test('note workflow and recurrence services never treat relational status as che
     new URL('../src/menu/menu-controller.ts', import.meta.url),
     'utf8',
   );
-  const homeCaptureSource = readFileSync(
-    new URL('../src/services/home-capture-service.ts', import.meta.url),
-    'utf8',
-  );
+
 
   assert.match(
     bulkEditSource,
@@ -1306,22 +1303,5 @@ test('note workflow and recurrence services never treat relational status as che
     /frontmatter\?\.status|frontmatter\.status/u,
     'the legacy submenu must not overwrite a relational status field',
   );
-  const workoutPreview = methodSource(
-    homeCaptureSource,
-    'private formatWorkoutLogPreview(',
-    'private async openWorkoutPath(',
-  );
-  assert.match(
-    workoutPreview,
-    /sharedServices\?\.status\?\.getStatusPropertyKey\?\.\(\) \|\| 'status'/u,
-  );
-  assert.match(
-    workoutPreview,
-    /sharedServices\?\.status\?\.normalize\(workflowStatus\)[\s\S]{0,160}normalizedWorkflowStatus === 'wont-do'/u,
-  );
-  assert.match(
-    workoutPreview,
-    /workflowStatusKey\.toLowerCase\(\) === 'status'[\s\S]{0,40}\? frontmatter\?\.status/u,
-    'the legacy status fallback is allowed only when status is still the workflow key',
-  );
+
 });

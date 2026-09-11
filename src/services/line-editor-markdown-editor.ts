@@ -18,7 +18,7 @@ import {
   parseCaptureLineMarker,
   removeCaptureListMarkerAtCursor,
   toggleCaptureTaskMarker,
-} from './home-capture-markdown-core';
+} from './line-editor-markdown-core';
 
 interface CaptureMarkdownEditorOptions {
   parentEl: HTMLElement;
@@ -41,7 +41,7 @@ class CaptureListMarkerWidget extends WidgetType {
 
   toDOM(): HTMLElement {
     const marker = document.createElement('span');
-    marker.className = `tps-home-capture-marker mod-${this.kind}`;
+    marker.className = `tps-gcm-line-capture-marker mod-${this.kind}`;
     marker.setAttribute('aria-hidden', 'true');
     if (this.kind === 'task') {
       const checkbox = document.createElement('input');
@@ -62,7 +62,7 @@ class CaptureListMarkerWidget extends WidgetType {
 class CapturePlaceholderWidget extends WidgetType {
   toDOM(): HTMLElement {
     const placeholder = document.createElement('span');
-    placeholder.className = 'tps-home-capture-editor-placeholder';
+    placeholder.className = 'tps-gcm-line-capture-editor-placeholder';
     placeholder.textContent = 'Write a note or thought...';
     placeholder.setAttribute('aria-hidden', 'true');
     return placeholder;
@@ -129,16 +129,16 @@ function buildCaptureDecorations(view: EditorView): DecorationSet {
 
     const bodyText = line.text.slice(bodyOffset);
     const bodyFrom = line.from + bodyOffset;
-    addDelimitedDecorations(ranges, view, bodyText, bodyFrom, /(\*\*|__)(.+?)\1/g, 'tps-home-capture-md-strong');
-    addDelimitedDecorations(ranges, view, bodyText, bodyFrom, /(`)([^`\n]+)\1/g, 'tps-home-capture-md-code');
-    addDelimitedDecorations(ranges, view, bodyText, bodyFrom, /(==)(.+?)\1/g, 'tps-home-capture-md-highlight');
-    addDelimitedDecorations(ranges, view, bodyText, bodyFrom, /(~~)(.+?)\1/g, 'tps-home-capture-md-strike');
+    addDelimitedDecorations(ranges, view, bodyText, bodyFrom, /(\*\*|__)(.+?)\1/g, 'tps-gcm-line-capture-md-strong');
+    addDelimitedDecorations(ranges, view, bodyText, bodyFrom, /(`)([^`\n]+)\1/g, 'tps-gcm-line-capture-md-code');
+    addDelimitedDecorations(ranges, view, bodyText, bodyFrom, /(==)(.+?)\1/g, 'tps-gcm-line-capture-md-highlight');
+    addDelimitedDecorations(ranges, view, bodyText, bodyFrom, /(~~)(.+?)\1/g, 'tps-gcm-line-capture-md-strike');
 
     for (const match of bodyText.matchAll(/\[\[([^\]\n]+)\]\]|\[([^\]\n]+)\]\(([^)\n]+)\)/g)) {
       const index = match.index ?? 0;
       const from = bodyFrom + index;
       const to = from + match[0].length;
-      ranges.push(Decoration.mark({ class: 'tps-home-capture-md-link' }).range(from, to));
+      ranges.push(Decoration.mark({ class: 'tps-gcm-line-capture-md-link' }).range(from, to));
     }
   }
   return Decoration.set(ranges, true);
@@ -193,7 +193,7 @@ const captureTheme = EditorView.theme({
   '.cm-selectionBackground, &.cm-focused .cm-selectionBackground': {
     backgroundColor: 'var(--text-selection)',
   },
-  '.tps-home-capture-marker': {
+  '.tps-gcm-line-capture-marker': {
     display: 'inline-flex',
     width: '1.25em',
     marginRight: '0.15em',
@@ -201,29 +201,29 @@ const captureTheme = EditorView.theme({
     alignItems: 'center',
     verticalAlign: 'middle',
   },
-  '.tps-home-capture-marker.mod-bullet::before': {
+  '.tps-gcm-line-capture-marker.mod-bullet::before': {
     content: '"\\2022"',
     fontSize: '1.15em',
     lineHeight: '1',
   },
-  '.tps-home-capture-marker input': {
+  '.tps-gcm-line-capture-marker input': {
     width: 'var(--checkbox-size)',
     height: 'var(--checkbox-size)',
     margin: '0',
     pointerEvents: 'none',
   },
-  '.tps-home-capture-editor-placeholder': { color: 'var(--text-faint)' },
-  '.tps-home-capture-md-strong': { fontWeight: '700' },
-  '.tps-home-capture-md-code': {
+  '.tps-gcm-line-capture-editor-placeholder': { color: 'var(--text-faint)' },
+  '.tps-gcm-line-capture-md-strong': { fontWeight: '700' },
+  '.tps-gcm-line-capture-md-code': {
     padding: '0 0.2em',
     borderRadius: 'var(--radius-s)',
     backgroundColor: 'var(--code-background)',
     color: 'var(--code-normal)',
     fontFamily: 'var(--font-monospace)',
   },
-  '.tps-home-capture-md-highlight': { backgroundColor: 'var(--text-highlight-bg)' },
-  '.tps-home-capture-md-strike': { textDecoration: 'line-through' },
-  '.tps-home-capture-md-link': { color: 'var(--link-color)', textDecoration: 'underline' },
+  '.tps-gcm-line-capture-md-highlight': { backgroundColor: 'var(--text-highlight-bg)' },
+  '.tps-gcm-line-capture-md-strike': { textDecoration: 'line-through' },
+  '.tps-gcm-line-capture-md-link': { color: 'var(--link-color)', textDecoration: 'underline' },
 });
 
 export class CaptureMarkdownEditor {

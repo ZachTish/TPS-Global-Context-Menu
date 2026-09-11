@@ -177,7 +177,6 @@ test('managed companions stay out of note, task, recurrence, and picker workflow
   const bulkEdit = read('src/services/bulk-edit-service.ts');
   const filePicker = read('src/modals/FileSuggestModal.ts');
   const multiPicker = read('src/modals/MultiFileSelectModal.ts');
-  const homeCapture = read('src/services/home-capture-service.ts');
   const headingSuggest = read('src/services/heading-link-suggest.ts');
   const timeTracking = read('src/services/time-tracking-service.ts');
   const taskApi = read('src/services/task-api-service.ts');
@@ -199,7 +198,7 @@ test('managed companions stay out of note, task, recurrence, and picker workflow
     assert.match(picker, /isFilePropertiesCompanionPath/u);
     assert.match(picker, /isFilePropertiesCompanionRecord/u);
   }
-  for (const source of [homeCapture, headingSuggest, timeTracking, taskApi, dailyInbox, persistentMenus, panelBuilder, tpsList, tpsTable]) {
+  for (const source of [headingSuggest, timeTracking, taskApi, dailyInbox, persistentMenus, panelBuilder, tpsList, tpsTable]) {
     assert.match(source, /filePropertiesService\?\.isCompanionFile/u);
   }
 });

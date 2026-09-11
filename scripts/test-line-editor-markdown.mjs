@@ -11,7 +11,7 @@ const temporaryDirectory = await mkdtemp(path.join(tmpdir(), 'tps-capture-markdo
 const bundlePath = path.join(temporaryDirectory, 'core.mjs');
 
 await build({
-  entryPoints: [path.join(root, 'src/services/home-capture-markdown-core.ts')],
+  entryPoints: [path.join(root, 'src/services/line-editor-markdown-core.ts')],
   outfile: bundlePath,
   bundle: true,
   format: 'esm',
@@ -91,26 +91,24 @@ test('Enter continues non-empty lists and exits an empty list', () => {
   });
 });
 
-test('capture modal uses the scoped live editor and one submission action', async () => {
+test('line modal uses the scoped live editor and one save action', async () => {
   const [modalSource, editorSource] = await Promise.all([
-    readFile(path.join(root, 'src/services/home-capture-service.ts'), 'utf8'),
-    readFile(path.join(root, 'src/services/home-capture-markdown-editor.ts'), 'utf8'),
+    readFile(path.join(root, 'src/services/line-editor-service.ts'), 'utf8'),
+    readFile(path.join(root, 'src/services/line-editor-markdown-editor.ts'), 'utf8'),
   ]);
   assert.match(modalSource, /new CaptureMarkdownEditor/);
   assert.doesNotMatch(modalSource, /const addTask =/);
-  assert.match(modalSource, /preserveMarkdown: true/);
-  assert.match(modalSource, /text: this\.options\.task === true \? 'Add task' : 'Capture'/);
   assert.match(editorSource, /key: 'Mod-l'/);
   assert.match(editorSource, /doc: options\.initialValue \?\? '- '/);
   assert.match(editorSource, /captureDecorations/);
   assert.match(editorSource, /markdown\(\)/);
 });
 
-test('Daily Note feed line editor uses guarded one-line atomic replacement', async () => {
-  const modalSource = await readFile(path.join(root, 'src/services/home-capture-service.ts'), 'utf8');
-  assert.match(modalSource, /class HomeCaptureLineEditModal extends Modal/);
-  assert.match(modalSource, /resolveHomeCaptureLineRange\(content, zeroBasedLine\)/);
-  assert.match(modalSource, /replaceHomeCaptureRangeIfUnchanged\(current, this\.snapshot/);
+test('Independent line editor uses guarded one-line atomic replacement', async () => {
+  const modalSource = await readFile(path.join(root, 'src/services/line-editor-service.ts'), 'utf8');
+  assert.match(modalSource, /class LineEditModal extends Modal/);
+  assert.match(modalSource, /resolveLineRange\(content, zeroBasedLine\)/);
+  assert.match(modalSource, /replaceLineRangeIfUnchanged\(current, this\.snapshot/);
   assert.match(modalSource, /Line editing supports one non-empty line\./);
   assert.match(modalSource, /line-editor:saved/);
 });

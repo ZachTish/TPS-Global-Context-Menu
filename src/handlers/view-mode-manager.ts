@@ -70,7 +70,6 @@ export class ViewModeManager extends Component {
         if (!file) return;
 
         if (await this.repairStaleLivePreviewMount(view)) return;
-        if (this.plugin.dailyNoteHomeService?.isLivePreviewOverride(leaf)) return;
 
         if (this.service.shouldIgnorePath(file.path, this.plugin.settings.viewModeIgnoredFolders)) {
             logger.log(`[TPS GCM] Skipping view mode check for ${file.basename} (Path ignored: ${file.path})`);

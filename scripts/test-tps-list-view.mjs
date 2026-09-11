@@ -763,7 +763,7 @@ test('TPS List heading and bullet entry points relocate only a unique rendered r
   );
 });
 
-test('TPS List resolves the Home-stamped Daily Note before Base and workspace fallbacks', async () => {
+test('TPS List resolves the explicit owner context before Base and workspace fallbacks', async () => {
   const { resolveBaseEmbedSourcePath } = await loadBaseEmbedContext();
   assert.equal(
     resolveBaseEmbedSourcePath(['2026-07-14.md', 'Daily Note Feed.base', '2026-07-13.md']),

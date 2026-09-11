@@ -389,7 +389,7 @@ export class TaskLineContextMenuService {
     const menu = constrainGcmMenu(new Menu(), { truncateText: true });
     menu.addItem((item) => {
       item.setTitle('Edit full line…').setIcon('text-cursor-input').setSection('tps-line').onClick(() => {
-        void this.plugin.homeCaptureService.openLineEditor(file, lineIndex);
+        void this.plugin.lineEditorService.openLineEditor(file, lineIndex);
       });
       (item as any)._isTpsItem = true;
     });
@@ -576,7 +576,6 @@ export class TaskLineContextMenuService {
       '.prompt',
       '.tps-gcm-task-editor-card',
       '.tps-gcm-base-link-preview',
-      '.tps-home-native-capture-editor',
     ].join(', ')));
   }
 
