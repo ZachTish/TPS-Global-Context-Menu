@@ -63,10 +63,10 @@ type ComputedPresentation = {
 /**
  * GCM-owned Notebook Navigator rule engine.
  *
- * Icon, color, and sort are transient presentation values. They are projected
- * through the public API and never persisted in a note. Hide rules remain an
- * explicit semantic-tag workflow, and create-time title repair remains a
- * separate note mutation.
+ * Icon/color rules repair stored appearance on opened notes. Read-only
+ * presentation and virtual sort remain available through the public API.
+ * Hide rules remain a separate semantic-tag workflow; create-time title
+ * repair remains separately owned.
  */
 export class NotebookNavigatorRuleService {
   private readonly timers = new Map<string, number>();
@@ -189,9 +189,7 @@ export class NotebookNavigatorRuleService {
   }
 
   shouldAutoApplyOnFileOpen(): boolean {
-    // Visual rules are invalidated by the presentation cache listeners. There
-    // is no note mutation that belongs on the latency-sensitive file-open path.
-    return false;
+    return !!this.getSettings()?.enabled && this.hasVisualRules(this.getSettings());
   }
 
   shouldAutoApplyOnMetadataChange(): boolean {
@@ -256,7 +254,7 @@ export class NotebookNavigatorRuleService {
   async applyRulesToAllFiles(options: ApplyOptions = {}): Promise<number> {
     this.invalidateNotebookNavigatorPresentation();
     if (!this.isReady()) return 0;
-    if (!this.hasEnabledHideRules(this.getSettings())) return 0;
+    if (!this.hasEnabledHideRules(this.getSettings()) && !this.hasVisualRules(this.getSettings())) return 0;
     let changed = 0;
     for (const file of this.getRuleCandidateFiles()) {
       if (await this.applyRulesToFile(file, {
@@ -293,8 +291,9 @@ export class NotebookNavigatorRuleService {
     const canMutateGeneratedTitle = options.reason === 'create';
     const canMutateHideTags = options.reason !== 'file-open'
       && this.hasEnabledHideRules(settings);
-    if (!canMutateGeneratedTitle && !canMutateHideTags) return false;
-    const ownedKeys: string[] = [];
+    const canMutateVisuals = this.hasVisualRules(settings);
+    if (!canMutateGeneratedTitle && !canMutateHideTags && !canMutateVisuals) return false;
+    const ownedKeys: string[] = canMutateVisuals ? [this.getIconField(settings), this.getColorField(settings)] : [];
     if (canMutateGeneratedTitle) ownedKeys.push('title');
     if (canMutateHideTags) ownedKeys.push('tags');
 
@@ -310,6 +309,24 @@ export class NotebookNavigatorRuleService {
         && !canAutomaticallyMutateTemplateFrontmatter(frontmatter, this.plugin.settings)
       ) return;
       const context = this.buildRuleContext(file, frontmatter, body);
+      if (canMutateVisuals) {
+        const visual = ruleEngine.resolveVisualOutputs(settings.rules || [], context);
+        const icon = visual.icon.matched ? String(visual.icon.value || '').trim()
+          : settings.clearIconWhenNoMatch ? null : undefined;
+        const color = visual.color.matched ? this.normalizeNoteColorValue(String(visual.color.value || '').trim())
+          : settings.clearColorWhenNoMatch ? null : undefined;
+        const inspection = this.plugin.nativeRecordService?.inspect(frontmatter);
+        const protectedKeys = inspection ? this.getNativeRecordProtectedKeys(inspection) : new Set<string>();
+        const apply = (key: string, value: string | null | undefined) => {
+          if (value === undefined || this.isProtectedKey(key) || protectedKeys.has(key.toLowerCase())) return;
+          if (value === null || value === '') deleteValueCaseInsensitive(frontmatter, key);
+          else setValueCaseInsensitive(frontmatter, key, value);
+        };
+        const iconField = this.getIconField(settings);
+        const colorField = this.getColorField(settings);
+        apply(iconField, iconField.toLowerCase() === colorField.toLowerCase() && icon === undefined ? color : icon);
+        if (iconField.toLowerCase() !== colorField.toLowerCase()) apply(colorField, color);
+      }
       // A record remains a record while the global architecture setting is temporarily
       // switched to Legacy. Semantic tag and title repair must respect the document
       // identity itself, not the current write mode.
@@ -341,6 +358,11 @@ export class NotebookNavigatorRuleService {
       });
     }
     return changed;
+  }
+
+  private hasVisualRules(settings: any): boolean {
+    return (settings?.rules || []).some((rule: any) => rule?.enabled)
+      || settings?.clearIconWhenNoMatch === true || settings?.clearColorWhenNoMatch === true;
   }
 
   private hasEnabledHideRules(settings: any): boolean {

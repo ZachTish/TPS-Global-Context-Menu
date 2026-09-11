@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 2.1.0
+
+Opened notes repair their saved icon and color from enabled Navigator rules, independently of Controller/User role. The existing 75 ms settled-file queue and source-preserving owned-key writer handle the repair. Rule exclusions and global auto-write exclusions apply; protected native identity fields remain untouched. Unmatched values remain unchanged unless the existing clear-when-no-match option applies. Sorting remains virtual; this adds no startup scan. The Rules & fields hub, routes and controls are unchanged; descriptions now explain saved appearance repair. The master rule switch controls this behavior; the retired autoApplyOnFileOpen flag remains inactive. Existing saved properties are repaired as eligible notes are opened; no production-wide migration is performed.
+
+Validation on 2026-09-11: all 1,134 declared tests passed, followed by the separate production build and isolated test-vault deployment. Obsidian 1.14.1 loaded 2.1.0. With one synthetic rule in memory, opening a synthetic note on the User role repaired stale saved properties to icon `sparkles` and color `#ff00cc`; all other source content stayed byte-identical. Navigator returned those same values. Original rules were restored without saving settings and the fixture was moved directly to `_archive`. The settings hub, controls, commands, keyboard routes and narrow layouts remain unchanged; only explanatory descriptions changed. Minimum Obsidian remains 1.10.0. This backward-compatible behavior restoration uses a minor version.
+
+Validation and artifact hashes are recorded in `release-notes/2.1.0.md`.
+
 ## 2.0.0 — Remove TPS Home
 
 TPS Home is removed, including its dashboard view, Daily Note Reading-view interception, component editor and actions, capture forms/modals, and Home-only styling. GCM no longer loads or renders Home panels during workspace restoration. Daily Notes remain ordinary Markdown; their navigation, task creation, inherited scheduling, time tracking, and standalone TPS Table/List/Calendar Bases remain available. Existing notes, capture text, and Base files are never deleted by this removal.

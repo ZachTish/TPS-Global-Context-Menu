@@ -302,26 +302,34 @@ function stripNativeUpdateLines(source) {
     .replace(/^  - tps\/record\/v1\/calendar-event\/calendar-3rv0kr(?:\r?\n)/gmu, '');
 }
 
-test('matched Notebook Navigator visual and sort rules never enter a YAML mutation path', async () => {
-  const fixture = makeFixture();
+test('file-open repairs stored icon/color while preserving every other source byte and virtual sort', async () => {
+  const source = pocRecord.replace('---\r\n', '---\r\nicon: obsolete\r\ncolor: red\r\n');
+  const fixture = makeFixture(source);
+  fixture.plugin.canRunBackgroundAutomation = () => false;
   const service = new NotebookNavigatorRuleService(fixture.plugin);
-  let mutationCalls = 0;
-  fixture.plugin.frontmatterMutationService.processOwnedKeysPreservingSource = async () => {
-    mutationCalls += 1;
-    throw new Error('visual and sort projection must not invoke a frontmatter writer');
-  };
+  service.isNavigationTextInputActive = () => false;
+  assert.equal(service.shouldAutoApplyOnFileOpen(), true);
+  const changed = await service.applyRulesToFile(fixture.file, { reason: 'file-open', force: true, bypassCreationGrace: true });
+  assert.equal(changed, true);
+  const content = fixture.getContent();
+  assert.match(content, /icon: calendar-clock/);
+  assert.match(content, /color: ["']?#3b82f6/);
+  const removeVisuals = value => value.replace(/^(icon|color):[^\r\n]*\r\n/gm, '');
+  assert.equal(removeVisuals(content), removeVisuals(source));
+  assert.equal(await service.applyRulesToFile(fixture.file, { reason: 'file-open', force: true }), false);
+  assert.equal(fixture.updates.length, 1);
+  fixture.plugin.settings.notebookNavigatorRules.enabled = false;
+  assert.equal(service.shouldAutoApplyOnFileOpen(), false);
+});
 
-  const changed = await service.applyRulesToFile(fixture.file, {
-    reason: 'gcm-manual-all',
-    force: true,
-    bypassCreationGrace: true,
-  });
-
-  assert.equal(changed, false);
-  assert.equal(mutationCalls, 0);
-  assert.equal(fixture.getContent(), pocRecord);
-  assert.equal(fixture.updates.length, 0);
-  assert.equal(fixture.indexed.length, 0);
+test('file-open visual repair respects source exclusions', async () => {
+  const fixture = makeFixture(pocRecord.replace('---\r\n', '---\r\nicon: obsolete\r\n'));
+  fixture.plugin.settings.frontmatterAutoWriteExclusions = '*';
+  const service = new NotebookNavigatorRuleService(fixture.plugin);
+  const before = fixture.getContent();
+  service.isNavigationTextInputActive = () => false;
+  assert.equal(await service.applyRulesToFile(fixture.file, { reason: 'file-open', force: true }), false);
+  assert.equal(fixture.getContent(), before);
 });
 
 test('native architecture retains blank-title cleanup and hide-tag automation for ordinary Markdown notes', async () => {

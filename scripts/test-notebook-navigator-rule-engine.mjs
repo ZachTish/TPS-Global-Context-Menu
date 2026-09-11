@@ -269,7 +269,7 @@ test('virtual sort preserves the unmatched fallback even with the legacy clear t
   assert.equal(noEnabledBuckets, null, 'the legacy clear toggle remains meaningful only with no enabled buckets');
 });
 
-test('visual and sort rules are projection-only while semantic mutations stay narrowly owned', () => {
+test('visual repair owns only icon/color while sort remains virtual and semantic mutations stay narrow', () => {
   const fileOpenGate = sourceBlock(
     registerEventsSource,
     "plugin.app.workspace.on('file-open'",
@@ -287,13 +287,14 @@ test('visual and sort rules are projection-only while semantic mutations stay na
   );
 
   assert.match(fileOpenGate, /shouldAutoApplyOnFileOpen\(\)/u);
-  assert.match(serviceSource, /shouldAutoApplyOnFileOpen\(\): boolean \{[\s\S]{0,260}return false;/u);
+  assert.match(serviceSource, /shouldAutoApplyOnFileOpen\(\): boolean \{[\s\S]{0,260}this\.hasVisualRules/u);
   assert.match(serviceSource, /requiresControllerAutomation\(options\.reason\)/u);
   assert.match(applyBlock, /options\.reason === 'create'/u);
   assert.match(applyBlock, /hasEnabledHideRules\(settings\)/u);
   assert.match(applyBlock, /ownedKeys\.push\('title'\)/u);
   assert.match(applyBlock, /ownedKeys\.push\('tags'\)/u);
-  assert.doesNotMatch(applyBlock, /resolveVisualOutputs|computeSortKey|iconField|colorField|sortField|applyPresentationScalar/u);
+  assert.doesNotMatch(applyBlock, /computeSortKey|sortField|applyPresentationScalar/u);
+  assert.match(applyBlock, /resolveVisualOutputs/u);
   assert.match(projectionBlock, /resolveVisualOutputs/u);
   assert.match(projectionBlock, /computeSortKey/u);
   assert.match(projectionBlock, /applyPresentationScalar/u);

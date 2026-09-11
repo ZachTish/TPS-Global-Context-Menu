@@ -478,7 +478,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
     new Setting(root)
       .setName('Enable Navigator rules')
-      .setDesc('Provide generated icon, color, and sort values through the virtual presentation API. Semantic tag rules remain an explicit frontmatter automation workflow.')
+      .setDesc('Apply icon and color rules to opened notes and provide virtual values for display and sorting. Semantic tags keep their separate automation controls.')
       .addToggle((toggle) => toggle.setValue(settings.enabled).onChange(async (value) => {
         settings.enabled = value;
         await this.plugin.saveSettings();
@@ -495,7 +495,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     const overview = root.createDiv({ cls: 'tps-gcm-settings-frontmatter-rules-overview-grid' });
     this.renderRuleOverviewCard(overview, 'Sort', `${settings.smartSort.buckets.length} buckets`, settings.smartSort.enabled ? 'Virtual sort is enabled.' : 'Disabled');
     this.renderRuleOverviewCard(overview, 'Tags', `${settings.hideRules.length} rules`, settings.autoRemoveHiddenWhenNoMatch ? 'Semantic YAML tags auto-clean.' : 'Unmatched YAML tags are preserved.');
-    this.renderRuleOverviewCard(overview, 'Icon + Color', `${settings.rules.length} rules`, 'Virtual values; authored appearance wins.');
+    this.renderRuleOverviewCard(overview, 'Icon + Color', `${settings.rules.length} rules`, 'Opened notes keep their saved icon and color in sync.');
 
     this.renderRouteButtons<FrontmatterEditorId>(
       root,
@@ -537,7 +537,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
     new Setting(advanced)
       .setName('Apply semantic tags after metadata changes')
-      .setDesc('Re-evaluate enabled tag rules after note metadata changes. Virtual icon, color, and sort values refresh independently without writing YAML.')
+      .setDesc('Re-evaluate enabled tag rules after note metadata changes. Opened-note icon and color values refresh separately; sort remains virtual.')
       .addToggle((toggle) => toggle.setValue(settings.autoApplyOnMetadataChange).onChange(async (value) => {
         settings.autoApplyOnMetadataChange = value;
         await this.plugin.saveSettings();
