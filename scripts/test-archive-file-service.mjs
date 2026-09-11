@@ -316,7 +316,6 @@ test('archives Markdown, Base, and Canvas files immediately while metadata stays
     harness.getFrontmatter(sourceFiles[0]),
     {
       tags: ['active', 'archive'],
-      archiveOriginalFolder: 'Inbox',
     },
   );
   assert.deepEqual(harness.queuedMoves, [[
@@ -555,4 +554,15 @@ test('a resolved-false metadata cleanup rolls the moved note back into archive w
     tags: ['archive', 'keep'],
     archiveOriginalFolder: 'Inbox',
   });
+});
+
+test('new archives restore nested and root notes without bookkeeping properties', async () => {
+ const harness=createArchiveHarness({files:[{path:'Inbox/Nested/Note.md',frontmatter:{kind:'note',type:'Keep',types:['Keep']}},{path:'Root.md',frontmatter:{kind:'note'}}]});
+ const service=new ArchiveFileService(harness.plugin);
+ const files=[harness.getFile('Inbox/Nested/Note.md'),harness.getFile('Root.md')];
+ assert.equal((await service.archiveFiles(files,'native-context-menu')).moved,2);
+ for(const file of files) assert.equal(harness.getFrontmatter(file).archiveOriginalFolder,undefined);
+ assert.equal((await service.unarchiveFiles(files,'native-context-menu')).moved,2);
+ assert.equal(files[0].path,'Inbox/Nested/Note.md');assert.equal(files[1].path,'Root.md');
+ assert.equal(harness.getFrontmatter(files[0]).type,'Keep');assert.deepEqual(harness.getFrontmatter(files[0]).types,['Keep']);
 });

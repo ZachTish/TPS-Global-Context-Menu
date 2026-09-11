@@ -125,12 +125,10 @@ export class ArchiveFileService {
           continue;
         }
 
-        const originalFolder = liveFile.parent?.path === '/' ? '' : liveFile.parent?.path ?? '';
         if (liveFile.extension?.toLowerCase() === 'md' && archiveTag) {
           try {
             await this.plugin.frontmatterMutationService.process(liveFile, (frontmatter: Record<string, unknown>) => {
               frontmatter.tags = mergeNormalizedTags(frontmatter.tags, archiveTag);
-              frontmatter.archiveOriginalFolder = originalFolder;
             });
             result.tagged += 1;
           } catch (error) {

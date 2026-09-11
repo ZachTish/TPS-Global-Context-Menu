@@ -1,3 +1,4 @@
+import { readManagedNoteField, writeManagedNoteField } from '../utils/managed-note-fields';
 import {
   TFile,
   TFolder,
@@ -2626,7 +2627,7 @@ export class NativeRecordService {
       } else if (record.kind !== 'task') {
         return { ok: false, changed: false, record: null, sourcePath: task.path, sourceLine: task.lineNumber, error: `Existing record ${record.id} is not a task.` };
       } else {
-        const priorSourcePath = String(record.frontmatter.sourcePath || '').trim();
+        const priorSourcePath = String(readManagedNoteField(this.plugin.settings, 'sourcePath', record.frontmatter) || '').trim();
         const priorSourceTaskId = String(record.frontmatter.sourceTaskId || '').trim();
         if (
           (priorSourcePath && priorSourcePath !== task.path)
@@ -2647,9 +2648,6 @@ export class NativeRecordService {
       if (!(sourceFile instanceof TFile)) throw new Error('Task source file disappeared during promotion.');
       const replaced = await this.replaceTaskWithRecordLink(sourceFile, task, record.file);
       if (!replaced) {
-        if (created) {
-          record = await this.update(record.file, { promotionState: 'unlinked' }, cause) || record;
-        }
         return {
           ok: false,
           changed: created,
@@ -2658,9 +2656,6 @@ export class NativeRecordService {
           sourceLine: task.lineNumber,
           error: 'The task changed before its stable record link could be written. The new record was preserved for recovery.',
         };
-      }
-      if (record.frontmatter.promotionState === 'unlinked') {
-        record = await this.update(record.file, { promotionState: null }, cause) || record;
       }
       this.notify([task.path, record.path], cause, 'task-record-promote');
       logger.flow('NativeRecords', 'task-promote:done', {
@@ -2711,8 +2706,7 @@ export class NativeRecordService {
       tags: [...task.tags],
     };
     if (includeSource) {
-      properties.sourcePath = task.path;
-      properties.sourceLine = task.line;
+      writeManagedNoteField(this.plugin.settings, 'sourcePath', properties, task.path);
     }
     for (const key of SHARED_TASK_FIELDS) {
       const sourceKey = key === 'recurrenceRule' && !task.fields.recurrenceRule ? 'recurrence' : key;

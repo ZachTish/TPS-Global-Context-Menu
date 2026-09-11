@@ -1124,7 +1124,7 @@ test('archive action uses Controller two-stage source folder and moves files imm
   assert.match(menuBuilderSource, /this\.plugin\.archiveFileService\.unarchiveFiles\(files, 'native-context-menu'\)/);
   assert.match(archiveFileServiceSource, /if \(!archiveFolder\)/);
   assert.match(archiveFileServiceSource, /liveFile\.extension\?\.toLowerCase\(\) === 'md' && archiveTag/);
-  assert.match(archiveFileServiceSource, /frontmatter\.archiveOriginalFolder = originalFolder;/);
+  assert.doesNotMatch(archiveFileServiceSource, /frontmatter\.archiveOriginalFolder\s*=/);
   assert.match(archiveFileServiceSource, /Archive metadata write failed; continuing with immediate move/);
   assert.match(archiveFileServiceSource, /await this\.plugin\.app\.fileManager\.renameFile\(liveFile, targetPath\);/);
 

@@ -603,6 +603,8 @@ export interface TPSGlobalContextMenuSettings {
 
   // Archive tag automation
   enableArchiveTagMove: boolean;
+  managedNoteFieldKeys?: Partial<Record<"externalId" | "sourcePath" | "location" | "url" | "tpsCalendarOrphanCandidateAt" | "tpsCalendarCancelledAt", string>>;
+  managedNoteFieldAliases?: Partial<Record<"externalId" | "sourcePath" | "location" | "url" | "tpsCalendarOrphanCandidateAt" | "tpsCalendarCancelledAt", string[]>>;
   archiveTag: string;
   archiveFolderPath: string;
   archiveUseDailyFolder: boolean;

@@ -9,7 +9,7 @@ test('GCM exposes the TPS identity service through the plugin API', () => {
   const api = read('src/plugin-api.ts');
   const shared = read('src/services/shared/index.ts');
   assert.match(service, /readonly internalIdKey = 'tpsId'/);
-  assert.match(service, /readonly externalIdKey = 'externalId'/);
+  assert.match(service, /get externalIdKey\(\): string/);
   assert.match(service, /buildCalendarExternalId\(event: CalendarIdentityInput\)/);
   assert.match(service, /calendar:\$\{this\.normalizeCalendarUrl\(sourceUrl\)\}#\$\{this\.normalizeIdentityValue\(eventId\)\}/);
   assert.match(service, /readLegacyCalendarIdentity/);

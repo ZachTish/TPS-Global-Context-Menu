@@ -849,12 +849,8 @@ export class FileNamingService {
         const fm = cache?.frontmatter;
         const existingFolderPath = this.getFrontmatterStringValueCaseInsensitive(fm || {}, 'folderPath').trim();
         const persistedFolderPath = await this.getPersistedFolderPath(liveFile);
-        const hasLegacyTypeKeys = Object.keys(fm || {}).some((key) => {
-            const normalized = String(key || '').trim().toLowerCase();
-            return normalized === 'type' || normalized === 'types';
-        });
 
-        logger.debug(`[FILE-DRAG] currentFolder=${currentFolder}, existingFolderPath=${existingFolderPath}, persistedFolderPath=${persistedFolderPath}, hasLegacyTypeKeys=${hasLegacyTypeKeys}`);
+        logger.debug(`[FILE-DRAG] currentFolder=${currentFolder}, existingFolderPath=${existingFolderPath}, persistedFolderPath=${persistedFolderPath}`);
 
         if (this.hasRecentFolderPathWrite(liveFile.path, currentFolder)) {
             logger.debug(`[FILE-DRAG] Skipping repeated folderPath write for ${liveFile.path}`);
@@ -862,7 +858,7 @@ export class FileNamingService {
         }
 
         const effectiveFolderPath = persistedFolderPath || existingFolderPath;
-        if (effectiveFolderPath === currentFolder && !hasLegacyTypeKeys) {
+        if (effectiveFolderPath === currentFolder) {
             logger.debug(`[FILE-DRAG] No update needed`);
             return;
         }
@@ -873,12 +869,6 @@ export class FileNamingService {
                 await this.plugin.frontmatterMutationService.process(liveFile, (frontmatter) => {
                     if (!this.canAutomaticallyMutateTemplateFrontmatter(frontmatter)) return;
                     frontmatter.folderPath = currentFolder;
-                    for (const key of Object.keys(frontmatter)) {
-                        const normalized = String(key || '').trim().toLowerCase();
-                        if (normalized === 'type' || normalized === 'types') {
-                            delete frontmatter[key];
-                        }
-                    }
                 });
             });
             this.rememberRecentFolderPathWrite(liveFile.path, currentFolder);

@@ -1,3 +1,4 @@
+import { managedNoteFieldKey, readManagedNoteField, writeManagedNoteField, type ManagedNoteField } from '../utils/managed-note-fields';
 import { TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { findKeyCaseInsensitive, setValueCaseInsensitive } from '../core';
@@ -18,7 +19,15 @@ export type CalendarIdentityInput = {
 
 export class TpsIdentityService {
   readonly internalIdKey = 'tpsId';
-  readonly externalIdKey = 'externalId';
+  get externalIdKey(): string { return managedNoteFieldKey(this.plugin.settings, 'externalId'); }
+
+  getNoteField(frontmatter: Record<string, unknown> | null | undefined, field: ManagedNoteField): unknown {
+    return readManagedNoteField(this.plugin.settings, field, frontmatter);
+  }
+
+  setNoteField(frontmatter: Record<string, unknown>, field: ManagedNoteField, value: unknown): void {
+    writeManagedNoteField(this.plugin.settings, field, frontmatter, value);
+  }
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
@@ -49,14 +58,13 @@ export class TpsIdentityService {
 
   getExternalId(frontmatter: Record<string, unknown> | null | undefined): string | null {
     if (!frontmatter) return null;
-    const key = findKeyCaseInsensitive(frontmatter, this.externalIdKey);
-    const value = key ? String(frontmatter[key] ?? '').trim() : '';
+    const value = String(this.getNoteField(frontmatter, 'externalId') ?? '').trim();
     return value || null;
   }
 
   setExternalId(frontmatter: Record<string, unknown>, externalId: string): string {
     const clean = String(externalId || '').trim();
-    if (clean) setValueCaseInsensitive(frontmatter, this.externalIdKey, clean);
+    if (clean) this.setNoteField(frontmatter, 'externalId', clean);
     return clean;
   }
 

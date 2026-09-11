@@ -1,3 +1,4 @@
+import { MANAGED_NOTE_FIELDS, managedNoteFieldKey, configureManagedNoteField } from './utils/managed-note-fields';
 import { App, ButtonComponent, Notice, PluginSettingTab, Setting, TextAreaComponent, TextComponent } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
 import type { AppearanceSettingKey, CreateTaskDefaultParentMode, CustomProperty, LinkedSubitemCheckboxMapping, ViewModeConditionOperator, ViewModeConditionType, ViewModeRule, ViewModeRuleCondition } from './types';
@@ -471,6 +472,34 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     }
   }
 
+  private renderIntegrationPropertyNames(container: HTMLElement): void {
+    container.createEl('h4', { text: 'Integration property names' });
+    container.createEl('p', { cls: 'setting-item-description', text: 'Used by external calendar notes and promoted tasks. Earlier names remain readable; changing a name does not scan or rewrite existing notes. Update Calendar and Controller together with GCM.' });
+    const labels = { externalId: 'External calendar identity', sourcePath: 'Promoted task source', location: 'Imported location', url: 'Imported URL', tpsCalendarOrphanCandidateAt: 'Missing-event detection date', tpsCalendarCancelledAt: 'Event cancellation date' };
+    for (const field of MANAGED_NOTE_FIELDS) {
+      let next = managedNoteFieldKey(this.plugin.settings, field);
+      const setting = new Setting(container).setName(labels[field]).addText(text => text
+        .setPlaceholder(field).setValue(next).onChange(value => { next = value; }))
+        .addButton(button => button.setButtonText('Apply').onClick(async () => {
+          const priorKeys = this.plugin.settings.managedNoteFieldKeys;
+          const priorAliases = this.plugin.settings.managedNoteFieldAliases;
+          button.setDisabled(true);
+          try {
+            configureManagedNoteField(this.plugin.settings, field, next);
+            await this.plugin.saveSettings();
+            new Notice('Property name saved. Earlier names remain readable.');
+          } catch (error) {
+            this.plugin.settings.managedNoteFieldKeys = priorKeys;
+            this.plugin.settings.managedNoteFieldAliases = priorAliases;
+            new Notice(error instanceof Error ? error.message : String(error));
+          } finally { button.setDisabled(false); }
+        }));
+      setting.controlEl.querySelector('input')?.setAttribute('aria-label', labels[field]);
+      setting.controlEl.querySelector('button')?.setAttribute('aria-label', `Apply ${labels[field]}`);
+    }
+
+  }
+
   private renderNotebookNavigatorRules(container: HTMLElement): void {
     const settings = this.plugin.settings.notebookNavigatorRules;
     const root = container.createDiv({ cls: 'tps-gcm-settings-editor-page' });
@@ -757,7 +786,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           ? this.createSettingsPage(containerEl, 'workflows', 'Workflows', 'Configure one note-interaction workflow at a time.')
           : this.activeSettingsPage === 'appearance'
             ? this.createSettingsPage(containerEl, 'appearance', 'Appearance', 'Tune menu, navigation, and modal sizing without changing behavior.')
-            : this.createSettingsPage(containerEl, 'advanced', 'Advanced', 'Troubleshooting and Base query reference material.');
+            : this.createSettingsPage(containerEl, 'advanced', 'Advanced', 'Configure integration property names, troubleshoot, and review Base queries.');
 
     if (this.activeSettingsPage === 'rules-fields') {
       this.renderRulesFieldsNavigation(activePage);
@@ -2208,6 +2237,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     }
 
     if (this.activeSettingsPage === 'advanced') {
+      this.renderIntegrationPropertyNames(activePage);
       const diagnostics = activePage;
       diagnostics.createEl('h4', { text: 'Data architecture' });
 
