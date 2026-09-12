@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 2.2.1 — mobile timer placement
+
+The mobile live timer dock now clears the system safe area and Obsidian navigation header. Its in-flow margin subtracts space already supplied by the current pane, so repeated updates and switching panes do not double the inset. Window resizing recalculates placement; desktop status-bar positioning, timer controls, settings and persisted records are unchanged. Minimum Obsidian remains 1.10.0. This patch is isolated from the separate unfinished development changes.
+
+Validation: all 1,147 declared tests passed with no failures/skips. The final versioned test suite and TypeScript build deployed only to Obsidian Plugin Test Vault. The reloaded 2.2.1 service was exercised in a 390px synthetic mobile pane: 59px safe area plus 50px navigation produced a 113px dock top; repeated refreshes stayed at 113px; an already inset host needed zero additional margin; simulated landscape with a 40px header used 44px. The visible timer cleared both colored system/navigation regions. This is desktop mobile-layout simulation, not physical iPhone/iPad acceptance. The synthetic timer did not write records or run a real timer, and its UI/intervals were removed. Original GCM settings stayed identical. The mandatory separate final build follows this documentation update; final shipped hashes are recorded in the public release notes. Production installation remains the user’s BRAT pull.
+
 ## 2.2.0
 
 GCM owns six configurable integration property names: external calendar identity (`externalId`), promoted-task source (`sourcePath`), imported `location` and `url`, missing-event detection (`tpsCalendarOrphanCandidateAt`), and cancellation date (`tpsCalendarCancelledAt`). Configure them in **Advanced → Integration property names**. Each editor has an explicit Apply action. The existing hub/default route and disclosures remain; no existing controls or commands are removed. Native Setting rows retain keyboard access and the existing narrow-layout styling.

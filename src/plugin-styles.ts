@@ -7089,6 +7089,7 @@ export const PLUGIN_STYLES = `
       body.is-mobile .tps-gcm-time-tracker-mobile-dock,
       body.is-phone .tps-gcm-time-tracker-mobile-dock {
         position: relative;
+        margin-top: max(0px, calc(var(--safe-area-inset-top, env(safe-area-inset-top, 0px)) + var(--view-header-height, 44px) + 4px - var(--tps-gcm-timer-flow-top, 0px)));
         z-index: 5;
         box-sizing: border-box;
         flex: 0 0 auto;

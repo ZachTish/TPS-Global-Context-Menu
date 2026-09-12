@@ -47,6 +47,7 @@ export class TimeTrackingStatusBarService {
       this.plugin.registerEvent(this.plugin.app.workspace.on('layout-change', () => {
         this.reposition();
       }));
+      this.plugin.registerDomEvent(window, 'resize', () => this.reposition());
     }
     this.refresh();
   }
@@ -294,11 +295,24 @@ export class TimeTrackingStatusBarService {
       if (this.itemEl.parentElement !== viewContent.parentElement || this.itemEl.nextElementSibling !== viewContent) {
         viewContent.parentElement.insertBefore(this.itemEl, viewContent);
       }
+      this.updateMobileTopInset();
       return;
     }
     if (this.itemEl.parentElement !== mountRoot) {
       mountRoot.prepend(this.itemEl);
     }
+    this.updateMobileTopInset();
+  }
+
+  private updateMobileTopInset(): void {
+    const item = this.itemEl;
+    const view = item?.ownerDocument?.defaultView;
+    if (!item?.isConnected || !view) return;
+    // Account for inset/header space already supplied by the host. Measuring
+    // before our own margin prevents a repeated refresh from adding it twice.
+    const margin = parseFloat(view.getComputedStyle(item).marginTop) || 0;
+    const naturalTop = item.getBoundingClientRect().top - margin;
+    item.style.setProperty('--tps-gcm-timer-flow-top', `${naturalTop}px`);
   }
 
   private findWordCountItem(statusBar: HTMLElement): HTMLElement | null {

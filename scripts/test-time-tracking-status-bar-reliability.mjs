@@ -220,6 +220,7 @@ function createHarness(statusResults, options = {}) {
     },
     registerInterval() {},
     registerEvent() {},
+    registerDomEvent() {},
     app: {
       workspace: {
         activeLeaf: { containerEl: leafContainer, view: { containerEl: viewContent } },
@@ -497,4 +498,33 @@ test('mobile timer CSS is namespaced, in-flow, and keeps usable touch targets', 
   assert.match(css, /min-height: 40px/);
   assert.match(css, /safe-area-inset-left/);
   assert.doesNotMatch(css, /position: fixed/);
+});
+
+
+test('mobile inset measurement subtracts its own margin and remains stable across refreshes', async () => {
+  const h = createHarness([activeStatus('Inset QA')]);
+  const service = new MobileTimeTrackingStatusBarService(h.plugin);
+  service.setup();
+  await settle();
+  const dock = h.createdElements[0];
+  let naturalTop = 0;
+  let margin = 113;
+  dock.isConnected = true;
+  dock.ownerDocument = { defaultView: { getComputedStyle: () => ({ marginTop: `${margin}px` }) } };
+  dock.getBoundingClientRect = () => ({ top: naturalTop + margin });
+  dock.style.setProperty = (key, value) => { dock.style[key] = value; };
+  service.repositionMobile();
+  assert.equal(dock.style['--tps-gcm-timer-flow-top'], '0px');
+  service.repositionMobile();
+  assert.equal(dock.style['--tps-gcm-timer-flow-top'], '0px', 'no accumulating offset');
+  naturalTop = 100;
+  margin = 13;
+  service.repositionMobile();
+  assert.equal(dock.style['--tps-gcm-timer-flow-top'], '100px', 'already inset hosts are measured once');
+});
+
+test('mobile timer clears both the safe area and navigation header without a fixed screen offset', () => {
+  const start = pluginStylesSource.indexOf('body.is-mobile .tps-gcm-time-tracker-mobile-dock');
+  const css = pluginStylesSource.slice(start, pluginStylesSource.indexOf('/* Mobile gesture passthrough', start));
+  assert.match(css, /margin-top: max\(0px, calc\(var\(--safe-area-inset-top, env\(safe-area-inset-top, 0px\)\) \+ var\(--view-header-height, 44px\) \+ 4px - var\(--tps-gcm-timer-flow-top, 0px\)\)\)/);
 });
