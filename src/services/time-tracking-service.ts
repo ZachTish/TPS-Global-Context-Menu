@@ -1099,10 +1099,14 @@ export class TimeTrackingService {
     let resolved = this.getFrontmatterTpsId(file);
     if (resolved) return resolved;
 
-    resolved = this.createId('item');
     await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
+      // The cache can lag a newly created record. Recheck the current source
+      // inside the serialized mutation before allocating an identity.
+      const key = findKeyCaseInsensitive(frontmatter, TPS_ID_FIELD) || findKeyCaseInsensitive(frontmatter, 'subitemId');
+      resolved = (key ? String(frontmatter[key] ?? '').trim() : '') || this.createId('item');
       setValueCaseInsensitive(frontmatter, TPS_ID_FIELD, resolved);
     });
+    if (!resolved) throw new Error('Could not resolve the note identity.');
     return resolved;
   }
 

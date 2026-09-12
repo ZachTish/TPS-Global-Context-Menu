@@ -1,3 +1,9 @@
+## 2.2.2 — preserve note identity when starting a timer
+
+Timer startup rechecks the current frontmatter inside its serialized mutation before allocating a missing tpsId. An empty or delayed metadata cache can no longer overwrite the stable identity of a newly created workout or other note. Existing case-insensitive tpsId and legacy subitemId values are preserved, and repeated starts reuse the same ID. Health 0.40.3 adds guarded Recheck recovery for already affected workouts. No settings, commands, layout, or minimum compatibility changes (Obsidian 1.10.0).
+
+Validation includes executable stale-cache and repeat-start regression coverage, the full declared suite, and a mandatory separate final build and test-vault reload. A synthetic native workout verifies identity preservation and the Health recovery flow. Final results and SHA-256 hashes are recorded in the public release notes. Production installation remains the user’s BRAT pull.
+
 # TPS Global Context Menu
 
 ## 2.2.1 — mobile timer placement

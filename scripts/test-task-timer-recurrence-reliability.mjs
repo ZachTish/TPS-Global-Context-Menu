@@ -808,3 +808,19 @@ test('timer duplicate resolves todo before vault.process and clears stale status
   );
   assert.doesNotMatch(methods, /setTaskStatusCheckboxState\(context\.rawLine, '\[ \]'\)/u);
 });
+
+
+test('note timer preserves source identity when metadata is missing or stale', async () => {
+  const { TimeTrackingService, TFile } = await importMappedTaskCreationServices();
+  for (const source of [{tpsId:'workout-original'}, {TPSID:'workout-case'}, {subitemId:'legacy-original'}, {}]) {
+    const expected = Object.values(source)[0];
+    const plugin = {app:{metadataCache:{getFileCache:()=>null}},frontmatterMutationService:{async process(_file, mutate){mutate(source);}}};
+    const service = new TimeTrackingService(plugin);
+    const first = await service.ensureNoteTpsId(new TFile('Inbox/Identity QA.md'));
+    const second = await service.ensureNoteTpsId(new TFile('Inbox/Identity QA.md'));
+    assert.equal(first, expected || second);
+    assert.equal(second, first);
+    assert.ok(first);
+    assert.equal(Object.entries(source).find(([key])=>key.toLowerCase()==='tpsid')[1],first);
+  }
+});
