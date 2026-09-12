@@ -1,3 +1,9 @@
+## 2.2.3 — cleaner settings copy
+
+Removed generic settings introductions and repeated navigation/page descriptions. Existing destinations, default route, optional disclosures, control labels/options, commands/actions, conditional visibility, focus behavior, and narrow-screen layout remain unchanged. Useful guidance about consequences, ownership, credentials, and non-obvious inputs stays beside its setting; dynamic status/counts remain. This presentation patch changes no settings schema, defaults, note data, provider behavior, or automation.
+
+Validated on 2026-09-12: source control/action/option/binding inventories preserved; full `npm test` passed (1148 tests). Separate `npm run build` deployed to the isolated test vault. Reloaded settings routes render without generic subtitles, and route navigation leaves settings unchanged. Native navigation, focus styles, and existing narrow-screen strips are retained. Release notes record exact results, route verification, and SHA-256 hashes. Minimum Obsidian remains 1.10.0. Production installation is the user's BRAT pull. Unrelated working-tree changes are excluded.
+
 ## 2.2.2 — preserve note identity when starting a timer
 
 Timer startup rechecks the current frontmatter inside its serialized mutation before allocating a missing tpsId. An empty or delayed metadata cache can no longer overwrite the stable identity of a newly created workout or other note. Existing case-insensitive tpsId and legacy subitemId values are preserved, and repeated starts reuse the same ID. Health 0.40.3 adds guarded Recheck recovery for already affected workouts. No settings, commands, layout, or minimum compatibility changes (Obsidian 1.10.0).

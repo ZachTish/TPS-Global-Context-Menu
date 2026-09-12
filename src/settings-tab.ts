@@ -212,9 +212,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       if (option.summary) {
         button.createSpan({ cls: 'tps-gcm-settings-route-summary', text: option.summary });
       }
-      if (option.description) {
-        button.createSpan({ cls: 'tps-gcm-settings-route-description', text: option.description });
-      }
       button.addEventListener('click', () => {
         if (option.id === activeId) return;
         onSelect(option.id);
@@ -237,10 +234,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     ].filter(Boolean).length;
 
     container.createEl('h3', { text: 'Choose what to configure', cls: 'tps-gcm-settings-hub-heading' });
-    container.createEl('p', {
-      text: 'Choose one area. Only that page is shown, so rule editors stay easy to find without loading every advanced option at once.',
-      cls: 'setting-item-description',
-    });
 
     this.renderRouteButtons<SettingsPageId>(
       container,
@@ -266,7 +259,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         {
           id: 'appearance',
           label: 'Appearance',
-          summary: 'Sizing & placement',
           description: 'Menu, navigation, and modal dimensions.',
         },
         {
@@ -338,10 +330,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
   private renderLinkedContextSettings(container: HTMLElement): void {
     container.createEl('h4', { text: 'Linked context' });
-    container.createEl('p', {
-      text: 'Show incoming-link excerpts and choose their stable source order.',
-      cls: 'setting-item-description',
-    });
 
     new Setting(container)
       .setName('Show linked context')
