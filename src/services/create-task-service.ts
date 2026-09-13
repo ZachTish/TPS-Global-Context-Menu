@@ -114,7 +114,7 @@ export class CreateTaskService {
 
     if (!nativeRecordModeEnabled && result.parentMode === 'standalone') {
       logger.flowWarn('CreateTask', 'route:standalone-unavailable', { mode: 'legacy' });
-      new Notice('Standalone task notes require Native Markdown records. Choose a containing note and try again.');
+      new Notice('Standalone task notes require Atomic note. Choose a containing note and try again.');
       return null;
     }
 

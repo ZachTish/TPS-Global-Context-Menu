@@ -751,7 +751,7 @@ test('sanitized native record aliases replace the raw persisted alias array', as
 });
 
 test('native record settings explain the fixed canonical envelope without exposing storage-key editors', () => {
-  const nativeSettingsStart = settingsTabSource.indexOf("diagnostics.createEl('h4', { text: 'Native record properties' })");
+  const nativeSettingsStart = settingsTabSource.indexOf("diagnostics.createEl('h4', { text: 'Atomic note properties' })");
   const nativeSettingsEnd = settingsTabSource.indexOf("diagnostics.createEl('h4', { text: 'Template identity' })", nativeSettingsStart);
   const nativeSettingsSource = settingsTabSource.slice(nativeSettingsStart, nativeSettingsEnd);
 
@@ -1204,4 +1204,10 @@ test('frontmatter-rule settings CSS stays GCM-owned and cannot style Notebook Na
     settingsTabSource,
     /LEGACY_GCM_NOTEBOOK_NAVIGATOR_RULE_SETTINGS_STYLE_ID/u,
   );
+});
+
+
+test("atomic labels preserve stored architecture values", () => {
+  assert.match(settingsTabSource, /addOption\('legacy', 'Atomic line'\)/);
+  assert.match(settingsTabSource, /addOption\('native-records', 'Atomic note'\)/);
 });

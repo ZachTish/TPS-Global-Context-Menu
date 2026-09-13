@@ -3562,8 +3562,8 @@ test('native profile is explicit, default-off, and removes legacy active paths o
   assert.match(typesSource, /TpsDataArchitectureMode = 'legacy' \| 'native-records'/u);
   assert.match(constantsSource, /dataArchitectureMode: 'legacy'/u);
   assert.match(constantsSource, /nativeRecordRootPath: '_records'/u);
-  assert.match(settingsSource, /Legacy TPS views and companions/u);
-  assert.match(settingsSource, /Native Markdown records and core Bases/u);
+  assert.match(settingsSource, /Atomic line/u);
+  assert.match(settingsSource, /Atomic note/u);
   assert.match(settingsSource, /Changing this requires an Obsidian reload/u);
   assert.match(mainSource, /if \(!this\.usesNativeRecordArchitecture\(\)\) \{[\s\S]{0,1200}registerBasesView\(TPS_TABLE_VIEW_TYPE[\s\S]{0,1200}registerBasesView\(TPS_LIST_VIEW_TYPE/u);
   assert.match(mainSource, /if \(!this\.usesNativeRecordArchitecture\(\)\) this\.baseRowIndexService\.setup\(\)/u);

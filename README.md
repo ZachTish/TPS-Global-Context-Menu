@@ -1,3 +1,9 @@
+## 2.2.4 — Atomic note / Atomic line terminology
+
+The architecture selector now displays **Atomic note** and **Atomic line**. Related record-root/layout/property labels, consolidation/asset commands, and task-creation notices use the same terminology. The underlying `native-records` / `legacy` values, setting keys, APIs, command IDs, defaults, and storage behavior are unchanged. This is a backwards-compatible wording patch, not a data migration. References to native Obsidian menus or built-in APIs retain their original meaning.
+
+Settings routes, control inventory, conditional visibility, keyboard handling, and mobile layout are unchanged. Focused regressions protect both labels and persisted selector values; the full declared suite and final build are required. Test-vault UI verification covers the reloaded Advanced architecture controls. No real settings or outbound automations are enabled for QA.
+
 ## 2.2.3 — cleaner settings copy
 
 Removed generic settings introductions and repeated navigation/page descriptions. Existing destinations, default route, optional disclosures, control labels/options, commands/actions, conditional visibility, focus behavior, and narrow-screen layout remain unchanged. Useful guidance about consequences, ownership, credentials, and non-obvious inputs stays beside its setting; dynamic status/counts remain. This presentation patch changes no settings schema, defaults, note data, provider behavior, or automation.

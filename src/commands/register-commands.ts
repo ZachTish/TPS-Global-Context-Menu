@@ -21,7 +21,7 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
         name: 'Tasks: Promote current task to tracked record',
         callback: async () => {
             if (!plugin.nativeRecordService.isEnabled()) {
-                new Notice('TPS GCM: Enable Native Markdown records in Advanced settings, then reload Obsidian.');
+                new Notice('TPS GCM: Enable Atomic note in Advanced settings, then reload Obsidian.');
                 return;
             }
             const view = getActiveMarkdownEditor(plugin);
@@ -52,7 +52,7 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.addCommand({
         id: 'normalize-native-task-identities',
-        name: 'Native records: Consolidate task identities',
+        name: 'Atomic notes: Consolidate task identities',
         checkCallback: (checking) => {
             if (!plugin.nativeRecordService.isEnabled()) return false;
             if (!checking) void (async () => {
@@ -123,11 +123,11 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.addCommand({
         id: 'open-or-create-native-asset-record',
-        name: 'Native records: Open or create asset record for current file',
+        name: 'Atomic notes: Open or create asset record for current file',
         callback: async () => {
             const file = plugin.app.workspace.getActiveFile();
             if (!plugin.usesNativeRecordArchitecture()) {
-                new Notice('TPS GCM: Native record mode is not enabled.');
+                new Notice('TPS GCM: Atomic note mode is not enabled.');
                 return;
             }
             if (!(file instanceof TFile) || file.extension.toLowerCase() === 'md') {

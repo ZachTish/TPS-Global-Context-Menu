@@ -402,7 +402,7 @@ test('Legacy Create task rejects an impossible standalone request before resolvi
   assert.equal(created, null);
   assert.equal(dailyNoteCalls, 0);
   assert.equal(processCalls, 0);
-  assert.ok(Notice.messages.some((message) => message.includes('require Native Markdown records')));
+  assert.ok(Notice.messages.some((message) => message.includes('require Atomic note')));
 });
 
 test('manual Create task always promotes a confirmed native-mode task into a note-backed record', async () => {

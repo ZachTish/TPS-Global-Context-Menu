@@ -2231,10 +2231,10 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
       new Setting(diagnostics)
         .setName('TPS data architecture')
-        .setDesc('Legacy keeps TPS List/Table, virtual Base embeds, line-row indexing, and non-Markdown companion properties. Native records keeps GCM menus and inline-task tools while ordinary Markdown records and core Bases own stored data and filtering. Changing this requires an Obsidian reload.')
+        .setDesc('Atomic line stores records within notes and uses TPS List/Table. Atomic note stores each record in its own Markdown note and uses core Bases. Reload Obsidian after changing this.')
         .addDropdown((dropdown) => dropdown
-          .addOption('legacy', 'Legacy TPS views and companions')
-          .addOption('native-records', 'Native Markdown records and core Bases')
+          .addOption('legacy', 'Atomic line')
+          .addOption('native-records', 'Atomic note')
           .setValue(this.plugin.settings.dataArchitectureMode || 'legacy')
           .onChange(async (value) => {
             this.plugin.settings.dataArchitectureMode = value === 'native-records'
@@ -2245,7 +2245,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           }));
 
       new Setting(diagnostics)
-        .setName('Native record root')
+        .setName('Atomic note root')
         .setDesc('Vault-relative destination for newly generated task, calendar, Health log/definition, workflow, time-entry, and asset records. Existing records are never moved by this setting. Enter / for the vault root.')
         .addText((text) => text
           .setPlaceholder('_records')
@@ -2256,7 +2256,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           }));
 
       new Setting(diagnostics)
-        .setName('Native record layout')
+        .setName('Atomic note layout')
         .setDesc('Kind folders preserves the existing _records/tasks-style layout. Flat stores every generated record directly in the selected destination, using its stable TPS ID as the filename.')
         .addDropdown((dropdown) => dropdown
           .addOption('kind-folders', 'Separate folders by record kind')
@@ -2267,14 +2267,14 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }));
 
-      diagnostics.createEl('h4', { text: 'Native record properties' });
+      diagnostics.createEl('h4', { text: 'Atomic note properties' });
 
       new Setting(diagnostics)
         .setName('Canonical record envelope')
-        .setDesc('New and consolidated native records store one system identity (tpsId) plus kind and title. Schema and file timestamps remain available virtually through the API, while saved custom property names and legacy identity tags remain read-only migration aliases.');
+        .setDesc('New and consolidated atomic notes store one system identity (tpsId) plus kind and title. Schema and file timestamps remain available virtually through the API, while saved custom property names and legacy identity tags remain read-only migration aliases.');
 
       new Setting(diagnostics)
-        .setName('Consolidate native record storage')
+        .setName('Consolidate atomic note storage')
         .setDesc('Rewrite recognized legacy identities to tpsId, kind, and title. User properties, ordinary tags, bodies, stable IDs, paths, and filenames are preserved. Legacy readers stay enabled for records that arrive later through Sync, and records that cannot be proven globally unique fail closed.')
         .addButton((button) => button
           .setButtonText('Consolidate records')
@@ -2282,7 +2282,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             button.setDisabled(true);
             try {
               const result = await this.plugin.nativeRecordService.migrateStorageProfile();
-              new Notice(`Native records: ${result.updated} updated, ${result.skipped} already current, ${result.failed} failed.`);
+              new Notice(`Atomic notes: ${result.updated} updated, ${result.skipped} already current, ${result.failed} failed.`);
             } catch (error) {
               new Notice(error instanceof Error ? error.message : String(error));
             } finally {
