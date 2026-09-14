@@ -124,7 +124,7 @@ async function loadFileNamingService() {
             export function normalizePath(path) {
               return String(path || '').replace(/\\\\/g, '/').replace(/\\/{2,}/g, '/').replace(/^\\//, '');
             }
-            export function parseYaml() { return {}; }
+            export function parseYaml(source) { return globalThis.filenameTestParseYaml?.(source) || {}; }
             export function stringifyYaml(value) { return JSON.stringify(value); }
           `,
         }));
@@ -3312,4 +3312,36 @@ test('timestamp sync rejects native identity evidence acquired at the source-pre
   } finally {
     globalThis.window = priorWindow;
   }
+});
+
+test('calendar records follow their title without allowing reverse title writes or renaming other records', async () => {
+  const priorWindow=globalThis.window;
+  globalThis.window={...priorWindow,moment:()=>({isValid:()=>false,format:()=>''})};
+  globalThis.filenameTestParseYaml=source=>{if(source.includes('bad: ['))throw Error('bad YAML');return Object.fromEntries(source.split('\n').filter(l=>l.includes(':')).map(l=>{const i=l.indexOf(':');return [l.slice(0,i),l.slice(i+1).trim()]}));};
+  try {
+    const {FileNamingService}=await loadFileNamingService();
+    const file={__isTestTFile:true,path:'Inbox/calendar-event-id.md',name:'calendar-event-id.md',basename:'calendar-event-id',extension:'md',parent:{path:'Inbox'},stat:{ctime:0,mtime:0}};
+    let fields={tpsId:'calendar-event-id',kind:'calendar-event',title:'Planning'},source='',collision=false,renames=0,writes=0;
+    const refresh=()=>source='---\n'+Object.entries(fields).map(([k,v])=>`${k}: ${v}`).join('\n')+'\n---\nBody stays here';refresh();
+    const inspect=fm=>fm?.tpsId&&fm?.kind?{id:fm.tpsId,kind:fm.kind}:null;
+    const plugin={settings:{enableAutoRename:true,autoSyncTitleFromFilename:true,folderExclusions:'',frontmatterAutoWriteExclusions:'',dailyNoteDateFormat:'YYYY-MM-DD'},registerEvent(){},shouldIgnoreAutoFrontmatterWrite:()=>false,
+      nativeRecordService:{isRecordFile:()=>!!inspect(fields),inspect,hasRecordIdentityEvidence:async()=>true},
+      bulkEditService:{shouldSkipNoteLevelRecurrence:async()=>false,canMutateFrontmatterSafely:async()=>true,runSerializedFrontmatterWrite:async(f,action)=>action()},
+      frontmatterMutationService:{process:async()=>{writes++;return true}},
+      app:{internalPlugins:{getPluginById:()=>null,plugins:{}},plugins:{getPlugin:()=>null,plugins:{}},
+        vault:{configDir:'.obsidian',adapter:{read:async()=>{throw Error('missing')}},getFiles:()=>[file],getMarkdownFiles:()=>[file],getAbstractFileByPath:path=>path===file.path?file:collision?{}:null,getFileByPath:path=>path===file.path?file:null,read:async()=>source,cachedRead:async()=>source,on:()=>({})},
+        metadataCache:{initialized:true,getFileCache:()=>({frontmatter:fields}),on:()=>({})},
+        fileManager:{renameFile:async(f,path)=>{renames++;f.path=path;f.name=path.split('/').at(-1);f.basename=f.name.slice(0,-3)}}}};
+    const service=new FileNamingService(plugin);await service.whenDailyNoteConfigurationReady();
+    assert.equal(service.shouldProcess(file),false,'generic mutations remain blocked');
+    assert.equal(service.shouldProcess(file,{allowCalendarEventFilename:true}),true);
+    const before=source;await service.updateFilenameIfNeeded(file);assert.equal(file.path,'Inbox/Planning.md');assert.equal(source,before);
+    await service.updateFilenameIfNeeded(file);assert.equal(renames,1,'idempotent');
+    fields.title='Revised planning';refresh();await service.processFileOnOpen(file);assert.equal(file.path,'Inbox/Revised planning.md');assert.equal(writes,0,'no reverse title/timestamp writes');
+    await service.syncTitleFromFilename(file,{force:true});assert.equal(writes,0);
+    fields.title='Collision';refresh();collision=true;await service.updateFilenameIfNeeded(file);assert.equal(renames,2);collision=false;
+    source+='\nbad: [';source=source.replace('title: Collision','title: Collision\nbad: [');await service.updateFilenameIfNeeded(file);assert.equal(renames,2,'malformed current bytes retain filename');
+    fields.kind='workout-session';refresh();await service.updateFilenameIfNeeded(file);assert.equal(renames,2,'other workflows remain protected');
+    fields.kind='calendar-event';refresh();plugin.settings.frontmatterAutoWriteExclusions='Inbox';plugin.shouldIgnoreAutoFrontmatterWrite=()=>true;await service.updateFilenameIfNeeded(file);assert.equal(renames,2,'exclusions remain authoritative');
+  } finally {globalThis.window=priorWindow;delete globalThis.filenameTestParseYaml;}
 });

@@ -3400,7 +3400,7 @@ test('only task lines with an authored scheduled or due value cross the native-r
 test('ordinary note auto-naming never overrides workflow-owned native record filenames', () => {
   assert.match(fileNamingSource, /nativeRecordService\?\.isRecordFile\(file\)/u);
   assert.equal(
-    (fileNamingSource.match(/hasWorkflowOwnedFilenameEvidence\(currentFile\)/gu) || []).length,
+    (fileNamingSource.match(/hasWorkflowOwnedFilenameEvidence\(currentFile(?:, true)?\)/gu) || []).length,
     2,
     'title-to-filename and filename-to-title synchronization both recheck authoritative identity evidence',
   );
@@ -3564,7 +3564,7 @@ test('native profile is explicit, default-off, and removes legacy active paths o
   assert.match(constantsSource, /nativeRecordRootPath: '_records'/u);
   assert.match(settingsSource, /Atomic line/u);
   assert.match(settingsSource, /Atomic note/u);
-  assert.match(settingsSource, /Changing this requires an Obsidian reload/u);
+  assert.match(settingsSource, /Reload Obsidian after changing this/u);
   assert.match(mainSource, /if \(!this\.usesNativeRecordArchitecture\(\)\) \{[\s\S]{0,1200}registerBasesView\(TPS_TABLE_VIEW_TYPE[\s\S]{0,1200}registerBasesView\(TPS_LIST_VIEW_TYPE/u);
   assert.match(mainSource, /if \(!this\.usesNativeRecordArchitecture\(\)\) this\.baseRowIndexService\.setup\(\)/u);
   assert.match(mainSource, /if \(!this\.usesNativeRecordArchitecture\(\)\) this\.addChild\(this\.virtualBaseEmbedService\)/u);

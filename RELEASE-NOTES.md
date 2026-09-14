@@ -1,13 +1,15 @@
-# 2.2.4
+# TPS Global Context Menu 2.2.5
 
-Rename the user-facing storage distinction to Atomic note / Atomic line, including related record configuration and commands. Internal setting keys, stored architecture values, command IDs, APIs and data behavior remain unchanged. No migration or architecture switch is performed.
+Fixes calendar events retaining generated identity filenames even with Auto-rename enabled. Atomic calendar-event notes now follow the existing sanitized scheduled-date/title naming rule on open and metadata reconciliation, including edits from a calendar while another note is active. Their stable IDs and note content are preserved.
 
-Validation: 1,149 tests passed. Reloaded Advanced settings display Atomic line and Atomic note while their stored values remain legacy and native-records. Existing navigation, conditional controls and native keyboard semantics are preserved. Separate final production-mode builds deployed to the isolated test vault; affected plugins were reloaded. No live bank data or credentials were used.
+The exception is limited to title-to-filename updates for verified calendar-event records. Reverse title synchronization cannot overwrite the title with an ID filename. Other record kinds, workflow filenames, Daily Note ownership, companion notes, exclusions, malformed-source guards, and collision protection remain in place. No settings keys, defaults, commands, layout, or migration changes. Minimum Obsidian: 1.10.0.
 
-Minimum Obsidian: 1.10.0. Tested in the test vault and ready for BRAT; publication alone does not install it in production.
+Validation: 1150 full-suite tests and 76 additional native-record tests passed. Mandatory separate production-mode build deployed to Obsidian Plugin Test Vault. Reload preserved settings and verified 2.2.5. Actual automatic creation/open reconciliation renamed a synthetic calendar record; a subsequent title edit renamed it again. Identity/body were unchanged, reverse title synchronization made no content changes, and a workout record kept its filename. Synthetic notes were archived. The stale native-profile reload-copy assertion now matches the previously shipped UI text.
 
-## SHA-256
+Tested in the test vault and ready for the user's BRAT pull. The production plugin was not deployed or reloaded. The specifically requested event was separately repaired through Obsidian's rename API, preserving its contents and identity. Unrelated existing development changes are excluded.
 
-- `main.js`: `a5a9b99ab4d0bc9129e2b095ed7386cd9e4e4979682688f05960ab1fd85c4a59`
-- `manifest.json`: `0202e70ec4a8f9884d9653a157c20d06f4de4f5b86b484612f547971f712b011`
+SHA-256 hashes of the tested release artifacts:
+
+- `main.js`: `4b7ff1fadf69ae2a45e66d70ddd062b7d72ec23d423fee60a61de06edbc23470`
+- `manifest.json`: `bd62ee6169b5bff83d2942839a15ea701820c9b72adae56e844068540f09bc73`
 - `styles.css`: `2cf3c1c5127f0bf34ba03c47416302408be318669e3ff1230e4b7a932b922f08`

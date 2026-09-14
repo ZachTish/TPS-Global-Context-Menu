@@ -334,6 +334,7 @@ function createHarness({
     parentLinkResolutionService: { getParentsForChild: () => [] },
     linkedSubitemCheckboxService: { refreshReferencesForChild: async () => {} },
     fileNamingService: {
+      isCalendarEventFile: () => false,
       shouldProcess: () => false,
       updateFilenameIfNeeded: async () => false,
       syncTitleFromFilename: async () => false,

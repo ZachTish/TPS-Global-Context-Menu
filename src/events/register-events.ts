@@ -571,8 +571,8 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     const debouncedFilenameSync = debounce((file: TFile) => {
         if (!file || file.extension !== 'md') return;
         const active = plugin.app.workspace.getActiveFile();
-        if (!(active instanceof TFile) || active.path !== file.path) return;
-        if (!plugin.fileNamingService.shouldProcess(file, { bypassCreationGrace: true })) return;
+        if ((!(active instanceof TFile) || active.path !== file.path) && !plugin.fileNamingService.isCalendarEventFile(file)) return;
+        if (!plugin.fileNamingService.shouldProcess(file, { bypassCreationGrace: true, allowCalendarEventFilename: true })) return;
         if (plugin.settings.enableAutoRename) {
             void plugin.fileNamingService.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
         }
@@ -592,7 +592,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             if (!(active instanceof TFile) || active.path !== path) return;
             const liveFile = plugin.app.vault.getFileByPath(path);
             if (!(liveFile instanceof TFile)) return;
-            if (!plugin.fileNamingService.shouldProcess(liveFile, { bypassCreationGrace: true })) return;
+            if (!plugin.fileNamingService.shouldProcess(liveFile, { bypassCreationGrace: true, allowCalendarEventFilename: true })) return;
             if (plugin.settings.enableAutoRename) {
                 void plugin.fileNamingService.updateFilenameIfNeeded(liveFile, { bypassCreationGrace: true });
             }

@@ -1,4 +1,4 @@
-import { normalizePath, TFile } from 'obsidian';
+import { normalizePath, parseYaml, TFile } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
 import * as logger from "../logger";
 import { extractDatePrefix, extractDateSuffix, stripDatePrefix, stripDateSuffix, FULL_DATE_REGEX } from '../utils/date-suffix-utils';
@@ -623,12 +623,12 @@ export class FileNamingService {
     ): Promise<void> {
         await this.dailyNoteConfigurationReady;
         const started = performance.now();
-        if (!this.shouldProcess(file, options)) return;
+        if (!this.shouldProcess(file, { ...options, allowCalendarEventFilename: true })) return;
         const liveFile = this.getLiveFile(file);
-        if (!liveFile || !this.shouldProcess(liveFile, options)) return;
+        if (!liveFile || !this.shouldProcess(liveFile, { ...options, allowCalendarEventFilename: true })) return;
         if (!(await this.canAutomaticallyMutateTemplateSource(liveFile))) return;
         const lockKey = liveFile.path;
-        const skipFrontmatterWrites = this.shouldSkipAutoFrontmatterWrite(liveFile);
+        const skipFrontmatterWrites = this.shouldSkipAutoFrontmatterWrite(liveFile) || this.plugin.nativeRecordService?.isRecordFile(liveFile) === true;
 
         // Prevent recursive processing
         if (this.processingFiles.has(lockKey)) {
@@ -1089,9 +1089,9 @@ export class FileNamingService {
      */
     async updateFilenameIfNeeded(file: TFile, options: { bypassCreationGrace?: boolean; titleOverride?: string; bypassProcessingLock?: boolean } = {}): Promise<void> {
         await this.dailyNoteConfigurationReady;
-        if (!this.shouldProcess(file, options)) return;
+        if (!this.shouldProcess(file, { ...options, allowCalendarEventFilename: true })) return;
         const liveFile = this.getLiveFile(file);
-        if (!liveFile || !this.shouldProcess(liveFile, options)) return;
+        if (!liveFile || !this.shouldProcess(liveFile, { ...options, allowCalendarEventFilename: true })) return;
         if (this.shouldSkipAutoFrontmatterWrite(liveFile)) return;
 
         const cache = this.plugin.app.metadataCache.getFileCache(liveFile);
@@ -1167,7 +1167,7 @@ export class FileNamingService {
         try {
             const currentFile = this.getLiveFile(liveFile);
             if (!currentFile) return;
-            if (await this.hasWorkflowOwnedFilenameEvidence(currentFile)) return;
+            if (await this.hasWorkflowOwnedFilenameEvidence(currentFile, true)) return;
             const finalFile = this.getLiveFile(currentFile);
             if (!finalFile) return;
             if (!(await this.canAutomaticallyMutateTemplateSource(finalFile))) return;
@@ -1195,7 +1195,7 @@ export class FileNamingService {
     /**
      * Check if a file should be processed for auto-naming
      */
-    shouldProcess(file: TFile, options: { bypassCreationGrace?: boolean; bypassProcessingLock?: boolean } = {}): boolean {
+    shouldProcess(file: TFile, options: { bypassCreationGrace?: boolean; bypassProcessingLock?: boolean; allowCalendarEventFilename?: boolean } = {}): boolean {
         // Only process markdown files
         if (file.extension !== 'md') return false;
         // Companion property notes are storage records for non-Markdown files,
@@ -1203,7 +1203,8 @@ export class FileNamingService {
         if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
         // Native-record filenames are owned by their creating workflow (or by
         // the user). Keep generic note auto-naming out of that contract.
-        if (this.plugin.nativeRecordService?.isRecordFile(file)) return false;
+        if (this.plugin.nativeRecordService?.isRecordFile(file)
+            && !(options.allowCalendarEventFilename && this.isCalendarEventFile(file))) return false;
 
         // Metadata cache is only a fast rejection. Every automatic mutation
         // path also rechecks current bytes at its write/rename boundary.
@@ -1387,7 +1388,11 @@ export class FileNamingService {
         return values;
     }
 
-    private async hasWorkflowOwnedFilenameEvidence(file: TFile): Promise<boolean> {
+    isCalendarEventFile(file: TFile): boolean {
+        return this.plugin.nativeRecordService?.inspect?.(this.plugin.app.metadataCache.getFileCache(file)?.frontmatter)?.kind === 'calendar-event';
+    }
+
+    private async hasWorkflowOwnedFilenameEvidence(file: TFile, allowCalendarEventFilename = false): Promise<boolean> {
         let content = '';
         try {
             const vault = this.plugin.app.vault as typeof this.plugin.app.vault & {
@@ -1401,7 +1406,17 @@ export class FileNamingService {
             return true;
         }
 
-        if (await this.plugin.nativeRecordService?.hasRecordIdentityEvidence(file, content)) return true;
+        if (await this.plugin.nativeRecordService?.hasRecordIdentityEvidence(file, content)) {
+            if (allowCalendarEventFilename) {
+                // Parse the same authoritative bytes used by the identity guard. Malformed
+                // YAML and other record kinds must retain workflow filename ownership.
+                try {
+                    const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/);
+                    if (match && this.plugin.nativeRecordService?.inspect?.(parseYaml(match[1]))?.kind === 'calendar-event') return false;
+                } catch { /* Keep the existing filename when identity cannot be verified. */ }
+            }
+            return true;
+        }
 
         const values = this.getFrontmatterStringValuesFromSource(content, [
             'runKind',
