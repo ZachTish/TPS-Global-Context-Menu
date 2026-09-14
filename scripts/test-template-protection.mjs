@@ -534,7 +534,9 @@ test('recurrence-template bootstrap reads a protected blueprint and creates a ve
     frontmatterMutationService: {
       process: async (file, mutate) => {
         processedPaths.push(file.path);
-        mutate({ tags: ['keep'] });
+        const fm = { tags: ['keep'], Icon: 'star', Color: '#123456', Sort: 4, Hidden: false };
+          mutate(fm);
+          assert.deepEqual([fm.Icon, fm.Color, fm.Sort, fm.Hidden], ['star', '#123456', 4, false]);
       },
     },
   };
@@ -613,7 +615,9 @@ test('generic recurrence cloning strips the source marker before create and fail
       filePropertiesService: { isCompanionFile: () => false },
       frontmatterMutationService: {
         process: async (file, mutate) => {
-          mutate({ tags: ['keep'] });
+          const fm = { tags: ['keep'], Icon: 'star', Color: '#123456', Sort: 4, Hidden: false };
+          mutate(fm);
+          assert.deepEqual([fm.Icon, fm.Color, fm.Sort, fm.Hidden], ['star', '#123456', 4, false]);
           if (options.outputAfterMutation) {
             sources.set(file.path, options.outputAfterMutation);
           }
@@ -742,7 +746,9 @@ test('Daily Note recurrence validates templates before locking and verifies new 
       },
       frontmatterMutationService: {
         process: async (file, mutate) => {
-          mutate({ tags: ['keep'] });
+          const fm = { tags: ['keep'], Icon: 'star', Color: '#123456', Sort: 4, Hidden: false };
+          mutate(fm);
+          assert.deepEqual([fm.Icon, fm.Color, fm.Sort, fm.Hidden], ['star', '#123456', 4, false]);
           if (outputAfterMutation !== null) sources.set(file.path, outputAfterMutation);
         },
       },
@@ -802,4 +808,29 @@ test('Daily Note recurrence validates templates before locking and verifies new 
     globalThis.window = originalWindow;
     globalThis.__TpsReconcileDailyNoteForTemplateTest = originalReconcile;
   }
+});
+
+
+test('recurrence template updates preserve and propagate user presentation fields', async () => {
+  const { BulkEditService } = await importBulkEditService();
+  const TFile = globalThis.__TpsTemplateProtectionTFile;
+  const template = makeFile(TFile, 'Templates/Series.md');
+  const instance = makeFile(TFile, 'Inbox/Instance.md');
+  const fields = {Icon: 'star', Color: '#123456', Sort: 4, Hidden: false};
+  const instanceFm = {recurrenceTemplate: '[[Series]]', scheduled: '2026-09-16', status: 'todo'};
+  const plugin = {
+    settings: {properties: [], recurrenceCompletionStatuses: ['complete']},
+    app: {vault: {getMarkdownFiles: () => [template, instance]}, metadataCache: {
+      getFileCache: file => ({frontmatter: file === template ? {...fields, scheduled: '2020-01-01'} : instanceFm}),
+    }},
+  };
+  const service = new BulkEditService(plugin);
+  service.frontmatterReferencesSeriesTemplate = () => true;
+  service.applyToFiles = async (files, mutate) => { assert.deepEqual(files, [instance]); mutate(instanceFm); return files.length; };
+  assert.equal(await service.applyTemplateToOpenInstances(template), 1);
+  for (const [key, value] of Object.entries(fields)) assert.equal(instanceFm[key], value);
+  assert.equal(instanceFm.scheduled, '2026-09-16');
+  assert.equal(instanceFm.status, 'todo');
+  const source = readFileSync(new URL('../src/services/bulk-edit-service.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /\['sort', 'hidden', 'icon', 'color'\]/);
 });

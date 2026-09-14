@@ -372,11 +372,7 @@ export class BulkEditService {
                 this.deleteFrontmatterValueCaseInsensitive(fm, "recurrenceTemplate");
                 this.clearLegacyRecurrenceTemplateMarker(fm);
                 this.deleteFrontmatterValueCaseInsensitive(fm, this.recurrenceLastGeneratedKey);
-                for (const key of Object.keys(fm)) {
-                    if (["sort", "hidden"].includes(key.toLowerCase())) {
-                        delete fm[key];
-                    }
-                }
+
             });
 
             if (!(await this.isVerifiedRecurrenceInstance(newFile, 'daily-note recurrence creation'))) {
@@ -1713,11 +1709,6 @@ export class BulkEditService {
             this.deleteFrontmatterValueCaseInsensitive(fmw, 'scheduled');
             this.deleteWorkflowStatusValue(fmw);
             this.deleteFrontmatterValueCaseInsensitive(fmw, 'completedDate');
-            for (const key of Object.keys(fmw)) {
-                if (['sort', 'hidden', 'icon', 'color'].includes(key.toLowerCase())) {
-                    delete fmw[key];
-                }
-            }
         });
 
         logger.log(`[TPS GCM] Updated recurrence template ${templateFile.path} from ${file.path}`);
@@ -1791,12 +1782,6 @@ export class BulkEditService {
                     this.deleteFrontmatterValueCaseInsensitive(fmw, 'scheduled');
                     this.deleteWorkflowStatusValue(fmw);
                     this.deleteFrontmatterValueCaseInsensitive(fmw, 'completedDate');
-                    // Strip Companion display properties — recalculated fresh for each instance
-                    for (const key of Object.keys(fmw)) {
-                        if (['sort', 'hidden', 'icon', 'color'].includes(key.toLowerCase())) {
-                            delete fmw[key];
-                        }
-                    }
                     // Explicitly store the recurrence rule — the copied content may not yet be
                     // flushed to disk when vault.read runs, so read it from the metadata cache.
                     const rule = fm?.recurrenceRule || fm?.recurrence;
@@ -2209,13 +2194,9 @@ export class BulkEditService {
                     this.deleteFrontmatterValueCaseInsensitive(fm, 'recurrence');
                 }
 
-                // Strip all stale/computed fields so the new instance starts clean.
+                // Reset instance lifecycle state; preserve user-authored presentation properties.
                 for (const key of Object.keys(fm)) {
                     if ([
-                        'sort',
-                        'hidden',
-                        'icon',
-                        'color',
                         'isrecurrencetemplate',
                         'completeddate',
                         'endedat',
@@ -2270,8 +2251,9 @@ export class BulkEditService {
      * instances that reference it via `recurrenceTemplate: [[SeriesName]]`.
      *
      * Only fields that belong to the series (not the individual instance) are copied.
-     * Instance-specific fields such as scheduled, status, completedDate, sort, icon,
-     * color, dateCreated, dateModified, and the template meta-fields are never touched.
+     * Instance lifecycle fields such as scheduled, status, completedDate,
+     * dateCreated, dateModified, and template meta-fields are never touched.
+     * User-authored icon, color, sort, and hidden properties propagate normally.
      */
     async applyTemplateToOpenInstances(templateFile: TFile): Promise<number> {
         if (this.plugin.filePropertiesService?.isCompanionFile(templateFile)) return 0;
@@ -2285,7 +2267,7 @@ export class BulkEditService {
         const SKIP_KEYS = new Set([
             'isrecurrencetemplate', 'recurrencestarted', 'recurrenceends',
             'recurrencetemplate', 'scheduled', 'completeddate',
-            'sort', 'icon', 'color', 'hidden', 'datecreated', 'datemodified',
+            'datecreated', 'datemodified',
             'startedat', 'endedat', 'durationseconds', 'timeestimate',
             'previouscompleteddate', 'secondssincepreviouscompletion',
             'lastcompleteddate', 'lastsessionpath', 'nextelegibledate',

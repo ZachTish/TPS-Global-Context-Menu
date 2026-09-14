@@ -1,3 +1,10 @@
+## 2.2.6 recurrence property preservation
+
+- Recurrence templates, daily-note instances, and subsequent instances preserve user-authored icon, color, sort, and hidden fields. These names no longer imply disposable computed data. Explicit template propagation includes these fields; instance lifecycle fields remain excluded.
+- The shared recurrence cleanup API follows the same preservation contract. Previously deleted values cannot be reconstructed automatically. No settings or identity migration.
+- Regression coverage exercises template propagation while retaining instance schedule and status.
+- Validation: full declared suite passed (1150 assertions/tests reported by the runner), plus the final focused recurrence fixtures passed. A separate production build deployed to the test vault and CLI plugin reload verified 2.2.6. The loaded shared cleanup API preserved mixed-case Icon/Color/Sort/Hidden values while resetting lifecycle state. No production install. Minimum Obsidian remains 1.10.0.
+
 ## 2.2.5 — Calendar event filenames follow their titles
 
 Identified atomic `calendar-event` notes now participate in the existing **Auto-rename** rule. Opening an event or changing its metadata reconciles its filename to the existing sanitized date-and-title format. Metadata reconciliation also accepts calendar events edited from a calendar while another note is active. The stable record ID remains in frontmatter; filenames no longer have to remain generated `calendar-event-…` identifiers. No retrospective vault-wide rename is performed.

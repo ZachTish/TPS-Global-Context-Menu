@@ -112,7 +112,7 @@ export function createSharedServices(plugin: TPSGlobalContextMenuPlugin) {
   const recurrence = {
     getCompletionStatuses: () => statusService.getDoneStatuses(),
     isCompletionStatus: (rawStatus: unknown) => statusService.isDoneStatus(rawStatus),
-    getStaleInstanceFields: () => ['sort', 'hidden', 'icon', 'color', 'isRecurrenceTemplate', 'completedDate'],
+    getStaleInstanceFields: () => ['isRecurrenceTemplate', 'completedDate'],
     stripStaleInstanceFields: (frontmatterRecord: Record<string, unknown>) => {
       for (const key of recurrence.getStaleInstanceFields()) {
         deleteValueCaseInsensitive(frontmatterRecord, key);
