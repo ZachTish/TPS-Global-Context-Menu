@@ -115,6 +115,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   plugin: TPSGlobalContextMenuPlugin;
   private static readonly SETTINGS_BUILD_STAMP = '2026-03-11 18:12';
   private readonly sectionState = new Map<string, boolean>();
+  private propertySearch = '';
+  private propertyTypeFilter = '';
   private activeSettingsPage: SettingsPageId = 'rules-fields';
   private activeRulesFieldsPage: RulesFieldsPageId = 'frontmatter';
   private activeFrontmatterEditor: FrontmatterEditorId = 'sort';
@@ -2422,15 +2424,37 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           });
       });
 
+    const filters = container.createDiv({ cls: 'tps-gcm-property-filters' });
+    const cards: Array<{ element: HTMLDetailsElement; property: CustomProperty }> = [];
+    const applyFilter = () => {
+      const query = this.propertySearch.trim().toLowerCase();
+      for (const { element, property } of cards) element.hidden = Boolean(
+        (this.propertyTypeFilter && property.type !== this.propertyTypeFilter) ||
+        (query && !`${property.label} ${property.key}`.toLowerCase().includes(query)));
+    };
+    new Setting(filters).setName('Find properties').addSearch(search => {
+      search.inputEl.setAttribute('aria-label', 'Find custom properties');
+      search.setPlaceholder('Name or key').setValue(this.propertySearch)
+        .onChange(value => { this.propertySearch = value; applyFilter(); });
+    })
+      .addDropdown(dropdown => {
+        dropdown.selectEl.setAttribute('aria-label', 'Filter properties by type');
+        dropdown.addOption('', 'All types');
+        for (const type of [...new Set(this.plugin.settings.properties.map(prop => prop.type))].sort()) dropdown.addOption(type, type);
+        dropdown.setValue(this.propertyTypeFilter).onChange(value => { this.propertyTypeFilter = value; applyFilter(); });
+      });
+
     this.plugin.settings.properties.forEach((prop, index) => {
       const stateKey = `Custom Property::${prop.id || prop.key || index}`;
-      const details = container.createEl('details', { cls: 'tps-gcm-setting-item tps-collapsible-section' });
+      const details = container.createEl('details', { cls: 'tps-gcm-setting-item tps-collapsible-section tps-gcm-property-card' });
+      cards.push({ element: details, property: prop });
       details.style.marginBottom = '10px';
       details.style.borderRadius = '6px';
       details.style.border = '1px solid var(--background-modifier-border)';
       if (this.sectionState.get(stateKey) ?? false) details.setAttr('open', 'true');
       details.addEventListener('toggle', () => {
         this.sectionState.set(stateKey, details.open);
+        if (details.open) for (const card of cards) if (card.element !== details) card.element.open = false;
       });
 
       const summary = details.createEl('summary', { cls: 'tps-collapsible-section-summary' });
@@ -2913,6 +2937,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       this.renderCustomPropertyValueSettings(valueSettingsHost, prop);
 
     });
+    applyFilter();
   }
 
   private renderBaseQueryGuide(container: HTMLElement): void {

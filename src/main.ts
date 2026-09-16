@@ -2734,6 +2734,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       this.stopArchiveTagAutomation();
     }
     await this.persistSettingsSnapshot();
+    this.emitGcmApiChanged(true);
     this.notebookNavigatorRuleService?.invalidateNotebookNavigatorPresentation();
     this.tpsNotebookNavigatorMenuBridge?.refresh();
     this.overlayRenderingService?.invalidate({

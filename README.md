@@ -1,3 +1,9 @@
+## 2.3.0 — Property catalog and field filtering
+
+Custom fields now offers Find properties and a type selector. Filters are transient, match label/key, and preserve field ordering; opening an editor closes other field editors. All existing field controls and actions remain in their existing destination. Public propertyCatalog API v1 lists key, label, type, and icon without returning mutable settings. GCM API change notifications after settings saves let TPS Navigator discover added fields. No note properties are rewritten.
+
+Verified in reloaded settings with 57 existing fields: search reduces the list to matching keys, opening a second editor closes the first, and all field controls/Add/reorder/delete actions remain. Filters have accessible native search/select controls and use the existing narrow-screen stacked settings layout. The default Rules & fields destination and five-destination hub are unchanged; finder/disclosure state is transient. A scoped hidden-card CSS rule prevents themes overriding search visibility. Full declared npm test and a separate final npm run build are required for the versioned artifacts; the stable build deploys only shipped files to Obsidian Plugin Test Vault. Hot Reload plus explicit test-plugin reload was used for UI verification. Release notes record final validation and SHA-256 hashes. Production installation remains the user’s BRAT pull.
+
 ## 2.2.6 recurrence property preservation
 
 - Recurrence templates, daily-note instances, and subsequent instances preserve user-authored icon, color, sort, and hidden fields. These names no longer imply disposable computed data. Explicit template propagation includes these fields; instance lifecycle fields remain excluded.

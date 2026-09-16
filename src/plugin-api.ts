@@ -842,6 +842,12 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
     };
 
     (plugin as any).api = {
+        propertyCatalog: {
+            version: 1,
+            list: () => (plugin.settings.properties || []).filter(property => property.key?.trim()).map(property => ({
+                key: property.key.trim(), label: property.label, type: property.type, icon: property.icon,
+            })),
+        },
         // ── Shared services ──────────────────────────────────────────────────
         services,
         contracts: {

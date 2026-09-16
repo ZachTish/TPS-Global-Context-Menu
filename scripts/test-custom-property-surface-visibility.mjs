@@ -320,3 +320,16 @@ test("stacked-panel collapse state remains path-owned across forced rebuilds", (
   assert.match(source, /stackedPropertiesCollapsedByPath\.get\(file\.path\)/);
   assert.match(source, /stackedPropertiesCollapsedByPath\.set\(file\.path, nextCollapsed\)/);
 });
+
+test('property search hides cards even when theme cards use display flex', () => {
+  const css = readFileSync(new URL('../styles.css', import.meta.url), 'utf8');
+  assert.match(css, /details\.tps-gcm-property-card\[hidden\]\s*\{\s*display: none !important/);
+});
+
+
+test('property finder keeps accessible native controls and a single open editor', () => {
+  const source = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
+  assert.match(source, /aria-label', 'Find custom properties'/);
+  assert.match(source, /aria-label', 'Filter properties by type'/);
+  assert.match(source, /card.element !== details\) card.element.open = false/);
+});
