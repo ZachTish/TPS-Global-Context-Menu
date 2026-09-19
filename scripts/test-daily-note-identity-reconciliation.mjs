@@ -81,6 +81,9 @@ async function loadDailyNoteIdentity() {
               return String(path || '').replace(/\\\\/g, '/').replace(/\\/{2,}/g, '/').replace(/^\\//, '');
             }
             export function parseYaml(source) {
+              if (/^-[ \t]+id:/m.test(source) && /^kind:/m.test(source)) {
+                throw new Error('Invalid mixed mapping and sequence');
+              }
               const parsed = {};
               for (const line of String(source || '').split(/\\r?\\n/)) {
                 const match = line.match(/^([^:#]+):\\s*(.*)$/);
@@ -759,7 +762,7 @@ test('canonical read fallback rejects authoritative non-Daily identity and unres
   assert.deepEqual(harness.renames, []);
 });
 
-test('unrelated malformed notes settle observational identity while reconciliation stays fail-closed', async () => {
+test('unrelated malformed notes do not block Daily Note opening or creation', async () => {
   const dailyPath = 'Inbox/Daily/2026-08-25.md';
   const malformedPath = '_archive/TPS Linter Unsafe YAML QA.md';
   const harness = createHarness(
@@ -773,7 +776,7 @@ test('unrelated malformed notes settle observational identity while reconciliati
   const malformedFile = harness.files.get(malformedPath);
   identity.markDailyNoteCandidatePathDirty(harness.app, malformedFile);
 
-  assert.equal(await identity.refreshPendingDailyNoteCandidatePaths(harness.app, {}), false);
+  assert.equal(await identity.refreshPendingDailyNoteCandidatePaths(harness.app, {}), true);
   assert.equal(
     identity.hasPendingDailyNoteCandidatePathRefresh(harness.app),
     false,
@@ -786,9 +789,15 @@ test('unrelated malformed notes settle observational identity while reconciliati
   );
   assert.deepEqual(
     await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'),
-    { status: 'blocked', file: null, reason: 'dirty-source-unresolved' },
-    'mutation reconciliation must remain fail-closed while malformed identity evidence exists',
+    { status: 'found', file: dailyFile },
+    'unrelated malformed YAML must not prevent returning an existing Daily Note',
   );
+  assert.deepEqual(
+    await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-26'),
+    { status: 'absent', file: null },
+    'unrelated malformed YAML must not prevent proving a new day absent',
+  );
+  assert.equal(harness.contents.get(malformedPath), '---\nkind: project\n');
 
   harness.contents.set(malformedPath, '---\nkind: project\n---\nRepaired');
   identity.markDailyNoteCandidatePathDirty(harness.app, malformedFile);
@@ -797,6 +806,44 @@ test('unrelated malformed notes settle observational identity while reconciliati
     await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'),
     { status: 'found', file: dailyFile },
   );
+});
+
+test('an archived project with a stray YAML list item cannot lock unrelated daily creation', async () => {
+  const path = '_archive/Legacy/Project.md';
+  const content = '---\nkind: project\ntest: test1\n- id: 123\n---\n';
+  const harness = createHarness([{ path, content }], { folder: '', format: 'YYYY-MM-DD' });
+  identity.markDailyNoteCandidatePathDirty(harness.app, harness.files.get(path));
+  assert.equal(await identity.refreshPendingDailyNoteCandidatePaths(harness.app, {}), true);
+  assert.deepEqual(await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-09-19'), {
+    status: 'absent', file: null,
+  });
+  assert.equal(harness.contents.get(path), content, 'the archived note is never repaired or rewritten');
+  assert.deepEqual(harness.renames, []);
+});
+
+test('malformed possible Daily Notes remain blockers until repaired', async () => {
+  for (const entry of [
+    { path: 'Inbox/Daily/2026-08-25.md', content: '---\nkind: project\n' },
+    { path: '_archive/2026-08-25.md', content: '---\nkind: project\n' },
+    { path: '_archive/Legacy.md', content: '---\nkind: daily-note\n' },
+    { path: '_archive/Legacy.md', content: '---\nkind: note/daily\n' },
+    { path: '_archive/Legacy.md', content: '---\nkind: *hidden\n' },
+    { path: '_archive/Legacy.md', content: '---\nkind: project\n', frontmatter: { kind: 'dailynote' } },
+  ]) {
+    const harness = createHarness([entry], { folder: 'Inbox/Daily', format: 'YYYY-MM-DD' });
+    identity.markDailyNoteCandidatePathDirty(harness.app, harness.files.get(entry.path));
+    assert.equal(await identity.refreshPendingDailyNoteCandidatePaths(harness.app, {}), false, entry.path);
+    assert.deepEqual(
+      await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-26'),
+      { status: 'blocked', file: null, reason: 'dirty-source-unresolved' },
+      entry.path,
+    );
+    assert.deepEqual(harness.renames, []);
+    harness.contents.set(entry.path, '---\nkind: project\n---\nRepaired');
+    harness.frontmatter.set(entry.path, { kind: 'project' });
+    identity.markDailyNoteCandidatePathDirty(harness.app, harness.files.get(entry.path));
+    assert.equal(await identity.refreshPendingDailyNoteCandidatePaths(harness.app, {}), true);
+  }
 });
 
 test('background metadata floods share one worker and replay bounded progress through zero dirty', async () => {

@@ -35,6 +35,7 @@ type DailyNoteCandidateIndex = {
 type LiveDailyNoteCandidateOverride = {
   file: TFile;
   frontmatter: Record<string, unknown> | null;
+  malformedDailyIdentity?: boolean;
 };
 
 export type DailyNoteResolution =
@@ -936,6 +937,39 @@ export function markDailyNoteCandidateMetadataReady(
   invalidateDailyNoteCandidateIndex(app);
 }
 
+/** Invalid non-Daily documents must not veto every Daily Note in the vault. */
+function hasBlockingMalformedDailyNoteCandidate(app: App, settings: unknown): boolean {
+  const overrides = liveDailyNoteCandidateOverrides.get(app as object);
+  for (const path of blockedDailyNoteCandidatePaths.get(app as object) || []) {
+    const entry = overrides?.get(path);
+    if (!entry || entry.malformedDailyIdentity) return true;
+    const candidate = getDailyNotePathDateCandidate(path, getDailyNoteFolder(app));
+    const format = getDailyNoteDateFormat(app, settings);
+    if (
+      (candidate && parseStrictDailyNoteDate(candidate, format))
+      || parseStrictDailyNoteDate(entry.file.basename, format)
+    ) return true;
+  }
+  return false;
+}
+
+function malformedSourceMayHaveDailyIdentity(
+  app: App,
+  settings: unknown,
+  file: TFile,
+  source: string,
+): boolean {
+  // Keep last-known Daily identity conservative while its current YAML is
+  // broken. Raw marker scanning also catches newly added/uncached identity.
+  if (hasExplicitDailyNoteIdentity(getFileFrontmatter(app, file), settings)) return true;
+  const normalized = source.replace(/\r\n/g, '\n').replace(/^\uFEFF/, '');
+  const closing = normalized.indexOf('\n---\n', 4);
+  const header = closing >= 0 ? normalized.slice(0, closing) : normalized;
+  // All supported Daily aliases contain "daily" after separator removal.
+  // Escapes/aliases can conceal those letters, so ambiguous YAML stays blocked.
+  return /[\\*&]/.test(header) || normalizeDailyNoteMarker(header).includes('daily');
+}
+
 async function refreshDirtyDailyNoteCandidatePaths(
   app: App,
   settings: unknown,
@@ -956,7 +990,7 @@ async function refreshDirtyDailyNoteCandidatePaths(
     }
   }
   const dirty = dirtyDailyNoteCandidatePaths.get(appKey);
-  if (!dirty || dirty.size === 0) return blocked && blocked.size > 0 ? 'blocked' : 'ready';
+  if (!dirty || dirty.size === 0) return hasBlockingMalformedDailyNoteCandidate(app, settings) ? 'blocked' : 'ready';
   let overrides = liveDailyNoteCandidateOverrides.get(appKey);
   if (!overrides) {
     overrides = new Map<string, LiveDailyNoteCandidateOverride>();
@@ -998,10 +1032,14 @@ async function refreshDirtyDailyNoteCandidatePaths(
       }
       // A stable malformed source is a mutation-safety blocker, not an
       // indexing operation that can eventually finish. Publish a path-only
-      // observational override and drain this generation so unrelated
-      // canonical Daily Notes remain readable. Reconciliation remains
-      // fail-closed below while any malformed source exists.
-      overrides.set(path, { file, frontmatter: null });
+      // observational override and drain this generation. Only a malformed
+      // possible Daily Note blocks reconciliation; unrelated invalid YAML
+      // is quarantined without becoming a vault-wide creation lock.
+      overrides.set(path, {
+        file,
+        frontmatter: null,
+        malformedDailyIdentity: malformedSourceMayHaveDailyIdentity(app, settings, file, current),
+      });
       blocked.add(path);
       dirty.delete(path);
       changed = true;
@@ -1021,7 +1059,7 @@ async function refreshDirtyDailyNoteCandidatePaths(
     blocked = undefined;
   }
   if (changed) invalidateDailyNoteCandidateIndex(app);
-  return blocked && blocked.size > 0 ? 'blocked' : 'ready';
+  return hasBlockingMalformedDailyNoteCandidate(app, settings) ? 'blocked' : 'ready';
 }
 
 /**
