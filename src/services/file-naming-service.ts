@@ -1192,6 +1192,7 @@ export class FileNamingService {
      * Check if a file should be processed for auto-naming
      */
     shouldProcess(file: TFile, options: { bypassCreationGrace?: boolean; bypassProcessingLock?: boolean; allowCalendarEventFilename?: boolean } = {}): boolean {
+        if (this.plugin.propertyMigrationService?.active) return false;
         // Only process markdown files
         if (file.extension !== 'md') return false;
         // Companion property notes are storage records for non-Markdown files,

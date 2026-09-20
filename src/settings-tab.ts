@@ -1,3 +1,5 @@
+import { MIGRATABLE_KEY_SETTINGS, PropertyMigration } from './utils/property-migration';
+import { PropertyMigrationModal } from './modals/property-migration-modal';
 import { MANAGED_NOTE_FIELDS, managedNoteFieldKey, configureManagedNoteField } from './utils/managed-note-fields';
 import { App, ButtonComponent, Notice, PluginSettingTab, Setting, TextAreaComponent, TextComponent } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
@@ -462,32 +464,54 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     }
   }
 
+  private async migrateProperty(change: PropertyMigration, configure: (settings: typeof this.plugin.settings) => void): Promise<boolean> {
+    try { return await this.plugin.propertyMigrationService.request(change, configure); }
+    catch (error) { logger.warn('[property-migration] stopped', { reason: error instanceof Error ? error.message : String(error) }); new Notice(error instanceof Error ? error.message : String(error), 10000); return false; }
+  }
+
+  private renderMigratingKeySetting(container: HTMLElement, name: string, description: string, field: keyof typeof MIGRATABLE_KEY_SETTINGS): void {
+    let next = this.plugin.settings[field] || MIGRATABLE_KEY_SETTINGS[field];
+    new Setting(container).setName(name).setDesc(`${description} Apply previews existing notes before saving.`)
+      .addText(text => text.setValue(next).onChange(value => { next = value.trim(); }))
+      .addButton(button => button.setButtonText('Apply').onClick(async () => {
+        if (field === 'timeTrackingPropertyKey' && next.toLowerCase() === 'scheduled') { new Notice('Time tracking must not use scheduled.'); return; }
+        button.setDisabled(true);
+        try {
+          const from = this.plugin.settings[field] || MIGRATABLE_KEY_SETTINGS[field];
+          if (await this.migrateProperty({ kind: 'key', from, to: next }, settings => { settings[field] = next; })) this.display();
+        } finally { button.setDisabled(false); }
+      }));
+  }
+
   private renderIntegrationPropertyNames(container: HTMLElement): void {
     container.createEl('h4', { text: 'Integration property names' });
-    container.createEl('p', { cls: 'setting-item-description', text: 'Used by external calendar notes and promoted tasks. Earlier names remain readable; changing a name does not scan or rewrite existing notes. Update Calendar and Controller together with GCM.' });
+    container.createEl('p', { cls: 'setting-item-description', text: 'Apply previews a confirmed migration of existing note frontmatter. Earlier integration names remain readable. Update Calendar and Controller mappings separately.' });
+    if (this.plugin.propertyMigrationService?.hasRecovery()) {
+      new Setting(container).setName('Restore interrupted property migration')
+        .setDesc('Restore original properties and configuration from the local recovery copy. Concurrent edits are preserved.')
+        .addButton(button => button.setButtonText('Review recovery').onClick(async () => {
+          button.setDisabled(true);
+          try { await this.plugin.propertyMigrationService.recover(); this.display(); }
+          catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
+          finally { button.setDisabled(false); }
+        }));
+    }
     const labels = { externalId: 'External calendar identity', sourcePath: 'Promoted task source', location: 'Imported location', url: 'Imported URL', tpsCalendarOrphanCandidateAt: 'Missing-event detection date', tpsCalendarCancelledAt: 'Event cancellation date' };
     for (const field of MANAGED_NOTE_FIELDS) {
       let next = managedNoteFieldKey(this.plugin.settings, field);
       const setting = new Setting(container).setName(labels[field]).addText(text => text
-        .setPlaceholder(field).setValue(next).onChange(value => { next = value; }))
+        .setPlaceholder(field).setValue(next).onChange(value => { next = value.trim(); }))
         .addButton(button => button.setButtonText('Apply').onClick(async () => {
-          const priorKeys = this.plugin.settings.managedNoteFieldKeys;
-          const priorAliases = this.plugin.settings.managedNoteFieldAliases;
           button.setDisabled(true);
           try {
-            configureManagedNoteField(this.plugin.settings, field, next);
-            await this.plugin.saveSettings();
-            new Notice('Property name saved. Earlier names remain readable.');
-          } catch (error) {
-            this.plugin.settings.managedNoteFieldKeys = priorKeys;
-            this.plugin.settings.managedNoteFieldAliases = priorAliases;
-            new Notice(error instanceof Error ? error.message : String(error));
+            if (await this.migrateProperty({ kind: 'key', from: managedNoteFieldKey(this.plugin.settings, field), to: next }, settings => {
+              configureManagedNoteField(settings, field, next);
+            })) this.display();
           } finally { button.setDisabled(false); }
         }));
       setting.controlEl.querySelector('input')?.setAttribute('aria-label', labels[field]);
       setting.controlEl.querySelector('button')?.setAttribute('aria-label', `Apply ${labels[field]}`);
     }
-
   }
 
   private renderNotebookNavigatorRules(container: HTMLElement): void {
@@ -632,26 +656,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       .setName('Auto-sync file timestamps')
       .setDesc('Keep created/modified timestamps on note frontmatter and task lines.')
       .addToggle(t => t.setValue(this.plugin.settings.autoSyncFileTimestamps).onChange(async v => { this.plugin.settings.autoSyncFileTimestamps = v; await this.plugin.saveSettings(); }));
-    new Setting(advanced)
-      .setName('Created timestamp key')
-      .setDesc('Frontmatter key used for the file creation timestamp.')
-      .addText(t => t
-        .setValue(this.plugin.settings.dateCreatedFrontmatterKey || 'datecreated')
-        .setPlaceholder('datecreated')
-        .onChange(async v => {
-          this.plugin.settings.dateCreatedFrontmatterKey = String(v || '').trim() || 'datecreated';
-          await this.plugin.saveSettings();
-        }));
-    new Setting(advanced)
-      .setName('Modified timestamp key')
-      .setDesc('Frontmatter key used for the file modified timestamp.')
-      .addText(t => t
-        .setValue(this.plugin.settings.dateModifiedFrontmatterKey || 'datemodified')
-        .setPlaceholder('datemodified')
-        .onChange(async v => {
-          this.plugin.settings.dateModifiedFrontmatterKey = String(v || '').trim() || 'datemodified';
-          await this.plugin.saveSettings();
-        }));
+    this.renderMigratingKeySetting(advanced, 'Created timestamp key', 'Frontmatter key used for the file creation timestamp.', 'dateCreatedFrontmatterKey');
+    this.renderMigratingKeySetting(advanced, 'Modified timestamp key', 'Frontmatter key used for the file modified timestamp.', 'dateModifiedFrontmatterKey');
     new Setting(advanced)
       .setName('Timestamp format')
       .setDesc('Moment.js format used for created/modified timestamp values.')
@@ -1304,18 +1310,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             })
         );
 
-      new Setting(viewModeConfigContainer)
-        .setName('Frontmatter key')
-        .setDesc('The frontmatter property used to determine view mode (e.g. "viewmode")')
-        .addText((text) =>
-          text
-            .setValue(this.plugin.settings.viewModeFrontmatterKey)
-            .setPlaceholder('viewmode')
-            .onChange(async (value) => {
-              this.plugin.settings.viewModeFrontmatterKey = value || 'viewmode';
-              await this.plugin.saveSettings();
-            })
-        );
+      this.renderMigratingKeySetting(viewModeConfigContainer, 'Frontmatter key', 'Frontmatter property used to determine view mode.', 'viewModeFrontmatterKey');
 
       new Setting(viewModeConfigContainer)
         .setName('Ignored folders')
@@ -1681,19 +1676,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       );
 
     if (this.plugin.settings.enableTimeTracking !== false) {
-      new Setting(timeTracking)
-        .setName('Property key')
-        .setDesc('Frontmatter key used for time tracking sessions. This must not be scheduled.')
-        .addText((text) =>
-          text
-            .setPlaceholder('timeTracking')
-            .setValue(this.plugin.settings.timeTrackingPropertyKey || 'timeTracking')
-            .onChange(async (value) => {
-              const next = value.trim() || 'timeTracking';
-              this.plugin.settings.timeTrackingPropertyKey = next.toLowerCase() === 'scheduled' ? 'timeTracking' : next;
-              await this.plugin.saveSettings();
-            })
-        );
+      this.renderMigratingKeySetting(timeTracking, 'Property key', 'Property used for time tracking sessions. This must not be scheduled.', 'timeTrackingPropertyKey');
 
       new Setting(timeTracking)
         .setName('Storage mode')
@@ -2003,18 +1986,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           })
       );
     if (this.plugin.settings.persistTaskVisibilityStateToFrontmatter === true) {
-      new Setting(taskAutomation)
-        .setName('Task reveal frontmatter key')
-        .setDesc('Single frontmatter property used to store showCompleted and showTasks state for this note.')
-        .addText((text) =>
-          text
-            .setPlaceholder('gcmTaskVisibility')
-            .setValue(this.plugin.settings.taskVisibilityStateFrontmatterKey || 'gcmTaskVisibility')
-            .onChange(async (value) => {
-              this.plugin.settings.taskVisibilityStateFrontmatterKey = value.trim() || 'gcmTaskVisibility';
-              await this.plugin.saveSettings();
-            })
-        );
+      this.renderMigratingKeySetting(taskAutomation, 'Task reveal frontmatter key', 'Property used to store showCompleted and showTasks state.', 'taskVisibilityStateFrontmatterKey');
     }
     this.renderLinkedSubitemCheckboxSettings(taskAutomation);
     new Setting(taskAutomation)
@@ -2050,7 +2022,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         text: 'Parent links, completion classification, and child-panel filters.',
         cls: 'setting-item-description',
       });
-    new Setting(relationshipAutomation).setName('Child parent property key').setDesc('Frontmatter key used on child notes to store parent links. Multiple parents are stored as an array under this key. Legacy parent/parents/childOf values are still read and migrated on write.').addText(t => t.setValue(this.plugin.settings.parentLinkFrontmatterKey || 'parent').onChange(async v => { this.plugin.settings.parentLinkFrontmatterKey = v.trim() || 'parent'; await this.plugin.saveSettings(); }));
+    this.renderMigratingKeySetting(relationshipAutomation, 'Child parent property key', 'Property used on child notes to store parent links.', 'parentLinkFrontmatterKey');
     new Setting(relationshipAutomation)
       .setName('Ignore matching parent/child notes')
       .setDesc('When enabled, notes matching the exact property key and value below are excluded from parent/child discovery, panels, and automation. Existing links and frontmatter are preserved.')
@@ -2549,37 +2521,28 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }));
 
-      // Key
+      // Key edits are drafts until a migration has been reviewed and confirmed.
+      let nextKey = prop.key;
       const keySetting = new Setting(fields)
         .setName('Frontmatter Key')
-        .setDesc('Required. Matching ignores case but preserves punctuation and interior spaces.')
-        .addText(text => text
-          .setValue(prop.key)
-          .onChange(async (value) => {
-            const candidate = value.trim();
-            const diagnostic = getPropertyKeyDiagnostic(this.plugin.settings.properties, index, candidate);
-            text.inputEl.setAttribute('aria-invalid', diagnostic ? 'true' : 'false');
-            keySetting.settingEl.toggleClass('tps-gcm-setting-item--invalid', !!diagnostic);
-            keySetting.descEl.setText(
-              diagnostic?.code === 'blank'
-                ? 'A frontmatter key is required. The saved key was not changed.'
-                : diagnostic?.code === 'duplicate'
-                  ? `Another field already uses "${candidate}" (case-insensitive). The saved key was not changed.`
-                  : 'Required. Matching ignores case but preserves punctuation and interior spaces.',
-            );
-            if (diagnostic) return;
-            prop.key = candidate;
-            await this.plugin.saveSettings();
-          }));
+        .setDesc('Required and unique. Apply previews existing notes before saving.')
+        .addText(text => text.setValue(prop.key).onChange(value => {
+          nextKey = value.trim();
+          const diagnostic = getPropertyKeyDiagnostic(this.plugin.settings.properties, index, nextKey);
+          text.inputEl.setAttribute('aria-invalid', diagnostic ? 'true' : 'false');
+          keySetting.settingEl.toggleClass('tps-gcm-setting-item--invalid', !!diagnostic);
+          keySetting.descEl.setText(diagnostic ? 'Enter a non-empty, unique property key. The saved key was not changed.' : 'Apply previews existing notes before saving.');
+        }))
+        .addButton(button => button.setButtonText('Apply').onClick(async () => {
+          if (getPropertyKeyDiagnostic(this.plugin.settings.properties, index, nextKey)) { new Notice('Enter a non-empty, unique property key.'); return; }
+          button.setDisabled(true);
+          try {
+            if (await this.migrateProperty({ kind: 'key', from: prop.key, to: nextKey }, settings => { settings.properties[index].key = nextKey; })) this.display();
+          } finally { button.setDisabled(false); }
+        }));
       const persistedKeyDiagnostic = getPropertyKeyDiagnostic(this.plugin.settings.properties, index);
       keySetting.settingEl.toggleClass('tps-gcm-setting-item--invalid', !!persistedKeyDiagnostic);
-      const keyInput = keySetting.controlEl.querySelector<HTMLInputElement>('input');
-      keyInput?.setAttribute('aria-invalid', persistedKeyDiagnostic ? 'true' : 'false');
-      if (persistedKeyDiagnostic?.code === 'blank') {
-        keySetting.descEl.setText('This saved field has no key. Enter a unique key to make it usable.');
-      } else if (persistedKeyDiagnostic?.code === 'duplicate') {
-        keySetting.descEl.setText(`This saved key is also used by ${persistedKeyDiagnostic.duplicateIndexes.length} other field${persistedKeyDiagnostic.duplicateIndexes.length === 1 ? '' : 's'}. Enter a unique key; TPS will not rename it automatically.`);
-      }
+      keySetting.controlEl.querySelector('input')?.setAttribute('aria-invalid', persistedKeyDiagnostic ? 'true' : 'false');
 
       // Type
       new Setting(fields)
@@ -3210,16 +3173,40 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       });
 
     if (propertyUsesManualOptions(prop)) {
+      let draftOptions = manualOptions.join(', ');
       new Setting(optionsDiv)
         .setName(prop.type === 'selector' || prop.type === 'kind' ? 'Manual options' : 'Manual suggestions')
-        .setDesc('Comma or newline separated values. Their order is preserved.')
-        .addTextArea((text) => text
-          .setValue(manualOptions.join(', '))
-          .onChange(async (value) => {
-            prop.options = normalizeManualPropertyOptions(value, prop);
-            await this.plugin.saveSettings();
-          }));
+        .setDesc('Comma or newline separated. Apply previews a single renamed value; additions and removals only change suggestions. Use Rename stored value for multiple renames.')
+        .addTextArea(text => text.setValue(draftOptions).onChange(value => { draftOptions = value; }))
+        .addButton(button => button.setButtonText('Apply').onClick(async () => {
+          const next = normalizeManualPropertyOptions(draftOptions, prop);
+          const current = prop.options || [];
+          const removed = current.filter(value => !next.includes(value));
+          const added = next.filter(value => !current.includes(value));
+          button.setDisabled(true);
+          try {
+            if (removed.length && added.length) {
+              if (removed.length !== 1 || added.length !== 1) { new Notice('Rename one stored value at a time using Rename stored value below.'); return; }
+              if (await this.migrateProperty({ kind: 'value', key: prop.key, from: removed[0], to: added[0] }, settings => {
+                settings.properties.find(property => property.id === prop.id)!.options = next;
+              })) this.display();
+            } else if (await PropertyMigrationModal.confirm(this.app, 'Update property suggestions', 'This only changes the choices in GCM. Existing note values are preserved. To change note values, use Rename stored value.', [...added.map(value => `Add: ${value}`), ...removed.map(value => `Remove suggestion: ${value}`)])) {
+              prop.options = next; await this.plugin.saveSettings(); this.display();
+            }
+          } finally { button.setDisabled(false); }
+        }));
     }
+    let oldValue = '', newValue = '';
+    new Setting(optionsDiv).setName('Rename stored value')
+      .setDesc('Replace an exact text value or list item in this property across note frontmatter. Apply previews affected notes before confirmation.')
+      .addText(text => { text.setPlaceholder('Old value').onChange(value => { oldValue = value; }); text.inputEl.setAttribute('aria-label', 'Old stored value'); })
+      .addText(text => { text.setPlaceholder('New value').onChange(value => { newValue = value; }); text.inputEl.setAttribute('aria-label', 'New stored value'); })
+      .addButton(button => button.setButtonText('Apply').onClick(async () => {
+        button.setDisabled(true);
+        try {
+          if (await this.migrateProperty({ kind: 'value', key: prop.key, from: oldValue, to: newValue }, () => {})) this.display();
+        } finally { button.setDisabled(false); }
+      }));
 
     const preview = optionsDiv.createDiv({ cls: 'setting-item-description' });
     const sourceLabel = propertyUsesVaultOptions(prop)

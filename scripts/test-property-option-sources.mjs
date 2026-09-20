@@ -559,5 +559,5 @@ test('Accepted kinds commits and source rerenders preserve focus without a delay
   assert.match(sourceSettingsBlock, /\.addOption\('manual\+vault\+entity', 'Manual \+ vault \+ entities'\)/);
   assert.match(sourceSettingsBlock, /document\.activeElement === drop\.selectEl/);
   assert.match(sourceSettingsBlock, /Task checkbox workflow remains separate as task\.status/);
-  assert.doesNotMatch(sourceSettingsBlock, /this\.display\(\)/);
+  assert.doesNotMatch(sourceSettingsBlock.split('if (propertyUsesManualOptions(prop))')[0], /this\.display\(\)/, 'Changing value sources preserves focus; explicit migration confirmation may rebuild updated definitions');
 });

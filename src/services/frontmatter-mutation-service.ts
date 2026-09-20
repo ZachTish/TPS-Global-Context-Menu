@@ -50,6 +50,19 @@ export class FrontmatterMutationService {
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
+  /** Apply a confirmed migration only if the exact reviewed source is still current. */
+  async applyMigrationSource(file: TFile, expected: string, replacement: string): Promise<void> {
+    await this.runSerialized(file, async () => {
+      await this.plugin.app.vault.process(file, current => {
+        if (current === replacement) return current; // Recovery and retries are idempotent.
+        if (current !== expected) throw new Error(`Note changed since preview: ${file.path}`);
+        return replacement;
+      });
+      const parsed = this.parseFrontmatterDocument(replacement.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n'));
+      if (parsed.ok) this.plugin.entityIndexService?.upsertFile(file, parsed.frontmatter);
+    });
+  }
+
   async process(
     file: TFile,
     mutator: FrontmatterMutator,

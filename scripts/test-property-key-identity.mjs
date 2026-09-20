@@ -62,7 +62,7 @@ test('new custom-field defaults are unique without treating punctuation variants
 test('custom-field settings block invalid saves and diagnose preserved legacy definitions', () => {
   assert.match(settingsSource, /createUniquePropertyKey\('new_prop', this\.plugin\.settings\.properties\)/u);
   assert.doesNotMatch(settingsSource, /key: 'new_prop', type: 'text'/u);
-  assert.match(settingsSource, /getPropertyKeyDiagnostic\(this\.plugin\.settings\.properties, index, candidate\)[\s\S]*if \(diagnostic\) return;[\s\S]*prop\.key = candidate/u);
+  assert.match(settingsSource, /getPropertyKeyDiagnostic\(this\.plugin\.settings\.properties, index, nextKey\)[\s\S]*this\.migrateProperty\(\{ kind: 'key', from: prop.key, to: nextKey/u);
   assert.match(settingsSource, /setAttribute\('aria-invalid', diagnostic \? 'true' : 'false'\)/u);
   assert.match(mainSource, /collectPropertyKeyDiagnostics\(this\.settings\.properties\)[\s\S]*custom-property-keys:invalid[\s\S]*preserved-for-manual-repair/u);
 });

@@ -618,6 +618,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.registerEvent(
         plugin.app.metadataCache.on('changed', (file) => {
+            if (plugin.propertyMigrationService?.active) return;
             logger.perf('metadataCache.changed', { file: file instanceof TFile ? file.path : null });
             if (file instanceof TFile && plugin.filePropertiesService?.isCompanionFile(file)) {
                 void plugin.filePropertiesService.handleCompanionMetadataChanged(file)
@@ -674,6 +675,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.registerEvent(
         plugin.app.vault.on('modify', (file) => {
+            if (plugin.propertyMigrationService?.active) return;
             if (file instanceof TFile && file.extension?.toLocaleLowerCase() === 'canvas') {
                 plugin.filePropertiesService.invalidateLegacyCanvas(file);
             }

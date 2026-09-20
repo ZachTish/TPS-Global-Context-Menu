@@ -702,3 +702,13 @@
       }
 
 body details.tps-gcm-property-card[hidden] { display: none !important; }
+
+/* Confirmed property migrations: keep the review usable on narrow screens. */
+.tps-gcm-property-migration-modal .setting-item-control { flex-wrap: wrap; gap: 8px; }
+.tps-gcm-property-migration-modal button { height: auto; min-height: 44px; white-space: normal; }
+.tps-gcm-property-migration-modal button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: 2px; }
+@media (max-width: 600px) {
+  .tps-gcm-property-migration-modal .setting-item { flex-direction: column; align-items: stretch; }
+  .tps-gcm-property-migration-modal .setting-item-control { justify-content: stretch; }
+  .tps-gcm-property-migration-modal button { flex: 1; }
+}

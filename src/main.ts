@@ -1,3 +1,4 @@
+import { PropertyMigrationService } from './services/property-migration-service';
 import { NoteOpeningService, migrateNoteOpeningSettings } from './services/note-opening-service';
 import { NativeBaseNoteOpening } from './services/native-base-note-opening';
 import { BasesView, Plugin, QueryController, TFile, WorkspaceLeaf, Menu, Notice, normalizePath, Platform, type BasesViewConfig, type ViewOption } from 'obsidian';
@@ -345,6 +346,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   workspaceRibbonService: WorkspaceRibbonService;
   linkedSubitemCheckboxService: LinkedSubitemCheckboxService;
   frontmatterMutationService: FrontmatterMutationService;
+  propertyMigrationService: PropertyMigrationService;
   parentLinkResolutionService: ParentLinkResolutionService;
   bodySubitemLinkService: BodySubitemLinkService;
   subitemRelationshipSyncService: SubitemRelationshipSyncService;
@@ -592,6 +594,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.addChild(this.foldExpansionContextMenuService);
     this.linkedSubitemCheckboxService = new LinkedSubitemCheckboxService(this);
     this.frontmatterMutationService = new FrontmatterMutationService(this);
+    this.propertyMigrationService = new PropertyMigrationService(this);
+    await this.propertyMigrationService.initialize();
     this.nativeRecordService = new NativeRecordService(this);
     this.nativeRecordService.setup();
     this.templateIdentityService = new TemplateIdentityService(this);
@@ -1919,6 +1923,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.propertyMigrationService?.dispose();
     if (this.basesPreviewPropertiesRefreshTimer !== null) {
       window.clearTimeout(this.basesPreviewPropertiesRefreshTimer);
       this.basesPreviewPropertiesRefreshTimer = null;

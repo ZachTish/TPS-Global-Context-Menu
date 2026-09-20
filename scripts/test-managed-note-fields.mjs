@@ -33,7 +33,7 @@ test('writes no longer add redundant bookkeeping or delete authored type fields'
 test('field configuration stays on Advanced with explicit, labeled apply actions', () => {
  const settings=readFileSync('src/settings-tab.ts','utf8');
  assert.match(settings,/if \(this.activeSettingsPage === 'advanced'\) \{\s*this.renderIntegrationPropertyNames\(activePage\)/);
- assert.match(settings,/configureManagedNoteField\(this.plugin.settings, field, next\)/);
+ assert.match(settings,/configureManagedNoteField\(settings, field, next\)/);
  assert.match(settings,/setAttribute\('aria-label', labels\[field\]\)/);
  assert.match(settings,/setAttribute\('aria-label', `Apply/);
 });
