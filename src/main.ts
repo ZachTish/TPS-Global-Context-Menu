@@ -1,3 +1,5 @@
+import { NoteOpeningService, migrateNoteOpeningSettings } from './services/note-opening-service';
+import { NativeBaseNoteOpening } from './services/native-base-note-opening';
 import { BasesView, Plugin, QueryController, TFile, WorkspaceLeaf, Menu, Notice, normalizePath, Platform, type BasesViewConfig, type ViewOption } from 'obsidian';
 import {
   BuildPanelOptions,
@@ -397,6 +399,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private recentBaseLinkPreviewAnchorEl: HTMLElement | null = null;
   private recentBaseLinkPreviewPointerUntil = 0;
   private recentBaseLinkPreviewPointerPoint: { x: number; y: number } | null = null;
+  noteOpeningService = new NoteOpeningService(this);
+  nativeBaseNoteOpening = new NativeBaseNoteOpening(this);
+
   private baseLinkHoverEditorLeaf: WorkspaceLeaf | null = null;
   private baseLinkPreviewSourceLeaf: WorkspaceLeaf | null = null;
   private openingBaseLinkHoverEditorPath: string | null = null;
@@ -667,6 +672,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     // Expose inter-plugin API
     await this.fileNamingService.whenDailyNoteConfigurationReady();
     setupPluginApi(this);
+    this.nativeBaseNoteOpening.install();
+    this.register(() => this.nativeBaseNoteOpening.dispose());
     this.tpsNotebookNavigatorMenuBridge.start();
     this.registerEvent(this.app.workspace.on(TPS_EVENTS.GCM_API_REQUEST as any, () => {
       this.emitGcmApiChanged(true);
@@ -2003,6 +2010,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     const loadedSettingsRecord = (loaded ?? {}) as SettingsRecord;
     const hadRetiredHomeSettings = RETIRED_HOME_SETTING_KEYS.some((key) => Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key));
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
+    Object.assign(this.settings, await migrateNoteOpeningSettings(this.app, loaded ?? {}));
+    const needsNoteOpeningMigration = loaded?.notePostCreateBehavior !== this.settings.notePostCreateBehavior
+      || loaded?.noteOpenDestination !== this.settings.noteOpenDestination;
     this.settings.dataArchitectureMode = loaded?.dataArchitectureMode === 'native-records'
       ? 'native-records'
       : 'legacy';
@@ -2074,6 +2084,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       ? 'contains'
       : 'equals';
     const preNormalizationSettings = JSON.parse(JSON.stringify(this.settings)) as SettingsRecord;
+    for (const key of ['notePostCreateBehavior', 'noteOpenDestination'] as const) {
+      if (Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key)) preNormalizationSettings[key] = loadedSettingsRecord[key];
+      else delete preNormalizationSettings[key];
+    }
     if (needsNativeRecordIdentityMigration) {
       const originalStorageValue = (key: string, fallback: unknown): unknown => (
         Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key)
@@ -2284,6 +2298,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       });
     }
     const needsSettingsMigration =
+      needsNoteOpeningMigration ||
       hadRetiredHomeSettings ||
       needsCheckboxMappingMigration ||
       needsNativeRecordIdentityMigration ||

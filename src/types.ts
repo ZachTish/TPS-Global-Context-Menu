@@ -506,6 +506,8 @@ export interface TPSGlobalContextMenuSettings {
   nativeMenuPlacement: 'tps-first' | 'tps-last';
   suppressMobileKeyboard: boolean;
   enableCanvasOpenGuard: boolean;
+  notePostCreateBehavior: 'preview' | 'open' | 'stay';
+  noteOpenDestination: 'current-tab' | 'new-tab';
   enableBasesForcedLinkPreview: boolean;
   collapseHeadingsOnOpen: boolean;
   hideCompletedCheckboxes: boolean;

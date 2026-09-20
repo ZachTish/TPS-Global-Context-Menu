@@ -6852,6 +6852,20 @@ export const PLUGIN_STYLES = `
         font-weight: 700;
       }
 
+      .tps-gcm-base-link-preview-name {
+        width: 100%;
+        min-width: 0;
+        font-size: 16px;
+        height: auto;
+        min-height: 36px;
+      }
+
+      .is-mobile .tps-gcm-base-link-preview-open,
+      .is-mobile .tps-gcm-base-link-preview-close {
+        min-width: 44px;
+        min-height: 44px;
+      }
+
       .tps-gcm-base-link-preview-path {
         overflow: hidden;
         text-overflow: ellipsis;

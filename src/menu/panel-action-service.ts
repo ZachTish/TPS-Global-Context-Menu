@@ -621,7 +621,7 @@ export class PanelActionService {
     }
 
     await this.plugin.bulkEditService.linkAttachments(parentFile, [created]);
-    await this.plugin.openFileInLeaf(created, false, () => this.app.workspace.getLeaf(false), { revealLeaf: true });
+    await this.plugin.noteOpeningService.present({ filePath: created.path, sourcePluginId: 'tps-global-context-menu' });
 
     new Notice(`Created note: ${created.basename}`);
   }

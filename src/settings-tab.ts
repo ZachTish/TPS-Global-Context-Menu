@@ -786,6 +786,30 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     }
 
     if (this.activeSettingsPage === 'menus-surfaces') {
+      activePage.createEl('h3', { text: 'Note opening' });
+      new Setting(activePage)
+        .setName('After creating a note')
+        .setDesc('Shared by native Bases, TPS Calendar, Navigator, and TPS note-creation actions. Background imports stay silent.')
+        .addDropdown(dropdown => dropdown
+          .addOption('preview', 'Editable preview')
+          .addOption('open', 'Open note')
+          .addOption('stay', 'Stay in current view')
+          .setValue(this.plugin.settings.notePostCreateBehavior)
+          .onChange(async value => {
+            this.plugin.settings.notePostCreateBehavior = value as 'preview' | 'open' | 'stay';
+            await this.plugin.saveSettings();
+          }));
+      new Setting(activePage)
+        .setName('Open destination')
+        .setDesc('Used by Open note and the preview’s Open button. Already-open notes are reused; pinned tabs are preserved.')
+        .addDropdown(dropdown => dropdown
+          .addOption('current-tab', 'Current tab')
+          .addOption('new-tab', 'New tab')
+          .setValue(this.plugin.settings.noteOpenDestination)
+          .onChange(async value => {
+            this.plugin.settings.noteOpenDestination = value as 'current-tab' | 'new-tab';
+            await this.plugin.saveSettings();
+          }));
       new Setting(activePage)
         .setName('Right-click menu placement')
         .setDesc('Choose whether TPS items appear before or after native/core menu items.')

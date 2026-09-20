@@ -29,7 +29,7 @@ function isMutationTarget(node) {
     && parent.operatorToken.kind <= ts.SyntaxKind.LastAssignment;
 }
 
-test('GCM never replaces Obsidian FileManager and has one scoped companion writer lookup', () => {
+test('GCM never replaces Obsidian FileManager; native create only delegates its existing write', () => {
   const accesses = [];
   for (const path of listTypeScriptFiles(sourceRoot)) {
     const source = readFileSync(path, 'utf8');
@@ -55,6 +55,10 @@ test('GCM never replaces Obsidian FileManager and has one scoped companion write
   assert.deepEqual(accesses, [{
     path: 'src/services/file-properties-service.ts',
     calledDirectly: false,
+    mutated: false,
+  }, {
+    path: 'src/services/native-base-note-opening.ts',
+    calledDirectly: true,
     mutated: false,
   }]);
 

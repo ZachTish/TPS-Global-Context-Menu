@@ -1,3 +1,4 @@
+import type { CreatedNoteRequest } from './services/note-opening-service';
 import { Notice, normalizePath, parseYaml, TFile, type WorkspaceLeaf } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
 import type { VaultQueryService } from './services/vault-query-service';
@@ -1160,6 +1161,16 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         },
         ui: {
             version: 1,
+            presentCreatedNote: (request: CreatedNoteRequest) => plugin.noteOpeningService.present(request),
+            handlesNativeBaseCreation: (controller: unknown) => plugin.nativeBaseNoteOpening.attach(controller),
+            getNoteOpeningSettings: () => ({ behavior: plugin.settings.notePostCreateBehavior, destination: plugin.settings.noteOpenDestination }),
+            openNoteOpeningSettings: () => {
+                const settings = (plugin.app as any).setting;
+                settings?.open();
+                settings?.openTabById(plugin.manifest.id);
+                const tab = settings?.activeTab;
+                if (tab) { tab.activeSettingsPage = 'menus-surfaces'; tab.display(); }
+            },
             shouldForceBaseLinkPreview: () => plugin.settings.enableBasesForcedLinkPreview === true,
             openEditableNotePreview: async (request: unknown): Promise<boolean> => {
                 const normalized = normalizeEditableNotePreviewRequest(request);

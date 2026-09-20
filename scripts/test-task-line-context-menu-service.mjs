@@ -165,7 +165,7 @@ test('GCM task and bullet line flows can create a linked child note without drop
   assert.match(dailyInboxLineSource, /if \(!sourceUpdated\) \{[\s\S]{0,420}stage: 'write-source-association'[\s\S]{0,180}return null;/);
   assert.ok(
     dailyInboxLineSource.indexOf("stage: 'write-source-association'") <
-      dailyInboxLineSource.indexOf('const opened = await this.openAssociatedNote(noteFile)'),
+      dailyInboxLineSource.indexOf('const opened = existing'),
     'a failed association write must return before opening the note',
   );
   assert.match(dailyInboxLineSource, /catch \(error\) \{[\s\S]{0,160}line-update:failed/);

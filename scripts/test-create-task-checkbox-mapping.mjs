@@ -349,6 +349,7 @@ test('native standalone Create task writes only one task record and never resolv
       },
       workspace: { getLeaf: () => ({}) },
     },
+    noteOpeningService: { async present(request) { opened.push(request.filePath); return true; } },
     async openFileInLeaf(file) { opened.push(file); },
   };
 
@@ -376,7 +377,7 @@ test('native standalone Create task writes only one task record and never resolv
   });
   assert.equal(typeof createInput.commitGuard, 'function');
   assert.equal(createInput.commitGuard(), true);
-  assert.deepEqual(opened, [recordFile]);
+  assert.deepEqual(opened, [recordFile.path]);
   assert.ok(Notice.messages.some((message) => message.includes('Created standalone task note')));
 });
 
@@ -451,6 +452,7 @@ test('manual Create task always promotes a confirmed native-mode task into a not
       },
       workspace: { getLeaf: () => ({}) },
     },
+    noteOpeningService: { async present(request) { opened.push(request.filePath); return true; } },
     async openFileInLeaf(file) { opened.push(file); },
     findOpenLeafForFile() { return null; },
   };
@@ -467,7 +469,7 @@ test('manual Create task always promotes a confirmed native-mode task into a not
   assert.doesNotMatch(promotions[0].ref.rawLine, /\[(?:scheduled|due)::/u);
   assert.match(promotions[0].ref.rawLine, /\[tpsId:: create-history-id\]/u);
   assert.equal(promotions[0].cause.surface, 'create-task-modal:native-task-record');
-  assert.deepEqual(opened, [recordFile]);
+  assert.deepEqual(opened, [recordFile.path]);
   assert.ok(Notice.messages.some((message) => message.includes('Created task note')));
 });
 

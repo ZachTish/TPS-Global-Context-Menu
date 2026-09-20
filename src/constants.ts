@@ -30,6 +30,8 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   nativeMenuPlacement: 'tps-last',
   suppressMobileKeyboard: true,
   enableCanvasOpenGuard: false,
+  notePostCreateBehavior: 'preview',
+  noteOpenDestination: 'current-tab',
   enableBasesForcedLinkPreview: false,
   collapseHeadingsOnOpen: false,
   hideCompletedCheckboxes: false,

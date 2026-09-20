@@ -190,6 +190,7 @@ export class PersistentMenuManager {
   private baseLinkPreviewSession = 0;
   private baseLinkPreviewReadySession: number | null = null;
   private baseLinkPreviewOpenRequest = 0;
+  private baseLinkPreviewTitleSave: (() => Promise<boolean>) | null = null;
   private baseLinkPreviewSaveConflictSession: number | null = null;
   private baseLinkPreviewOutsideHandler: ((evt: MouseEvent) => void) | null = null;
   private baseLinkPreviewOverlay: KeyboardAwareOverlay | null = null;
@@ -3489,7 +3490,7 @@ export class PersistentMenuManager {
   public async showBaseLinkEditablePreview(
     file: TFile,
     anchorEl: HTMLElement,
-    options: { focusEditor?: boolean } = {},
+    options: { focusEditor?: boolean; focusTitle?: boolean; openNote?: () => Promise<boolean> } = {},
   ): Promise<boolean> {
     const openRequest = ++this.baseLinkPreviewOpenRequest;
     if (!anchorEl.isConnected || file.extension.toLowerCase() !== 'md') return false;
@@ -3542,6 +3543,51 @@ export class PersistentMenuManager {
     title.className = 'tps-gcm-base-link-preview-title';
     title.textContent = this.getFileDisplayTitle(file);
     titleWrap.appendChild(title);
+    let nameInput: HTMLInputElement | null = null;
+    if (options.focusTitle) {
+      nameInput = targetDocument.createElement('input');
+      nameInput.className = 'tps-gcm-base-link-preview-name';
+      nameInput.setAttribute('aria-label', 'Note name');
+      nameInput.value = file.basename;
+      nameInput.style.width = '100%';
+      nameInput.style.minWidth = '0';
+      title.replaceWith(nameInput);
+      let pending: Promise<boolean> | null = null;
+      const input = nameInput;
+      const save = (): Promise<boolean> => {
+        if (pending) return pending.then(ok => ok ? save() : false);
+        const name = input.value.trim();
+        if (name === file.basename) return Promise.resolve(true);
+        if (!name || /[\\/:*?"<>|]/u.test(name) || name === '.' || name === '..') {
+          new Notice('Enter a valid note name.');
+          return Promise.resolve(false);
+        }
+        const folder = file.parent?.path === '/' ? '' : file.parent?.path || '';
+        const nextPath = `${folder ? `${folder}/` : ''}${name}.md`;
+        pending = this.plugin.app.fileManager.renameFile(file, nextPath).then(() => {
+          path.textContent = file.path;
+          popover.dataset.path = file.path;
+          return true;
+        }).catch(error => {
+          logger.flowError('NoteOpening', 'created:rename-failed', error, { path: file.path });
+          new Notice('Could not rename the note. Choose another name or press Escape to keep its current name.');
+          return false;
+        }).finally(() => { pending = null; });
+        return pending;
+      };
+      this.baseLinkPreviewTitleSave = save;
+      input.addEventListener('change', () => { void save(); });
+      input.addEventListener('keydown', event => {
+        event.stopPropagation();
+        if (event.isComposing) return;
+        if (event.key === 'Escape') input.value = file.basename;
+        if (event.key === 'Enter') {
+          event.preventDefault();
+          void save().then(ok => { if (ok && session === this.baseLinkPreviewSession) this.activateBaseLinkPreviewSourceEditor(); });
+        }
+      });
+    }
+
 
     const path = targetDocument.createElement('div');
     path.className = 'tps-gcm-base-link-preview-path';
@@ -3562,7 +3608,7 @@ export class PersistentMenuManager {
     addSafeClickListener(openButton, () => {
       void this.hideBaseLinkEditablePreview().then((closed) => (
         closed
-          ? this.plugin.openFileInLeaf(file, false, () => this.plugin.app.workspace.getLeaf(false), { revealLeaf: true })
+          ? (options.openNote?.() ?? this.plugin.openFileInLeaf(file, false, () => this.plugin.app.workspace.getLeaf(false), { revealLeaf: true }))
           : false
       ));
     });
@@ -3632,6 +3678,14 @@ export class PersistentMenuManager {
     const component = new Component();
     component.load();
     this.baseLinkPreviewComponent = component;
+    component.registerEvent(this.plugin.app.vault.on('rename', (renamed, oldPath) => {
+      if (renamed !== file) return;
+      path.textContent = file.path;
+      popover.dataset.path = file.path;
+      title.textContent = this.getFileDisplayTitle(file);
+      const oldName = oldPath.split('/').pop()?.replace(/\.md$/iu, '');
+      if (nameInput && nameInput.value === oldName) nameInput.value = file.basename;
+    }));
     try {
       await MarkdownRenderer.render(this.plugin.app, parts.body || '\n', bodySizer, file.path, component);
     } catch (error) {
@@ -3659,7 +3713,7 @@ export class PersistentMenuManager {
     this.baseLinkPreviewOverlay?.schedule();
 
     popover.addEventListener('keydown', (evt: KeyboardEvent) => {
-      if (evt.key !== 'Escape' || evt.isComposing) return;
+      if (evt.key !== 'Escape' || evt.isComposing || evt.target === nameInput) return;
       evt.preventDefault();
       evt.stopPropagation();
       void this.hideBaseLinkEditablePreview();
@@ -3715,7 +3769,11 @@ export class PersistentMenuManager {
       }
     }, 0);
 
-    if (options.focusEditor === true && session === this.baseLinkPreviewSession && popover.isConnected) {
+    if (nameInput && session === this.baseLinkPreviewSession && popover.isConnected) {
+      nameInput.focus({ preventScroll: true });
+      nameInput.select();
+    }
+    if (!nameInput && options.focusEditor === true && session === this.baseLinkPreviewSession && popover.isConnected) {
       this.activateBaseLinkPreviewSourceEditor();
     }
     logger.flow('EditableNotePreview', 'card:opened', { path: file.path, focusEditor: options.focusEditor === true });
@@ -4008,6 +4066,8 @@ export class PersistentMenuManager {
 
   private async closeBaseLinkEditablePreview(): Promise<boolean> {
     const session = this.baseLinkPreviewSession;
+    if (this.baseLinkPreviewTitleSave && !await this.baseLinkPreviewTitleSave()) return false;
+    if (session !== this.baseLinkPreviewSession) return false;
     const editorEl = this.baseLinkPreviewEditorEl;
     if (editorEl) editorEl.readOnly = true;
     this.baseLinkPreviewEl?.classList.add('is-closing');
@@ -4063,6 +4123,7 @@ export class PersistentMenuManager {
     this.baseLinkPreviewBodyEl = null;
     this.baseLinkPreviewEditorEl = null;
     this.baseLinkPreviewFile = null;
+    this.baseLinkPreviewTitleSave = null;
     this.baseLinkPreviewLastSavedBody = '';
     this.baseLinkPreviewBodyRevision = '';
     this.baseLinkPreviewReadySession = null;

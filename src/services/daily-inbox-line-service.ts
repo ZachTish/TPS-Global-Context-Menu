@@ -227,7 +227,9 @@ export class DailyInboxLineService {
       });
       return null;
     }
-    const opened = await this.openAssociatedNote(noteFile);
+    const opened = existing
+      ? await this.openAssociatedNote(noteFile)
+      : await this.plugin.noteOpeningService.present({ filePath: noteFile.path, sourcePluginId: 'tps-global-context-menu' });
     logger.flow('DailyInboxLine', 'create-note-for-line:done', {
       sourcePath: context.file.path,
       line: context.lineIndex + 1,

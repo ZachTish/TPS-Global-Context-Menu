@@ -143,7 +143,7 @@ test('local editable preview opens only after rendering and supports focus, X, E
     managerSource.indexOf('private async forceCloseBaseLinkEditablePreview'),
     managerSource.indexOf('public isBaseLinkEditablePreviewOpen'),
   );
-  assert.match(managerSource, /showBaseLinkEditablePreview\([\s\S]{0,180}options: \{ focusEditor\?: boolean \} = \{\},[\s\S]{0,80}Promise<boolean>/u);
+  assert.match(managerSource, /showBaseLinkEditablePreview\([\s\S]{0,180}options: \{ focusEditor\?: boolean; focusTitle\?: boolean; openNote\?: \(\) => Promise<boolean> \} = \{\},[\s\S]{0,80}Promise<boolean>/u);
   assert.match(managerSource, /!parts\.lineEndingsSupported[\s\S]{0,180}card:unsupported-line-endings[\s\S]{0,120}return false/u);
   assert.match(managerSource, /await MarkdownRenderer\.render/u);
   assert.match(managerSource, /this\.baseLinkPreviewReadySession = session/u);
@@ -175,4 +175,15 @@ test('local editable preview opens only after rendering and supports focus, X, E
   assert.match(managerSource, /\(this\.baseLinkPreviewWindow \?\? window\)\.clearTimeout\(this\.baseLinkPreviewRenderTimer\)/u);
   assert.match(stylesSource, /\.tps-gcm-base-link-preview-open,\s*\.tps-gcm-base-link-preview-close/u);
   assert.match(stylesSource, /\.tps-gcm-base-link-preview-close:focus-visible/u);
+});
+
+test('preview follows automatic renames while preserving a name being typed', () => {
+  const close = managerSource.slice(managerSource.indexOf('private async closeBaseLinkEditablePreview'));
+  assert.ok(close.indexOf('const session = this.baseLinkPreviewSession') < close.indexOf('await this.baseLinkPreviewTitleSave()'));
+  assert.match(close, /await this\.baseLinkPreviewTitleSave\(\)[\s\S]{0,120}session !== this\.baseLinkPreviewSession/u);
+  assert.match(managerSource, /component\.registerEvent\(this\.plugin\.app\.vault\.on\('rename'/u);
+  assert.match(managerSource, /if \(renamed !== file\) return;/u);
+  assert.match(managerSource, /popover\.dataset\.path = file\.path;/u);
+  assert.match(managerSource, /nameInput && nameInput\.value === oldName/u);
+  assert.match(managerSource, /baseLinkPreviewTitleSave && !await this\.baseLinkPreviewTitleSave\(\)/u);
 });

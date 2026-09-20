@@ -137,12 +137,7 @@ export class CreateTaskService {
           ),
         );
         try {
-          await this.plugin.openFileInLeaf(
-            record.file,
-            false,
-            () => this.plugin.app.workspace.getLeaf(false),
-            { revealLeaf: true },
-          );
+          await this.plugin.noteOpeningService.present({ filePath: record.file.path, sourcePluginId: 'tps-global-context-menu' });
           new Notice(`Created standalone task note ${record.path}`);
         } catch (error) {
           logger.flowWarn('CreateTask', 'standalone-task:open-failed', {
@@ -289,12 +284,7 @@ export class CreateTaskService {
         });
         if (promotion.ok && promotion.record) {
           try {
-            await this.plugin.openFileInLeaf(
-              promotion.record.file,
-              false,
-              () => this.plugin.app.workspace.getLeaf(false),
-              { revealLeaf: true },
-            );
+            await this.plugin.noteOpeningService.present({ filePath: promotion.record.file.path, sourcePluginId: 'tps-global-context-menu' });
             new Notice(`Created task note ${promotion.record.path}`);
           } catch (error) {
             logger.flowWarn('CreateTask', 'native-task:open-failed', {
