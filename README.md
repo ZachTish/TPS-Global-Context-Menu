@@ -2,7 +2,7 @@
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [2.4.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/2.4.0) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [2.5.1](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/2.5.1) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -81,3 +81,14 @@ Additive `api.ui` v1 capabilities: `presentCreatedNote({filePath, sourcePluginId
 Validation uses `scripts/test-note-opening.mjs` (routing, desktop/mobile preview, migration, native defaults/callback preservation, failure/cancel, repeated activation, unload), the existing preview/write-ownership/task suites, `npm run prepretest`, `npm test`, and a separate `npm run build`. Test deployment uses the shared helper and only shipped artifacts; reload uses the test-vault plugin reload command. Desktop QA in Obsidian Plugin Test Vault verified the embedded native Table New button, keyboard creation, preview rename/body persistence without extra tabs, stay, open/new-tab, and native template metadata versus active-view/Base defaults. Physical iPhone acceptance remains for the user's BRAT test. Minimum Obsidian stays 1.10.0; unsupported native contracts use Obsidian's own behavior. This is a backward-compatible minor feature release, not a production installation.
 
 Final validation: 1,166 full-suite checks plus 126 additional checks passed; the separate production build deployed only shipped test artifacts. The final 2.5.0 reload passed rename-conflict protection and automatic-rename path tracking. Calendar and Navigator settings handoffs were exercised in the test vault. Existing runtime state was retained by the shared deploy helper; QA opening preferences and the temporary native-record root were restored. Synthetic notes were archived after verification. Physical iPhone validation remains pending.
+
+
+## 2.5.1 — Preserve title capitalization in filenames (2026-09-20)
+
+With Auto-rename enabled, title changes that only change case now rename the file too: `TishOS V0.2.md` becomes `TishOS v0.2.md` when the authored title uses a lowercase `v`. Both explicit title editing and the existing metadata-driven filename sync use exact-case equality for the no-change guard. Obsidian's FileManager performs the rename and link updates; no temporary note or direct filesystem rename is introduced.
+
+Exact and case-insensitive sibling collisions still prevent overwriting another file. An existing lookup that refers to the same file permits a case-only rename. Daily/workflow filename ownership, creation grace, automatic-write exclusions, malformed-source checks, and the Auto-rename preference are preserved. No setting migration or bulk rename is performed. Navigator 6.4.0 independently recognizes folder notes by their authored titles.
+
+The filename regression exercises the actual FileNamingService against case-sensitive and insensitive lookups, explicit and metadata title routes, idempotence, collision protection, content preservation, and exclusions. Required validation is the focused Daily Note/filename suite, `npm test`, `npm run prepretest`, and a separate production build, followed by deployment/reload and title-edit QA in Obsidian Plugin Test Vault. Minimum Obsidian remains 1.10.0. This is a patch release and a BRAT handoff; physical iPhone acceptance remains pending.
+
+Test-vault UI validation on 2026-09-20 used the Edit Title dialog and Save action to change `TishOS V0.2` to `TishOS v0.2`. The actual FileManager rename succeeded on macOS's case-insensitive filesystem, the old path disappeared, the title matched, and the body remained intact. Auto-rename and Navigator QA preferences were restored and synthetic notes archived. Full validation passed 1,167 declared test checks plus 126 additional checks before the separate final build/deployment and plugin reload.

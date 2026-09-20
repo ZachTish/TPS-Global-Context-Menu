@@ -3345,3 +3345,69 @@ test('calendar records follow their title without allowing reverse title writes 
     fields.kind='calendar-event';refresh();plugin.settings.frontmatterAutoWriteExclusions='Inbox';plugin.shouldIgnoreAutoFrontmatterWrite=()=>true;await service.updateFilenameIfNeeded(file);assert.equal(renames,2,'exclusions remain authoritative');
   } finally {globalThis.window=priorWindow;delete globalThis.filenameTestParseYaml;}
 });
+
+test('title sync applies case-only renames, remains idempotent, and never overwrites a sibling', async () => {
+  const priorWindow = globalThis.window;
+  globalThis.window = { ...priorWindow, moment: () => ({ isValid: () => false, format: () => '' }) };
+  globalThis.filenameTestParseYaml = source => Object.fromEntries(source.split('\n').filter(line => line.includes(':')).map(line => {
+    const split = line.indexOf(':');
+    return [line.slice(0, split), line.slice(split + 1).trim()];
+  }));
+  try {
+    const { FileNamingService } = await loadFileNamingService();
+    const parent = { path: 'Inbox', children: [] };
+    const file = { __isTestTFile: true, path: 'Inbox/TishOS V0.2.md', name: 'TishOS V0.2.md', basename: 'TishOS V0.2', extension: 'md', parent, stat: { ctime: 0, mtime: 0 } };
+    parent.children.push(file);
+    let title = 'TishOS v0.2';
+    let renames = 0;
+    let excluded = false;
+    let caseInsensitiveLookup = true;
+    const source = () => `---\ntitle: ${title}\nkind: note\n---\nKeep the body`;
+    const plugin = {
+      settings: { enableAutoRename: true, folderExclusions: '', frontmatterAutoWriteExclusions: '', dailyNoteDateFormat: 'YYYY-MM-DD' },
+      registerEvent() {},
+      shouldIgnoreAutoFrontmatterWrite: () => excluded,
+      nativeRecordService: { isRecordFile: () => false, hasRecordIdentityEvidence: async () => false },
+      bulkEditService: { shouldSkipNoteLevelRecurrence: async () => false, canMutateFrontmatterSafely: async () => true },
+      app: {
+        internalPlugins: { getPluginById: () => null, plugins: {} }, plugins: { getPlugin: () => null, plugins: {} },
+        vault: {
+          configDir: '.obsidian', adapter: { read: async () => { throw Error('missing'); } },
+          getFiles: () => [file], getMarkdownFiles: () => [file],
+          getAbstractFileByPath: path => parent.children.find(child => caseInsensitiveLookup ? child.path.toLowerCase() === path.toLowerCase() : child.path === path) ?? null,
+          getFileByPath: path => path === file.path ? file : null,
+          read: async () => source(), cachedRead: async () => source(), on: () => ({})
+        },
+        metadataCache: { initialized: true, getFileCache: () => ({ frontmatter: { title, kind: 'note' } }), on: () => ({}) },
+        fileManager: { renameFile: async (target, path) => {
+          renames++;
+          target.path = path; target.name = path.split('/').at(-1); target.basename = target.name.slice(0, -3);
+        } }
+      }
+    };
+    const service = new FileNamingService(plugin);
+    await service.whenDailyNoteConfigurationReady();
+    const before = source();
+    await service.updateFilenameIfNeeded(file, { titleOverride: title });
+    assert.equal(file.path, 'Inbox/TishOS v0.2.md');
+    assert.equal(source(), before, 'case-only rename never changes note content');
+    await service.updateFilenameIfNeeded(file);
+    assert.equal(renames, 1, 'an exact match does not rename again');
+    // A case-sensitive vault also catches portable case-folded collisions.
+    caseInsensitiveLookup = false;
+    title = 'Occupied';
+    parent.children.push({ path: 'Inbox/OCCUPIED.md' });
+    await service.updateFilenameIfNeeded(file);
+    assert.equal(renames, 1);
+    parent.children.pop();
+    title = 'TishOS V0.2'; excluded = true;
+    await service.updateFilenameIfNeeded(file);
+    assert.equal(renames, 1, 'auto-write exclusions still win');
+    excluded = false;
+    await service.updateFilenameIfNeeded(file);
+    assert.equal(file.path, 'Inbox/TishOS V0.2.md', 'metadata-triggered sync also preserves authored case');
+  } finally {
+    globalThis.window = priorWindow;
+    delete globalThis.filenameTestParseYaml;
+  }
+});

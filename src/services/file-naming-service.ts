@@ -1117,14 +1117,8 @@ export class FileNamingService {
 
         const expectedBasename = this.buildExpectedBasename(title, scheduled);
 
-        // Check if current filename already matches (case-insensitive and trimmed)
-        if (!expectedBasename) return;
-        const currentNormalized = this.normalizeBasenameForCompare(liveFile.basename);
-        const expectedNormalized = this.normalizeBasenameForCompare(expectedBasename);
-
-        if (currentNormalized === expectedNormalized) {
-            return; // Already has correct name
-        }
+        // Preserve authored capitalization too (including case-only title edits).
+        if (!expectedBasename || liveFile.basename === expectedBasename) return;
 
         // Additional safety check: if current filename already contains the date, don't rename
         if (scheduled) {
@@ -1149,13 +1143,15 @@ export class FileNamingService {
         const expectedPath = parentPath
             ? `${parentPath}/${expectedBasename}.md`
             : `${expectedBasename}.md`;
-        const currentPathNormalized = normalizePath(liveFile.path).toLowerCase();
-        const expectedPathNormalized = normalizePath(expectedPath).toLowerCase();
+        const currentPathNormalized = normalizePath(liveFile.path);
+        const expectedPathNormalized = normalizePath(expectedPath);
         if (currentPathNormalized === expectedPathNormalized) {
             return;
         }
 
-        const existingFile = this.plugin.app.vault.getAbstractFileByPath(expectedPath);
+        const existingFile = this.plugin.app.vault.getAbstractFileByPath(expectedPath)
+            ?? liveFile.parent?.children?.find(candidate => candidate !== liveFile &&
+                normalizePath(candidate.path).toLowerCase() === expectedPathNormalized.toLowerCase());
 
         if (existingFile && existingFile !== liveFile) {
             // A different file with this name already exists - don't overwrite
