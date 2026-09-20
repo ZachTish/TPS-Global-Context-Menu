@@ -2,7 +2,7 @@
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [2.3.1](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/2.3.1) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [2.4.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/2.4.0) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -17,6 +17,16 @@ The settings hub opens on **Rules & fields**. Other destinations are **Menus & s
 - Use **Atomic note** for a full note as the record, and **Atomic line** for an inline record. GCM owns the shared identity, configured field mappings, status choices, and checkbox mappings consumed by other TPS plugins.
 - Navigator presentation rules provide virtual sorting/icon/color values. User-authored icon, color, sort, and hidden properties are preserved during recurrence cleanup.
 - Linked menus, recurrence, timers, and Daily Note workflows use their configured fields. Source mode shows source rather than replacing the note with a rendered TPS surface.
+
+## Two-level Daily Note identity — 2.4.0
+
+Daily Notes may use `kind: note` together with `noteKind: daily`. Both values are required for this new identity route; keys and values are case-insensitive and surrounding whitespace is ignored. Existing Daily kind/type/tag aliases remain supported. This is an additive identity feature, not a general subtype hierarchy or a note migration.
+
+The pair supplies Daily identity while the configured filename or existing scheduled/title date supplies the date. Templates can use the pair without being mistaken for a dated Daily Note while their date is unresolved. Creation preserves both authored properties. Navigator's Core Daily Notes mode, date lookup, legacy reconciliation, navigation, and task-date inheritance consume the shared classifier. Calendar 0.14.0 adds matching task-placement support for explicitly selected Daily Notes.
+
+`kind: note` alone, `noteKind: daily` alone, other note subtypes, and task/workout/calendar identities do not gain Daily identity through the pair. A date-only note with no kind still follows the existing path-based behavior. Mixed/conflicting kinds, conflicting dates, malformed YAML, and current-source checks retain their protections. No defaults, saved settings, or public API versions change; put the pair in a note or the configured Daily Notes template to use it.
+
+Regression coverage includes canonical/named files, case and single-value list compatibility, template date absence, reconciliation with unchanged metadata, incomplete pairs, conflicting record/date identity, and stale-cache rejection. Tests, final build/deployment, test-vault reload and installed creation/reopening QA are recorded in [2.4.0 release notes](release-notes/2.4.0.md). Validation on 2026-09-20 passed 1,158 full-suite checks, 125 additional checks, and 97 focused checks; TypeScript and the separate final build deployed to the test vault. After `plugin:reload`, Navigator created and reopened the paired-template note with both fields intact; provider lookup recognized canonical and named paired notes and excluded the ordinary-note control. Temporary defaults were restored and QA fixtures archived. Minimum Obsidian remains 1.10.0; production installation is a separate BRAT update.
 
 ## Daily Note reliability — 2.3.1
 

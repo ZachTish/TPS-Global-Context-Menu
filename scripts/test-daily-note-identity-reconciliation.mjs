@@ -297,6 +297,69 @@ test('strict whole-name legacy formats and authoritative metadata remain support
   assert.equal(identity.parseDailyNoteFileDate(harness.app, settings, harness.files.get('2026-09-05.md')), null);
 });
 
+test('two-level note/daily identity resolves canonical and named Daily Notes', () => {
+  for (const frontmatter of [
+    { kind: 'note', noteKind: 'daily' },
+    { Kind: ' NOTE ', NoteKind: ' Daily ' },
+    { kind: ['note'], noteKind: ['daily'] },
+  ]) {
+    const harness = createHarness([
+      { path: '2026-09-20.md', frontmatter },
+      { path: 'Journal.md', frontmatter: { ...frontmatter, scheduled: '2026-09-21 00:00:00' } },
+      { path: 'Template.md', frontmatter },
+    ], { format: 'YYYY-MM-DD' });
+    assert.equal(identity.parseDailyNoteFileDate(harness.app, {}, harness.files.get('2026-09-20.md')), '2026-09-20');
+    assert.equal(identity.findCanonicalDailyNoteForIsoDate(harness.app, {}, '2026-09-20'), harness.files.get('2026-09-20.md'));
+    assert.equal(identity.parseDailyNoteFileDate(harness.app, {}, harness.files.get('Journal.md')), '2026-09-21');
+    assert.equal(identity.getInheritedDailyNoteTaskScheduledValue(harness.app, {}, harness.files.get('Journal.md')), '2026-09-21');
+    assert.equal(identity.parseDailyNoteFileDate(harness.app, {}, harness.files.get('Template.md')), null);
+  }
+});
+
+test('two-level Daily Note reconciliation preserves both authored properties', async () => {
+  const fields = { kind: 'note', noteKind: 'daily', scheduled: '2026-09-20 00:00:00' };
+  const harness = createHarness([{ path: 'Journal.md', frontmatter: fields }], { format: 'YYYY-MM-DD' });
+  const contents = harness.contents.get('Journal.md');
+  const result = await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-09-20');
+  assert.equal(result.status, 'found');
+  assert.equal(result.file.path, '2026-09-20.md');
+  assert.equal(harness.contents.get('2026-09-20.md'), contents);
+  assert.deepEqual(harness.frontmatter.get('2026-09-20.md'), fields);
+});
+
+test('incomplete two-level identity and conflicting record kinds remain excluded', () => {
+  const settings = { nativeRecordKindPropertyKey: 'recordKind' };
+  for (const frontmatter of [
+    { kind: 'note' },
+    { noteKind: 'daily' },
+    { kind: 'note', noteKind: 'meeting' },
+    { kind: 'task', noteKind: 'daily' },
+    { kind: ['note', 'task'], noteKind: 'daily' },
+    { kind: 'note', noteKind: ['daily', 'meeting'] },
+    { kind: 'note', noteKind: 'daily', recordKind: 'task' },
+    { kind: 'note', noteKind: 'daily', type: 'calendar-event' },
+    { kind: 'note', noteKind: 'daily', runKind: 'run' },
+  ]) {
+    const harness = createHarness([{ path: 'Journal.md', frontmatter: { ...frontmatter, scheduled: '2026-09-20' } }]);
+    assert.equal(identity.parseDailyNoteFileDate(harness.app, settings, harness.files.get('Journal.md')), null, JSON.stringify(frontmatter));
+  }
+  const plainNote = createHarness([{ path: '2026-09-20.md', frontmatter: { kind: 'note' } }], { format: 'YYYY-MM-DD' });
+  assert.equal(identity.findCanonicalDailyNoteForIsoDate(plainNote.app, {}, '2026-09-20'), null);
+});
+
+test('two-level identity retains conflicting-date and live-source guards', async () => {
+  const frontmatter = { kind: 'note', noteKind: 'daily', scheduled: '2026-09-21' };
+  const conflict = createHarness([{ path: '2026-09-20.md', frontmatter }], { format: 'YYYY-MM-DD' });
+  assert.equal(identity.parseDailyNoteFileDate(conflict.app, {}, conflict.files.get('2026-09-20.md')), null);
+  assert.equal((await identity.reconcileExistingDailyNoteForIsoDate(conflict.app, {}, '2026-09-20')).status, 'blocked');
+  const changed = createHarness([{
+    path: 'Journal.md', frontmatter,
+    content: '---\nkind: note\nnoteKind: meeting\nscheduled: 2026-09-21\n---\n',
+  }], { format: 'YYYY-MM-DD' });
+  assert.equal((await identity.reconcileExistingDailyNoteForIsoDate(changed.app, {}, '2026-09-21')).status, 'blocked');
+  assert.deepEqual(changed.renames, []);
+});
+
 test('an authoritative non-Daily kind wins over stale Daily Note tags and blocks mutation', async () => {
   const canonicalPath = 'Tue, Aug 25 2026.md';
   const harness = createHarness([{

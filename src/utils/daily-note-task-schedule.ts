@@ -202,11 +202,18 @@ export function normalizeExpectedDailyNotePath(value: unknown): string | null {
   return normalizePath(text).replace(/^\/+/, '');
 }
 
+/** The broad note kind identifies a Daily Note only with its explicit subtype. */
+function hasTwoLevelDailyNoteIdentity(frontmatter: Record<string, unknown>): boolean {
+  return String(getFrontmatterValue(frontmatter, 'kind') ?? '').trim().toLowerCase() === 'note'
+    && String(getFrontmatterValue(frontmatter, 'noteKind') ?? '').trim().toLowerCase() === 'daily';
+}
+
 export function hasExplicitDailyNoteIdentity(
   frontmatter: Record<string, unknown> | null | undefined,
   settings?: unknown,
 ): boolean {
   if (!frontmatter || isProcessRunFrontmatter(frontmatter)) return false;
+  if (hasTwoLevelDailyNoteIdentity(frontmatter)) return true;
 
   const configuredKindKey = String(
     (settings as { nativeRecordKindPropertyKey?: string } | null | undefined)?.nativeRecordKindPropertyKey || '',
@@ -774,9 +781,12 @@ export function hasAuthoritativeNonDailyNoteIdentity(
     .flatMap((key) => normalizeFrontmatterList(getFrontmatterValue(frontmatter, key)))
     .map(normalizeDailyNoteMarker);
   // `kind`, `kinds`, and the configured native kind key are record identity,
-  // not an extensible allowlist. Every nonblank value must be a recognized
-  // Daily alias; mixed Daily/non-Daily values therefore fail closed.
-  if (authoredKindMarkers.some((marker) => !isAcceptedDailyNoteMarker(marker))) return true;
+  // not an extensible allowlist. The note/daily pair permits only the broad
+  // "note" marker; other mixed Daily/non-Daily values still fail closed.
+  const twoLevelDaily = hasTwoLevelDailyNoteIdentity(frontmatter);
+  if (authoredKindMarkers.some((marker) =>
+    !isAcceptedDailyNoteMarker(marker) && !(twoLevelDaily && marker === 'note')
+  )) return true;
 
   // `type`/`types` predate the native record contract and remain a deliberate
   // compatibility surface: accepted Daily aliases opt in, while only known
