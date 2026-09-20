@@ -10,7 +10,7 @@ export function managedNoteFieldKey(settings: ManagedNoteFieldSettings, field: M
   return String(settings.managedNoteFieldKeys?.[field] || field).trim() || field;
 }
 export function managedNoteFieldNames(settings: ManagedNoteFieldSettings, field: ManagedNoteField): string[] {
-  return [...new Set([managedNoteFieldKey(settings, field), field, ...(settings.managedNoteFieldAliases?.[field] || [])].map(key => key.toLowerCase()))];
+  return [managedNoteFieldKey(settings, field).toLowerCase()];
 }
 export function validateManagedNoteFieldKey(settings: ManagedNoteFieldSettings, field: ManagedNoteField, value: string): string | null {
   const key = value.trim();
@@ -21,8 +21,7 @@ export function validateManagedNoteFieldKey(settings: ManagedNoteFieldSettings, 
 export function configureManagedNoteField(settings: ManagedNoteFieldSettings, field: ManagedNoteField, value: string): void {
   const error = validateManagedNoteFieldKey(settings, field, value);
   if (error) throw new Error(error);
-  const prior = managedNoteFieldKey(settings, field);
-  settings.managedNoteFieldAliases = { ...settings.managedNoteFieldAliases, [field]: [...new Set([...(settings.managedNoteFieldAliases?.[field] || []), prior])] };
+  settings.managedNoteFieldAliases = { ...settings.managedNoteFieldAliases, [field]: [] };
   settings.managedNoteFieldKeys = { ...settings.managedNoteFieldKeys, [field]: value.trim() };
 }
 export function readManagedNoteField(settings: ManagedNoteFieldSettings, field: ManagedNoteField, frontmatter: Record<string, unknown> | null | undefined): unknown {

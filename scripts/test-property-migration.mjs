@@ -97,6 +97,58 @@ test('unrelated merged frontmatter is outside the migration scope',()=>{
 });
 
 test('custom keys sharing integration or default timestamp ownership move those mappings too',()=>{
- const integration={properties:[{id:'external',key:'externalId'}]};references(integration,{kind:'key',from:'externalId',to:'calendarIdentity'});assert.equal(integration.managedNoteFieldKeys.externalId,'calendarIdentity');assert.ok(integration.managedNoteFieldAliases.externalId.includes('externalId'));
+ const integration={properties:[{id:'external',key:'externalId'}]};references(integration,{kind:'key',from:'externalId',to:'calendarIdentity'});assert.equal(integration.managedNoteFieldKeys.externalId,'calendarIdentity');assert.deepEqual(integration.managedNoteFieldAliases.externalId,[]);
  const timestamp={properties:[{id:'created',key:'datecreated'}]};references(timestamp,{kind:'key',from:'datecreated',to:'createdAt'});assert.equal(timestamp.dateCreatedFrontmatterKey,'createdAt');
+});
+
+test('a Calendar mapping confirmation updates matching Controller mappings, with settings saved after notes', async () => {
+ const h=harness();
+ const calendar={settings:{statusKey:'status',titleKey:'title'},saveSettings:async()=>{assert.match(h.data.get('Inbox/a.md'),/taskStatus/);}};
+ const controller={settings:{statusKey:'status',startProperty:'scheduled'},saveSettings:async()=>{}};
+ h.plugin.app.plugins={plugins:{'tps-calendar-base':calendar,'tps-controller':controller}};
+ PropertyMigrationModal.confirm=async()=>true;
+ assert.equal(await h.service.requestPluginKey('tps-calendar-base','statusKey','taskStatus'),true);
+ assert.equal(calendar.settings.statusKey,'taskStatus');assert.equal(controller.settings.statusKey,'taskStatus');
+ assert.equal(h.plugin.settings.properties[0].key,'taskStatus');assert.equal(h.storage.size,0);
+});
+test('cross-plugin cancellation and concurrent edits never change notes or other owners', async () => {
+ for(const cancel of [true,false]) {
+  const h=harness();const calendar={settings:{statusKey:'status'},saveSettings:async()=>{}};
+  h.plugin.app.plugins={plugins:{'tps-calendar-base':calendar}};
+  PropertyMigrationModal.confirm=async()=>{if(!cancel)calendar.settings.statusKey='concurrent';return !cancel;};
+  if(cancel)assert.equal(await h.service.requestPluginKey('tps-calendar-base','statusKey','taskStatus'),false);
+  else await assert.rejects(h.service.requestPluginKey('tps-calendar-base','statusKey','taskStatus'),/settings changed/);
+  assert.equal(h.writes.length,0);
+ }
+});
+test('consumer save failures restore note data and all participating mappings', async () => {
+ const h=harness();let saves=0;
+ const calendar={settings:{statusKey:'status'},saveSettings:async()=>{if(++saves===1)throw Error('consumer disk error');}};
+ h.plugin.app.plugins={plugins:{'tps-calendar-base':calendar}};PropertyMigrationModal.confirm=async()=>true;
+ await assert.rejects(h.service.requestPluginKey('tps-calendar-base','statusKey','taskStatus'),/consumer disk error/);
+ assert.equal(calendar.settings.statusKey,'status');assert.equal(h.plugin.settings.properties[0].key,'status');assert.equal(h.data.get('Inbox/a.md'),fm('status: todo'));assert.equal(h.storage.size,0);
+});
+test('previous integration keys are migrated only in a confirmed change and removed from configuration', async () => {
+ const h=harness({'a.md':fm('oldExternal: provider')});
+ h.plugin.settings.managedNoteFieldKeys={externalId:'providerId'};h.plugin.settings.managedNoteFieldAliases={externalId:['oldExternal']};
+ PropertyMigrationModal.confirm=async()=>true;
+ await h.service.request({kind:'key',from:'providerId',to:'eventIdentity'},()=>{});
+ assert.match(h.data.get('a.md'),/"eventIdentity": provider/);assert.doesNotMatch(h.data.get('a.md'),/oldExternal/);assert.deepEqual(h.plugin.settings.managedNoteFieldAliases.externalId,[]);
+});
+
+
+test('shared mappings wait for an active Health workout before writing any notes', async () => {
+ const h=harness();
+ h.plugin.app.plugins={plugins:{'tps-calendar-base':{settings:{statusKey:'status'},saveSettings:async()=>{}},'tps-health':{settings:{activeWorkoutId:'session-1'}}}};
+ PropertyMigrationModal.confirm=async()=>true;
+ await assert.rejects(h.service.requestPluginKey('tps-calendar-base','statusKey','taskStatus'),/Finish the active workout/);
+ assert.equal(h.writes.length,0);assert.equal(h.storage.size,0);
+});
+
+
+test('shared key changes cannot combine distinct Health nutrient properties even in an empty vault', async () => {
+ const h=harness({});
+ h.plugin.app.plugins={plugins:{'tps-health':{settings:{nativeRecordProperties:{calories:'calories',proteinG:'proteinG'}},saveSettings:async()=>{}}}};
+ await assert.rejects(h.service.request({kind:'key',from:'calories',to:'proteinG'},()=>{}),/another record property/);
+ assert.equal(h.writes.length,0);assert.equal(h.storage.size,0);
 });

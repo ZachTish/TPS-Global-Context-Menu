@@ -65,6 +65,8 @@ async function importNativeRecordStorageModule() {
             : `
               export class TFile {}
               export class TFolder {}
+              export class Modal {}
+              export class Setting {}
               export const normalizePath = (value) => String(value || '');
               export const parseYaml = () => ({});
               export const stringifyYaml = () => '';
@@ -750,22 +752,22 @@ test('sanitized native record aliases replace the raw persisted alias array', as
   assert.equal(disk.unrelatedSetting, 'preserve');
 });
 
-test('native record settings explain the fixed canonical envelope without exposing storage-key editors', () => {
+test('native record settings expose one confirmed kind-key mapping and explicit legacy migration', () => {
   const nativeSettingsStart = settingsTabSource.indexOf("diagnostics.createEl('h4', { text: 'Atomic note properties' })");
   const nativeSettingsEnd = settingsTabSource.indexOf("diagnostics.createEl('h4', { text: 'Template identity' })", nativeSettingsStart);
   const nativeSettingsSource = settingsTabSource.slice(nativeSettingsStart, nativeSettingsEnd);
 
   assert.ok(nativeSettingsStart >= 0 && nativeSettingsEnd > nativeSettingsStart);
   assert.match(nativeSettingsSource, /setName\('Canonical record envelope'\)/);
-  assert.match(nativeSettingsSource, /one system identity \(tpsId\) plus kind and title/);
-  assert.match(nativeSettingsSource, /Schema and file timestamps remain available virtually through the API/);
+  assert.match(nativeSettingsSource, /Records use tpsId, the configured kind key/);
+  assert.match(nativeSettingsSource, /Only the current mapping is read/);
   assert.doesNotMatch(nativeSettingsSource, /setName\('Store record identity as'\)/);
   assert.doesNotMatch(nativeSettingsSource, /addOption\('tag', 'Tag'\)/);
   assert.doesNotMatch(nativeSettingsSource, /setName\('Identity tag prefix'\)/);
   assert.doesNotMatch(nativeSettingsSource, /nativeRecordIdentityPropertyKey|nativeRecordSchemaPropertyKey/);
-  assert.doesNotMatch(nativeSettingsSource, /nativeRecordKindPropertyKey|nativeRecordTitlePropertyKey/);
+  assert.match(nativeSettingsSource, /renderMigratingKeySetting\(diagnostics, 'Record kind key'/);
   assert.doesNotMatch(nativeSettingsSource, /nativeRecordCreatedPropertyKey|nativeRecordModifiedPropertyKey/);
-  assert.match(nativeSettingsSource, /Legacy readers stay enabled for records that arrive later through Sync/);
+  assert.match(nativeSettingsSource, /Historical names are used only for this confirmed migration/);
   assert.match(nativeSettingsSource, /setButtonText\('Consolidate records'\)/);
 });
 

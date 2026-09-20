@@ -2,7 +2,7 @@ import { MANAGED_NOTE_FIELDS, managedNoteFieldKey, configureManagedNoteField } f
 import { isAlias, isMap, isScalar, isSeq, parseDocument, visit } from 'yaml';
 
 export type PropertyMigration =
-  | { kind: 'key'; from: string; to: string }
+  | { kind: 'key'; from: string; to: string; previousKeys?: string[] }
   | { kind: 'value'; key: string; from: string; to: string };
 export interface SettingsPatch { key: string; before: unknown; after: unknown }
 export const MIGRATABLE_KEY_SETTINGS = {
@@ -12,6 +12,8 @@ export const MIGRATABLE_KEY_SETTINGS = {
   timeTrackingPropertyKey: 'timeTracking',
   taskVisibilityStateFrontmatterKey: 'gcmTaskVisibility',
   parentLinkFrontmatterKey: 'parent',
+  nativeRecordKindPropertyKey: 'kind',
+  nativeRecordTitlePropertyKey: 'title',
 } as const;
 const fold = (value: string) => value.trim().toLowerCase();
 const forbidden = new Set(['__proto__', 'constructor', 'prototype']);
@@ -24,6 +26,7 @@ export function validateMigration(change: PropertyMigration): void {
 
 export function validateMigrationSettings(settings: any, change: PropertyMigration): void {
   if (change.kind !== 'key' || fold(change.from) === fold(change.to)) return;
+  if (['tpsid', 'tags', 'aliases'].includes(fold(change.to)) || fold(change.from) === 'tpsid') throw new Error('This property is reserved and cannot be used for this mapping.');
   const configured = [
     ...(settings.properties || []).map((property: any) => property.key),
     ...Object.entries(MIGRATABLE_KEY_SETTINGS).map(([key, fallback]) => settings[key] || fallback),
@@ -37,6 +40,13 @@ export function validateMigrationSettings(settings: any, change: PropertyMigrati
 /** Patch source ranges, never serialize the document or alter the Markdown body. */
 export function migrateNoteProperties(source: string, change: PropertyMigration): string {
   validateMigration(change);
+  if (change.kind === 'key' && change.previousKeys?.length) {
+    let next = source;
+    for (const from of [...new Set([change.from, ...change.previousKeys])]) {
+      if (from !== change.to) next = migrateNoteProperties(next, { kind: 'key', from, to: change.to });
+    }
+    return next;
+  }
   const opening = /^(?:\uFEFF)?---[ \t]*\r?\n/.exec(source);
   if (!opening) return source;
   const rest = source.slice(opening[0].length);

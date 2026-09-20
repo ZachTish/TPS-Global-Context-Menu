@@ -4,24 +4,25 @@ import { build } from 'esbuild';
 import { readFileSync } from 'node:fs';
 const result = await build({ entryPoints: ['src/utils/managed-note-fields.ts'], bundle: true, format: 'esm', write: false });
 const {configureManagedNoteField: configure, readManagedNoteField: read, writeManagedNoteField: write, MANAGED_NOTE_FIELDS: fields} = await import('data:text/javascript;base64,' + Buffer.from(result.outputFiles[0].text).toString('base64'));
-for (const field of fields) test(`${field}: rename twice retains old note reads and writes only the chosen key`, () => {
- const settings = {}; const fm = {[field]: 'original', title: 'Untouched', tpsId: 'stable'};
- configure(settings, field, 'custom_' + field);
- assert.equal(read(settings, field, fm), 'original');
+for (const field of fields) test(`${field}: only the configured name is read and no aliases are retained`, () => {
+ const settings = {}; configure(settings, field, 'custom_' + field);
+ assert.equal(read(settings, field, {[field]: 'old'}), undefined);
+ const fm = {['custom_' + field]: 'current', title: 'Untouched'};
+ assert.equal(read(settings, field, fm), 'current');
  write(settings, field, fm, 'updated');
- assert.equal(fm[field], undefined);
+ assert.equal(fm['custom_' + field], 'updated');
  configure(settings, field, 'next_' + field);
- assert.equal(read(settings, field, fm), 'updated');
- write(settings, field, fm, 'final');
- assert.deepEqual(fm, {title: 'Untouched', tpsId: 'stable', ['next_' + field]: 'final'});
- write(settings, field, fm, null); assert.deepEqual(fm, {title:'Untouched',tpsId:'stable'});
+ assert.equal(read(settings, field, fm), undefined);
+ assert.deepEqual(settings.managedNoteFieldAliases[field], []);
 });
-test('identity collisions and conflicting aliases fail before a note mutation', () => {
+test('identity collisions are rejected while unrelated old names remain untouched', () => {
  const settings = {};
  for (const bad of ['tpsId','title','tags','sourcePath','__proto__','bad\nkey','']) assert.throws(() => configure(settings,'externalId',bad));
  configure(settings,'externalId','mirrorKey');
- const fm={externalId:'first',mirrorKey:'second',title:'Keep'}; const before=JSON.stringify(fm);
- assert.throws(()=>read(settings,'externalId',fm));assert.throws(()=>write(settings,'externalId',fm,'third'));assert.equal(JSON.stringify(fm),before);
+ const fm={externalId:'unrelated',mirrorKey:'current'};
+ assert.equal(read(settings,'externalId',fm),'current');
+ write(settings,'externalId',fm,'next');
+ assert.deepEqual(fm,{externalId:'unrelated',mirrorKey:'next'});
 });
 test('writes no longer add redundant bookkeeping or delete authored type fields', () => {
  const archive=readFileSync('src/services/archive-file-service.ts','utf8');const records=readFileSync('src/services/native-record-service.ts','utf8');const naming=readFileSync('src/services/file-naming-service.ts','utf8');

@@ -1149,6 +1149,11 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         notebookNavigatorPresentation: notebookNavigatorPresentationApi,
         taskRecords: taskRecordsApi,
         templates: templatesApi,
+        propertyMappings: {
+            version: 1,
+            changeKey: (pluginId: string, settingKey: string, value: string) => plugin.propertyMigrationService.requestPluginKey(pluginId, settingKey, value),
+            isMigrating: () => plugin.propertyMigrationService.active,
+        },
         history: {
             version: 1,
             resolveEntity: (reference: string | ItemHistoryTaskReference) =>

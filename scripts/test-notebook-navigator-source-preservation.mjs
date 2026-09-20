@@ -91,7 +91,9 @@ async function importBundled(relativePath) {
             export class TFolder {}
             export class MarkdownView {}
             export class WorkspaceLeaf {}
-            export class Notice {}
+            export class Modal {}
+export class Setting {}
+export class Notice {}
             export function normalizePath(path) {
               return String(path || '').replace(/\\\\/gu, '/').replace(/\\/+/gu, '/');
             }
@@ -696,7 +698,7 @@ test('legacy architecture still protects a proven native record from Notebook Na
   const parsed = parseNativeRecordDocument(source);
   assert.ok(parsed, 'fixture parses');
   assert.ok(
-    fixture.plugin.nativeRecordService.inspect(parsed.frontmatter),
+    fixture.plugin.nativeRecordService.hasRecordIdentityEvidenceInFrontmatter(parsed.frontmatter),
     'record identity remains provable while global architecture is Legacy',
   );
 
@@ -829,7 +831,7 @@ test('proven native records reject Notebook Navigator destinations owned by curr
     const parsed = parseNativeRecordDocument(testCase.source);
     assert.ok(parsed, `${testCase.label}: fixture parses`);
     assert.ok(
-      fixture.plugin.nativeRecordService.inspect(parsed.frontmatter),
+      fixture.plugin.nativeRecordService.hasRecordIdentityEvidenceInFrontmatter(parsed.frontmatter),
       `${testCase.label}: fixture is a proven native record`,
     );
 
@@ -846,8 +848,8 @@ test('proven native records reject Notebook Navigator destinations owned by curr
   }
 });
 
-test('nativeRecords.update migrates legacy identity through owned fields and preserves producer source', async () => {
-  const fixture = makeFixture();
+test('nativeRecords.update cleans agreeing identity evidence through owned fields and preserves producer source', async () => {
+  const fixture = makeFixture(pocRecord.replace('---\r\n', '---\r\ntpsId: calendar-3rv0kr\r\n'));
   const service = new NativeRecordService(fixture.plugin);
   const nextTitle = '[[Calendar Events/2026-09-01/Calendar event--calendar-3rv0kr|Daily Standup: Platform sync]]';
 

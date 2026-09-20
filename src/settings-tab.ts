@@ -485,7 +485,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
   private renderIntegrationPropertyNames(container: HTMLElement): void {
     container.createEl('h4', { text: 'Integration property names' });
-    container.createEl('p', { cls: 'setting-item-description', text: 'Apply previews a confirmed migration of existing note frontmatter. Earlier integration names remain readable. Update Calendar and Controller mappings separately.' });
+    container.createEl('p', { cls: 'setting-item-description', text: 'Apply previews a confirmed migration of existing note frontmatter. Only the configured key is read after migration. Matching Calendar and Controller mappings update together.' });
     if (this.plugin.propertyMigrationService?.hasRecovery()) {
       new Setting(container).setName('Restore interrupted property migration')
         .setDesc('Restore original properties and configuration from the local recovery copy. Concurrent edits are preserved.')
@@ -2266,14 +2266,15 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           }));
 
       diagnostics.createEl('h4', { text: 'Atomic note properties' });
+      this.renderMigratingKeySetting(diagnostics, 'Record kind key', 'Property identifying the record type. Used by all TPS atomic records.', 'nativeRecordKindPropertyKey');
 
       new Setting(diagnostics)
         .setName('Canonical record envelope')
-        .setDesc('New and consolidated atomic notes store one system identity (tpsId) plus kind and title. Schema and file timestamps remain available virtually through the API, while saved custom property names and legacy identity tags remain read-only migration aliases.');
+        .setDesc('Records use tpsId, the configured kind key, and title. Only the current mapping is read. Review older identities below to migrate them.');
 
       new Setting(diagnostics)
         .setName('Consolidate atomic note storage')
-        .setDesc('Rewrite recognized legacy identities to tpsId, kind, and title. User properties, ordinary tags, bodies, stable IDs, paths, and filenames are preserved. Legacy readers stay enabled for records that arrive later through Sync, and records that cannot be proven globally unique fail closed.')
+        .setDesc('Rewrite recognized legacy identities to tpsId, kind, and title. User properties, ordinary tags, bodies, stable IDs, paths, and filenames are preserved. Historical names are used only for this confirmed migration; ambiguous identities are blocked.')
         .addButton((button) => button
           .setButtonText('Consolidate records')
           .onClick(async () => {

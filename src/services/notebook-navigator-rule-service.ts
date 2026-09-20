@@ -315,7 +315,7 @@ export class NotebookNavigatorRuleService {
           : settings.clearIconWhenNoMatch ? null : undefined;
         const color = visual.color.matched ? this.normalizeNoteColorValue(String(visual.color.value || '').trim())
           : settings.clearColorWhenNoMatch ? null : undefined;
-        const inspection = this.plugin.nativeRecordService?.inspect(frontmatter);
+        const inspection = this.plugin.nativeRecordService?.inspect(frontmatter) || (this.plugin.nativeRecordService?.hasRecordIdentityEvidenceInFrontmatter?.(frontmatter) ? {} : null);
         const protectedKeys = inspection ? this.getNativeRecordProtectedKeys(inspection) : new Set<string>();
         const apply = (key: string, value: string | null | undefined) => {
           if (value === undefined || this.isProtectedKey(key) || protectedKeys.has(key.toLowerCase())) return;
@@ -385,7 +385,7 @@ export class NotebookNavigatorRuleService {
     const profiles = [
       nativeRecordService?.getStorageProfile?.(),
       inspection?.profile,
-      ...(nativeRecordService?.getReadableStorageProfiles?.() || []),
+      ...(nativeRecordService?.getIdentityEvidenceProfiles?.() || []),
     ].filter(Boolean);
 
     for (const profile of profiles) {
@@ -538,7 +538,7 @@ export class NotebookNavigatorRuleService {
       : settings.clearColorWhenNoMatch ? null : undefined;
     const iconField = this.getIconField(settings);
     const colorField = this.getColorField(settings);
-    const nativeRecordInspection = this.plugin.nativeRecordService?.inspect(frontmatter) || null;
+    const nativeRecordInspection = this.plugin.nativeRecordService?.inspect(frontmatter) || (this.plugin.nativeRecordService?.hasRecordIdentityEvidenceInFrontmatter?.(frontmatter) ? {} : null);
     const nativeRecordProtectedKeys = nativeRecordInspection
       ? this.getNativeRecordProtectedKeys(nativeRecordInspection)
       : null;

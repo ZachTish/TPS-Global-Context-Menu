@@ -1,3 +1,4 @@
+import { PropertyMigrationModal } from '../modals/property-migration-modal';
 import { readManagedNoteField, writeManagedNoteField } from '../utils/managed-note-fields';
 import {
   TFile,
@@ -310,7 +311,7 @@ function validateReadableNativeRecordStorageProfile(profileValue: TpsNativeRecor
   if (
     profile.identityMode === 'property'
     && !profile.schemaPropertyKey
-    && profileKey(profile) !== profileKey(DEFAULT_NATIVE_RECORD_STORAGE_PROFILE)
+    && profileKey({ ...profile, kindPropertyKey: 'kind', titlePropertyKey: 'title' }) !== profileKey(DEFAULT_NATIVE_RECORD_STORAGE_PROFILE)
   ) {
     errors.push('Schema-free native record storage is reserved for the exact canonical tpsId, kind, and title envelope.');
   }
@@ -335,7 +336,7 @@ export function validateNativeRecordStorageProfile(profileValue: TpsNativeRecord
   const profile = normalizeNativeRecordStorageProfile(profileValue);
   const errors = validateReadableNativeRecordStorageProfile(profile);
   const canonical = DEFAULT_NATIVE_RECORD_STORAGE_PROFILE;
-  if (profileKey(profile) !== profileKey(canonical)) {
+  if (profileKey({ ...profile, kindPropertyKey: 'kind', titlePropertyKey: 'title' }) !== profileKey(canonical)) {
     errors.push('Writable native records must use the canonical tpsId, kind, and title envelope.');
   }
   const writableKeys = [
@@ -384,7 +385,7 @@ export function resolveWritableNativeRecordStorageConfiguration(
   const configuredProfile = normalizeNativeRecordStorageProfile(profileValue);
   const retiredTagIdentity = configuredProfile.identityMode === 'tag';
   const writeProfile = normalizeNativeRecordStorageProfile(
-    DEFAULT_NATIVE_RECORD_STORAGE_PROFILE,
+    { ...DEFAULT_NATIVE_RECORD_STORAGE_PROFILE, ...(configuredProfile.identityMode === 'property' && !configuredProfile.schemaPropertyKey ? { kindPropertyKey: configuredProfile.kindPropertyKey, titlePropertyKey: configuredProfile.titlePropertyKey } : {}) },
   );
   const writeKey = profileKey(writeProfile);
   const requiresSettingsMigration = profileKey(configuredProfile) !== writeKey;
@@ -1086,6 +1087,12 @@ export class NativeRecordService {
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
+  refreshConfiguration(): void {
+    this.rebuildIndex();
+    this.identitySourceGeneration += 1;
+    this.authoritativeIdentityGeneration = -1;
+  }
+
   setup(): void {
     if (this.setupComplete) return;
     this.setupComplete = true;
@@ -1153,13 +1160,13 @@ export class NativeRecordService {
     return this.getStorageConfiguration().writeProfile;
   }
 
+  private readingMigrationSources = false;
+
   getReadableStorageProfiles(): TpsNativeRecordStorageProfile[] {
     const configuration = this.getStorageConfiguration();
     const values = [
       configuration.writeProfile,
-      ...configuration.readAliases,
-      LEGACY_NATIVE_RECORD_PROPERTY_PROFILE,
-      DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE,
+      ...(this.readingMigrationSources ? [...configuration.readAliases, LEGACY_NATIVE_RECORD_PROPERTY_PROFILE, DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE] : []),
     ].map((profile) => normalizeNativeRecordStorageProfile(profile));
     const seen = new Set<string>();
     return values.filter((profile) => {
@@ -1169,6 +1176,10 @@ export class NativeRecordService {
       seen.add(key);
       return true;
     });
+  }
+
+  getIdentityEvidenceProfiles(): TpsNativeRecordStorageProfile[] {
+    return [this.getStorageProfile(), ...this.getStorageConfiguration().readAliases, LEGACY_NATIVE_RECORD_PROPERTY_PROFILE, DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE];
   }
 
   private getConfiguredStorageProfile(): TpsNativeRecordStorageProfile {
@@ -1194,6 +1205,7 @@ export class NativeRecordService {
   inspect(frontmatter: unknown): TpsNativeRecordInspection | null {
     if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) return null;
     const raw = frontmatter as Record<string, unknown>;
+    if (!inspectNativeRecordMatchSet(raw, this.getIdentityEvidenceProfiles(), this.getStorageProfile())) return null;
     return inspectNativeRecordMatchSet(
       raw,
       this.getReadableStorageProfiles(),
@@ -1337,7 +1349,7 @@ export class NativeRecordService {
     cause?: FilePropertiesMutationCause,
     internalPlanKey?: symbol,
   ): Promise<TpsNativeRecordHandle | null> {
-    if (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock) return null;
+    if (this.plugin.propertyMigrationService?.active || (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock)) return null;
     this.assertEnabled();
     const record = await this.resolve(reference);
     if (!record) return null;
@@ -1473,7 +1485,7 @@ export class NativeRecordService {
     cause: FilePropertiesMutationCause = { kind: 'user' },
     internalPlanKey?: symbol,
   ): Promise<TpsNativeRecordHandle | null> {
-    if (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock) return null;
+    if (this.plugin.propertyMigrationService?.active || (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock)) return null;
     this.assertValidStorageProfile();
     if (!this.isUpdatePayloadShapeSafe(updates)) return null;
     await this.refreshIdentityIndexFromVaultSource();
@@ -1484,7 +1496,7 @@ export class NativeRecordService {
       if (!this.hasUniquePathOwnership(record.id, record.path)) return null;
     }
     const writeProfile = this.getStorageProfile();
-    const readableProfiles = this.getReadableStorageProfiles();
+    const readableProfiles = this.getIdentityEvidenceProfiles();
     const ownedKeys = this.uniquePropertyKeys([
       ...storageKeys(writeProfile),
       ...readableProfiles.flatMap(storageKeys),
@@ -2094,7 +2106,7 @@ export class NativeRecordService {
     ownedKeys: string[];
   } | null {
     const writeProfile = this.getStorageProfile();
-    const readableProfiles = this.getReadableStorageProfiles();
+    const readableProfiles = this.getIdentityEvidenceProfiles();
     const ownedKeys = this.uniquePropertyKeys([
       ...storageKeys(writeProfile),
       ...readableProfiles.flatMap(storageKeys),
@@ -2137,7 +2149,7 @@ export class NativeRecordService {
   } | null {
     if (!this.isUpdatePayloadShapeSafe(updates)) return null;
     const writeProfile = this.getStorageProfile();
-    const readableProfiles = this.getReadableStorageProfiles();
+    const readableProfiles = this.getIdentityEvidenceProfiles();
 
     const matchSet = inspectNativeRecordMatchSet(rawFrontmatter, readableProfiles, writeProfile);
     const inspection = matchSet?.inspection;
@@ -2277,7 +2289,7 @@ export class NativeRecordService {
     options: TpsNativeRecordReidentifyOptions = {},
     internalPlanKey?: symbol,
   ): Promise<TpsNativeRecordHandle | null> {
-    if (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock) return null;
+    if (this.plugin.propertyMigrationService?.active || (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock)) return null;
     this.assertEnabled();
     this.assertValidStorageProfile();
     const nextId = String(nextIdValue || '').trim();
@@ -2317,7 +2329,7 @@ export class NativeRecordService {
     }
 
     const writeProfile = this.getStorageProfile();
-    const readableProfiles = this.getReadableStorageProfiles();
+    const readableProfiles = this.getIdentityEvidenceProfiles();
     const ownedKeys = this.uniquePropertyKeys([
       ...storageKeys(writeProfile),
       ...readableProfiles.flatMap(storageKeys),
@@ -2483,9 +2495,12 @@ export class NativeRecordService {
     }
     const key = Symbol('tps-native-storage-migration');
     this.nativePlanMutationLock = key;
+    this.readingMigrationSources = true;
     try {
       return await this.migrateStorageProfileLocked(key);
     } finally {
+      this.readingMigrationSources = false;
+      this.rebuildIndex();
       this.nativePlanMutationLock = null;
       this.nativeMutationRevision += 1;
     }
@@ -2508,7 +2523,8 @@ export class NativeRecordService {
       failed: 0,
     };
     const profile = this.getStorageProfile();
-    const readableProfiles = this.getReadableStorageProfiles();
+    const readableProfiles = this.getIdentityEvidenceProfiles();
+    if (!await PropertyMigrationModal.confirm(this.plugin.app, 'Update existing record identities?', 'Convert historical identifiers to the current key. Old identities will be removed; fallback readers will not be retained. Conflicting records require repair.', records, [...this.blockedIdentityEvidencePaths])) return result;
     for (const path of records) {
       if (this.blockedIdentityEvidencePaths.has(path)) {
         result.failed += 1;
@@ -2573,7 +2589,7 @@ export class NativeRecordService {
       }
     }
     if (result.failed === 0) {
-      this.plugin.settings.nativeRecordStorageAliases = this.getStorageConfiguration().readAliases;
+      this.plugin.settings.nativeRecordStorageAliases = [];
       await this.plugin.saveSettings();
     }
     this.rebuildIndex();
@@ -2837,7 +2853,7 @@ export class NativeRecordService {
       modifiedDate: timestamp,
     };
     const writeProfile = this.getStorageProfile();
-    const readableProfiles = this.getReadableStorageProfiles();
+    const readableProfiles = this.getIdentityEvidenceProfiles();
     const preliminaryFrontmatter = applyEnvelopeToRawFrontmatter(
       userProperties,
       frontmatter,
@@ -3084,7 +3100,7 @@ export class NativeRecordService {
     if (frontmatterSource == null) return false;
     const propertyKeys = new Set<string>();
     const tagPrefixes = new Set<string>();
-    for (const profile of this.getReadableStorageProfiles()) {
+    for (const profile of this.getIdentityEvidenceProfiles()) {
       if (profile.identityMode === 'property') {
         propertyKeys.add(profile.identityPropertyKey);
         propertyKeys.add(profile.schemaPropertyKey);
@@ -3112,7 +3128,7 @@ export class NativeRecordService {
     this.removePath(file.path);
     const resolved = frontmatter ?? this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
     if (resolved) {
-      const readableProfiles = this.getReadableStorageProfiles();
+      const readableProfiles = this.getIdentityEvidenceProfiles();
       const applicableProfiles = selectApplicableReadableProfiles(
         resolved,
         readableProfiles,
@@ -3148,7 +3164,7 @@ export class NativeRecordService {
       );
       if (
         hasInvalidReadableIdentityEvidence(resolved, applicableProfiles, this.getStorageProfile())
-        || (recoverableIds.size > 0 && !combinedMatch)
+        || (recoverableIds.size > 0 && (!combinedMatch || !this.inspect(resolved)))
       ) {
         this.blockedIdentityEvidencePaths.add(file.path);
         for (const id of recoverableIds) {
@@ -3337,7 +3353,7 @@ export class NativeRecordService {
 
   private hasNativeIdentityMarker(frontmatter: Record<string, unknown>): boolean {
     if (this.inspect(frontmatter)) return true;
-    for (const profile of this.getReadableStorageProfiles()) {
+    for (const profile of this.getIdentityEvidenceProfiles()) {
       if (profile.identityMode === 'property') {
         if (propertyProfileUsesTags(profile)) {
           if (inspectWithProfile(frontmatter, profile)) return true;
@@ -3398,6 +3414,7 @@ export class NativeRecordService {
   }
 
   private assertEnabled(): void {
+    if (this.plugin.propertyMigrationService?.active) throw new Error('Wait for the property migration to finish.');
     if (!this.isEnabled()) {
       throw new Error('TPS native record creation requires the native-records data architecture mode.');
     }
