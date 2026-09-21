@@ -406,12 +406,8 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                     plugin.taskCheckboxHandler.scheduleChecklistPropertyUpdate(file);
                 }
                 previousActiveFile = file;
-                scheduleResponsiveMenuRefresh(file, {
-                    ensureMenus: true,
-                    force: false,
-                    rebuildInlineSubitems: true,
-                    delayMs: 300,
-                });
+                // file-open already requests menu mounting above. A second file
+                // refresh replaced freshly mounted badges after the note settled.
 
                 // ── Note-open reconciliation hooks ─────────────────────────────────
                 // 0. Repair broken parent body links from childOf backlinks before any
@@ -548,10 +544,10 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     // ── Debounced frontmatter/filename sync ──────────────────────────────────
 
-    const debouncedMenuRefresh = debounce((file: TFile) => {
+    const scheduleMetadataMenuRefresh = (file: TFile) => {
         if (file && file.extension === 'md') {
             // Force refresh so frontmatter edits made while typing are reflected immediately.
-            overlayRendering.scheduleFileRefresh(file, 'metadata-menu-refresh', { force: true, delayMs: 0 });
+            overlayRendering.scheduleFileRefresh(file, 'metadata-menu-refresh', { force: true, rebuildInlineSubitems: true, delayMs: 300 });
 
             const parentKey = String(plugin.settings.parentLinkFrontmatterKey || 'childOf').trim() || 'childOf';
             const fm = (plugin.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, any>;
@@ -562,12 +558,12 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 for (const pv of parentValues) {
                     const parentFile = resolveLinkValueToFile(plugin.app, pv, file.path);
                     if (parentFile instanceof TFile && parentFile.path !== file.path) {
-                        overlayRendering.scheduleFileRefresh(parentFile, 'metadata-parent-menu-refresh', { force: true, delayMs: 0 });
+                        overlayRendering.scheduleFileRefresh(parentFile, 'metadata-parent-menu-refresh', { force: true, delayMs: 300 });
                     }
                 }
             }
         }
-    }, 350, false);
+    };
 
     const debouncedFilenameSync = debounce((file: TFile) => {
         if (!file || file.extension !== 'md') return;
@@ -648,7 +644,9 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 plugin.menuController.panelBuilder?.clearFileTitleCache(file.path);
                 plugin.noteTitleRenderService?.clearTitleCache(file.path);
             }
-            debouncedMenuRefresh(file);
+            // Queue each file in the shared batch; a single-argument debounce
+            // both lost earlier files and caused a second delayed forced render.
+            scheduleMetadataMenuRefresh(file);
             debouncedFilenameSync(file);
             if (file instanceof TFile) {
                 if (plugin.canRunBackgroundAutomation() && plugin.notebookNavigatorRuleService.shouldAutoApplyOnMetadataChange()) {
@@ -666,7 +664,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 lastKnownStatusByPath.set(file.path, currentStatus);
                 scheduleExternalChecklistCompletionGuard(file, previousStatus, currentStatus);
                 scheduleActiveFilenameReconcile(file, 1200);
-                scheduleResponsiveMenuRefresh(file, { rebuildInlineSubitems: true, delayMs: 300 });
                 if (plugin.canRunBackgroundAutomation()) {
                     scheduleCompletedDateSync(file);
                 }

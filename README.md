@@ -2,7 +2,7 @@
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.1.1](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.1.1) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.1.2](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.1.2) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -145,3 +145,14 @@ The active-view watcher refreshes completed-task widgets without reconfiguring e
 No settings, defaults, records, or public API contract change. This is a backward-compatible performance patch. Focused behavioral tests exercise widget refresh versus settings refresh and foreground/background/existing-note activation. Full tests, a separate final build, test-vault deployment/reload and navigation QA are recorded in the release notes. Minimum Obsidian stays 1.10.0; production remains the user's BRAT pull.
 
 Installed QA: the same four-note-open sequence dropped from eight global editor reconfigurations to zero, with four native focus calls instead of five. Reading, Source and Live Preview transitions retained the exact note body; a settled manual scroll retained its position and cursor. Full suite: 1,207 passed plus 131 additional checks; TypeScript and final build passed. Test deployment and explicit reload used only Obsidian Plugin Test Vault. QA fixtures were archived, temporary runtime probes removed, and original navigation restored. No settings were saved or outbound automation enabled. See release notes for final artifact hashes.
+
+
+## 3.1.2 — Consolidate action refreshes (2026-09-21)
+
+Property metadata changes and their parent updates now enter the existing per-file overlay batch directly. This removes the second delayed forced render and preserves every file in a multi-file edit. Opening a note mounts its menu once without also queuing a redundant file refresh; native view lifecycle, mobile attachment retries, typing guards, and explicit commands remain available.
+
+The GCM events API delivers each GCM-emitted file update, explicit action, and Calendar refresh once. Both raw workspace event names still fire for existing integrations. Independent legacy/canonical producers, nested actions, consecutive updates to the same file, caller attribution, and unsubscribe remain supported. This is synchronous identity-based handling of GCM's own mirrored emission, not a time-based filter across external producers. A consumer directly subscribing to both raw names must still choose/deduplicate its own subscriptions.
+
+Navigator presentation invalidates the resolved file and its tracked dependents instead of clearing every prepared record whenever a metadata batch settles. One initial full settlement remains for startup link resolution, along with existing full invalidation for create/delete/rename, settings and date changes. Retired reference-panel cleanup inspects existing footer hosts instead of creating and immediately removing an empty host on every menu refresh. Shared nonempty hosts stay mounted. No preferences, frontmatter or API versions migrate.
+
+Behavioral regression coverage lives in `test-gcm-event-service.mjs`, `test-note-open-refresh.mjs`, and `test-notebook-navigator-presentation.mjs`, alongside the existing typing and note-opening suites. Validation and installed test-vault results are recorded in [release notes](release-notes/3.1.2.md). This patch reduces reproduced duplicate work; it does not assert that every command or every source of visual movement across all plugins is resolved. Production remains a separate user-controlled BRAT update.

@@ -410,3 +410,26 @@ test('plugin wires the exact top-level notebookNavigatorPresentation v1 contract
   assert.match(mainSource, /notebookNavigatorRuleService\.setupPresentationProjection\(\)/u);
   assert.match(mainSource, /saveSettings\(\)[\s\S]{0,1800}invalidateNotebookNavigatorPresentation\(\)/u);
 });
+
+test('settled metadata does not evict unrelated presentation; per-file link resolution still invalidates dependents', async (t) => {
+  const fixture = makeFixture();
+  const service = new NotebookNavigatorRuleService(fixture.plugin);
+  service.setupPresentationProjection();
+  t.after(() => service.dispose());
+  await service.ensureNotebookNavigatorPresentation([fixture.child, fixture.unrelated]);
+  fixture.metadataEvents.emit('resolved');
+  assert.equal(service.getNotebookNavigatorPresentation(fixture.child), undefined, 'initial settlement repairs pre-index relationships');
+  await service.ensureNotebookNavigatorPresentation([fixture.child, fixture.unrelated]);
+  const child = service.getNotebookNavigatorPresentation(fixture.child);
+  const unrelated = service.getNotebookNavigatorPresentation(fixture.unrelated);
+  fixture.metadataEvents.emit('resolved');
+  assert.equal(service.getNotebookNavigatorPresentation(fixture.child), child);
+  assert.equal(service.getNotebookNavigatorPresentation(fixture.unrelated), unrelated);
+  fixture.metadataEvents.emit('resolve', fixture.parent);
+  assert.equal(service.getNotebookNavigatorPresentation(fixture.child), undefined);
+  assert.equal(service.getNotebookNavigatorPresentation(fixture.unrelated), unrelated);
+  await service.ensureNotebookNavigatorPresentation([fixture.child]);
+  fixture.metadataEvents.emit('resolved');
+  assert.notEqual(service.getNotebookNavigatorPresentation(fixture.child), undefined);
+  assert.equal(service.getNotebookNavigatorPresentation(fixture.unrelated), unrelated);
+});

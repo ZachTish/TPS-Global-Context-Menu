@@ -75,3 +75,66 @@ test('navigation refreshes widget roots without reconfiguring other editors; set
   assert.doesNotMatch(poll, /workspace\.updateOptions/);
   assert.match(poll, /refreshAllEditors\(\{ reconfigureEditors: false \}\)/);
 });
+
+test('metadata refreshes batch every changed file and parent without a second delayed render', () => {
+  const eventPath = '../src/events/register-events.ts';
+  const sourceText = readFileSync(new URL(eventPath, import.meta.url), 'utf8');
+  const source = ts.createSourceFile(eventPath, sourceText, ts.ScriptTarget.Latest, true);
+  let initializer;
+  const visit = node => {
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'scheduleMetadataMenuRefresh') initializer = node.initializer.getText(source);
+    ts.forEachChild(node, visit);
+  };
+  visit(source); assert.ok(initializer);
+  const overlay = readFileSync(new URL('../src/services/overlay-rendering-service.ts', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
+  const output = ts.transpileModule(`
+    class Component {}
+    export class TFile { extension = 'md'; constructor(public path: string) {} }
+    const logger = { perf() {}, taskTrace() {}, error() {} };
+    ${overlay}
+    export function metadataScheduler(plugin, overlayRendering, resolveLinkValueToFile) { return ${initializer}; }
+  `, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+  const module = {}; let nextId = 0; const timers = new Map();
+  const window = { setTimeout(fn) { const id = ++nextId; timers.set(id, fn); return id; }, clearTimeout(id) { timers.delete(id); } };
+  new Function('exports', 'window', output)(module, window);
+  const a = new module.TFile('A.md'), b = new module.TFile('B.md'), parent = new module.TFile('Parent.md');
+  const refreshed = [];
+  const plugin = { settings: {}, app: { metadataCache: { getFileCache: () => ({ frontmatter: { childOf: 'Parent' } }) } },
+    persistentMenuManager: { refreshMenusForFile(file, force) { refreshed.push([file.path, force]); } } };
+  const service = new module.OverlayRenderingService(plugin);
+  const schedule = module.metadataScheduler(plugin, service, () => parent);
+  service.scheduleFileRefresh(a, 'vault-modify', { force: true, delayMs: 400 });
+  schedule(a); schedule(b);
+  assert.equal(timers.size, 1);
+  for (const [id, run] of [...timers]) { timers.delete(id); run(); }
+  assert.deepEqual(refreshed, [['A.md', true], ['Parent.md', true], ['B.md', true]]);
+  assert.equal(timers.size, 0, 'there must be no second 350 ms debounce render');
+  service.onunload();
+  const openHandler = sourceText.slice(sourceText.indexOf("plugin.app.workspace.on('file-open'"), sourceText.indexOf('// ── Reactive completedDate sync'));
+  assert.match(openHandler, /scheduleMenus\('file-open', 0\)/);
+  assert.doesNotMatch(openHandler, /scheduleResponsiveMenuRefresh/);
+});
+
+
+test('retired panel cleanup removes existing remnants without creating footer hosts', () => {
+  const output = ts.transpileModule(`export class Cleanup { ${method('../src/menu/persistent-menu-manager.ts', 'removeNoteReferencesPanel')} }`,
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+  class Element {
+    constructor(children = []) { this.children = children; this.removed = false; }
+    remove() { this.removed = true; }
+  }
+  const module = {};
+  new Function('exports', 'HTMLElement', output)(module, Element);
+  const oldPanel = new Element(), stray = new Element(), emptyHost = new Element(), sharedHost = new Element([{}]);
+  const view = { contentEl: { querySelectorAll(selector) {
+    return selector === '.tps-gcm-note-references' ? [stray] : [emptyHost, sharedHost];
+  } } };
+  const cleanup = Object.assign(new module.Cleanup(), {
+    noteReferencesPanels: new Map([[view, oldPanel]]),
+    resolveNoteFooterParent() { assert.fail('cleanup must not create a footer'); },
+  });
+  cleanup.removeNoteReferencesPanel(view);
+  assert.equal(oldPanel.removed, true); assert.equal(stray.removed, true);
+  assert.equal(emptyHost.removed, true); assert.equal(sharedHost.removed, false);
+  assert.equal(cleanup.noteReferencesPanels.size, 0);
+});

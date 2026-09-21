@@ -101,8 +101,17 @@ export class NotebookNavigatorRuleService {
     this.plugin.registerEvent(this.plugin.app.metadataCache.on('changed', (file) => {
       this.invalidatePresentationFiles([this.resolvePresentationSourceFile(file)]);
     }));
+    let awaitingInitialResolution = true;
     this.plugin.registerEvent(this.plugin.app.metadataCache.on('resolved', () => {
+      if (!awaitingInitialResolution) return;
+      awaitingInitialResolution = false;
+      // Startup may have prepared an item before its parent link was resolvable.
       this.invalidateNotebookNavigatorPresentation();
+    }));
+    this.plugin.registerEvent(this.plugin.app.metadataCache.on('resolve', (file) => {
+      // Link resolution is per file. A completed metadata batch must not evict
+      // every prepared Navigator item after a single property edit.
+      this.invalidatePresentationFiles([this.resolvePresentationSourceFile(file)]);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('modify', (file) => {
       this.invalidatePresentationFiles([this.resolvePresentationSourceFile(file)]);

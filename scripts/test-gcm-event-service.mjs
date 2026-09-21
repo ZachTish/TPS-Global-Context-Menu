@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
 const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
 
@@ -53,4 +54,54 @@ test('GCM status service exposes active and inactive status classification', () 
   assert.match(statusService, /const active = new Set\(this\.getActiveStatuses\(\)\)/);
   assert.match(statusService, /if \(active\.has\(status\)\) continue;/);
   assert.match(settingsTab, /Active Status Values/);
+});
+
+// Exercise the emitted/subscribed protocol, not just the registration strings.
+const { build } = await import('esbuild');
+const bundled = await build({
+  entryPoints: [fileURLToPath(new URL('../src/services/gcm-event-service.ts', import.meta.url))],
+  bundle: true, format: 'esm', platform: 'node', write: false,
+  plugins: [{ name: 'obsidian-stub', setup(b) {
+    b.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian', namespace: 'stub' }));
+    b.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: 'export const normalizePath = s => s;' }));
+  } }],
+});
+const { GcmEventService } = await import(`data:text/javascript;base64,${Buffer.from(bundled.outputFiles[0].text).toString('base64')}`);
+function fixture() {
+  const listeners = new Map();
+  const workspace = {
+    on(name, fn) { const ref = { name, fn }; const group = listeners.get(name) || new Set(); group.add(ref); listeners.set(name, group); return ref; },
+    offref(ref) { listeners.get(ref.name)?.delete(ref); },
+    trigger(name, payload) { for (const ref of [...(listeners.get(name) || [])]) ref.fn(payload); },
+  };
+  return { workspace, service: new GcmEventService({ app: { workspace }, manifest: { id: 'gcm' } }) };
+}
+for (const [emit, subscribe, legacy, canonical] of [
+  ['emitFilesUpdated', 'onFilesUpdated', 'tps-gcm-files-updated', 'tps:files-updated'],
+  ['emitExplicitAction', 'onExplicitAction', 'tps-gcm-explicit-action', 'tps:gcm-explicit-action'],
+  ['emitCalendarRefresh', 'onCalendarRefresh', 'tps-calendar-explicit-refresh', 'tps:calendar-explicit-refresh'],
+]) {
+  test(`${emit}: one API delivery per action; both raw names and separate actions preserved`, () => {
+    const { service, workspace } = fixture(); const deliveries = []; const raw = [];
+    const dispose = service[subscribe]((paths, payload) => deliveries.push({ paths, payload }));
+    workspace.on(legacy, () => raw.push('legacy')); workspace.on(canonical, () => raw.push('canonical'));
+    const first = service[emit](['A.md'], { sourcePluginId: 'caller', source: 'menu' });
+    assert.equal(deliveries.length, 1); assert.deepEqual(deliveries[0].payload, first);
+    assert.deepEqual(raw, ['legacy', 'canonical']);
+    service[emit](['A.md']); assert.equal(deliveries.length, 2, 'same-file actions are not time-window deduplicated');
+    workspace.trigger(legacy, ['B.md']); workspace.trigger(canonical, { paths: ['C.md'], sourcePluginId: 'external' });
+    assert.deepEqual(deliveries.map(d => d.paths), [['A.md'], ['A.md'], ['B.md'], ['C.md']]);
+    dispose(); service[emit](['D.md']); assert.equal(deliveries.length, 4);
+  });
+}
+test('nested mirrored actions and independent legacy events are all delivered exactly once', () => {
+  const { service, workspace } = fixture(); const paths = [];
+  service.onFilesUpdated(p => paths.push(...p));
+  workspace.on('tps-gcm-files-updated', p => {
+    if (p[0] !== 'outer.md') return;
+    service.emitFilesUpdated(['inner.md']);
+    workspace.trigger('tps-gcm-files-updated', ['independent.md']);
+  });
+  service.emitFilesUpdated(['outer.md']);
+  assert.deepEqual(paths, ['inner.md', 'independent.md', 'outer.md']);
 });

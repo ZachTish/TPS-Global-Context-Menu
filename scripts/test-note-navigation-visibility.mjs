@@ -379,10 +379,10 @@ test("note-open refresh attaches late hosts without forcing stable navigation re
     "plugin.app.workspace.on('file-open'",
     "// ── Reactive completedDate sync",
   );
-  assert.match(
-    fileOpenSource,
-    /scheduleResponsiveMenuRefresh\(file, \{[\s\S]*?ensureMenus: true,[\s\S]*?force: false,[\s\S]*?delayMs: 300/,
-  );
+  assert.match(fileOpenSource, /scheduleMenus\('file-open', 0\)/);
+  assert.doesNotMatch(fileOpenSource, /scheduleResponsiveMenuRefresh/);
+  assert.match(managerSource, /this\.scheduleAttachRetry\(view, 120\)/);
+
 
   const refreshMenusSource = sourceBetween(
     managerSource,

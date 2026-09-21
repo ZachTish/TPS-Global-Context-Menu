@@ -6958,11 +6958,9 @@ export class PersistentMenuManager {
       this.noteReferencesPanels.delete(view);
     }
 
-    const parent = this.resolveNoteFooterParent(view);
-    parent?.querySelectorAll('.tps-gcm-note-references').forEach((node) => node.remove());
-    if (parent instanceof HTMLElement && parent.classList.contains('tps-gcm-note-footer-host') && !parent.children.length) {
-      parent.remove();
-    }
+    // Cleanup must only inspect existing DOM. Resolving a footer here creates
+    // an empty host just to remove it again, waking every workspace observer.
+    view.contentEl?.querySelectorAll('.tps-gcm-note-references').forEach((node) => node.remove());
     view.contentEl?.querySelectorAll('.tps-gcm-note-footer-host').forEach((node) => {
       if (node instanceof HTMLElement && !node.children.length) {
         node.remove();

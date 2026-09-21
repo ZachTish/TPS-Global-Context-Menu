@@ -11,6 +11,10 @@ export type GcmEventPayload = {
 };
 
 export class GcmEventService {
+  // Both workspace names remain public. API subscribers receive our mirrored
+  // pair only once, with the canonical source/timestamp, without time-window
+  // deduplication that could swallow a second legitimate action.
+  private readonly mirroredLegacyPayloads = new WeakSet<object>();
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
   normalizePaths(paths: unknown): string[] {
@@ -31,25 +35,12 @@ export class GcmEventService {
   emitFilesUpdated(paths: unknown, options?: { sourcePluginId?: string }): GcmEventPayload {
     const payload = this.makePayload(paths, options?.sourcePluginId);
     if (!payload.paths.length) return payload;
-    this.plugin.app.workspace.trigger(TPS_LEGACY_EVENTS.GCM_FILES_UPDATED as any, payload.paths);
-    this.plugin.app.workspace.trigger(TPS_EVENTS.FILES_UPDATED as any, payload);
+    this.emitPathPair(TPS_LEGACY_EVENTS.GCM_FILES_UPDATED, TPS_EVENTS.FILES_UPDATED, payload.paths, payload);
     return payload;
   }
 
   onFilesUpdated(callback: (paths: string[], payload: GcmEventPayload | Record<string, unknown>) => void): () => void {
-    const legacyRef = this.plugin.app.workspace.on(TPS_LEGACY_EVENTS.GCM_FILES_UPDATED as any, ((paths: string[] | undefined) => {
-      const normalized = this.normalizePaths(paths);
-      if (normalized.length) callback(normalized, this.makePayload(normalized));
-    }) as any);
-    const namespacedRef = this.plugin.app.workspace.on(TPS_EVENTS.FILES_UPDATED as any, ((payload: { paths?: string[] } | string[] | undefined) => {
-      const normalized = this.normalizePaths(Array.isArray(payload) ? payload : payload?.paths);
-      if (!normalized.length) return;
-      callback(normalized, Array.isArray(payload) ? this.makePayload(normalized) : { ...payload, paths: normalized });
-    }) as any);
-    return () => {
-      this.offref(legacyRef);
-      this.offref(namespacedRef);
-    };
+    return this.onPathPayloadPair(TPS_LEGACY_EVENTS.GCM_FILES_UPDATED, TPS_EVENTS.FILES_UPDATED, callback);
   }
 
   emitExplicitAction(paths: unknown, options?: { sourcePluginId?: string; source?: string }): GcmEventPayload {
@@ -58,11 +49,8 @@ export class GcmEventService {
       source: options?.source || 'api',
     };
     if (!payload.paths.length) return payload;
-    this.plugin.app.workspace.trigger(TPS_LEGACY_EVENTS.GCM_EXPLICIT_ACTION as any, {
-      paths: payload.paths,
-      source: payload.source,
-    });
-    this.plugin.app.workspace.trigger(TPS_EVENTS.GCM_EXPLICIT_ACTION as any, payload);
+    this.emitPathPair(TPS_LEGACY_EVENTS.GCM_EXPLICIT_ACTION, TPS_EVENTS.GCM_EXPLICIT_ACTION,
+      { paths: payload.paths, source: payload.source }, payload);
     return payload;
   }
 
@@ -77,8 +65,7 @@ export class GcmEventService {
   emitCalendarRefresh(paths: unknown, options?: { sourcePluginId?: string }): GcmEventPayload {
     const payload = this.makePayload(paths, options?.sourcePluginId);
     if (!payload.paths.length) return payload;
-    this.plugin.app.workspace.trigger(TPS_LEGACY_EVENTS.CALENDAR_EXPLICIT_REFRESH as any, payload.paths);
-    this.plugin.app.workspace.trigger(TPS_EVENTS.CALENDAR_EXPLICIT_REFRESH as any, payload);
+    this.emitPathPair(TPS_LEGACY_EVENTS.CALENDAR_EXPLICIT_REFRESH, TPS_EVENTS.CALENDAR_EXPLICIT_REFRESH, payload.paths, payload);
     return payload;
   }
 
@@ -104,6 +91,16 @@ export class GcmEventService {
     this.plugin.app.workspace.trigger(TPS_LEGACY_EVENTS.GCM_DELETE_COMPLETE as any);
   }
 
+  private emitPathPair(legacyEvent: string, event: string, legacyPayload: object, payload: GcmEventPayload): void {
+    this.mirroredLegacyPayloads.add(legacyPayload);
+    try {
+      this.plugin.app.workspace.trigger(legacyEvent as any, legacyPayload);
+      this.plugin.app.workspace.trigger(event as any, payload);
+    } finally {
+      this.mirroredLegacyPayloads.delete(legacyPayload);
+    }
+  }
+
   private offref(ref: EventRef): void {
     this.plugin.app.workspace.offref(ref);
   }
@@ -114,6 +111,7 @@ export class GcmEventService {
     callback: (paths: string[], payload: GcmEventPayload | Record<string, unknown>) => void,
   ): () => void {
     const legacyRef = this.plugin.app.workspace.on(legacyEvent as any, ((payload: { paths?: string[] } | string[] | undefined) => {
+      if (payload && this.mirroredLegacyPayloads.has(payload)) return;
       const normalized = this.normalizePaths(Array.isArray(payload) ? payload : payload?.paths);
       if (normalized.length) callback(normalized, Array.isArray(payload) ? this.makePayload(normalized) : { ...payload, paths: normalized });
     }) as any);
