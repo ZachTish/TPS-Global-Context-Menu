@@ -1156,8 +1156,37 @@ export class NativeRecordService {
     return normalizeNativeRecordLayout(this.plugin.settings.nativeRecordLayout);
   }
 
-  getStorageProfile(): TpsNativeRecordStorageProfile {
-    return this.getStorageConfiguration().writeProfile;
+  getStorageProfile(kind?: string): TpsNativeRecordStorageProfile {
+    const profile = this.getStorageConfiguration().writeProfile;
+    const keys = this.getKindPropertyKeys();
+    const key = kind && Object.prototype.hasOwnProperty.call(keys, kind) ? keys[kind] : undefined;
+    return key ? { ...profile, kindPropertyKey: key } : profile;
+  }
+
+  getKindPropertyKeys(): Record<string, string> {
+    const source = this.plugin.settings.nativeRecordKindPropertyKeys;
+    if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
+    return Object.fromEntries(Object.entries(source).filter(([kind, key]) => (
+      isValidNativeRecordKind(kind) && typeof key === 'string' && /^[A-Za-z_][A-Za-z0-9_-]*$/.test(key)
+      && validateNativeRecordStorageProfile({ ...this.getStorageConfiguration().writeProfile, kindPropertyKey: key }).length === 0
+    )));
+  }
+
+  async configureKindPropertyKeys(next: Record<string, string>, expected: Record<string, string>): Promise<void> {
+    if (JSON.stringify(this.getKindPropertyKeys()) !== JSON.stringify(expected)) throw new Error('Record mappings changed. Review the migration again.');
+    for (const [kind, key] of Object.entries(next)) {
+      if (!isValidNativeRecordKind(kind) || !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(key)
+        || validateNativeRecordStorageProfile({ ...this.getStorageConfiguration().writeProfile, kindPropertyKey: key }).length) throw new Error('Invalid record kind mapping.');
+    }
+    this.plugin.settings.nativeRecordKindPropertyKeys = { ...next };
+    try { await this.plugin.saveSettings(); }
+    catch (error) {
+      this.plugin.settings.nativeRecordKindPropertyKeys = { ...expected };
+      try { await this.plugin.saveSettings(); }
+      catch { throw new Error('Could not restore the record key map after a settings write failed. Reload and repair the mapping before logging.'); }
+      throw error;
+    }
+    this.refreshConfiguration();
   }
 
   private readingMigrationSources = false;
@@ -1166,6 +1195,7 @@ export class NativeRecordService {
     const configuration = this.getStorageConfiguration();
     const values = [
       configuration.writeProfile,
+      ...Object.keys(this.getKindPropertyKeys()).map(kind => this.getStorageProfile(kind)),
       ...(this.readingMigrationSources ? [...configuration.readAliases, LEGACY_NATIVE_RECORD_PROPERTY_PROFILE, DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE] : []),
     ].map((profile) => normalizeNativeRecordStorageProfile(profile));
     const seen = new Set<string>();
@@ -1179,7 +1209,7 @@ export class NativeRecordService {
   }
 
   getIdentityEvidenceProfiles(): TpsNativeRecordStorageProfile[] {
-    return [this.getStorageProfile(), ...this.getStorageConfiguration().readAliases, LEGACY_NATIVE_RECORD_PROPERTY_PROFILE, DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE];
+    return [this.getStorageProfile(), ...Object.keys(this.getKindPropertyKeys()).map(kind => this.getStorageProfile(kind)), ...this.getStorageConfiguration().readAliases, LEGACY_NATIVE_RECORD_PROPERTY_PROFILE, DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE];
   }
 
   private getConfiguredStorageProfile(): TpsNativeRecordStorageProfile {
@@ -1206,11 +1236,11 @@ export class NativeRecordService {
     if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) return null;
     const raw = frontmatter as Record<string, unknown>;
     if (!inspectNativeRecordMatchSet(raw, this.getIdentityEvidenceProfiles(), this.getStorageProfile())) return null;
-    return inspectNativeRecordMatchSet(
-      raw,
-      this.getReadableStorageProfiles(),
-      this.getStorageProfile(),
-    )?.inspection || null;
+    const inspection = inspectNativeRecordMatchSet(raw, this.getReadableStorageProfiles(), this.getStorageProfile())?.inspection;
+    if (!inspection) return null;
+    if (this.readingMigrationSources) return inspection;
+    const current = this.getStorageProfile(inspection.kind);
+    return inspectNativeRecordMatchSet(raw, [current], current)?.inspection || null;
   }
 
   /** Classifies current frontmatter synchronously from inside an atomic mutation callback. */
@@ -1495,7 +1525,7 @@ export class NativeRecordService {
       this.rebuildIndex();
       if (!this.hasUniquePathOwnership(record.id, record.path)) return null;
     }
-    const writeProfile = this.getStorageProfile();
+    const writeProfile = this.getStorageProfile(record.kind);
     const readableProfiles = this.getIdentityEvidenceProfiles();
     const ownedKeys = this.uniquePropertyKeys([
       ...storageKeys(writeProfile),
@@ -2105,7 +2135,7 @@ export class NativeRecordService {
     envelope: TpsNativeRecordEnvelope;
     ownedKeys: string[];
   } | null {
-    const writeProfile = this.getStorageProfile();
+    const writeProfile = this.getStorageProfile(record.kind);
     const readableProfiles = this.getIdentityEvidenceProfiles();
     const ownedKeys = this.uniquePropertyKeys([
       ...storageKeys(writeProfile),
@@ -2148,7 +2178,7 @@ export class NativeRecordService {
     ownedKeys: string[];
   } | null {
     if (!this.isUpdatePayloadShapeSafe(updates)) return null;
-    const writeProfile = this.getStorageProfile();
+    const writeProfile = this.getStorageProfile(record.kind);
     const readableProfiles = this.getIdentityEvidenceProfiles();
 
     const matchSet = inspectNativeRecordMatchSet(rawFrontmatter, readableProfiles, writeProfile);
@@ -2262,7 +2292,7 @@ export class NativeRecordService {
   private isUpdatePayloadShapeSafe(updates: Record<string, unknown>): boolean {
     if (!updates || typeof updates !== 'object' || Array.isArray(updates)) return false;
     const protectedKeys = new Set(
-      storageKeys(this.getStorageProfile()).map((key) => key.toLocaleLowerCase()),
+      [...storageKeys(this.getStorageProfile()), ...Object.values(this.getKindPropertyKeys())].map((key) => key.toLocaleLowerCase()),
     );
     const seen = new Set<string>();
     for (const key of Object.keys(updates)) {
@@ -2328,7 +2358,7 @@ export class NativeRecordService {
       return this.rename(record.file, options.fileName!, cause, internalPlanKey);
     }
 
-    const writeProfile = this.getStorageProfile();
+    const writeProfile = this.getStorageProfile(record.kind);
     const readableProfiles = this.getIdentityEvidenceProfiles();
     const ownedKeys = this.uniquePropertyKeys([
       ...storageKeys(writeProfile),
@@ -2564,7 +2594,7 @@ export class NativeRecordService {
           const nextFrontmatter = applyEnvelopeToRawFrontmatter(
             parsed.frontmatter,
             inspection.frontmatter,
-            profile,
+            this.getStorageProfile(inspection.kind),
             matchSet.matchedProfiles,
             matchSet.recognizedIdentityTagProfiles,
           );
@@ -2774,7 +2804,7 @@ export class NativeRecordService {
   ): Record<string, unknown> {
     const copied: Record<string, unknown> = {};
     const protectedKeys = new Set(
-      storageKeys(this.getStorageProfile()).map((key) => key.toLocaleLowerCase()),
+      [...storageKeys(this.getStorageProfile()), ...Object.values(this.getKindPropertyKeys())].map((key) => key.toLocaleLowerCase()),
     );
     for (const [key, value] of Object.entries(properties || {})) {
       const normalizedKey = key.trim().toLocaleLowerCase();
@@ -2821,7 +2851,7 @@ export class NativeRecordService {
     if (!title) throw new Error('TPS native records require a title.');
 
     const protectedKeys = new Set(
-      storageKeys(this.getStorageProfile()).map((key) => key.toLocaleLowerCase()),
+      [...storageKeys(this.getStorageProfile()), ...Object.values(this.getKindPropertyKeys())].map((key) => key.toLocaleLowerCase()),
     );
     const seenPayloadKeys = new Set<string>();
     for (const key of Object.keys(properties)) {
@@ -2852,7 +2882,7 @@ export class NativeRecordService {
       createdDate: timestamp,
       modifiedDate: timestamp,
     };
-    const writeProfile = this.getStorageProfile();
+    const writeProfile = this.getStorageProfile(kind);
     const readableProfiles = this.getIdentityEvidenceProfiles();
     const preliminaryFrontmatter = applyEnvelopeToRawFrontmatter(
       userProperties,

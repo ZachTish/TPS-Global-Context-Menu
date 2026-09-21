@@ -3583,7 +3583,7 @@ test('native profile is explicit, default-off, and removes legacy active paths o
 });
 
 test('public GCM API exposes versioned generic and task record contracts', () => {
-  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true \}\)/u);
+  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true \}\)/u);
   assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
   assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 6;/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);
@@ -3601,4 +3601,45 @@ test('current-only record readers reject old kinds while identity evidence still
  const created=await service.create('task',{title:'New'},{id:'task-new-key'});
  assert.equal(created.kind,'task');
  assert.equal(service.inspect({tpsId:'task-new-key',entityKind:'task',title:'New'})?.kind,'task');
+});
+
+
+test('Health records use an independent current key for creation, updates, resolution and identity changes', async()=>{
+ const {service,plugin,contents}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={'food-entry':'entryKind','activity-entry':'entryKind','workout-session':'entryKind'};
+ const entry=await service.create('food-entry',{title:'Lunch',calories:100},{id:'food-entry-key-test'});
+ assert.match(contents.get(entry.file),/entryKind: food-entry/);assert.doesNotMatch(contents.get(entry.file),/^kind:/m);
+ assert.equal(service.inspect({tpsId:entry.id,title:'Lunch',kind:'food-entry'}),null);
+ assert.equal(service.inspect({tpsId:entry.id,title:'Lunch',entryKind:'food-entry'})?.kind,'food-entry');
+ const updated=await service.update(entry.path,{calories:150});assert.equal(updated.frontmatter.calories,150);
+ assert.match(contents.get(entry.file),/entryKind: food-entry/);assert.doesNotMatch(contents.get(entry.file),/^kind:/m);
+ const renamed=await service.reidentify(entry.path,'food-entry-new-key-test');assert.equal(renamed.id,'food-entry-new-key-test');
+ assert.match(contents.get(entry.file),/entryKind: food-entry/);
+ const task=await service.create('task',{title:'Task'});assert.match(contents.get(task.file),/^kind: task/m);
+ service.refreshConfiguration();assert.equal((await service.resolve(entry.path))?.kind,'food-entry');
+});
+
+test('explicit per-kind keys can equal the shared key and persist without an enabled Health plugin',async()=>{
+ const {service,plugin,contents}=createHarness();
+ await service.configureKindPropertyKeys({'workout-session':'kind'},{});
+ const entry=await service.create('workout-session',{title:'Workout'});
+ assert.match(contents.get(entry.file),/^kind: workout-session/m);
+ assert.equal(service.getStorageProfile('workout-session').kindPropertyKey,'kind');
+ await assert.rejects(service.configureKindPropertyKeys({},{}),/mappings changed/);
+ assert.equal(plugin.settings.nativeRecordKindPropertyKeys['workout-session'],'kind');
+});
+
+test('kind key map save failure restores the previous persisted mapping', async()=>{
+ const {service,plugin}=createHarness();let saves=0;
+ plugin.saveSettings=async()=>{if(++saves===1)throw Error('Storage failed');};
+ await assert.rejects(service.configureKindPropertyKeys({'food-entry':'entryKind'},{}),/Storage failed/);
+ assert.deepEqual(service.getKindPropertyKeys(),{});assert.equal(saves,2);
+});
+
+
+test('creating a record rejects all current physical identity keys instead of silently dropping them',async()=>{
+ const {service,plugin}=createHarness('native-records',{kindPropertyKey:'recordType'});
+ plugin.settings.nativeRecordKindPropertyKeys={'food-entry':'entryKind'};
+ await assert.rejects(service.create('food-entry',{title:'Lunch',recordType:'user data'}),/collides with system storage/);
+ await assert.rejects(service.create('task',{title:'Task',entryKind:'user data'}),/collides with system storage/);
 });

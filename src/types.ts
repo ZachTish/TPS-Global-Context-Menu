@@ -487,6 +487,7 @@ export interface TPSGlobalContextMenuSettings {
   nativeRecordSchemaPropertyKey: string;
   nativeRecordIdentityTagPrefix: string;
   nativeRecordKindPropertyKey: string;
+  nativeRecordKindPropertyKeys: Record<string, string>;
   nativeRecordTitlePropertyKey: string;
   nativeRecordCreatedPropertyKey: string;
   nativeRecordModifiedPropertyKey: string;

@@ -730,11 +730,14 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
     };
     const nativeRecordsApi = {
         version: plugin.nativeRecordService.version,
-        capabilities: Object.freeze({ customKinds: true, calendarTemplateRecords: true }),
+        capabilities: Object.freeze({ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true }),
         getMode: () => plugin.nativeRecordService.getMode(),
         isEnabled: () => plugin.nativeRecordService.isEnabled(),
         getRootPath: () => plugin.nativeRecordService.getRootPath(),
-        getStorageProfile: () => plugin.nativeRecordService.getStorageProfile(),
+        getStorageProfile: (kind?: string) => plugin.nativeRecordService.getStorageProfile(kind),
+        getKindPropertyKeys: () => plugin.nativeRecordService.getKindPropertyKeys(),
+        configureKindPropertyKeys: (next: Record<string, string>, expected: Record<string, string>) => plugin.nativeRecordService.configureKindPropertyKeys(next, expected),
+        refreshConfiguration: () => plugin.nativeRecordService.refreshConfiguration(),
         inspect: (frontmatter: unknown) => plugin.nativeRecordService.inspect(frontmatter),
         isRecord: (file: TFile) => plugin.nativeRecordService.isRecordFile(file),
         create: (
@@ -1152,6 +1155,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         propertyMappings: {
             version: 1,
             changeKey: (pluginId: string, settingKey: string, value: string) => plugin.propertyMigrationService.requestPluginKey(pluginId, settingKey, value),
+            changeHealthKindKey: (value: string) => plugin.propertyMigrationService.requestHealthKindKey(value),
             isMigrating: () => plugin.propertyMigrationService.active,
         },
         history: {

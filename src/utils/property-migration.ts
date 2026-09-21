@@ -2,7 +2,7 @@ import { MANAGED_NOTE_FIELDS, managedNoteFieldKey, configureManagedNoteField } f
 import { isAlias, isMap, isScalar, isSeq, parseDocument, visit } from 'yaml';
 
 export type PropertyMigration =
-  | { kind: 'key'; from: string; to: string; previousKeys?: string[] }
+  | { kind: 'key'; from: string; to: string; previousKeys?: string[]; recordKinds?: string[] }
   | { kind: 'value'; key: string; from: string; to: string };
 export interface SettingsPatch { key: string; before: unknown; after: unknown }
 export const MIGRATABLE_KEY_SETTINGS = {
@@ -27,6 +27,10 @@ export function validateMigration(change: PropertyMigration): void {
 export function validateMigrationSettings(settings: any, change: PropertyMigration): void {
   if (change.kind !== 'key' || fold(change.from) === fold(change.to)) return;
   if (['tpsid', 'tags', 'aliases'].includes(fold(change.to)) || fold(change.from) === 'tpsid') throw new Error('This property is reserved and cannot be used for this mapping.');
+  if (change.recordKinds) {
+    if (['title', 'tpsschemaversion', 'createddate', 'modifieddate'].includes(fold(change.to))) throw new Error('This property is reserved.');
+    return;
+  }
   const configured = [
     ...(settings.properties || []).map((property: any) => property.key),
     ...Object.entries(MIGRATABLE_KEY_SETTINGS).map(([key, fallback]) => settings[key] || fallback),
@@ -56,6 +60,21 @@ export function migrateNoteProperties(source: string, change: PropertyMigration)
   const doc = parseDocument(yaml, { uniqueKeys: false, keepSourceTokens: true });
   const map = isMap(doc.contents) ? doc.contents : null;
   const matches = map?.items.filter(pair => isScalar(pair.key) && fold(String(pair.key.value)) === wanted) || [];
+  if (change.kind === 'key' && change.recordKinds && doc.errors.length && !/[\\&*!]|<</.test(yaml)
+    && (!yaml.toLowerCase().includes('tpsid') || !change.recordKinds.some(kind => yaml.includes(kind)))) return source;
+  if (change.kind === 'key' && change.recordKinds && !doc.errors.length) {
+    const id = map?.items.find(pair => isScalar(pair.key) && fold(String(pair.key.value)) === 'tpsid')?.value;
+    if (map?.items.some(pair => isScalar(pair.key) && pair.key.value === '<<')) {
+      let possibleKind = false, possibleId = false;
+      visit(doc, { Pair(_key, pair) {
+        if (isScalar(pair.key) && fold(String(pair.key.value)) === 'tpsid') possibleId = true;
+        if (isScalar(pair.value) && change.recordKinds!.includes(String(pair.value.value))) possibleKind = true;
+      } });
+      if (possibleId && possibleKind) throw new Error('YAML merge keys require manual migration.');
+    }
+    if (isScalar(id) && matches.some(pair => isAlias(pair.value))) throw new Error('Aliased kind values require manual migration.');
+    if (!isScalar(id) || !String(id.value || '').trim() || !matches.some(pair => isScalar(pair.value) && change.recordKinds!.includes(String(pair.value.value)))) return source;
+  }
   if (map?.items.some(pair => isScalar(pair.key) && pair.key.value === '<<')) {
     let mayInheritSource = matches.length > 0;
     visit(doc, { Pair(_key, pair) { if (isScalar(pair.key) && fold(String(pair.key.value)) === wanted) mayInheritSource = true; } });
@@ -105,6 +124,10 @@ export function migrateNoteProperties(source: string, change: PropertyMigration)
 
 /** Update known GCM references, not arbitrary text, formulas, or other plugins. */
 export function updateMigrationReferences(settings: any, change: PropertyMigration): void {
+  if (change.kind === 'key' && change.recordKinds) return;
+  if (change.kind === 'key' && settings.nativeRecordKindPropertyKeys) {
+    for (const [kind, key] of Object.entries(settings.nativeRecordKindPropertyKeys)) if (typeof key === 'string' && fold(key) === fold(change.from)) settings.nativeRecordKindPropertyKeys[kind] = change.to;
+  }
   const key = change.kind === 'key' ? change.from : change.key;
   const renameKey = (value: any) => typeof value === 'string' && fold(value) === fold(key) ? change.to : value;
   const renameValue = (value: any) => value === change.from ? change.to : value;

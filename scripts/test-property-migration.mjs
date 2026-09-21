@@ -152,3 +152,31 @@ test('shared key changes cannot combine distinct Health nutrient properties even
  await assert.rejects(h.service.request({kind:'key',from:'calories',to:'proteinG'},()=>{}),/another record property/);
  assert.equal(h.writes.length,0);assert.equal(h.storage.size,0);
 });
+
+
+test('Health-only key migration separates records from templates and other TPS notes and can merge them again',async()=>{
+ const h=harness({'entry.md':fm('tpsId: food-1\nkind: food-entry'),'template.md':fm('kind: food'),'workout.md':fm('kind: workout-plan'),'task.md':fm('tpsId: task-1\nkind: task')});
+ const health={settings:{nativeRecordKinds:{foodEntry:'food-entry',activityEntry:'activity-entry',workoutSession:'workout-session',workoutExercise:'workout-exercise'},nativeRecordProperties:{calories:'calories'}},nativeRecordService:{refreshConfiguration(){}}};
+ h.plugin.app.plugins={plugins:{'tps-health':health}};
+ h.plugin.nativeRecordService={getStorageProfile:kind=>({kindPropertyKey:h.plugin.settings.nativeRecordKindPropertyKeys?.[kind]||'kind'}),refreshConfiguration(){}};
+ PropertyMigrationModal.confirm=async()=>false;assert.equal(await h.service.requestHealthKindKey('entryKind'),false);assert.equal(h.writes.length,0);
+ PropertyMigrationModal.confirm=async()=>true;assert.equal(await h.service.requestHealthKindKey('entryKind'),true);
+ assert.match(h.data.get('entry.md'),/"entryKind": food-entry/);
+ assert.equal(h.data.get('template.md'),fm('kind: food'));assert.equal(h.data.get('workout.md'),fm('kind: workout-plan'));assert.equal(h.data.get('task.md'),fm('tpsId: task-1\nkind: task'));
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKey,undefined);
+ assert.equal(await h.service.requestHealthKindKey('kind'),true);assert.match(h.data.get('entry.md'),/"kind": food-entry/);assert.doesNotMatch(h.data.get('entry.md'),/entryKind/);
+});
+
+
+test('Health-scoped migration skips malformed unrelated templates but blocks possibly matching broken records',()=>{
+ const change={kind:'key',from:'kind',to:'entryKind',recordKinds:['food-entry']};
+ const unrelated=fm('kind: project\n- malformed');assert.equal(migrate(unrelated,change),unrelated);
+ assert.throws(()=>migrate(fm('tpsId: one\nkind: food-entry\n- malformed'),change),/malformed/);
+});
+
+
+test('scoped Health migration cannot silently skip merged or aliased record identities',()=>{
+ const change={kind:'key',from:'kind',to:'entryKind',recordKinds:['food-entry']};
+ assert.throws(()=>migrate(fm('defaults: &defaults {tpsId: one, kind: food-entry}\n<<: *defaults'),change),/merge keys/);
+ assert.throws(()=>migrate(fm('type: &type food-entry\ntpsId: one\nkind: *type'),change),/Aliased kind/);
+});

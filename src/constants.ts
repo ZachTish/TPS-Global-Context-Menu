@@ -11,6 +11,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   nativeRecordSchemaPropertyKey: '',
   nativeRecordIdentityTagPrefix: 'tps/record',
   nativeRecordKindPropertyKey: 'kind',
+  nativeRecordKindPropertyKeys: {},
   nativeRecordTitlePropertyKey: 'title',
   nativeRecordCreatedPropertyKey: '',
   nativeRecordModifiedPropertyKey: '',

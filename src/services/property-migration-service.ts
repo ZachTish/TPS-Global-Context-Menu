@@ -67,6 +67,23 @@ export class PropertyMigrationService {
     const from = owner.settings[settingKey] || PLUGIN_MAPPING_FIELDS[pluginId][settingKey];
     return this.request({ kind: 'key', from, to: to.trim() }, () => {});
   }
+  async requestHealthKindKey(to: string): Promise<boolean> {
+    const health = this.consumer('tps-health');
+    const kinds = Object.values(health?.settings?.nativeRecordKinds || {}) as string[];
+    if (!kinds.length) throw new Error('Enable Health before changing its record key.');
+    to = to.trim();
+    if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(to)) throw new Error('Enter a valid frontmatter key.');
+    const fromKeys = [...new Set(kinds.map(kind => this.plugin.nativeRecordService.getStorageProfile(kind).kindPropertyKey))];
+    if (fromKeys.length !== 1) throw new Error('Health records have inconsistent key mappings. Repair these before migrating.');
+    if (fromKeys[0] === to) return false;
+    const profile = this.plugin.nativeRecordService.getStorageProfile(kinds[0]);
+    if (['identityPropertyKey', 'schemaPropertyKey', 'titlePropertyKey', 'createdPropertyKey', 'modifiedPropertyKey'].some(field => String((profile as any)[field] || '').toLowerCase() === to.toLowerCase())) throw new Error('This key belongs to the shared record envelope.');
+    if (Object.values(health.settings.nativeRecordProperties || {}).some(key => String(key).toLowerCase() === to.toLowerCase())
+      || [health.settings.workoutStartPropertyKey, health.settings.workoutIntervalPropertyKey].some(key => String(key).toLowerCase() === to.toLowerCase())) throw new Error('Another Health field already uses this key.');
+    return this.request({ kind: 'key', from: fromKeys[0], to, recordKinds: kinds }, settings => {
+      settings.nativeRecordKindPropertyKeys = { ...settings.nativeRecordKindPropertyKeys, ...Object.fromEntries(kinds.map(kind => [kind, to])) };
+    });
+  }
   private assertConsumers(plans: PluginSettingsPatch[]): void {
     for (const plan of plans) {
       const owner = this.consumer(plan.pluginId);
@@ -89,7 +106,7 @@ export class PropertyMigrationService {
   async request(change: PropertyMigration, configure: (settings: typeof this.plugin.settings) => void): Promise<boolean> {
     if (this.disposed) throw new Error('GCM was reloaded. Reopen its settings before migrating.');
     if (this.busy || this.recoveryPending) throw new Error('Finish or restore the previous property migration first.');
-    if (change.kind === 'key') {
+    if (change.kind === 'key' && !change.recordKinds) {
       const field = MANAGED_NOTE_FIELDS.find(field => managedNoteFieldKey(this.plugin.settings, field).toLowerCase() === change.from.toLowerCase());
       if (field) change = { ...change, previousKeys: [field, ...(this.plugin.settings.managedNoteFieldAliases?.[field] || [])] };
     }
@@ -102,21 +119,24 @@ export class PropertyMigrationService {
       updateMigrationReferences(afterSettings, change);
       configure(afterSettings);
       const patches = settingsPatches(beforeSettings, afterSettings);
-      const plugins = Object.keys(PLUGIN_MAPPING_FIELDS).flatMap(pluginId => {
+      const plugins = (change.kind === 'key' && change.recordKinds ? [] : Object.keys(PLUGIN_MAPPING_FIELDS)).flatMap(pluginId => {
         const owner = this.consumer(pluginId);
         if (!owner?.settings) return [];
         const patches = pluginMappingPatches(pluginId, owner.settings, change);
         return patches.length ? [{ pluginId, patches }] : [];
       });
+      const healthKinds = change.kind === 'key' && change.recordKinds ? JSON.stringify(this.consumer('tps-health')?.settings?.nativeRecordKinds) : null;
       const plan = await this.preview(change);
       if (this.disposed) throw new Error('GCM was reloaded. Apply again to review a fresh preview.');
+      const scope = change.kind === 'key' && change.recordKinds ? 'Only logged Health entries and workout sessions are included; reusable templates and other record types keep their keys.' : 'Includes archived notes and templates.';
       const name = change.kind === 'key' ? `Rename property “${change.from}” → “${change.to}”` : `Rename ${change.key} value “${change.from}” → “${change.to}”`;
       const confirmed = await PropertyMigrationModal.confirm(this.plugin.app, name,
-        `${plan.notes.length} Markdown notes will change, including archived notes and templates. This updates frontmatter only. Exact string values and list items match; note bodies, inline fields, and Base formulas are not rewritten. Matching mappings in enabled TPS plugins update together; disabled plugins must be enabled before migrating their fields. ${patches.length} GCM settings groups and ${plugins.length} TPS plugins will update. A temporary local recovery copy is kept until completion.`,
+        `${plan.notes.length} Markdown notes will change. ${scope} This updates frontmatter only. Exact string values and list items match; note bodies, inline fields, and Base formulas are not rewritten. Matching mappings in enabled TPS plugins update together; disabled plugins must be enabled before migrating their fields. ${patches.length} GCM settings groups and ${plugins.length} TPS plugins will update. A temporary local recovery copy is kept until completion.`,
         plan.notes.map(note => note.path), plan.blocked);
       if (!confirmed) return false;
       if (this.disposed) throw new Error('GCM was reloaded. Apply again to review a fresh preview.');
       if (!equal(beforeSettings, this.plugin.settings)) throw new Error('Settings changed during preview. Apply again to review a fresh preview.');
+      if (healthKinds && healthKinds !== JSON.stringify(this.consumer('tps-health')?.settings?.nativeRecordKinds)) throw new Error('Health kinds changed. Review the migration again.');
       this.assertConsumers(plugins);
       const fresh = await this.preview(change);
       if (fresh.blocked.length || !equal(plan.notes, fresh.notes)) throw new Error('Notes changed during preview. Apply again to review a fresh preview.');
@@ -144,6 +164,7 @@ export class PropertyMigrationService {
         const remaining = await this.preview(change);
         if (remaining.notes.length || remaining.blocked.length) throw new Error('New matching notes appeared during migration. Restoring the migration.');
         if (!equal(beforeSettings, this.plugin.settings)) throw new Error('Settings changed while notes were updating. Restoring the migration.');
+        if (healthKinds && healthKinds !== JSON.stringify(this.consumer('tps-health')?.settings?.nativeRecordKinds)) throw new Error('Health kinds changed. Review the migration again.');
         this.assertConsumers(plugins);
         this.applyPatches(patches, 'after');
         await this.plugin.saveSettings();
@@ -215,6 +236,7 @@ export class PropertyMigrationService {
   private refresh(notes: NoteChange[]): void {
     try {
       this.plugin.nativeRecordService?.refreshConfiguration();
+      this.consumer('tps-health')?.nativeRecordService?.refreshConfiguration?.();
       this.plugin.eventService.emitFilesUpdated(notes.map(note => note.path), { sourcePluginId: this.plugin.manifest.id });
       this.plugin.notebookNavigatorRuleService?.invalidateNotebookNavigatorPresentation();
     } catch { logger.warn('[property-migration] refresh deferred until next open'); }
