@@ -166,12 +166,12 @@ test('every TPS editor substitution fails closed in strict Source mode', () => {
   assert.match(viewModeManagerSource, /now - previousRepair < 2_000/);
 });
 
-test('active mode transitions rebuild editor and injected surfaces from real view state', () => {
+test('active mode transitions refresh injected surfaces without global editor reconfiguration', () => {
   const source = readFileSync(new URL('../src/events/register-events.ts', import.meta.url), 'utf8');
   assert.match(source, /getViewMode\(view\)/);
   assert.match(source, /isStrictSourceMode\(view\)/);
-  assert.match(source, /plugin\.app\.workspace\.updateOptions\(\)/);
-  assert.match(source, /hideCompletedCheckboxesService\?\.refreshAllEditors\(\)/);
+  assert.doesNotMatch(source, /plugin\.app\.workspace\.updateOptions\(\)/);
+  assert.match(source, /hideCompletedCheckboxesService\?\.refreshAllEditors\(\{ reconfigureEditors: false \}\)/);
   assert.match(source, /virtualBaseEmbedService\?\.scheduleRefresh\(0\)/);
   assert.doesNotMatch(source, /getViewModeSignature/);
 });

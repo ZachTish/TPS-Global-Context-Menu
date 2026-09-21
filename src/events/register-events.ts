@@ -220,8 +220,9 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
         if (!signature || signature === lastActiveModeSignature) return;
         lastActiveModeSignature = signature;
         throttledEnsureMenus();
-        plugin.app.workspace.updateOptions();
-        plugin.hideCompletedCheckboxesService?.refreshAllEditors();
+        // Obsidian already configures the newly opened/switched editor. Refresh
+        // our DOM surfaces without reconfiguring every Markdown tab twice.
+        plugin.hideCompletedCheckboxesService?.refreshAllEditors({ reconfigureEditors: false });
         plugin.virtualBaseEmbedService?.scheduleRefresh(0);
         overlayRendering.invalidate({
             reason: 'active-view-mode-transition',

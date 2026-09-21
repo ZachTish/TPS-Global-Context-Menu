@@ -131,11 +131,11 @@ export class HideCompletedCheckboxesService {
     });
   }
 
-  refreshAllEditors(): void {
+  refreshAllEditors(options: { reconfigureEditors?: boolean } = {}): void {
     this.discoverLivePreviewRoots();
     this.discoverRenderedRoots();
     this.scheduleRefresh();
-    this.plugin.app.workspace.updateOptions();
+    if (options.reconfigureEditors !== false) this.plugin.app.workspace.updateOptions();
   }
 
   shouldHideCompletedTasksInLivePreview(): boolean {

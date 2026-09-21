@@ -3385,7 +3385,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         await leaf.openFile(file, { active: openActiveForMount } as any);
       }
       const openedLeaf = this.findOpenLeafForFile(file) ?? leaf;
-      if (openActive) {
+      // openFile/setViewState already activates and focuses a foreground open.
+      if (openActive && this.app.workspace.activeLeaf !== openedLeaf) {
         this.app.workspace.setActiveLeaf(openedLeaf, { focus: true } as any);
       }
       if (revealLeaf) {
