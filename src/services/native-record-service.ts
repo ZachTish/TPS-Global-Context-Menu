@@ -1088,6 +1088,13 @@ export class NativeRecordService {
   }>();
   private authoritativeSourceRevision = 0;
   private readonly authoritativeIndexDirtyPaths = new Set<string>();
+  private inspectionProfiles: {
+    signature: string;
+    write: TpsNativeRecordStorageProfile;
+    evidence: TpsNativeRecordStorageProfile[];
+    readable: TpsNativeRecordStorageProfile[];
+    kindKeys: Record<string, string>;
+  } | null = null;
   private nativePlanMutationLock: symbol | null = null;
   private nativeMutationRevision = 0;
   private activeNativeWrites = 0;
@@ -1119,6 +1126,10 @@ export class NativeRecordService {
       if (!(file instanceof TFile)) return;
       this.invalidateAuthoritativeSources([file.path]);
       if (!this.isInternalIdentityWrite(file.path)) this.identitySourceGeneration += 1;
+      this.indexFile(file);
+      // Vault discovery emits create for existing files before layout readiness.
+      // Index those files, but never treat them as newly authored Base drafts.
+      if (!this.plugin.app.workspace.layoutReady) return;
       this.newlyCreatedFiles.add(file);
       const timer = globalThis.setTimeout(() => {
         this.newlyCreatedFiles.delete(file);
@@ -1126,7 +1137,6 @@ export class NativeRecordService {
       }, 10_000);
       (timer as unknown as { unref?: () => void }).unref?.();
       this.draftEligibilityTimers.set(file, timer);
-      this.indexFile(file);
       void this.adoptNewTaskDraft(file);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('modify', (file) => {
@@ -1247,12 +1257,42 @@ export class NativeRecordService {
   inspect(frontmatter: unknown): TpsNativeRecordInspection | null {
     if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) return null;
     const raw = frontmatter as Record<string, unknown>;
-    if (!inspectNativeRecordMatchSet(raw, this.getIdentityEvidenceProfiles(), this.getStorageProfile())) return null;
-    const inspection = inspectNativeRecordMatchSet(raw, this.getReadableStorageProfiles(), this.getStorageProfile())?.inspection;
+    const profiles = this.getInspectionProfiles();
+    if (!inspectNativeRecordMatchSet(raw, profiles.evidence, profiles.write)) return null;
+    const inspection = inspectNativeRecordMatchSet(raw, profiles.readable, profiles.write)?.inspection;
     if (!inspection) return null;
-    if (this.readingMigrationSources) return inspection;
-    const current = this.getStorageProfile(inspection.kind);
-    return inspectNativeRecordMatchSet(raw, [current], current)?.inspection || null;
+    const key = Object.prototype.hasOwnProperty.call(profiles.kindKeys, inspection.kind)
+      ? profiles.kindKeys[inspection.kind] : undefined;
+    const current = key ? { ...profiles.write, kindPropertyKey: key } : profiles.write;
+    const result = this.readingMigrationSources
+      ? inspection
+      : inspectNativeRecordMatchSet(raw, [current], current)?.inspection;
+    // API callers may edit the returned profile; keep prepared profiles private.
+    return result ? { ...result, profile: { ...result.profile } } : null;
+  }
+
+  private getInspectionProfiles(): NonNullable<NativeRecordService['inspectionProfiles']> {
+    const settings = this.plugin.settings;
+    // Compare values, not object identity: settings drafts and migrations can
+    // mutate nested mappings in place before save/refreshConfiguration runs.
+    const signature = JSON.stringify([
+      settings.nativeRecordIdentityMode, settings.nativeRecordIdentityPropertyKey,
+      settings.nativeRecordSchemaPropertyKey, settings.nativeRecordIdentityTagPrefix,
+      settings.nativeRecordKindPropertyKey, settings.nativeRecordTitlePropertyKey,
+      settings.nativeRecordCreatedPropertyKey, settings.nativeRecordModifiedPropertyKey,
+      settings.nativeRecordStorageAliases, settings.nativeRecordKindPropertyKeys,
+      this.readingMigrationSources,
+    ]);
+    if (this.inspectionProfiles?.signature !== signature) {
+      this.inspectionProfiles = {
+        signature,
+        write: this.getStorageProfile(),
+        evidence: this.getIdentityEvidenceProfiles(),
+        readable: this.getReadableStorageProfiles(),
+        kindKeys: this.getKindPropertyKeys(),
+      };
+    }
+    return this.inspectionProfiles;
   }
 
   /** Classifies current frontmatter synchronously from inside an atomic mutation callback. */
@@ -3062,6 +3102,7 @@ export class NativeRecordService {
   }
 
   private rebuildIndex(): void {
+    const started = performance.now();
     this.authoritativeSourceCache.clear();
     this.authoritativeSourceRevision += 1;
     this.authoritativeIdentityGeneration = -1;
@@ -3072,6 +3113,12 @@ export class NativeRecordService {
     const markdownFiles = vault.getMarkdownFiles();
     this.clearIdentityIndex();
     for (const file of markdownFiles) this.indexFile(file);
+    logger.flow('NativeRecords', 'index:rebuilt', {
+      files: markdownFiles.length,
+      records: this.recordsByPath.size,
+      blocked: this.blockedIdentityEvidencePaths.size,
+      durationMs: Math.round(performance.now() - started),
+    });
   }
 
   private clearIdentityIndex(): void {
@@ -3234,11 +3281,12 @@ export class NativeRecordService {
     this.removePath(file.path);
     const resolved = frontmatter ?? this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
     if (resolved) {
-      const readableProfiles = this.getIdentityEvidenceProfiles();
+      const profiles = this.getInspectionProfiles();
+      const readableProfiles = profiles.evidence;
       const applicableProfiles = selectApplicableReadableProfiles(
         resolved,
         readableProfiles,
-        this.getStorageProfile(),
+        profiles.write,
       );
       const recoverableIds = new Set<string>();
       for (const profile of applicableProfiles) {
@@ -3266,10 +3314,10 @@ export class NativeRecordService {
       const combinedMatch = inspectNativeRecordMatchSet(
         resolved,
         readableProfiles,
-        this.getStorageProfile(),
+        profiles.write,
       );
       if (
-        hasInvalidReadableIdentityEvidence(resolved, applicableProfiles, this.getStorageProfile())
+        hasInvalidReadableIdentityEvidence(resolved, applicableProfiles, profiles.write)
         || (recoverableIds.size > 0 && (!combinedMatch || !this.inspect(resolved)))
       ) {
         this.blockedIdentityEvidencePaths.add(file.path);

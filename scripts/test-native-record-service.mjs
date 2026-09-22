@@ -300,6 +300,7 @@ function createHarness(mode = 'native-records', options = {}) {
     registerEvent: () => {},
     app: {
       vault,
+      workspace: { layoutReady: options.layoutReady !== false },
       metadataCache: {
         getFileCache: (file) => ({ frontmatter: metadata.get(file) }),
         on: (eventName, handler) => {
@@ -3730,4 +3731,84 @@ test('incremental source reconciliation retains unchanged records and repairs pr
   contents.set(files[0],'No record now');vault.emit('modify',files[0]);
   assert.equal(await service.resolve('food-0'),null);
   assert.equal((await service.snapshot()).records.length,1000);
+});
+
+test('cold vault discovery indexes existing records without reading or adopting existing task drafts', async () => {
+  const { service, plugin, vault, contents } = createHarness('native-records', { layoutReady: false });
+  let reads = 0;
+  const read = vault.cachedRead;
+  vault.cachedRead = async file => { reads++; return read(file); };
+  const discovered = [];
+  for (let i = 0; i < 1000; i++) {
+    const fm = i % 2 ? { kind: 'task', title: `Existing ${i}`, tpsId: `existing-${i}` } : { kind: 'task', title: `Existing ${i}` };
+    const text = serializeNativeRecordDocument({ bom: '', newline: '\n', closer: '---', body: '', frontmatter: fm });
+    const file = await vault.create(`Existing ${i}.md`, text);
+    discovered.push({ file, text });
+  }
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(reads, 0, 'startup create events must not read note bodies for draft adoption');
+  assert.equal(service.recordsByPath.size, 500, 'existing native records are indexed during discovery');
+  for (const { file, text } of discovered) {
+    assert.equal(contents.get(file), text);
+    assert.equal(service.newlyCreatedFiles.has(file), false);
+    assert.equal(service.draftEligibilityTimers.has(file), false);
+  }
+  plugin.app.workspace.layoutReady = true;
+  for (const { file } of discovered) plugin.app.metadataCache.emit('changed', file);
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(reads, 0, 'late metadata does not reinterpret discovered notes as new drafts');
+  const draft = await vault.create('Actually new.md', '---\nkind: task\ntitle: New\n---\n');
+  await new Promise(resolve => setTimeout(resolve, 0));
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.match(draft.path, /^_records\/tasks\/task-/);
+});
+
+test('record inspection prepares mappings once and keeps returned profiles and note mutations independent', () => {
+  const { service, addFile } = createHarness();
+  let preparations = 0;
+  const prepare = service.getIdentityEvidenceProfiles;
+  service.getIdentityEvidenceProfiles = function () { preparations++; return prepare.call(this); };
+  service.inspectionProfiles = null;
+  const fm = { tpsId: 'prepared', kind: 'task', title: 'Before' };
+  for (let i = 0; i < 1000; i++) assert.equal(service.inspect(fm)?.id, 'prepared');
+  const file = addFile('Prepared.md', fm);
+  for (let i = 0; i < 1000; i++) service.indexFile(file, fm);
+  assert.equal(service.recordsByPath.get(file.path)?.tpsId, 'prepared');
+  assert.equal(preparations, 1);
+  const first = service.inspect(fm);
+  first.profile.identityPropertyKey = 'poisoned';
+  first.frontmatter.title = 'Caller-owned copy';
+  fm.title = 'After';
+  assert.equal(service.inspect(fm)?.frontmatter.title, 'After');
+  assert.equal(service.inspect(fm)?.profile.identityPropertyKey, 'tpsId');
+  fm.tpsId = '';
+  assert.equal(service.inspect(fm), null, 'conflicting evidence is still evaluated on every call');
+});
+
+test('prepared inspection tracks nested key changes, aliases and migration mode without requiring a settings save', () => {
+  const { service, plugin } = createHarness();
+  const fm = { tpsId: 'mapped', kind: 'task', title: 'Mapped' };
+  assert.equal(service.inspect(fm)?.id, 'mapped');
+  plugin.settings.nativeRecordKindPropertyKeys = { task: 'taskKind' };
+  assert.equal(service.inspect(fm), null);
+  fm.taskKind = 'task';
+  assert.equal(service.inspect(fm)?.profile.kindPropertyKey, 'taskKind');
+  plugin.settings.nativeRecordKindPropertyKeys.task = 'recordType';
+  assert.equal(service.inspect(fm), null);
+  fm.recordType = 'task';
+  assert.equal(service.inspect(fm)?.profile.kindPropertyKey, 'recordType');
+  for (const change of [
+    () => { plugin.settings.nativeRecordStorageAliases.push({ ...DEFAULT_NATIVE_RECORD_STORAGE_PROFILE, identityPropertyKey: 'oldId' }); },
+    () => { plugin.settings.nativeRecordStorageAliases[0].titlePropertyKey = 'oldTitle'; },
+    () => { service.readingMigrationSources = true; },
+    () => { plugin.settings.nativeRecordTitlePropertyKey = 'name'; },
+    () => { service.readingMigrationSources = false; },
+  ]) {
+    const previous = service.inspectionProfiles;
+    change();
+    const result = service.inspect(fm);
+    assert.notEqual(service.inspectionProfiles, previous);
+    service.inspectionProfiles = null;
+    assert.deepEqual(service.inspect(fm), result, 'cached and freshly prepared classification agree');
+  }
 });
