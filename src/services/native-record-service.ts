@@ -1080,6 +1080,14 @@ export class NativeRecordService {
   private identitySourceGeneration = 0;
   private authoritativeIdentityGeneration = -1;
   private authoritativeIdentityRefresh: Promise<void> | null = null;
+  private readonly authoritativeSourceCache = new Map<string, {
+    file: TFile;
+    mtime: number;
+    size: number;
+    frontmatter: Record<string, unknown> | null;
+  }>();
+  private authoritativeSourceRevision = 0;
+  private readonly authoritativeIndexDirtyPaths = new Set<string>();
   private nativePlanMutationLock: symbol | null = null;
   private nativeMutationRevision = 0;
   private activeNativeWrites = 0;
@@ -1109,6 +1117,7 @@ export class NativeRecordService {
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('create', (file) => {
       if (!(file instanceof TFile)) return;
+      this.invalidateAuthoritativeSources([file.path]);
       if (!this.isInternalIdentityWrite(file.path)) this.identitySourceGeneration += 1;
       this.newlyCreatedFiles.add(file);
       const timer = globalThis.setTimeout(() => {
@@ -1121,16 +1130,19 @@ export class NativeRecordService {
       void this.adoptNewTaskDraft(file);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('modify', (file) => {
+      if (file instanceof TFile) this.invalidateAuthoritativeSources([file.path]);
       if (file instanceof TFile && !this.isInternalIdentityWrite(file.path)) {
         this.identitySourceGeneration += 1;
       }
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('delete', (file) => {
       if (!(file instanceof TFile)) return;
+      this.invalidateAuthoritativeSources([file.path]);
       if (!this.isInternalIdentityWrite(file.path)) this.identitySourceGeneration += 1;
       this.removePath(file.path);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('rename', (file, oldPath) => {
+      this.invalidateAuthoritativeSources([oldPath, file.path]);
       if (
         file instanceof TFile
         && !this.isInternalIdentityWrite(oldPath)
@@ -3050,6 +3062,8 @@ export class NativeRecordService {
   }
 
   private rebuildIndex(): void {
+    this.authoritativeSourceCache.clear();
+    this.authoritativeSourceRevision += 1;
     this.authoritativeIdentityGeneration = -1;
     const vault = this.plugin.app.vault as typeof this.plugin.app.vault & {
       getMarkdownFiles?: () => TFile[];
@@ -3061,6 +3075,7 @@ export class NativeRecordService {
   }
 
   private clearIdentityIndex(): void {
+    this.authoritativeIndexDirtyPaths.clear();
     this.idsByPath.clear();
     this.pathsById.clear();
     this.recordsByPath.clear();
@@ -3070,9 +3085,9 @@ export class NativeRecordService {
   }
 
   /**
-   * MetadataCache can lag files arriving through Sync. Re-identification is a
-   * rare migration boundary, so refresh every parseable Markdown envelope from
-   * authoritative Vault bytes before reserving a destination ID.
+   * MetadataCache can lag files arriving through Sync. Validate authoritative
+   * source before reserving IDs, reusing unchanged source envelopes so ordinary
+   * edits do not make every food log read the entire vault again.
    */
   private async refreshIdentityIndexFromVaultSource(): Promise<void> {
     if (this.authoritativeIdentityGeneration === this.identitySourceGeneration) return;
@@ -3090,38 +3105,99 @@ export class NativeRecordService {
     }
   }
 
+  private invalidateAuthoritativeSources(paths: readonly string[]): void {
+    for (const path of paths) {
+      this.authoritativeSourceCache.delete(path);
+      this.authoritativeIndexDirtyPaths.add(path);
+    }
+    this.authoritativeSourceRevision += 1;
+  }
+
   private async refreshIdentityIndexUntilStable(): Promise<void> {
     const vault = this.plugin.app.vault as typeof this.plugin.app.vault & {
       getMarkdownFiles?: () => TFile[];
     };
-    while (this.authoritativeIdentityGeneration !== this.identitySourceGeneration) {
-      const generation = this.identitySourceGeneration;
-      if (typeof vault.getMarkdownFiles !== 'function') {
-        this.authoritativeIdentityGeneration = generation;
-        return;
-      }
-      const snapshot: Array<[TFile, Record<string, unknown> | null]> = [];
-      for (const file of vault.getMarkdownFiles()) {
-        try {
-          const source = await this.readVaultSource(file);
-          const parsed = parseNativeRecordDocument(source);
-          if (!parsed && this.malformedSourceHasNativeIdentityEvidence(source)) {
-            throw new Error(`Malformed native-record identity evidence: ${file.path}`);
-          }
-          snapshot.push([file, parsed?.frontmatter || null]);
-        } catch (error) {
-          if (error instanceof Error && error.message.startsWith('Malformed native-record identity evidence:')) {
-            throw error;
-          }
-          throw new Error(`Unable to authoritatively read native-record candidate: ${file.path}`);
+    const started = performance.now();
+    let reads = 0;
+    let passes = 0;
+    try {
+      while (this.authoritativeIdentityGeneration !== this.identitySourceGeneration) {
+        passes += 1;
+        const generation = this.identitySourceGeneration;
+        const sourceRevision = this.authoritativeSourceRevision;
+        if (typeof vault.getMarkdownFiles !== 'function') {
+          this.authoritativeIdentityGeneration = generation;
+          return;
         }
+        const files = vault.getMarkdownFiles();
+        const paths = new Set(files.map(file => file.path));
+        for (const path of this.authoritativeSourceCache.keys()) {
+          if (!paths.has(path)) {
+            this.authoritativeSourceCache.delete(path);
+            this.authoritativeIndexDirtyPaths.add(path);
+          }
+        }
+        const snapshot: Array<[TFile, Record<string, unknown> | null]> = [];
+        for (const file of files) {
+          const path = file.path;
+          const mtime = file.stat?.mtime;
+          const size = file.stat?.size;
+          const cached = this.authoritativeSourceCache.get(path);
+          if (cached?.file === file && cached.mtime === mtime && cached.size === size) {
+            snapshot.push([file, cached.frontmatter]);
+            continue;
+          }
+          this.authoritativeIndexDirtyPaths.add(path);
+          const readRevision = this.authoritativeSourceRevision;
+          try {
+            reads += 1;
+            const source = await this.readVaultSource(file);
+            const parsed = parseNativeRecordDocument(source);
+            // Any write during this read makes its result uncertain. Keep the
+            // other verified envelopes and retry against the current file list.
+            if (readRevision !== this.authoritativeSourceRevision || file.path !== path) continue;
+            if (!parsed && this.malformedSourceHasNativeIdentityEvidence(source)) {
+              throw new Error(`Malformed native-record identity evidence: ${file.path}`);
+            }
+            const frontmatter = parsed?.frontmatter || null;
+            this.authoritativeSourceCache.set(path, { file, mtime, size, frontmatter });
+            snapshot.push([file, frontmatter]);
+          } catch (error) {
+            if (readRevision !== this.authoritativeSourceRevision || file.path !== path) continue;
+            this.authoritativeSourceCache.delete(path);
+            if (error instanceof Error && error.message.startsWith('Malformed native-record identity evidence:')) throw error;
+            throw new Error(`Unable to authoritatively read native-record candidate: ${file.path}`);
+          }
+        }
+        if (generation !== this.identitySourceGeneration || sourceRevision !== this.authoritativeSourceRevision) continue;
+        // Metadata events may have touched the provisional index during reads.
+        // Reconcile those paths plus changed sources; keep verified identities
+        // for every unchanged file, including duplicate and blocked ownership.
+        for (const path of this.authoritativeIndexDirtyPaths) {
+          if (!paths.has(path)) this.removePath(path);
+        }
+        for (const [file, frontmatter] of snapshot) {
+          if (!this.authoritativeIndexDirtyPaths.has(file.path)) continue;
+          if (!frontmatter) {
+            this.removePath(file.path);
+            continue;
+          }
+          this.indexFile(file, frontmatter);
+          if (!this.idsByPath.has(file.path) && !this.blockedIdentityEvidencePaths.has(file.path)) {
+            // Remember verified non-records without repeatedly classifying their
+            // properties. A source or configuration change invalidates this marker.
+            const cached = this.authoritativeSourceCache.get(file.path);
+            if (cached) cached.frontmatter = null;
+          }
+        }
+        this.authoritativeIndexDirtyPaths.clear();
+        this.authoritativeIdentityGeneration = generation;
       }
-      if (generation !== this.identitySourceGeneration) continue;
-      this.clearIdentityIndex();
-      for (const [file, frontmatter] of snapshot) {
-        if (frontmatter) this.indexFile(file, frontmatter);
-      }
-      this.authoritativeIdentityGeneration = generation;
+    } finally {
+      logger.perf('native-records:identity-refresh', {
+        reads, passes, cachedFiles: this.authoritativeSourceCache.size,
+        durationMs: Math.round(performance.now() - started),
+      });
     }
   }
 
@@ -3225,6 +3301,7 @@ export class NativeRecordService {
   }
 
   private removePath(path: string): void {
+    this.authoritativeIndexDirtyPaths.add(path);
     const prior = this.recordsByPath.get(path);
     this.recordsByPath.delete(path);
     this.blockedIdentityEvidencePaths.delete(path);
@@ -3345,6 +3422,7 @@ export class NativeRecordService {
       completed = true;
       return result;
     } finally {
+      this.invalidateAuthoritativeSources(normalizedPaths);
       for (const path of normalizedPaths) {
         const remaining = (this.internalIdentityWritesByPath.get(path) || 1) - 1;
         if (remaining > 0) this.internalIdentityWritesByPath.set(path, remaining);

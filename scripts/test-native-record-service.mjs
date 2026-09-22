@@ -2203,11 +2203,11 @@ test('resolve refreshes stale identity state from Vault bytes and rejects every 
   vault.emit('modify', changed);
 
   assert.equal(await service.resolve('calendar-resolve-owner'), null);
-  assert.equal(authoritativeReads, 2, 'one stale generation performs one complete authoritative refresh');
+  assert.equal(authoritativeReads, 1, 'only the changed source needs an authoritative read');
   assert.equal(await service.resolve(owner), null);
   assert.equal(await service.resolve({ path: owner.path, id: 'calendar-resolve-owner' }), null);
   assert.equal(await service.resolve(changed), null);
-  assert.equal(authoritativeReads, 2, 'subsequent ambiguous resolves reuse the current authoritative index');
+  assert.equal(authoritativeReads, 1, 'subsequent ambiguous resolves reuse the current authoritative index');
   await assert.rejects(() => service.snapshot(), /identity conflicts must be resolved/u);
 });
 
@@ -3642,4 +3642,92 @@ test('creating a record rejects all current physical identity keys instead of si
  plugin.settings.nativeRecordKindPropertyKeys={'food-entry':'entryKind'};
  await assert.rejects(service.create('food-entry',{title:'Lunch',recordType:'user data'}),/collides with system storage/);
  await assert.rejects(service.create('task',{title:'Task',entryKind:'user data'}),/collides with system storage/);
+});
+
+
+test('an edit during a large source scan retries changed files instead of restarting every read', async () => {
+  const {service,vault,contents,addFile}=createHarness();
+  const files=Array.from({length:1000},(_,i)=>addFile(`Inbox/note-${i}.md`, '---\ntitle: Ordinary\n---\nOrdinary body'));
+  const original=vault.read,reads=new Map();let changed=false;
+  vault.read=async file=>{
+    reads.set(file,(reads.get(file)||0)+1);
+    const source=await original(file);
+    if(file===files[900]&&!changed){changed=true;contents.set(files[0],'Edited body');vault.emit('modify',files[0]);}
+    return source;
+  };
+  await service.snapshot();
+  assert.equal(reads.get(files[0]),2);
+  assert.equal(reads.get(files[500]),1,'unchanged earlier files are not read again');
+  assert.ok([...reads.values()].reduce((a,b)=>a+b,0)<=1002);
+  let before=[...reads.values()].reduce((a,b)=>a+b,0);
+  const originalIndex=service.indexFile.bind(service);let classifications=0;
+  service.indexFile=(...args)=>{classifications++;return originalIndex(...args);};
+  contents.set(files[20],'Another body');vault.emit('modify',files[20]);
+  await service.create('food-entry',{title:'Oats',calories:100},{id:'food-oats'});
+  assert.equal([...reads.values()].reduce((a,b)=>a+b,0)-before,1,'logging after an ordinary edit only reads that changed file');
+  assert.ok(classifications<5,'unchanged ordinary properties are not repeatedly classified as records');
+});
+
+test('source cache preserves internal writes through an unrelated later edit and handles rename/delete/replacement', async()=>{
+  const {service,vault,contents,entries,addFile}=createHarness();
+  const record=await service.create('food-entry',{title:'First',calories:100},{id:'food-cache'});
+  const ordinary=addFile('Inbox/ordinary.md','Ordinary');vault.emit('create',ordinary);
+  await service.snapshot();
+  await service.update(record.file,{calories:250});
+  contents.set(ordinary,'Changed');vault.emit('modify',ordinary);
+  await service.snapshot();assert.equal((await service.resolve('food-cache')).frontmatter.calories,250);
+  await vault.rename(record.file,'Inbox/renamed.md');
+  assert.equal((await service.resolve('food-cache')).path,'Inbox/renamed.md');
+  const raw=contents.get(record.file);entries.delete(record.file.path);vault.emit('delete',record.file);
+  assert.equal(await service.resolve('food-cache'),null);
+  const replacement=addFile('Inbox/renamed.md',raw);vault.emit('create',replacement);
+  assert.equal((await service.resolve('food-cache')).file,replacement);
+});
+
+test('an in-flight source change cannot publish its earlier identity bytes', async()=>{
+  const {service,vault,contents,addFile}=createHarness();
+  const record=await service.create('food-entry',{title:'Owner'},{id:'food-owner'});
+  const other=addFile('Inbox/new.md','Ordinary');vault.emit('create',other);
+  const original=vault.read;let changed=false;
+  vault.read=async file=>{
+    const stale=await original(file);
+    if(file===other&&!changed){changed=true;contents.set(other,contents.get(record.file));vault.emit('modify',other);}
+    return stale;
+  };
+  await assert.rejects(()=>service.create('food-entry',{title:'Duplicate'},{id:'food-owner'}),/already exists/);
+  assert.equal(await service.resolve('food-owner'),null,'the concurrent duplicate must be indexed');
+});
+
+
+test('a cached non-record is reconsidered after source and storage configuration changes', async()=>{
+  const {service,plugin,vault,contents,addFile}=createHarness();
+  const ordinary=addFile('Inbox/later-record.md','---\ntitle: Ordinary\n---\nBody');
+  await service.snapshot();
+  contents.set(ordinary,'---\ntitle: Later\ntpsId: later-food\nkind: food-entry\ntpsSchemaVersion: 1\n---\nBody');
+  vault.emit('modify',ordinary);
+  assert.equal((await service.resolve('later-food'))?.path,ordinary.path);
+  const original=vault.read;let reads=0;
+  vault.read=async file=>{reads++;return original(file);};
+  service.refreshConfiguration();
+  assert.equal((await service.resolve('later-food'))?.path,ordinary.path);
+  assert.equal(reads,1,'configuration refresh discards all prior source classifications');
+});
+
+test('incremental source reconciliation retains unchanged records and repairs provisional metadata', async()=>{
+  const {service,plugin,vault,contents,addFile}=createHarness();
+  const files=Array.from({length:1000},(_,i)=>addFile(`Inbox/record-${i}.md`,`---\ntpsId: food-${i}\nkind: food-entry\ntitle: Food ${i}\n---\nBody`));
+  const ordinary=addFile('Inbox/ordinary.md','Ordinary');
+  assert.equal((await service.snapshot()).records.length,1000);
+  contents.set(ordinary,'Edited ordinary');vault.emit('modify',ordinary);
+  plugin.app.metadataCache.emit('changed',files[500],'',{frontmatter:{tpsId:'poison',kind:'food-entry',title:'Stale'}});
+  const original=service.indexFile.bind(service);let classifications=0;
+  service.indexFile=(...args)=>{classifications++;return original(...args);};
+  await service.create('food-entry',{title:'New food'},{id:'food-new'});
+  assert.ok(classifications<=3,'only the provisional record and new record lifecycle need classification');
+  assert.equal((await service.resolve('food-500'))?.path,files[500].path);
+  assert.equal(await service.resolve('poison'),null);
+  assert.equal((await service.snapshot()).records.length,1001);
+  contents.set(files[0],'No record now');vault.emit('modify',files[0]);
+  assert.equal(await service.resolve('food-0'),null);
+  assert.equal((await service.snapshot()).records.length,1000);
 });

@@ -2,7 +2,7 @@
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.1.2](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.1.2) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.1.3](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.1.3) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -156,3 +156,12 @@ The GCM events API delivers each GCM-emitted file update, explicit action, and C
 Navigator presentation invalidates the resolved file and its tracked dependents instead of clearing every prepared record whenever a metadata batch settles. One initial full settlement remains for startup link resolution, along with existing full invalidation for create/delete/rename, settings and date changes. Retired reference-panel cleanup inspects existing footer hosts instead of creating and immediately removing an empty host on every menu refresh. Shared nonempty hosts stay mounted. No preferences, frontmatter or API versions migrate.
 
 Behavioral regression coverage lives in `test-gcm-event-service.mjs`, `test-note-open-refresh.mjs`, and `test-notebook-navigator-presentation.mjs`, alongside the existing typing and note-opening suites. Validation and installed test-vault results are recorded in [release notes](release-notes/3.1.2.md). This patch reduces reproduced duplicate work; it does not assert that every command or every source of visual movement across all plugins is resolved. Production remains a separate user-controlled BRAT update.
+
+
+## 3.1.3 — Avoid repeated vault reads while logging food (2026-09-22)
+
+Native-record creation, including Health food logging, verifies record identities against Vault source bytes. Previously an ordinary note edit invalidated the whole source scan, and any edit during that scan restarted all reads. GCM now keeps an in-memory cache of relevant parsed frontmatter and verified non-record markers keyed by file, path, modification time and size. Unchanged ordinary notes do not repeat identity classification. Create/modify/delete/rename events and internal record writes invalidate affected entries; configuration changes discard the cache. Retries retain verified unchanged entries and reject results made uncertain by an intervening write. Note bodies are not retained in this cache.
+
+Duplicate identities, unreadable candidates, malformed identity evidence, stale migration previews and source-preserving writes retain their guards. No record, setting or API-version migration occurs. This is a backward-compatible performance patch; Health consumes it through GCM's existing nativeRecords API and does not require a new Health release. The first source verification after startup or configuration changes still reads the vault; subsequent checks still enumerate files, but read, parse and reconcile only invalidated paths (including paths touched by provisional metadata events). Food-provider network latency and legacy Daily Note logging are separate paths and are not changed here.
+
+Regression tests cover a 1,000-note scan interrupted by an edit, single-file rereads before food creation, internal edits followed by unrelated changes, rename/delete/replacement, and a duplicate appearing during a read. Structured performance diagnostics report source reads, passes, cache size and duration without note contents. Full tests, the separate final build/deployment, explicit test-vault reload, installed logging checks and artifact hashes are recorded in [release notes](release-notes/3.1.3.md). Minimum Obsidian remains 1.10.0. This release is for the user's BRAT pull; production installation and mobile acceptance remain separate.
