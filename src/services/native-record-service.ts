@@ -3185,14 +3185,14 @@ export class NativeRecordService {
           }
         }
         const snapshot: Array<[TFile, Record<string, unknown> | null]> = [];
-        for (const file of files) {
+        const readFile = async (file: TFile): Promise<void> => {
           const path = file.path;
           const mtime = file.stat?.mtime;
           const size = file.stat?.size;
           const cached = this.authoritativeSourceCache.get(path);
           if (cached?.file === file && cached.mtime === mtime && cached.size === size) {
             snapshot.push([file, cached.frontmatter]);
-            continue;
+            return;
           }
           this.authoritativeIndexDirtyPaths.add(path);
           const readRevision = this.authoritativeSourceRevision;
@@ -3202,7 +3202,7 @@ export class NativeRecordService {
             const parsed = parseNativeRecordDocument(source);
             // Any write during this read makes its result uncertain. Keep the
             // other verified envelopes and retry against the current file list.
-            if (readRevision !== this.authoritativeSourceRevision || file.path !== path) continue;
+            if (readRevision !== this.authoritativeSourceRevision || file.path !== path) return;
             if (!parsed && this.malformedSourceHasNativeIdentityEvidence(source)) {
               throw new Error(`Malformed native-record identity evidence: ${file.path}`);
             }
@@ -3210,12 +3210,28 @@ export class NativeRecordService {
             this.authoritativeSourceCache.set(path, { file, mtime, size, frontmatter });
             snapshot.push([file, frontmatter]);
           } catch (error) {
-            if (readRevision !== this.authoritativeSourceRevision || file.path !== path) continue;
+            if (readRevision !== this.authoritativeSourceRevision || file.path !== path) return;
             this.authoritativeSourceCache.delete(path);
             if (error instanceof Error && error.message.startsWith('Malformed native-record identity evidence:')) throw error;
             throw new Error(`Unable to authoritatively read native-record candidate: ${file.path}`);
           }
-        }
+        };
+        // Bound I/O concurrency: cold identity verification must read all source
+        // files, but need not serialize thousands of independent Vault reads.
+        // Drain every in-flight read on failure before another refresh can start.
+        let cursor = 0;
+        let failure: unknown = null;
+        await Promise.all(Array.from({ length: Math.min(8, files.length) }, async () => {
+          while (cursor < files.length && !failure) {
+            const file = files[cursor++];
+            try {
+              await readFile(file);
+            } catch (error) {
+              failure = failure || error;
+            }
+          }
+        }));
+        if (failure) throw failure;
         if (generation !== this.identitySourceGeneration || sourceRevision !== this.authoritativeSourceRevision) continue;
         // Metadata events may have touched the provisional index during reads.
         // Reconcile those paths plus changed sources; keep verified identities
@@ -3352,10 +3368,11 @@ export class NativeRecordService {
     this.authoritativeIndexDirtyPaths.add(path);
     const prior = this.recordsByPath.get(path);
     this.recordsByPath.delete(path);
-    this.blockedIdentityEvidencePaths.delete(path);
-    for (const [id, paths] of this.blockedPathsById) {
-      paths.delete(path);
-      if (paths.size === 0) this.blockedPathsById.delete(id);
+    if (this.blockedIdentityEvidencePaths.delete(path)) {
+      for (const [id, paths] of this.blockedPathsById) {
+        paths.delete(path);
+        if (paths.size === 0) this.blockedPathsById.delete(id);
+      }
     }
     if (prior && nativeRecordStructuralKind(prior) === 'asset') {
       const sourcePath = normalizePath(String(prior.sourcePath || '').trim());

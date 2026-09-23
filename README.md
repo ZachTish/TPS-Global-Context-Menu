@@ -2,7 +2,7 @@
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.1.6](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.1.6) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.1.7](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.1.7) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -198,3 +198,10 @@ Reading view retains unchanged linked-item row DOM across refreshes, preserving 
 Reading view and Live Preview share a presentation signature covering title/alias, checkbox kind/state/icon, visual classes, property pills and action targets. The signature snapshots mutable file paths. Live Preview retains CodeMirror's mounted wrapper and replaces all changed child content and event handlers together; the former checkbox-only update left titles, pills and event targets stale. Unchanged widgets still reuse their DOM. The linked-row editor extension has highest precedence so native wikilink refreshes cannot cover its recognized ranges with blank replacements. Native list markers and checkbox editing remain in place.
 
 No saved settings, defaults, content migrations or public APIs change. This targets linked-item refresh work, not all Base/Markdown rendering or the separate Source/Live Preview transition issue recorded in 3.1.5. Regression coverage includes repeated unchanged refreshes, presentation changes, file renames, native rerenders, removed rows, nested rows, missing targets and duplicate-host fallback mapping. Full tests, final build/deployment, test-vault plugin reload and installed rendering checks are recorded in [release notes](release-notes/3.1.6.md). Physical iPhone validation remains separate.
+
+
+## 3.1.7 — Reduce first-use identity verification work (2026-09-23)
+
+The first Health food save after startup could still wait for every Markdown file to be read sequentially, even with the incremental cache introduced in 3.1.3. Authoritative identity verification now runs at most eight independent Vault reads concurrently. It retains the same complete source verification, changed-file invalidation, uncertain-read retries and duplicate/malformed-source guards. A failed read stops new work and waits for in-flight reads to settle before releasing the shared refresh, so a retry cannot race leftover workers. Reindexing an ordinary or valid record also stops walking every unrelated blocked identity; conflict cleanup runs only for a path that actually owned blocked evidence.
+
+This is a backward-compatible performance patch with no settings, defaults, frontmatter or API changes. The first verification still visits every file and slower storage can still delay it; it is not skipped or replaced with potentially stale metadata. Warm saves keep the existing incremental behavior. Focused tests verify concurrency, the eight-read ceiling, failure draining, no record on failed verification, safe retry and edits during parallel reads. Full suite, separate final build, targeted test-vault reload, installed food-save timings and artifact hashes are recorded in [release notes](release-notes/3.1.7.md). Minimum Obsidian remains 1.10.0; production installation remains the user's BRAT pull. The reported 30-second click delay has not been reproduced exactly, and these results do not establish its cause on the user's device.

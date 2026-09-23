@@ -3659,7 +3659,7 @@ test('an edit during a large source scan retries changed files instead of restar
   await service.snapshot();
   assert.equal(reads.get(files[0]),2);
   assert.equal(reads.get(files[500]),1,'unchanged earlier files are not read again');
-  assert.ok([...reads.values()].reduce((a,b)=>a+b,0)<=1002);
+  assert.ok([...reads.values()].reduce((a,b)=>a+b,0)<=1009);
   let before=[...reads.values()].reduce((a,b)=>a+b,0);
   const originalIndex=service.indexFile.bind(service);let classifications=0;
   service.indexFile=(...args)=>{classifications++;return originalIndex(...args);};
@@ -3811,4 +3811,62 @@ test('prepared inspection tracks nested key changes, aliases and migration mode 
     service.inspectionProfiles = null;
     assert.deepEqual(service.inspect(fm), result, 'cached and freshly prepared classification agree');
   }
+});
+
+test('cold source verification overlaps reads with a bounded worker count', async()=>{
+  const {service,vault,addFile}=createHarness();
+  for(let i=0;i<40;i++)addFile(`Inbox/cold-${i}.md`,'Ordinary');
+  const original=vault.read,pending=[];let active=0,peak=0,reads=0,done=false;
+  vault.read=file=>new Promise(resolve=>{
+    reads++;active++;peak=Math.max(peak,active);
+    pending.push(async()=>{active--;resolve(await original(file));});
+  });
+  const scan=service.snapshot().finally(()=>{done=true;});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(pending.length,8,'independent reads start together');
+  while(!done){
+    const batch=pending.splice(0);await Promise.all(batch.map(release=>release()));
+    await new Promise(resolve=>setImmediate(resolve));
+  }
+  await scan;assert.equal(reads,40);assert.equal(active,0);assert.equal(peak,8);
+});
+
+test('a failed parallel scan drains pending reads and never commits a record', async()=>{
+  const {service,vault,addFile,entries}=createHarness();
+  for(let i=0;i<20;i++)addFile(`Inbox/failure-${i}.md`,'Ordinary');
+  const original=vault.read,pending=[];let done=false,reads=0;
+  vault.read=file=>new Promise((resolve,reject)=>{
+    reads++;pending.push({file,resolve,reject});
+  });
+  const write=service.create('food-entry',{title:'Pending food'},{id:'food-failed-read'});
+  const rejected=assert.rejects(write,/Unable to authoritatively read/).finally(()=>{done=true;});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(pending.length,8);
+  pending.shift().reject(Error('Storage offline'));
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(done,false,'the refresh remains owned until in-flight reads settle');
+  assert.equal(reads,8,'no further reads start after the failure');
+  for(const item of pending.splice(0))item.resolve(await original(item.file));
+  await rejected;
+  assert.equal([...entries.values()].filter(file=>file.path.includes('food-failed-read')).length,0);
+  vault.read=original;
+  assert.ok(await service.create('food-entry',{title:'Retry food'},{id:'food-failed-read'}));
+});
+
+test('ordinary index updates do not walk unrelated blocked identities', async()=>{
+  const {service,addFile}=createHarness();
+  const blocked=Array.from({length:250},(_,i)=>addFile(`Inbox/blocked-${i}.md`,`---\ntpsId: blocked-${i}\nkind: food-entry\n---\n`));
+  const ordinary=addFile('Inbox/ordinary.md','---\ntitle: Ordinary\n---\n');
+  await service.refreshIdentityIndexFromVaultSource();
+  let deletes=0;
+  for(const paths of service.blockedPathsById.values()){
+    const original=paths.delete.bind(paths);paths.delete=path=>{deletes++;return original(path);};
+  }
+  service.indexFile(ordinary,{title:'Changed'});
+  assert.equal(deletes,0,'an ordinary file cannot own any blocked identity');
+  service.removePath(blocked[0].path);
+  assert.equal(service.blockedPathsById.has('blocked-0'),false);
+  assert.equal(service.blockedPathsById.get('blocked-1').has(blocked[1].path),true);
+  assert.equal(service.blockedIdentityEvidencePaths.has(blocked[0].path),false);
+  assert.equal(service.blockedIdentityEvidencePaths.size,249);
 });
