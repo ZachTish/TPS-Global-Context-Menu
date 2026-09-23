@@ -1,5 +1,5 @@
 import { MarkdownView, Menu, Notice, TFile, parseYaml, setIcon } from 'obsidian';
-import { RangeSetBuilder, StateEffect } from '@codemirror/state';
+import { Prec, RangeSetBuilder, StateEffect } from '@codemirror/state';
 import { Decoration, type DecorationSet, EditorView, ViewPlugin, type ViewUpdate, WidgetType } from '@codemirror/view';
 import type TPSGlobalContextMenuPlugin from '../main';
 import * as logger from '../logger';
@@ -9,7 +9,7 @@ import { resolveLinkTargetToFile } from './link-target-service';
 import { ViewModeService } from './view-mode-service';
 import type { BodySubitemLink } from './subitem-types';
 import { SubitemLineModelService, type SubitemLineModel, type PropertyPill } from './subitem-line-model';
-import { buildLinkedSubitemRow, getIconNameForModel } from './linked-subitem-row-builder';
+import { buildLinkedSubitemRow, getLinkedSubitemRenderSignature } from './linked-subitem-row-builder';
 import { getEffectivePropertyOptions } from '../utils/property-options';
 import { TextInputModal } from '../modals/text-input-modal';
 import { getCheckboxStateMarker } from '../utils/checkbox-state';
@@ -35,6 +35,7 @@ const refreshLinkedSubitemEffect = StateEffect.define<number>();
  * checkbox intact.
  */
 class LinkedSubitemRowWidget extends WidgetType {
+  private readonly signature: string;
   private readonly onClick: (path: string) => void;
   private readonly onPillClick: (evt: MouseEvent, pill: PropertyPill) => void;
   
@@ -45,18 +46,13 @@ class LinkedSubitemRowWidget extends WidgetType {
     onPillClick: (evt: MouseEvent, pill: PropertyPill) => void,
   ) {
     super();
+    this.signature = getLinkedSubitemRenderSignature(model);
     this.onClick = onLinkClick;
     this.onPillClick = onPillClick;
   }
 
   eq(other: LinkedSubitemRowWidget): boolean {
-    return (
-      other.model.childFile.path === this.model.childFile.path &&
-      other.model.parentFile.path === this.model.parentFile.path &&
-      other.model.checkboxState === this.model.checkboxState &&
-      other.model.visualState === this.model.visualState &&
-      JSON.stringify(other.model.pills) === JSON.stringify(this.model.pills)
-    );
+    return other.signature === this.signature;
   }
 
   toDOM(): HTMLElement {
@@ -72,18 +68,13 @@ class LinkedSubitemRowWidget extends WidgetType {
   }
 
   updateDOM(dom: HTMLElement): boolean {
-    // Check if this is still the same subitem
-    if (dom.dataset.linkedSubitemPath !== this.model.childFile.path) return false;
-    
-    // Update checkbox state if changed
-    const checkbox = dom.querySelector(`.${VIRTUAL_CHECKBOX_CLASS}`) as HTMLElement | null;
-    if (checkbox && checkbox.dataset.linkedSubitemState !== this.model.checkboxState) {
-      checkbox.dataset.linkedSubitemState = this.model.checkboxState || '[ ]';
-      checkbox.className = `${VIRTUAL_CHECKBOX_CLASS} state-${this.model.visualState}`;
-      checkbox.innerHTML = '';
-      setIcon(checkbox, getIconNameForModel(this.model));
-    }
-    
+    // Keep CodeMirror's mounted wrapper, but replace every child and action
+    // handler together. A checkbox-only update leaves titles and pills stale.
+    const updated = this.toDOM();
+    dom.className = updated.className;
+    dom.dataset.linkedSubitemPath = updated.dataset.linkedSubitemPath;
+    dom.dataset.linkedSubitemParent = updated.dataset.linkedSubitemParent;
+    dom.replaceChildren(...Array.from(updated.childNodes));
     return true;
   }
 
@@ -111,7 +102,7 @@ export class LinkedSubitemCheckboxService {
   private refreshTimers = new Map<MarkdownView, number>();
   private syncingFiles = new Set<string>();
   private decoratingViews = new WeakSet<MarkdownView>();
-  private elementStates = new WeakMap<HTMLElement, string>();
+  private readingRows = new WeakMap<HTMLAnchorElement, { signature: string; row: HTMLElement }>();
   private checkboxLongPressTimer: number | null = null;
   // NOTE: Removed lastSuccessfulEditorDecorations cache - it was preserving stale decorations
   // with invalid positions after document changes, causing RangeError runtime errors.
@@ -123,7 +114,9 @@ export class LinkedSubitemCheckboxService {
   }
 
   getEditorExtension() {
-    return this.editorExtension;
+    // Own the recognized linked-row ranges ahead of native wikilink rendering.
+    // Otherwise a native refresh can cover our widget with an empty replacement.
+    return Prec.highest(this.editorExtension);
   }
 
   ensureForAllMarkdownViews(): void {
@@ -764,10 +757,7 @@ export class LinkedSubitemCheckboxService {
         return;
       }
       
-      const editorAny = view.editor as any;
-      const source = typeof editorAny?.getValue === 'function'
-        ? String(editorAny.getValue() || '')
-        : String((view as any)?.data || '');
+      const source = this.getReadingModeSource(view);
       const lines = String(source || '').split('\n');
       
       // Parse all lines and build models for recognized subitem lines
@@ -828,51 +818,17 @@ export class LinkedSubitemCheckboxService {
         return;
       }
 
-      this.clearDecorations(view);
-      
-      // Now decorate each matched element
+      const retainedRows = new Set<HTMLElement>();
       for (const [lineNum, entry] of subitemEntries) {
-        const li = lineToElement.get(lineNum);
-        if (!li) {
-          logger.log('[TPS GCM] [LinkedSubitem] no element for line', { lineNum, line: lines[lineNum] });
-          continue;
-        }
-        
-        const { parsed, childFile, model } = entry;
-        
-        // Mark the list item as a linked subitem task
-        li.classList.add('tps-gcm-linked-subitem-task', model.visualStateClass);
-        
-        // Build the complete row content using shared builder
-        const elements = buildLinkedSubitemRow(
-          model,
-          (evt) => {
-            const checkboxEl = elements.checkbox;
-            if (checkboxEl) {
-              void this.handleCustomCheckboxClick(evt, checkboxEl);
-            }
-          },
-          (path) => this.openLinkedSubitemPath(path),
-          (evt, pill) => {
-            void this.handlePropertyPillClick(evt, this.findPillElement(elements.pillsContainer, pill));
-          },
-          { includeCheckbox: model.kind !== 'checkbox' },
-        );
-
-        logger.log('[TPS GCM] [DIAG] reading-mode rendered row before replace', {
-          parentFile: file.path,
-          childFile: childFile.path,
-          lineNumber: lineNum,
-          modelPillCount: model.pills.length,
-          renderedPillCount: elements.pillsContainer.children.length,
-          renderedPills: Array.from(elements.pillsContainer.children).map((pillEl) => ({
-            kind: (pillEl as HTMLElement).dataset.linkedSubitemPillKind,
-            value: (pillEl as HTMLElement).dataset.linkedSubitemPillValue,
-            text: (pillEl as HTMLElement).textContent,
-          })),
-        });
-        
-        this.injectReadingModeLinkWidget(li, childFile, model, elements.container);
+        const host = lineToElement.get(lineNum);
+        if (!host) continue;
+        const row = this.renderReadingModeRow(host, entry.model);
+        if (row) retainedRows.add(row);
+      }
+      // Obsidian can briefly expose an incomplete section map while rendering.
+      // Only sweep obsolete rows when every source row has a rendered target.
+      if (retainedRows.size === subitemEntries.size) {
+        this.removeStaleReadingRows(previewContainer, retainedRows);
       }
       this.taskTrace('decorateView:end', {
         durationMs: Math.round(performance.now() - startedAt),
@@ -945,53 +901,37 @@ export class LinkedSubitemCheckboxService {
   }
   
   /**
-   * Fallback method using text-based matching when preview renderer info is unavailable.
+   * Fallback using standalone native link destinations when section info is unavailable.
    * @deprecated Use buildDeterministicSourceLineToElementMap when possible.
    */
   private buildFallbackSourceLineToElementMap(
     container: Element,
-    lines: string[],
+    _lines: string[],
     subitemEntries: Map<number, { parsed: any; childFile: TFile; model: SubitemLineModel }>,
   ): Map<number, HTMLElement> {
     const result = new Map<number, HTMLElement>();
-    const usedLines = new Set<number>();
-    
-    // First pass: use data-line attributes for precise matching
-    const listItems = Array.from(container.querySelectorAll<HTMLElement>('li'));
-    for (const li of listItems) {
-      const dataLine = this.getDataLineAttribute(li);
-      if (dataLine !== null && subitemEntries.has(dataLine) && !usedLines.has(dataLine)) {
-        result.set(dataLine, li);
-        usedLines.add(dataLine);
-      }
-    }
-    
-    // Second pass: for any unmatched entries, use text-based matching
+    // Native data-line values can be relative to a section, not the document.
+    // Match real link destinations in source/DOM order, never reusing a host.
+    const hosts = Array.from(container.querySelectorAll<HTMLElement>('li, p'));
+    const targets = hosts.map(host => ({
+      host,
+      links: Array.from(host.querySelectorAll<HTMLAnchorElement>('a.internal-link'))
+        .filter(link => link.closest('li, p') === host
+          && Array.from(host.childNodes).every(node => node === link
+            || (node.nodeType === 3 && !String(node.textContent || '').replace(/[\s\u200b]/g, ''))
+            || (node.nodeType === 1 && (node as HTMLElement).matches(
+              'input[type=checkbox], ul, ol, br, .list-bullet, .tps-gcm-linked-subitem-row-content',
+            ))))
+        .map(link => link.getAttribute('data-href') || link.getAttribute('href') || ''),
+    }));
+    const usedHosts = new Set<HTMLElement>();
     for (const [lineNum, entry] of subitemEntries) {
-      if (usedLines.has(lineNum)) continue;
-      
-      for (const li of listItems) {
-        if (result.has(lineNum)) break;
-        
-        const liText = this.getListItemText(li);
-        if (!liText) continue;
-        
-        const sourceLine = lines[lineNum];
-        if (!sourceLine) continue;
-        
-        // Check if the source line's wikilink target appears in the rendered text
-        const linkTarget = entry.parsed.linkTarget;
-        const displayLabel = entry.model.displayLabel;
-        
-        // The rendered text should contain either the link target or display label
-        if ((liText.includes(linkTarget) || liText.includes(displayLabel)) &&
-            sourceLine.includes(entry.parsed.wikilink)) {
-          result.set(lineNum, li);
-          usedLines.add(lineNum);
-        }
-      }
+      const target = targets.find(({ host, links }) => !usedHosts.has(host)
+        && links.some(link => this.resolveLinkedFile(link, entry.model.parentFile.path)?.path === entry.childFile.path));
+      if (!target) continue;
+      result.set(lineNum, target.host);
+      usedHosts.add(target.host);
     }
-    
     return result;
   }
 
@@ -1124,23 +1064,54 @@ export class LinkedSubitemCheckboxService {
     this.replaceListContent(li, customContent, lineKind);
   }
 
-  /**
-   * Reading mode decoration: hide the native link and inject our inline widget
-   * immediately after it, preserving the original checkbox/list structure.
-   */
-  private injectReadingModeLinkWidget(
-    li: HTMLElement,
-    childFile: TFile,
-    model: SubitemLineModel,
-    customContent: HTMLElement,
-  ): void {
-    const host = this.normalizeReadingModeHostElement(li) ?? li;
-    customContent.classList.add('is-reading-mode');
-    const nativeLink = this.findReadingModeNativeLink(host, childFile, model.displayLabel);
-    if (!nativeLink) return;
+  private renderReadingModeRow(element: HTMLElement, model: SubitemLineModel): HTMLElement | null {
+    const host = this.normalizeReadingModeHostElement(element) ?? element;
+    const nativeLink = this.findReadingModeNativeLink(host, model.childFile, model.displayLabel);
+    if (!nativeLink) return null;
+    const signature = getLinkedSubitemRenderSignature(model);
+    const previous = this.readingRows.get(nativeLink);
+    const mounted = previous?.row === nativeLink.nextElementSibling;
+    if (mounted && previous.signature === signature
+      && nativeLink.classList.contains('tps-gcm-hidden-native-link')
+      && host.classList.contains('tps-gcm-linked-subitem-task')
+      && host.classList.contains(model.visualStateClass)) {
+      return previous.row;
+    }
 
+    // Build off-DOM; replacement never exposes a temporarily empty native row.
+    const elements = buildLinkedSubitemRow(
+      model,
+      (evt) => {
+        if (elements.checkbox) void this.handleCustomCheckboxClick(evt, elements.checkbox);
+      },
+      (path) => this.openLinkedSubitemPath(path),
+      (evt, pill) => {
+        void this.handlePropertyPillClick(evt, this.findPillElement(elements.pillsContainer, pill));
+      },
+      { includeCheckbox: model.kind !== 'checkbox' },
+    );
+    elements.container.classList.add('is-reading-mode');
+    if (mounted) previous.row.replaceWith(elements.container);
+    else nativeLink.insertAdjacentElement('afterend', elements.container);
     nativeLink.classList.add('tps-gcm-hidden-native-link');
-    nativeLink.insertAdjacentElement('afterend', customContent);
+    host.classList.remove('is-open', 'is-complete', 'is-canceled');
+    host.classList.add('tps-gcm-linked-subitem-task', model.visualStateClass);
+    this.readingRows.set(nativeLink, { signature, row: elements.container });
+    return elements.container;
+  }
+
+  private removeStaleReadingRows(container: Element, retained: Set<HTMLElement>): void {
+    for (const row of Array.from(container.querySelectorAll<HTMLElement>('.tps-gcm-linked-subitem-row-content'))) {
+      if (retained.has(row)) continue;
+      row.previousElementSibling?.classList.remove('tps-gcm-hidden-native-link');
+      row.remove();
+    }
+    for (const host of Array.from(container.querySelectorAll<HTMLElement>('.tps-gcm-linked-subitem-task'))) {
+      // A nested child's row must not keep a removed parent's marker alive.
+      const hasOwnRow = Array.from(host.querySelectorAll<HTMLElement>('.tps-gcm-linked-subitem-row-content'))
+        .some(row => row.closest('li, p') === host);
+      if (!hasOwnRow) host.classList.remove('tps-gcm-linked-subitem-task', 'is-open', 'is-complete', 'is-canceled');
+    }
   }
 
   private findReadingModeNativeLink(
@@ -1187,6 +1158,13 @@ export class LinkedSubitemCheckboxService {
     return el;
   }
 
+  private getReadingModeSource(view: MarkdownView): string {
+    // The hidden editor may retain an older document after external edits in
+    // Reading view. TextFileView.data is the source currently being previewed.
+    if (typeof view.data === 'string') return view.data;
+    return String(view.editor?.getValue?.() || '');
+  }
+
   private getSourceLineForReadingHost(
     view: MarkdownView,
     host: HTMLElement,
@@ -1195,8 +1173,7 @@ export class LinkedSubitemCheckboxService {
     if (!(file instanceof TFile)) return null;
     const text = this.getListItemText(host);
     if (!text) return null;
-    const editor = view.editor as any;
-    const source = typeof editor?.getValue === 'function' ? editor.getValue() : ((view as any)?.data || '');
+    const source = this.getReadingModeSource(view);
     const lines = String(source || '').split('\n');
     const idx = lines.findIndex((line) => {
       const parsed = this.plugin.bodySubitemLinkService.parseLine(line);
@@ -1606,8 +1583,8 @@ export class LinkedSubitemCheckboxService {
    * TaskNotes-style behavior: keep the native markdown checkbox/list marker and
    * hide only the wikilink token, then render an inline widget beside it.
    *
-   * Important: use mark+widget, not Decoration.replace. Replacing ranges from a
-   * ViewPlugin can trip CodeMirror invariants during document/layout churn.
+   * Replacements stay within a single source line and have priority over the
+   * native wikilink replacement; list markers and checkboxes remain native.
    */
   private buildEditorDecorations(view: EditorView): {
     decorations: DecorationSet;

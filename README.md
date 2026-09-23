@@ -2,7 +2,7 @@
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.1.5](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.1.5) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.1.6](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.1.6) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -189,3 +189,12 @@ This is a backward-compatible patch with no new settings, defaults, migrations o
 Installed test-vault measurements: 3.1.4 timer scans took 1,203.2 / 788.3 / 753.6 ms across 8,796 notes. The final indexed path took 22.9 / 22.9 / 21.1 ms across approximately 8,800 notes with identical session results (34× faster by median); only three retryable source reads remained per warm scan. A forced cold scan still took 949.5 ms. Four normal editing-view opens made zero linked-subitem visibility-helper calls. These component measurements do not establish an overall opening/typing/scrolling speedup. The first installed candidate revealed an additional visibility read in cleanup; final cleanup also avoids layout measurement.
 
 Final validation: 1,217 full-suite checks and 148 additional checks passed, followed by the separate final build/test deployment and explicit GCM reload. Fresh Reading/Live Preview/Source openings passed their widget checks. The measured four-open sequence called the visibility helper zero times. Persisted GCM settings were preserved, fixtures archived, diagnostic probes removed and the original tab restored. A separate Source/Live Preview transition interaction remains unresolved; no mode-transition scheduling or decoration-retention changes are included in this patch.
+
+
+## 3.1.6 — Stable linked-item rendering (2026-09-22)
+
+Reading view retains unchanged linked-item row DOM across refreshes, preserving focus and avoiding repeated checkbox/pill creation. Changed rows are built off-DOM and replaced in one operation; removed rows restore native links. Incomplete preview mapping preserves mounted rows until a complete mapping can safely clean up. Reading view uses current preview text rather than a stale hidden editor. Fallback mapping matches actual link destinations in source/DOM order instead of section-relative line numbers and assigns each rendered host at most once, including repeated links. Native rerenders and removed widgets invalidate reuse.
+
+Reading view and Live Preview share a presentation signature covering title/alias, checkbox kind/state/icon, visual classes, property pills and action targets. The signature snapshots mutable file paths. Live Preview retains CodeMirror's mounted wrapper and replaces all changed child content and event handlers together; the former checkbox-only update left titles, pills and event targets stale. Unchanged widgets still reuse their DOM. The linked-row editor extension has highest precedence so native wikilink refreshes cannot cover its recognized ranges with blank replacements. Native list markers and checkbox editing remain in place.
+
+No saved settings, defaults, content migrations or public APIs change. This targets linked-item refresh work, not all Base/Markdown rendering or the separate Source/Live Preview transition issue recorded in 3.1.5. Regression coverage includes repeated unchanged refreshes, presentation changes, file renames, native rerenders, removed rows, nested rows, missing targets and duplicate-host fallback mapping. Full tests, final build/deployment, test-vault plugin reload and installed rendering checks are recorded in [release notes](release-notes/3.1.6.md). Physical iPhone validation remains separate.

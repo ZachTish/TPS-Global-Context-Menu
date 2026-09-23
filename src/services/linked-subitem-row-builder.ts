@@ -17,6 +17,15 @@ export interface LinkedSubitemRowElements {
   pillsContainer: HTMLElement;
 }
 
+/** Snapshot all rendered content and action targets, including mutable TFile paths. */
+export function getLinkedSubitemRenderSignature(model: SubitemLineModel): string {
+  return JSON.stringify([
+    model.childFile.path, model.parentFile.path, model.kind, model.displayLabel,
+    model.checkboxState, model.checkboxIcon, model.visualState, model.visualStateClass,
+    model.pills,
+  ]);
+}
+
 /**
  * Build a complete linked subitem row DOM structure.
  * This is the single source of truth for row rendering in both modes.
