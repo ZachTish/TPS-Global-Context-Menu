@@ -700,9 +700,14 @@ export class LinkedSubitemCheckboxService {
   private clearDecorations(view: MarkdownView): void {
     const root = view.contentEl;
     if (!root) return;
-    const previewContainer = this.getVisiblePreviewContainer(view);
-    if (!(previewContainer instanceof HTMLElement)) return;
+    // Cleanup applies to hidden preview wrappers too and must not force style
+    // calculation after menu writes. Never touch CodeMirror's source widgets.
+    for (const container of Array.from(root.querySelectorAll<HTMLElement>('.markdown-preview-view, .markdown-reading-view'))) {
+      this.clearPreviewDecorations(container);
+    }
+  }
 
+  private clearPreviewDecorations(previewContainer: HTMLElement): void {
     // Remove all custom elements
     previewContainer.querySelectorAll('.tps-gcm-linked-subitem-pill').forEach(el => el.remove());
     previewContainer.querySelectorAll('.tps-gcm-linked-subitem-checkbox').forEach(el => el.remove());
@@ -1790,6 +1795,14 @@ export class LinkedSubitemCheckboxService {
 
   private getLinkedSubitemRenderMode(view: MarkdownView): 'preview' | 'source' | null {
     if (isStrictSourceMode(view)) return null;
+    // Obsidian's current mode does not require a style/layout flush. Keep DOM
+    // detection only for compatible views that cannot report their mode.
+    try {
+      const mode = view.getMode();
+      if (mode === 'source' || mode === 'preview') return mode;
+    } catch {
+      // Fall through for views that are being torn down or lack the mode API.
+    }
     const previewContainer = this.getVisiblePreviewContainer(view);
     if (previewContainer) return 'preview';
 

@@ -113,10 +113,24 @@ const RUNNING_SCHEDULE_SYNC_INTERVAL_MS = 60_000;
 
 export class TimeTrackingService {
   private activeTimerCountsByPath = new Map<string, number>();
+  private sessionIndexReady = false;
+  private sessionSourceRevision = 0;
+  private sessionScan: Promise<StoredSession[]> | null = null;
+  private readonly sessionSources = new Map<TFile, {
+    path: string; mtime: number; size: number; key: string;
+    frontmatter: Record<string, unknown> | undefined;
+  }>();
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
   setup(): void {
+    if (this.sessionIndexReady) return;
+    this.plugin.registerEvent(this.plugin.app.vault.on('create', file => this.invalidateSessionSource(file)));
+    this.plugin.registerEvent(this.plugin.app.vault.on('modify', file => this.invalidateSessionSource(file)));
+    this.plugin.registerEvent(this.plugin.app.vault.on('delete', file => this.invalidateSessionSource(file)));
+    this.plugin.registerEvent(this.plugin.app.vault.on('rename', file => this.invalidateSessionSource(file)));
+    this.plugin.registerEvent(this.plugin.app.metadataCache.on('changed', file => this.invalidateSessionSource(file)));
+    this.sessionIndexReady = true;
     this.plugin.registerInterval(window.setInterval(() => {
       void this.syncRunningScheduledMetadata();
     }, RUNNING_SCHEDULE_SYNC_INTERVAL_MS));
@@ -1138,12 +1152,16 @@ export class TimeTrackingService {
 
   private async appendFrontmatterSession(file: TFile, record: TimeTrackingSessionRecord): Promise<void> {
     const key = this.getPropertyKey();
-    await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
-      const existingKey = findKeyCaseInsensitive(frontmatter, key) || key;
-      const current = this.normalizeRecordList(frontmatter[existingKey]);
-      current.push(record);
-      setValueCaseInsensitive(frontmatter, existingKey, current);
-    });
+    try {
+      await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
+        const existingKey = findKeyCaseInsensitive(frontmatter, key) || key;
+        const current = this.normalizeRecordList(frontmatter[existingKey]);
+        current.push(record);
+        setValueCaseInsensitive(frontmatter, existingKey, current);
+      });
+    } finally {
+      this.invalidateSessionSource(file);
+    }
   }
 
   private async ensureTrackedNoteDailyLink(sourceFile: TFile, dailyNote: TFile): Promise<void> {
@@ -1172,12 +1190,16 @@ export class TimeTrackingService {
 
   private async replaceFrontmatterSession(file: TFile, id: string, nextRecord: TimeTrackingSessionRecord): Promise<void> {
     const key = this.getPropertyKey();
-    await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
-      const existingKey = findKeyCaseInsensitive(frontmatter, key) || key;
-      const current = this.normalizeRecordList(frontmatter[existingKey]);
-      const next = current.map((record) => record.id === id ? nextRecord : record);
-      setValueCaseInsensitive(frontmatter, existingKey, next);
-    });
+    try {
+      await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
+        const existingKey = findKeyCaseInsensitive(frontmatter, key) || key;
+        const current = this.normalizeRecordList(frontmatter[existingKey]);
+        const next = current.map((record) => record.id === id ? nextRecord : record);
+        setValueCaseInsensitive(frontmatter, existingKey, next);
+      });
+    } finally {
+      this.invalidateSessionSource(file);
+    }
   }
 
   private async removeStoredSession(stored: StoredSession): Promise<void> {
@@ -1186,16 +1208,20 @@ export class TimeTrackingService {
 
   private async removeFrontmatterSession(file: TFile, id: string): Promise<void> {
     const key = this.getPropertyKey();
-    await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
-      const existingKey = findKeyCaseInsensitive(frontmatter, key);
-      if (!existingKey) return;
-      const next = this.normalizeRecordList(frontmatter[existingKey]).filter((record) => record.id !== id);
-      if (next.length > 0) {
-        setValueCaseInsensitive(frontmatter, existingKey, next);
-      } else {
-        deleteValueCaseInsensitive(frontmatter, existingKey);
-      }
-    });
+    try {
+      await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
+        const existingKey = findKeyCaseInsensitive(frontmatter, key);
+        if (!existingKey) return;
+        const next = this.normalizeRecordList(frontmatter[existingKey]).filter((record) => record.id !== id);
+        if (next.length > 0) {
+          setValueCaseInsensitive(frontmatter, existingKey, next);
+        } else {
+          deleteValueCaseInsensitive(frontmatter, existingKey);
+        }
+      });
+    } finally {
+      this.invalidateSessionSource(file);
+    }
   }
 
   private async resolveStorageFileForNewSession(
@@ -1348,47 +1374,107 @@ export class TimeTrackingService {
     }
   }
 
-  private async scanStoredSessions(): Promise<StoredSession[]> {
-    const key = this.getPropertyKey();
-    const output: StoredSession[] = [];
+  private invalidateSessionSource(file: unknown): void {
+    this.sessionSourceRevision += 1;
+    if (file instanceof TFile) this.sessionSources.delete(file);
+  }
 
-    for (const file of this.plugin.app.vault.getMarkdownFiles()) {
-      if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
-      if (this.shouldIgnoreTimeTrackingPath(file.path)) continue;
-      const frontmatter = await this.readFrontmatterForTimeTrackingScan(file);
-      const existingKey = frontmatter ? findKeyCaseInsensitive(frontmatter, key) : null;
-      if (frontmatter && existingKey) {
-        for (const record of this.normalizeRecordList(frontmatter[existingKey])) {
-          output.push({ record, storageMode: 'frontmatter', storageFile: file });
+  private async scanStoredSessions(): Promise<StoredSession[]> {
+    const scan = this.sessionScan ?? (this.sessionScan = this.scanStoredSessionsUntilStable());
+    try {
+      // Consumers sort arrays and edit records; never expose the shared scan result.
+      return (await scan).map(session => ({ ...session, record: { ...session.record } }));
+    } finally {
+      if (this.sessionScan === scan) this.sessionScan = null;
+    }
+  }
+
+  private sessionScanConfiguration(): string {
+    return JSON.stringify([this.getPropertyKey(), this.plugin.settings.timeTrackingIgnoreArchivedFiles,
+      this.plugin.getArchiveFolderPath?.()]);
+  }
+
+  private async scanStoredSessionsUntilStable(): Promise<StoredSession[]> {
+    const started = performance.now();
+    let passes = 0;
+    while (true) {
+      passes += 1;
+      const revision = this.sessionSourceRevision;
+      const configuration = this.sessionScanConfiguration();
+      const key = this.getPropertyKey();
+      const output: StoredSession[] = [];
+      const files = this.plugin.app.vault.getMarkdownFiles();
+      const liveFiles = new Set(files);
+      for (const file of this.sessionSources.keys()) {
+        if (!liveFiles.has(file)) this.sessionSources.delete(file);
+      }
+      for (const file of files) {
+        if (this.shouldIgnoreTimeTrackingPath(file.path)) continue;
+        const frontmatter = await this.readFrontmatterForTimeTrackingScan(file);
+        const existingKey = frontmatter ? findKeyCaseInsensitive(frontmatter, key) : null;
+        if (frontmatter && existingKey) {
+          // Companion classification can inspect metadata; only session-bearing
+          // candidates need it on every status refresh.
+          if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
+          for (const record of this.normalizeRecordList(frontmatter[existingKey])) {
+            output.push({ record, storageMode: 'frontmatter', storageFile: file });
+          }
         }
       }
+      if (revision !== this.sessionSourceRevision || configuration !== this.sessionScanConfiguration()) continue;
+      logger.perf('time-tracking:session-scan', {
+        files: files.length, sessions: output.length, cachedFiles: this.sessionSources.size,
+        passes, durationMs: Math.round(performance.now() - started),
+      });
+      return output;
     }
-
-    return output;
   }
 
   private async readFrontmatterForTimeTrackingScan(file: TFile): Promise<Record<string, unknown> | undefined> {
-    const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
-    if (cached && findKeyCaseInsensitive(cached, this.getPropertyKey())) return cached;
+    const key = this.getPropertyKey();
+    const { path } = file;
+    const mtime = file.stat?.mtime;
+    const size = file.stat?.size;
+    const verified = this.sessionSources.get(file);
+    if (this.sessionIndexReady && verified?.path === path && verified.key === key
+      && verified.mtime === mtime && verified.size === size) return verified.frontmatter;
 
-    let raw = '';
+    const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
+    // Before event listeners are installed, retain the uncached legacy path.
+    if (!this.sessionIndexReady && cached && findKeyCaseInsensitive(cached, key)) return cached;
+    const revision = this.sessionSourceRevision;
+    let raw: string;
     try {
       raw = await this.plugin.app.vault.cachedRead(file);
     } catch {
+      // Do not turn a transient read failure into a persistent negative result.
       return cached;
     }
-    if (!raw.startsWith('---')) return cached;
-    const normalized = raw.replace(/\r\n/g, '\n');
-    const closing = normalized.indexOf('\n---', 3);
-    if (closing < 0) return cached;
-    try {
-      const parsed = parseYaml(normalized.slice(4, closing));
-      return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-        ? parsed as Record<string, unknown>
-        : cached;
-    } catch {
-      return cached;
+    let frontmatter: Record<string, unknown> | undefined;
+    const normalized = raw.replace(/^\uFEFF/u, '').replace(/\r\n/g, '\n');
+    const opening = /^---[ \t]*\n/u.exec(normalized);
+    if (opening) {
+      const closing = /^(?:---|\.\.\.)[ \t]*$/mu.exec(normalized.slice(opening[0].length));
+      if (!closing) return cached;
+      try {
+        const parsed = parseYaml(normalized.slice(opening[0].length, opening[0].length + closing.index));
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const existingKey = findKeyCaseInsensitive(parsed, key);
+          // Retain only normalized session data, never note bodies or unrelated properties.
+          if (existingKey) frontmatter = { [key]: this.normalizeRecordList(parsed[existingKey]) };
+        }
+      } catch {
+        return cached;
+      }
     }
+    if (this.sessionIndexReady && revision === this.sessionSourceRevision && key === this.getPropertyKey()
+      && file.path === path && file.stat?.mtime === mtime && file.stat?.size === size) {
+      this.sessionSources.set(file, { path, mtime, size, key, frontmatter });
+    }
+    if (file.path !== path || file.stat?.mtime !== mtime || file.stat?.size !== size) {
+      this.invalidateSessionSource(file);
+    }
+    return frontmatter;
   }
 
   private async findStoredSession(id: string): Promise<StoredSession | null> {

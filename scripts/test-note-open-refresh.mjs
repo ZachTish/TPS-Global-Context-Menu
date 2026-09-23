@@ -138,3 +138,40 @@ test('retired panel cleanup removes existing remnants without creating footer ho
   assert.equal(emptyHost.removed, true); assert.equal(sharedHost.removed, false);
   assert.equal(cleanup.noteReferencesPanels.size, 0);
 });
+
+test('linked-subitem mode resolution avoids style/layout reads when Obsidian reports its mode', () => {
+  const source = method('../src/services/linked-subitem-checkbox-service.ts', 'getLinkedSubitemRenderMode');
+  const output = ts.transpileModule(`export class Modes { ${source} }`, {compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
+  const module = {};
+  new Function('exports','isStrictSourceMode','getViewMode',output)(module,view=>view.strict===true,()=>null);
+  const service = new module.Modes();
+  service.getVisiblePreviewContainer = () => assert.fail('reported mode must avoid computed style and layout reads');
+  for (const mode of ['source','preview']) {
+    const view = {getMode:()=>mode,contentEl:{querySelector:()=>assert.fail('mode must not query stale render wrappers')}};
+    assert.equal(service.getLinkedSubitemRenderMode(view),mode);
+    assert.equal(service.getLinkedSubitemRenderMode({...view,strict:true}),null);
+  }
+});
+
+test('linked-subitem mode resolution retains DOM fallback for missing or throwing mode APIs', () => {
+  const output=ts.transpileModule(`export class Modes { ${method('../src/services/linked-subitem-checkbox-service.ts','getLinkedSubitemRenderMode')} }`,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
+  const module={};new Function('exports','isStrictSourceMode','getViewMode',output)(module,()=>false,()=>null);
+  const service=new module.Modes();service.getVisiblePreviewContainer=()=>({});
+  assert.equal(service.getLinkedSubitemRenderMode({}), 'preview');
+  assert.equal(service.getLinkedSubitemRenderMode({getMode(){throw Error('teardown');}}), 'preview');
+  service.getVisiblePreviewContainer=()=>null;service.isVisibleRenderContainer=el=>!!el;
+  assert.equal(service.getLinkedSubitemRenderMode({contentEl:{querySelector:()=>({})}}), 'source');
+});
+
+test('preview cleanup removes visible and hidden remnants without layout reads or touching editor widgets', () => {
+  const path='../src/services/linked-subitem-checkbox-service.ts';
+  const output=ts.transpileModule(`export class Cleanup { ${method(path,'clearDecorations')} ${method(path,'clearPreviewDecorations')} }`,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2020}}).outputText;
+  const module={};class Input {}
+  new Function('exports','HTMLInputElement',output)(module,Input);
+  const service=new module.Cleanup();service.getVisiblePreviewContainer=()=>assert.fail('cleanup must never measure visibility');
+  const checkbox=()=>({removed:false,remove(){this.removed=true;}});
+  const shown=checkbox(),hidden=checkbox(),editor=checkbox();
+  const wrapper=box=>({querySelectorAll:selector=>selector==='.tps-gcm-linked-subitem-checkbox'?[box]:[]});
+  const view={contentEl:{querySelectorAll(selector){assert.equal(selector,'.markdown-preview-view, .markdown-reading-view');return [wrapper(shown),wrapper(hidden)];}}};
+  service.clearDecorations(view);assert.equal(shown.removed,true);assert.equal(hidden.removed,true);assert.equal(editor.removed,false);
+});
