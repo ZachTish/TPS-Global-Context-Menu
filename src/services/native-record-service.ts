@@ -1340,12 +1340,28 @@ export class NativeRecordService {
     return this.createRecord(kind, properties, options);
   }
 
+  /** Allocate a new identity; callers cannot choose or reuse an existing ID. */
+  async createFresh(
+    kind: TpsNativeRecordKind,
+    properties: Record<string, unknown>,
+    options: Omit<TpsNativeRecordCreateOptions, 'id' | 'planToken' | 'expectedPath'> = {},
+  ): Promise<TpsNativeRecordHandle> {
+    if ('id' in options || 'planToken' in options || 'expectedPath' in options) {
+      throw new Error('Fresh record creation cannot supply an identity or an identity plan.');
+    }
+    const id = this.generateCryptographicId(kind);
+    // Without a secure random source, retain the existing verified create path.
+    if (!id) return this.create(kind, properties, options);
+    return this.createRecord(kind, properties, { ...options, id }, undefined, undefined, true);
+  }
+
   private async createRecord(
     kind: TpsNativeRecordKind,
     properties: Record<string, unknown>,
     options: TpsNativeRecordCreateOptions,
     commitGuard?: () => boolean,
     internalPlanKey?: symbol,
+    freshIdentity = false,
   ): Promise<TpsNativeRecordHandle> {
     if (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock) {
       throw new Error('TPS native-record identity plan is currently being applied.');
@@ -1371,7 +1387,7 @@ export class NativeRecordService {
     }
     this.inFlightCreateIds.add(reservationKey);
     try {
-      await this.refreshIdentityIndexFromVaultSource();
+      if (!freshIdentity) await this.refreshIdentityIndexFromVaultSource();
       if (
         options.planToken != null
         && (!Number.isSafeInteger(options.planToken) || options.planToken !== this.identitySourceGeneration)
@@ -1392,7 +1408,7 @@ export class NativeRecordService {
       if (commitGuard && !commitGuard()) {
         throw new Error('Standalone task checkbox mapping changed before record creation.');
       }
-      await this.refreshIdentityIndexFromVaultSource();
+      if (!freshIdentity) await this.refreshIdentityIndexFromVaultSource();
       if (
         options.planToken != null
         && options.planToken !== this.identitySourceGeneration
@@ -1420,7 +1436,7 @@ export class NativeRecordService {
       this.indexFile(file, persistedFrontmatter);
       this.plugin.entityIndexService?.upsertFile(file, persistedEnvelope);
       this.notify([file.path], options.cause, 'native-record-create');
-      logger.flow('NativeRecords', 'create:done', { kind, id, path: file.path });
+      logger.flow('NativeRecords', 'create:done', { kind, id, path: file.path, identity: freshIdentity ? 'fresh-uuid' : 'verified' });
       return this.toHandle(file, persistedEnvelope);
     } finally {
       this.inFlightCreateIds.delete(reservationKey);
@@ -3570,6 +3586,21 @@ export class NativeRecordService {
       ? globalThis.crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 12)}`;
     return `${prefix}-${uuid}`;
+  }
+
+  private generateCryptographicId(kind: TpsNativeRecordKind): string | null {
+    if (typeof globalThis.crypto?.getRandomValues !== 'function') return null;
+    try {
+      const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+      bytes[6] = (bytes[6] & 0x0f) | 0x40;
+      bytes[8] = (bytes[8] & 0x3f) | 0x80;
+      const hex = Array.from(bytes, byte => byte.toString(16).padStart(2, '0')).join('');
+      const uuid = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+      const prefix = nativeRecordFolder(kind).replace(/-records$|-entries$|-sessions$|-exercises$|s$/gu, '');
+      return `${prefix}-${uuid}`;
+    } catch {
+      return null;
+    }
   }
 
   private generateAvailableId(kind: TpsNativeRecordKind): string {

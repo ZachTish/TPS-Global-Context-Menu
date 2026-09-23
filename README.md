@@ -2,11 +2,21 @@
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.2.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.2.0) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.3.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.3.0) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
 Add `ZachTish/TPS-Global-Context-Menu` to BRAT. Use manual updates with `Latest`, or freeze an exact numeric tag for a controlled rollout. Each release supplies `main.js`, `manifest.json`, and `styles.css`; release notes record validation and artifact hashes. A published release is not evidence that any device has installed it.
+
+## Fresh food saves — 3.3.0
+
+Health 3.2.1+ uses the additive `nativeRecords.createFresh(kind, properties, options)` method, advertised by `capabilities.freshIdentityCreates`, to allocate a new record identity without a vault-wide source scan. GCM generates a cryptographically random UUIDv4 through Web Crypto, retains its kind prefix, and returns the stored ID. Callers cannot supply an ID, plan token, expected path or protected identity property. This route relies on standard random UUID uniqueness rather than searching all files for its newly minted ID. Known index conflicts, in-flight reservations, exclusive mutation plans, safe path allocation, property validation and non-overwriting Vault creation still apply.
+
+Existing `create`/resolve/update/reidentify/identity-plan contracts retain authoritative source verification, including IDs missing from stale metadata and malformed or nonstandard YAML. `createFresh` does not mark an unverified global index as verified and does not wait for an already-running scan. If secure random generation is unavailable, it falls back to the existing verified creation path. API v6 remains compatible; consumers must feature-detect both method and capability. No private metadata-cache API is used. No existing notes, IDs, settings, schemas, navigation or defaults migrate. Minimum Obsidian remains 1.10.0.
+
+Install GCM **3.3.0** with Health **3.2.1** for the food-save fix. This optimization applies to allocating new food-entry IDs; identity-sensitive edits and reconciliation retain their existing checks. The first save no longer depends on the number of Markdown notes or on a vault-wide indexing pass finishing. Physical device timing is not inferred from desktop measurements. Regression coverage and installed test-vault measurements are recorded in [3.3.0 release notes](release-notes/3.3.0.md).
+
+Validation on 2026-09-23: GCM passed 101 focused native-record checks, 1,228 full-suite checks and 160 additional checks; Health passed 480 checks with zero failures and one optional live USDA test skipped without its credential. Installed test-vault QA forced the GCM source index cold, logged two synthetic half-servings through Health, and verified 100 calories plus matching returned/persisted UUIDs. The first complete save took 585 ms (107 ms native entry creation), the second 102 ms (41 ms native entry creation), with zero global verification reads. The pre-fix cold save took 6,824 ms and 9,044 source reads. These are desktop measurements; physical iPhone timing is not claimed. Both runtime settings files stayed byte-identical, probes/folder overrides were restored, and fixtures were archived directly to `_archive/QA-food-fresh-final-20260923`. No providers or production vault were accessed. Separate final TypeScript/build deployments and named test-vault reloads validate the release artifacts.
 
 ## Configure fields and workflows
 

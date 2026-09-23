@@ -3584,7 +3584,7 @@ test('native profile is explicit, default-off, and removes legacy active paths o
 });
 
 test('public GCM API exposes versioned generic and task record contracts', () => {
-  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true \}\)/u);
+  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true, freshIdentityCreates: true \}\)/u);
   assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
   assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 6;/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);
@@ -3903,4 +3903,80 @@ test('conflict snapshots report all duplicate and blocked owners, including cust
   assert.ok(s.conflicts.every(c=>c.kinds.includes('calendar-event')));
   assert.equal(await service.canCreateIdentity('shared'),false);
   await assert.rejects(()=>service.list(),/identity conflicts/);
+});
+
+test('fresh food identities avoid 30 seconds of modeled serial reads in a cold 10,000-note vault',async()=>{
+ const h=createHarness();
+ for(let i=0;i<10000;i++)h.addFile(`Notes/${i}.md`,'Ordinary');
+ let reads=0;const read=h.vault.read;h.vault.read=async file=>{reads++;return read(file);};
+ await h.service.create('food-entry',{title:'Existing contract'},{id:'known-new-id'});
+ assert.equal(reads,10000);assert.equal(reads*3,30000,'3 ms per serial mobile storage read');
+ h.service.authoritativeSourceCache.clear();h.service.authoritativeIdentityGeneration=-1;reads=0;
+ const fresh=await h.service.createFresh('food-entry',{title:'New food',calories:100});
+ assert.match(fresh.id,/^food-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+ assert.equal(reads,0);assert.equal(fresh.frontmatter.calories,100);
+ assert.equal(parseNativeRecordDocument(h.contents.get(fresh.file)).frontmatter.tpsId,fresh.id);
+ assert.equal(h.service.authoritativeIdentityGeneration,-1,'fresh creation does not falsely certify the global index');
+});
+
+test('fresh creation cannot accept caller IDs, plan tokens, or protected identity properties',async()=>{
+ const {service,vault}=createHarness();
+ for(const options of [{id:'reused'},{planToken:1},{expectedPath:'existing.md'}])
+  await assert.rejects(service.createFresh('food-entry',{title:'Invalid'},options),/cannot supply an identity/);
+ for(const key of ['tpsId','TPSID','kind'])
+  await assert.rejects(service.createFresh('food-entry',{title:'Invalid',[key]:'reused'}),/collides with system storage/);
+ assert.equal(vault.getMarkdownFiles().length,0);
+});
+
+test('fresh creation retains known conflict checks and in-flight ID reservations',async()=>{
+ const h=createHarness();
+ const existing=h.addFile('Existing.md','---\ntpsId: forced-id\nkind: food-entry\ntitle: Owner\n---\n');
+ h.service.indexFile(existing);
+ h.service.generateCryptographicId=()=> 'forced-id';
+ await assert.rejects(h.service.createFresh('food-entry',{title:'Duplicate'}),/already exists/);
+ h.service.generateCryptographicId=()=> 'reserved-id';
+ let release;const gate=new Promise(resolve=>{release=resolve;});const create=h.vault.create;
+ h.vault.create=async(...args)=>{await gate;return create(...args);};
+ const first=h.service.createFresh('food-entry',{title:'First'});
+ try{await assert.rejects(h.service.createFresh('food-entry',{title:'Second'}),/already in progress/);}finally{release();}
+ await first;assert.equal(h.vault.getMarkdownFiles().length,2);
+});
+
+test('fresh logging does not wait for a pending whole-vault verification', {timeout:2000}, async()=>{
+ const h=createHarness();h.addFile('Slow.md','Ordinary');
+ let release;const gate=new Promise(resolve=>{release=resolve;});const read=h.vault.read;
+ h.vault.read=async file=>{await gate;return read(file);};
+ const pending=h.service.refreshIdentityIndexFromVaultSource();
+ try{
+  const record=await h.service.createFresh('food-entry',{title:'While syncing'});
+  assert.equal(record.frontmatter.title,'While syncing');
+ }finally{release();await pending;}
+});
+
+test('fresh creation retains exclusive plans, write failures, and retry reservations',async()=>{
+ const h=createHarness();h.service.nativePlanMutationLock=Symbol('plan');
+ await assert.rejects(h.service.createFresh('food-entry',{title:'Locked'}),/currently being applied/);
+ h.service.nativePlanMutationLock=null;
+ h.service.generateCryptographicId=()=> 'retry-id';const create=h.vault.create;
+ h.vault.create=async()=>{throw Error('Storage failed');};
+ await assert.rejects(h.service.createFresh('food-entry',{title:'Retry'}),/Storage failed/);
+ assert.equal(h.service.inFlightCreateIds.size,0);
+ h.vault.create=create;
+ assert.equal((await h.service.createFresh('food-entry',{title:'Retry'})).id,'retry-id');
+});
+
+test('secure-random unavailability retains authoritative source verification',async()=>{
+ const h=createHarness();h.addFile('Uncached.md','Ordinary');
+ h.service.generateCryptographicId=()=>null;
+ let reads=0;const read=h.vault.read;h.vault.read=async file=>{reads++;return read(file);};
+ await h.service.createFresh('food-entry',{title:'Fallback'});assert.equal(reads,1);
+});
+
+test('explicit identities still detect nonstandard whitespace YAML hidden by core metadata',async()=>{
+ const h=createHarness();
+ h.addFile('Whitespace.md','--- \t\ntpsId: hidden-owner\nkind: food-entry\ntitle: Owner\n--- \t\n');
+ h.plugin.app.metadataCache.getFileCache=()=>({sections:[{type:'paragraph'}]});
+ await assert.rejects(h.service.create('food-entry',{title:'Duplicate'},{id:'hidden-owner'}),/already exists/);
+ assert.match(apiSource,/freshIdentityCreates: true/);
+ assert.match(apiSource,/createFresh:[\s\S]{0,400}nativeRecordService\.createFresh/);
 });
