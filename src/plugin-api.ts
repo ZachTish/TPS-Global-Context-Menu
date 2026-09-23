@@ -730,7 +730,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
     };
     const nativeRecordsApi = {
         version: plugin.nativeRecordService.version,
-        capabilities: Object.freeze({ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true }),
+        capabilities: Object.freeze({ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true }),
         getMode: () => plugin.nativeRecordService.getMode(),
         isEnabled: () => plugin.nativeRecordService.isEnabled(),
         getRootPath: () => plugin.nativeRecordService.getRootPath(),
@@ -761,8 +761,8 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             plugin.nativeRecordService.resolve(reference),
         list: (kind?: Parameters<typeof plugin.nativeRecordService.list>[0]) =>
             plugin.nativeRecordService.list(kind),
-        snapshot: (kind?: Parameters<typeof plugin.nativeRecordService.snapshot>[0]) =>
-            plugin.nativeRecordService.snapshot(kind),
+        snapshot: (kind?: Parameters<typeof plugin.nativeRecordService.snapshot>[0], options?: Parameters<typeof plugin.nativeRecordService.snapshot>[1]) =>
+            plugin.nativeRecordService.snapshot(kind, options),
         update: (
             reference: Parameters<typeof plugin.nativeRecordService.update>[0],
             updates: Parameters<typeof plugin.nativeRecordService.update>[1],

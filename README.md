@@ -2,7 +2,7 @@
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.1.7](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.1.7) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.2.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.2.0) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -35,6 +35,28 @@ Malformed YAML in an unrelated project or archived note no longer locks all Dail
 Potential Daily Notes remain conservative blockers: date-shaped paths, last-known Daily identity, raw Daily markers, and escaped/aliased malformed YAML. Conflicting identities, unreadable or unresolved sources, canonical target occupancy, and malformed selected notes retain their existing guards. A malformed note containing an incidental Daily marker can still require repair before creation; this is intentional duplicate protection.
 
 Focused regressions cover the archived-project mixed YAML mapping/list failure, unrelated malformed files, existing/new days, possible Daily identities, and recovery after repair. Validation on 2026-09-19: all 1,154 `npm test` checks and 125 additional `prepretest` checks passed, plus 93 focused Daily Note checks. The separate production build deployed to the test vault and `plugin:reload` loaded 2.3.1. The previously blocked provider call succeeded; Navigator’s confirmation created and opened one templated note, and reopening made no duplicate. The malformed fixture remained unchanged and temporary defaults were restored. Installed UI QA used Core template tokens (Templater is not installed in the test vault); Templater behavior remains covered by the existing automated suite. See [release notes](release-notes/2.3.1.md). This patch is a BRAT handoff; production installation and acceptance remain separate.
+
+## Conflict-aware reconciliation — 3.2.0
+
+The additive `nativeRecords.capabilities.conflictAwareSnapshots` capability enables
+`snapshot(undefined, { includeConflicts: true })`. The result includes only uniquely
+owned writable records, plus detached diagnostic entries (`path`, `ids`, `kinds`,
+`frontmatter`) for all excluded owners. Callers must reject conflicts relevant to
+their domain before planning writes. Default snapshots and lists remain strict.
+Global identity reservations, token/revision checks, source validation, malformed
+YAML rejection, and exact batch preflight remain enforced. This does not repair or
+migrate conflicting notes. Controller 2.4.2 uses it to keep unrelated invalid notes
+from blocking calendar imports. Existing API v6 remains compatible; feature-detect
+the capability. No settings, navigation, or defaults change.
+
+Validation (2026-09-23): the full declared suite, focused identity-conflict tests,
+TypeScript, and final production build pass. Test-vault CLI reload verifies the
+versioned artifacts. Installed Controller/GCM QA creates an event beside an
+incomplete unrelated record, repeats with zero creates and unchanged bytes, and
+rejects a duplicate calendar owner before writing. The unrelated note stays
+byte-identical. Synthetic fixtures were archived directly from Inbox; settings
+and outbound automation were preserved. This is a BRAT handoff, not evidence of
+production installation or user acceptance.
 
 ## Integration
 

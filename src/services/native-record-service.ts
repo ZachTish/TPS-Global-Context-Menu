@@ -190,6 +190,8 @@ export interface TpsNativeRecordSnapshot {
   token: number;
   revision: number;
   records: TpsNativeRecordHandle[];
+  /** Present only when explicitly requested; these notes are never writable through this snapshot. */
+  conflicts?: Array<{ path: string; ids: string[]; kinds: string[]; frontmatter: Record<string, unknown> | null }>;
 }
 
 interface ParsedNativeRecordDocument {
@@ -1772,7 +1774,7 @@ export class NativeRecordService {
    * A caller can bind a later identity-plan preflight to this exact discovery
    * snapshot so files arriving between discovery and planning fail closed.
    */
-  async snapshot(kind?: TpsNativeRecordKind): Promise<TpsNativeRecordSnapshot> {
+  async snapshot(kind?: TpsNativeRecordKind, options?: { includeConflicts?: boolean }): Promise<TpsNativeRecordSnapshot> {
     if (!this.isEnabled()) return { token: this.identitySourceGeneration, revision: this.nativeMutationRevision, records: [] };
     if (validateNativeRecordStorageProfile(this.getStorageProfile()).length > 0) {
       return { token: this.identitySourceGeneration, revision: this.nativeMutationRevision, records: [] };
@@ -1786,10 +1788,13 @@ export class NativeRecordService {
       await this.refreshIdentityIndexFromVaultSource();
       if (snapshotRevision === this.nativeMutationRevision) break;
     }
-    if (
-      this.blockedIdentityEvidencePaths.size > 0
-      || [...this.pathsById.values()].some((paths) => paths.size !== 1)
-    ) {
+    const conflictPaths = new Set(this.blockedIdentityEvidencePaths);
+    for (const [id, paths] of this.pathsById) {
+      if (paths.size !== 1 || this.blockedPathsById.has(id)) {
+        for (const path of paths) conflictPaths.add(path);
+      }
+    }
+    if (conflictPaths.size && options?.includeConflicts !== true) {
       throw new Error('TPS native-record identity conflicts must be resolved before records can be listed.');
     }
     const records: TpsNativeRecordHandle[] = [];
@@ -1801,7 +1806,21 @@ export class NativeRecordService {
       const file = this.plugin.app.vault.getFileByPath(path);
       if (file instanceof TFile) records.push(this.toHandle(file, frontmatter));
     }
-    return { token: this.identitySourceGeneration, revision: snapshotRevision, records };
+    const conflicts = options?.includeConflicts === true
+      ? [...conflictPaths].sort().map(path => {
+        const raw = this.authoritativeSourceCache.get(path)?.frontmatter || null;
+        const ids = new Set<string>();
+        for (const index of [this.pathsById, this.blockedPathsById]) {
+          for (const [id, paths] of index) if (paths.has(path)) ids.add(id);
+        }
+        const profiles = this.getInspectionProfiles();
+        const kindKeys = new Set(['kind', ...profiles.evidence.map(profile => profile.kindPropertyKey), ...Object.values(profiles.kindKeys)]);
+        const kinds = raw ? [...kindKeys].flatMap(key => readValuesCaseInsensitive(raw, key))
+          .flatMap(value => Array.isArray(value) ? value : [value])
+          .filter((value): value is string => typeof value === 'string') : [];
+        return { path, ids: [...ids].sort(), kinds: [...new Set(kinds)], frontmatter: raw ? JSON.parse(JSON.stringify(raw)) : null };
+      }) : undefined;
+    return { token: this.identitySourceGeneration, revision: snapshotRevision, records, ...(conflicts ? { conflicts } : {}) };
   }
 
   /**

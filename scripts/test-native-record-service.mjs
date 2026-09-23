@@ -3584,7 +3584,7 @@ test('native profile is explicit, default-off, and removes legacy active paths o
 });
 
 test('public GCM API exposes versioned generic and task record contracts', () => {
-  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true \}\)/u);
+  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true \}\)/u);
   assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
   assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 6;/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);
@@ -3869,4 +3869,38 @@ test('ordinary index updates do not walk unrelated blocked identities', async()=
   assert.equal(service.blockedPathsById.get('blocked-1').has(blocked[1].path),true);
   assert.equal(service.blockedIdentityEvidencePaths.has(blocked[0].path),false);
   assert.equal(service.blockedIdentityEvidencePaths.size,249);
+});
+
+test('opt-in conflict snapshot isolates invalid unrelated records without releasing their identities', async () => {
+  const {service,addFile,contents}=createHarness();
+  const doc=fm=>serializeNativeRecordDocument({bom:'',newline:'\n',closer:'---',body:'Keep this body\n',frontmatter:fm});
+  const invalid=addFile('broken-item.md',doc({tpsId:'item-broken',entityKind:'food',nested:{keep:true}}));
+  addFile('event.md',doc({tpsId:'calendar-owned',kind:'calendar-event',title:'Event'}));
+  await assert.rejects(()=>service.snapshot(),/identity conflicts/);
+  const before=contents.get(invalid);
+  const snapshot=await service.snapshot(undefined,{includeConflicts:true});
+  assert.equal(snapshot.records.length,1);
+  assert.deepEqual(snapshot.conflicts.map(x=>x.ids),[['item-broken']]);
+  assert.equal(snapshot.conflicts[0].path,'broken-item.md');
+  snapshot.conflicts[0].frontmatter.nested.keep=false;
+  assert.equal((await service.snapshot(undefined,{includeConflicts:true})).conflicts[0].frontmatter.nested.keep,true);
+  assert.equal(await service.canCreateIdentity('ITEM-BROKEN'),false);
+  assert.equal(await service.planIdentityChanges([{operation:'create',nextId:'item-broken',kind:'calendar-event',properties:{title:'Wrong owner'}}],snapshot),null);
+  assert.equal(await service.canCreateIdentity('calendar-free'),true);
+  assert.equal(contents.get(invalid),before);
+});
+
+test('conflict snapshots report all duplicate and blocked owners, including custom kind evidence', async () => {
+  const {service,addFile}=createHarness();
+  const doc=fm=>serializeNativeRecordDocument({bom:'',newline:'\n',closer:'---',body:'',frontmatter:fm});
+  addFile('a.md',doc({tpsId:'shared',kind:'calendar-event',title:'A'}));
+  addFile('b.md',doc({tpsId:'SHARED',kind:'calendar-event',title:'B'}));
+  addFile('c.md',doc({tpsId:'other',kind:'calendar-event',title:'Valid'}));
+  addFile('d.md',doc({tpsId:'OTHER',kind:'calendar-event'}));
+  const s=await service.snapshot(undefined,{includeConflicts:true});
+  assert.equal(s.records.length,0);
+  assert.equal(s.conflicts.length,4);
+  assert.ok(s.conflicts.every(c=>c.kinds.includes('calendar-event')));
+  assert.equal(await service.canCreateIdentity('shared'),false);
+  await assert.rejects(()=>service.list(),/identity conflicts/);
 });
