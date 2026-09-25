@@ -160,15 +160,14 @@ export class NoteTitleRenderService {
       try {
         const liveFile = this.plugin.app.vault.getFileByPath(file.path);
         if (!(liveFile instanceof TFile)) return;
-        await this.plugin.bulkEditService.updateFrontmatter([liveFile], { title: nextTitle });
-        this.clearTitleCache(liveFile.path);
-        if (this.plugin.settings.enableAutoRename) {
-          await this.plugin.fileNamingService.updateFilenameIfNeeded(liveFile, {
-            bypassCreationGrace: true,
-            bypassProcessingLock: true,
-            titleOverride: nextTitle,
-          });
+        // The frontmatter writer also owns title-driven filename updates.
+        // A cancelled, rejected or unchanged write must not rename independently.
+        const changed = await this.plugin.bulkEditService.updateFrontmatter([liveFile], { title: nextTitle });
+        if (!changed) {
+          logger.flow('NoteTitle', 'rename:not-applied', { path: liveFile.path });
+          return;
         }
+        this.clearTitleCache(liveFile.path);
         this.plugin.eventService.emitFilesUpdated([liveFile.path]);
         this.plugin.overlayRenderingService.scheduleFileRefresh(liveFile, 'title-rename', { force: true, delayMs: 0 });
         logger.flow('NoteTitle', 'rename:done', {

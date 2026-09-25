@@ -123,7 +123,7 @@ const serviceBuild = await build({
           return {
             contents: [
               'export class MarkdownView {}',
-              'export class Notice {}',
+              'export class Notice { constructor(message) { globalThis.__tpsTitleNotice = message; } }',
               'export class TFile {',
               '  constructor(path) {',
               '    this.path = path;',
@@ -137,7 +137,7 @@ const serviceBuild = await build({
           };
         }
         if (args.path === 'text-input-modal') {
-          return { contents: 'export class TextInputModal {}' };
+          return { contents: 'export class TextInputModal { constructor(app, label, initialValue, submit) { globalThis.__tpsTitleSubmit = submit; } open() {} }' };
         }
         if (args.path === 'leaf-resolver') {
           return { contents: 'export function isStrictSourceMode() { return false; }' };
@@ -522,3 +522,77 @@ if (process.env.TPS_NOTE_TITLE_BENCHMARK === '1') {
     );
   });
 }
+
+
+function makeRenameHarness({ changed = true, autoRename = true, failure = false } = {}) {
+  const file = new TestTFile('Inbox/Before.md');
+  const state = { title: 'Before', renames: 0, events: 0, refreshes: 0 };
+  const plugin = {
+    settings: { enableAutoRename: autoRename },
+    app: {
+      vault: { getFileByPath: path => path === file.path ? file : null },
+      metadataCache: { getFileCache: () => ({ frontmatter: { title: state.title } }) },
+    },
+    fileNamingService: {
+      async updateFilenameIfNeeded(target, options) {
+        state.renames++;
+        target.path = `Inbox/${options.titleOverride}.md`;
+      },
+    },
+    bulkEditService: {
+      async updateFrontmatter(files, updates) {
+        if (failure) throw new Error('Write failed');
+        if (!changed) return 0;
+        state.title = updates.title;
+        // The shared frontmatter writer owns title-driven filename updates.
+        if (autoRename) await plugin.fileNamingService.updateFilenameIfNeeded(files[0], { titleOverride: updates.title });
+        return 1;
+      },
+    },
+    eventService: { emitFilesUpdated() { state.events++; } },
+    overlayRenderingService: { scheduleFileRefresh() { state.refreshes++; } },
+  };
+  globalThis.__tpsTitleNotice = null;
+  return { file, state, service: new serviceModule.NoteTitleRenderService(plugin) };
+}
+
+test('a cancelled or rejected title write cannot rename the file or announce success', async () => {
+  const { file, state, service } = makeRenameHarness({ changed: false });
+  await service.promptRenameTitle(file);
+  await globalThis.__tpsTitleSubmit('After');
+  assert.equal(file.path, 'Inbox/Before.md');
+  assert.equal(state.title, 'Before');
+  assert.equal(state.renames, 0);
+  assert.equal(state.events, 0);
+  assert.equal(state.refreshes, 0);
+});
+
+test('a successful title edit uses the shared writer once for the filename', async () => {
+  const { file, state, service } = makeRenameHarness();
+  await service.promptRenameTitle(file);
+  await globalThis.__tpsTitleSubmit('  After   rename  ');
+  assert.equal(state.title, 'After rename');
+  assert.equal(file.path, 'Inbox/After rename.md');
+  assert.equal(state.renames, 1);
+  assert.equal(state.events, 1);
+  assert.equal(state.refreshes, 1);
+});
+
+test('title editing with auto-rename disabled preserves the filename', async () => {
+  const { file, state, service } = makeRenameHarness({ autoRename: false });
+  await service.promptRenameTitle(file);
+  await globalThis.__tpsTitleSubmit('After');
+  assert.equal(state.title, 'After');
+  assert.equal(file.path, 'Inbox/Before.md');
+  assert.equal(state.renames, 0);
+});
+
+test('an exception during title editing leaves the filename alone and reports failure', async () => {
+  const { file, state, service } = makeRenameHarness({ failure: true });
+  await service.promptRenameTitle(file);
+  await globalThis.__tpsTitleSubmit('After');
+  assert.equal(file.path, 'Inbox/Before.md');
+  assert.equal(state.title, 'Before');
+  assert.equal(state.renames, 0);
+  assert.equal(globalThis.__tpsTitleNotice, 'Title rename failed.');
+});

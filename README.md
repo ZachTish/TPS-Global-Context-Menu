@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 3.3.3 — Keep title renames tied to the saved title
+
+The GCM **Title: …** action in note menus and inline titles now lets the existing frontmatter writer own filename updates. Previously the menu performed a second filename update with the requested title even when the property write was cancelled or rejected. This reproduced `After.md` with `title: Before` in the test vault when the existing frontmatter safety check rejected the write. Removing that redundant rename prevents the mismatch at its source. An unchanged/cancelled/rejected write also stops before success events and refreshes, with a concise `rename:not-applied` diagnostic.
+
+Successful title saves still honor Auto-rename and the existing filename exclusions/collision protection. Turning Auto-rename off continues to change only the title. No settings, migration, watcher, retry or repair behavior was added; existing mismatched notes are not rewritten. Navigator's separate native **Rename note** action is unchanged. This fixes the reproduced GCM path; the user's exact menu action and rejection reason have not been independently confirmed.
+
+Validation: regression tests failed on 3.3.2 for the rejected-write mismatch and duplicate rename call, then passed after removal. Focused tests cover unchanged/rejected writes, successful title edits, Auto-rename off, exceptions and Navigator menu routing. Full suites, final versioned build/test deployment, named plugin reload and installed title-dialog verification are recorded in [3.3.3 release notes](release-notes/3.3.3.md). Physical iPhone testing remains user acceptance. Minimum Obsidian remains 1.10.0; production installation is a separate BRAT pull.
+
 ## 3.3.2 — Keep automatic appearance writes on the Controller
 
 Opening a note previously bypassed GCM's existing device-role check. A mobile/User device could append icon/color while the Controller independently added the same fields to another revision of a newly created note. The installed test-vault reproduction uses the real User file-open and Controller create rule paths: both outputs are valid YAML, but Obsidian's editor merge duplicates the appearance lines when the revisions also differ in timer metadata/body text.
@@ -12,7 +20,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.3.2](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.3.2) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.3.3](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.3.3) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
