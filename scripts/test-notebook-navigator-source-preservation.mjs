@@ -1104,3 +1104,82 @@ test('CR-only Markdown fails closed without creating duplicate frontmatter', asy
   assert.equal(fixture.updates.length, 0);
   assert.equal(fixture.indexed.length, 0);
 });
+
+const workoutDuplicateFixture = (newline = '\n', bom = '') => bom + [
+  '---', 'kind: workout-session', 'scheduled: 2026-09-25T11:14:07.378Z',
+  'timeEstimate: 60', 'status: active', 'session:', '  version: 1', '  exercises: []',
+  'timeTrackingDailyNotes:', '  - "[[2026-09-25]]"', 'title: Workout QA',
+  'tpsId: workout-qa', 'icon: dumbbell', 'color: "#dbab9f"',
+  'icon: dumbbell', 'color: "#dbab9f"', '---', '', 'Human workout notes.', '',
+].join(newline);
+
+test('opening a workout repairs identical appearance duplicates without rewriting session data or body', async () => {
+  for (const [newline, bom] of [['\n', ''], ['\r\n', '\uFEFF']]) {
+    const source = workoutDuplicateFixture(newline, bom);
+    const fixture = makeFixture(source);
+    const rules = new NotebookNavigatorRuleService(fixture.plugin);
+    rules.isNavigationTextInputActive = () => false;
+    fixture.plugin.settings.notebookNavigatorRules.rules = [{
+      id: 'workout', enabled: true, icon: 'dumbbell', color: '#dbab9f', match: 'all',
+      conditions: [{ source: 'property', field: 'kind', operator: 'is', value: 'workout-session' }],
+    }];
+    assert.equal(await rules.applyRulesToFile(fixture.file, {reason: 'file-open'}), true);
+    assert.equal(fixture.getContent(), source.replace(
+      `icon: dumbbell${newline}color: "#dbab9f"${newline}icon: dumbbell${newline}color: "#dbab9f"`,
+      `icon: dumbbell${newline}color: "#dbab9f"`,
+    ));
+    assert.equal(await rules.applyRulesToFile(fixture.file, {reason: 'file-open'}), false);
+    assert.equal(fixture.updates.length, 1);
+  }
+});
+
+test('duplicate recovery is opt-in, scalar-only, and never chooses conflicting or unrelated fields', async () => {
+  const cases = [
+    ['icon: dumbbell\nicon: dumbbell\n', []],
+    ['icon: dumbbell\nicon: calendar\n', ['icon']],
+    ['icon: dumbbell\nIcon: dumbbell\n', ['icon']],
+    ['icon: &visual dumbbell\nicon: &visual dumbbell\n', ['icon']],
+    ['icon: |\n  dumbbell\nicon: |\n  dumbbell\n', ['icon']],
+    ['icon: dumbbell\n  continuation\nicon: dumbbell\n  continuation\n', ['icon']],
+    ['icon:\n  - dumbbell\nicon:\n  - dumbbell\n', ['icon']],
+    ['kind: workout-session\nkind: workout-session\n', ['icon']],
+  ];
+  for (const [fields, repair] of cases) {
+    const source = `---\n${fields}---\nBody.\n`;
+    const fixture = makeFixture(source);
+    const changed = await fixture.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(
+      fixture.file, ['icon', 'kind'], () => {}, {kind:'automation'}, {repairIdenticalScalarKeys: () => repair},
+    );
+    assert.equal(changed, false, fields);
+    assert.equal(fixture.getContent(), source, fields);
+  }
+});
+
+test('recovery uses current source and custom appearance mappings while serializing concurrent open repairs', async () => {
+  const source = workoutDuplicateFixture().replaceAll('icon:', 'noteIcon:').replaceAll('color:', 'noteColor:');
+  const fixture = makeFixture(source);
+  const service = fixture.plugin.frontmatterMutationService;
+  const results = await Promise.all(Array.from({length:8}, () => service.processOwnedKeysPreservingSource(
+    fixture.file, ['noteIcon','noteColor'], () => {}, {kind:'automation'},
+    {repairIdenticalScalarKeys:()=>['noteIcon','noteColor']},
+  )));
+  assert.equal(results.filter(Boolean).length, 1);
+  assert.equal(fixture.getMaxActiveProcesses(), 1);
+  assert.equal((fixture.getContent().match(/^noteIcon:/gm) || []).length, 1);
+  assert.equal((fixture.getContent().match(/^noteColor:/gm) || []).length, 1);
+  assert.equal(fixture.indexed.length, 1);
+});
+
+test('fresh exclusion and protected-key guards cancel tentative duplicate recovery', async () => {
+  for (const cancel of [true, false]) {
+    const source = workoutDuplicateFixture();
+    const fixture = makeFixture(source);
+    const changed = await fixture.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(
+      fixture.file, ['icon','color'], () => cancel ? false : undefined, {kind:'automation'},
+      {repairIdenticalScalarKeys: fm => cancel ? ['icon','color'] : (fm.kind === 'workout-session' ? [] : ['icon','color'])},
+    );
+    assert.equal(changed, false);
+    assert.equal(fixture.getContent(), source);
+    assert.equal(fixture.updates.length, 0);
+  }
+});

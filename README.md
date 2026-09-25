@@ -1,5 +1,15 @@
 # TPS Global Context Menu
 
+## 3.3.1 — Recover duplicated appearance properties
+
+Automatic Navigator appearance rules can now recover a note containing byte-identical repeated scalar icon/color properties, including configured property names. The repair runs inside the existing serialized `Vault.process` write and uses current source. It removes only redundant copies, preserving the first spelling/value, all unrelated frontmatter, nested workout session data, timestamps, comments, body, BOM and line endings. A second application performs no write. Opening the note triggers the normal enabled appearance-rule path; create and explicit rule application use the same recovery.
+
+Recovery is opt-in for appearance keys only. Conflicting values or spellings, lists/maps/multiline values, anchors, aliases, tags, protected native identity fields, excluded notes, and unrelated malformed YAML are not repaired. A fresh mutation guard can reject the whole write. No settings, mappings, defaults or bulk migration change. Health source is unchanged because it delegates native workout creation to GCM and does not write icon/color itself.
+
+This fixes the reproduced recovery failure for the duplicate icon/color screenshot. The original iPhone duplicate-producing step remains unconfirmed: twelve installed test-vault creation/opening trials with concurrent timer-style and appearance writes did not produce duplicates. This release must not be described as eliminating all mobile or sync races. Physical iPhone verification remains necessary.
+
+Validation on 2026-09-25: 26 focused source-preservation tests, all 1,232 full-suite tests, and 160 additional tests passed; TypeScript/build passed. Installed test-vault 3.3.0 left the screenshot-shaped fixture invalid; 3.3.1 repaired exactly the two redundant lines, strict YAML parsing recovered the kind and nested session, and the repeat write returned false. Live Preview displayed the workout card and note body with no raw YAML error. No physical iPhone verification is claimed. The separate final build deploys only to the test vault; reload uses `plugin:reload id=tps-global-context-menu`. Health/GCM settings remained byte-identical, fixtures were moved directly from Inbox to `_archive/QA-creation-20260925`, and production was untouched. Details and hashes are in [release notes](release-notes/3.3.1.md). Minimum Obsidian remains 1.10.0; this is the BRAT handoff.
+
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
 Current release: [3.3.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.3.0) · Obsidian 1.10.0+ · Desktop and mobile.
