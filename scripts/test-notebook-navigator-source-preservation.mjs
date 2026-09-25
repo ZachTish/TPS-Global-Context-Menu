@@ -304,10 +304,10 @@ function stripNativeUpdateLines(source) {
     .replace(/^  - tps\/record\/v1\/calendar-event\/calendar-3rv0kr(?:\r?\n)/gmu, '');
 }
 
-test('file-open repairs stored icon/color while preserving every other source byte and virtual sort', async () => {
+test('Controller file-open updates stored icon/color while preserving every other source byte and virtual sort', async () => {
   const source = pocRecord.replace('---\r\n', '---\r\nicon: obsolete\r\ncolor: red\r\n');
   const fixture = makeFixture(source);
-  fixture.plugin.canRunBackgroundAutomation = () => false;
+  fixture.plugin.canRunBackgroundAutomation = () => true;
   const service = new NotebookNavigatorRuleService(fixture.plugin);
   service.isNavigationTextInputActive = () => false;
   assert.equal(service.shouldAutoApplyOnFileOpen(), true);
@@ -1105,81 +1105,53 @@ test('CR-only Markdown fails closed without creating duplicate frontmatter', asy
   assert.equal(fixture.indexed.length, 0);
 });
 
-const workoutDuplicateFixture = (newline = '\n', bom = '') => bom + [
-  '---', 'kind: workout-session', 'scheduled: 2026-09-25T11:14:07.378Z',
-  'timeEstimate: 60', 'status: active', 'session:', '  version: 1', '  exercises: []',
-  'timeTrackingDailyNotes:', '  - "[[2026-09-25]]"', 'title: Workout QA',
-  'tpsId: workout-qa', 'icon: dumbbell', 'color: "#dbab9f"',
-  'icon: dumbbell', 'color: "#dbab9f"', '---', '', 'Human workout notes.', '',
-].join(newline);
-
-test('opening a workout repairs identical appearance duplicates without rewriting session data or body', async () => {
-  for (const [newline, bom] of [['\n', ''], ['\r\n', '\uFEFF']]) {
-    const source = workoutDuplicateFixture(newline, bom);
-    const fixture = makeFixture(source);
-    const rules = new NotebookNavigatorRuleService(fixture.plugin);
-    rules.isNavigationTextInputActive = () => false;
-    fixture.plugin.settings.notebookNavigatorRules.rules = [{
-      id: 'workout', enabled: true, icon: 'dumbbell', color: '#dbab9f', match: 'all',
-      conditions: [{ source: 'property', field: 'kind', operator: 'is', value: 'workout-session' }],
-    }];
-    assert.equal(await rules.applyRulesToFile(fixture.file, {reason: 'file-open'}), true);
-    assert.equal(fixture.getContent(), source.replace(
-      `icon: dumbbell${newline}color: "#dbab9f"${newline}icon: dumbbell${newline}color: "#dbab9f"`,
-      `icon: dumbbell${newline}color: "#dbab9f"`,
-    ));
-    assert.equal(await rules.applyRulesToFile(fixture.file, {reason: 'file-open'}), false);
-    assert.equal(fixture.updates.length, 1);
+test('User/mobile devices never write automatic appearance on open or creation, even when forced', async () => {
+  const fixture = makeFixture();
+  fixture.plugin.canRunBackgroundAutomation = () => false;
+  const service = new NotebookNavigatorRuleService(fixture.plugin);
+  assert.equal(service.shouldAutoApplyOnFileOpen(), false);
+  for (const reason of [undefined, 'file-open', 'metadata-change', 'create', 'rename', 'gcm-startup-auto', 'gcm-created-daily-note', 'gcm-subitem-create']) {
+    service.scheduleApply(fixture.file, {reason, force:true, bypassCreationGrace:true});
+    assert.equal(service.timers.size, 0, `must not schedule ${reason}`);
+    assert.equal(await service.applyRulesToFile(fixture.file, {reason, force:true, bypassCreationGrace:true}), false, reason);
+    assert.equal(fixture.getContent(), pocRecord, reason);
   }
+  assert.equal(fixture.updates.length, 0);
 });
 
-test('duplicate recovery is opt-in, scalar-only, and never chooses conflicting or unrelated fields', async () => {
-  const cases = [
-    ['icon: dumbbell\nicon: dumbbell\n', []],
-    ['icon: dumbbell\nicon: calendar\n', ['icon']],
-    ['icon: dumbbell\nIcon: dumbbell\n', ['icon']],
-    ['icon: &visual dumbbell\nicon: &visual dumbbell\n', ['icon']],
-    ['icon: |\n  dumbbell\nicon: |\n  dumbbell\n', ['icon']],
-    ['icon: dumbbell\n  continuation\nicon: dumbbell\n  continuation\n', ['icon']],
-    ['icon:\n  - dumbbell\nicon:\n  - dumbbell\n', ['icon']],
-    ['kind: workout-session\nkind: workout-session\n', ['icon']],
-  ];
-  for (const [fields, repair] of cases) {
-    const source = `---\n${fields}---\nBody.\n`;
-    const fixture = makeFixture(source);
-    const changed = await fixture.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(
-      fixture.file, ['icon', 'kind'], () => {}, {kind:'automation'}, {repairIdenticalScalarKeys: () => repair},
-    );
-    assert.equal(changed, false, fields);
-    assert.equal(fixture.getContent(), source, fields);
-  }
-});
-
-test('recovery uses current source and custom appearance mappings while serializing concurrent open repairs', async () => {
-  const source = workoutDuplicateFixture().replaceAll('icon:', 'noteIcon:').replaceAll('color:', 'noteColor:');
-  const fixture = makeFixture(source);
-  const service = fixture.plugin.frontmatterMutationService;
-  const results = await Promise.all(Array.from({length:8}, () => service.processOwnedKeysPreservingSource(
-    fixture.file, ['noteIcon','noteColor'], () => {}, {kind:'automation'},
-    {repairIdenticalScalarKeys:()=>['noteIcon','noteColor']},
-  )));
-  assert.equal(results.filter(Boolean).length, 1);
-  assert.equal(fixture.getMaxActiveProcesses(), 1);
-  assert.equal((fixture.getContent().match(/^noteIcon:/gm) || []).length, 1);
-  assert.equal((fixture.getContent().match(/^noteColor:/gm) || []).length, 1);
-  assert.equal(fixture.indexed.length, 1);
-});
-
-test('fresh exclusion and protected-key guards cancel tentative duplicate recovery', async () => {
-  for (const cancel of [true, false]) {
-    const source = workoutDuplicateFixture();
-    const fixture = makeFixture(source);
-    const changed = await fixture.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(
-      fixture.file, ['icon','color'], () => cancel ? false : undefined, {kind:'automation'},
-      {repairIdenticalScalarKeys: fm => cancel ? ['icon','color'] : (fm.kind === 'workout-session' ? [] : ['icon','color'])},
-    );
-    assert.equal(changed, false);
-    assert.equal(fixture.getContent(), source);
+test('automatic rules recheck Controller ownership when a queued create executes', async () => {
+  const fixture = makeFixture();
+  const service = new NotebookNavigatorRuleService(fixture.plugin);
+  const previousWindow = globalThis.window;
+  let pending;
+  globalThis.window = {setTimeout: callback => {pending=callback;return 1},clearTimeout:()=>{}};
+  try {
+    service.scheduleApply(fixture.file, {reason:'create', force:true, bypassCreationGrace:true});
+    assert.equal(typeof pending, 'function');
+    fixture.plugin.canRunBackgroundAutomation = () => false;
+    pending();
+    await new Promise(resolve=>setTimeout(resolve,10));
+    assert.equal(fixture.getContent(), pocRecord);
     assert.equal(fixture.updates.length, 0);
-  }
+  } finally {globalThis.window=previousWindow;}
+});
+
+test('explicit rule application still works on User/mobile devices', async () => {
+  const fixture = makeFixture();
+  fixture.plugin.canRunBackgroundAutomation = () => false;
+  const service = new NotebookNavigatorRuleService(fixture.plugin);
+  assert.equal(await service.applyRulesToFile(fixture.file, {reason:'gcm-manual-active',force:true,bypassCreationGrace:true}), true);
+  assert.match(fixture.getContent(), /^icon: calendar-clock/m);
+  assert.equal(stripManagedLines(fixture.getContent()), pocRecord);
+});
+
+test('identical duplicate appearance keys remain untouched instead of being automatically repaired', async () => {
+  const source='---\nkind: workout-session\nicon: dumbbell\ncolor: "#dbab9f"\nicon: dumbbell\ncolor: "#dbab9f"\n---\nBody.\n';
+  const fixture=makeFixture(source);
+  const changed=await fixture.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(
+    fixture.file,['icon','color'], fm=>{fm.icon='dumbbell';fm.color='#dbab9f';},
+  );
+  assert.equal(changed,false);
+  assert.equal(fixture.getContent(),source);
+  assert.equal(fixture.updates.length,0);
 });

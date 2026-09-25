@@ -10,12 +10,10 @@ import type { FilePropertiesMutationCause } from './file-properties-service';
 
 type FrontmatterRecord = Record<string, unknown>;
 type FrontmatterMutator = (frontmatter: FrontmatterRecord) => void | Promise<void>;
-type SynchronousFrontmatterMutator = (frontmatter: FrontmatterRecord) => void | boolean;
+type SynchronousFrontmatterMutator = (frontmatter: FrontmatterRecord) => void;
 type SourcePreservingMutationOptions = {
   emitEvents?: boolean;
   updateEntityIndex?: boolean;
-  /** Opt-in recovery of byte-identical scalar repetitions for presentation fields only. */
-  repairIdenticalScalarKeys?: (frontmatter: FrontmatterRecord) => string[];
 };
 type OwnedValueSnapshot = {
   actualKey: string | null;
@@ -218,7 +216,7 @@ export class FrontmatterMutationService {
     if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
     if (file.extension.toLowerCase() !== 'md') {
       return this.plugin.filePropertiesService?.isPropertyTarget(file)
-        ? this.plugin.filePropertiesService.process(file, frontmatter => { mutator(frontmatter); }, cause)
+        ? this.plugin.filePropertiesService.process(file, mutator, cause)
         : false;
     }
 
@@ -230,17 +228,16 @@ export class FrontmatterMutationService {
     const started = performance.now();
     await this.runSerialized(file, async () => {
       await this.plugin.app.vault.process(file, (currentContent) => {
-        const original = String(currentContent || '');
-        const raw = this.collapseIdenticalScalarKeys(original, keys, options.repairIdenticalScalarKeys);
+        const raw = String(currentContent || '');
         if (/\r(?!\n)/u.test(raw)) {
           this.warnMalformed(file, 'unsupported-bare-cr-line-ending');
-          return original;
+          return raw;
         }
         const contentForParsing = raw.replace(/^\uFEFF/, '').replace(/\r\n/g, '\n');
         const parsed = this.parseFrontmatterDocument(contentForParsing);
         if (parsed.ok !== true) {
           this.warnMalformed(file, parsed.reason, parsed.error);
-          return original;
+          return raw;
         }
         const duplicateOwnedKey = this.findDuplicateOwnedSourceKey(raw, keys);
         if (duplicateOwnedKey) {
@@ -250,7 +247,7 @@ export class FrontmatterMutationService {
             duplicateOwnedKey,
             ownedKeys: keys,
           });
-          return original;
+          return raw;
         }
         if (!this.canRewriteOwnedFrontmatterSource(raw, parsed.frontmatter, keys)) {
           this.warnMalformed(file, 'unsupported-owned-key-source-layout');
@@ -258,17 +255,17 @@ export class FrontmatterMutationService {
             file: file.path,
             ownedKeys: keys,
           });
-          return original;
+          return raw;
         }
 
         const frontmatter = parsed.frontmatter;
         const before = this.snapshotOwnedValues(frontmatter, keys);
-        if (mutator(frontmatter) === false) return original;
+        mutator(frontmatter);
         const mutations = this.collectOwnedMutations(before, frontmatter, keys);
-        if (mutations.length === 0 && raw === original) return original;
+        if (mutations.length === 0) return raw;
 
         const nextContent = this.rewriteOwnedFrontmatterSource(raw, mutations);
-        if (nextContent === original) return original;
+        if (nextContent === raw) return raw;
 
         const validation = this.validateNextContent(nextContent);
         if (validation.ok !== true) {
@@ -279,7 +276,7 @@ export class FrontmatterMutationService {
             ownedKeys: keys,
             stack: new Error().stack,
           });
-          return original;
+          return raw;
         }
         if (!this.hasSuspiciousBrokenSubitemLine(raw) && this.hasSuspiciousBrokenSubitemLine(nextContent)) {
           this.warnMalformed(file, 'suspicious-broken-subitem-line');
@@ -288,7 +285,7 @@ export class FrontmatterMutationService {
             ownedKeys: keys,
             stack: new Error().stack,
           });
-          return original;
+          return raw;
         }
 
         const indexedDocument = this.parseFrontmatterDocument(
@@ -302,12 +299,9 @@ export class FrontmatterMutationService {
             ownedKeys: keys,
             stack: new Error().stack,
           });
-          return original;
+          return raw;
         }
 
-        if (raw !== original) logger.flow('Frontmatter', 'repair-identical-presentation-keys', {
-          file: file.path, ownedKeys: keys,
-        });
         indexedFrontmatter = { ...indexedDocument.frontmatter };
         changed = true;
         return nextContent;
@@ -511,59 +505,6 @@ export class FrontmatterMutationService {
     }
   }
 
-  private collapseIdenticalScalarKeys(
-    raw: string, keys: string[], allowedKeys?: (frontmatter: FrontmatterRecord) => string[],
-  ): string {
-    if (!allowedKeys || !keys.length || /\r(?!\n)/u.test(raw)) return raw;
-    const bom = raw.startsWith('\uFEFF') ? '\uFEFF' : '';
-    const source = raw.slice(bom.length);
-    const start = this.findSourceFrontmatterStart(source);
-    if (start < 0) return raw;
-    const blockStart = source.indexOf('\n', start) + 1;
-    const end = this.findSourceFrontmatterClose(source, blockStart);
-    if (!blockStart || end < 0) return raw;
-    const owned = new Set(keys.map(casefold));
-    const groups = new Map<string, SourceKeySpan[]>();
-    for (const span of this.findSourceKeySpans(source, blockStart, end)) {
-      const key = casefold(span.key);
-      if (!owned.has(key)) continue;
-      const group = groups.get(key) || [];
-      group.push(span);
-      groups.set(key, group);
-    }
-    const removals: SourceKeySpan[] = [];
-    for (const group of groups.values()) {
-      if (group.length < 2) continue;
-      const text = source.slice(group[0].start, group[0].end);
-      // No mappings, sequences, multiline values, anchors, aliases or tags.
-      // Exact source equality also preserves key spelling and authored comments.
-      const line = text.replace(/\r?\n$/u, '');
-      const tail = this.parseSourceKeyLine(line)?.tail.trim();
-      if (!tail || /[\r\n]/u.test(line) || /^[&*!|>]/u.test(tail)) return raw;
-      if (group.some(span => source.slice(span.start, span.end) !== text
-        || /^[ \t]+\S/u.test(source.slice(span.end, end).split(/\r?\n/u).find(line => line.trim()) || ''))) return raw;
-      try {
-        const value = parseYaml(text)?.[group[0].key];
-        if (!['string', 'number', 'boolean'].includes(typeof value)) return raw;
-      } catch { return raw; }
-      removals.push(...group.slice(1));
-    }
-    if (!removals.length) return raw;
-    let next = source;
-    for (const span of removals.sort((a, b) => b.start - a.start)) {
-      next = next.slice(0, span.start) + next.slice(span.end);
-    }
-    // Repair must produce valid YAML itself; never hide unrelated corruption.
-    const split = this.splitFrontmatterDocument(next.replace(/\r\n/g, '\n'));
-    if (!split.ok || !split.frontmatterBlock) return raw;
-    try {
-      const parsed = parseYaml(split.frontmatterBlock);
-      const allowed = new Set(allowedKeys(parsed).map(casefold));
-      if (removals.some(span => !allowed.has(casefold(span.key)))) return raw;
-    } catch { return raw; }
-    return bom + next;
-  }
-
   private findDuplicateOwnedSourceKey(rawContent: string, ownedKeys: string[]): string | null {
     const source = rawContent.startsWith('\uFEFF') ? rawContent.slice(1) : rawContent;
     const openStart = this.findSourceFrontmatterStart(source);
@@ -660,7 +601,7 @@ export class FrontmatterMutationService {
     const candidate = { ...parsedFrontmatter };
     const before = this.snapshotOwnedValues(candidate, ownedKeys);
     try {
-      if (mutator(candidate) === false) return false;
+      mutator(candidate);
     } catch {
       return false;
     }

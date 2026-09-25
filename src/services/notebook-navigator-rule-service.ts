@@ -63,7 +63,7 @@ type ComputedPresentation = {
 /**
  * GCM-owned Notebook Navigator rule engine.
  *
- * Icon/color rules repair stored appearance on opened notes. Read-only
+ * Controller-owned icon/color rules update stored appearance on opened notes. Read-only
  * presentation and virtual sort remain available through the public API.
  * Hide rules remain a separate semantic-tag workflow; create-time title
  * repair remains separately owned.
@@ -198,6 +198,7 @@ export class NotebookNavigatorRuleService {
   }
 
   shouldAutoApplyOnFileOpen(): boolean {
+    if (!this.plugin.canRunBackgroundAutomation()) return false;
     return !!this.getSettings()?.enabled && this.hasVisualRules(this.getSettings());
   }
 
@@ -312,11 +313,11 @@ export class NotebookNavigatorRuleService {
       if (!canAutomaticallyMutateTemplateFrontmatter(
         frontmatter,
         settings.frontmatterWriteExclusions,
-      )) return false;
+      )) return;
       if (
         isAutomaticMutation
         && !canAutomaticallyMutateTemplateFrontmatter(frontmatter, this.plugin.settings)
-      ) return false;
+      ) return;
       const context = this.buildRuleContext(file, frontmatter, body);
       if (canMutateVisuals) {
         const visual = ruleEngine.resolveVisualOutputs(settings.rules || [], context);
@@ -351,15 +352,6 @@ export class NotebookNavigatorRuleService {
       kind: 'automation',
       sourcePluginId: this.plugin.manifest.id,
       surface: 'notebook-navigator-rules',
-    }, {
-      repairIdenticalScalarKeys: (frontmatter) => {
-        if (!canMutateVisuals) return [];
-        const inspection = this.plugin.nativeRecordService?.inspect(frontmatter)
-          || (this.plugin.nativeRecordService?.hasRecordIdentityEvidenceInFrontmatter?.(frontmatter) ? {} : null);
-        const protectedKeys = inspection ? this.getNativeRecordProtectedKeys(inspection) : new Set<string>();
-        return [this.getIconField(settings), this.getColorField(settings)]
-          .filter(key => !this.isProtectedKey(key) && !protectedKeys.has(key.toLowerCase()));
-      },
     });
     logger.perf('notebookRules:applyRulesToFile', {
       file: file.path,
@@ -870,7 +862,7 @@ export class NotebookNavigatorRuleService {
   }
 
   private requiresControllerAutomation(reason: string | undefined): boolean {
-    return this.isAutomaticReason(reason) && reason !== 'file-open';
+    return this.isAutomaticMutationReason(reason);
   }
 
   private isNavigationTextInputActive(): boolean {

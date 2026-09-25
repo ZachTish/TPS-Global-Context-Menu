@@ -206,7 +206,7 @@ function makeFixture() {
       registered.push(disposer);
       return disposer;
     },
-    canRunBackgroundAutomation: () => true,
+    canRunBackgroundAutomation: () => false,
     filePropertiesService: {
       isCompanionFile: () => false,
       isPropertyTarget: (file) => file === asset,
