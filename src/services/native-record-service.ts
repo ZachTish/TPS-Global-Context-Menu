@@ -1112,6 +1112,7 @@ export class NativeRecordService {
     evidence: TpsNativeRecordStorageProfile[];
     readable: TpsNativeRecordStorageProfile[];
     kindKeys: Record<string, string>;
+    byKind: Map<string, TpsNativeRecordStorageProfile>;
   } | null = null;
   private nativePlanMutationLock: symbol | null = null;
   private nativeMutationRevision = 0;
@@ -1196,21 +1197,17 @@ export class NativeRecordService {
     return normalizeNativeRecordLayout(this.plugin.settings.nativeRecordLayout);
   }
 
+  private copyStorageProfile(profile: TpsNativeRecordStorageProfile): TpsNativeRecordStorageProfile {
+    return { ...profile, ...(profile.classification ? { classification: { ...profile.classification } } : {}) };
+  }
+
   getStorageProfile(kind?: string): TpsNativeRecordStorageProfile {
-    const profile = this.getStorageConfiguration().writeProfile;
-    const keys = this.getKindPropertyKeys();
-    const key = kind && Object.prototype.hasOwnProperty.call(keys, kind) ? keys[kind] : undefined;
-    const definition = kind && kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, kind);
-    return definition ? { ...profile, kindPropertyKey: definition.key, classification: { parentKind: definition.parentKind, value: definition.value, recordKind: kind! } } : key ? { ...profile, kindPropertyKey: key } : profile;
+    const profiles = this.getInspectionProfiles();
+    return this.copyStorageProfile((kind && profiles.byKind.get(kind)) || profiles.write);
   }
 
   getKindPropertyKeys(): Record<string, string> {
-    const source = this.plugin.settings.nativeRecordKindPropertyKeys;
-    if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
-    return Object.fromEntries(Object.entries(source).map(([kind, value]) => [kind, typeof value === 'string' ? value : kindClassification(source, kind)!.key]).filter(([kind, key]) => (
-      isValidNativeRecordKind(kind) && typeof key === 'string' && /^[A-Za-z_][A-Za-z0-9_-]*$/.test(key)
-      && validateNativeRecordStorageProfile({ ...this.getStorageConfiguration().writeProfile, kindPropertyKey: key }).length === 0
-    )));
+    return { ...this.getInspectionProfiles().kindKeys };
   }
 
   async configureKindPropertyKeys(next: Record<string, string>, expected: Record<string, string>): Promise<void> {
@@ -1234,24 +1231,11 @@ export class NativeRecordService {
   private readingMigrationSources = false;
 
   getReadableStorageProfiles(): TpsNativeRecordStorageProfile[] {
-    const configuration = this.getStorageConfiguration();
-    const values = [
-      configuration.writeProfile,
-      ...Object.keys(this.getKindPropertyKeys()).map(kind => this.getStorageProfile(kind)),
-      ...(this.readingMigrationSources ? [...configuration.readAliases, LEGACY_NATIVE_RECORD_PROPERTY_PROFILE, DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE] : []),
-    ].map((profile) => normalizeNativeRecordStorageProfile(profile));
-    const seen = new Set<string>();
-    return values.filter((profile) => {
-      if (validateReadableNativeRecordStorageProfile(profile).length > 0) return false;
-      const key = profileKey(profile);
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
+    return this.getInspectionProfiles().readable.map(profile => this.copyStorageProfile(profile));
   }
 
   getIdentityEvidenceProfiles(): TpsNativeRecordStorageProfile[] {
-    return [this.getStorageProfile(), ...Object.keys(this.getKindPropertyKeys()).map(kind => this.getStorageProfile(kind)), ...this.getStorageConfiguration().readAliases, LEGACY_NATIVE_RECORD_PROPERTY_PROFILE, DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE];
+    return this.getInspectionProfiles().evidence.map(profile => this.copyStorageProfile(profile));
   }
 
   private getConfiguredStorageProfile(): TpsNativeRecordStorageProfile {
@@ -1283,12 +1267,12 @@ export class NativeRecordService {
     if (!inspection) return null;
     const key = Object.prototype.hasOwnProperty.call(profiles.kindKeys, inspection.kind)
       ? profiles.kindKeys[inspection.kind] : undefined;
-    const current = !isCanonicalCalendarRecordId(inspection.id) && key ? this.getStorageProfile(inspection.kind) : profiles.write;
+    const current = !isCanonicalCalendarRecordId(inspection.id) && key ? profiles.byKind.get(inspection.kind)! : profiles.write;
     const result = this.readingMigrationSources
       ? inspection
       : inspectNativeRecordMatchSet(raw, [current], current)?.inspection;
     // API callers may edit the returned profile; keep prepared profiles private.
-    return result ? { ...result, profile: { ...result.profile } } : null;
+    return result ? { ...result, profile: this.copyStorageProfile(result.profile) } : null;
   }
 
   private getInspectionProfiles(): NonNullable<NativeRecordService['inspectionProfiles']> {
@@ -1304,13 +1288,39 @@ export class NativeRecordService {
       this.readingMigrationSources,
     ]);
     if (this.inspectionProfiles?.signature !== signature) {
-      this.inspectionProfiles = {
-        signature,
-        write: this.getStorageProfile(),
-        evidence: this.getIdentityEvidenceProfiles(),
-        readable: this.getReadableStorageProfiles(),
-        kindKeys: this.getKindPropertyKeys(),
-      };
+      // Resolve configuration once per generation, not once per note or per
+      // mapped kind. Presentation and inspection share these prepared profiles.
+      const configuration = this.getStorageConfiguration();
+      const write = configuration.writeProfile;
+      const source = settings.nativeRecordKindPropertyKeys;
+      const kindKeys: Record<string, string> = {};
+      const byKind = new Map<string, TpsNativeRecordStorageProfile>();
+      if (source && typeof source === 'object' && !Array.isArray(source)) {
+        for (const [kind, value] of Object.entries(source)) {
+          const definition = kindClassification(source, kind);
+          const key = typeof value === 'string' ? value : definition?.key;
+          if (!isValidNativeRecordKind(kind) || typeof key !== 'string'
+            || !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(key)
+            || validateNativeRecordStorageProfile({ ...write, kindPropertyKey: key }).length > 0) continue;
+          kindKeys[kind] = key;
+          byKind.set(kind, definition
+            ? { ...write, kindPropertyKey: definition.key, classification: { parentKind: definition.parentKind, value: definition.value, recordKind: kind } }
+            : { ...write, kindPropertyKey: key });
+        }
+      }
+      const current = [write, ...byKind.values()];
+      const legacy = [...configuration.readAliases, LEGACY_NATIVE_RECORD_PROPERTY_PROFILE, DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE];
+      const seen = new Set<string>();
+      const readable = [...current, ...(this.readingMigrationSources ? legacy : [])]
+        .map(profile => normalizeNativeRecordStorageProfile(profile))
+        .filter(profile => {
+          if (validateReadableNativeRecordStorageProfile(profile).length > 0) return false;
+          const key = profileKey(profile);
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      this.inspectionProfiles = { signature, write, evidence: [...current, ...legacy], readable, kindKeys, byKind };
     }
     return this.inspectionProfiles;
   }

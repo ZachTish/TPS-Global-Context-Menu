@@ -3766,8 +3766,8 @@ test('cold vault discovery indexes existing records without reading or adopting 
 test('record inspection prepares mappings once and keeps returned profiles and note mutations independent', () => {
   const { service, addFile } = createHarness();
   let preparations = 0;
-  const prepare = service.getIdentityEvidenceProfiles;
-  service.getIdentityEvidenceProfiles = function () { preparations++; return prepare.call(this); };
+  const prepare = service.getStorageConfiguration;
+  service.getStorageConfiguration = function () { preparations++; return prepare.call(this); };
   service.inspectionProfiles = null;
   const fm = { tpsId: 'prepared', kind: 'task', title: 'Before' };
   for (let i = 0; i < 1000; i++) assert.equal(service.inspect(fm)?.id, 'prepared');
@@ -4025,4 +4025,32 @@ test('calendar hierarchy preserves legacy IDs while canonical calendar IDs do no
  await service.update(event.path,{scheduled:'2026-09-29'});assert.match(contents.get(event.file),/^transactionKind: event$/m);
  const plain=await service.create('calendar-event',{title:'No default classification'},{id:'calendar:v1:abcdefghijklmnop:abcdefghijklmnopqrstuvwxyz1'});
  assert.equal((await service.resolve(plain.path))?.kind,'calendar-event');assert.doesNotMatch(contents.get(plain.file),/^kind:/m);
+});
+
+test('presentation profile reads share prepared mappings and return detached nested classifications', () => {
+  const { service, plugin } = createHarness();
+  plugin.settings.nativeRecordKindPropertyKeys = Object.fromEntries(
+    Array.from({ length: 26 }, (_, i) => [`perf-${i}`, { key: 'entityKind', parentKind: 'entity', value: `type-${i}` }]),
+  );
+  let configurations = 0;
+  const resolve = service.getStorageConfiguration;
+  service.getStorageConfiguration = function () { configurations++; return resolve.call(this); };
+  for (let i = 0; i < 1000; i++) {
+    assert.equal(service.getStorageProfile('perf-0').classification.value, 'type-0');
+    assert.equal(service.getIdentityEvidenceProfiles().length >= 27, true);
+    assert.equal(service.getReadableStorageProfiles().length, 27);
+  }
+  assert.equal(configurations, 1, 'shared settings resolve once, not once per note/mapping');
+  const publicProfile = service.getStorageProfile('perf-0');
+  publicProfile.classification.value = 'poisoned';
+  const evidence = service.getIdentityEvidenceProfiles();
+  evidence[1].classification.parentKind = 'poisoned';
+  const keys = service.getKindPropertyKeys();
+  keys['perf-0'] = 'poisoned';
+  assert.equal(service.getStorageProfile('perf-0').classification.value, 'type-0');
+  assert.equal(service.getStorageProfile('perf-0').classification.parentKind, 'entity');
+  assert.equal(service.getKindPropertyKeys()['perf-0'], 'entityKind');
+  plugin.settings.nativeRecordKindPropertyKeys['perf-0'].value = 'updated';
+  assert.equal(service.getStorageProfile('perf-0').classification.value, 'updated');
+  assert.equal(configurations, 2, 'in-place settings edits invalidate prepared mappings');
 });
