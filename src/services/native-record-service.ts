@@ -1,3 +1,4 @@
+import { kindClassification } from '../utils/kind-classification';
 import { PropertyMigrationModal } from '../modals/property-migration-modal';
 import { readManagedNoteField, writeManagedNoteField } from '../utils/managed-note-fields';
 import {
@@ -270,6 +271,7 @@ export function normalizeNativeRecordStorageProfile(
   value: Partial<TpsNativeRecordStorageProfile> | null | undefined,
 ): TpsNativeRecordStorageProfile {
   return {
+    ...(value?.classification ? { classification: { ...value.classification } } : {}),
     identityMode: value?.identityMode === 'tag' ? 'tag' : 'property',
     identityPropertyKey: normalizePropertyKey(
       value?.identityPropertyKey,
@@ -313,13 +315,14 @@ function validateReadableNativeRecordStorageProfile(profileValue: TpsNativeRecor
   if (
     profile.identityMode === 'property'
     && !profile.schemaPropertyKey
-    && profileKey({ ...profile, kindPropertyKey: 'kind', titlePropertyKey: 'title' }) !== profileKey(DEFAULT_NATIVE_RECORD_STORAGE_PROFILE)
+    && profileKey({ ...profile, classification: undefined, kindPropertyKey: 'kind', titlePropertyKey: 'title' }) !== profileKey(DEFAULT_NATIVE_RECORD_STORAGE_PROFILE)
   ) {
     errors.push('Schema-free native record storage is reserved for the exact canonical tpsId, kind, and title envelope.');
   }
   const keyedFields = [
     ...(profile.identityMode === 'property' ? [profile.identityPropertyKey, profile.schemaPropertyKey] : []),
     profile.kindPropertyKey,
+    ...(profile.classification ? ['kind'] : []),
     profile.titlePropertyKey,
     profile.createdPropertyKey,
     profile.modifiedPropertyKey,
@@ -338,13 +341,14 @@ export function validateNativeRecordStorageProfile(profileValue: TpsNativeRecord
   const profile = normalizeNativeRecordStorageProfile(profileValue);
   const errors = validateReadableNativeRecordStorageProfile(profile);
   const canonical = DEFAULT_NATIVE_RECORD_STORAGE_PROFILE;
-  if (profileKey({ ...profile, kindPropertyKey: 'kind', titlePropertyKey: 'title' }) !== profileKey(canonical)) {
+  if (profileKey({ ...profile, classification: undefined, kindPropertyKey: 'kind', titlePropertyKey: 'title' }) !== profileKey(canonical)) {
     errors.push('Writable native records must use the canonical tpsId, kind, and title envelope.');
   }
   const writableKeys = [
     profile.identityPropertyKey,
     profile.schemaPropertyKey,
     profile.kindPropertyKey,
+    ...(profile.classification ? ['kind'] : []),
     profile.titlePropertyKey,
     profile.createdPropertyKey,
     profile.modifiedPropertyKey,
@@ -571,10 +575,14 @@ function inspectWithProfile(
   }
   if (schemaVersion !== TPS_NATIVE_RECORD_SCHEMA_VERSION || !id) return null;
   const canonicalCalendar = isCanonicalCalendarRecordId(id);
+  if (canonicalCalendar && profile.classification) return null;
   if (canonicalCalendar) {
     // A legacy identity tag is still identity evidence, not a business field.
     if (profile.identityMode === 'tag' && kind !== 'calendar-event') return null;
     kind = 'calendar-event';
+  } else if (profile.classification) {
+    if (kind !== profile.classification.value || readValueCaseInsensitive(raw, 'kind') !== profile.classification.parentKind) return null;
+    kind = profile.classification.recordKind;
   } else if (profile.kindPropertyKey) {
     const authoredKind = stringifyReadableStorageValue(
       readValueCaseInsensitive(raw, profile.kindPropertyKey),
@@ -615,6 +623,7 @@ function storagePropertyKeys(profile: TpsNativeRecordStorageProfile): string[] {
       ? [profile.identityPropertyKey, profile.schemaPropertyKey]
       : []),
     profile.kindPropertyKey,
+    ...(profile.classification ? ['kind'] : []),
     profile.titlePropertyKey,
     profile.createdPropertyKey,
     profile.modifiedPropertyKey,
@@ -635,6 +644,8 @@ function selectApplicableReadableProfiles(
   profiles: TpsNativeRecordStorageProfile[],
   writeProfile: TpsNativeRecordStorageProfile,
 ): TpsNativeRecordStorageProfile[] {
+  const classified = profiles.filter(profile => profile.classification && inspectWithProfile(raw, profile));
+  if (classified.length) profiles = profiles.filter(profile => profile.kindPropertyKey !== 'kind' || !classified.some(match => match.identityPropertyKey === profile.identityPropertyKey));
   if (!inspectWithProfile(raw, writeProfile)) return profiles;
   const writeKey = profileKey(writeProfile);
   return profiles.filter((profile) => {
@@ -800,6 +811,7 @@ function inspectNativeRecordMatchSet(
   profiles: TpsNativeRecordStorageProfile[],
   writeProfile: TpsNativeRecordStorageProfile,
 ): NativeRecordMatchSet | null {
+  if (profiles.some(profile => profile.classification && readValueCaseInsensitive(raw, profile.kindPropertyKey) === profile.classification.value && readValueCaseInsensitive(raw, 'kind') !== profile.classification.parentKind)) return null;
   const applicableProfiles = selectApplicableReadableProfiles(raw, profiles, writeProfile);
   if (hasInvalidReadableIdentityEvidence(raw, applicableProfiles, writeProfile)) return null;
   const allMatches = applicableProfiles
@@ -923,6 +935,10 @@ function applyEnvelopeToRawFrontmatter(
     // into the template/user-owned public kind, including during re-identify.
     const publicKindKey = findKeyCaseInsensitive(raw, 'kind');
     if (publicKindKey) next[publicKindKey] = raw[publicKindKey];
+    if (profile.classification && Object.prototype.hasOwnProperty.call(raw, profile.kindPropertyKey)) next[profile.kindPropertyKey] = raw[profile.kindPropertyKey];
+  } else if (profile.classification) {
+    next.kind = profile.classification.parentKind;
+    next[profile.kindPropertyKey] = profile.classification.value;
   } else if (profile.kindPropertyKey) next[profile.kindPropertyKey] = envelope.kind;
   next[profile.titlePropertyKey] = envelope.title;
   if (profile.createdPropertyKey) next[profile.createdPropertyKey] = envelope.createdDate;
@@ -1184,13 +1200,14 @@ export class NativeRecordService {
     const profile = this.getStorageConfiguration().writeProfile;
     const keys = this.getKindPropertyKeys();
     const key = kind && Object.prototype.hasOwnProperty.call(keys, kind) ? keys[kind] : undefined;
-    return key ? { ...profile, kindPropertyKey: key } : profile;
+    const definition = kind && kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, kind);
+    return definition ? { ...profile, kindPropertyKey: definition.key, classification: { parentKind: definition.parentKind, value: definition.value, recordKind: kind! } } : key ? { ...profile, kindPropertyKey: key } : profile;
   }
 
   getKindPropertyKeys(): Record<string, string> {
     const source = this.plugin.settings.nativeRecordKindPropertyKeys;
     if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
-    return Object.fromEntries(Object.entries(source).filter(([kind, key]) => (
+    return Object.fromEntries(Object.entries(source).map(([kind, value]) => [kind, typeof value === 'string' ? value : kindClassification(source, kind)!.key]).filter(([kind, key]) => (
       isValidNativeRecordKind(kind) && typeof key === 'string' && /^[A-Za-z_][A-Za-z0-9_-]*$/.test(key)
       && validateNativeRecordStorageProfile({ ...this.getStorageConfiguration().writeProfile, kindPropertyKey: key }).length === 0
     )));
@@ -1202,10 +1219,11 @@ export class NativeRecordService {
       if (!isValidNativeRecordKind(kind) || !/^[A-Za-z_][A-Za-z0-9_-]*$/.test(key)
         || validateNativeRecordStorageProfile({ ...this.getStorageConfiguration().writeProfile, kindPropertyKey: key }).length) throw new Error('Invalid record kind mapping.');
     }
-    this.plugin.settings.nativeRecordKindPropertyKeys = { ...next };
+    const before = this.plugin.settings.nativeRecordKindPropertyKeys || {};
+    this.plugin.settings.nativeRecordKindPropertyKeys = Object.fromEntries(Object.entries(next).map(([kind, key]) => { const prior = before[kind]; return [kind, typeof prior === 'object' ? { ...prior, key } : key]; }));
     try { await this.plugin.saveSettings(); }
     catch (error) {
-      this.plugin.settings.nativeRecordKindPropertyKeys = { ...expected };
+      this.plugin.settings.nativeRecordKindPropertyKeys = before;
       try { await this.plugin.saveSettings(); }
       catch { throw new Error('Could not restore the record key map after a settings write failed. Reload and repair the mapping before logging.'); }
       throw error;
@@ -1265,7 +1283,7 @@ export class NativeRecordService {
     if (!inspection) return null;
     const key = Object.prototype.hasOwnProperty.call(profiles.kindKeys, inspection.kind)
       ? profiles.kindKeys[inspection.kind] : undefined;
-    const current = key ? { ...profiles.write, kindPropertyKey: key } : profiles.write;
+    const current = !isCanonicalCalendarRecordId(inspection.id) && key ? this.getStorageProfile(inspection.kind) : profiles.write;
     const result = this.readingMigrationSources
       ? inspection
       : inspectNativeRecordMatchSet(raw, [current], current)?.inspection;
@@ -2891,7 +2909,7 @@ export class NativeRecordService {
   ): Record<string, unknown> {
     const copied: Record<string, unknown> = {};
     const protectedKeys = new Set(
-      [...storageKeys(this.getStorageProfile()), ...Object.values(this.getKindPropertyKeys())].map((key) => key.toLocaleLowerCase()),
+      [...storageKeys(this.getStorageProfile()), ...(calendarTemplateRecord ? [] : Object.values(this.getKindPropertyKeys()))].map((key) => key.toLocaleLowerCase()),
     );
     for (const [key, value] of Object.entries(properties || {})) {
       const normalizedKey = key.trim().toLocaleLowerCase();
@@ -2938,7 +2956,7 @@ export class NativeRecordService {
     if (!title) throw new Error('TPS native records require a title.');
 
     const protectedKeys = new Set(
-      [...storageKeys(this.getStorageProfile()), ...Object.values(this.getKindPropertyKeys())].map((key) => key.toLocaleLowerCase()),
+      [...storageKeys(this.getStorageProfile()), ...(calendarTemplateRecord ? [] : Object.values(this.getKindPropertyKeys()))].map((key) => key.toLocaleLowerCase()),
     );
     const seenPayloadKeys = new Set<string>();
     for (const key of Object.keys(properties)) {

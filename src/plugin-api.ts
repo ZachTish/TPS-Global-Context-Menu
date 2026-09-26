@@ -1,3 +1,4 @@
+import { encodeKind, decodeKind, kindClassification } from './utils/kind-classification';
 import type { CreatedNoteRequest } from './services/note-opening-service';
 import { Notice, normalizePath, parseYaml, TFile, type WorkspaceLeaf } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
@@ -990,6 +991,12 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         externalActions: {
             version: 1,
             register: (action: any) => plugin.registerExternalAction(action),
+        },
+        frontmatterKinds: {
+            version: 1,
+            encode: (fields: Record<string, any>) => encodeKind(plugin.settings.nativeRecordKindPropertyKeys, fields),
+            decode: (fields: Record<string, any>) => decodeKind(plugin.settings.nativeRecordKindPropertyKeys, fields),
+            definition: (kind: string) => kindClassification(plugin.settings.nativeRecordKindPropertyKeys, kind),
         },
         dailyNotes: {
             version: 4,

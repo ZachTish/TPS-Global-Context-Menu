@@ -1,3 +1,4 @@
+import type { KindMappings } from './utils/kind-classification';
 import { TFile, MarkdownView } from 'obsidian';
 
 export interface CustomPropertyCondition {
@@ -80,6 +81,7 @@ export interface TpsNativeRecordStorageProfile {
   schemaPropertyKey: string;
   identityTagPrefix: string;
   kindPropertyKey: string;
+  classification?: { parentKind: string; value: string; recordKind: string };
   titlePropertyKey: string;
   createdPropertyKey: string;
   modifiedPropertyKey: string;
@@ -487,7 +489,7 @@ export interface TPSGlobalContextMenuSettings {
   nativeRecordSchemaPropertyKey: string;
   nativeRecordIdentityTagPrefix: string;
   nativeRecordKindPropertyKey: string;
-  nativeRecordKindPropertyKeys: Record<string, string>;
+  nativeRecordKindPropertyKeys: KindMappings;
   nativeRecordTitlePropertyKey: string;
   nativeRecordCreatedPropertyKey: string;
   nativeRecordModifiedPropertyKey: string;

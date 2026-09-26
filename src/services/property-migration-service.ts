@@ -81,7 +81,7 @@ export class PropertyMigrationService {
     if (Object.values(health.settings.nativeRecordProperties || {}).some(key => String(key).toLowerCase() === to.toLowerCase())
       || [health.settings.workoutStartPropertyKey, health.settings.workoutIntervalPropertyKey].some(key => String(key).toLowerCase() === to.toLowerCase())) throw new Error('Another Health field already uses this key.');
     return this.request({ kind: 'key', from: fromKeys[0], to, recordKinds: kinds }, settings => {
-      settings.nativeRecordKindPropertyKeys = { ...settings.nativeRecordKindPropertyKeys, ...Object.fromEntries(kinds.map(kind => [kind, to])) };
+      settings.nativeRecordKindPropertyKeys = { ...settings.nativeRecordKindPropertyKeys, ...Object.fromEntries(kinds.map(kind => [kind, typeof settings.nativeRecordKindPropertyKeys?.[kind] === "object" ? { ...settings.nativeRecordKindPropertyKeys[kind] as import("../utils/kind-classification").KindClassification, key: to } : to])) };
     });
   }
   private assertConsumers(plans: PluginSettingsPatch[]): void {

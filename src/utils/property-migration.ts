@@ -126,7 +126,10 @@ export function migrateNoteProperties(source: string, change: PropertyMigration)
 export function updateMigrationReferences(settings: any, change: PropertyMigration): void {
   if (change.kind === 'key' && change.recordKinds) return;
   if (change.kind === 'key' && settings.nativeRecordKindPropertyKeys) {
-    for (const [kind, key] of Object.entries(settings.nativeRecordKindPropertyKeys)) if (typeof key === 'string' && fold(key) === fold(change.from)) settings.nativeRecordKindPropertyKeys[kind] = change.to;
+    for (const [kind, key] of Object.entries(settings.nativeRecordKindPropertyKeys)) if (typeof key === 'string' && fold(key) === fold(change.from)) settings.nativeRecordKindPropertyKeys[kind] = change.to; else if (key && typeof key === 'object' && fold((key as any).key) === fold(change.from)) (key as any).key = change.to;
+  }
+  if (change.kind === 'value') for (const definition of Object.values(settings.nativeRecordKindPropertyKeys || {}) as any[]) {
+    if (definition && typeof definition === 'object' && fold(definition.key) === fold(change.key) && definition.value === change.from) definition.value = change.to;
   }
   const key = change.kind === 'key' ? change.from : change.key;
   const renameKey = (value: any) => typeof value === 'string' && fold(value) === fold(key) ? change.to : value;

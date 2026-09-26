@@ -3980,3 +3980,49 @@ test('explicit identities still detect nonstandard whitespace YAML hidden by cor
  assert.match(apiSource,/freshIdentityCreates: true/);
  assert.match(apiSource,/createFresh:[\s\S]{0,400}nativeRecordService\.createFresh/);
 });
+
+test('configured hierarchy creates and updates a Health record without confusing its parent kind with identity', async () => {
+ const {service,plugin,contents}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{key:'transactionKind',value:'food-entry',parentKind:'transaction'}};
+ const created=await service.create('food-entry',{title:'Lunch',calories:120},{id:'hierarchy-food'});
+ assert.match(contents.get(created.file),/^kind: transaction$/m);
+ assert.match(contents.get(created.file),/^transactionKind: food-entry$/m);
+ assert.equal(created.kind,'food-entry');
+ const update=await service.update(created.path,{calories:180});assert.equal(update.kind,'food-entry');
+ assert.match(contents.get(created.file),/^kind: transaction$/m);
+ assert.equal((await service.resolve(created.path))?.kind,'food-entry');
+ await assert.rejects(service.create('task',{title:'Duplicate'},{id:'hierarchy-food'}));
+ const renamed=await service.reidentify(created.path,'hierarchy-food-new');assert.equal(renamed.kind,'food-entry');
+ assert.match(contents.get(created.file),/^transactionKind: food-entry$/m);
+});
+
+test('configured subtype values decode to canonical record kinds and reject conflicting hierarchy identities',async()=>{
+ const {service,plugin,contents}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{key:'transactionKind',value:'food',parentKind:'transaction'}};
+ const entry=await service.create('food-entry',{title:'Snack'});
+ assert.match(contents.get(entry.file),/^transactionKind: food$/m);
+ assert.equal(service.inspect({tpsId:entry.id,title:'Snack',kind:'transaction',transactionKind:'food'})?.kind,'food-entry');
+ assert.equal(service.inspect({tpsId:entry.id,title:'Snack',kind:'entity',transactionKind:'food'}),null);
+ assert.equal(service.inspect({tpsId:entry.id,title:'Snack',kind:'food-entry'}),null);
+});
+
+test('calendar template classification survives creation and update with Health classifications configured',async()=>{
+ const {service,plugin,contents}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{key:'transactionKind',value:'food-entry',parentKind:'transaction'},food:{key:'entityKind',value:'food',parentKind:'entity'}};
+ const created=await service.create('calendar-event',{title:'Meeting',kind:'transaction',transactionKind:'event'},{id:'calendar:v1:abcdefghijklmnop:abcdefghijklmnopqrstuvwxyz0'});
+ assert.match(contents.get(created.file),/^transactionKind: event$/m);
+ await service.update(created.path,{scheduled:'2026-09-28'});
+ assert.match(contents.get(created.file),/^kind: transaction$/m);assert.match(contents.get(created.file),/^transactionKind: event$/m);
+ assert.equal((await service.resolve(created.path))?.kind,'calendar-event');
+});
+
+test('calendar hierarchy preserves legacy IDs while canonical calendar IDs do not require public classification',async()=>{
+ const {service,plugin,contents}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={'calendar-event':{key:'transactionKind',value:'event',parentKind:'transaction'}};
+ const legacy=await service.create('calendar-event',{title:'Legacy'},{id:'legacy-calendar-id'});
+ assert.match(contents.get(legacy.file),/^kind: transaction$/m);assert.equal((await service.resolve(legacy.path))?.kind,'calendar-event');
+ const event=await service.create('calendar-event',{title:'Event',kind:'transaction',transactionKind:'event'},{id:'calendar:v1:abcdefghijklmnop:abcdefghijklmnopqrstuvwxyzz'});
+ await service.update(event.path,{scheduled:'2026-09-29'});assert.match(contents.get(event.file),/^transactionKind: event$/m);
+ const plain=await service.create('calendar-event',{title:'No default classification'},{id:'calendar:v1:abcdefghijklmnop:abcdefghijklmnopqrstuvwxyz1'});
+ assert.equal((await service.resolve(plain.path))?.kind,'calendar-event');assert.doesNotMatch(contents.get(plain.file),/^kind:/m);
+});
