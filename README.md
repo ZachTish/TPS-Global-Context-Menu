@@ -20,7 +20,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.3.3](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.3.3) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.4.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.4.0) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -255,3 +255,19 @@ No saved settings, defaults, content migrations or public APIs change. This targ
 The first Health food save after startup could still wait for every Markdown file to be read sequentially, even with the incremental cache introduced in 3.1.3. Authoritative identity verification now runs at most eight independent Vault reads concurrently. It retains the same complete source verification, changed-file invalidation, uncertain-read retries and duplicate/malformed-source guards. A failed read stops new work and waits for in-flight reads to settle before releasing the shared refresh, so a retry cannot race leftover workers. Reindexing an ordinary or valid record also stops walking every unrelated blocked identity; conflict cleanup runs only for a path that actually owned blocked evidence.
 
 This is a backward-compatible performance patch with no settings, defaults, frontmatter or API changes. The first verification still visits every file and slower storage can still delay it; it is not skipped or replaced with potentially stale metadata. Warm saves keep the existing incremental behavior. Focused tests verify concurrency, the eight-read ceiling, failure draining, no record on failed verification, safe retry and edits during parallel reads. Full suite, separate final build, targeted test-vault reload, installed food-save timings and artifact hashes are recorded in [release notes](release-notes/3.1.7.md). Minimum Obsidian remains 1.10.0; production installation remains the user's BRAT pull. The reported 30-second click delay has not been reproduced exactly, and these results do not establish its cause on the user's device.
+
+## 3.4.0 — Navigator visibility in Custom properties
+
+Navigator's Properties configuration button, section-menu action, and property-key settings action open GCM's Rules & fields → Custom fields destination. Tags, ADOLink, PR Link, all other existing definitions, and note frontmatter remain unchanged. This release adds controls; it does not apply the proposed taxonomy or remove Health fields.
+
+Each GCM property editor shows three Navigator toggles: navigation tree, populated note-list values, and file context menu. These edit only the active Navigator profile, whose name is shown beside the controls. Global Navigator section/list switches still govern their surfaces. Existing per-profile visibility and ordering remain authoritative; missing keys are added only when edited, with unrelated surfaces off. Existing catalog import behavior is unchanged. Removing a GCM definition does not erase Navigator preferences or note data. Navigator-only keys can be managed here by adding a matching GCM custom property.
+
+GCM 3.4.0 publishes `api.ui.openCustomPropertySettings(): boolean`; Navigator 6.5.0 publishes `api.propertyVisibility` v1 with `get(key)` and `set(key, surface, visible, expectedProfileId)`. The three surfaces are `showInNavigation`, `showInList`, and `showInFileMenu`. GCM hosts the controls; Navigator validates and persists its existing profile settings. There is no mirrored visibility configuration, migration, note writer, new watcher or background automation. Stale-profile edits fail before mutation. Failed saves restore in-memory visibility and surface the error.
+
+The handoff clears only transient property search/type filters and focuses the property search. No destination or nested disclosure is added: controls sit inside the existing single expanded property editor and reuse the responsive native Setting/toggle layout. Navigator retains its original configuration modal with missing/older GCM; GCM shows the required Navigator version when its adapter is unavailable. Upstream Notebook Navigator is never addressed.
+
+Validation: focused adapter tests cover existing values, profile isolation, casing/order, new keys, no-op writes, stale profiles, save failure and missing providers. The full suites, final builds and installed test-vault UI verification are recorded in this release's notes. This is a backward-compatible minor feature, ready for a BRAT pull after publication; production installation and physical iPhone acceptance are separate.
+
+Explicit all-off property entries now survive Navigator normalization and the standalone modal, so a later catalog refresh cannot re-enable a deliberately hidden key. Installed QA used Navigator’s Configure property keys action to open GCM, expanded Status, changed visibility using the native toggles, reloaded Navigator with every surface off, and confirmed the persisted all-off entry. Original test-profile keys were restored; GCM custom-property definitions were unchanged. No notes were created or modified. Controls reuse the existing responsive native settings layout; physical iPhone testing remains outstanding.
+
+All 1,240 declared-suite tests and 160 supplemental tests passed; TypeScript and the production build passed. Final artifacts were deployed only to Obsidian Plugin Test Vault and reloaded with the targeted plugin command. Release notes contain SHA-256 hashes.

@@ -1178,6 +1178,15 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             presentCreatedNote: (request: CreatedNoteRequest) => plugin.noteOpeningService.present(request),
             handlesNativeBaseCreation: (controller: unknown) => plugin.nativeBaseNoteOpening.attach(controller),
             getNoteOpeningSettings: () => ({ behavior: plugin.settings.notePostCreateBehavior, destination: plugin.settings.noteOpenDestination }),
+            openCustomPropertySettings: () => {
+                const settings = (plugin.app as any).setting;
+                settings?.open();
+                settings?.openTabById(plugin.manifest.id);
+                const tab = settings?.activeTab;
+                if (typeof tab?.openCustomPropertySettings !== 'function') return false;
+                tab.openCustomPropertySettings();
+                return true;
+            },
             openNoteOpeningSettings: () => {
                 const settings = (plugin.app as any).setting;
                 settings?.open();

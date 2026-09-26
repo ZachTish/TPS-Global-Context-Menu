@@ -1,3 +1,4 @@
+import { renderNavigatorPropertyVisibility } from './integrations/notebook-navigator-property-visibility';
 import { MIGRATABLE_KEY_SETTINGS, PropertyMigration } from './utils/property-migration';
 import { PropertyMigrationModal } from './modals/property-migration-modal';
 import { MANAGED_NOTE_FIELDS, managedNoteFieldKey, configureManagedNoteField } from './utils/managed-note-fields';
@@ -129,6 +130,15 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   constructor(app: App, plugin: TPSGlobalContextMenuPlugin) {
     super(app, plugin);
     this.plugin = plugin;
+  }
+
+  openCustomPropertySettings(): void {
+    this.activeSettingsPage = 'rules-fields';
+    this.activeRulesFieldsPage = 'custom-fields';
+    this.propertySearch = '';
+    this.propertyTypeFilter = '';
+    this.display();
+    this.containerEl.querySelector<HTMLInputElement>('[aria-label="Find custom properties"]')?.focus();
   }
 
   private getSectionStateKey(parent: HTMLElement, title: string): string {
@@ -2767,6 +2777,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             else delete prop.contextMenuShowWhen;
             await this.plugin.saveSettings();
           }));
+
+      renderNavigatorPropertyVisibility(fields, this.app, () => prop.key);
 
       const scopeDiv = div.createDiv();
       scopeDiv.style.gridColumn = '1 / -1';
