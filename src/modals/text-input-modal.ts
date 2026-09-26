@@ -8,13 +8,15 @@ export class TextInputModal extends Modal {
     value: string = '';
     private submitting = false;
     private readonly suggestions: string[];
+    private readonly selectOnOpen: boolean;
 
-    constructor(app: App, label: string, initialValue: string, onSubmit: (value: string) => void | Promise<void>, options: { suggestions?: readonly string[] } = {}) {
+    constructor(app: App, label: string, initialValue: string, onSubmit: (value: string) => void | Promise<void>, options: { suggestions?: readonly string[]; selectOnOpen?: boolean } = {}) {
         super(app);
         this.label = label;
         this.initialValue = initialValue || '';
         this.value = this.initialValue;
         this.onSubmit = onSubmit;
+        this.selectOnOpen = options.selectOnOpen === true;
         const identities = new Set<string>();
         this.suggestions = (options.suggestions ?? []).map(value => String(value || '').trim()).filter(value => {
             const identity = value.toLocaleLowerCase();
@@ -68,7 +70,11 @@ export class TextInputModal extends Modal {
             text.inputEl.addEventListener('focus', () => renderSuggestions(this.value));
             renderSuggestions(this.initialValue);
             // Focus the input
-            setTimeout(() => text.inputEl.focus(), 50);
+            setTimeout(() => {
+                if (!text.inputEl.isConnected) return;
+                text.inputEl.focus();
+                if (this.selectOnOpen) text.inputEl.select();
+            }, 50);
         });
 
         new Setting(contentEl).addButton((btn) => {

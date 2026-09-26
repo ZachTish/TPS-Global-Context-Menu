@@ -181,7 +181,7 @@ export class NoteTitleRenderService {
         logger.error('[TPS GCM] Failed renaming note title:', error);
         new Notice('Title rename failed.');
       }
-    }).open();
+    }, { selectOnOpen: true }).open();
   }
 
   private replaceLinkTextWithTitle(link: HTMLElement, sourcePath: string): void {

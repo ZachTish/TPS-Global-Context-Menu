@@ -8,7 +8,7 @@ const list = readFileSync(new URL('../src/tps-list/views/TpsListView.ts', import
 const table = readFileSync(new URL('../src/views/log-base-view.ts', import.meta.url), 'utf8');
 
 test('free-text tag suggestions require an explicit pointer choice', () => {
-  assert.match(modal, /options:\s*\{ suggestions\?: readonly string\[\] \}/u);
+  assert.match(modal, /options:\s*\{ suggestions\?: readonly string\[\]; selectOnOpen\?: boolean \}/u);
   assert.match(modal, /value\.toLocaleLowerCase\(\)\.includes\(normalizedQuery\)/u);
   assert.match(modal, /option\.addEventListener\(["']click["'],[\s\S]*?textComponent\?\.setValue\(value\)/u);
   assert.match(modal, /if \(e\.key === ["']Enter["']\) \{[\s\S]*?void this\.submit\(\)/u);
