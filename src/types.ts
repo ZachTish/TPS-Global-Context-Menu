@@ -81,7 +81,7 @@ export interface TpsNativeRecordStorageProfile {
   schemaPropertyKey: string;
   identityTagPrefix: string;
   kindPropertyKey: string;
-  classification?: { parentKind: string; value: string; recordKind: string };
+  classification?: ({ parentKind: string; value: string } | { tag: string }) & { recordKind: string };
   titlePropertyKey: string;
   createdPropertyKey: string;
   modifiedPropertyKey: string;

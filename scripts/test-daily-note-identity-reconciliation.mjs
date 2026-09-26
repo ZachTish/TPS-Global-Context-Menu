@@ -1082,3 +1082,13 @@ test('Daily Note classification consumers use the hardened shared path', () => {
   assert.match(noteOperationSource, /reconcileExistingDailyNoteForIsoDate\([\s\S]{0,180}expectedPath === null \? undefined : \{ expectedPath \}/u);
   assert.match(noteOperationSource, /resolution\.status === 'blocked'[\s\S]*return null/u);
 });
+
+test('configured full tags identify Daily Notes and exclude non-Daily and conflicting tags',()=>{
+ const settings={nativeRecordKindPropertyKeys:{dailynote:{tag:'journal/daily'},task:{tag:'work/action'}}};
+ const h=createHarness([{path:'Journal.md',frontmatter:{tags:['journal/daily'],scheduled:'2026-09-20'}},{path:'2026-09-21.md',frontmatter:{tags:['work/action']}},{path:'Mixed.md',frontmatter:{tags:['journal/daily','work/action'],scheduled:'2026-09-22'}}],{format:'YYYY-MM-DD'});
+ assert.equal(identity.parseDailyNoteFileDate(h.app,settings,h.files.get('Journal.md')),'2026-09-20');
+ assert.equal(identity.parseDailyNoteFileDate(h.app,settings,h.files.get('2026-09-21.md')),null);
+ assert.equal(identity.parseDailyNoteFileDate(h.app,settings,h.files.get('Mixed.md')),null);
+ settings.nativeRecordKindPropertyKeys.dailynote.tag='different';
+ assert.equal(identity.parseDailyNoteFileDate(h.app,settings,h.files.get('Journal.md')),null);
+});

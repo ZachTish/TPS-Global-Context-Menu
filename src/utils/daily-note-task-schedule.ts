@@ -1,3 +1,4 @@
+import { decodeKind, type KindMappings } from './kind-classification';
 import { App, TFile, moment, normalizePath, parseYaml } from 'obsidian';
 import { parseDateFromFilename, parseStrictDateFromFilename } from './daily-file-date';
 import { getDailyNotePathDateCandidate } from './daily-note-creation';
@@ -213,6 +214,10 @@ export function hasExplicitDailyNoteIdentity(
   settings?: unknown,
 ): boolean {
   if (!frontmatter || isProcessRunFrontmatter(frontmatter)) return false;
+  try {
+    const decoded = decodeKind((settings as { nativeRecordKindPropertyKeys?: KindMappings })?.nativeRecordKindPropertyKeys, frontmatter);
+    if (decoded.kind === 'dailynote') return true;
+  } catch { return false; }
   if (hasTwoLevelDailyNoteIdentity(frontmatter)) return true;
 
   const configuredKindKey = String(
@@ -492,6 +497,7 @@ function getDailyNoteCandidatesForDate(
   const signature = [
     normalizeDailyFolder(getDailyNoteFolder(app)),
     getDailyNoteDateFormat(app, settings),
+    JSON.stringify((settings as { nativeRecordKindPropertyKeys?: KindMappings })?.nativeRecordKindPropertyKeys || {}),
     String((settings as { nativeRecordKindPropertyKey?: string } | null | undefined)?.nativeRecordKindPropertyKey || '').trim().toLowerCase(),
   ].join('\u0000');
   let indexes = dailyNoteCandidateIndexes.get(app as object);
@@ -773,6 +779,10 @@ export function hasAuthoritativeNonDailyNoteIdentity(
   settings: unknown,
 ): boolean {
   if (isProcessRunFrontmatter(frontmatter)) return true;
+  try {
+    const decoded = decodeKind((settings as { nativeRecordKindPropertyKeys?: KindMappings })?.nativeRecordKindPropertyKeys, frontmatter);
+    if (decoded.kind && decoded.kind !== frontmatter.kind) return decoded.kind !== 'dailynote';
+  } catch { return true; }
   const configuredKindKey = String(
     (settings as { nativeRecordKindPropertyKey?: string } | null | undefined)?.nativeRecordKindPropertyKey || '',
   ).trim();

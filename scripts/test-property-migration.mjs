@@ -180,3 +180,10 @@ test('scoped Health migration cannot silently skip merged or aliased record iden
  assert.throws(()=>migrate(fm('defaults: &defaults {tpsId: one, kind: food-entry}\n<<: *defaults'),change),/merge keys/);
  assert.throws(()=>migrate(fm('type: &type food-entry\ntpsId: one\nkind: *type'),change),/Aliased kind/);
 });
+
+test('classification tag renames update GCM mapping, scoped fields and presentation references',()=>{
+ const settings={nativeRecordKindPropertyKeys:{food:{tag:'old/path'}},properties:[{scopeTags:['old/path']}],templateIdentificationTag:'old/path',notebookNavigatorRules:{rules:[{conditions:[{source:'tag',operator:'contains',value:'old/path'}]}]}};
+ references(settings,{kind:'value',key:'tags',from:'old/path',to:'new'});
+ assert.equal(settings.nativeRecordKindPropertyKeys.food.tag,'new');assert.deepEqual(settings.properties[0].scopeTags,['new']);assert.equal(settings.templateIdentificationTag,'new');assert.equal(settings.notebookNavigatorRules.rules[0].conditions[0].value,'new');
+ assert.doesNotThrow(()=>references(settings,{kind:'key',from:'unrelated',to:'other'}));
+});

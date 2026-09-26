@@ -126,14 +126,17 @@ export function migrateNoteProperties(source: string, change: PropertyMigration)
 export function updateMigrationReferences(settings: any, change: PropertyMigration): void {
   if (change.kind === 'key' && change.recordKinds) return;
   if (change.kind === 'key' && settings.nativeRecordKindPropertyKeys) {
-    for (const [kind, key] of Object.entries(settings.nativeRecordKindPropertyKeys)) if (typeof key === 'string' && fold(key) === fold(change.from)) settings.nativeRecordKindPropertyKeys[kind] = change.to; else if (key && typeof key === 'object' && fold((key as any).key) === fold(change.from)) (key as any).key = change.to;
+    for (const [kind, key] of Object.entries(settings.nativeRecordKindPropertyKeys)) if (typeof key === 'string' && fold(key) === fold(change.from)) settings.nativeRecordKindPropertyKeys[kind] = change.to; else if (key && typeof key === 'object' && typeof (key as any).key === 'string' && fold((key as any).key) === fold(change.from)) (key as any).key = change.to;
   }
   if (change.kind === 'value') for (const definition of Object.values(settings.nativeRecordKindPropertyKeys || {}) as any[]) {
-    if (definition && typeof definition === 'object' && fold(definition.key) === fold(change.key) && definition.value === change.from) definition.value = change.to;
+    if (definition && typeof definition === 'object' && change.key === 'tags' && definition.tag === change.from) definition.tag = change.to;
+    if (definition && typeof definition === 'object' && typeof definition.key === 'string' && fold(definition.key) === fold(change.key) && definition.value === change.from) definition.value = change.to;
   }
   const key = change.kind === 'key' ? change.from : change.key;
   const renameKey = (value: any) => typeof value === 'string' && fold(value) === fold(key) ? change.to : value;
   const renameValue = (value: any) => value === change.from ? change.to : value;
+  const renameTag = change.kind === 'value' && fold(change.key) === 'tags';
+  if (renameTag && settings.templateIdentificationTag === change.from) settings.templateIdentificationTag = change.to;
   const condition = (item: any) => {
     if (!item || typeof item.key !== 'string' || fold(item.key) !== fold(key)) return;
     if (change.kind === 'key') item.key = change.to;
@@ -146,6 +149,9 @@ export function updateMigrationReferences(settings: any, change: PropertyMigrati
     if (renamesKindValue) {
       if (typeof property.acceptsKind === 'string') property.acceptsKind = property.acceptsKind.split(',').map((value: string) => renameValue(value.trim())).join(', ');
       for (const field of ['scopeKinds', 'hideKinds']) if (Array.isArray(property[field])) property[field] = property[field].map(renameValue);
+    }
+    if (renameTag) {
+      for (const field of ['scopeTags', 'excludeTags']) if (Array.isArray(property[field])) property[field] = property[field].map(renameValue);
     }
     property.scopeProperties?.forEach(condition);
     property.hideWhenProperties?.forEach(condition);
@@ -164,6 +170,7 @@ export function updateMigrationReferences(settings: any, change: PropertyMigrati
     for (const field of settings.virtualBaseEmbedProperties || []) field.key = renameKey(field.key);
   }
   const ruleCondition = (item: any) => {
+    if (renameTag && ['tag', 'parent-tag'].includes(item?.source)) item.value = renameValue(item.value);
     if (!item || !['frontmatter', 'parent-frontmatter'].includes(item.source) || fold(item.field || '') !== fold(key)) return;
     if (change.kind === 'key') item.field = change.to;
     else {

@@ -4054,3 +4054,37 @@ test('presentation profile reads share prepared mappings and return detached nes
   assert.equal(service.getStorageProfile('perf-0').classification.value, 'updated');
   assert.equal(configurations, 2, 'in-place settings edits invalidate prepared mappings');
 });
+
+test('complete configured tags replace kind properties through record creation, update and re-identify', async () => {
+ const {service,plugin,contents}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{tag:'kind/food/transaction'}};
+ const created=await service.create('food-entry',{title:'Lunch',tags:['favorite']},{id:'tag-food'});
+ assert.match(contents.get(created.file),/kind\/food\/transaction/);
+ assert.doesNotMatch(contents.get(created.file),/^kind:/m);
+ assert.equal(service.inspect({tpsId:'tag-food',title:'Lunch',tags:['kind/food/transaction']})?.kind,'food-entry');
+ assert.equal(service.inspect({tpsId:'tag-food',title:'Lunch',kind:'food-entry'}),null);
+ const updated=await service.update(created.path,{calories:180});assert.equal(updated.kind,'food-entry');
+ assert.match(contents.get(created.file),/favorite/);assert.doesNotMatch(contents.get(created.file),/^kind:/m);
+ const renamed=await service.reidentify(created.path,'tag-food-new');assert.equal(renamed.kind,'food-entry');
+ assert.equal((await service.resolve(created.path))?.id,'tag-food-new');
+});
+
+test('tags have arbitrary paths, exact matching and ambiguous identities are rejected', async () => {
+ const {service,plugin}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{tag:'food'},exercise:{tag:'Food/Library/custom/entry'}};
+ assert.equal(service.inspect({tpsId:'a',title:'A',tags:['FOOD']})?.kind,'food-entry');
+ assert.equal(service.inspect({tpsId:'a',title:'A',tags:['food/other']}),null);
+ assert.equal(service.inspect({tpsId:'a',title:'A',tags:['food','Food/Library/custom/entry']}),null);
+ plugin.settings.nativeRecordKindPropertyKeys['food-entry'].tag='logs/nutrition';
+ assert.equal(service.inspect({tpsId:'a',title:'A',tags:['FOOD']}),null);
+ assert.equal(service.inspect({tpsId:'a',title:'A',tags:['logs/nutrition']})?.kind,'food-entry');
+});
+
+test('canonical calendar identity remains independent of public template tags',async()=>{
+ const {service,plugin,contents}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={'calendar-event':{tag:'anything/events'},'food-entry':{tag:'kind/food/transaction'}};
+ const created=await service.create('calendar-event',{title:'Calendar',tags:['anything/events']},{id:'calendar:v1:abcdefghijklmnop:abcdefghijklmnopqrstuvwxyz2'});
+ await service.update(created.path,{scheduled:'2026-10-01'});
+ assert.equal((await service.resolve(created.path))?.kind,'calendar-event');
+ assert.match(contents.get(created.file),/anything\/events/);assert.doesNotMatch(contents.get(created.file),/^kind:/m);
+});

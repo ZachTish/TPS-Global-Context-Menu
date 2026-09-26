@@ -1,3 +1,4 @@
+import { normalizeClassificationTag } from './utils/kind-classification';
 import { renderNavigatorPropertyVisibility } from './integrations/notebook-navigator-property-visibility';
 import { MIGRATABLE_KEY_SETTINGS, PropertyMigration } from './utils/property-migration';
 import { PropertyMigrationModal } from './modals/property-migration-modal';
@@ -1218,6 +1219,36 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     if (this.activeSettingsPage === 'rules-fields' && this.activeRulesFieldsPage === 'custom-fields') {
       const propertyConfig = activePage.createDiv({ cls: 'tps-gcm-settings-editor-page' });
       propertyConfig.dataset.tpsSettingsRoute = 'custom-fields';
+      const tagMappings = Object.entries(this.plugin.settings.nativeRecordKindPropertyKeys || {})
+        .filter((entry): entry is [string, { tag: string }] => typeof entry[1] === 'object' && 'tag' in entry[1]);
+      if (tagMappings.length) {
+        propertyConfig.createEl('h4', { text: 'Record tags' });
+        propertyConfig.createEl('p', { cls: 'setting-item-description', text: 'Each record type uses one complete tag. Subtag names and depth are yours to choose. Apply previews an exact frontmatter tag rename; review Base filters separately.' });
+        let selected = tagMappings[0][0];
+        let draft = tagMappings[0][1].tag;
+        let input: import('obsidian').TextComponent;
+        new Setting(propertyConfig).setName('Record type').addDropdown(dropdown => {
+          for (const [kind] of tagMappings) dropdown.addOption(kind, kind);
+          dropdown.onChange(kind => { selected = kind; draft = tagMappings.find(([key]) => key === kind)![1].tag; input.setValue(draft); });
+        });
+        new Setting(propertyConfig).setName('Tag').addText(text => {
+          input = text; text.setValue(draft).onChange(value => { draft = value; });
+          text.inputEl.setAttribute('aria-label', 'Record classification tag');
+        }).addButton(button => button.setButtonText('Apply').onClick(async () => {
+          button.setDisabled(true);
+          try {
+            const to = normalizeClassificationTag(draft);
+            const current = this.plugin.settings.nativeRecordKindPropertyKeys[selected];
+            if (!current || typeof current !== 'object' || !('tag' in current)) throw new Error('The record mapping changed. Reopen settings.');
+            if (Object.entries(this.plugin.settings.nativeRecordKindPropertyKeys).some(([kind, value]) => kind !== selected && typeof value === 'object' && 'tag' in value && value.tag.toLowerCase() === to.toLowerCase())) throw new Error('Another record type already uses that tag.');
+            if (await this.plugin.propertyMigrationService.request({ kind: 'value', key: 'tags', from: current.tag, to }, settings => {
+              settings.nativeRecordKindPropertyKeys[selected] = { tag: to };
+            })) this.display();
+          } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
+          finally { button.setDisabled(false); }
+        }));
+      }
+
 
       new Setting(propertyConfig)
         .setName('Show custom fields in inline UI')
