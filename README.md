@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 3.6.4 — Keep unchanged preview controls mounted
+
+Native hover and Base preview properties now refresh from metadata and the existing DOM observer through one coalesced callback. A body write no longer forces every open panel to rebuild at 60, 250 and 900 milliseconds. Late mounting and path changes are observed directly, and explicit visibility/settings actions still force the intended update. Unchanged semantic frontmatter preserves the mounted controls; actual property, classification or visibility-rule inputs refresh them. The existing signature includes all semantic frontmatter keys so scope dependencies do not become stale, and ignores parser position metadata. No new setting, cache, watcher, migration or repair pass. Minimum Obsidian remains 1.10.0.
+
+Regression coverage executes the actual bridge methods across unrelated edit bursts, body-only metadata, changed fields, rule dependencies, file/path changes, explicit visibility actions and late mounting. Validation on 2026-09-27: 17 focused checks, 1,268 declared-suite checks and 184 supplemental checks passed, with zero failures/skips; TypeScript and the separate final build passed. The final build deployed only to Obsidian Plugin Test Vault; a named plugin reload verified 3.6.4. Installed preview QA reduced unrelated/body-only edits from five panel rebuilds to zero, and a changed property from five rebuilds to one. Late path assignment, same-value navigation to another file, and a preview inserted inside a prebuilt wrapper all mounted the correct property panel. Seven involved plugins' settings remained byte-identical. These operation counts do not establish general production latency or native-performance parity. See [3.6.4 release notes](release-notes/3.6.4.md) for limitations and artifact hashes.
+
 ## 3.6.3 — Give title edits one filename owner
 
 Inline title rendering is read-only. It no longer queues filename reconciliation using a rendered or cached title. The previous path could undo an explicit preview rename, causing two file renames and repeated downstream refreshes. Explicit title writes and the existing metadata/modify naming path retain ownership.
@@ -48,7 +54,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.6.3](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.3) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.6.4](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.4) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 

@@ -28,7 +28,8 @@ export function shouldReuseCustomPropertyPreviewPanel(
 ): boolean {
   return options.hasExistingPanel
     && !options.force
-    && (options.isCurrentSignature || options.isCurrentPath);
+    && options.isCurrentSignature
+    && options.isCurrentPath;
 }
 
 export function getCustomPropertySurfaceVisibilityMode(

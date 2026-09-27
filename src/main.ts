@@ -392,7 +392,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private restoreCanvasOpenGuard: (() => void) | null = null;
   private basesPreviewPropertiesObserver: MutationObserver | null = null;
   private basesPreviewPropertiesRefreshTimer: number | null = null;
-  private basesPreviewPropertiesRetryTimers: number[] = [];
   private viewModeSuppressedPaths: Set<string> = new Set();
   private externalActionRegistrations: Map<string, GcmExternalActionRegistration> = new Map();
   private basesLinkPreviewArmedPath: string | null = null;
@@ -1521,29 +1520,29 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (typeof MutationObserver === 'undefined') return;
     if (this.settings.showCustomPropertiesUnderTitle !== true) return;
 
-    const scheduleRefresh = (force = false) => {
+    const scheduleRefresh = () => {
       if (this.basesPreviewPropertiesRefreshTimer !== null) {
         window.clearTimeout(this.basesPreviewPropertiesRefreshTimer);
       }
       this.basesPreviewPropertiesRefreshTimer = window.setTimeout(() => {
         this.basesPreviewPropertiesRefreshTimer = null;
-        this.refreshBasesPreviewProperties(force);
+        this.refreshBasesPreviewProperties();
       }, 60);
     };
 
-    const scheduleRefreshBurst = (force = false) => {
-      scheduleRefresh(force);
-      for (const delay of [250, 900]) {
-        const timer = window.setTimeout(() => {
-          this.basesPreviewPropertiesRetryTimers = this.basesPreviewPropertiesRetryTimers.filter((id) => id !== timer);
-          this.refreshBasesPreviewProperties(force);
-        }, delay);
-        this.basesPreviewPropertiesRetryTimers.push(timer);
-      }
-    };
-
+    const previewSelector = [
+      '.hover-popover',
+      '.popover.hover-popover',
+      '.markdown-hover-popover',
+      '.bases-hover-popover',
+      '.bases-preview',
+      '.bases-table-cell-popover',
+      '.metadata-container',
+      '.metadata-properties',
+    ].join(', ');
     const isRelevantPreviewMutation = (mutation: MutationRecord): boolean => {
-      const candidates: Node[] = [mutation.target, ...Array.from(mutation.addedNodes)];
+      const addedNodes = Array.from(mutation.addedNodes);
+      const candidates: Node[] = [mutation.target, ...addedNodes];
       return candidates.some((node) => {
         const el = node instanceof HTMLElement
           ? node
@@ -1552,33 +1551,28 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
             : null;
         if (!el) return false;
         if (this.isCalendarBaseEmbedElement(el)) return false;
-        return !!el.closest([
-          '.hover-popover',
-          '.popover.hover-popover',
-          '.markdown-hover-popover',
-          '.bases-hover-popover',
-          '.bases-preview',
-          '.bases-table-cell-popover',
-          '.metadata-container',
-          '.metadata-properties',
-        ].join(', '));
+        return !!el.closest(previewSelector)
+          || (addedNodes.includes(node) && !!el.querySelector(previewSelector));
       });
     };
 
     this.basesPreviewPropertiesObserver = new MutationObserver((mutations) => {
       if (mutations.some(isRelevantPreviewMutation)) {
-        scheduleRefreshBurst(false);
+        scheduleRefresh();
       }
     });
     this.basesPreviewPropertiesObserver.observe(document.body, {
       childList: true,
       subtree: true,
+      attributes: true,
+      attributeFilter: ['data-path', 'data-src', 'data-file', 'data-file-path', 'data-filepath', 'data-linkpath', 'data-href', 'data-url'],
     });
 
-    this.registerEvent(this.app.metadataCache.on('changed', () => scheduleRefreshBurst(true)));
-    this.registerEvent(this.app.vault.on('create', () => scheduleRefreshBurst(true)));
-    this.registerEvent(this.app.vault.on('modify', () => scheduleRefreshBurst(true)));
-    this.app.workspace.onLayoutReady(() => scheduleRefreshBurst(false));
+    // Metadata owns property updates; DOM observation owns late preview mounting.
+    // A body write does not authorize rebuilding every open property editor.
+    this.registerEvent(this.app.metadataCache.on('changed', scheduleRefresh));
+    this.registerEvent(this.app.vault.on('rename', scheduleRefresh));
+    this.app.workspace.onLayoutReady(scheduleRefresh);
   }
 
   /** Rebuilds non-leaf stacked property panels after an interactive rule change. */
@@ -1726,13 +1720,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     const storedFrontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
     const frontmatter = this.nativeRecordService.inspect(storedFrontmatter)?.frontmatter
       || storedFrontmatter;
-    const propertyKeys = (this.settings.properties || [])
-      .filter((property) => property && property.showInCollapsed !== false)
-      .map((property) => String(property.key || property.id || '').trim())
-      .filter(Boolean)
-      .sort((a, b) => a.localeCompare(b));
+    // Visibility rules can depend on keys that are not themselves displayed.
+    // Cache positions are parser metadata, not property values.
     const values: Record<string, unknown> = {};
-    for (const key of propertyKeys) {
+    for (const key of Object.keys(frontmatter).filter(key => key !== 'position').sort()) {
       values[key] = (frontmatter as Record<string, unknown>)[key];
     }
     return JSON.stringify(values);
@@ -1928,10 +1919,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       window.clearTimeout(this.basesPreviewPropertiesRefreshTimer);
       this.basesPreviewPropertiesRefreshTimer = null;
     }
-    for (const timer of this.basesPreviewPropertiesRetryTimers) {
-      window.clearTimeout(timer);
-    }
-    this.basesPreviewPropertiesRetryTimers = [];
     this.basesPreviewPropertiesObserver?.disconnect();
     this.basesPreviewPropertiesObserver = null;
     this.closeBaseLinkHoverEditor(getPluginById(this.app, 'obsidian-hover-editor') as any);
