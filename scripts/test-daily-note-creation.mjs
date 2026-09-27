@@ -4,6 +4,7 @@ import { Buffer } from 'node:buffer';
 import { build } from 'esbuild';
 import { fileURLToPath } from 'node:url';
 import { readFileSync } from 'node:fs';
+import { parse as parseYaml } from 'yaml';
 
 async function loadDailyNoteCreationUtilities() {
   const result = await build({
@@ -985,6 +986,93 @@ test('Daily Note move classification awaits persisted settings and honors Period
   }
 });
 
+test('settled note edits refresh Daily Note identity without broadcasting an unchanged provider', async () => {
+  const priorWindow = globalThis.window;
+  const priorParseYaml = globalThis.filenameTestParseYaml;
+  globalThis.filenameTestParseYaml = parseYaml;
+  installDailyNoteMoment();
+  try {
+    const { FileNamingService, parseDailyNoteFileDate } = await loadFileNamingService();
+    const vaultEvents = new Map();
+    const metadataEvents = new Map();
+    const file = {
+      __isTestTFile: true,
+      path: 'Inbox/Ordinary.md', basename: 'Ordinary', extension: 'md',
+      stat: { size: 100 },
+    };
+    let content = '---\nkind: project\n---\nOriginal body';
+    let reads = 0;
+    let announcements = 0;
+    const plugin = {
+      settings: { dailyNoteDateFormat: 'YYYY-MM-DD' },
+      registerEvent() {},
+      emitGcmApiChanged() { announcements++; },
+      app: {
+        internalPlugins: { getPluginById: () => ({ enabled: true, instance: {
+          options: { folder: 'Journal', format: 'YYYY-MM-DD', template: '' },
+        } }) },
+        plugins: { getPlugin: () => null, plugins: {} },
+        vault: {
+          getFiles: () => [file], getMarkdownFiles: () => [file],
+          getAbstractFileByPath: (path) => path === file.path ? file : null,
+          read: async () => { reads++; return content; },
+          adapter: { read: async () => { throw new Error('no persisted configuration'); } },
+          on: (event, callback) => { vaultEvents.set(event, callback); return { event }; },
+        },
+        metadataCache: {
+          initialized: true,
+          // Deliberately stale: current source still owns identity after edits.
+          getFileCache: () => ({ frontmatter: { kind: 'project' } }),
+          on: (event, callback) => { metadataEvents.set(event, callback); return { event }; },
+        },
+      },
+    };
+    const service = new FileNamingService(plugin);
+    await service.whenDailyNoteConfigurationReady();
+    assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+    for (const event of ['create', 'modify', 'rename']) {
+      content += `\n${event} body`;
+      vaultEvents.get(event)(file, event === 'rename' ? 'Inbox/Before.md' : undefined);
+      await metadataEvents.get('changed')(file);
+      await metadataEvents.get('resolve')(file);
+      await metadataEvents.get('resolved')();
+      assert.equal(announcements, 0, `${event} does not announce readiness that no consumer missed`);
+    }
+    const beforeBurstReads = reads;
+    for (let index = 0; index < 20; index++) {
+      content += `\nEdit ${index}`;
+      vaultEvents.get('modify')(file);
+    }
+    await Promise.all(Array.from({ length: 20 }, () => metadataEvents.get('changed')(file)));
+    assert.equal(reads - beforeBurstReads, 1, 'the existing refresh owner drains the burst once');
+    assert.equal(announcements, 0, 'an edit burst does not broadcast the unchanged API');
+    assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+    assert.equal(parseDailyNoteFileDate(plugin.app, plugin.settings, file), null);
+
+    content = '---\nkind: dailynote\nscheduled: 2026-09-27 00:00:00\n---\nNew identity';
+    vaultEvents.get('modify')(file);
+    await metadataEvents.get('changed')(file);
+    assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+    assert.equal(parseDailyNoteFileDate(plugin.app, plugin.settings, file), '2026-09-27',
+      'removing the announcement does not bypass current-source identity refresh');
+    assert.equal(announcements, 0);
+
+    content = '---\nkind: dailynote\nscheduled: 2026-09-28 00:00:00\n---\nObserved edit';
+    vaultEvents.get('modify')(file);
+    assert.equal(service.isDailyNoteMetadataCacheReady(), false, 'a consumer observes blocked identity');
+    assert.equal(service.isDailyNoteMetadataCacheReady(), false, 'multiple blocked reads coalesce');
+    await Promise.all([metadataEvents.get('changed')(file), metadataEvents.get('resolve')(file)]);
+    assert.equal(announcements, 1, 'the blocked consumer receives exactly one recovery announcement');
+    assert.equal(parseDailyNoteFileDate(plugin.app, plugin.settings, file), '2026-09-28');
+    assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+    await metadataEvents.get('resolved')();
+    assert.equal(announcements, 1, 'settled callbacks and reads do not replay readiness');
+  } finally {
+    globalThis.window = priorWindow;
+    globalThis.filenameTestParseYaml = priorParseYaml;
+  }
+});
+
 test('metadata refresh blocks only sync identity reads while the ready configuration stays stable', async () => {
   const priorWindow = globalThis.window;
   globalThis.window = {
@@ -1192,6 +1280,7 @@ test('metadata refresh blocks only sync identity reads while the ready configura
     vaultEvents.get('modify').callback(markdownFile);
     const olderRefresh = metadataEvents.get('changed').callback(markdownFile);
     await olderReadStarted;
+    assert.equal(service.isDailyNoteMetadataCacheReady(), false, 'a consumer observes the in-flight failed-read generation');
     const newerRefresh = metadataEvents.get('changed').callback(markdownFile);
     assert.equal(
       overlapReadCount,
@@ -1212,6 +1301,7 @@ test('metadata refresh blocks only sync identity reads while the ready configura
     vaultEvents.get('modify').callback(markdownFile);
     const refreshOwner = metadataEvents.get('changed').callback(markdownFile);
     await olderReadStarted;
+    assert.equal(service.isDailyNoteMetadataCacheReady(), false, 'a consumer observes the shared in-flight generation');
     const duplicateRefresh = metadataEvents.get('changed').callback(markdownFile);
     releaseOlderRead();
     await Promise.all([refreshOwner, duplicateRefresh]);

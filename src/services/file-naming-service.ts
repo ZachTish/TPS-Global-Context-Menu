@@ -129,7 +129,8 @@ export class FileNamingService {
                         markDailyNoteCandidateMetadataReady(this.plugin.app, oldPath);
                     }
                     markDailyNoteCandidatePathDirty(this.plugin.app, file);
-                    this.dailyNoteMetadataReadyNotificationPending = true;
+                    // Only an identity consumer that observes blocked readiness
+                    // needs an API reannouncement when this generation settles.
                 }
                 this.dailyNoteMetadataReady = false;
                 if (event !== 'delete') this.dailyNoteMetadataRefreshPending = true;

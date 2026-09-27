@@ -25,12 +25,12 @@ const {TimeTrackingService,TFile}=module.exports;
 const record = id => ({id,targetId:'target',sourcePath:'Target.md',targetType:'note',start:'2026-09-22T12:00:00Z'});
 const document = fm => `---\n${stringify(fm)}---\n`;
 function harness() {
-  const files=[],bodies=new Map(),metadata=new Map(),events=new Map();let reads=0;let readHook=null;
+  const files=[],bodies=new Map(),metadata=new Map(),events=new Map(),layoutCallbacks=[];let reads=0;let readHook=null;
   const on=(event,fn)=>{const list=events.get(event)||[];list.push(fn);events.set(event,list);return {};};
   const emit=(event,...args)=>{for(const fn of events.get(event)||[])fn(...args);};
   const plugin={settings:{},registerEvent(){},registerInterval(){},getArchiveFolderPath:()=> '_archive',
     filePropertiesService:{isCompanionFile:f=>f.path.endsWith('.companion.md')},
-    app:{workspace:{onLayoutReady(){}},metadataCache:{on:(event,fn)=>on('metadata:'+event,fn),getFileCache:f=>metadata.get(f)},
+    app:{workspace:{onLayoutReady(fn){layoutCallbacks.push(fn);}},metadataCache:{on:(event,fn)=>on('metadata:'+event,fn),getFileCache:f=>metadata.get(f)},
       vault:{on,getMarkdownFiles:()=>[...files],async cachedRead(f){reads++;if(readHook)return readHook(f);return bodies.get(f);}}},
     frontmatterMutationService:{async process(f,mutate){const fm=parse(bodies.get(f).split('---')[1]);mutate(fm);bodies.set(f,document(fm));}},
   };
@@ -38,8 +38,57 @@ function harness() {
   const previous=globalThis.window;globalThis.window={setInterval:()=>0};service.setup();globalThis.window=previous;
   const add=(path,fm={},raw)=>{const f=new TFile(path);files.push(f);bodies.set(f,raw??document(fm));emit('create',f);return f;};
   const write=(f,fm,event='modify')=>{bodies.set(f,document(fm));emit(event,f);};
-  return {service,plugin,files,bodies,metadata,add,write,emit,reads:()=>reads,setReadHook:fn=>{readHook=fn;}};
+  const runStartup=async beforeTimers=>{
+    const timers=[],previous=globalThis.window;
+    try {
+      globalThis.window={setTimeout:fn=>{timers.push(fn);return 0;}};
+      for(const fn of layoutCallbacks)fn();
+    } finally {globalThis.window=previous;}
+    beforeTimers?.();
+    for(const fn of timers)fn();
+    if(service.sessionScan)await service.sessionScan;
+    await new Promise(resolve=>setImmediate(resolve));
+  };
+  return {service,plugin,files,bodies,metadata,add,write,emit,runStartup,reads:()=>reads,setReadHook:fn=>{readHook=fn;}};
 }
+
+test('disabled startup leaves the timer source index unread, including disable before scheduled work',async()=>{
+ for(const initiallyEnabled of [false,true]){
+  const h=harness();h.plugin.settings.enableTimeTracking=initiallyEnabled;
+  for(let i=0;i<1000;i++)h.add(`Ordinary ${i}.md`);
+  let scans=0;const original=h.plugin.app.vault.getMarkdownFiles;
+  h.plugin.app.vault.getMarkdownFiles=()=>{scans++;return original();};
+  await h.runStartup(()=>{h.plugin.settings.enableTimeTracking=false;});
+  assert.equal(h.reads(),0,'disabled time tracking must not read every note after layout');
+  assert.equal(scans,0,'disabled startup must not enumerate the vault');
+  assert.equal(h.service.sessionSources.size,0);
+ }
+});
+
+test('enabled startup prepares the timer index once through the existing synchronization owner',async()=>{
+ const h=harness();h.plugin.settings.enableTimeTracking=false;
+ for(let i=0;i<1000;i++)h.add(`Ordinary ${i}.md`);
+ let refreshes=0;const refresh=h.service.refreshActiveTimerCache.bind(h.service);
+ h.service.refreshActiveTimerCache=(...args)=>{refreshes++;return refresh(...args);};
+ await h.runStartup(()=>{h.plugin.settings.enableTimeTracking=true;});
+ assert.equal(h.reads(),1000,'enabling before the delayed callback still discovers stored sessions');
+ assert.equal(refreshes,1,'startup synchronization already refreshes timer counts');
+ assert.equal(h.service.sessionSources.size,1000);
+});
+
+test('enabled startup still restores active note timer counts without modifying the target',async()=>{
+ const h=harness();h.plugin.settings.enableTimeTracking=true;
+ const target=h.add('Target.md',{tpsId:'target',title:'Target'});
+ h.add('Session.md',{timeTracking:[record('active')]});
+ h.plugin.app.vault.getAbstractFileByPath=path=>h.files.find(file=>file.path===path)??null;
+ const updates=[];h.plugin.eventService={emitFilesUpdated:paths=>updates.push(...paths)};
+ const before=h.bodies.get(target);
+ await h.runStartup();
+ assert.equal(h.service.getActiveTimerCountForFileSync(target),1);
+ assert.deepEqual(updates,['Target.md']);
+ assert.equal(h.bodies.get(target),before);
+ assert.equal(h.reads(),2);
+});
 test('warm scans share verified empty results, return independent records, and coalesce initial reads',async()=>{
  const h=harness();for(let i=0;i<1000;i++)h.add(`${i}.md`,i===9?{timeTracking:[record('one')]}:{});
  let companionChecks=0;h.plugin.filePropertiesService.isCompanionFile=()=>{companionChecks++;return false;};

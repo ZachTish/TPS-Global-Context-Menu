@@ -136,7 +136,6 @@ export class TimeTrackingService {
     }, RUNNING_SCHEDULE_SYNC_INTERVAL_MS));
     this.plugin.app.workspace.onLayoutReady(() => {
       window.setTimeout(() => void this.syncRunningScheduledMetadata(), 2000);
-      window.setTimeout(() => void this.refreshActiveTimerCache(), 2000);
     });
   }
 

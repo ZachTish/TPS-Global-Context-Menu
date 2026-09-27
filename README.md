@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 3.6.5 — Stop unrelated work after edits and during startup
+
+Daily Note identity still invalidates and refreshes the changed source after note creation, editing and renaming. Settling that work now reannounces the shared GCM API only when a consumer actually encountered blocked identity. Previously every Markdown mutation armed an announcement, even with no waiting consumer, causing Navigator and Calendar to refresh unrelated indexes and views.
+
+Startup, API discovery requests, saved configuration changes, unload and genuine blocked-to-ready recovery retain their announcements. Current-byte identity checks, concurrent-generation protection, malformed-note safeguards and Daily Note creation behavior are unchanged. Time-tracking startup also keeps its existing guarded synchronization as the sole timer-discovery owner, removing a second unguarded startup scan. Disabled time tracking must not read every note to look for timers; enabled synchronization continues to discover stored sessions. This patch removes redundant triggers; it adds no cache, timer, watcher, setting, API version or repair pass.
+
+Regression coverage requires zero API announcements for unobserved settled create/modify/rename and a 20-edit burst, while current-source identity still changes correctly. A consumer that observes blocked identity receives one recovery announcement across duplicate metadata callbacks; failed reads, cold indexing and hot reload retain their coverage. The regression failed against 3.6.4 before correction. Installed 3.6.4 diagnosis recorded one API announcement for each of six ordinary body edits with no blocked identity reads. The versioned declared suite passed 1,269 checks and the supplemental suite passed 187, with zero failures/skips. Startup regressions also require zero enumeration/body reads when tracking is disabled and one discovery owner when enabled, including setting changes before the delayed callback. TypeScript and separate final build passed; deployment and a named reload verified 3.6.5 in Obsidian Plugin Test Vault. Six installed body edits emitted zero API announcements; settled samples made approximately half the previous native-record inspections and metadata lookups, with remaining consumer work still present. The installed compiled timer-startup fixture performed zero scans/reads/refreshes when disabled and one discovery/refresh when enabled. Twelve real Edit Title saves selected all text, preserved bodies and produced matching titles/filenames with one modify and one rename each. Real Daily Note API creation, repeat lookup and concurrent creation preserved one shared file and an immediate body edit. Test settings were preserved/restored. These counts do not establish production latency, physical iPhone behavior or native-performance parity; see [3.6.5 release notes](release-notes/3.6.5.md). Minimum Obsidian stays 1.10.0. Production installation remains the user's BRAT pull.
+
 ## 3.6.4 — Keep unchanged preview controls mounted
 
 Native hover and Base preview properties now refresh from metadata and the existing DOM observer through one coalesced callback. A body write no longer forces every open panel to rebuild at 60, 250 and 900 milliseconds. Late mounting and path changes are observed directly, and explicit visibility/settings actions still force the intended update. Unchanged semantic frontmatter preserves the mounted controls; actual property, classification or visibility-rule inputs refresh them. The existing signature includes all semantic frontmatter keys so scope dependencies do not become stale, and ignores parser position metadata. No new setting, cache, watcher, migration or repair pass. Minimum Obsidian remains 1.10.0.
@@ -54,7 +62,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.6.4](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.4) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.6.5](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.5) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
