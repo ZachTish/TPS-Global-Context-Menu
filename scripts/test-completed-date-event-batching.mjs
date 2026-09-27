@@ -636,3 +636,29 @@ test('irrelevant metadata changes skip raw template-protection reads', async () 
   assert.equal(h.mutations.length, 0);
   h.cleanup();
 });
+
+test('startup create announcements schedule no creation writers while post-layout creation keeps its owner', async () => {
+  const h = createHarness();
+  const calls = { templateGate: 0, rules: 0, title: 0, timestamps: 0, fileProperties: 0 };
+  h.plugin.app.workspace.layoutReady = false;
+  h.plugin.settings.autoSyncTitleFromFilename = true;
+  h.plugin.fileNamingService.whenDailyNoteConfigurationReady = async () => { calls.templateGate++; };
+  h.plugin.fileNamingService.getDailyNoteConfigurationSnapshot = () => null;
+  h.plugin.fileNamingService.syncTitleFromFilename = async () => { calls.title++; };
+  h.plugin.fileNamingService.syncFileTimestamps = async () => { calls.timestamps++; };
+  h.plugin.notebookNavigatorRuleService.scheduleApply = () => { calls.rules++; };
+  h.plugin.filePropertiesService.isPropertyTarget = file => file.extension === 'png';
+  h.plugin.filePropertiesService.handleSourceCreate = async () => { calls.fileProperties++; };
+  for (let i = 0; i < 1_000; i++) h.emit('vault', 'create', h.addFile(`Inbox/Existing ${i}.md`));
+  h.emit('vault', 'create', h.addFile('Inbox/Existing attachment.png'));
+  await settleDebounces();
+  assert.deepEqual(calls, { templateGate: 0, rules: 0, title: 0, timestamps: 0, fileProperties: 0 });
+  assert.equal(h.mutations.length, 0);
+
+  h.plugin.app.workspace.layoutReady = true;
+  h.emit('vault', 'create', h.addFile('Inbox/Actual new note.md'));
+  h.emit('vault', 'create', h.addFile('Inbox/Actual new attachment.png'));
+  await settleDebounces();
+  assert.deepEqual(calls, { templateGate: 1, rules: 2, title: 1, timestamps: 1, fileProperties: 1 });
+  h.cleanup();
+});

@@ -722,6 +722,9 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.registerEvent(
         plugin.app.vault.on('create', (file) => {
+            // Initial vault loading announces existing files as creates. Their
+            // startup indexes already have owners; they are not new-note work.
+            if (plugin.app.workspace.layoutReady === false) return;
             if (file instanceof TFile && plugin.filePropertiesService?.isCompanionFile(file)) return;
             if (file instanceof TFile && plugin.filePropertiesService?.isPropertyTarget(file)) {
                 void plugin.filePropertiesService.handleSourceCreate(file).catch((error) => {

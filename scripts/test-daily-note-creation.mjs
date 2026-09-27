@@ -1073,6 +1073,109 @@ test('settled note edits refresh Daily Note identity without broadcasting an unc
   }
 });
 
+test('startup create announcements do not turn cached Daily Note identity into a vault-wide raw-read queue', async () => {
+  const priorWindow = globalThis.window;
+  const priorParseYaml = globalThis.filenameTestParseYaml;
+  globalThis.filenameTestParseYaml = parseYaml;
+  installDailyNoteMoment();
+  try {
+    const { FileNamingService, parseDailyNoteFileDate } = await loadFileNamingService();
+    const vaultEvents = new Map();
+    const metadataEvents = new Map();
+    const files = new Map();
+    const sources = new Map();
+    const metadata = new Map();
+    const addFile = (path, frontmatter = { kind: 'project' }) => {
+      const file = { __isTestTFile: true, path, basename: path.split('/').pop().slice(0, -3), extension: 'md', stat: { size: 100 } };
+      files.set(path, file);
+      metadata.set(path, { frontmatter });
+      sources.set(path, '---\nkind: project\n---\nExisting body');
+      return file;
+    };
+    for (let index = 0; index < 2_000; index++) addFile(`Inbox/Existing ${index}.md`);
+    const daily = addFile('Journal/2026-09-27.md', { kind: 'dailynote', scheduled: '2026-09-27 00:00:00' });
+    sources.set(daily.path, '---\nkind: dailynote\nscheduled: 2026-09-27 00:00:00\n---\nDaily body');
+    let rawReads = 0;
+    let enumerations = 0;
+    let metadataQueries = 0;
+    let announcements = 0;
+    const plugin = {
+      settings: { dailyNoteDateFormat: 'YYYY-MM-DD' },
+      registerEvent() {},
+      emitGcmApiChanged() { announcements++; },
+      app: {
+        workspace: { layoutReady: false },
+        internalPlugins: { getPluginById: () => ({ enabled: true, instance: { options: { folder: 'Journal', format: 'YYYY-MM-DD', template: '' } } }) },
+        plugins: { getPlugin: () => null, plugins: {} },
+        vault: {
+          getFiles: () => [...files.values()], getMarkdownFiles: () => { enumerations++; return [...files.values()]; },
+          getAbstractFileByPath: path => files.get(path) ?? null,
+          read: async file => { rawReads++; return sources.get(file.path); },
+          adapter: { read: async () => { throw Error('No persisted configuration'); } },
+          on: (event, callback) => { vaultEvents.set(event, callback); return { event }; },
+        },
+        metadataCache: {
+          initialized: undefined,
+          getFileCache: file => { metadataQueries++; return metadata.get(file.path) ?? null; },
+          on: (event, callback) => { metadataEvents.set(event, callback); return { event }; },
+        },
+      },
+    };
+    const service = new FileNamingService(plugin);
+    await service.whenDailyNoteConfigurationReady();
+    let prematureReady = 0;
+    // Actual cold startup exposes undefined before initialized becomes true.
+    // Neither consumer queries nor per-file callbacks may rescan all files.
+    for (let query = 0; query < 100; query++) {
+      if (service.isDailyNoteMetadataCacheReady()) prematureReady++;
+    }
+    for (const file of files.values()) vaultEvents.get('create')(file);
+    plugin.app.metadataCache.initialized = true;
+    for (const file of files.values()) {
+      await metadataEvents.get('changed')(file);
+      await metadataEvents.get('resolve')(file);
+      if (service.isDailyNoteMetadataCacheReady()) prematureReady++;
+    }
+    assert.deepEqual({ enumerations, metadataQueries, prematureReady, announcements }, {
+      enumerations: 0, metadataQueries: 0, prematureReady: 0, announcements: 0,
+    }, 'per-file startup callbacks and readiness queries must wait for public global resolution without scanning the vault');
+    await metadataEvents.get('resolved')();
+    assert.equal(announcements, 1, 'one public resolved event wakes the waiting identity consumer');
+    assert.equal(rawReads, 0, 'loading 2,001 existing files must use startup metadata, not reread every body');
+    assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+    assert.equal(parseDailyNoteFileDate(plugin.app, plugin.settings, daily), '2026-09-27');
+
+    // Only startup create announcements are ignored. A real modification before
+    // layout is ready still needs the existing current-source identity boundary.
+    const modified = files.get('Inbox/Existing 0.md');
+    sources.set(modified.path, '---\nkind: dailynote\nscheduled: 2026-09-28 00:00:00\n---\nEdited during loading');
+    vaultEvents.get('modify')(modified);
+    assert.equal(service.isDailyNoteMetadataCacheReady(), false);
+    await metadataEvents.get('changed')(modified);
+    assert.equal(rawReads, 1);
+    assert.equal(parseDailyNoteFileDate(plugin.app, plugin.settings, modified), '2026-09-28', 'current bytes win over stale cached project identity');
+
+    plugin.app.workspace.layoutReady = true;
+    const created = addFile('Inbox/New after layout.md');
+    sources.set(created.path, '---\nkind: dailynote\nscheduled: 2026-09-29 00:00:00\n---\nNew Daily identity');
+    vaultEvents.get('create')(created);
+    assert.equal(service.isDailyNoteMetadataCacheReady(), false);
+    await metadataEvents.get('changed')(created);
+    assert.equal(rawReads, 2, 'real creation after layout retains its one-file authoritative refresh');
+    assert.equal(parseDailyNoteFileDate(plugin.app, plugin.settings, created), '2026-09-29');
+    sources.set(created.path, '---\nkind: project\n---\nChanged back to ordinary');
+    vaultEvents.get('modify')(created);
+    await metadataEvents.get('changed')(created);
+    assert.equal(rawReads, 3);
+    assert.equal(parseDailyNoteFileDate(plugin.app, plugin.settings, created), null);
+    await metadataEvents.get('resolved')();
+    assert.equal(rawReads, 3, 'settled metadata never replays the startup body scan');
+  } finally {
+    globalThis.window = priorWindow;
+    globalThis.filenameTestParseYaml = priorParseYaml;
+  }
+});
+
 test('metadata refresh blocks only sync identity reads while the ready configuration stays stable', async () => {
   const priorWindow = globalThis.window;
   globalThis.window = {
@@ -3151,7 +3254,7 @@ test('generic title synchronization checks workflow ownership only at a real mut
         runSerializedFrontmatterWrite: async (_file, action) => action(),
       },
       frontmatterMutationService: {
-        async process() {
+        async processOwnedKeysPreservingSource() {
           titleMutations += 1;
           return true;
         },

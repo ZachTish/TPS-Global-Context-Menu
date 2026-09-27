@@ -6,7 +6,6 @@ import {
     clearDailyNoteConfigurationOverride,
     hasPendingDailyNoteCandidatePathRefresh,
     invalidateDailyNoteCandidateIndex,
-    isMarkdownMetadataEntrySettled,
     markDailyNoteCandidateMetadataReady,
     markDailyNoteCandidatePathDirty,
     parseDailyNoteFileDate,
@@ -93,17 +92,11 @@ export class FileNamingService {
             this.dailyNoteMetadataReady = true;
             return true;
         }
-        const getMarkdownFiles = (this.plugin.app.vault as any)?.getMarkdownFiles;
-        if (typeof metadataCache?.getFileCache !== 'function' || typeof getMarkdownFiles !== 'function') {
-            this.dailyNoteMetadataReady = true;
-            return true;
-        }
-        this.dailyNoteMetadataReady = getMarkdownFiles.call(this.plugin.app.vault)
-            .every((file: TFile) => isMarkdownMetadataEntrySettled(this.plugin.app, file));
-        if (!this.dailyNoteMetadataReady) {
-            this.dailyNoteMetadataReadyNotificationPending = true;
-        }
-        return this.dailyNoteMetadataReady;
+        // Per-file startup callbacks can arrive after initialized changes but
+        // before global resolution. The public resolved event owns readiness;
+        // rescanning every file on each callback makes startup quadratic.
+        this.dailyNoteMetadataReadyNotificationPending = true;
+        return false;
     }
 
     public getDailyNoteConfigurationSnapshot(): DailyNoteConfigurationSnapshot | null {
@@ -116,6 +109,10 @@ export class FileNamingService {
         if (typeof registerEvent !== 'function') return;
         for (const event of ['create', 'modify', 'delete', 'rename']) {
             const ref = (this.plugin.app.vault as any)?.on?.(event, (file: unknown, oldPath?: string) => {
+                // Obsidian announces every existing file as created while loading.
+                // Startup metadata owns that initial identity; only real creates
+                // need the current-source refresh used for subsequent mutations.
+                if (event === 'create' && this.plugin.app.workspace?.layoutReady === false) return;
                 invalidateDailyNoteCandidateIndex(this.plugin.app);
                 // Folder and attachment events can never be followed by a
                 // Markdown metadata-cache event. They still invalidate the
@@ -1056,11 +1053,26 @@ export class FileNamingService {
                     if (!currentFile) return;
                     if (!(await this.canAutomaticallyMutateTemplateSource(currentFile))) return;
                     if (await this.hasWorkflowOwnedFilenameEvidence(currentFile)) return;
-                    changed = await this.plugin.frontmatterMutationService.process(currentFile, (frontmatter) => {
+                    changed = await this.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(currentFile, ['title', 'alias', 'aliases'], (frontmatter) => {
                         if (!this.canAutomaticallyMutateTemplateFrontmatter(frontmatter)) return;
+                        if (currentFile.path !== lockKey || currentFile.basename.trim() !== rawBasename) return;
+                        if (this.plugin.nativeRecordService?.hasRecordIdentityEvidenceInFrontmatter(frontmatter)
+                            || this.isProcessRunFrontmatter(frontmatter)) return;
                         const existingTitleKeys = Object.keys(frontmatter).filter(
                             (key) => key.trim().toLowerCase() === 'title',
                         );
+                        // Cached eligibility only avoids unnecessary work. The
+                        // current title owns this decision after queueing, too.
+                        const currentTitle = this.getFrontmatterStringValueCaseInsensitive(frontmatter, 'title').trim();
+                        const templateDerivedTitle = this.isTemplateDerivedTitle(currentTitle);
+                        if (options.onlyIfMissing && currentTitle && !templateDerivedTitle) return;
+                        if (options.onlyIfTemplateDerived && !templateDerivedTitle) {
+                            const scheduled = this.getFrontmatterStringValueCaseInsensitive(frontmatter, 'scheduled');
+                            const scheduledDate = scheduled ? window.moment(scheduled) : null;
+                            if (!scheduledDate?.isValid?.()
+                                || !this.hasKnownScheduledDateMarker(rawBasename, scheduledDate)
+                                || !this.hasKnownScheduledDateMarker(currentTitle, scheduledDate)) return;
+                        }
                         if (existingTitleKeys.length === 0) {
                             frontmatter.title = nextTitle;
                         } else {
@@ -1070,7 +1082,7 @@ export class FileNamingService {
                             }
                         }
                         this.addMeaningfulAliases(frontmatter, [currentTitle, rawBasename], nextTitle);
-                    });
+                    }, { kind: 'automation', surface: 'file-title-sync' });
                 });
                 return changed ? "updated" : "skipped";
             }
