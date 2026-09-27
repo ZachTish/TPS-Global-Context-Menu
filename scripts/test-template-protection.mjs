@@ -341,11 +341,11 @@ test('automatic background writers recheck explicit exclusions at their mutation
   assert.match(navigatorRules, /reason === 'gcm-startup-auto'/u);
   assert.match(
     checkboxHandler,
-    /updateChecklistPropertyForFile[\s\S]{0,300}canAutomaticallyMutateTemplateFile[\s\S]{0,1200}canAutomaticallyMutateTemplateFrontmatter/u,
+    /updateChecklistPropertyForFile[\s\S]{0,1300}canAutomaticallyMutateTemplateFile[\s\S]{0,1200}canAutomaticallyMutateTemplateFrontmatter/u,
   );
   assert.match(
     checkboxReconcile,
-    /reconcileFileNow[\s\S]{0,300}canAutomaticallyMutateTemplateFile[\s\S]{0,700}canAutomaticallyMutateTemplateSource/u,
+    /reconcileFileNow[\s\S]{0,350}canAutomaticallyMutatePathWithExclusions[\s\S]{0,1000}canAutomaticallyMutateTemplateSource/u,
   );
   assert.match(
     events,
@@ -353,7 +353,7 @@ test('automatic background writers recheck explicit exclusions at their mutation
   );
   assert.match(
     events,
-    /reconcileCompletedDate[\s\S]{0,300}canAutomaticallyMutateTemplateFile[\s\S]{0,600}canAutomaticallyMutateTemplateFrontmatter/u,
+    /reconcileCompletedDate[\s\S]{0,600}canAutomaticallyMutateTemplateFile[\s\S]{0,600}canAutomaticallyMutateTemplateFrontmatter/u,
   );
   assert.match(
     nativeRecords,

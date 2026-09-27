@@ -5,7 +5,7 @@ import { getLinkedSubitemCompleteMarkers } from '../utils/linked-subitem-mapping
 import type { LinkedSubitemCheckboxMapping } from '../types';
 import { scanMarkdownDocumentLines } from '../utils/markdown-document-lines';
 import {
-  canAutomaticallyMutateTemplateFile,
+  canAutomaticallyMutatePathWithExclusions,
   canAutomaticallyMutateTemplateSource,
 } from '../utils/template-protection';
 
@@ -30,14 +30,6 @@ export class TaskStatusCheckboxReconcileService extends Component {
       const file = (info as { file?: unknown } | undefined)?.file;
       if (file instanceof TFile) this.scheduleFile(file, 'editor-change', RECONCILE_DELAY_MS);
     }));
-
-    this.registerEvent(this.plugin.app.workspace.on('active-leaf-change', () => {
-      this.scheduleActiveFile('active-leaf-change');
-    }));
-
-    this.plugin.app.workspace.onLayoutReady(() => {
-      window.setTimeout(() => this.scheduleActiveFile('layout-ready'), 800);
-    });
   }
 
   onunload(): void {
@@ -49,6 +41,7 @@ export class TaskStatusCheckboxReconcileService extends Component {
     this.filesBeingProcessed.clear();
   }
 
+  // Explicit settings changes can request a pass; navigation must not call this.
   scheduleActiveFile(reason: string): void {
     const activeFile = this.plugin.app.workspace.getActiveFile();
     if (activeFile instanceof TFile) this.scheduleFile(activeFile, reason);
@@ -64,7 +57,7 @@ export class TaskStatusCheckboxReconcileService extends Component {
   async reconcileFileNow(file: TFile): Promise<number> {
     if (!this.isMarkdownFile(file)) return 0;
     if (this.filesBeingProcessed.has(file.path)) return 0;
-    if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) return 0;
+    if (!canAutomaticallyMutatePathWithExclusions(file, this.plugin.settings)) return 0;
 
     const statusKey = this.getStatusKey();
     const mappings = this.plugin.settings.linkedSubitemCheckboxMappings || [];
@@ -74,32 +67,37 @@ export class TaskStatusCheckboxReconcileService extends Component {
     const normalizeStatus = (value: unknown): string => this.plugin.sharedServices.status.normalize(value);
 
     let changeCount = 0;
+    const reconcile = (data: string): string => {
+      changeCount = 0;
+      if (!canAutomaticallyMutatePathWithExclusions(file, this.plugin.settings)
+        || !canAutomaticallyMutateTemplateSource(data, this.plugin.settings)) return data;
+      const newline = data.includes('\r\n') ? '\r\n' : data.includes('\r') ? '\r' : '\n';
+      const endsWithNewline = /(?:\r\n|\n|\r)$/u.test(data);
+      const documentLines = scanMarkdownDocumentLines(data);
+      const lines = documentLines.map((line) => line.text);
+      if (endsWithNewline) lines.pop();
+
+      const nextLines = lines.map((line, index) => {
+        if (documentLines[index]?.isContent !== true) return line;
+        const result = reconcileTaskStatusLine(line, statusKey, mappings, {
+          completedAt,
+          completeMarkers,
+          normalizeStatus,
+          syncStatusToCheckbox: this.isStatusSyncEnabled(),
+        });
+        if (result.changed) changeCount += 1;
+        return result.line;
+      });
+      return changeCount === 0 ? data : `${nextLines.join(newline)}${endsWithNewline ? newline : ''}`;
+    };
+
     this.filesBeingProcessed.add(file.path);
     try {
-      await this.plugin.app.vault.process(file, (data) => {
-        if (!canAutomaticallyMutateTemplateSource(data, this.plugin.settings)) return data;
-        const newline = data.includes('\r\n') ? '\r\n' : data.includes('\r') ? '\r' : '\n';
-        const endsWithNewline = /(?:\r\n|\n|\r)$/u.test(data);
-        const documentLines = scanMarkdownDocumentLines(data);
-        const lines = documentLines.map((line) => line.text);
-        if (endsWithNewline) lines.pop();
-
-        changeCount = 0;
-        const nextLines = lines.map((line, index) => {
-          if (documentLines[index]?.isContent !== true) return line;
-          const result = reconcileTaskStatusLine(line, statusKey, mappings, {
-            completedAt,
-            completeMarkers,
-            normalizeStatus,
-            syncStatusToCheckbox: this.isStatusSyncEnabled(),
-          });
-          if (result.changed) changeCount += 1;
-          return result.line;
-        });
-
-        if (changeCount === 0) return data;
-        return `${nextLines.join(newline)}${endsWithNewline ? newline : ''}`;
-      });
+      // A no-op must not enter Obsidian's serialized disk/write queue.
+      const snapshot = await this.plugin.app.vault.cachedRead(file);
+      if (reconcile(snapshot) === snapshot) return 0;
+      // Recompute against the atomic, current source; never write the cached plan.
+      await this.plugin.app.vault.process(file, (data) => reconcile(data));
     } finally {
       this.filesBeingProcessed.delete(file.path);
     }

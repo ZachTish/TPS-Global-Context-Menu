@@ -1,5 +1,15 @@
 # TPS Global Context Menu
 
+## 3.6.1 — Keep unchanged notes out of the maintenance queue
+
+Opening/leaving a note and layout readiness no longer schedule checklist-property or inline-checkbox reconciliation. Actual vault modifications/editor changes continue to own checkbox reconciliation; metadata/content changes and explicit synchronization continue to own checklist properties. Obsolete open-time relationship repair calls were removed. Existing explicit filename/title, presentation and Daily Note population settings retain their behavior; this release does not promise zero work from those configured open actions.
+
+Inline-checkbox reconciliation now checks cached content before entering `vault.process`. Unchanged notes make zero raw reads and zero mutation attempts. When a change is needed, the existing atomic writer recomputes against current content and checks path/tag exclusions again, preserving concurrent edits. Checklist/completed-date maintenance and Daily Note scheduled-field alignment also check for a possible change before its authoritative template-protection read. Read-only unresolved-link inspection uses live editor content or cached file content and skips notes that are no longer active; explicit body mutations retain fresh reads.
+
+Performance contract: keep ordinary navigation on UI/read-only paths; place maintenance on its owning content event or explicit action. Regressions count raw reads, mutation attempts and event scheduling, including repeated navigation with 1,000 unrelated files, no-op reconciliation, relevant edits, concurrent changes, template protection, Markdown examples and line endings. Do not replace a slow path with another cache, timer, watcher or repair pass. No settings/schema/API migration or automatic note repair is introduced.
+
+Validation: 1,253 declared tests, 171 supplemental tests and 49 focused checks passed; TypeScript, separate final build and test-vault deployment/reload passed. Four installed note switches reduced raw-read calls from 20 to 8 and mutation attempts from 3 to 0, preserving source. A real edit still reconciled its checkbox date and a repeat made zero changes. Temporary settings were restored, runtime settings stayed byte-identical and fixtures were archived. Timing samples and limits are recorded in [3.6.1 release notes](release-notes/3.6.1.md). Minimum Obsidian remains 1.10.0. This patch is a BRAT handoff; production and physical iPhone latency need user verification.
+
 ## 3.3.3 — Keep title renames tied to the saved title
 
 The GCM **Title: …** action in note menus and inline titles now lets the existing frontmatter writer own filename updates. Previously the menu performed a second filename update with the requested title even when the property write was cancelled or rejected. This reproduced `After.md` with `title: Before` in the test vault when the existing frontmatter safety check rejected the write. Removing that redundant rename prevents the mismatch at its source. An unchanged/cancelled/rejected write also stops before success events and refreshes, with a concise `rename:not-applied` diagnostic.
@@ -20,7 +30,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.4.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.4.0) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.6.1](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.1) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 

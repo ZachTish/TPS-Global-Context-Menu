@@ -132,13 +132,16 @@ export class SubitemRelationshipSyncService {
     return inserted;
   }
 
-  async readMarkdownText(file: TFile): Promise<string> {
+  async readMarkdownText(file: TFile, options: { cached?: boolean } = {}): Promise<string> {
     if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return '';
     const openView = this.getOpenMarkdownViewForFile(file);
     if (openView) {
-      return this.readViewSource(openView) ?? await this.plugin.app.vault.read(file);
+      const source = this.readViewSource(openView);
+      if (source !== null) return source;
     }
-    return await this.plugin.app.vault.read(file);
+    return options.cached
+      ? await this.plugin.app.vault.cachedRead(file)
+      : await this.plugin.app.vault.read(file);
   }
 
   private async reconcileMarkdownParentLinks(

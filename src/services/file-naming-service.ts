@@ -490,10 +490,11 @@ export class FileNamingService {
         if (!(await this.isDailyNoteFile(file))) return false;
         const expectedDate = this.parseDailyNoteBasenameToIso(file.basename);
         if (!expectedDate) return false;
-        if (!(await this.canAutomaticallyMutateTemplateSource(file))) return false;
         const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
         if (this.isProcessRunFrontmatter(frontmatter)) return false;
         const expectedScheduled = `${expectedDate} 00:00:00`;
+        if (String(frontmatter?.scheduled ?? '').trim() === expectedScheduled) return false;
+        if (!(await this.canAutomaticallyMutateTemplateSource(file))) return false;
         if (!(await this.plugin.bulkEditService.canMutateFrontmatterSafely(file))) return false;
 
         let changed = false;

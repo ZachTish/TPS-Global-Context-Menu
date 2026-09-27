@@ -354,6 +354,9 @@ function createHarness({
   return {
     plugin,
     mutations,
+    emit(scope, event, ...args) {
+      for (const callback of listeners.get(`${scope}:${event}`) || []) callback(...args);
+    },
     addFile(path, frontmatter = {}) {
       const file = new TFile(path, frontmatter);
       filesByPath.set(path, file);
@@ -597,4 +600,39 @@ test('completedDate set, normalize, remove, and preserve semantics remain unchan
   assert.equal(cases[4].frontmatter.completedDate, '2026-07-28T10:00:00');
   assert.equal(harness.mutations.length, 3);
   harness.cleanup();
+});
+
+
+test('switching notes never schedules checklist writes or retired link repairs', async () => {
+  const h = createHarness();
+  let checklist = 0, retired = 0;
+  h.plugin.taskCheckboxHandler.scheduleChecklistPropertyUpdate = () => checklist++;
+  h.plugin.subitemRelationshipSyncService.repairBrokenBodyLinksForParent = () => retired++;
+  h.plugin.subitemRelationshipSyncService.ensureBodyLinksForChild = () => retired++;
+  const files = [h.addFile('Inbox/A.md'), h.addFile('Inbox/B.md')];
+  // An unrelated large vault must not turn navigation into a sweep.
+  for (let i = 0; i < 1000; i++) h.addFile(`Inbox/unrelated-${i}.md`);
+  for (const file of [...files, ...files]) {
+    h.emit('workspace', 'active-leaf-change');
+    h.emit('workspace', 'file-open', file);
+  }
+  assert.equal(checklist, 0);
+  assert.equal(retired, 0);
+  assert.equal(h.mutations.length, 0);
+  h.emit('vault', 'modify', files[0]);
+  assert.equal(checklist, 1, 'actual edits still own checklist maintenance');
+  await settleDebounces();
+  h.cleanup();
+});
+
+test('irrelevant metadata changes skip raw template-protection reads', async () => {
+  const h = createHarness();
+  let reads = 0;
+  h.plugin.settings.frontmatterAutoWriteExclusions = '#template';
+  h.plugin.app.vault.read = async () => { reads++; return 'Ordinary note'; };
+  for (let i = 0; i < 100; i++) h.metadataChanged(h.addFile(`Inbox/unchanged-${i}.md`));
+  await settleDebounces();
+  assert.equal(reads, 0);
+  assert.equal(h.mutations.length, 0);
+  h.cleanup();
 });

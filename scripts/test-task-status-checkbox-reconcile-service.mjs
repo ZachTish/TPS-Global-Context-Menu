@@ -171,7 +171,7 @@ test('task reconciliation is registered and keeps completedDate independent of s
   assert.match(serviceSource, /export class TaskStatusCheckboxReconcileService extends Component/);
   assert.match(serviceSource, /vault\.process\(file, \(data\) =>/);
   assert.match(serviceSource, /workspace\.on\('editor-change'/);
-  assert.match(serviceSource, /workspace\.on\('active-leaf-change'/);
+  assert.doesNotMatch(serviceSource, /workspace\.on\('active-leaf-change'/);
   assert.match(serviceSource, /isEditorQuiet\(\)/);
   assert.match(serviceSource, /scanMarkdownDocumentLines\(data\)/);
   assert.match(serviceSource, /documentLines\[index\]\?\.isContent !== true/);
@@ -179,10 +179,111 @@ test('task reconciliation is registered and keeps completedDate independent of s
   assert.match(serviceSource, /data\.includes\('\\r'\) \? '\\r' : '\\n'/);
   assert.match(serviceSource, /getCompleteMarkers\(mappings\)/);
   assert.match(serviceSource, /syncStatusToCheckbox: this\.isStatusSyncEnabled\(\)/);
-  assert.match(serviceSource, /canAutomaticallyMutateTemplateFile\(this\.plugin\.app\.vault, file, this\.plugin\.settings\)/);
+  assert.match(serviceSource, /canAutomaticallyMutatePathWithExclusions\(file, this\.plugin\.settings\)/);
   assert.match(serviceSource, /canAutomaticallyMutateTemplateSource\(data, this\.plugin\.settings\)/);
   assert.doesNotMatch(serviceSource, /scheduleFile[\s\S]{0,180}if \(!this\.isStatusSyncEnabled\(\)\) return/);
   assert.match(mainSource, /new TaskStatusCheckboxReconcileService\(this\)/);
   assert.match(mainSource, /this\.addChild\(this\.taskStatusCheckboxReconcileService\)/);
   assert.match(settingsSource, /Sync inline status to checkbox marker/);
+});
+
+async function importService() {
+  const result = await esbuild.build({
+    entryPoints: [fileURLToPath(new URL('../src/services/task-status-checkbox-reconcile-service.ts', import.meta.url))],
+    bundle: true, format: 'esm', platform: 'node', write: false,
+    plugins: [{ name: 'obsidian-service-stub', setup(builder) {
+      builder.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian', namespace: 'stub' }));
+      builder.onLoad({ filter: /.*/, namespace: 'stub' }, () => ({ contents: `
+        export class Component { registerEvent() {} }
+        export class TFile { constructor(path) { this.path = path; this.extension = path.split('.').pop(); } }
+        globalThis.__ReconcileTFile = TFile;
+      ` }));
+    } }],
+  });
+  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
+}
+const serviceModule = await importService();
+function serviceFixture(source, { latest = source, settings = {} } = {}) {
+  const counts = { cachedRead: 0, read: 0, process: 0, refresh: 0 };
+  const events = new Map();
+  const file = new globalThis.__ReconcileTFile('Inbox/Example.md');
+  let saved = latest;
+  const on = (name, callback) => events.set(name, callback);
+  const plugin = {
+    settings: { linkedSubitemCheckboxMappings: mappings, frontmatterAutoWriteExclusions: '#template', ...settings },
+    sharedServices: { status: { getStatusPropertyKey: () => 'status', normalize: v => String(v ?? '').toLowerCase(), getDoneStatuses: () => ['complete'] } },
+    app: {
+      vault: { on, async cachedRead() { counts.cachedRead++; return source; }, async read() { counts.read++; return saved; },
+        async process(_file, transform) { counts.process++; saved = transform(saved); } },
+      workspace: { on, onLayoutReady(callback) { events.set('layout-ready', callback); }, getActiveFile: () => file, updateOptions() { counts.refresh++; } },
+    },
+  };
+  return { service: new serviceModule.TaskStatusCheckboxReconcileService(plugin), file, counts, events, saved: () => saved };
+}
+
+test('ordinary navigation and layout readiness schedule no checkbox maintenance', () => {
+  const f = serviceFixture('Plain note');
+  f.service.scheduleFile = () => assert.fail('navigation must not schedule maintenance');
+  f.service.onload();
+  for (let i = 0; i < 100; i++) {
+    f.events.get('active-leaf-change')?.();
+    f.events.get('file-open')?.(f.file);
+    f.events.get('layout-ready')?.();
+  }
+  assert.deepEqual(f.counts, { cachedRead: 0, read: 0, process: 0, refresh: 0 });
+  const scheduled = [];
+  f.service.scheduleFile = (file, reason) => scheduled.push([file, reason]);
+  f.events.get('modify')(f.file);
+  f.events.get('editor-change')({}, { file: f.file });
+  assert.deepEqual(scheduled, [[f.file, 'vault-modify'], [f.file, 'editor-change']]);
+});
+
+test('plain notes and already reconciled tasks never enter the disk/write queue', async () => {
+  for (const source of ['Plain note\n', '- [ ] Open task\n', '- [x] Finished [completedDate:: 2026-09-27 09:00:00]\n']) {
+    const f = serviceFixture(source);
+    assert.equal(await f.service.reconcileFileNow(f.file), 0);
+    assert.deepEqual(f.counts, { cachedRead: 1, read: 0, process: 0, refresh: 0 });
+    assert.equal(f.saved(), source);
+  }
+});
+
+test('missing mappings and excluded paths stop before any read', async () => {
+  for (const settings of [{ linkedSubitemCheckboxMappings: [] }, { frontmatterAutoWriteExclusions: 'path:Inbox/' }]) {
+    const f = serviceFixture('- [x] Done', { settings });
+    assert.equal(await f.service.reconcileFileNow(f.file), 0);
+    assert.deepEqual(f.counts, { cachedRead: 0, read: 0, process: 0, refresh: 0 });
+  }
+});
+
+test('changed tasks reconcile atomically, preserve concurrent body edits and line endings', async () => {
+  const f = serviceFixture('- [ ] Do it [status:: working]\r\n', { latest: 'New paragraph\r\n- [ ] Do it [status:: working]\r\n' });
+  assert.equal(await f.service.reconcileFileNow(f.file), 1);
+  assert.equal(f.saved(), 'New paragraph\r\n- [\\] Do it\r\n');
+  assert.deepEqual(f.counts, { cachedRead: 1, read: 0, process: 1, refresh: 1 });
+});
+
+test('a concurrent reconciliation causes no refresh or stale rewrite', async () => {
+  const latest = '- [\\] Do it\n';
+  const f = serviceFixture('- [ ] Do it [status:: working]\n', { latest });
+  assert.equal(await f.service.reconcileFileNow(f.file), 0);
+  assert.equal(f.saved(), latest);
+  assert.equal(f.counts.refresh, 0);
+});
+
+test('template exclusions are checked in the cached preflight and again at the atomic write', async () => {
+  const protectedSource = '---\ntags: [template]\n---\n- [x] Done\n';
+  const f = serviceFixture(protectedSource);
+  assert.equal(await f.service.reconcileFileNow(f.file), 0);
+  assert.equal(f.counts.process, 0);
+  const concurrent = serviceFixture('- [x] Done\n', { latest: protectedSource });
+  assert.equal(await concurrent.service.reconcileFileNow(concurrent.file), 0);
+  assert.equal(concurrent.saved(), protectedSource);
+  assert.equal(concurrent.counts.refresh, 0);
+});
+
+test('frontmatter and fenced examples are not reconciled', async () => {
+  const source = '---\nexample: |\n  - [x] Example\n---\n```md\n- [x] Example\n```\n';
+  const f = serviceFixture(source);
+  assert.equal(await f.service.reconcileFileNow(f.file), 0);
+  assert.equal(f.counts.process, 0);
 });

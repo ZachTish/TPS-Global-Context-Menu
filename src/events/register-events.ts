@@ -26,8 +26,6 @@ import { DailyNoteTemplateInstanceCleanupService } from '../services/daily-note-
  * Also performs the initial `ensureMenus()` call at the end.
  */
 export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
-    // Track the previously active file so we can update its checklist property on leaf change
-    let previousActiveFile: TFile | null = null;
     const recentEditorChangeAtByPath = new Map<string, number>();
     const timestampSyncEditorWindowMs = 15_000;
     const statusBeforeModifyByPath = new Map<string, string>();
@@ -257,7 +255,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
         plugin.app.workspace.on('active-leaf-change', () => {
             logger.perf('active-leaf-change', {
                 active: plugin.app.workspace.getActiveFile()?.path || null,
-                previous: previousActiveFile?.path || null,
             });
             throttledEnsureMenus();
             throttledEnsureLinkedSubitemCheckboxes();
@@ -267,12 +264,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                     (plugin as any).viewModeSuppressedPaths.delete(path);
                 }
             }
-            // Update checklist property for the note being left
-            if (previousActiveFile && previousActiveFile instanceof TFile) {
-                plugin.taskCheckboxHandler.scheduleChecklistPropertyUpdate(previousActiveFile);
-            }
-            const activeFile = plugin.app.workspace.getActiveFile() ?? null;
-            previousActiveFile = activeFile instanceof TFile ? activeFile : null;
         }),
     );
 
@@ -393,7 +384,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                     );
                 }, 500);
             }
-            // Update checklist property for the newly opened note
+            // Navigation mounts UI; checklist maintenance belongs to content changes.
             if (file instanceof TFile) {
                 if (plugin.notebookNavigatorRuleService.shouldAutoApplyOnFileOpen()) {
                     logger.perf('file-open:scheduleNotebookNavigatorRules', { file: file.path });
@@ -402,34 +393,10 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                         bypassCreationGrace: true,
                     });
                 }
-                if (plugin.canRunBackgroundAutomation()) {
-                    plugin.taskCheckboxHandler.scheduleChecklistPropertyUpdate(file);
-                }
-                previousActiveFile = file;
-                // file-open already requests menu mounting above. A second file
-                // refresh replaced freshly mounted badges after the note settled.
-
-                // ── Note-open reconciliation hooks ─────────────────────────────────
-                // 0. Repair broken parent body links from childOf backlinks before any
-                // other subitem reconciliation runs. This prevents transient broken
-                // lines like `- [ ] [[` from stripping childOf links on open.
-                if (plugin.canRunBackgroundAutomation()) {
-                    void logger.timeAsync('file-open:repairBrokenBodyLinksForParent', { file: file.path }, () =>
-                        plugin.subitemRelationshipSyncService?.repairBrokenBodyLinksForParent(file) ?? Promise.resolve(0)
-                    );
-                }
-
-                // 1. Ensure missing subitem body links are inserted after frontmatter
-                if (plugin.canRunBackgroundAutomation()) {
-                    void logger.timeAsync('file-open:ensureBodyLinksForChild', { file: file.path }, () =>
-                        plugin.subitemRelationshipSyncService?.ensureBodyLinksForChild(file) ?? Promise.resolve(0)
-                    );
-                }
-
-                // 2. Check for unresolved/deleted subitem links and prompt user
+                // Check for unresolved/deleted subitem links and prompt user
                 // Run after a short delay to let the file fully load
                 setTimeout(() => {
-                    if (!plugin.canRunBackgroundAutomation()) return;
+                    if (!plugin.canRunBackgroundAutomation() || plugin.app.workspace.getActiveFile() !== file) return;
                     void logger.timeAsync('file-open:checkAndPromptForUnresolvedSubitems', { file: file.path }, () =>
                         checkAndPromptForUnresolvedSubitems(plugin, file)
                     );
@@ -466,11 +433,11 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     const reconcileCompletedDate = async (file: TFile, doneStatuses: Set<string>): Promise<boolean> => {
         if (!plugin.canRunBackgroundAutomation()) return false;
         if (!file || file.extension !== 'md') return false;
-        if (!(await canAutomaticallyMutateTemplateFile(plugin.app.vault, file, plugin.settings))) return false;
 
         const cache = plugin.app.metadataCache.getFileCache(file);
         const fm = (cache?.frontmatter || {}) as Record<string, any>;
         if (!getCompletedDateSyncAction(fm, doneStatuses)) return false;
+        if (!(await canAutomaticallyMutateTemplateFile(plugin.app.vault, file, plugin.settings))) return false;
 
         return await plugin.frontmatterMutationService.process(file, (frontmatter) => {
             if (!canAutomaticallyMutateTemplateFrontmatter(frontmatter, plugin.settings)) return;

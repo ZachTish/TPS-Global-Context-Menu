@@ -657,7 +657,6 @@ export class TaskCheckboxHandler {
 
     private async updateChecklistPropertyForFile(file: TFile, filePath = file.path): Promise<void> {
         if (this.plugin.filePropertiesService?.isCompanionFile(file)) return;
-        if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) return;
         const propKey = this.plugin.settings.checklistCompletionPropertyKey?.trim();
         if (!propKey) return;
 
@@ -673,6 +672,7 @@ export class TaskCheckboxHandler {
 
         const cache = this.plugin.app.metadataCache.getFileCache(file);
         if (cache?.frontmatter?.[propKey] === hasOpenChecklistItem) return;
+        if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) return;
         if (!(await this.plugin.bulkEditService.canMutateFrontmatterSafely(file))) {
             logger.warn('[TPS GCM] Skipping checklist property update due to malformed frontmatter', { filePath });
             return;

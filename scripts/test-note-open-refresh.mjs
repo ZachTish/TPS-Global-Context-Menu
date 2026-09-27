@@ -175,3 +175,55 @@ test('preview cleanup removes visible and hidden remnants without layout reads o
   const view={contentEl:{querySelectorAll(selector){assert.equal(selector,'.markdown-preview-view, .markdown-reading-view');return [wrapper(shown),wrapper(hidden)];}}};
   service.clearDecorations(view);assert.equal(shown.removed,true);assert.equal(hidden.removed,true);assert.equal(editor.removed,false);
 });
+
+
+test('read-only subitem inspection uses cached content while explicit mutations retain fresh reads', async () => {
+  const output = ts.transpileModule(`export class Reader { ${method('../src/services/subitem-relationship-sync-service.ts', 'readMarkdownText')} }`,
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+  const module = {};
+  new Function('exports', 'TFile', output)(module, exports.TFile);
+  const file = new exports.TFile('Inbox/Note.md'); file.extension = 'md';
+  let cached = 0, raw = 0, view = null;
+  const reader = Object.assign(new module.Reader(), {
+    plugin: { app: { vault: {
+      cachedRead: async () => { cached++; return 'cached'; },
+      read: async () => { raw++; return 'fresh'; },
+    } } },
+    getOpenMarkdownViewForFile: () => view,
+    readViewSource: () => view.source,
+  });
+  assert.equal(await reader.readMarkdownText(file, { cached: true }), 'cached');
+  assert.equal(await reader.readMarkdownText(file), 'fresh');
+  view = { source: 'unsaved editor content' };
+  assert.equal(await reader.readMarkdownText(file, { cached: true }), view.source);
+  view.source = '';
+  assert.equal(await reader.readMarkdownText(file, { cached: true }), '');
+  assert.deepEqual([cached, raw], [1, 1]);
+  const prompt = readFileSync(new URL('../src/services/unresolved-subitem-modal.ts', import.meta.url), 'utf8');
+  assert.match(prompt, /readMarkdownText\(parentFile, \{ cached: true \}\)/);
+});
+
+
+test('opening an already aligned daily note skips scheduled-field mutation work', async () => {
+  const output = ts.transpileModule(`export class Naming { ${method('../src/services/file-naming-service.ts', 'repairDailyNoteScheduled')} }`,
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+  const module = {}; new Function('exports', output)(module);
+  const counts = { protection: 0, safety: 0, process: 0 };
+  const fm = { scheduled: '2026-09-27 00:00:00' };
+  const service = Object.assign(new module.Naming(), {
+    isDailyNoteFile: async () => true, parseDailyNoteBasenameToIso: () => '2026-09-27',
+    isProcessRunFrontmatter: () => false, parseScheduledToIso: value => value.slice(0, 10),
+    canAutomaticallyMutateTemplateSource: async () => { counts.protection++; return true; },
+    canAutomaticallyMutateTemplateFrontmatter: () => true,
+    plugin: { app: { metadataCache: { getFileCache: () => ({ frontmatter: fm }) } },
+      bulkEditService: { canMutateFrontmatterSafely: async () => { counts.safety++; return true; }, runSerializedFrontmatterWrite: async (_f, run) => run() },
+      frontmatterMutationService: { process: async (_f, run) => { counts.process++; run(fm); } },
+    },
+  });
+  assert.equal(await service.repairDailyNoteScheduled({ basename: '2026-09-27' }), false);
+  assert.deepEqual(counts, { protection: 0, safety: 0, process: 0 });
+  fm.scheduled = '2026-09-26 00:00:00';
+  assert.equal(await service.repairDailyNoteScheduled({ basename: '2026-09-27' }), true);
+  assert.equal(fm.scheduled, '2026-09-27 00:00:00');
+  assert.deepEqual(counts, { protection: 1, safety: 1, process: 1 });
+});

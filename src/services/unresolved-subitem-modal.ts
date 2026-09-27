@@ -118,7 +118,7 @@ export async function checkAndPromptForUnresolvedSubitems(
   parentFile: TFile,
 ): Promise<boolean> {
   if (plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) return false;
-  const raw = await plugin.subitemRelationshipSyncService.readMarkdownText(parentFile);
+  const raw = await plugin.subitemRelationshipSyncService.readMarkdownText(parentFile, { cached: true });
   if (plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) return false;
   const links = plugin.bodySubitemLinkService.scanText(parentFile, raw);
 
