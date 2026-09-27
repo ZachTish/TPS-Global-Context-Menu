@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 3.6.9 — Reuse relationship results while building a menu
+
+A file context menu now resolves its parents and children once, using the same arrays for the relationship counts and submenu contents. Previously the child count scanned every relationship candidate, then eager submenu construction repeated that complete scan before the user selected an action such as Rename. The arrays live only during that menu construction; reopening the menu reads current relationships. No retained cache, index, deferred submenu behavior, metadata-policy change, settings or migration is introduced.
+
+Parent/child labels, navigation and unlink actions, empty states, companion-backed attachments, mixed selections and ignore rules retain their existing behavior. One child-discovery scan remains necessary under the current relationship model; this patch removes its duplicate and does not claim zero menu-wide work or general performance parity. Minimum Obsidian stays 1.10.0.
+
+Two focused operation-count regressions failed against 3.6.8 and now pass, including a menu with 1,024 unrelated candidates and fresh data across later menus. All 39 focused menu-builder, parent/child-ignore and Navigator-bridge tests pass. The final versioned declared suite passes 1,314 checks and the supplemental suite passes 193, with zero failures/skips, under Node 24.19.0/npm 10.9.2; TypeScript and the build-only build pass. The separate normal build/test deployment and named reload passed. Three actual foreground Navigator context-menu openings reduced child-resolution work from two passes totaling 375–380 ms to one pass taking 197–203 ms; metadata lookups in that work fell from 187,158 to 93,579 per opening. These are instrumented test-vault operation timings, not physical click-to-paint or production guarantees. Installed parent/child counts, navigation/unlink entries and empty states remain present; fixture relationships and bodies were preserved. Settings stayed byte-identical, probes and note/search state were restored, and new fixtures were archived. See [3.6.9 release notes](release-notes/3.6.9.md) for full evidence and hashes.
+
 ## 3.6.8 — One completion notification for property and title edits
 
 The shared frontmatter writer now announces a successful mutation after its existing title-driven filename operation, using the file's current path. Bulk edits and the Edit Title dialog no longer announce the same mutation again. A committed property write still announces its result if the subsequent filename step fails; rejected writes and unchanged values stay silent. Source attribution and explicit user-action events are preserved, and automation remains separate from explicit actions.
@@ -88,7 +96,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.6.8](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.8) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.6.9](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.9) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 

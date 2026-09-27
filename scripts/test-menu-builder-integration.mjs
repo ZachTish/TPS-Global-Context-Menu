@@ -240,6 +240,77 @@ test("the real menu builder de-duplicates only standard Markdown tags", async ()
   assert.equal(titles.some((title) => title.startsWith("createdDate")), false);
 });
 
+test("relationship counts and submenu contents share one lookup per menu construction", async () => {
+  const { MenuBuilder, TFile } = await loadMenuBuilderModule();
+  const { builder, addFile, plugin } = createBuilderHarness(MenuBuilder, TFile);
+  const root = addFile("Notes/Root.md");
+  const parent = addFile("Projects/Parent.md");
+  const child = addFile("Notes/Child.md");
+  const attachment = addFile("Reference/Attachment.pdf");
+  for (let i = 0; i < 1024; i++) addFile(`Notes/unrelated-${i}.md`);
+  let parentLookups = 0;
+  let childScans = 0;
+  let childChecks = 0;
+  const candidates = plugin.parentLinkResolutionService.getRelationshipCandidates;
+  const allCandidates = candidates();
+  plugin.parentLinkResolutionService.getParentsForChild = file => {
+    assert.equal(file, root);
+    parentLookups++;
+    return [{ file: parent }];
+  };
+  plugin.parentLinkResolutionService.getRelationshipCandidates = () => { childScans++; return candidates(); };
+  plugin.parentLinkResolutionService.hasParent = (candidate, file) => {
+    assert.equal(file, root);
+    childChecks++;
+    return candidate === child || candidate === attachment;
+  };
+
+  const menu = buildMenu(builder, [root], bridgeOptions([root]));
+  const parentItem = menu.items.find(item => item.title === 'Link to Parent (1)');
+  const childItem = menu.items.find(item => item.title === 'Link Children (2)');
+  assert.ok(parentItem?.submenu);
+  assert.ok(childItem?.submenu);
+  assert.equal(parentItem.submenu.items.filter(item => item.title === parent.basename).length, 2);
+  for (const file of [child, attachment]) {
+    assert.equal(childItem.submenu.items.filter(item => item.title === file.basename).length, 2);
+  }
+  assert.equal(childItem.submenu.items.some(item => item.title === 'Create new child...'), true);
+  assert.equal(childItem.submenu.items.some(item => item.title === 'Link existing child...'), true);
+  assert.equal(parentLookups, 1, 'count and submenu must not resolve the same parents twice');
+  assert.equal(childScans, 1, 'count and submenu must not enumerate the vault twice');
+  assert.equal(childChecks, allCandidates.length, 'each candidate is examined once per menu');
+});
+
+test("relationship snapshots are local to one menu and a later menu reads fresh relationships", async () => {
+  const { MenuBuilder, TFile } = await loadMenuBuilderModule();
+  const { builder, addFile, plugin } = createBuilderHarness(MenuBuilder, TFile);
+  const root = addFile("Notes/Root.md");
+  const parent = addFile("Projects/Parent.md");
+  const child = addFile("Notes/Child.md");
+  let parentFiles = [];
+  const childFiles = new Set();
+  let scans = 0;
+  const candidates = plugin.parentLinkResolutionService.getRelationshipCandidates;
+  plugin.parentLinkResolutionService.getParentsForChild = () => parentFiles.map(file => ({ file }));
+  plugin.parentLinkResolutionService.hasParent = candidate => childFiles.has(candidate);
+  plugin.parentLinkResolutionService.getRelationshipCandidates = () => { scans++; return candidates(); };
+
+  const first = buildMenu(builder, [root], bridgeOptions([root]));
+  assert.equal(first.items.find(item => item.title === 'Link Children').submenu.items.some(item => item.title === 'No linked children'), true);
+  assert.equal(first.items.find(item => item.title === 'Link to Parent').submenu.items.some(item => item.title === 'No linked parents'), true);
+  parentFiles = [parent];
+  childFiles.add(child);
+  const second = buildMenu(builder, [root], bridgeOptions([root]));
+  assert.ok(second.items.find(item => item.title === 'Link Children (1)').submenu.items.find(item => item.title === child.basename));
+  assert.ok(second.items.find(item => item.title === 'Link to Parent (1)').submenu.items.find(item => item.title === parent.basename));
+  assert.equal(scans, 2, 'each new menu owns one fresh scan; no retained relationship cache');
+
+  plugin.parentLinkResolutionService.isIgnoredFile = file => file === root;
+  const ignored = buildMenu(builder, [root], bridgeOptions([root]));
+  assert.equal(ignored.items.some(item => /^Link (?:Children|to Parent)/u.test(item.title)), false);
+  assert.equal(scans, 2, 'ignored roots do not enumerate relationships');
+});
+
 test("note time tracking exposes one inferred-target start action instead of task-vs-note modes", async () => {
   const { MenuBuilder, TFile } = await loadMenuBuilderModule();
   const { builder, addFile } = createBuilderHarness(MenuBuilder, TFile);

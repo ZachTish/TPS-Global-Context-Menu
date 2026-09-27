@@ -291,9 +291,7 @@ export class MenuBuilder {
     return count;
   }
 
-  private populateParentRelationSubmenu(menu: Menu, file: TFile): void {
-    const parentFiles = this.resolveParentFilesFor(file);
-
+  private populateParentRelationSubmenu(menu: Menu, file: TFile, parentFiles: readonly TFile[]): void {
     menu.addItem((sub) => {
       sub.setTitle(parentFiles.length > 0 ? 'Add another parent...' : 'Link existing parent...')
         .setIcon('plus')
@@ -371,9 +369,7 @@ export class MenuBuilder {
     });
   }
 
-  private populateChildRelationSubmenu(menu: Menu, file: TFile): void {
-    const childFiles = this.resolveChildFilesFor(file);
-
+  private populateChildRelationSubmenu(menu: Menu, file: TFile, childFiles: readonly TFile[]): void {
     if (this.plugin.parentLinkResolutionService.isRelationshipTarget(file)) {
       menu.addItem((sub) => {
         sub.setTitle('Create new child...')
@@ -793,25 +789,25 @@ export class MenuBuilder {
           this.populateBatchParentRelationSubmenu(subMenu, relationshipFiles);
         });
       } else if (includeSingleTargetActions) {
-        const parentCount = this.resolveParentFilesFor(file).length;
-        const childCount = this.resolveChildFilesFor(file).length;
+        const parentFiles = this.resolveParentFilesFor(file);
+        const childFiles = this.resolveChildFilesFor(file);
 
         menu.addItem((item) => {
-          item.setTitle(parentCount > 0 ? `Link to Parent (${parentCount})` : 'Link to Parent')
+          item.setTitle(parentFiles.length > 0 ? `Link to Parent (${parentFiles.length})` : 'Link to Parent')
             .setIcon('link')
             .setSection('tps-props');
 
           const subMenu = (item as any).setSubmenu();
-          this.populateParentRelationSubmenu(subMenu, file);
+          this.populateParentRelationSubmenu(subMenu, file, parentFiles);
         });
 
         menu.addItem((item) => {
-          item.setTitle(childCount > 0 ? `Link Children (${childCount})` : 'Link Children')
+          item.setTitle(childFiles.length > 0 ? `Link Children (${childFiles.length})` : 'Link Children')
             .setIcon('network')
             .setSection('tps-props');
 
           const subMenu = (item as any).setSubmenu();
-          this.populateChildRelationSubmenu(subMenu, file);
+          this.populateChildRelationSubmenu(subMenu, file, childFiles);
         });
       }
     }
