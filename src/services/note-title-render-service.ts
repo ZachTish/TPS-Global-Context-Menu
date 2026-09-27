@@ -7,7 +7,6 @@ import { getPlainDisplayTitle } from '../utils/display-title';
 
 export class NoteTitleRenderService {
   private readonly linkTitleCache = new Map<string, string>();
-  private readonly lastFilenameSyncKey = new Map<string, string>();
   private lastInlineTitlePromptAt = 0;
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
@@ -256,7 +255,6 @@ export class NoteTitleRenderService {
     }
     const displayTitle = this.getDisplayTitle(file);
     if (!displayTitle) return;
-    this.reconcileFilenameForRenderedTitle(file, displayTitle);
     if (titleEl.textContent === displayTitle) return;
     titleEl.dataset.tpsGcmOriginalInlineTitle = titleEl.dataset.tpsGcmOriginalInlineTitle || String(titleEl.textContent || '');
     titleEl.dataset.tpsGcmRenderedTitle = displayTitle;
@@ -365,23 +363,5 @@ export class NoteTitleRenderService {
     } catch (error) {
       logger.error('[TPS GCM] Failed clearing generated note title:', error);
     }
-  }
-
-  private reconcileFilenameForRenderedTitle(file: TFile, displayTitle: string): void {
-    if (!this.plugin.settings.enableAutoRename) return;
-    const title = String(displayTitle || '').replace(/\s+/g, ' ').trim();
-    if (!title) return;
-    const key = `${file.path}\n${title}`;
-    if (this.lastFilenameSyncKey.get(file.path) === key) return;
-    this.lastFilenameSyncKey.set(file.path, key);
-    window.setTimeout(() => {
-      const liveFile = this.plugin.app.vault.getFileByPath(file.path);
-      if (!(liveFile instanceof TFile)) return;
-      void this.plugin.fileNamingService.updateFilenameIfNeeded(liveFile, {
-        bypassCreationGrace: true,
-        bypassProcessingLock: true,
-        titleOverride: title,
-      });
-    }, 0);
   }
 }

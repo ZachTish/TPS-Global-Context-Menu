@@ -556,6 +556,68 @@ function makeRenameHarness({ changed = true, autoRename = true, failure = false 
   return { file, state, service: new serviceModule.NoteTitleRenderService(plugin) };
 }
 
+function watchRenderedTitleWork(t, service, file) {
+  const callbacks = [];
+  t.mock.method(globalThis, 'setTimeout', callback => {
+    callbacks.push(callback);
+    return callbacks.length;
+  });
+  const previousWindow = globalThis.window;
+  const previousDocument = globalThis.document;
+  globalThis.window = { setTimeout: globalThis.setTimeout };
+  globalThis.document = { activeElement: null };
+  t.after(() => {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+    if (previousDocument === undefined) delete globalThis.document;
+    else globalThis.document = previousDocument;
+  });
+  // Exercise the actual render path with an already-rendered inline title.
+  // A differing filename is not permission for the renderer to mutate it.
+  const title = new FakeElement('title', ['inline-title']);
+  service.resolveInlineTitleElement = () => title;
+  return {
+    callbacks,
+    render() {
+      title.textContent = service.getDisplayTitle(file);
+      service.refreshInlineTitle({ file });
+    },
+    drain() {
+      while (callbacks.length) callbacks.shift()();
+    },
+  };
+}
+
+test('rendering mismatched or stale titles never schedules filename mutations', t => {
+  const { file, state, service } = makeRenameHarness();
+  const work = watchRenderedTitleWork(t, service, file);
+  // Metadata/display caches can temporarily retain the previous title after a
+  // rename. Repeated rendering must not turn that stale value into a new edit.
+  file.path = 'Inbox/Already renamed.md';
+  file.basename = 'Already renamed';
+  for (let index = 0; index < 25; index++) work.render();
+  state.title = 'New cached title';
+  service.clearTitleCache(file.path);
+  for (let index = 0; index < 25; index++) work.render();
+  const scheduled = work.callbacks.length;
+  work.drain();
+  assert.deepEqual({ scheduled, renames: state.renames }, { scheduled: 0, renames: 0 });
+  assert.equal(file.path, 'Inbox/Already renamed.md');
+});
+
+test('rendering after an explicit title save does not replay the writer-owned rename', async t => {
+  const { file, state, service } = makeRenameHarness();
+  const work = watchRenderedTitleWork(t, service, file);
+  await service.promptRenameTitle(file);
+  await globalThis.__tpsTitleSubmit('After');
+  assert.equal(state.renames, 1, 'the explicit frontmatter writer still owns the filename update');
+  for (let index = 0; index < 25; index++) work.render();
+  const scheduled = work.callbacks.length;
+  work.drain();
+  assert.deepEqual({ scheduled, renames: state.renames }, { scheduled: 0, renames: 1 });
+  assert.equal(file.path, 'Inbox/After.md');
+});
+
 test('a cancelled or rejected title write cannot rename the file or announce success', async () => {
   const { file, state, service } = makeRenameHarness({ changed: false });
   await service.promptRenameTitle(file);

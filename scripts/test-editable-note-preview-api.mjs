@@ -184,6 +184,263 @@ test('preview follows automatic renames while preserving a name being typed', ()
   assert.match(managerSource, /component\.registerEvent\(this\.plugin\.app\.vault\.on\('rename'/u);
   assert.match(managerSource, /if \(renamed !== file\) return;/u);
   assert.match(managerSource, /popover\.dataset\.path = file\.path;/u);
-  assert.match(managerSource, /nameInput && nameInput\.value === oldName/u);
+  assert.doesNotMatch(managerSource, /nameInput && nameInput\.value === oldName/u);
   assert.match(managerSource, /baseLinkPreviewTitleSave && !await this\.baseLinkPreviewTitleSave\(\)/u);
+});
+
+// Execute the real preview title-input closure without loading the unrelated
+// menu/renderer graph. This covers event wiring, save ordering and failure
+// behavior in the production code rather than reimplementing the save action.
+function loadPreviewTitleInputSetup() {
+  const syntax = ts.createSourceFile('manager.ts', managerSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let block;
+  const visit = node => {
+    if (ts.isMethodDeclaration(node) && node.name.getText(syntax) === 'showBaseLinkEditablePreview') {
+      block = node.body.statements.find(statement => ts.isIfStatement(statement)
+        && statement.expression.getText(syntax) === 'options.focusTitle');
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(syntax);
+  assert.ok(block, 'the actual created-note title input must exist');
+  const javascript = ts.transpileModule(`(function(context) {
+    const { targetDocument, title, file, popover, path, session, options, Notice, logger,
+      splitEditableNotePreviewDocument, normalizeEditableNotePreviewBody } = context;
+    let nameInput = null;
+    ${block.getText(syntax)}
+    return nameInput;
+  })`, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } }).outputText;
+  return new Function(`return ${javascript}`)();
+}
+
+const setupPreviewTitleInput = loadPreviewTitleInputSetup();
+
+function loadPreviewBodyFlush(context) {
+  const syntax = ts.createSourceFile('manager.ts', managerSource, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
+  let method;
+  const visit = node => {
+    if (ts.isMethodDeclaration(node) && node.name.getText(syntax) === 'flushBaseLinkPreviewBodySave') method = node;
+    else ts.forEachChild(node, visit);
+  };
+  visit(syntax);
+  assert.ok(method);
+  const javascript = ts.transpileModule(`(async function(${method.parameters.map(parameter => parameter.getText(syntax)).join(', ')}) ${method.body.getText(syntax)})`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None }
+  }).outputText;
+  return new Function('context', `const { TFile, Notice, logger, splitEditableNotePreviewDocument, composeEditableNotePreviewDocument } = context; return ${javascript}`)(context);
+}
+
+function previewTitleHarness({ autoRename = true, native = false, reject = false, fail = false, crlf = false, beforeWrite, afterWrite, flushResult = true } = {}) {
+  class TFile {}
+  const file = Object.assign(new TFile(), { path: 'Inbox/Storage name.md', basename: 'Storage name', parent: { path: 'Inbox' }, extension: 'md' });
+  const eol = crlf ? '\r\n' : '\n';
+  const state = {
+    title: 'Semantic title', body: `Original body${eol}`, draft: `Original body${eol}`,
+    directRenames: 0, canonicalRenames: 0, writes: [], order: [], notices: [], focusBody: 0
+  };
+  const input = {
+    value: '', style: {}, attributes: {}, listeners: new Map(),
+    setAttribute(key, value) { this.attributes[key] = value; },
+    addEventListener(type, listener) { this.listeners.set(type, listener); },
+    dispatch(type, extras = {}) {
+      this.listeners.get(type)?.({ stopPropagation() {}, preventDefault() {}, isComposing: false, ...extras });
+    }
+  };
+  const editor = { readOnly: false };
+  const manager = {
+    baseLinkPreviewSession: 1,
+    baseLinkPreviewReadySession: 1,
+    baseLinkPreviewWindow: { clearTimeout() {} },
+    baseLinkPreviewSaveTimer: null,
+    baseLinkPreviewRenderTimer: null,
+    baseLinkPreviewSaveInFlight: null,
+    baseLinkPreviewFile: file,
+    baseLinkPreviewEditorEl: editor,
+    baseLinkPreviewLastSavedBody: documentUtility.normalizeEditableNotePreviewBody(state.body),
+    baseLinkPreviewBodyRevision: state.body,
+    baseLinkPreviewEl: { isConnected: true, querySelector: () => ({ textContent: '' }) },
+    topLinkPreviewTextCache: new Map(),
+    isBaseLinkEditablePreviewOpen: () => true,
+    getEditablePreviewBodyText: () => documentUtility.normalizeEditableNotePreviewBody(state.draft),
+    async flushBaseLinkPreviewBodySave() {
+      state.order.push('body');
+      if (!flushResult) return false;
+      state.body = state.draft;
+      manager.baseLinkPreviewLastSavedBody = documentUtility.normalizeEditableNotePreviewBody(state.draft);
+      manager.baseLinkPreviewBodyRevision = state.body;
+      return true;
+    },
+    activateBaseLinkPreviewSourceEditor() { state.focusBody++; },
+    plugin: {
+      noteTitleRenderService: { getDisplayTitle: () => state.title || file.basename },
+      app: {
+        fileManager: { async renameFile(target, nextPath) {
+          state.directRenames++;
+          target.path = nextPath;
+          target.basename = nextPath.split('/').pop().replace(/\.md$/u, '');
+        } },
+        vault: {
+          cachedRead: async () => `---\ntitle: ${state.title}\n---\n${state.body}`,
+          async process(target, transform) {
+            assert.equal(target, file);
+            const next = transform(`---\ntitle: ${state.title}\n---\n${state.body}`);
+            state.body = documentUtility.splitEditableNotePreviewDocument(next).body;
+            return next;
+          }
+        }
+      },
+      bulkEditService: { async updateFrontmatter(files, updates) {
+        state.order.push('title');
+        state.writes.push(updates);
+        assert.deepEqual(files, [file]);
+        assert.equal(editor.readOnly, true, 'preview body autosave cannot interleave the title write');
+        await beforeWrite?.(state);
+        if (fail) throw Error('Synthetic title save failure');
+        if (reject) return 0;
+        state.title = updates.title;
+        // Match the established canonical writer's full-source normalization.
+        state.body = state.body.replace(/\r\n/gu, '\n');
+        if (autoRename && !native) {
+          state.canonicalRenames++;
+          file.basename = updates.title.replace(/[<>:"/\\|?*]/gu, '');
+          file.path = `Inbox/${file.basename}.md`;
+        }
+        await afterWrite?.(state);
+        return 1;
+      } }
+    }
+  };
+  const context = {
+    targetDocument: { createElement: () => input }, title: { replaceWith() {} },
+    file, popover: { dataset: {} }, path: { textContent: file.path }, session: 1,
+    options: { focusTitle: true },
+    Notice: class { constructor(message) { state.notices.push(message); } },
+    TFile,
+    logger: { flowError() {}, flowWarn() {}, flow() {} },
+    splitEditableNotePreviewDocument: documentUtility.splitEditableNotePreviewDocument,
+    composeEditableNotePreviewDocument: documentUtility.composeEditableNotePreviewDocument,
+    normalizeEditableNotePreviewBody: documentUtility.normalizeEditableNotePreviewBody
+  };
+  setupPreviewTitleInput.call(manager, context);
+  return { input, manager, file, state, editor, save: () => manager.baseLinkPreviewTitleSave(),
+    flushBody: () => loadPreviewBodyFlush(context).call(manager, { textContent: '' }) };
+}
+
+test('created-note preview initializes the semantic title and keeps unchanged input read-only', async () => {
+  const h = previewTitleHarness();
+  assert.equal(h.input.value, 'Semantic title');
+  assert.equal(h.input.attributes['aria-label'], 'Note title');
+  assert.equal(await h.save(), true);
+  assert.deepEqual(h.state.writes, []);
+  assert.equal(h.state.directRenames, 0);
+});
+
+for (const mode of ['auto-rename', 'title-only', 'native-record']) {
+  test(`preview title save preserves canonical ${mode} ownership and pending body edits`, async () => {
+    const h = previewTitleHarness({ autoRename: mode !== 'title-only', native: mode === 'native-record' });
+    h.state.draft = 'Body typed before title save\n';
+    h.input.value = '  Human:  title  ';
+    assert.equal(await h.save(), true);
+    assert.equal(h.state.title, 'Human: title');
+    assert.equal(h.state.body, h.state.draft);
+    assert.deepEqual(h.state.order, ['body', 'title']);
+    assert.equal(h.state.directRenames, 0);
+    assert.equal(h.state.canonicalRenames, mode === 'auto-rename' ? 1 : 0);
+    assert.equal(h.file.path, mode === 'auto-rename' ? 'Inbox/Human title.md' : 'Inbox/Storage name.md');
+    assert.equal(h.editor.readOnly, false);
+    assert.equal(await h.save(), true, 'dismissal after acceptance must not resubmit because basename differs');
+    assert.equal(h.state.writes.length, 1);
+    h.input.value = 'Draft not accepted';
+    h.input.dispatch('keydown', { key: 'Escape' });
+    assert.equal(h.input.value, 'Human: title');
+  });
+}
+
+for (const outcome of ['rejected', 'failed', 'body-conflict']) {
+  test(`${outcome} preview title save retains input and does not enter the body editor`, async () => {
+    const h = previewTitleHarness({ reject: outcome === 'rejected', fail: outcome === 'failed', flushResult: outcome !== 'body-conflict' });
+    h.input.value = 'Requested title';
+    h.input.dispatch('keydown', { key: 'Enter' });
+    assert.equal(await h.save(), false);
+    assert.equal(h.input.value, 'Requested title');
+    assert.equal(h.state.focusBody, 0);
+    assert.equal(h.state.title, 'Semantic title');
+    assert.equal(h.file.path, 'Inbox/Storage name.md');
+    assert.equal(h.state.directRenames, 0);
+    assert.equal(h.editor.readOnly, false);
+    if (outcome === 'body-conflict') assert.deepEqual(h.state.writes, []);
+  });
+}
+
+test('change, Enter and dismissal share a pending title save; newer input saves once afterward', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const h = previewTitleHarness({ beforeWrite: state => state.writes.length === 1 ? gate : undefined });
+  h.input.value = 'First title';
+  h.input.dispatch('change');
+  await Promise.resolve();
+  h.input.value = 'Latest title';
+  h.input.dispatch('keydown', { key: 'Enter' });
+  const closing = h.save();
+  release();
+  assert.equal(await closing, true);
+  assert.deepEqual(h.state.writes, [{ title: 'First title' }, { title: 'Latest title' }]);
+  assert.equal(h.state.title, 'Latest title');
+  assert.equal(h.state.directRenames, 0);
+  assert.equal(h.editor.readOnly, false);
+});
+
+test('change, Enter and dismissal without newer input perform one title write', async () => {
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const h = previewTitleHarness({ beforeWrite: () => gate });
+  h.input.value = 'Accepted once';
+  h.input.dispatch('change');
+  h.input.dispatch('keydown', { key: 'Enter' });
+  const closing = h.save();
+  release();
+  assert.equal(await closing, true);
+  assert.deepEqual(h.state.writes, [{ title: 'Accepted once' }]);
+  assert.equal(h.state.focusBody, 1);
+  assert.equal(h.state.directRenames, 0);
+});
+
+test('blank preview titles do not flush the body or invoke a writer', async () => {
+  const h = previewTitleHarness();
+  h.input.value = ' \n ';
+  assert.equal(await h.save(), false);
+  assert.deepEqual(h.state.order, []);
+  assert.equal(h.state.notices[0], 'Title cannot be empty.');
+  assert.equal(h.state.directRenames, 0);
+});
+
+test('canonical title save advances the preview body revision after CRLF normalization', async () => {
+  const h = previewTitleHarness({ crlf: true });
+  h.input.value = 'New title';
+  assert.equal(await h.save(), true);
+  assert.equal(h.manager.baseLinkPreviewBodyRevision, h.state.body);
+  assert.equal(h.manager.baseLinkPreviewLastSavedBody, h.state.body);
+  h.state.draft = 'Body edited after title save\n';
+  assert.equal(await h.flushBody(), true, 'the actual body writer must not falsely conflict after the title writer changes line endings');
+  assert.equal(h.state.body, h.state.draft);
+  assert.equal(h.state.directRenames, 0);
+});
+
+test('title save preserves a concurrent external body change and the next preview edit remains a conflict', async () => {
+  const h = previewTitleHarness({ afterWrite: state => { state.body = 'External body revision\n'; } });
+  h.input.value = 'New title';
+  assert.equal(await h.save(), true);
+  assert.equal(h.manager.baseLinkPreviewBodyRevision, 'Original body\n');
+  h.state.draft = 'Preview edit based on the old body\n';
+  assert.equal(await h.flushBody(), false);
+  assert.equal(h.state.body, 'External body revision\n');
+});
+
+test('title save restores an already read-only editor exactly', async () => {
+  const h = previewTitleHarness();
+  h.editor.readOnly = true;
+  h.input.value = 'New title';
+  assert.equal(await h.save(), true);
+  assert.equal(h.editor.readOnly, true);
 });

@@ -1,5 +1,15 @@
 # TPS Global Context Menu
 
+## 3.6.3 — Give title edits one filename owner
+
+Inline title rendering is read-only. It no longer queues filename reconciliation using a rendered or cached title. The previous path could undo an explicit preview rename, causing two file renames and repeated downstream refreshes. Explicit title writes and the existing metadata/modify naming path retain ownership.
+
+The new-note preview’s focused title field follows the same semantic title policy as the Edit Title dialog: it displays the note title and saves through the shared frontmatter writer. Auto-rename controls ordinary filenames; workflow-owned native filenames retain their existing protection. There is no independent preview filename write. Pending body edits settle through the existing preview save before a title mutation; failed saves keep the preview open and preserve typed input. The preview updates its existing body revision after its own successful writer without repairing note content or accepting an external body change.
+
+No new settings, caches, watchers, timers, migrations or repair passes. This is a backward-compatible fix, with minimum Obsidian 1.10.0 unchanged. Focused tests cover stale rendering, single rename ownership, preview title/body saves, rapid edits, failure and filename-policy cases. Final validation and release artifact hashes are recorded in [3.6.3 release notes](release-notes/3.6.3.md).
+
+Validation: 1,262 declared checks, 184 supplemental checks and 50 focused checks passed. The separate final TypeScript/build deployed 3.6.3 to the test vault; a named GCM reload with its updated manifest verified the version. The installed preview changed from two renames and a reverted filename to one rename with matching title and filename. Body edits, reopen, Auto-rename off, CRLF input and native task filename protection passed; runtime settings stayed byte-identical and fixtures were archived. Ordinary Edit Title save timing remained about 240 ms, so no general speedup is claimed for that dialog. Foreground captures had no long tasks; a detailed sample attributes most remaining save time to the required source read and Obsidian rename. Physical iPhone and production latency remain user acceptance. See the release notes for measurements, limits and artifact hashes.
+
 ## 3.6.2 — Stop redundant lifecycle work
 
 Calendar button counts use Obsidian’s task metadata to skip reading bodies without checkboxes; missing metadata and real tasks still use the existing parser. Startup recurrence checking rejects notes without a recurrence rule before reading their source. Notebook Navigator appearance rules project their desired values from cached metadata before entering the authoritative writer; unchanged results do no raw protection reads or mutation attempts. Actual changes still recheck exclusions at the atomic writer and preserve current content. Creation uses one existing rule schedule instead of a second forced replay 3.8 seconds later. Filename synchronization has one existing debounced event path, and retired parent maintenance emits no false file-change/render notifications.
@@ -38,7 +48,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.6.2](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.2) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.6.3](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.3) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 

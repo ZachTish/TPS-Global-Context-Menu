@@ -3547,8 +3547,9 @@ export class PersistentMenuManager {
     if (options.focusTitle) {
       nameInput = targetDocument.createElement('input');
       nameInput.className = 'tps-gcm-base-link-preview-name';
-      nameInput.setAttribute('aria-label', 'Note name');
-      nameInput.value = file.basename;
+      nameInput.setAttribute('aria-label', 'Note title');
+      let acceptedTitle = this.plugin.noteTitleRenderService.getDisplayTitle(file);
+      nameInput.value = acceptedTitle;
       nameInput.style.width = '100%';
       nameInput.style.minWidth = '0';
       title.replaceWith(nameInput);
@@ -3556,23 +3557,51 @@ export class PersistentMenuManager {
       const input = nameInput;
       const save = (): Promise<boolean> => {
         if (pending) return pending.then(ok => ok ? save() : false);
-        const name = input.value.trim();
-        if (name === file.basename) return Promise.resolve(true);
-        if (!name || /[\\/:*?"<>|]/u.test(name) || name === '.' || name === '..') {
-          new Notice('Enter a valid note name.');
+        const nextTitle = input.value.replace(/\s+/g, ' ').trim();
+        if (nextTitle === acceptedTitle) return Promise.resolve(true);
+        if (!nextTitle) {
+          new Notice('Title cannot be empty.');
           return Promise.resolve(false);
         }
-        const folder = file.parent?.path === '/' ? '' : file.parent?.path || '';
-        const nextPath = `${folder ? `${folder}/` : ''}${name}.md`;
-        pending = this.plugin.app.fileManager.renameFile(file, nextPath).then(() => {
-          path.textContent = file.path;
-          popover.dataset.path = file.path;
-          return true;
-        }).catch(error => {
-          logger.flowError('NoteOpening', 'created:rename-failed', error, { path: file.path });
-          new Notice('Could not rename the note. Choose another name or press Escape to keep its current name.');
-          return false;
-        }).finally(() => { pending = null; });
+        pending = (async () => {
+          const editor = this.baseLinkPreviewEditorEl;
+          const wasReadOnly = editor?.readOnly;
+          if (editor) editor.readOnly = true;
+          try {
+            const statusEl = this.baseLinkPreviewEl?.querySelector<HTMLElement>('.tps-gcm-base-link-preview-status');
+            if (!await this.flushBaseLinkPreviewBodySave(statusEl, { renderAfterSave: false })) return false;
+            if (session !== this.baseLinkPreviewSession || this.baseLinkPreviewFile !== file) return false;
+            // Match the Title action: the canonical writer owns any configured
+            // filename change, including native-record filename protection.
+            const changed = await this.plugin.bulkEditService.updateFrontmatter([file], { title: nextTitle });
+            if (!changed) {
+              new Notice('Title was not saved. Check the note and try again, or press Escape to keep its current title.');
+              return false;
+            }
+            acceptedTitle = nextTitle;
+            path.textContent = file.path;
+            popover.dataset.path = file.path;
+            // The shared title writer can change document line endings. Advance
+            // our own revision only when the saved body still matches; an
+            // external body change must retain the normal conflict protection.
+            const currentParts = splitEditableNotePreviewDocument(await this.plugin.app.vault.cachedRead(file));
+            if (session === this.baseLinkPreviewSession
+              && this.baseLinkPreviewFile === file
+              && currentParts.lineEndingsSupported
+              && normalizeEditableNotePreviewBody(currentParts.body) === this.baseLinkPreviewLastSavedBody) {
+              this.baseLinkPreviewBodyRevision = currentParts.body;
+            }
+            return true;
+          } catch (error) {
+            logger.flowError('NoteOpening', 'created:title-save-failed', error, { path: file.path });
+            new Notice('Could not save the title. Try again or press Escape to keep its current title.');
+            return false;
+          } finally {
+            if (editor && session === this.baseLinkPreviewSession && editor === this.baseLinkPreviewEditorEl) {
+              editor.readOnly = wasReadOnly ?? false;
+            }
+          }
+        })().finally(() => { pending = null; });
         return pending;
       };
       this.baseLinkPreviewTitleSave = save;
@@ -3580,7 +3609,7 @@ export class PersistentMenuManager {
       input.addEventListener('keydown', event => {
         event.stopPropagation();
         if (event.isComposing) return;
-        if (event.key === 'Escape') input.value = file.basename;
+        if (event.key === 'Escape') input.value = acceptedTitle;
         if (event.key === 'Enter') {
           event.preventDefault();
           void save().then(ok => { if (ok && session === this.baseLinkPreviewSession) this.activateBaseLinkPreviewSourceEditor(); });
@@ -3678,13 +3707,11 @@ export class PersistentMenuManager {
     const component = new Component();
     component.load();
     this.baseLinkPreviewComponent = component;
-    component.registerEvent(this.plugin.app.vault.on('rename', (renamed, oldPath) => {
+    component.registerEvent(this.plugin.app.vault.on('rename', (renamed) => {
       if (renamed !== file) return;
       path.textContent = file.path;
       popover.dataset.path = file.path;
       title.textContent = this.getFileDisplayTitle(file);
-      const oldName = oldPath.split('/').pop()?.replace(/\.md$/iu, '');
-      if (nameInput && nameInput.value === oldName) nameInput.value = file.basename;
     }));
     try {
       await MarkdownRenderer.render(this.plugin.app, parts.body || '\n', bodySizer, file.path, component);
