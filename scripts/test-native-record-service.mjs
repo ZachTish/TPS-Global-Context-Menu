@@ -121,6 +121,17 @@ async function loadModule() {
     plugins: [{
       name: 'native-record-stubs',
       setup(builder) {
+        // Count the actual classifier only in this test bundle; no runtime hook ships.
+        builder.onLoad({ filter: /native-record-service\.ts$/ }, (args) => {
+          let contents = readFileSync(args.path, 'utf8');
+          const marker = 'function inspectWithProfile(\n  raw: Record<string, unknown>,\n  profile: TpsNativeRecordStorageProfile,\n): TpsNativeRecordInspection | null {';
+          assert.equal(contents.includes(marker), true, 'profile inspection counter must target the real function');
+          contents = contents.replace(marker, `${marker}\n  globalThis.__nativeRecordProfileInspection?.(raw, profile);`);
+          const copyMarker = 'const frontmatter = { ...raw } as TpsNativeRecordEnvelope;';
+          assert.equal(contents.includes(copyMarker), true, 'envelope counter must target the real copy');
+          contents = contents.replace(copyMarker, `globalThis.__nativeRecordEnvelopeCopy?.(raw, profile);\n  ${copyMarker}`);
+          return { contents, loader: 'ts', resolveDir: dirname(args.path) };
+        });
         builder.onResolve({ filter: /property-migration-modal$/ }, () => ({ path: 'modal', namespace: 'migration-modal-test' }));
         builder.onLoad({ filter: /.*/, namespace: 'migration-modal-test' }, () => ({ contents: 'export class PropertyMigrationModal { static async confirm(){ return true; } }' }));
         builder.onResolve({ filter: /^obsidian$/u }, () => ({ path: 'obsidian', namespace: 'native-record-test' }));
@@ -4087,4 +4098,149 @@ test('canonical calendar identity remains independent of public template tags',a
  await service.update(created.path,{scheduled:'2026-10-01'});
  assert.equal((await service.resolve(created.path))?.kind,'calendar-event');
  assert.match(contents.get(created.file),/anything\/events/);assert.doesNotMatch(contents.get(created.file),/^kind:/m);
+});
+
+
+function countedRecordInspection(service, raw) {
+  const calls = new Map();
+  let copies = 0;
+  globalThis.__nativeRecordProfileInspection = (source, profile) => {
+    assert.equal(source, raw, 'this synchronous operation only inspects its input');
+    calls.set(profile, (calls.get(profile) || 0) + 1);
+  };
+  globalThis.__nativeRecordEnvelopeCopy = () => { copies++; };
+  try {
+    return { result: service.inspect(raw), calls, get copies() { return copies; } };
+  } finally {
+    delete globalThis.__nativeRecordProfileInspection;
+    delete globalThis.__nativeRecordEnvelopeCopy;
+  }
+}
+
+function assertSingleProfileEvaluation(measurement, expectedCalls, expectedCopies) {
+  assert.equal([...measurement.calls.values()].every(count => count === 1), true,
+    'a prepared profile must be evaluated at most once during one inspection, including null results');
+  assert.equal(measurement.calls.size, expectedCalls);
+  assert.equal(measurement.copies, expectedCopies);
+}
+
+test('profile inspection reuse rejects 1000 ordinary notes without repeated no-match evaluations', () => {
+  const { service } = createHarness();
+  let evaluations = 0;
+  for (let i = 0; i < 1000; i++) {
+    const measurement = countedRecordInspection(service, { title: `Ordinary ${i}`, tags: ['notes'] });
+    assert.equal(measurement.result, null);
+    assertSingleProfileEvaluation(measurement, 3, 0);
+    evaluations += [...measurement.calls.values()].reduce((sum, count) => sum + count, 0);
+  }
+  assert.equal(evaluations, 3000, 'burst work scales with profiles, not repeated validation passes');
+});
+
+test('profile inspection reuse covers native kinds and arbitrary nested tag mappings', () => {
+  const kinds = ['task', 'food-entry', 'activity-entry', 'workout-session', 'workout-exercise', 'calendar-event', 'nutrition-log'];
+  const { service, plugin } = createHarness();
+  for (const kind of kinds) {
+    const measurement = countedRecordInspection(service, { tpsId: `fixture-${kind}`, kind, title: 'Fixture' });
+    assert.equal(measurement.result?.kind, kind);
+    assertSingleProfileEvaluation(measurement, 4, 2);
+  }
+  plugin.settings.nativeRecordKindPropertyKeys = Object.fromEntries(kinds.map(kind => [kind, { tag: `custom/${kind}` }]));
+  const ordinary = countedRecordInspection(service, { title: 'Ordinary', tags: ['notes'] });
+  assert.equal(ordinary.result, null);
+  assertSingleProfileEvaluation(ordinary, 10, 0);
+  for (const kind of kinds) {
+    const measurement = countedRecordInspection(service, { tpsId: `fixture-${kind}`, title: 'Fixture', tags: [`custom/${kind}`] });
+    assert.equal(measurement.result?.kind, kind);
+    assertSingleProfileEvaluation(measurement, 15, 2);
+  }
+  const calendar = countedRecordInspection(service, {
+    tpsId: 'calendar:v1:abcdefghijklmnop:abcdefghijklmnopqrstuvwxyz2', title: 'Calendar', tags: ['unrelated'],
+  });
+  assert.equal(calendar.result?.kind, 'calendar-event');
+  assertSingleProfileEvaluation(calendar, 18, 2);
+});
+
+test('profile inspection reuse preserves current custom keys, pair mappings and legacy migration readers', () => {
+  const current = createHarness('native-records', { kindPropertyKey: 'recordType', titlePropertyKey: 'name' });
+  const mapped = countedRecordInspection(current.service, { tpsId: 'current-food', recordType: 'food-entry', name: 'Food' });
+  assert.equal(mapped.result?.kind, 'food-entry');
+  assertSingleProfileEvaluation(mapped, 4, 2);
+  const pair = createHarness();
+  pair.plugin.settings.nativeRecordKindPropertyKeys = { 'food-entry': { key: 'entryType', parentKind: 'transaction', value: 'food' } };
+  const paired = countedRecordInspection(pair.service, { tpsId: 'food', title: 'Food', kind: 'transaction', entryType: 'food' });
+  assert.equal(paired.result?.kind, 'food-entry');
+  assertSingleProfileEvaluation(paired, 3, 3);
+  const legacy = createHarness('native-records', {
+    identityPropertyKey: 'recordId', schemaPropertyKey: 'recordSchema', kindPropertyKey: 'recordType',
+    titlePropertyKey: 'name', createdPropertyKey: 'created', modifiedPropertyKey: 'updated',
+  });
+  const raw = { recordId: 'legacy-food', recordSchema: 1, recordType: 'food-entry', name: 'Food', created: '2026-09-27', updated: '2026-09-27' };
+  assert.equal(legacy.service.inspect(raw), null, 'legacy storage remains migration-only');
+  legacy.service.readingMigrationSources = true;
+  const migrated = countedRecordInspection(legacy.service, raw);
+  assert.equal(migrated.result?.id, 'legacy-food');
+  assertSingleProfileEvaluation(migrated, 8, 2);
+  legacy.service.readingMigrationSources = false;
+  assert.equal(legacy.service.inspect(raw), null);
+});
+
+test('profile inspection reuse keeps equivalent distinct profiles separate and repeated objects shared', () => {
+  const { service } = createHarness();
+  const profiles = service.getInspectionProfiles();
+  const equivalent = { ...profiles.write };
+  profiles.evidence.push(equivalent, equivalent);
+  profiles.readable.push(equivalent, equivalent);
+  const measurement = countedRecordInspection(service, { tpsId: 'duplicate-profiles', kind: 'task', title: 'Task' });
+  assert.equal(measurement.result?.id, 'duplicate-profiles');
+  assert.equal(measurement.calls.get(equivalent), 1);
+  assert.equal(measurement.calls.get(profiles.write), 1);
+  assertSingleProfileEvaluation(measurement, 5, 3);
+});
+
+test('profile inspection reuse does not survive input edits, mapping edits or returned-value mutation', () => {
+  const { service, plugin } = createHarness();
+  plugin.settings.nativeRecordKindPropertyKeys = { 'food-entry': { tag: 'logs/food' } };
+  const raw = { tpsId: 'food-one', title: 'Before', tags: ['logs/food'] };
+  const before = structuredClone(raw);
+  const first = countedRecordInspection(service, raw);
+  assert.equal(first.result?.kind, 'food-entry');
+  assert.deepEqual(raw, before);
+  first.result.frontmatter.title = 'Caller copy';
+  first.result.profile.classification.tag = 'poisoned';
+  raw.title = 'Edited';
+  raw.tpsId = 'food-two';
+  const second = countedRecordInspection(service, raw);
+  assert.equal(second.result?.id, 'food-two');
+  assert.equal(second.result?.frontmatter.title, 'Edited');
+  assert.equal(second.result?.profile.classification.tag, 'logs/food');
+  assert.notEqual(first.result.frontmatter, second.result.frontmatter);
+  const other = countedRecordInspection(service, { ...raw, tpsId: 'other-food', title: 'Other source' });
+  assert.equal(other.result?.id, 'other-food');
+  assert.equal(other.result?.frontmatter.title, 'Other source');
+  delete raw.tpsId;
+  assert.equal(countedRecordInspection(service, raw).result, null);
+  raw.tpsId = 'food-two';
+  assert.equal(countedRecordInspection(service, raw).result?.id, 'food-two');
+  plugin.settings.nativeRecordKindPropertyKeys['food-entry'].tag = 'logs/nutrition';
+  assert.equal(countedRecordInspection(service, raw).result, null);
+  raw.tags = ['logs/nutrition'];
+  assert.equal(countedRecordInspection(service, raw).result?.kind, 'food-entry');
+});
+
+test('profile inspection reuse preserves conflicting evidence and timestamp fallback isolation', () => {
+  const { service, plugin } = createHarness();
+  plugin.settings.nativeRecordKindPropertyKeys = { 'food-entry': { tag: 'food' }, exercise: { tag: 'exercise' } };
+  assert.equal(countedRecordInspection(service, { tpsId: 'conflict', title: 'Both', tags: ['food', 'exercise'] }).result, null);
+  assert.equal(countedRecordInspection(service, { tpsId: 'a', TPSID: 'b', title: 'Case conflict', tags: ['food'] }).result, null);
+  plugin.settings.nativeRecordKindPropertyKeys = {};
+  const raw = { tpsId: 'fallback', tpsSchemaVersion: 1, title: 'Fallback', kind: 'task', createdDate: '2026-09-01', modifiedDate: '2026-09-02' };
+  const original = structuredClone(raw);
+  service.readingMigrationSources = true;
+  assert.equal(countedRecordInspection(service, raw).result?.frontmatter.createdDate, '2026-09-01');
+  assert.deepEqual(raw, original);
+  service.readingMigrationSources = false;
+  const current = countedRecordInspection(service, raw);
+  assert.equal(current.result?.frontmatter.createdDate, '', 'evidence fallback cannot mutate the current-profile result');
+  assert.equal(current.result?.frontmatter.modifiedDate, '');
+  assert.deepEqual(raw, original);
 });

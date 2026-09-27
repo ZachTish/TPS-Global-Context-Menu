@@ -505,9 +505,22 @@ function identityTagCandidateMatchCount(
   )).length;
 }
 
+type NativeRecordProfileInspector = (profile: TpsNativeRecordStorageProfile) => TpsNativeRecordInspection | null;
+
+function createProfileInspector(raw: Record<string, unknown>): NativeRecordProfileInspector {
+  // One synchronous source inspection owns these results, including no-matches.
+  // Never carry them into another source/candidate check or mutation boundary.
+  const inspections = new Map<TpsNativeRecordStorageProfile, TpsNativeRecordInspection | null>();
+  return (profile) => {
+    if (!inspections.has(profile)) inspections.set(profile, inspectWithProfile(raw, profile));
+    return inspections.get(profile) ?? null;
+  };
+}
+
 function hasInvalidReservedIdentityTagEvidence(
   raw: Record<string, unknown>,
   profiles: TpsNativeRecordStorageProfile[],
+  inspectProfile: NativeRecordProfileInspector,
 ): boolean {
   const prefixes: string[] = [];
   const prefixKeys = new Set<string>();
@@ -533,7 +546,7 @@ function hasInvalidReservedIdentityTagEvidence(
   if (parsedIdentity.requiresPropertyDisambiguation) return true;
   const propertyInspections = profiles
     .filter((profile) => profile.identityMode === 'property')
-    .map((profile) => inspectWithProfile(raw, profile))
+    .map((profile) => inspectProfile(profile))
     .filter((inspection): inspection is TpsNativeRecordInspection => inspection !== null);
   if (propertyInspections.length > 0) {
     return propertyInspections.some((inspection) => (
@@ -542,7 +555,7 @@ function hasInvalidReservedIdentityTagEvidence(
     ));
   }
   return !profiles.some((profile) => (
-    profile.identityMode === 'tag' && inspectWithProfile(raw, profile) !== null
+    profile.identityMode === 'tag' && inspectProfile(profile) !== null
   ));
 }
 
@@ -645,28 +658,28 @@ function selectApplicableReadableProfiles(
   raw: Record<string, unknown>,
   profiles: TpsNativeRecordStorageProfile[],
   writeProfile: TpsNativeRecordStorageProfile,
+  inspectProfile: NativeRecordProfileInspector = createProfileInspector(raw),
 ): TpsNativeRecordStorageProfile[] {
-  const classified = profiles.filter(profile => profile.classification && inspectWithProfile(raw, profile));
+  const classified = profiles.filter(profile => profile.classification && inspectProfile(profile));
   if (classified.length) profiles = profiles.filter(profile => profile.classification || profile.kindPropertyKey !== 'kind' || !classified.some(match => match.identityPropertyKey === profile.identityPropertyKey));
-  if (!inspectWithProfile(raw, writeProfile)) return profiles;
+  if (!inspectProfile(writeProfile)) return profiles;
   const writeKey = profileKey(writeProfile);
   return profiles.filter((profile) => {
     if (profileKey(profile) === writeKey || profile.identityMode === 'tag') return true;
     if (propertyProfileUsesTags(profile)) return false;
-    return inspectWithProfile(raw, profile) !== null;
+    return inspectProfile(profile) !== null;
   });
 }
 
 function hasInvalidPropertyIdentityEvidence(
   raw: Record<string, unknown>,
   profiles: TpsNativeRecordStorageProfile[],
+  inspectProfile: NativeRecordProfileInspector,
 ): boolean {
   const propertyProfiles = profiles.filter((profile) => profile.identityMode === 'property');
-  const inspections = new Map<TpsNativeRecordStorageProfile, TpsNativeRecordInspection | null>();
   const explainedMarkers = new Set<string>();
   for (const profile of propertyProfiles) {
-    const inspection = inspectWithProfile(raw, profile);
-    inspections.set(profile, inspection);
+    const inspection = inspectProfile(profile);
     if (!inspection) continue;
     explainedMarkers.add(`id:${profile.identityPropertyKey.toLocaleLowerCase()}`);
     if (profile.schemaPropertyKey) {
@@ -674,7 +687,7 @@ function hasInvalidPropertyIdentityEvidence(
     }
   }
   for (const profile of propertyProfiles) {
-    if (inspections.get(profile)) continue;
+    if (inspectProfile(profile)) continue;
     const idPresent = findKeyCaseInsensitive(raw, profile.identityPropertyKey) !== null;
     const schemaPresent = profile.schemaPropertyKey
       ? findKeyCaseInsensitive(raw, profile.schemaPropertyKey) !== null
@@ -707,15 +720,16 @@ function hasDuplicateReadableStorageKeys(
 function hasAmbiguousPropertyTagsEvidence(
   raw: Record<string, unknown>,
   profiles: TpsNativeRecordStorageProfile[],
+  inspectProfile: NativeRecordProfileInspector,
 ): boolean {
   const matchedPropertyOwners = profiles.filter((profile) => (
     propertyProfileUsesTags(profile)
-      && inspectWithProfile(raw, profile) !== null
+      && inspectProfile(profile) !== null
   ));
   if (!matchedPropertyOwners.length) return false;
   if (matchedPropertyOwners.length > 1) return true;
   if (profiles.some((profile) => (
-    profile.identityMode === 'tag' && inspectWithProfile(raw, profile) !== null
+    profile.identityMode === 'tag' && inspectProfile(profile) !== null
   ))) return true;
   const tagsKey = findKeyCaseInsensitive(raw, 'tags');
   const tagsValue = tagsKey ? raw[tagsKey] : undefined;
@@ -731,13 +745,14 @@ function hasInvalidReadableIdentityEvidence(
   raw: Record<string, unknown>,
   profiles: TpsNativeRecordStorageProfile[],
   writeProfile: TpsNativeRecordStorageProfile,
+  inspectProfile: NativeRecordProfileInspector = createProfileInspector(raw),
 ): boolean {
-  return hasInvalidReservedIdentityTagEvidence(raw, profiles)
-    || hasInvalidPropertyIdentityEvidence(raw, profiles)
+  return hasInvalidReservedIdentityTagEvidence(raw, profiles, inspectProfile)
+    || hasInvalidPropertyIdentityEvidence(raw, profiles, inspectProfile)
     || hasDuplicateReadableStorageKeys(raw, profiles)
-    || hasAmbiguousPropertyTagsEvidence(raw, profiles)
-    || hasConflictingMatchedTimestamps(raw, profiles, writeProfile)
-    || hasConflictingMatchedTitles(raw, profiles, writeProfile);
+    || hasAmbiguousPropertyTagsEvidence(raw, profiles, inspectProfile)
+    || hasConflictingMatchedTimestamps(profiles, writeProfile, inspectProfile)
+    || hasConflictingMatchedTitles(profiles, writeProfile, inspectProfile);
 }
 
 function matchedTimestampValues(
@@ -756,14 +771,14 @@ function matchedTimestampValues(
 }
 
 function hasConflictingMatchedTimestamps(
-  raw: Record<string, unknown>,
   profiles: TpsNativeRecordStorageProfile[],
   writeProfile: TpsNativeRecordStorageProfile,
+  inspectProfile: NativeRecordProfileInspector,
 ): boolean {
   const matches = profiles
-    .map((profile) => inspectWithProfile(raw, profile))
+    .map((profile) => inspectProfile(profile))
     .filter((value): value is TpsNativeRecordInspection => value !== null);
-  const current = inspectWithProfile(raw, writeProfile);
+  const current = inspectProfile(writeProfile);
   return (['createdDate', 'modifiedDate'] as const).some((key) => {
     if (current && stringifyReadableStorageValue(current.frontmatter[key]).trim()) return false;
     return matchedTimestampValues(matches, key).length > 1;
@@ -771,13 +786,13 @@ function hasConflictingMatchedTimestamps(
 }
 
 function hasConflictingMatchedTitles(
-  raw: Record<string, unknown>,
   profiles: TpsNativeRecordStorageProfile[],
   writeProfile: TpsNativeRecordStorageProfile,
+  inspectProfile: NativeRecordProfileInspector,
 ): boolean {
-  if (inspectWithProfile(raw, writeProfile)) return false;
+  if (inspectProfile(writeProfile)) return false;
   const titles = new Set(profiles
-    .map((profile) => inspectWithProfile(raw, profile))
+    .map((profile) => inspectProfile(profile))
     .filter((value): value is TpsNativeRecordInspection => value !== null)
     .map((match) => stringifyReadableStorageValue(match.frontmatter.title).trim())
     .filter(Boolean));
@@ -812,12 +827,13 @@ function inspectNativeRecordMatchSet(
   raw: Record<string, unknown>,
   profiles: TpsNativeRecordStorageProfile[],
   writeProfile: TpsNativeRecordStorageProfile,
+  inspectProfile: NativeRecordProfileInspector = createProfileInspector(raw),
 ): NativeRecordMatchSet | null {
   if (profiles.some(profile => profile.classification && !('tag' in profile.classification) && readValueCaseInsensitive(raw, profile.kindPropertyKey) === profile.classification.value && readValueCaseInsensitive(raw, 'kind') !== profile.classification.parentKind)) return null;
-  const applicableProfiles = selectApplicableReadableProfiles(raw, profiles, writeProfile);
-  if (hasInvalidReadableIdentityEvidence(raw, applicableProfiles, writeProfile)) return null;
+  const applicableProfiles = selectApplicableReadableProfiles(raw, profiles, writeProfile, inspectProfile);
+  if (hasInvalidReadableIdentityEvidence(raw, applicableProfiles, writeProfile, inspectProfile)) return null;
   const allMatches = applicableProfiles
-    .map((profile) => inspectWithProfile(raw, profile))
+    .map((profile) => inspectProfile(profile))
     .filter((value): value is TpsNativeRecordInspection => value !== null);
   const propertyMatches = allMatches.filter((match) => match.profile.identityMode === 'property');
   const propertyIdentity = propertyMatches[0];
@@ -1270,14 +1286,15 @@ export class NativeRecordService {
     if (!frontmatter || typeof frontmatter !== 'object' || Array.isArray(frontmatter)) return null;
     const raw = frontmatter as Record<string, unknown>;
     const profiles = this.getInspectionProfiles();
-    if (!inspectNativeRecordMatchSet(raw, profiles.evidence, profiles.write)) return null;
-    const inspection = inspectNativeRecordMatchSet(raw, profiles.readable, profiles.write)?.inspection;
+    const inspectProfile = createProfileInspector(raw);
+    if (!inspectNativeRecordMatchSet(raw, profiles.evidence, profiles.write, inspectProfile)) return null;
+    const inspection = inspectNativeRecordMatchSet(raw, profiles.readable, profiles.write, inspectProfile)?.inspection;
     if (!inspection) return null;
     const current = !isCanonicalCalendarRecordId(inspection.id)
       ? profiles.byKind.get(inspection.kind) || profiles.write : profiles.write;
     const result = this.readingMigrationSources
       ? inspection
-      : inspectNativeRecordMatchSet(raw, [current], current)?.inspection;
+      : inspectNativeRecordMatchSet(raw, [current], current, inspectProfile)?.inspection;
     // API callers may edit the returned profile; keep prepared profiles private.
     return result ? { ...result, profile: this.copyStorageProfile(result.profile) } : null;
   }

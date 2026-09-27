@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 3.6.7 — Reuse profile checks within one record inspection
+
+Native-record classification now evaluates each prepared storage-profile object at most once during one synchronous frontmatter inspection. The existing result map is owned by that inspection and shared by its identity-evidence, readable-profile and current-profile checks, including no-match results. It is discarded at return; a later call inspects current values again. Standalone source/candidate/persisted checks each get a separate map. No vault cache, watcher, background task, new setting or Health-specific classification is added.
+
+The classifier still applies all current and migration profile rules, identity conflicts, case-insensitive duplicate-key checks, timestamp/title conflicts, custom kind/title mappings, nested tags, property pairs and canonical calendar identity. Equivalent distinct profile objects remain independently checked; profile-key normalization and selection order are unchanged. Timestamp fallback stays on the existing copied envelope, and public returned profiles remain detached. Inputs, saved notes, settings, API version and minimum Obsidian 1.10.0 are unchanged.
+
+Four new operation-count regressions failed before correction. The complete native-record contract suite passes 115 checks, including a 1,000-note no-match burst, current and migration mappings, duplicate profile objects, conflicting evidence, timestamp fallback and edits to inputs/settings/returned values between calls. Default native classification falls from 21 to four profile evaluations and 18 to two envelope copies; with seven nested-tag mappings it falls from 83 to 15 evaluations and 17 to two copies. Ordinary notes fall from 14 to three evaluations, or 49 to ten with those mappings. These are synchronous test counts, not installed latency guarantees. The final versioned 1,293 declared and 193 supplemental checks passed with zero failures/skips, including TypeScript and a build with deployment suppressed. The separate normal build/test deployment and named reload passed. An installed foreground capture reduced one full Health rebuild from 397 to 149 ms; first visible content remained about 2.87 seconds, and another event ordering still caused two Health rebuilds. Nine in-memory installed classification checks retained identity, fresh inputs and detached results. Settings, original note state and profiling hooks were restored, and the fixture archived. No end-to-end latency or native-parity guarantee is made; complete evidence, remaining limitations and artifact hashes are in [3.6.7 release notes](release-notes/3.6.7.md).
+
 ## 3.6.6 — Keep startup discovery and new-note title writes with their owners
 
 Obsidian announces every existing vault file with a `create` event while loading. GCM now ignores those initial announcements in its Daily Note invalidation and generic creation listeners until the workspace is ready, following [Obsidian's load-time guidance](https://docs.obsidian.md/plugins/guides/load-time). Cold readiness now waits for the existing public metadata `resolved` event instead of scanning every file on each per-file callback; hot reload retains its initialized snapshot (or waits for the next public resolution when that runtime flag is unavailable). Startup metadata continues to own initial Daily Note discovery; genuine modifications during loading and creation after layout readiness retain their existing current-source checks. Explicit configured startup rule application and attachment indexing retain their separate owners. No new readiness cache, timer, watcher or retry is introduced.
@@ -72,7 +80,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.6.6](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.6) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.6.7](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.7) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
