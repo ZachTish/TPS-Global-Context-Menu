@@ -750,18 +750,7 @@ export class MenuBuilder {
                 async (newVal) => {
                   if (newVal !== null && newVal !== undefined) {
                     const finalVal = prop.type === 'number' ? Number(newVal) : newVal;
-                    const files = this.getPropertyFiles(propertyEntries);
                     await this.updatePropertyFiles(propertyEntries, { [prop.key]: finalVal });
-
-                    const normalizedKey = String(prop?.key || '').trim().toLowerCase();
-                    if (normalizedKey === 'title') {
-                      const nextTitle = String(finalVal ?? '').trim();
-                      await Promise.all(
-                        files.map((entryFile) =>
-                          this.plugin.fileNamingService.updateFilenameIfNeeded(entryFile, { bypassCreationGrace: true, titleOverride: nextTitle })
-                        )
-                      );
-                    }
                   }
                 }
               ).open();

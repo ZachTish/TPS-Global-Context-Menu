@@ -513,16 +513,6 @@ export class PropertyRowService {
         { [prop.key]: input.value }
       );
       await this.afterWholeNotePropertyEdit(this.filesFromEntries(entries), [prop.key]);
-
-      const normalizedKey = String(prop?.key || '').trim().toLowerCase();
-      if (normalizedKey === 'title') {
-        const nextTitle = String(input.value || '').trim();
-        await Promise.all(
-          files.map((file: any) =>
-            this.plugin.fileNamingService.updateFilenameIfNeeded(file, { bypassCreationGrace: true, titleOverride: nextTitle })
-          )
-        );
-      }
     });
     this.d.addSafeClickListener(input, (e) => e.stopPropagation());
     input.addEventListener("mousedown", (e) => e.stopPropagation());

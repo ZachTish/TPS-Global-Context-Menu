@@ -167,7 +167,6 @@ export class NoteTitleRenderService {
           return;
         }
         this.clearTitleCache(liveFile.path);
-        this.plugin.eventService.emitFilesUpdated([liveFile.path]);
         this.plugin.overlayRenderingService.scheduleFileRefresh(liveFile, 'title-rename', { force: true, delayMs: 0 });
         logger.flow('NoteTitle', 'rename:done', {
           sourcePath: file.path,

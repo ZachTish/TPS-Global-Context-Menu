@@ -7,11 +7,12 @@ import { build } from "esbuild";
 async function loadMenuBuilderModule() {
   const stubs = new Map([
     ["../main", "export default class TPSGlobalContextMenuPlugin {}"],
-    ["../modals/text-input-modal", "export class TextInputModal { open() {} }"],
+    ["../modals/text-input-modal", "export class TextInputModal { constructor(_app, _label, _value, submit) { globalThis.__tpsLatestTextInputSubmit = submit; } open() {} }"],
+    ["../modals/PropertyValueSuggestModal", "export const openPropertyValueSuggestModal = () => {};"],
     ["../modals/FileSuggestModal", "export class FileSuggestModal { constructor(_app, choose, options) { globalThis.__tpsLatestFileSuggestChoose = choose; globalThis.__tpsLatestFileSuggestOptions = options; } open() {} }"],
     ["../modals/MultiFileSelectModal", "export class MultiFileSelectModal { constructor(_app, _choose, options) { globalThis.__tpsLatestMultiFileOptions = options; } open() {} }"],
     ["../modals/file-properties-relink-modal", "export const promptFilePropertiesRelink = () => {};"],
-    ["../logger", "export const warn = () => {};"],
+    ["../logger", "export const warn = () => {}; export const flow = () => {};"],
     ["../resolve-profiles", "export const resolveCustomProperties = (properties) => properties.filter((property) => !property.hidden);"],
     ["../services/view-mode-service", "export class ViewModeService {}"],
     ["../services/link-target-service", "export const parseLinksFromFrontmatterValue = () => [];"],
@@ -20,12 +21,14 @@ async function loadMenuBuilderModule() {
     ["../utils/entity-property", "export const isEntityReferenceProperty = () => false;"],
     ["./property-value-choice-menu", "export const addPropertyValueChoiceMenuItems = () => {};"],
     ["../utils/property-option-source", "export const propertyUsesEntityOptions = () => false;"],
+    ["../utils/property-options", "export const getEffectivePropertyOptions = () => [];"],
     ["../services/archive-file-service", "export const isPathInArchiveFolder = () => false;"],
   ]);
   const result = await build({
     stdin: {
       contents: `
         export { MenuBuilder } from './src/menu/menu-builder.ts';
+        export { PropertyRowService } from './src/services/property-row-service.ts';
         export { TFile } from 'obsidian';
       `,
       resolveDir: fileURLToPath(new URL("..", import.meta.url)),
@@ -198,7 +201,7 @@ function createBuilderHarness(MenuBuilder, TFile) {
     frontmatter.set(path, {});
     return file;
   };
-  return { builder: new MenuBuilder(plugin, delegates), addFile };
+  return { builder: new MenuBuilder(plugin, delegates), addFile, plugin, frontmatter };
 }
 
 function buildTitles(builder, targets, options) {
@@ -356,4 +359,144 @@ test("all-Markdown multi-selection keeps batch properties and conversions but no
   assert.equal(titles.includes("Embed Attachments"), false);
   assert.equal(titles.includes("Time Tracking"), false);
   assert.equal(titles.includes("Archive (2 items)"), true);
+});
+
+// The shared frontmatter writer owns filename updates. Model that boundary here;
+// the real writer's mutation/rename contract is covered by its integration suite.
+function installPropertyWriter(harness, { key = "title", enableAutoRename = true, result = "changed" } = {}) {
+  const { plugin } = harness;
+  const writes = [];
+  const filenameUpdates = [];
+  const storedValues = new Map();
+  let insideWriter = false;
+  plugin.settings.enableAutoRename = enableAutoRename;
+  plugin.fileNamingService = {
+    updateFilenameIfNeeded: async (file, options) => {
+      filenameUpdates.push({ file, options, owner: insideWriter ? "writer" : "editor" });
+    },
+  };
+  plugin.bulkEditService.updateFrontmatter = async (files, updates) => {
+    writes.push({ files, updates });
+    if (result === "error") throw new Error("Property write rejected");
+    if (result === "rejected") return 0;
+    let changed = 0;
+    for (const file of files) {
+      if (storedValues.get(file) === updates[key]) continue;
+      storedValues.set(file, updates[key]);
+      changed += 1;
+      if (key.toLowerCase() === "title" && String(updates[key]).trim() && enableAutoRename) {
+        insideWriter = true;
+        try {
+          await plugin.fileNamingService.updateFilenameIfNeeded(file, {
+            bypassCreationGrace: true,
+            titleOverride: String(updates[key]).trim(),
+          });
+        } finally {
+          insideWriter = false;
+        }
+      }
+    }
+    return changed;
+  };
+  return { writes, filenameUpdates, storedValues };
+}
+
+function createTextRowInput(PropertyRowService, plugin, entries, property) {
+  const originalDocument = Object.getOwnPropertyDescriptor(globalThis, "document");
+  Object.defineProperty(globalThis, "document", {
+    configurable: true,
+    value: {
+      createElement: (tag) => ({
+        tag,
+        children: [],
+        listeners: new Map(),
+        addEventListener(type, listener) { this.listeners.set(type, listener); },
+        appendChild(child) { this.children.push(child); },
+      }),
+    },
+  });
+  try {
+    const service = new PropertyRowService(plugin.app, plugin, { addSafeClickListener: () => {} });
+    const row = service.createTextRow(entries, property);
+    const input = row.children.find((child) => child.tag === "input");
+    assert.ok(input?.listeners.get("change"), "the real row registers its change handler");
+    return input;
+  } finally {
+    if (originalDocument) Object.defineProperty(globalThis, "document", originalDocument);
+    else delete globalThis.document;
+  }
+}
+
+for (const scenario of [
+  { name: "enabled auto-rename", expected: 1 },
+  { name: "disabled auto-rename", enableAutoRename: false, expected: 0 },
+  { name: "unchanged value", next: "Before", expected: 0 },
+  { name: "rejected mutation", result: "rejected", expected: 0 },
+  { name: "failed mutation", result: "error", expected: 0 },
+  { name: "cleared title", next: "", expected: 0 },
+  { name: "case-variant title key", key: "Title", expected: 1 },
+  { name: "two selected notes", count: 2, expected: 2 },
+]) {
+  test(`the real custom title row leaves filename ownership to the writer: ${scenario.name}`, async () => {
+    const { MenuBuilder, PropertyRowService, TFile } = await loadMenuBuilderModule();
+    const harness = createBuilderHarness(MenuBuilder, TFile);
+    const key = scenario.key ?? "title";
+    const next = scenario.next ?? "After";
+    const writer = installPropertyWriter(harness, { ...scenario, key });
+    const files = Array.from({ length: scenario.count ?? 1 }, (_, index) => harness.addFile(`Notes/Before ${index}.md`));
+    files.forEach((file) => writer.storedValues.set(file, "Before"));
+    // Entry snapshots are deliberately separate from authoritative writer data.
+    const entries = files.map((file) => ({ file, frontmatter: { [key]: "Before" } }));
+    const input = createTextRowInput(PropertyRowService, harness.plugin, entries, { key, label: "Title", type: "text" });
+    input.value = next;
+    if (scenario.result === "error") {
+      await assert.rejects(input.listeners.get("change")(), /Property write rejected/u);
+    } else {
+      await input.listeners.get("change")();
+    }
+    assert.deepEqual(writer.writes, [{ files, updates: { [key]: next } }]);
+    assert.equal(writer.filenameUpdates.length, scenario.expected, "only successful, changed, enabled writer updates may rename");
+    assert.equal(writer.filenameUpdates.every((update) => update.owner === "writer"), true, "the editor must not independently request a filename update");
+    const persisted = scenario.result === "error" || scenario.result === "rejected" ? "Before" : next;
+    assert.deepEqual(files.map((file) => writer.storedValues.get(file)), files.map(() => persisted));
+  });
+}
+
+test("the real context menu excludes custom title keys and IDs before creating text editors", async () => {
+  const { MenuBuilder, TFile } = await loadMenuBuilderModule();
+  const harness = createBuilderHarness(MenuBuilder, TFile);
+  harness.plugin.settings.properties = [
+    { id: "custom-title", key: "title", label: "Canonical custom title", type: "text" },
+    { id: "custom-title-case", key: " Title ", label: "Case-variant custom title", type: "text" },
+    { id: "TITLE", key: "heading", label: "Title-ID custom text", type: "text" },
+    { id: "summary", key: "summary", label: "Summary", type: "text" },
+  ];
+  const file = harness.addFile("Notes/Before.md");
+  const titles = buildTitles(harness.builder, [file], bridgeOptions([file]));
+  assert.equal(titles.some((title) => /custom title|custom text/u.test(title)), false);
+  assert.equal(titles.includes("Summary (create field)"), true);
+});
+
+test("the real context-menu text editor delegates its exact value once without requesting a filename update", async () => {
+  const { MenuBuilder, TFile } = await loadMenuBuilderModule();
+  const harness = createBuilderHarness(MenuBuilder, TFile);
+  harness.plugin.settings.properties = [{ id: "summary", key: "summary", label: "Summary", type: "text" }];
+  harness.plugin.fieldInitializationService.isFieldDefinedForEntries = () => true;
+  const file = harness.addFile("Notes/Before.md");
+  harness.frontmatter.set(file.path, { summary: "Before" });
+  const writer = installPropertyWriter(harness, { key: "summary" });
+  writer.storedValues.set(file, "Before");
+  const menu = buildMenu(harness.builder, [file], bridgeOptions([file]));
+  const item = menu.items.find((entry) => entry.title === "Summary: Before");
+  assert.ok(item?.click);
+  try {
+    await item.click();
+    assert.equal(typeof globalThis.__tpsLatestTextInputSubmit, "function");
+    await globalThis.__tpsLatestTextInputSubmit("After");
+    assert.deepEqual(writer.writes, [{ files: [file], updates: { summary: "After" } }]);
+    assert.equal(writer.filenameUpdates.length, 0);
+    assert.equal(writer.storedValues.get(file), "After");
+  } finally {
+    delete globalThis.__tpsLatestTextInputSubmit;
+  }
 });

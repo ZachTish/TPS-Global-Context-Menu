@@ -544,8 +544,9 @@ function makeRenameHarness({ changed = true, autoRename = true, failure = false 
         if (failure) throw new Error('Write failed');
         if (!changed) return 0;
         state.title = updates.title;
-        // The shared frontmatter writer owns title-driven filename updates.
+        // The shared writer owns the filename update and its completion event.
         if (autoRename) await plugin.fileNamingService.updateFilenameIfNeeded(files[0], { titleOverride: updates.title });
+        plugin.eventService.emitFilesUpdated([files[0].path]);
         return 1;
       },
     },

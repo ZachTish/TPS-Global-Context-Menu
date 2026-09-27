@@ -975,7 +975,7 @@ export class BulkEditService {
         options: { writeGuard?: (file: TFile) => boolean } = {},
     ): Promise<number> {
         let count = 0;
-        const updatedFiles: TFile[] = [];
+        const updatedPropertyTargets: TFile[] = [];
         let skippedUnsupported = 0;
         let skippedUnsafe = 0;
         let failures = 0;
@@ -1002,7 +1002,7 @@ export class BulkEditService {
                     callback(fm, file);
                 });
                 if (!changed) return;
-                updatedFiles.push(file);
+                if (extension !== 'md') updatedPropertyTargets.push(file);
                 count++;
             } catch (e) {
                 failures++;
@@ -1010,14 +1010,14 @@ export class BulkEditService {
             }
         }, 40);
 
-        setTimeout(() => {
-            for (const file of updatedFiles) {
-                this.plugin.persistentMenuManager?.refreshMenusForFile(file);
-            }
-        }, 350);
-
-        if (updatedFiles.length > 0) {
-            this.notifyFilesChanged(updatedFiles);
+        // Mutation services publish their own events. Markdown overlays consume
+        // those events; attachment menus still require this direct refresh.
+        if (updatedPropertyTargets.length > 0) {
+            setTimeout(() => {
+                for (const file of updatedPropertyTargets) {
+                    this.plugin.persistentMenuManager?.refreshMenusForFile(file);
+                }
+            }, 350);
         }
 
         logger.flow('BulkEdit', 'apply:done', {

@@ -131,14 +131,6 @@ export class FrontmatterMutationService {
           return;
         }
         await this.writeContent(file, nextContent);
-        const sourcePluginId = String(cause.sourcePluginId || this.plugin.manifest.id);
-        this.plugin.eventService.emitFilesUpdated([file.path], { sourcePluginId });
-        if (cause.kind !== 'automation') {
-          this.plugin.eventService.emitExplicitAction([file.path], {
-            sourcePluginId,
-            source: String(cause.surface || 'frontmatter'),
-          });
-        }
         indexedFrontmatter = { ...sorted };
         changed = true;
       }
@@ -150,16 +142,31 @@ export class FrontmatterMutationService {
       durationMs: Math.round(performance.now() - started),
       stack: changed ? compactStack(new Error().stack) : undefined,
     });
-    if (changed && indexedFrontmatter) {
-      this.plugin.entityIndexService?.upsertFile(file, indexedFrontmatter);
-    }
-    if (changed && nextTitle && this.plugin.settings.enableAutoRename) {
-      const liveFile = this.plugin.app.vault.getFileByPath(file.path);
-      if (liveFile instanceof TFile) {
-        await this.plugin.fileNamingService.updateFilenameIfNeeded(liveFile, {
-          bypassCreationGrace: true,
-          titleOverride: nextTitle,
-        });
+    try {
+      if (changed && indexedFrontmatter) {
+        this.plugin.entityIndexService?.upsertFile(file, indexedFrontmatter);
+      }
+      if (changed && nextTitle && this.plugin.settings.enableAutoRename) {
+        const liveFile = this.plugin.app.vault.getFileByPath(file.path);
+        if (liveFile instanceof TFile) {
+          await this.plugin.fileNamingService.updateFilenameIfNeeded(liveFile, {
+            bypassCreationGrace: true,
+            titleOverride: nextTitle,
+          });
+        }
+      }
+    } finally {
+      // This writer owns the completed mutation event, including a committed
+      // title write whose subsequent filename update failed.
+      if (changed) {
+        const sourcePluginId = String(cause.sourcePluginId || this.plugin.manifest.id);
+        this.plugin.eventService.emitFilesUpdated([file.path], { sourcePluginId });
+        if (cause.kind !== 'automation') {
+          this.plugin.eventService.emitExplicitAction([file.path], {
+            sourcePluginId,
+            source: String(cause.surface || 'frontmatter'),
+          });
+        }
       }
     }
     return changed;

@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 3.6.8 — One completion notification for property and title edits
+
+The shared frontmatter writer now announces a successful mutation after its existing title-driven filename operation, using the file's current path. Bulk edits and the Edit Title dialog no longer announce the same mutation again. A committed property write still announces its result if the subsequent filename step fails; rejected writes and unchanged values stay silent. Source attribution and explicit user-action events are preserved, and automation remains separate from explicit actions.
+
+Markdown property edits use their existing event-driven refresh. Bulk editing no longer adds a separate delayed Markdown menu refresh; attachment property targets retain their direct refresh and their existing source/companion notification owner. Edit Title retains its immediate local refresh. Custom text property rows now rely on the shared writer for filename changes, respecting Auto-rename being off and avoiding an independent rename after a rejected or unchanged edit. An unreachable duplicate title branch was also removed from the custom-property menu, which already excludes title fields.
+
+No settings, data schema, API version, watcher, cache, retry or repair pass is added. Existing metadata-triggered naming checks, configured rules, native-record protections and the separate Markdown rename-listener issue are outside this patch. Minimum Obsidian remains 1.10.0. Focused integrated regressions reproduced seven notification/ordering failures before correction and verify the actual title prompt, bulk service, frontmatter writer and filename service together; custom-property route regressions reproduced seven duplicate or unrequested filename calls. The final versioned declared suite passed 1,312 checks and the supplemental suite passed 193, with zero failures/skips, including TypeScript and a build with deployment suppressed. The separate final normal build deployed 3.6.8 to the test vault, followed by a named GCM reload with its updated manifest. An actual foreground Edit Title save produced one completion notification instead of three, one source modification and one filename rename, preserving the title and body. Menu refreshes fell from three to two, with the extra 350 ms refresh removed. Save time remained about 100 ms (99 ms before, 103 ms after), so this proves less repeated work rather than a latency improvement. Actual Navigator toolbar creation opened the configured preview; immediate title and body edits survived with one creation, one rename and two modifications. Settings stayed byte-identical, listeners and the prior note/search state were restored, and fixtures were archived. Full evidence, limits and artifact hashes are in [3.6.8 release notes](release-notes/3.6.8.md). Production and physical iPhone acceptance remain separate.
+
 ## 3.6.7 — Reuse profile checks within one record inspection
 
 Native-record classification now evaluates each prepared storage-profile object at most once during one synchronous frontmatter inspection. The existing result map is owned by that inspection and shared by its identity-evidence, readable-profile and current-profile checks, including no-match results. It is discarded at return; a later call inspects current values again. Standalone source/candidate/persisted checks each get a separate map. No vault cache, watcher, background task, new setting or Health-specific classification is added.
@@ -80,7 +88,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.6.7](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.7) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.6.8](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.8) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
