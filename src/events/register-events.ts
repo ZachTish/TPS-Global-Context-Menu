@@ -548,21 +548,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
         }
     }, 1500, false);
 
-    const scheduleActiveFilenameReconcile = (file: TFile, delayMs = 900): void => {
-        if (!(file instanceof TFile) || file.extension !== 'md') return;
-        const path = file.path;
-        window.setTimeout(() => {
-            const active = plugin.app.workspace.getActiveFile();
-            if (!(active instanceof TFile) || active.path !== path) return;
-            const liveFile = plugin.app.vault.getFileByPath(path);
-            if (!(liveFile instanceof TFile)) return;
-            if (!plugin.fileNamingService.shouldProcess(liveFile, { bypassCreationGrace: true, allowCalendarEventFilename: true })) return;
-            if (plugin.settings.enableAutoRename) {
-                void plugin.fileNamingService.updateFilenameIfNeeded(liveFile, { bypassCreationGrace: true });
-            }
-        }, delayMs);
-    };
-
     const debouncedTimestampSync = debounce((file: TFile, reason: 'modify' | 'create' | 'rename' | 'open') => {
         if (!plugin.canRunBackgroundAutomation()) return;
         if (!(file instanceof TFile) || file.extension !== 'md') return;
@@ -630,7 +615,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 statusBeforeModifyByPath.delete(file.path);
                 lastKnownStatusByPath.set(file.path, currentStatus);
                 scheduleExternalChecklistCompletionGuard(file, previousStatus, currentStatus);
-                scheduleActiveFilenameReconcile(file, 1200);
                 if (plugin.canRunBackgroundAutomation()) {
                     scheduleCompletedDateSync(file);
                 }
@@ -666,7 +650,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 debouncedTimestampSync(file, 'modify');
             }
             debouncedFilenameSync(file);
-            scheduleActiveFilenameReconcile(file);
             scheduleResponsiveMenuRefresh(file, { rebuildInlineSubitems: true, delayMs: 400 });
         }),
     );
@@ -717,16 +700,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             reason: 'create',
             force: true,
         });
-        window.setTimeout(() => {
-            if (!plugin.canRunBackgroundAutomation()) return;
-            const liveFile = plugin.app.vault.getFileByPath(file.path);
-            if (!(liveFile instanceof TFile) || liveFile !== file) return;
-            void plugin.notebookNavigatorRuleService.applyRulesToFile(liveFile, {
-                reason: 'create',
-                force: true,
-                bypassCreationGrace: true,
-            });
-        }, 3800);
         if (file.extension !== 'md') return;
         window.setTimeout(() => {
             if (!plugin.canRunBackgroundAutomation()) return;

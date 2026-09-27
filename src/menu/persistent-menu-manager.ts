@@ -5718,6 +5718,11 @@ export class PersistentMenuManager {
   }
 
   private async collectTasksInFile(file: TFile): Promise<NoteTaskPopoverItem[]> {
+    const cache = this.plugin.app.metadataCache.getFileCache(file);
+    // Obsidian already indexes checkbox list items. Counting a calendar button
+    // must not read every ordinary note merely to discover it has no tasks.
+    // Missing metadata is unknown, so retain the content read in that case.
+    if (cache && !cache.listItems?.some((item) => typeof item.task === 'string')) return [];
     const content = await this.plugin.app.vault.cachedRead(file);
     return this.extractTasksFromContent(content, file);
   }

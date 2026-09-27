@@ -288,15 +288,6 @@ export class NotebookNavigatorRuleService {
     const settings = this.getSettings();
     const ruleEngine = this.getRuleEngine();
     if (!settings || !ruleEngine) return false;
-    if (!(await this.passesRuleExclusionPreflight(file, settings.frontmatterWriteExclusions))) return false;
-    const isAutomaticMutation = this.isAutomaticMutationReason(options.reason);
-    if (
-      isAutomaticMutation
-      && !(await this.passesRuleExclusionPreflight(
-        file,
-        this.plugin.settings.frontmatterAutoWriteExclusions,
-      ))
-    ) return false;
 
     const canMutateGeneratedTitle = options.reason === 'create';
     const canMutateHideTags = options.reason !== 'file-open'
@@ -307,9 +298,10 @@ export class NotebookNavigatorRuleService {
     if (canMutateGeneratedTitle) ownedKeys.push('title');
     if (canMutateHideTags) ownedKeys.push('tags');
 
+    const isAutomaticMutation = this.isAutomaticMutationReason(options.reason);
     const started = performance.now();
     const body = await this.readBody(file);
-    const changed = await this.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(file, ownedKeys, (frontmatter) => {
+    const applyDesiredValues = (frontmatter: Record<string, unknown>): void => {
       if (!canAutomaticallyMutateTemplateFrontmatter(
         frontmatter,
         settings.frontmatterWriteExclusions,
@@ -348,7 +340,27 @@ export class NotebookNavigatorRuleService {
       if (canMutateHideTags && !hasNativeRecordIdentityEvidence) {
         this.applyHideTagMutations(ruleEngine, settings, context, frontmatter);
       }
-    }, {
+    };
+    // Navigation often reapplies the same appearance. Reject a no-op before
+    // authoritative protection reads or entering the serialized writer.
+    const cached = this.getFrontmatterForFile(file);
+    if (cached) {
+      const preview = { ...cached };
+      applyDesiredValues(preview);
+      if (Object.keys(preview).length === Object.keys(cached).length
+        && Object.entries(preview).every(([key, value]) => Object.prototype.hasOwnProperty.call(cached, key)
+          && JSON.stringify(value) === JSON.stringify(cached[key]))) return false;
+    }
+    if (!(await this.passesRuleExclusionPreflight(file, settings.frontmatterWriteExclusions))) return false;
+    if (
+      isAutomaticMutation
+      && !(await this.passesRuleExclusionPreflight(
+        file,
+        this.plugin.settings.frontmatterAutoWriteExclusions,
+      ))
+    ) return false;
+
+    const changed = await this.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(file, ownedKeys, applyDesiredValues, {
       kind: 'automation',
       sourcePluginId: this.plugin.manifest.id,
       surface: 'notebook-navigator-rules',

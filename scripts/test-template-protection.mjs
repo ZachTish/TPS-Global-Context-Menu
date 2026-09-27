@@ -336,7 +336,7 @@ test('automatic background writers recheck explicit exclusions at their mutation
 
   assert.match(
     navigatorRules,
-    /isAutomaticMutation[\s\S]{0,400}passesRuleExclusionPreflight\([\s\S]{0,180}frontmatterAutoWriteExclusions[\s\S]{0,1200}canAutomaticallyMutateTemplateFrontmatter/u,
+    /const applyDesiredValues[\s\S]{0,400}canAutomaticallyMutateTemplateFrontmatter[\s\S]*passesRuleExclusionPreflight\([\s\S]{0,300}frontmatterAutoWriteExclusions[\s\S]{0,300}processOwnedKeysPreservingSource\(file, ownedKeys, applyDesiredValues/u,
   );
   assert.match(navigatorRules, /reason === 'gcm-startup-auto'/u);
   assert.match(
@@ -446,6 +446,8 @@ test('startup recurrence healing does not treat template identity as a global ig
     [protectedFile.path, '---\ntags: [template]\nrecurrenceRule: FREQ=DAILY\nstatus: complete\n---\n'],
     [unsafeFile.path, '---\ntags: [template\nrecurrenceRule: FREQ=DAILY\nstatus: complete\n'],
   ]);
+  const ordinary = Array.from({ length: 1000 }, (_, i) => makeFile(TFile, `Inbox/ordinary-${i}.md`));
+  let rawReads = 0;
   let createNextCalls = 0;
   let frontmatterWrites = 0;
   let recurrenceStateWrites = 0;
@@ -459,14 +461,14 @@ test('startup recurrence healing does not treat template identity as a global ig
     },
     app: {
       vault: {
-        getMarkdownFiles: () => [protectedFile, unsafeFile],
-        read: async (file) => sources.get(file.path),
+        getMarkdownFiles: () => [...ordinary, protectedFile, unsafeFile],
+        read: async (file) => { rawReads++; assert.ok(sources.has(file.path), 'ordinary notes must not be read'); return sources.get(file.path); },
         adapter: {
           write: async () => { recurrenceStateWrites += 1; },
         },
       },
       metadataCache: {
-        getFileCache: () => ({
+        getFileCache: (file) => ordinary.includes(file) ? { frontmatter: { title: 'Ordinary' } } : ({
           frontmatter: {
             recurrenceRule: 'FREQ=DAILY',
             status: 'complete',
@@ -489,6 +491,7 @@ test('startup recurrence healing does not treat template identity as a global ig
 
   await service.checkMissingRecurrences();
 
+  assert.equal(rawReads, 2);
   assert.equal(createNextCalls, 1, 'safe template identity is not an implicit exclusion, while ambiguous YAML remains fail-closed');
   assert.equal(frontmatterWrites, 0);
   assert.equal(recurrenceStateWrites, 0);

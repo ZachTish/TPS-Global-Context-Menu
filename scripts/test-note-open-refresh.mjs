@@ -227,3 +227,18 @@ test('opening an already aligned daily note skips scheduled-field mutation work'
   assert.equal(fm.scheduled, '2026-09-27 00:00:00');
   assert.deepEqual(counts, { protection: 1, safety: 1, process: 1 });
 });
+
+
+test('retired parent maintenance emits no false change or render event', async () => {
+  const output = ts.transpileModule(`export class Maintenance { ${method('../src/services/bulk-edit-service.ts', 'reconcileParentChildLinksForParent')} }`,
+    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
+  const module = {};
+  new Function('exports', 'setTimeout', output)(module, () => assert.fail('unchanged maintenance must not queue a render'));
+  const fail = () => assert.fail('unchanged maintenance must not notify consumers');
+  const service = Object.assign(new module.Maintenance(), {
+    plugin: { subitemRelationshipSyncService: { reconcileMarkdownParent: async () => ({addedParents: 0, removedParents: 0, touchedChildren: []}) },
+      viewModeManager: {handlePotentialFrontmatterChange: fail} },
+    parentLinkHandler: {normalizeParentKey: fail}, notifyFilesChanged: fail,
+  });
+  for (let i = 0; i < 100; i++) assert.equal(await service.reconcileParentChildLinksForParent({path: `Parent${i}.md`}), 0);
+});

@@ -2353,6 +2353,9 @@ export class BulkEditService {
 
                 if (!fm) continue;
 
+                const recurrenceInfo = this.resolveRecurrenceInfo(file, fm);
+                if (!recurrenceInfo.rule) continue;
+
                 // Classify template identity from current bytes for the narrow
                 // recurrence-blueprint bootstrap path. Identity alone does not
                 // grant automatic-write protection; those mutation boundaries
@@ -2368,8 +2371,6 @@ export class BulkEditService {
                     });
                     continue;
                 }
-                const recurrenceInfo = this.resolveRecurrenceInfo(file, fm);
-                if (!recurrenceInfo.rule) continue;
 
                 const isRecurrenceTemplateCandidate = this.isFileInRecurrenceTemplateFolder(file)
                     && (this.isRecurrenceTemplateFrontmatter(fm) || !fm.scheduled);
@@ -2683,6 +2684,7 @@ export class BulkEditService {
 
     async reconcileParentChildLinksForParent(parentFile: TFile): Promise<number> {
         const result = await this.plugin.subitemRelationshipSyncService.reconcileMarkdownParent(parentFile);
+        if (result.addedParents === 0 && result.removedParents === 0 && result.touchedChildren.length === 0) return 0;
         const touched = [parentFile, ...result.touchedChildren];
         if (touched.length > 0) {
             const parentKey = this.parentLinkHandler.normalizeParentKey();

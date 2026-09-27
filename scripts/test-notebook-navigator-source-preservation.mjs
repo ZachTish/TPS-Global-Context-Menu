@@ -1155,3 +1155,37 @@ test('identical duplicate appearance keys remain untouched instead of being auto
   assert.equal(fixture.getContent(),source);
   assert.equal(fixture.updates.length,0);
 });
+
+test('repeated navigation with matching rules performs no raw reads or mutation attempts', async () => {
+  const f = makeFixture();
+  const service = new NotebookNavigatorRuleService(f.plugin);
+  service.isNavigationTextInputActive = () => false;
+  f.plugin.app.metadataCache.getFileCache = () => ({ frontmatter: parseNativeRecordDocument(f.getContent()).frontmatter, tags: [] });
+  assert.equal(await service.applyRulesToFile(f.file, { reason: 'file-open', force: true }), true);
+  const before = f.getContent();
+  const counts = { read: 0, process: 0 };
+  const read = f.plugin.app.vault.read, process = f.plugin.app.vault.process;
+  f.plugin.app.vault.read = async (...args) => { counts.read++; return read(...args); };
+  f.plugin.app.vault.process = async (...args) => { counts.process++; return process(...args); };
+  f.plugin.settings.frontmatterAutoWriteExclusions = '#template';
+  for (let i = 0; i < 10; i++) assert.equal(await service.applyRulesToFile(f.file, { reason: 'file-open', force: true }), false);
+  assert.deepEqual(counts, { read: 0, process: 0 });
+  assert.equal(f.getContent(), before);
+});
+
+test('an actual rule change rechecks current exclusions after cached preflight', async () => {
+  const f = makeFixture();
+  const service = new NotebookNavigatorRuleService(f.plugin);
+  service.isNavigationTextInputActive = () => false;
+  f.plugin.app.metadataCache.getFileCache = () => ({ frontmatter: parseNativeRecordDocument(f.getContent()).frontmatter, tags: [] });
+  f.plugin.settings.frontmatterAutoWriteExclusions = '#template';
+  const process = f.plugin.app.vault.process;
+  let protectedContent;
+  f.plugin.app.vault.process = async (...args) => {
+    protectedContent = f.getContent().replace('  - work\r\n', '  - work\r\n  - template\r\n');
+    f.setContent(protectedContent);
+    return process(...args);
+  };
+  assert.equal(await service.applyRulesToFile(f.file, { reason: 'file-open', force: true }), false);
+  assert.equal(f.getContent(), protectedContent);
+});

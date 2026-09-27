@@ -1148,8 +1148,9 @@ test('archive action uses Controller two-stage source folder and moves files imm
 test('create-time title sync does not inject titles into blank new notes', () => {
   assert.match(registerEventsSource, /onlyIfMissing: true,/);
   assert.match(registerEventsSource, /onlyIfHasFrontmatter: true,/);
-  assert.match(registerEventsSource, /applyRulesToFile\(liveFile, \{\s*reason: 'create',\s*force: true,\s*bypassCreationGrace: true,/);
-  assert.match(registerEventsSource, /\}, 3800\);/);
+  assert.match(registerEventsSource, /scheduleApply\(file, \{\s*reason: 'create',\s*force: true,/);
+  assert.doesNotMatch(registerEventsSource, /\}, 3800\);/);
+  assert.doesNotMatch(registerEventsSource, /scheduleActiveFilenameReconcile/);
   assert.match(notebookRuleServiceSource, /removeGeneratedBlankNoteTitle\(file, frontmatter, body, options\)/);
   assert.match(notebookRuleServiceSource, /if \(options\.reason !== 'create'\) return;/);
   assert.match(notebookRuleServiceSource, /deleteValueCaseInsensitive\(frontmatter, 'title'\);/);

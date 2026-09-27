@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 3.6.2 — Stop redundant lifecycle work
+
+Calendar button counts use Obsidian’s task metadata to skip reading bodies without checkboxes; missing metadata and real tasks still use the existing parser. Startup recurrence checking rejects notes without a recurrence rule before reading their source. Notebook Navigator appearance rules project their desired values from cached metadata before entering the authoritative writer; unchanged results do no raw protection reads or mutation attempts. Actual changes still recheck exclusions at the atomic writer and preserve current content. Creation uses one existing rule schedule instead of a second forced replay 3.8 seconds later. Filename synchronization has one existing debounced event path, and retired parent maintenance emits no false file-change/render notifications.
+
+No new settings, caches, watchers, repair passes or API versions. Explicit rules, template settlement, title/filename behavior, recurrence generation and actual link editing retain their owners. Regression coverage checks large unrelated note sets, repeated unchanged rules, exclusions changing at the write boundary, and empty parent maintenance. See [3.6.2 release notes](release-notes/3.6.2.md) for final validation and test-vault QA. Minimum Obsidian remains 1.10.0; production installation remains a BRAT update.
+
+Validation: 1,260 declared checks and 171 supplemental checks passed, including TypeScript. The separate final build deployed 3.6.2 to the test vault; a named disable/enable reload verified the installed version. An installed startup-candidate probe reduced raw reads for 128 nonrecurring notes from 128 to zero. With Navigator 7.0.2, Health 3.7.2 and Calendar 0.16.1 enabled, four test note switches made 448 identity inspections instead of 72,849 and returned in 20–29 ms. Real Calendar creation used the shared GCM registry, returned in 59 ms and opened the configured preview; title and an immediate body edit survived 4.5 seconds of settling. Runtime settings were preserved. These small desktop samples are not production/iPhone guarantees: the earlier background-window capture included a 904 ms timer delay (not a demonstrated CPU stall), and test-vault background automation remained disabled. A repeat with the test window visibly focused opened notes in 11–42 ms, with no long tasks and maximum timer drift of 18 ms. Full configured production profiling informed the fix, but production artifacts were not replaced.
+
 ## 3.6.1 — Keep unchanged notes out of the maintenance queue
 
 Opening/leaving a note and layout readiness no longer schedule checklist-property or inline-checkbox reconciliation. Actual vault modifications/editor changes continue to own checkbox reconciliation; metadata/content changes and explicit synchronization continue to own checklist properties. Obsolete open-time relationship repair calls were removed. Existing explicit filename/title, presentation and Daily Note population settings retain their behavior; this release does not promise zero work from those configured open actions.
@@ -30,7 +38,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.6.1](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.1) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.6.2](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.2) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
