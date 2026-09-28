@@ -52,6 +52,7 @@ async function loadRegisterEvents() {
                     constructor() {}
                   }
                   globalThis.__GcmEventBatchingTestTFile = TFile;
+                  globalThis.__GcmEventBatchingTestTFolder = TFolder;
                   export class MarkdownView {}
                   export class WorkspaceLeaf {}
                   export const Platform = { isMobile: false };
@@ -148,6 +149,7 @@ async function loadRegisterEvents() {
 
 const { registerGcmEvents } = await loadRegisterEvents();
 const TFile = globalThis.__GcmEventBatchingTestTFile;
+const TFolder = globalThis.__GcmEventBatchingTestTFolder;
 
 class FakeHtmlElement {}
 globalThis.HTMLElement = FakeHtmlElement;
@@ -723,4 +725,147 @@ test('100 folder-only moves do not request redundant title renders or source mut
   await Promise.resolve();
   assert.deepEqual([renders, reads, h.mutations.length], [0, 0, 0]);
   h.cleanup();
+});
+
+// Exercise the actual registered callbacks. Spies measure dispatch to the legacy
+// service boundary; its read/write/conflict behavior is covered by the separate
+// real-service suite and installed first-use operation-count QA.
+function observeLegacyLifecycle(h) {
+  const calls = [];
+  for (const name of [
+    'captureSourceRenameCompanion', 'handlePendingMarkdownTargetRename',
+    'handleCompanionRename', 'handleSourceRename', 'handleSourceFolderRename',
+    'handleSourceFolderDelete', 'handleSourceCreate', 'handleSourceDelete',
+    'handleCompanionDelete', 'handleCompanionMetadataChanged',
+    'invalidatePendingMarkdownTarget', 'invalidateLegacyCanvas',
+  ]) {
+    const original = h.plugin.filePropertiesService[name];
+    h.plugin.filePropertiesService[name] = (...args) => {
+      calls.push(name);
+      return original(...args);
+    };
+  }
+  return calls;
+}
+
+test('native-record folder and attachment event bursts never dispatch legacy indexing or bookkeeping', () => {
+  const h = createHarness();
+  h.plugin.settings.dataArchitectureMode = 'native-records';
+  h.plugin.canRunBackgroundAutomation = () => false;
+  const calls = observeLegacyLifecycle(h);
+  const cleaned = [];
+  h.plugin.bulkEditService.cleanupLinksForDeletedFile = async (path) => cleaned.push(path);
+  try {
+    for (let i = 0; i < 20; i++) {
+      const folder = new TFolder(`Inbox/New ${i}`);
+      h.emit('vault', 'rename', folder, `Inbox/Old ${i}`);
+      h.emit('vault', 'delete', folder);
+      const asset = h.addFile(`Inbox/image ${i}.png`);
+      h.renameFile(asset, asset.path, `Inbox/renamed ${i}.png`);
+      h.deleteFile(asset);
+      const canvas = h.addFile(`Inbox/Board ${i}.canvas`);
+      h.emit('vault', 'modify', canvas);
+      h.metadataChanged(canvas);
+    }
+    assert.deepEqual(calls, []);
+    assert.equal(cleaned.length, 20, 'ordinary link cleanup remains owned by the delete event');
+  } finally { h.cleanup(); }
+});
+
+test('inactive companions stay excluded without reading, repairing or notifying their legacy service', () => {
+  const h = createHarness();
+  h.plugin.settings.dataArchitectureMode = 'native-records';
+  const calls = observeLegacyLifecycle(h);
+  const companion = h.addFile('System/File properties/example.md');
+  h.plugin.filePropertiesService.isCompanionFile = (file) => file === companion;
+  h.plugin.filePropertiesService.isCompanionRename = (file) => file === companion;
+  let ordinaryWork = 0;
+  let deleteNotifications = 0;
+  h.plugin.bulkEditService.cleanupLinksForDeletedFile = async () => ordinaryWork++;
+  h.plugin.noteTitleRenderService.handleMetadataChanged = () => ordinaryWork++;
+  h.plugin.fileNamingService.syncTitleFromFilename = async () => ordinaryWork++;
+  h.plugin.eventService.emitDeleteComplete = () => deleteNotifications++;
+  try {
+    h.metadataChanged(companion);
+    h.emit('vault', 'modify', companion);
+    h.renameFile(companion, companion.path, 'System/File properties/example.txt');
+    h.deleteFile(companion);
+    assert.deepEqual(calls, []);
+    assert.equal(ordinaryWork, 0, 'retired records must not fall through into ordinary note automation');
+    assert.equal(deleteNotifications, 1);
+  } finally { h.cleanup(); }
+});
+
+test('native-record Markdown renames retain title refresh and configured sync without a legacy queue', async () => {
+  const h = createHarness();
+  h.plugin.settings.dataArchitectureMode = 'native-records';
+  h.plugin.settings.autoSyncTitleFromFilename = true;
+  const calls = observeLegacyLifecycle(h);
+  const file = h.addFile('Inbox/Before.md', { title: 'Authored title' });
+  const titles = [];
+  const cleaned = [];
+  const invalidated = [];
+  h.plugin.noteTitleRenderService.handleMetadataChanged = (f) => titles.push(['render', f.path]);
+  h.plugin.fileNamingService.syncTitleFromFilename = async (f) => titles.push(['sync', f.path]);
+  h.plugin.bulkEditService.cleanupLinksForDeletedFile = async (path) => cleaned.push(path);
+  h.plugin.persistentMenuManager.invalidateLinkedContextSourcePaths = (paths) => invalidated.push(paths);
+  try {
+    h.renameFile(file, file.path, 'Inbox/After.md');
+    await Promise.resolve();
+    assert.deepEqual(titles, [['sync', 'Inbox/After.md'], ['render', 'Inbox/After.md']]);
+    h.deleteFile(file);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(cleaned, ['Inbox/After.md']);
+    assert.deepEqual(invalidated, [['Inbox/After.md']]);
+  } finally { h.cleanup(); }
+});
+
+test('legacy mode retains folder, source, companion and pending-target event routing', async () => {
+  const h = createHarness();
+  h.plugin.settings.dataArchitectureMode = 'legacy';
+  h.plugin.canRunBackgroundAutomation = () => false;
+  const calls = observeLegacyLifecycle(h);
+  try {
+    const folder = new TFolder('Inbox/New');
+    h.emit('vault', 'rename', folder, 'Inbox/Old');
+    h.emit('vault', 'delete', folder);
+    const asset = h.addFile('Inbox/image.png');
+    h.renameFile(asset, asset.path, 'Inbox/renamed.png');
+    h.deleteFile(asset);
+    const md = h.addFile('Inbox/Target.md');
+    h.renameFile(md, md.path, 'Inbox/Moved.md');
+    const canvas = h.addFile('Inbox/Board.canvas');
+    h.emit('vault', 'modify', canvas);
+    h.metadataChanged(canvas);
+    const companion = h.addFile('System/File properties/example.md');
+    h.plugin.filePropertiesService.isCompanionFile = (file) => file === companion;
+    h.plugin.filePropertiesService.isCompanionRename = (file) => file === companion;
+    h.metadataChanged(companion);
+    h.renameFile(companion, companion.path, 'System/File properties/moved.md');
+    h.deleteFile(companion);
+    await Promise.resolve();
+    assert.deepEqual(calls, [
+      'handleSourceFolderRename', 'handleSourceFolderDelete',
+      'captureSourceRenameCompanion', 'handleSourceRename',
+      'invalidatePendingMarkdownTarget', 'handleSourceDelete',
+      'handlePendingMarkdownTargetRename', 'invalidateLegacyCanvas', 'invalidateLegacyCanvas',
+      'handleCompanionMetadataChanged', 'handleCompanionRename',
+      'invalidatePendingMarkdownTarget', 'handleCompanionDelete',
+    ]);
+  } finally { h.cleanup(); }
+});
+
+test('lifecycle dispatch reads the current architecture setting at each event', () => {
+  const h = createHarness();
+  h.plugin.settings.dataArchitectureMode = 'native-records';
+  const calls = observeLegacyLifecycle(h);
+  const folder = new TFolder('Inbox/New');
+  try {
+    h.emit('vault', 'rename', folder, 'Inbox/Old');
+    h.plugin.settings.dataArchitectureMode = 'legacy';
+    h.emit('vault', 'rename', folder, 'Inbox/Old');
+    h.plugin.settings.dataArchitectureMode = 'native-records';
+    h.emit('vault', 'delete', folder);
+    assert.deepEqual(calls, ['handleSourceFolderRename']);
+  } finally { h.cleanup(); }
 });

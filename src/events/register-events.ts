@@ -568,8 +568,10 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     plugin.registerEvent(
         plugin.app.metadataCache.on('changed', (file) => {
             if (plugin.propertyMigrationService?.active) return;
+            const useLegacyFileProperties = plugin.settings.dataArchitectureMode !== 'native-records';
             logger.perf('metadataCache.changed', { file: file instanceof TFile ? file.path : null });
             if (file instanceof TFile && plugin.filePropertiesService?.isCompanionFile(file)) {
+                if (!useLegacyFileProperties) return;
                 void plugin.filePropertiesService.handleCompanionMetadataChanged(file)
                     .then((handled) => {
                         if (!handled || !plugin.canRunBackgroundAutomation()) return;
@@ -588,7 +590,8 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                     });
                 return;
             }
-            if (file instanceof TFile && file.extension?.toLocaleLowerCase() === 'canvas') {
+            if (useLegacyFileProperties
+                && file instanceof TFile && file.extension?.toLocaleLowerCase() === 'canvas') {
                 plugin.filePropertiesService.invalidateLegacyCanvas(file);
             }
             // Refresh saved titles when their metadata arrives.
@@ -625,7 +628,8 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     plugin.registerEvent(
         plugin.app.vault.on('modify', (file) => {
             if (plugin.propertyMigrationService?.active) return;
-            if (file instanceof TFile && file.extension?.toLocaleLowerCase() === 'canvas') {
+            if (plugin.settings.dataArchitectureMode !== 'native-records'
+                && file instanceof TFile && file.extension?.toLocaleLowerCase() === 'canvas') {
                 plugin.filePropertiesService.invalidateLegacyCanvas(file);
             }
             if (!(file instanceof TFile) || file.extension !== 'md') return;
@@ -757,7 +761,11 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.registerEvent(
         plugin.app.vault.on('rename', (file, oldPath) => {
+            // Match startup ownership: native records do not use the legacy
+            // companion index. Keep ordinary title/link handling below active.
+            const useLegacyFileProperties = plugin.settings.dataArchitectureMode !== 'native-records';
             if (file instanceof TFolder) {
+                if (!useLegacyFileProperties) return;
                 const capturedNewPath = file.path;
                 void plugin.filePropertiesService.handleSourceFolderRename(file, oldPath, capturedNewPath).catch((error) => {
                     logger.warn('[TPS GCM] Could not reconcile file properties after folder rename', {
@@ -769,6 +777,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 return;
             }
             if (file instanceof TFile && plugin.filePropertiesService?.isCompanionRename(file, oldPath)) {
+                if (!useLegacyFileProperties) return;
                 const rejectedExtensionRename = file.extension?.toLocaleLowerCase() !== 'md';
                 void plugin.filePropertiesService.handleCompanionRename(file, oldPath).then(() => {
                     if (rejectedExtensionRename) {
@@ -790,14 +799,16 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 && file.extension?.toLocaleLowerCase() === 'md'
                 && oldPath.toLocaleLowerCase().endsWith('.md')) {
                 const capturedNewPath = file.path;
-                void plugin.filePropertiesService.handlePendingMarkdownTargetRename(file, oldPath, capturedNewPath)
-                    .catch((error) => {
-                        logger.warn('[TPS GCM] Could not advance a pending Markdown file-property target', {
-                            source: capturedNewPath,
-                            oldPath,
-                            error,
+                if (useLegacyFileProperties) {
+                    void plugin.filePropertiesService.handlePendingMarkdownTargetRename(file, oldPath, capturedNewPath)
+                        .catch((error) => {
+                            logger.warn('[TPS GCM] Could not advance a pending Markdown file-property target', {
+                                source: capturedNewPath,
+                                oldPath,
+                                error,
+                            });
                         });
-                    });
+                }
                 // Finish the synchronous rename event before refreshing: a
                 // later core view listener can replace the title with its basename.
                 // Do not wait for renameFile's unrelated incoming link rewrites.
@@ -815,7 +826,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 }
                 return;
             }
-            if (file instanceof TFile && (
+            if (useLegacyFileProperties && file instanceof TFile && (
                 file.extension?.toLowerCase() !== 'md'
                 || !oldPath.toLowerCase().endsWith('.md')
             )) {
@@ -889,7 +900,8 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     plugin.register(() => plugin.menuController.detach());
     plugin.registerEvent(
         plugin.app.vault.on('delete', (file) => {
-            if (!(file instanceof TFile)) {
+            const useLegacyFileProperties = plugin.settings.dataArchitectureMode !== 'native-records';
+            if (useLegacyFileProperties && !(file instanceof TFile)) {
                 void plugin.filePropertiesService.handleSourceFolderDelete(file.path).catch((error) => {
                     logger.warn('[TPS GCM] Could not mark file properties missing after folder deletion', {
                         folder: file.path,
@@ -898,10 +910,10 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 });
             }
             const deletedCompanion = file instanceof TFile && plugin.filePropertiesService?.isCompanionFile(file);
-            if (file instanceof TFile) {
+            if (useLegacyFileProperties && file instanceof TFile) {
                 plugin.filePropertiesService.invalidatePendingMarkdownTarget(file);
             }
-            if (deletedCompanion && file instanceof TFile) {
+            if (useLegacyFileProperties && deletedCompanion && file instanceof TFile) {
                 void plugin.filePropertiesService.handleCompanionDelete(file).catch((error) => {
                     logger.warn('[TPS GCM] Could not invalidate a deleted file-property companion', {
                         companion: file.path,
@@ -909,7 +921,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                     });
                 });
             }
-            if (!deletedCompanion && file instanceof TFile && file.extension?.toLowerCase() !== 'md') {
+            if (useLegacyFileProperties && !deletedCompanion && file instanceof TFile && file.extension?.toLowerCase() !== 'md') {
                 void plugin.filePropertiesService.handleSourceDelete(file.path).catch((error) => {
                     logger.warn('[TPS GCM] Could not mark file properties missing after source deletion', {
                         source: file.path,

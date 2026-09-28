@@ -925,8 +925,8 @@ test('vault deletion wiring delegates companion invalidation to the service', ()
   assert.match(source, /file-property companions must remain Markdown files\. The \.md extension was restored/u);
   assert.match(source, /deletedCompanion[\s\S]{0,300}handleCompanionDelete\(file\)/u);
   assert.doesNotMatch(source, /deletedCompanion[\s\S]{0,200}forgetCompanion/u);
-  assert.match(source, /metadataCache\.on\('changed',[\s\S]{0,1400}invalidateLegacyCanvas\(file\)/u);
-  assert.match(source, /vault\.on\('modify',[\s\S]{0,300}invalidateLegacyCanvas\(file\)/u);
+  // Canvas invalidation dispatch in both modes is exercised by the real
+  // registered callbacks in test-completed-date-event-batching.mjs.
   assert.match(
     source,
     /handleCompanionMetadataChanged\(file\)[\s\S]{0,700}getSourceFileForCompanion\(file\)[\s\S]{0,500}scheduleApply\(logicalSource,[\s\S]{0,180}reason: 'metadata-change'/u,
