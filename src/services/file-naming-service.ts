@@ -1194,6 +1194,9 @@ export class FileNamingService {
             await this.plugin.app.fileManager.renameFile(finalFile, expectedPath);
             logger.log(`[TPS GCM] Renamed file from "${previousBasename}" to "${expectedBasename}" (${previousPath} -> ${expectedPath})`);
         } catch (error) {
+            // The committed-title caller owns completion and failure reporting.
+            // Automatic filename maintenance retains its existing logged error policy.
+            if (options.titleOverride !== undefined) throw error;
             if (this.isLikelyMissingFileError(error)) return;
             logger.error(`[TPS GCM] Failed to rename file to "${expectedBasename}":`, error);
         }

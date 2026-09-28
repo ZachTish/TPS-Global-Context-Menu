@@ -1028,6 +1028,9 @@ export class BulkEditService {
             skippedUnsafe,
             failures,
         });
+        if (failures > 0) {
+            new Notice(`Could not finish updating properties for ${failures} ${failures === 1 ? 'note' : 'notes'}.`);
+        }
         return count;
     }
 

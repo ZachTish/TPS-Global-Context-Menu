@@ -81,7 +81,12 @@ export class FrontmatterMutationService {
     let indexedFrontmatter: FrontmatterRecord | null = null;
     const started = performance.now();
     await this.runSerialized(file, async () => {
-      const attempt = await this.readParsedWithRetries(file);
+      const editorView = this.getOpenMarkdownViewForFile(file);
+      const editorSource = editorView ? this.readViewSource(editorView) : null;
+      const normalizedEditor = editorSource === null ? null : this.normalizeSource(editorSource);
+      const attempt = normalizedEditor
+        ? { normalized: normalizedEditor, parsed: this.parseFrontmatterDocument(normalizedEditor.content) }
+        : await this.readParsedWithRetries(file);
       if (!attempt) return;
 
       const { normalized, parsed } = attempt;
@@ -111,7 +116,8 @@ export class FrontmatterMutationService {
         ? `${normalized.bom}---\n${after}\n---${parsed.body ? `\n${parsed.body}` : '\n'}`
         : `${normalized.bom}${parsed.body}`;
 
-      if (nextContent !== normalized.fullContent || before !== after) {
+      // An unchanged property action must not rewrite authored YAML formatting.
+      if (before !== after) {
         const validation = this.validateNextContent(nextContent);
         if (validation.ok !== true) {
           this.warnMalformed(file, validation.reason, validation.error);
@@ -130,7 +136,7 @@ export class FrontmatterMutationService {
           });
           return;
         }
-        await this.writeContent(file, nextContent);
+        await this.writeContent(file, nextContent, normalized.fullContent, editorView);
         indexedFrontmatter = { ...sorted };
         changed = true;
       }
@@ -945,28 +951,100 @@ export class FrontmatterMutationService {
   private async readNormalized(file: TFile): Promise<{ bom: string; content: string; fullContent: string } | null> {
     try {
       const fullContent = await this.plugin.app.vault.read(file);
-      const normalized = fullContent.replace(/\r\n/g, '\n');
-      if (!normalized) {
-        return { bom: '', content: '', fullContent: normalized };
-      }
-      if (normalized.startsWith('\uFEFF')) {
-        return { bom: '\uFEFF', content: normalized.slice(1), fullContent: normalized };
-      }
-      return { bom: '', content: normalized, fullContent: normalized };
+      return this.normalizeSource(fullContent);
     } catch (error) {
       logger.warn('[TPS GCM] Failed reading file for frontmatter mutation', { file: file.path, error });
       return null;
     }
   }
 
-  private async writeContent(file: TFile, nextContent: string): Promise<void> {
+  private normalizeSource(source: string): { bom: string; content: string; fullContent: string } {
+    const fullContent = source.replace(/\r\n/g, '\n');
+    const bom = fullContent.startsWith('\uFEFF') ? '\uFEFF' : '';
+    return { bom, content: fullContent.slice(bom.length), fullContent };
+  }
+
+  private sourceHeader(source: string): string {
+    const split = this.splitFrontmatterDocument(source.replace(/^\uFEFF/, ''));
+    if (split.ok !== true) throw new Error(`Cannot edit changed frontmatter: ${split.reason}`);
+    return source.slice(0, source.length - split.body.length);
+  }
+
+  private async writeContent(
+    file: TFile,
+    nextContent: string,
+    expectedContent: string,
+    originalView: MarkdownView | null,
+  ): Promise<void> {
     const started = performance.now();
-    await this.plugin.app.vault.modify(file, nextContent);
+    const view = this.getOpenMarkdownViewForFile(file);
+    if (originalView && view !== originalView) {
+      throw new Error('The edited note changed views before its property change could be applied.');
+    }
+    if (view) {
+      const current = this.readViewSource(view);
+      if (current === null || this.sourceHeader(current) !== this.sourceHeader(expectedContent)) {
+        throw new Error('Frontmatter changed while the property action was pending.');
+      }
+      const before = this.sourceHeader(current);
+      const after = this.sourceHeader(nextContent);
+      const nextSource = after + current.slice(before.length);
+      await this.saveEditorPropertyChange(file, view, nextSource, () => {
+        // clear=false uses Obsidian's incremental programmatic edit, preserving
+        // body/selection/undo and synchronizing its native Properties editor.
+        view.setViewData(nextSource, false);
+      });
+    } else {
+      await this.plugin.app.vault.modify(file, nextContent);
+    }
     logger.perf('frontmatterMutation.writeContent', {
       file: file.path,
-      mode: 'vault.modify',
+      mode: view ? 'editor' : 'vault.modify',
       durationMs: Math.round(performance.now() - started),
     });
+  }
+
+  private async saveEditorPropertyChange(
+    file: TFile,
+    view: MarkdownView,
+    expectedContent: string,
+    edit: () => void,
+  ): Promise<void> {
+    const vault = this.plugin.app.vault;
+    const expectedHeader = this.sourceHeader(expectedContent);
+    let resolve!: () => void, reject!: (error: unknown) => void;
+    let settled = false;
+    const persisted = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    const check = async () => {
+      if (settled) return;
+      try {
+        const source = this.normalizeSource(await vault.cachedRead(file)).fullContent;
+        // A previous in-flight save can have the same header but an older body.
+        // Accept this edit's full snapshot, or a newer complete editor snapshot
+        // that retains the requested header. Never confirm just an old title.
+        const current = view.file === file ? this.readViewSource(view) : null;
+        if (source === expectedContent || (source === current && this.sourceHeader(source) === expectedHeader)) {
+          settled = true; resolve();
+        }
+      } catch (error) { settled = true; reject(error); }
+    };
+    // TextFileView.save() can resolve early when a previous save is in flight.
+    // Observe this operation's persisted content before its rename/notification.
+    // This listener never writes, retries, polls or outlives the operation.
+    const modified = vault.on('modify', target => { if (target === file) void check(); });
+    const deleted = vault.on('delete', target => {
+      if (target === file) reject(new Error('The note was deleted before its property change was saved.'));
+    });
+    const timeout = window.setTimeout(() => reject(new Error('Obsidian did not confirm saving the property change.')), 30_000);
+    try {
+      edit();
+      await Promise.all([view.save().then(check), persisted]);
+    } finally {
+      settled = true;
+      window.clearTimeout(timeout);
+      vault.offref(modified);
+      vault.offref(deleted);
+    }
   }
 
   private async readParsedWithRetries(file: TFile): Promise<{
@@ -1416,7 +1494,7 @@ export class FrontmatterMutationService {
   }
 
   private getOpenMarkdownViewForFile(file: TFile): MarkdownView | null {
-    return this.getOpenMarkdownViewsForFile(file)[0] ?? null;
+    return this.getOpenMarkdownViewsForFile(file).find(view => getViewMode(view) === 'source') ?? null;
   }
 
   private getOpenMarkdownViewsForFile(file: TFile): MarkdownView[] {
@@ -1438,19 +1516,6 @@ export class FrontmatterMutationService {
     return orderedLeaves
       .map((leaf) => getCompatibleMarkdownViewFromLeaf(leaf))
       .filter((view): view is MarkdownView => view instanceof MarkdownView);
-  }
-
-  private readViewData(view: MarkdownView): string {
-    const anyView = view as any;
-    const editor = anyView.editor;
-    if (typeof editor?.getValue === 'function') {
-      return String(editor.getValue() || '');
-    }
-    if (typeof anyView.getViewData === 'function') {
-      const data = anyView.getViewData();
-      if (typeof data === 'string') return data;
-    }
-    return String(anyView.data || '');
   }
 
   private readViewSource(view: MarkdownView): string | null {
