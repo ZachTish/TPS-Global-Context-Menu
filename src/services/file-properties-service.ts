@@ -1395,7 +1395,6 @@ export class FilePropertiesService {
         report.conflicts.push('Folder rename reconciliation requires non-empty old and new paths.');
         return report;
       }
-      await this.rebuildCompanionIndexUnlocked();
       const recordsBySource = await this.collectCompanionRecordsUnderFolder(oldFolder, report);
       for (const records of recordsBySource.values()) {
         if (records.length !== 1) {
@@ -1615,7 +1614,6 @@ export class FilePropertiesService {
         report.conflicts.push('Folder delete reconciliation requires a non-empty path.');
         return report;
       }
-      await this.rebuildCompanionIndexUnlocked();
       const recordsBySource = await this.collectCompanionRecordsUnderFolder(folder, report);
       for (const records of recordsBySource.values()) {
         if (records.length !== 1) {
@@ -1978,14 +1976,15 @@ export class FilePropertiesService {
       string,
       Array<{ companion: TFile; raw: FilePropertyRecord; sourcePath: string }>
     >();
-    for (const companion of this.getAllCompanionFiles()) {
+    // Collect from the same discovery pass that refreshes global identity evidence.
+    // Callers only mutate records after the complete index has been rebuilt.
+    await this.rebuildCompanionIndexUnlocked(false, (companion, raw) => {
       try {
-        const raw = await this.readRawFrontmatterAsync(companion);
         const sourcePath = raw ? this.validateCompanionRecord(raw, companion) : '';
-        if (!raw || !sourcePath) continue;
-        if (this.readReservedString(raw, FILE_PROPERTY_KEYS.tombstonedAt)) continue;
+        if (!raw || !sourcePath) return;
+        if (this.readReservedString(raw, FILE_PROPERTY_KEYS.tombstonedAt)) return;
         const sourceKey = this.pathKey(sourcePath);
-        if (sourceKey !== folderKey && !sourceKey.startsWith(`${folderKey}/`)) continue;
+        if (sourceKey !== folderKey && !sourceKey.startsWith(`${folderKey}/`)) return;
         report.matched += 1;
         const records = recordsBySource.get(sourceKey) || [];
         records.push({ companion, raw, sourcePath });
@@ -1995,11 +1994,14 @@ export class FilePropertiesService {
           report.conflicts.push(error instanceof Error ? error.message : String(error));
         }
       }
-    }
+    });
     return recordsBySource;
   }
 
-  private async rebuildCompanionIndexUnlocked(scanAllMarkdown = false): Promise<void> {
+  private async rebuildCompanionIndexUnlocked(
+    scanAllMarkdown = false,
+    visit?: (companion: TFile, raw: FilePropertyRecord | null) => void,
+  ): Promise<void> {
     this.companionsBySourcePath.clear();
     this.companionsByFileId.clear();
     this.indexedKeysByCompanion.clear();
@@ -2018,6 +2020,7 @@ export class FilePropertiesService {
         ? await this.readRawFrontmatterAuthoritative(companion)
         : await this.readRawFrontmatterAsync(companion);
       if (raw && this.isCompanionRecord(raw)) this.indexCompanion(companion, raw);
+      visit?.(companion, raw);
     }
     this.companionIndexReady = true;
   }

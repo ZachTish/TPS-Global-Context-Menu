@@ -1925,3 +1925,93 @@ test('known property names include only unique live active records', async () =>
   await service.setup();
   assert.deepEqual(await service.listKnownPropertyNames(), ['activeName']);
 });
+
+function countFolderDiscovery(harness) {
+  const original = harness.vault.getMarkdownFiles;
+  let scans = 0;
+  harness.vault.getMarkdownFiles = function (...args) {
+    scans += 1;
+    return original.apply(this, args);
+  };
+  return () => scans;
+}
+
+test('folder lifecycle discovers companions once per operation in an unrelated large vault', async () => {
+  const h = createHarness();
+  for (let i = 0; i < 1000; i++) h.addFile(`Notes/Plain ${i}.md`, 'plain body');
+  const service = new FilePropertiesService(h.plugin);
+  await service.handleMetadataResolved();
+  const scans = countFolderDiscovery(h);
+  const renamed = await service.handleSourceFolderRename('Elsewhere/New', 'Elsewhere/Old');
+  assert.equal(renamed.matched, 0);
+  assert.equal(scans(), 1);
+  const deleted = await service.handleSourceFolderDelete('Elsewhere/New');
+  assert.equal(deleted.matched, 0);
+  assert.equal(scans(), 2);
+  assert.deepEqual(h.writeTargets, []);
+});
+
+test('unchanged folder lifecycle bursts keep one discovery pass per request', async () => {
+  const h = createHarness();
+  const service = new FilePropertiesService(h.plugin);
+  await service.handleMetadataResolved();
+  const scans = countFolderDiscovery(h);
+  for (let i = 0; i < 10; i++) {
+    assert.equal((await service.handleSourceFolderRename('New', 'Old')).matched, 0);
+    assert.equal((await service.handleSourceFolderDelete('New')).matched, 0);
+  }
+  assert.equal(scans(), 20);
+  assert.deepEqual(h.writeTargets, []);
+});
+
+test('single-pass folder discovery finishes global duplicate checks before changing a record', async () => {
+  const h = createHarness();
+  const first = h.addFile('Old/First.pdf', 'first bytes');
+  const other = h.addFile('Other/Second.pdf', 'second bytes');
+  const companion = h.addCompanion(`${FILE_PROPERTIES_ROOT}/First.md`, reservedRecord(first.path, 'shared-folder-id', { rating: 1 }));
+  h.addCompanion(`${FILE_PROPERTIES_ROOT}/Second.md`, reservedRecord(other.path, 'shared-folder-id', { rating: 2 }));
+  const service = new FilePropertiesService(h.plugin);
+  await service.handleMetadataResolved();
+  await h.rename(first, 'New/First.pdf');
+  const scans = countFolderDiscovery(h);
+  const report = await service.handleSourceFolderRename('New', 'Old');
+  assert.equal(report.matched, 1);
+  assert.equal(report.updated, 0);
+  assert.equal(report.conflicts.length, 1);
+  assert.equal(h.readRaw(companion)[FILE_PROPERTY_KEYS.sourcePath], 'Old/First.pdf');
+  assert.deepEqual(h.writeTargets, []);
+  assert.equal(scans(), 1);
+});
+
+test('folder discovery drops removed identity evidence and preserves concurrent user edits at the writer', async () => {
+  const h = createHarness();
+  const source = h.addFile('Old/Asset.pdf', 'asset bytes');
+  const companion = h.addCompanion(`${FILE_PROPERTIES_ROOT}/Asset.md`, reservedRecord(source.path, 'folder-asset', { rating: 1 }));
+  const removed = h.addCompanion(`${FILE_PROPERTIES_ROOT}/Removed.md`, reservedRecord('Other/Old.pdf', 'folder-asset'));
+  const service = new FilePropertiesService(h.plugin);
+  await service.handleMetadataResolved();
+  h.remove(removed);
+  await h.rename(source, 'New/Asset.pdf');
+  h.injectConcurrentFrontmatterEdit(file => h.directEditCompanion(file, { ...h.readRaw(file), rating: 9 }));
+  const scans = countFolderDiscovery(h);
+  const report = await service.handleSourceFolderRename('New', 'Old');
+  assert.equal(report.updated, 1);
+  assert.deepEqual(report.conflicts, []);
+  assert.equal(h.readRaw(companion).rating, 9);
+  assert.equal(h.readRaw(companion)[FILE_PROPERTY_KEYS.sourcePath], source.path);
+  assert.equal(h.readContent(source), 'asset bytes');
+  assert.equal(scans(), 1);
+});
+
+test('single-pass folder discovery still reports malformed managed companions', async () => {
+  const h = createHarness();
+  h.addCompanion(`${FILE_PROPERTIES_ROOT}/Invalid.md`, { bad: true });
+  const service = new FilePropertiesService(h.plugin);
+  await service.handleMetadataResolved();
+  const scans = countFolderDiscovery(h);
+  const report = await service.handleSourceFolderDelete('Old');
+  assert.equal(report.matched, 0);
+  assert.equal(report.conflicts.length, 1);
+  assert.deepEqual(h.writeTargets, []);
+  assert.equal(scans(), 1);
+});
