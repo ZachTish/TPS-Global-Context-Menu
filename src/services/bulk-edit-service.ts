@@ -32,6 +32,7 @@ import {
     canAutomaticallyMutateTemplateFile,
     canAutomaticallyMutateTemplateFrontmatter,
     canAutomaticallyMutateTemplateSource,
+    canAutomaticallyMutatePathWithExclusions,
     inspectTemplateProtectionSource,
     removeTemplateProtectionTagFromFrontmatter,
     stripTemplateProtectionTagFromSource,
@@ -3030,7 +3031,7 @@ export class BulkEditService {
         const removedReferenceKeys = new Set<string>();
         const ambiguousReferenceKeys = new Set<string>();
 
-        const isMatch = (linkValue: unknown, sourcePath: string, pendingRemovedReferences: Set<string>): boolean => {
+        const isMatch = (linkValue: unknown, sourcePath: string, pendingRemovedReferences?: Set<string>): boolean => {
             const resolvedFile = resolveLinkValueToFile(this.plugin.app, linkValue, sourcePath);
             const liveResolvedFile = resolvedFile
                 ? this.plugin.app.vault.getAbstractFileByPath(resolvedFile.path)
@@ -3048,7 +3049,7 @@ export class BulkEditService {
                 return false;
             }
             if (decision === 'match') {
-                pendingRemovedReferences.add(referenceKey);
+                pendingRemovedReferences?.add(referenceKey);
                 return true;
             }
             return false;
@@ -3062,28 +3063,35 @@ export class BulkEditService {
         const touchedFiles: TFile[] = [];
         for (const file of files) {
             const isMarkdown = file.extension?.toLowerCase() === 'md';
-            if (
-                isMarkdown
-                && !(await canAutomaticallyMutateTemplateFile(
-                    this.plugin.app.vault,
-                    file,
-                    this.plugin.settings,
-                ))
-            ) {
-                continue;
+            if (isMarkdown && !canAutomaticallyMutatePathWithExclusions(file, this.plugin.settings)) continue;
+            // Inspection may reject work, but only the existing atomic writers
+            // below authorize changes against current source and exclusions.
+            let inspectedSource = '';
+            if (isMarkdown) {
+                try {
+                    inspectedSource = await this.plugin.app.vault.cachedRead(file);
+                } catch (err) {
+                    logger.warn(`[TPS GCM] cleanupLinksForDeletedFile: failed to inspect ${file.path}:`, err);
+                    continue;
+                }
+                if (!canAutomaticallyMutateTemplateSource(inspectedSource, this.plugin.settings)) continue;
             }
             const fm = this.plugin.parentLinkResolutionService.getLogicalFrontmatter(file);
-            const hasPk = Object.keys(fm).some((key) => parentKeys.includes(key.toLowerCase()));
-            const hasAk = !!fm && Object.keys(fm).some(k => k.toLowerCase() === attachmentsKey.toLowerCase());
+            const hasMatchingFrontmatter = Object.entries(fm).some(([key, raw]) => {
+                if (!parentKeys.includes(key.toLowerCase()) && key.toLowerCase() !== attachmentsKey) return false;
+                const values = Array.isArray(raw) ? raw : (raw != null ? [raw] : []);
+                return values.some(value => isMatch(value, file.path));
+            });
             let frontmatterChanged = false;
             const frontmatterRemovedReferences = new Set<string>();
 
-            if (hasPk || hasAk) {
+            if (hasMatchingFrontmatter) {
                 try {
                     await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
                         if (
                             isMarkdown
-                            && !canAutomaticallyMutateTemplateFrontmatter(frontmatter, this.plugin.settings)
+                            && (!canAutomaticallyMutatePathWithExclusions(file, this.plugin.settings)
+                                || !canAutomaticallyMutateTemplateFrontmatter(frontmatter, this.plugin.settings))
                         ) return;
                         // Parent fields may be scalar or arrays. Remove only the
                         // deleted member and preserve unrelated parents.
@@ -3124,8 +3132,10 @@ export class BulkEditService {
                 continue;
             }
             try {
-                const raw = await this.plugin.app.vault.cachedRead(file);
-                if (!canAutomaticallyMutateTemplateSource(raw, this.plugin.settings)) continue;
+                const raw = frontmatterChanged
+                    ? await this.plugin.app.vault.cachedRead(file)
+                    : inspectedSource;
+                if (frontmatterChanged && !canAutomaticallyMutateTemplateSource(raw, this.plugin.settings)) continue;
                 const lines = raw.split('\n');
                 const preflightRemovedReferences = new Set<string>();
                 const preflight = lines.filter((line) => {
@@ -3137,7 +3147,8 @@ export class BulkEditService {
                 if (preflight.length !== lines.length) {
                     const bodyRemovedReferences = new Set<string>();
                     await this.plugin.app.vault.process(file, (current) => {
-                        if (!canAutomaticallyMutateTemplateSource(current, this.plugin.settings)) return current;
+                        if (!canAutomaticallyMutatePathWithExclusions(file, this.plugin.settings)
+                            || !canAutomaticallyMutateTemplateSource(current, this.plugin.settings)) return current;
                         const currentLines = current.split('\n');
                         const filtered = currentLines.filter((line) => {
                             const parsed = this.plugin.bodySubitemLinkService.parseLine(line);

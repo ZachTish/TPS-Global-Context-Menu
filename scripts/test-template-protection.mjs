@@ -364,15 +364,21 @@ test('automatic background writers recheck explicit exclusions at their mutation
     /sweepArchiveTaggedFiles[\s\S]{0,2200}reason !== "manual"[\s\S]{0,260}canAutomaticallyMutateTemplateFile[\s\S]{0,500}renameFile/u,
     'background archive sweeps recheck current exclusion evidence while manual sweeps remain explicit',
   );
+  const deletedCleanup = bulkEdit.slice(bulkEdit.indexOf('private async runDeletedLinkCleanup('));
   assert.match(
-    bulkEdit,
-    /runDeletedLinkCleanup[\s\S]{0,3500}canAutomaticallyMutateTemplateFile[\s\S]{0,1000}frontmatterMutationService\.process\(file,[\s\S]{0,260}canAutomaticallyMutateTemplateFrontmatter/u,
-    'automatic deleted-link frontmatter cleanup checks both current bytes and mutation-boundary frontmatter',
+    deletedCleanup,
+    /inspectedSource = await this\.plugin\.app\.vault\.cachedRead\(file\);[\s\S]{0,320}canAutomaticallyMutateTemplateSource\(inspectedSource,/u,
+    'automatic deleted-link inspection uses cached bytes to reject work',
   );
   assert.match(
-    bulkEdit,
-    /const raw = await this\.plugin\.app\.vault\.cachedRead\(file\);[\s\S]{0,180}canAutomaticallyMutateTemplateSource\(raw,[\s\S]{0,1000}vault\.process\(file, \(current\) =>[\s\S]{0,180}canAutomaticallyMutateTemplateSource\(current,/u,
-    'automatic deleted-link body cleanup rechecks exact bytes inside Vault.process',
+    deletedCleanup,
+    /frontmatterMutationService\.process\(file, \(frontmatter\) =>[\s\S]{0,250}canAutomaticallyMutatePathWithExclusions[\s\S]{0,180}canAutomaticallyMutateTemplateFrontmatter/u,
+    'automatic deleted-link frontmatter cleanup rechecks current path/settings and mutation-boundary frontmatter',
+  );
+  assert.match(
+    deletedCleanup,
+    /vault\.process\(file, \(current\) =>[\s\S]{0,180}canAutomaticallyMutatePathWithExclusions[\s\S]{0,180}canAutomaticallyMutateTemplateSource\(current,/u,
+    'automatic deleted-link body cleanup rechecks current path/settings and exact bytes inside Vault.process',
   );
 });
 
