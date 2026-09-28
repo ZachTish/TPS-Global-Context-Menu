@@ -52,6 +52,15 @@ export class NoteOpeningService {
     const { app } = this.plugin;
     const file = app.vault.getAbstractFileByPath(request.filePath);
     if (!(file instanceof TFile)) return false;
+    try {
+      await this.plugin.nativeRecordService.prepareCreatedNote(file);
+    } catch (error) {
+      logger.flowError('NoteOpening', 'created:prepare-failed', error, {
+        path: file.path, source: request.sourcePluginId,
+      });
+      new Notice(`Note created at ${file.path}, but task preparation failed. Check the note before continuing.`, 10000);
+      return true; // A file exists; callers must not recreate it or open a second surface.
+    }
     const behavior = request.explicitDestination ? 'open' : this.plugin.settings.notePostCreateBehavior;
     logger.flow('NoteOpening', 'created:route', { path: file.path, source: request.sourcePluginId, behavior });
     if (behavior === 'open' || file.extension !== 'md') {

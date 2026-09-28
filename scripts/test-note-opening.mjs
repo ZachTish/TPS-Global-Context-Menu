@@ -32,6 +32,7 @@ function fixture() {
   const opened = [], previews = [];
   const leaf = { view: { containerEl: { isConnected: true } } };
   const plugin = {
+    nativeRecordService: { prepareCreatedNote: async () => {} },
     settings: { notePostCreateBehavior: 'preview', noteOpenDestination: 'current-tab' },
     app: { vault: { getAbstractFileByPath: path => path === file.path ? file : null }, workspace: { activeLeaf: leaf, getLeaf: context => ({ context }) } },
     openFileInLeaf: async (...args) => { opened.push(args); return true; },
@@ -140,4 +141,47 @@ test('open can focus the created file name after the existing navigation service
   f.plugin.findOpenLeafForFile = () => ({ view: { setEphemeralState: state => states.push(state) } });
   await f.service.present({ filePath: f.file.path, sourcePluginId: 'test', renameTitle: true });
   assert.deepEqual(states, [{ rename: 'all' }]);
+});
+
+test('every created-note route awaits preparation and presents the final file', async () => {
+  for (const behavior of ['preview', 'open', 'stay', 'explicit-tab']) {
+    const f = fixture();
+    f.plugin.settings.notePostCreateBehavior = behavior === 'explicit-tab' ? 'stay' : behavior;
+    let release;
+    const gate = new Promise(resolve => { release = resolve; });
+    let prepared = false, settled = false;
+    f.plugin.nativeRecordService.prepareCreatedNote = async file => {
+      await gate;
+      file.path = '_records/tasks/final.md';
+      prepared = true;
+    };
+    const pending = f.service.present({ filePath: f.file.path, sourcePluginId: 'test',
+      ...(behavior === 'explicit-tab' ? { explicitDestination: 'tab' } : {})
+    }).then(result => { settled = true; return result; });
+    await Promise.resolve();
+    assert.equal(settled, false);
+    assert.equal(f.opened.length + f.previews.length, 0);
+    release();
+    assert.equal(await pending, true);
+    assert.equal(prepared, true);
+    const presented = [...f.opened, ...f.previews];
+    assert.equal(presented.length, behavior === 'stay' ? 0 : 1);
+    if (presented.length) assert.equal(presented[0][0].path, '_records/tasks/final.md');
+  }
+});
+
+test('failed preparation preserves the created file without opening or permitting caller fallback', async () => {
+  const f = fixture();
+  f.plugin.nativeRecordService.prepareCreatedNote = async () => { throw new Error('write failed'); };
+  assert.equal(await f.service.present({ filePath: f.file.path, sourcePluginId: 'test' }), true);
+  assert.equal(f.opened.length + f.previews.length, 0);
+  assert.match(notices.at(-1), /task preparation failed/);
+  assert.match(notices.at(-1), /Inbox\/New.md/);
+});
+
+test('ordinary note opening never prepares or mutates a created draft', async () => {
+  const f = fixture();
+  f.plugin.nativeRecordService.prepareCreatedNote = async () => { assert.fail('ordinary navigation must not prepare'); };
+  assert.equal(await f.service.open(f.file), true);
+  assert.equal(f.opened.length, 1);
 });

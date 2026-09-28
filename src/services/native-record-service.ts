@@ -1108,7 +1108,6 @@ export class NativeRecordService {
   readonly version = 6;
   private setupComplete = false;
   private readonly newlyCreatedFiles = new WeakSet<TFile>();
-  private readonly draftEligibilityTimers = new WeakMap<TFile, ReturnType<typeof setTimeout>>();
   private readonly draftAdoptions = new WeakMap<TFile, Promise<void>>();
   private readonly idsByPath = new Map<string, string>();
   private readonly pathsById = new Map<string, Set<string>>();
@@ -1163,7 +1162,6 @@ export class NativeRecordService {
       if (this.authoritativeIdentityGeneration !== this.identitySourceGeneration) {
         this.indexFile(file, cache?.frontmatter);
       }
-      if (this.newlyCreatedFiles.has(file)) void this.adoptNewTaskDraft(file);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('create', (file) => {
       if (!(file instanceof TFile)) return;
@@ -1174,13 +1172,6 @@ export class NativeRecordService {
       // Index those files, but never treat them as newly authored Base drafts.
       if (!this.plugin.app.workspace.layoutReady) return;
       this.newlyCreatedFiles.add(file);
-      const timer = globalThis.setTimeout(() => {
-        this.newlyCreatedFiles.delete(file);
-        this.draftEligibilityTimers.delete(file);
-      }, 10_000);
-      (timer as unknown as { unref?: () => void }).unref?.();
-      this.draftEligibilityTimers.set(file, timer);
-      void this.adoptNewTaskDraft(file);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('modify', (file) => {
       if (file instanceof TFile) this.invalidateAuthoritativeSources([file.path]);
@@ -3055,24 +3046,17 @@ export class NativeRecordService {
     return { persistedFrontmatter, persistedInspection, body: templateBody ?? '' };
   }
 
-  /**
-   * Core Bases creates a new Markdown file beside the Base, then materializes
-   * positive property filters into its frontmatter. In the native TPS profile,
-   * a task Base also filters by the canonical record folder, so that temporary
-   * file would otherwise disappear from the view immediately. Adopt only files
-   * observed through this session's Vault create event, and only while they are
-   * still empty, unenveloped task drafts.
+  /** Finish a newly created task after its creator has written filters/templates,
+   * before the shared created-note handoff presents it. Vault and metadata events
+   * only index; they never start or retry this mutation.
    */
-  private adoptNewTaskDraft(file: TFile): Promise<void> {
+  prepareCreatedNote(file: TFile): Promise<void> {
     const existing = this.draftAdoptions.get(file);
     if (existing) return existing;
+    if (!this.newlyCreatedFiles.has(file)) return Promise.resolve();
     const operation = this.adoptNewTaskDraftInternal(file)
-      .catch((error) => {
-        logger.flowError('NativeRecords', 'base-task-draft:adopt-failed', error, {
-          path: file.path,
-        });
-      })
       .finally(() => {
+        this.newlyCreatedFiles.delete(file);
         this.draftAdoptions.delete(file);
       });
     this.draftAdoptions.set(file, operation);
@@ -3151,10 +3135,6 @@ export class NativeRecordService {
       }
     });
     if (!adopted) return;
-    this.newlyCreatedFiles.delete(file);
-    const timer = this.draftEligibilityTimers.get(file);
-    if (timer != null) globalThis.clearTimeout(timer);
-    this.draftEligibilityTimers.delete(file);
     this.indexFile(file);
     this.plugin.entityIndexService?.upsertFile(file, adopted);
     this.notify([originalPath, canonicalPath], { kind: 'user', surface: 'native-base-new-task' }, 'native-base-new-task');

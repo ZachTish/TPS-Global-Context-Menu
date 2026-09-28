@@ -3202,8 +3202,8 @@ test('a new empty task draft created by core Bases is adopted into the canonical
       name: 'Draft producer name',
     },
   }));
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(draft.path, 'Untitled.md');
+  await service.prepareCreatedNote(draft);
 
   assert.match(draft.path, /^_records\/tasks\/task-[^.]+\.md$/u);
   assert.equal(entries.has('Untitled.md'), false);
@@ -3220,7 +3220,7 @@ test('a new empty task draft created by core Bases is adopted into the canonical
 });
 
 test('native draft adoption never absorbs existing, non-task, enveloped, or body-bearing notes', async () => {
-  const { vault } = createHarness();
+  const { service, vault } = createHarness();
   const cases = [
     ['Body task.md', { kind: 'task', title: '' }, 'human notes'],
     ['Project.md', { kind: 'project', title: '' }, ''],
@@ -3231,7 +3231,7 @@ test('native draft adoption never absorbs existing, non-task, enveloped, or body
     const file = await vault.create(path, serializeNativeRecordDocument({
       bom: '', newline: '\n', closer: '---', body, frontmatter,
     }));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await service.prepareCreatedNote(file);
     assert.equal(file.path, path);
   }
 });
@@ -3249,7 +3249,7 @@ test('native draft adoption honors explicit Global path and tag exclusions', asy
       tags: ['template', 'keep'],
     },
   ]) {
-    const { vault, contents } = createHarness('native-records', {
+    const { service, vault, contents } = createHarness('native-records', {
       frontmatterAutoWriteExclusions: fixture.exclusions,
     });
     const draft = await vault.create(fixture.path, serializeNativeRecordDocument({
@@ -3263,8 +3263,7 @@ test('native draft adoption honors explicit Global path and tag exclusions', asy
         tags: fixture.tags,
       },
     }));
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await service.prepareCreatedNote(draft);
 
     assert.equal(draft.path, fixture.path);
     const parsed = parseNativeRecordDocument(contents.get(draft));
@@ -3762,15 +3761,16 @@ test('cold vault discovery indexes existing records without reading or adopting 
   for (const { file, text } of discovered) {
     assert.equal(contents.get(file), text);
     assert.equal(service.newlyCreatedFiles.has(file), false);
-    assert.equal(service.draftEligibilityTimers.has(file), false);
   }
   plugin.app.workspace.layoutReady = true;
   for (const { file } of discovered) plugin.app.metadataCache.emit('changed', file);
   await new Promise(resolve => setTimeout(resolve, 0));
   assert.equal(reads, 0, 'late metadata does not reinterpret discovered notes as new drafts');
   const draft = await vault.create('Actually new.md', '---\nkind: task\ntitle: New\n---\n');
-  await new Promise(resolve => setTimeout(resolve, 0));
-  await new Promise(resolve => setTimeout(resolve, 0));
+  plugin.app.metadataCache.emit('changed', draft);
+  assert.equal(draft.path, 'Actually new.md');
+  assert.equal(reads, 0);
+  await service.prepareCreatedNote(draft);
   assert.match(draft.path, /^_records\/tasks\/task-/);
 });
 
@@ -4243,4 +4243,92 @@ test('profile inspection reuse preserves conflicting evidence and timestamp fall
   assert.equal(current.result?.frontmatter.createdDate, '', 'evidence fallback cannot mutate the current-profile result');
   assert.equal(current.result?.frontmatter.modifiedDate, '');
   assert.deepEqual(raw, original);
+});
+
+test('post-layout create and metadata bursts do no draft IO; the explicit handoff prepares once', async () => {
+  const { service, plugin, vault } = createHarness();
+  const counts = { cachedRead: 0, read: 0, process: 0, rename: 0, timers: 0 };
+  for (const method of ['cachedRead', 'read', 'process', 'rename']) {
+    const original = vault[method];
+    vault[method] = (...args) => { counts[method]++; return original(...args); };
+  }
+  const originalTimer = globalThis.setTimeout;
+  const files = [];
+  try {
+    globalThis.setTimeout = (...args) => { counts.timers++; return originalTimer(...args); };
+    for (let i = 0; i < 1000; i++) {
+      const file = await vault.create(`Inbox/Draft ${i}.md`, '---\nkind: task\n---\n');
+      files.push(file);
+      for (let j = 0; j < 3; j++) plugin.app.metadataCache.emit('changed', file);
+    }
+    await Promise.resolve();
+    assert.deepEqual(counts, { cachedRead: 0, read: 0, process: 0, rename: 0, timers: 0 });
+    await Promise.all([service.prepareCreatedNote(files[0]), service.prepareCreatedNote(files[0])]);
+    assert.equal(counts.process, 1);
+    assert.equal(counts.rename, 1);
+    assert.equal(counts.read, 0);
+    assert.equal(counts.timers, 0);
+    const after = { ...counts };
+    for (let i = 0; i < 5; i++) {
+      plugin.app.metadataCache.emit('changed', files[0]);
+      await service.prepareCreatedNote(files[0]);
+    }
+    assert.deepEqual(counts, after);
+  } finally { globalThis.setTimeout = originalTimer; }
+});
+
+test('task preparation preserves a concurrent body edit or newly applied exclusion without later retries', async () => {
+  for (const change of ['body', 'exclusion']) {
+    const { service, plugin, vault, contents } = createHarness();
+    const file = await vault.create('Inbox/Draft.md', '---\nkind: task\n---\n');
+    const original = vault.process;
+    let writes = 0, renames = 0;
+    vault.rename = async () => { renames++; };
+    vault.process = async (...args) => {
+      writes++;
+      if (change === 'body') contents.set(file, '---\nkind: task\n---\nConcurrent human body');
+      else plugin.settings.frontmatterAutoWriteExclusions = 'path:Inbox/';
+      return original(...args);
+    };
+    await service.prepareCreatedNote(file);
+    const expected = contents.get(file);
+    assert.equal(expected.includes('tpsId'), false);
+    assert.equal(file.path, 'Inbox/Draft.md');
+    assert.equal(renames, 0);
+    plugin.app.metadataCache.emit('changed', file);
+    await service.prepareCreatedNote(file);
+    assert.equal(writes, 1);
+    assert.equal(contents.get(file), expected);
+    if (change === 'body') assert.match(expected, /Concurrent human body/);
+  }
+});
+
+test('preparation failures propagate once; metadata changes do not retry reads, writes or renames', async () => {
+  for (const method of ['cachedRead', 'process', 'rename']) {
+    const { service, plugin, vault } = createHarness();
+    const file = await vault.create('Inbox/Failed.md', '---\nkind: task\n---\n');
+    let attempts = 0;
+    vault[method] = async () => { attempts++; throw new Error(`failed ${method}`); };
+    await assert.rejects(service.prepareCreatedNote(file), new RegExp(`failed ${method}`));
+    for (let i = 0; i < 3; i++) {
+      plugin.app.metadataCache.emit('changed', file);
+      await service.prepareCreatedNote(file);
+    }
+    assert.equal(attempts, 1);
+    assert.equal(file.path, 'Inbox/Failed.md');
+  }
+});
+
+test('old files and fully prepared native creations are not adopted at the handoff', async () => {
+  const { service, vault, addFile, contents } = createHarness();
+  const old = addFile('Existing.md', '---\nkind: task\n---\n');
+  const prepared = await service.create('task', { title: 'Owned creation' }, { id: 'owned-task' });
+  let writes = 0;
+  vault.process = async () => { writes++; assert.fail('already prepared'); };
+  for (const file of [old, prepared.file]) {
+    const before = contents.get(file);
+    await service.prepareCreatedNote(file);
+    assert.equal(contents.get(file), before);
+  }
+  assert.equal(writes, 0);
 });
