@@ -49,5 +49,5 @@ test('title sync preserves meaningful previous title and basename aliases', () =
   assert.match(writeSource, /targetKey = aliasKeys\.find/);
   assert.match(writeSource, /normalized === 'alias' \|\| normalized === 'aliases'/);
   assert.match(writeSource, /TEMPLATE_TITLE_MARKERS\.some/);
-  assert.match(syncSource, /this\.addMeaningfulAliases\(frontmatter, \[currentTitle, rawBasename\], nextTitle\)/);
+  assert.match(syncSource, /this\.addMeaningfulAliases\(frontmatter, \[latestTitle, rawBasename\], nextTitle\)/);
 });

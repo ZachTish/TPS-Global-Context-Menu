@@ -892,11 +892,12 @@ export class FileNamingService {
      */
     async syncTitleFromFilename(
         file: TFile,
-        options: { onlyIfTemplateDerived?: boolean; onlyIfMissing?: boolean; onlyIfHasFrontmatter?: boolean; force?: boolean; bypassCreationGrace?: boolean } = {},
+        options: { onlyIfTemplateDerived?: boolean; onlyIfMissing?: boolean; onlyIfHasFrontmatter?: boolean; force?: boolean; bypassCreationGrace?: boolean; renamedFromPath?: string } = {},
     ): Promise<void> {
         if (!options.force && !this.plugin.settings.autoSyncTitleFromFilename) {
             return;
         }
+        if (options.renamedFromPath?.split('/').pop() === file.name) return;
         await this.syncTitleFromFilenameWithOptions(file, options);
     }
 
@@ -963,7 +964,7 @@ export class FileNamingService {
 
     private async syncTitleFromFilenameWithOptions(
         file: TFile,
-        options: { onlyIfTemplateDerived?: boolean; onlyIfMissing?: boolean; onlyIfHasFrontmatter?: boolean; force?: boolean; bypassCreationGrace?: boolean },
+        options: { onlyIfTemplateDerived?: boolean; onlyIfMissing?: boolean; onlyIfHasFrontmatter?: boolean; force?: boolean; bypassCreationGrace?: boolean; renamedFromPath?: string },
     ): Promise<"updated" | "skipped"> {
         await this.dailyNoteConfigurationReady;
         if (!options.force && !this.plugin.settings.autoSyncTitleFromFilename) return "skipped";
@@ -1028,6 +1029,11 @@ export class FileNamingService {
                 persistedValues.get('title')
                 ?? this.getFrontmatterStringValueCaseInsensitive(fm, 'title')
             ).trim();
+            // A title edit can itself rename the file (with sanitization/date
+            // formatting). That filename is already correct; retain the authored
+            // title instead of treating the rename as a second title edit.
+            if (options.renamedFromPath && currentTitle
+                && this.buildExpectedBasename(currentTitle, scheduled) === rawBasename) return "skipped";
             if (!currentTitle && await this.isBlankGeneratedUntitledNote(liveFile, rawBasename)) return "skipped";
             const templateDerivedTitle = this.isTemplateDerivedTitle(currentTitle);
             if (options.onlyIfMissing && currentTitle && !templateDerivedTitle) {
@@ -1063,15 +1069,17 @@ export class FileNamingService {
                         );
                         // Cached eligibility only avoids unnecessary work. The
                         // current title owns this decision after queueing, too.
-                        const currentTitle = this.getFrontmatterStringValueCaseInsensitive(frontmatter, 'title').trim();
-                        const templateDerivedTitle = this.isTemplateDerivedTitle(currentTitle);
-                        if (options.onlyIfMissing && currentTitle && !templateDerivedTitle) return;
+                        const latestTitle = this.getFrontmatterStringValueCaseInsensitive(frontmatter, 'title').trim();
+                        if (options.renamedFromPath && (!this.plugin.settings.autoSyncTitleFromFilename
+                            || latestTitle !== currentTitle)) return;
+                        const templateDerivedTitle = this.isTemplateDerivedTitle(latestTitle);
+                        if (options.onlyIfMissing && latestTitle && !templateDerivedTitle) return;
                         if (options.onlyIfTemplateDerived && !templateDerivedTitle) {
                             const scheduled = this.getFrontmatterStringValueCaseInsensitive(frontmatter, 'scheduled');
                             const scheduledDate = scheduled ? window.moment(scheduled) : null;
                             if (!scheduledDate?.isValid?.()
                                 || !this.hasKnownScheduledDateMarker(rawBasename, scheduledDate)
-                                || !this.hasKnownScheduledDateMarker(currentTitle, scheduledDate)) return;
+                                || !this.hasKnownScheduledDateMarker(latestTitle, scheduledDate)) return;
                         }
                         if (existingTitleKeys.length === 0) {
                             frontmatter.title = nextTitle;
@@ -1081,7 +1089,7 @@ export class FileNamingService {
                                 delete frontmatter[existingTitleKeys[i]];
                             }
                         }
-                        this.addMeaningfulAliases(frontmatter, [currentTitle, rawBasename], nextTitle);
+                        this.addMeaningfulAliases(frontmatter, [latestTitle, rawBasename], nextTitle);
                     }, { kind: 'automation', surface: 'file-title-sync' });
                 });
                 return changed ? "updated" : "skipped";
@@ -1184,6 +1192,9 @@ export class FileNamingService {
             const previousBasename = finalFile.basename;
             const previousPath = finalFile.path;
             await this.plugin.app.fileManager.renameFile(finalFile, expectedPath);
+            // Core can replace the visible title with the filename after the
+            // title metadata event. Repaint at this operation's completion.
+            this.plugin.noteTitleRenderService?.handleMetadataChanged(finalFile);
             logger.log(`[TPS GCM] Renamed file from "${previousBasename}" to "${expectedBasename}" (${previousPath} -> ${expectedPath})`);
         } catch (error) {
             if (this.isLikelyMissingFileError(error)) return;

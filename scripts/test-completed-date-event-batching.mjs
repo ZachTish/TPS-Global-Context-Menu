@@ -662,3 +662,30 @@ test('startup create announcements schedule no creation writers while post-layou
   assert.deepEqual(calls, { templateGate: 1, rules: 2, title: 1, timestamps: 1, fileProperties: 1 });
   h.cleanup();
 });
+
+test('ordinary Markdown rename reaches title synchronization immediately alongside companion bookkeeping', () => {
+  const h = createHarness();
+  const calls = [];
+  h.plugin.settings.autoSyncTitleFromFilename = true;
+  h.plugin.filePropertiesService.handlePendingMarkdownTargetRename = async (...args) => { calls.push(['companion', ...args]); };
+  h.plugin.fileNamingService.syncTitleFromFilename = async (...args) => { calls.push(['title', ...args]); };
+  h.plugin.fileNamingService.syncFileTimestamps = async () => { throw Error('Unrelated writer'); };
+  const f = h.addFile('Inbox/Untitled.md', { title: 'Untitled' });
+  h.renameFile(f, f.path, 'Inbox/Named.md');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0][0], 'companion');
+  assert.deepEqual(calls[1], ['title', f, { bypassCreationGrace: true, renamedFromPath: 'Inbox/Untitled.md' }]);
+  h.cleanup();
+});
+
+for (const disabled of ['setting', 'automation']) {
+  test(`Markdown rename avoids the title writer when ${disabled} is disabled`, () => {
+    const h = createHarness();
+    h.plugin.settings.autoSyncTitleFromFilename = disabled !== 'setting';
+    h.plugin.canRunBackgroundAutomation = () => disabled !== 'automation';
+    h.plugin.fileNamingService.syncTitleFromFilename = async () => { throw Error('Unexpected title writer'); };
+    const f = h.addFile('Inbox/Untitled.md');
+    h.renameFile(f, f.path, 'Inbox/Named.md');
+    h.cleanup();
+  });
+}

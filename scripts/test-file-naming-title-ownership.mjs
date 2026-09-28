@@ -279,3 +279,107 @@ for (const marker of ['tpsId: native-record', 'kind: workout-session', 'tags: [t
     assert.equal(f.stats.events, 0);
   });
 }
+
+const syncRename = (f, previousPath = 'Inbox/Previous name.md') => f.service.syncTitleFromFilename(f.file, {
+  bypassCreationGrace: true,
+  renamedFromPath: previousPath,
+});
+
+test('explicit rename synchronizes an authored title once, preserving the body and alias', async () => {
+  const f = fixture('---\ntitle: Previous name\n---\nKeep body\n', 'New name');
+  await syncRename(f);
+  assert.equal(f.frontmatter().title, 'New name');
+  assert.deepEqual(f.frontmatter().aliases, ['Previous name']);
+  assert.ok(f.source().endsWith('Keep body\n'));
+  assert.equal(f.stats.modifies, 1);
+  const raw = f.stats.rawReads;
+  for (let i = 0; i < 100; i++) await syncRename(f);
+  assert.equal(f.stats.modifies, 1);
+  assert.equal(f.stats.queues, 1);
+  assert.equal(f.stats.rawReads, raw);
+});
+
+test('moving a file without changing its name does not read or rewrite its authored title', async () => {
+  const f = fixture('---\ntitle: Authored display title\n---\nKeep body\n', 'Filename');
+  for (let i = 0; i < 100; i++) await syncRename(f, 'Other/Folder/Filename.md');
+  assert.equal(f.frontmatter().title, 'Authored display title');
+  assert.equal(f.stats.cachedReads, 0);
+  assert.equal(f.stats.rawReads, 0);
+  assert.equal(f.stats.queues, 0);
+});
+
+for (const [title, basename, scheduled] of [
+  ['Question: why?', 'Question why', ''],
+  ['Planning', '2026-09-28 Planning', '2026-09-28'],
+]) {
+  test(`title-owned filename synchronization preserves ${title}`, async () => {
+    const f = fixture(`---\ntitle: "${title}"\n${scheduled ? `scheduled: ${scheduled}\n` : ''}---\nKeep body\n`, basename);
+    // Use the configured filename formatter, including platform sanitization/date format.
+    f.rename(f.service.buildExpectedBasename(title, scheduled));
+    await syncRename(f);
+    assert.equal(f.frontmatter().title, title);
+    assert.equal(f.stats.queues, 0);
+    assert.equal(f.stats.rawReads, 0);
+    assert.equal(f.stats.modifies, 0);
+  });
+}
+
+for (const boundary of ['beforeWrite', 'beforeProcess']) {
+  test(`an explicit rename does not overwrite a newer title at ${boundary}`, async () => {
+    const f = fixture('---\ntitle: Previous name\n---\nKeep body\n', 'New name');
+    const source = '---\ntitle: Newer authored title\n---\nNewer body\n';
+    f[boundary](() => f.setSource(source));
+    await syncRename(f);
+    assert.equal(f.source(), source);
+    assert.equal(f.stats.modifies, 0);
+  });
+}
+
+test('rename title synchronization respects the disabled setting without reads or writes', async () => {
+  const f = fixture('---\ntitle: Previous name\n---\nKeep body\n', 'New name');
+  f.plugin.settings.autoSyncTitleFromFilename = false;
+  await syncRename(f);
+  assert.equal(f.frontmatter().title, 'Previous name');
+  assert.equal(f.stats.cachedReads, 0);
+  assert.equal(f.stats.queues, 0);
+});
+
+test('disabling title synchronization while a rename waits prevents the write', async () => {
+  const f = fixture('---\ntitle: Previous name\n---\nKeep body\n', 'New name');
+  f.beforeProcess(() => { f.plugin.settings.autoSyncTitleFromFilename = false; });
+  await syncRename(f);
+  assert.equal(f.frontmatter().title, 'Previous name');
+  assert.equal(f.stats.modifies, 0);
+});
+
+for (const marker of ['tpsId: native-record', 'kind: workout-session', 'tags: [template]']) {
+  test(`explicit rename retains new atomic ownership/exclusion: ${marker}`, async () => {
+    const f = fixture('---\ntitle: Previous name\n---\nKeep body\n', 'New name');
+    f.plugin.settings.frontmatterAutoWriteExclusions = 'tag:template';
+    const source = `---\ntitle: Previous name\n${marker}\n---\nConcurrent body\n`;
+    f.beforeProcess(() => f.setSource(source));
+    await syncRename(f);
+    assert.equal(f.source(), source);
+    assert.equal(f.stats.modifies, 0);
+  });
+}
+
+test('a newer filename supersedes an earlier rename queued for title synchronization', async () => {
+  const f = fixture('---\ntitle: Previous name\n---\nKeep body\n', 'First rename');
+  f.beforeWrite(() => { f.beforeWrite(null); f.rename('Latest rename'); });
+  await syncRename(f);
+  assert.equal(f.stats.modifies, 0);
+  await syncRename(f, 'Inbox/First rename.md');
+  assert.equal(f.frontmatter().title, 'Latest rename');
+  assert.equal(f.stats.modifies, 1);
+});
+
+test('native records skip filename-to-title work before source reads', async () => {
+  const f = fixture('---\ntitle: Native title\ntpsId: stable-id\nkind: task\n---\nKeep body\n', 'New name');
+  f.plugin.nativeRecordService.isRecordFile = () => true;
+  await syncRename(f);
+  assert.equal(f.frontmatter().title, 'Native title');
+  assert.equal(f.stats.rawReads, 0);
+  assert.equal(f.stats.cachedReads, 0);
+  assert.equal(f.stats.queues, 0);
+});

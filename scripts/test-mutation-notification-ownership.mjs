@@ -241,3 +241,54 @@ test('delegated attachment mutation retains its source/companion event and local
   assert.equal(f.events.length, 1);
   assert.deepEqual(f.delayedRefreshes, [f.file.path]);
 });
+
+for (const title of ['After', 'Question: why?']) {
+  test(`a title-owned rename event does not start a second write: ${title}`, async t => {
+    const f = fixture(t);
+    const rename = f.plugin.app.fileManager.renameFile;
+    const renameWork = [];
+    f.plugin.app.fileManager.renameFile = async (file, path) => {
+      const previousPath = file.path;
+      await rename(file, path);
+      renameWork.push(f.plugin.fileNamingService.syncTitleFromFilename(file, {
+        bypassCreationGrace: true, renamedFromPath: previousPath,
+      }));
+    };
+    await f.prompt(title);
+    await Promise.all(renameWork);
+    assert.equal(parse(f.sources.get(f.file).split('---')[1]).title, title);
+    assert.equal(f.stats.modifies, 1);
+    assert.equal(f.stats.renames, 1);
+    assert.equal(f.events.length, 1);
+    assert.equal(f.explicit.length, 1);
+    assert.ok(f.sources.get(f.file).endsWith('Keep body marker\n'));
+  });
+}
+
+test('title-driven filename completion restores authored text after core overwrites the view title', async t => {
+  const f = fixture(t);
+  const view = { file: f.file, title: 'Before' };
+  const other = { file: f.add('Unrelated'), title: 'Unrelated' };
+  const renders = [];
+  f.plugin.app.workspace.getLeavesOfType = () => [{ view }, { view: other }];
+  f.plugin.noteTitleRenderService.refreshInlineTitleForView = target => {
+    renders.push(target);
+    target.title = parse(f.sources.get(target.file).split('---')[1]).title;
+  };
+  const rename = f.plugin.app.fileManager.renameFile;
+  f.plugin.app.fileManager.renameFile = async (file, path) => {
+    // Metadata for the authored title can arrive before core's rename finishes.
+    f.plugin.noteTitleRenderService.handleMetadataChanged(file);
+    await rename(file, path);
+    view.title = file.basename;
+  };
+  await f.prompt('Question: why?');
+  assert.equal(f.file.basename, 'Question why');
+  assert.equal(view.title, 'Question: why?');
+  assert.equal(other.title, 'Unrelated');
+  assert.deepEqual(renders, [view, view]);
+  assert.equal(f.stats.modifies, 1);
+  assert.equal(f.stats.renames, 1);
+  for (let i = 0; i < 100; i++) await f.plugin.fileNamingService.updateFilenameIfNeeded(f.file);
+  assert.deepEqual(renders, [view, view], 'unchanged filenames do not add title renders');
+});

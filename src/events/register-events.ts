@@ -798,6 +798,15 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                             error,
                         });
                     });
+                // Companion bookkeeping must not swallow ordinary filename edits.
+                // The committed rename owns title synchronization; no navigation
+                // settlement timer or unrelated maintenance is needed here.
+                if (plugin.canRunBackgroundAutomation() && plugin.settings.autoSyncTitleFromFilename) {
+                    void plugin.fileNamingService.syncTitleFromFilename(file, {
+                        bypassCreationGrace: true,
+                        renamedFromPath: oldPath,
+                    });
+                }
                 return;
             }
             if (file instanceof TFile && (
