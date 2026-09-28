@@ -1,5 +1,15 @@
 # TPS Global Context Menu
 
+## 3.6.15 — One Daily Note navigation authority
+
+The date strip now resolves existing notes and creation paths through the same Daily Notes API used by Navigator. A filename match elsewhere in the vault no longer substitutes an unrelated or archived non-Daily note. Recognized legacy Daily Notes still open in their current location without reconciliation or a write. Existing canonical notes retain the API's read-only observation behavior while other metadata is pending. If identity is not ready and no note can be observed, navigation reports that condition without starting creation.
+
+Date-strip visibility uses the shared file classifier, including configured kind/tag mappings and non-Daily exclusions; scheduled-note date parsing retains its existing behavior. Configuration comes from the existing naming-service snapshot, removing the strip's independent Periodic-first precedence. Confirmed creation passes the displayed expected path to the existing creator so a folder/format change cannot silently redirect it. Cancellation, source-leaf selection, open options and template ownership remain unchanged. No settings, public API version, data migration, cache, watcher, timer or repair is added. Minimum Obsidian remains 1.10.0.
+
+The routing regression executes the real navigation manager with mocked API/UI boundaries; shared identity/creation semantics have separate composed tests. It covers archived collisions, recognized legacy notes, 100 unchanged opens, competing configuration, changed confirmation targets, cold identity, refusal/cancel and classification. Validation passed 117 focused, 1,356 declared-suite and 197 supplemental checks, with zero failures/skips, plus TypeScript and the separate normal Test build. Named disable/loadManifest/enable loaded 3.6.15 with unchanged data.json. Actual foreground UI verified template creation, an archived filename collision producing the correct confirmation, cancellation, refusal after the confirmed folder changed, and recognized legacy navigation with no creation/modify/process/rename. The legacy body replaced a distinct anchor body in 31 ms in one warm desktop sample; this is not a general speed claim. Four synthetic notes and their template were archived directly with byte checks; seven configurations and the prior leaf/window were restored. The scheduled-note button test temporarily disabled the competing top-parent navigation control in memory, then restored it. Templater, physical iPhone, cold startup and native-baseline parity remain unverified. See [3.6.15 release notes](release-notes/3.6.15.md).
+
+Measurement correction: the 3.6.14 repeated-template readiness probe checked the expected path plus a body marker shared by those templates. It therefore did not prove when the old body was replaced. Treat its repeated date-strip timings as provisional; first creation from an empty leaf and the source/operation-count regressions remain useful evidence. Future body-switch probes must require unique per-file content and disappearance of the previous content. No production speed or overall native-performance percentage is established.
+
 ## 3.6.14 — Reuse Daily Note metadata readiness
 
 Daily Note reconciliation now consults the existing naming service's metadata-readiness result before its legacy whole-vault readiness check. That service already observes initialization/global resolution and pending current-source generations. Installed template creation previously repeated the whole-vault check three times while the owner already reported ready. The candidate identity index and all current-source, collision, configuration, template, and concurrent-generation guards remain in place. No cache, watcher, timer, setting, data migration, or API version is added.
@@ -139,7 +149,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.6.14](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.14) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.6.15](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.15) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 

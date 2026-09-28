@@ -778,7 +778,7 @@ test('all active GCM Daily Note creation routes use the canonical creator', () =
   assert.match(noteOperationSource, /ensureDailyNoteTitleFallback\(fm, titleValue\)/u);
   assert.doesNotMatch(noteOperationSource, /fm\.title\s*=\s*titleValue/u);
 
-  assert.match(dailyNavSource, /return this\.plugin\.noteOperationService\.ensureDailyNote\(`\$\{isoDate\} 00:00:00`\)/u);
+  assert.match(dailyNavSource, /dailyNotes\.ensureForIsoDate\(isoDate, \{ expectedPath: targetPath \}\)/u);
   assert.doesNotMatch(dailyNavSource, /fm\.title\s*=\s*titleValue/u);
   assert.match(timeTrackingSource, /private async ensureDailyNoteForDate\(date: Date\): Promise<TFile>/u);
   assert.match(timeTrackingSource, /noteOperationService\.ensureDailyNote\(`\$\{isoDate\} 00:00:00`\)/u);

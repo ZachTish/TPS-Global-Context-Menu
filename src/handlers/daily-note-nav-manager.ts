@@ -1,8 +1,9 @@
-import { App, Component, MarkdownView, Modal, TFile, WorkspaceLeaf, setIcon, normalizePath, Notice, Platform } from "obsidian";
+import { App, Component, MarkdownView, Modal, TFile, WorkspaceLeaf, setIcon, Notice, Platform } from "obsidian";
 import TPSGlobalContextMenuPlugin from "../main";
 import * as logger from "../logger";
 import { isStrictSourceMode } from "../services/leaf-resolver";
 import { getDailyNavDayOffsets, normalizeDailyNavDayCount } from "../utils/daily-note-nav-days";
+import { parseDailyNoteFileDate } from "../utils/daily-note-task-schedule";
 
 type DailyNavTarget = {
     leaf: WorkspaceLeaf;
@@ -75,36 +76,6 @@ export class DailyNoteNavManager extends Component {
         for (const timer of this._layoutRetryTimers) clearTimeout(timer);
         this._layoutRetryTimers = [];
         this.detachNav();
-    }
-
-    getDailyNoteSettings() {
-        try {
-            // 1. Try Periodic Notes plugin (community plugin)
-            // @ts-ignore
-            const periodicNotes = this.plugin.app.plugins.getPlugin("periodic-notes");
-            if (periodicNotes && periodicNotes.settings?.daily) {
-                return {
-                    format: periodicNotes.settings.daily.format || "YYYY-MM-DD",
-                    folder: periodicNotes.settings.daily.folder || "",
-                    template: periodicNotes.settings.daily.template || ""
-                };
-            }
-
-            // 2. Try Core Daily Notes plugin (internal plugin)
-            // @ts-ignore - internal API
-            const internalPlugins = (this.plugin.app as any).internalPlugins;
-            const dailyNotes = internalPlugins.getPluginById("daily-notes");
-            if (dailyNotes && dailyNotes.instance && dailyNotes.instance.options) {
-                return {
-                    format: dailyNotes.instance.options.format || "YYYY-MM-DD",
-                    folder: dailyNotes.instance.options.folder || "",
-                    template: dailyNotes.instance.options.template || ""
-                };
-            }
-        } catch (e) {
-            logger.error("Failed to load daily note settings", e);
-        }
-        return { format: "YYYY-MM-DD", folder: "", template: "" };
     }
 
     refresh() {
@@ -198,15 +169,9 @@ export class DailyNoteNavManager extends Component {
         const file = (leaf.view as any).file;
         if (!(file instanceof TFile)) return null;
 
-        const { format } = this.getDailyNoteSettings();
-        const cache = this.plugin.app.metadataCache.getFileCache(file);
-        const frontmatter = cache?.frontmatter;
-        const basenameDate = this.parseDailyNoteBasename(file.basename, format);
-        const hasDailyNoteType = this.hasDailyNoteType(frontmatter);
-        if (!basenameDate && !hasDailyNoteType) return null;
-        const date = this.resolveDailyNoteDate(file, format, frontmatter, basenameDate);
-        if (!date) return null;
-        return { leaf, isoDate: date.format("YYYY-MM-DD"), kind: "daily-note" };
+        if (!this.plugin.fileNamingService.getDailyNoteConfigurationSnapshot()) return null;
+        const isoDate = parseDailyNoteFileDate(this.plugin.app, this.plugin.settings, file);
+        return isoDate ? { leaf, isoDate, kind: "daily-note" } : null;
     }
 
     private getScheduledNoteLeafInfo(leaf: WorkspaceLeaf | null | undefined): DailyNavTarget | null {
@@ -214,57 +179,13 @@ export class DailyNoteNavManager extends Component {
         const file = (leaf.view as any).file;
         if (!(file instanceof TFile)) return null;
 
-        const { format } = this.getDailyNoteSettings();
+        const format = this.plugin.fileNamingService.getDailyNoteConfigurationSnapshot()?.format;
         const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
         const scheduledDate = this.parseDailyNoteDateValue(frontmatter?.scheduled, format);
         if (!scheduledDate) return null;
         if (this.getDailyNoteLeafInfo(leaf)) return null;
 
         return { leaf, isoDate: scheduledDate.format("YYYY-MM-DD"), kind: "scheduled-note" };
-    }
-
-    private hasDailyNoteType(frontmatter: Record<string, any> | null | undefined): boolean {
-        if (!frontmatter) return false;
-        return this.frontmatterValueContains(frontmatter.types, "dailynote")
-            || this.frontmatterValueContains(frontmatter.type, "dailynote")
-            || this.frontmatterValueContains(frontmatter.tags, "dailynote")
-            || this.frontmatterValueContains(frontmatter.tag, "dailynote");
-    }
-
-    private frontmatterValueContains(value: unknown, expected: string): boolean {
-        const normalizedExpected = this.normalizeDailyNoteMarker(expected);
-        return this.flattenFrontmatterValue(value).some((entry) => this.normalizeDailyNoteMarker(entry) === normalizedExpected);
-    }
-
-    private flattenFrontmatterValue(value: unknown): string[] {
-        if (Array.isArray(value)) return value.flatMap((entry) => this.flattenFrontmatterValue(entry));
-        if (value && typeof value === "object") {
-            return Object.values(value as Record<string, unknown>).flatMap((entry) => this.flattenFrontmatterValue(entry));
-        }
-        if (typeof value === "string") {
-            return value.split(/[,;]/).map((entry) => entry.trim()).filter(Boolean);
-        }
-        if (value == null) return [];
-        return [String(value)];
-    }
-
-    private normalizeDailyNoteMarker(value: unknown): string {
-        return String(value ?? "").trim().replace(/^#/, "").replace(/[\s_-]+/g, "").toLowerCase();
-    }
-
-    private resolveDailyNoteDate(
-        file: TFile,
-        format: string | undefined,
-        frontmatter: Record<string, any> | null | undefined,
-        basenameDate: any | null,
-    ): any | null {
-        if (frontmatter) {
-            for (const key of ["scheduled", "date", "day", "daily", "title"]) {
-                const parsed = this.parseDailyNoteDateValue(frontmatter[key], format);
-                if (parsed) return parsed;
-            }
-        }
-        return basenameDate ?? this.parseDailyNoteBasename(file.basename, format);
     }
 
     private isLeafVisible(leaf: WorkspaceLeaf | null | undefined): boolean {
@@ -468,13 +389,6 @@ export class DailyNoteNavManager extends Component {
             "MMM D, YYYY",
         ];
         return Array.from(new Set(formats.map((format) => String(format || "").trim()).filter(Boolean)));
-    }
-
-    private parseDailyNoteBasename(basename: string, primaryFormat?: string): any | null {
-        const m = (window as any).moment;
-        if (!m) return null;
-        const parsed = m(String(basename || "").trim(), this.getDailyNoteDateFormats(primaryFormat), true);
-        return parsed?.isValid?.() ? parsed : null;
     }
 
     private parseDailyNoteDateValue(value: unknown, primaryFormat?: string): any | null {
@@ -685,18 +599,6 @@ export class DailyNoteNavManager extends Component {
         el.addEventListener("touchstart", suppressPointerDown, { capture: true, passive: false, signal } as any);
     }
 
-    private async ensureDailyNoteExists(targetPath: string, titleValue: string, targetDate: any): Promise<TFile | null> {
-        const isoDate = targetDate?.format?.("YYYY-MM-DD") ?? null;
-        if (!isoDate) {
-            logger.warn("Daily Note navigation could not resolve the requested date", {
-                targetPath,
-                titleValue,
-            });
-            return null;
-        }
-        return this.plugin.noteOperationService.ensureDailyNote(`${isoDate} 00:00:00`);
-    }
-
     async goToDate(baseIsoDateStr: string | null, offset: number, sourceLeaf?: WorkspaceLeaf | null) {
         try {
             const m = (window as any).moment;
@@ -704,48 +606,27 @@ export class DailyNoteNavManager extends Component {
                 ? m().startOf("day")
                 : m(baseIsoDateStr, "YYYY-MM-DD").add(offset, "days");
 
-            const { format, folder } = this.getDailyNoteSettings();
-            const targetFilename = targetDate.format(format);
-
-            // 1. Construct the canonical path
-            let targetPath = folder ? `${folder}/${targetFilename}` : targetFilename;
-            if (!targetPath.endsWith(".md")) targetPath += ".md";
-            targetPath = normalizePath(targetPath);
-
-            // 2. Exact vault path lookup (correct API — avoids cross-folder collisions)
-            let file: TFile | null =
-                (this.plugin.app.vault.getAbstractFileByPath(targetPath) as TFile | null) ?? null;
-
-            // 3. Fallback: search all accepted daily-note filename formats.
-            if (!(file instanceof TFile)) {
-                for (const candidateFormat of this.getDailyNoteDateFormats(format)) {
-                    const candidateFilename = targetDate.format(candidateFormat);
-                    let candidatePath = folder ? `${folder}/${candidateFilename}` : candidateFilename;
-                    if (!candidatePath.endsWith(".md")) candidatePath += ".md";
-                    const candidate = this.plugin.app.vault.getAbstractFileByPath(normalizePath(candidatePath));
-                    if (candidate instanceof TFile) {
-                        file = candidate;
-                        break;
-                    }
-                }
+            await this.plugin.fileNamingService.whenDailyNoteConfigurationReady();
+            const dailyNotes = (this.plugin as any).api?.dailyNotes;
+            const isoDate = targetDate.format("YYYY-MM-DD");
+            const targetPath = dailyNotes?.pathForIsoDate(isoDate);
+            if (!targetPath) {
+                new Notice("Daily Note configuration is not ready.");
+                return;
             }
 
-            // 4. Fallback: search by filename only (handles files moved out of configured folder)
+            // Share the same identity and configuration as Navigator/creation.
+            // Filename-only lookup can select an unrelated or archived note.
+            let file: TFile | null = dailyNotes.findForIsoDate(isoDate);
             if (!(file instanceof TFile)) {
-                for (const candidateFormat of this.getDailyNoteDateFormats(format)) {
-                    const justName = targetDate.format(candidateFormat) + ".md";
-                    const found = this.plugin.app.metadataCache.getFirstLinkpathDest(justName, folder || "");
-                    if (found instanceof TFile) {
-                        file = found;
-                        break;
-                    }
+                if (!this.plugin.fileNamingService.isDailyNoteMetadataCacheReady()) {
+                    new Notice("Daily Notes are still indexing. Try again when indexing finishes.");
+                    return;
                 }
-            }
-
-            if (!(file instanceof TFile)) {
+                const targetFilename = targetPath.split("/").pop()?.replace(/\.md$/i, "") || isoDate;
                 const shouldCreate = await this.confirmCreateDailyNote(targetFilename, targetPath);
                 if (!shouldCreate) return;
-                file = await this.ensureDailyNoteExists(targetPath, targetFilename, targetDate);
+                file = await dailyNotes.ensureForIsoDate(isoDate, { expectedPath: targetPath });
             }
 
             if (file instanceof TFile) {

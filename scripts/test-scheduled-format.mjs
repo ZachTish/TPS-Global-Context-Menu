@@ -59,7 +59,8 @@ test('daily-note scheduled writers use midnight timestamp, not bare date or T se
   assert.match(dailyNoteSchedule, /return `\$\{String\(isoDate \|\| ''\)\.trim\(\)\} 00:00:00`/);
   assert.match(noteOperation, /const scheduledValue = isoDate \? getDailyNoteScheduledValueForIsoDate\(isoDate\) : `\$\{titleValue\} 00:00:00`/);
   assert.match(noteOperation, /fm\.scheduled = scheduledValue/);
-  assert.match(dailyNav, /noteOperationService\.ensureDailyNote\(`\$\{isoDate\} 00:00:00`\)/);
+  assert.match(dailyNav, /dailyNotes\.ensureForIsoDate\(isoDate, \{ expectedPath: targetPath \}\)/);
+  assert.match(read('src/plugin-api.ts'), /return plugin\.noteOperationService\.ensureDailyNote\(\s*`\$\{normalized\} 00:00:00`/);
   assert.doesNotMatch(dailyNav, /fm\.scheduled\s*=/);
   assert.match(fileNaming, /const expectedScheduled = `\$\{expectedDate\} 00:00:00`/);
   assert.doesNotMatch(fileNaming, /frontmatter\.scheduled = expectedIso/);
