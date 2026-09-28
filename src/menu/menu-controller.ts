@@ -258,8 +258,15 @@ export class MenuController {
       .map(p => p.replace(/\/+$/, ''));
     const folderSet = new Set(normalizedPaths);
 
-    const leafPaths = normalizedPaths
-      .filter(path => !normalizedPaths.some(other => other !== path && other.startsWith(path + '/')));
+    const nonLeafPaths = new Set<string>();
+    for (const path of normalizedPaths) {
+      let separator = path.lastIndexOf('/');
+      while (separator > 0) {
+        nonLeafPaths.add(path.slice(0, separator));
+        separator = path.lastIndexOf('/', separator - 1);
+      }
+    }
+    const leafPaths = normalizedPaths.filter(path => !nonLeafPaths.has(path));
 
     const directFileCounts = new Map<string, number>();
     for (const file of files) {
