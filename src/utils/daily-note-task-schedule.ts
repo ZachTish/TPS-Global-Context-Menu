@@ -885,6 +885,12 @@ export function isMarkdownMetadataEntrySettled(app: App, file: TFile): boolean {
 async function waitForDailyNoteMetadataCache(app: App): Promise<'ready' | 'refreshed' | 'blocked'> {
   const metadataCache = (app as any)?.metadataCache;
   if (!metadataCache?.getFileCache || !app.vault?.getMarkdownFiles) return 'ready';
+  // The owning service already observes global resolution and drains current
+  // vault generations. Reuse that proof instead of enumerating the whole vault
+  // at each creation boundary. Dirty-source and selected-file checks below
+  // still validate current bytes; readiness never authorizes a mutation.
+  const naming = (app as any)?.plugins?.plugins?.['tps-global-context-menu']?.fileNamingService;
+  if (naming?.isDailyNoteMetadataCacheReady?.() === true) return 'ready';
   const deadline = Date.now() + 5_000;
   const waitedForInitialization = metadataCache.initialized === false;
   while (metadataCache.initialized === false && Date.now() < deadline) {

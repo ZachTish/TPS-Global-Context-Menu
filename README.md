@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 3.6.14 — Reuse Daily Note metadata readiness
+
+Daily Note reconciliation now consults the existing naming service's metadata-readiness result before its legacy whole-vault readiness check. That service already observes initialization/global resolution and pending current-source generations. Installed template creation previously repeated the whole-vault check three times while the owner already reported ready. The candidate identity index and all current-source, collision, configuration, template, and concurrent-generation guards remain in place. No cache, watcher, timer, setting, data migration, or API version is added.
+
+When the owner is unavailable or unready, the existing metadata wait/check still applies. Readiness skips inspection work only; it never authorizes writing stale content. Regression coverage counts enumerations and raw reads across 100 absent and 100 existing lookups, checks newer source identity and edits during reads, and retains unresolved-metadata gating. Minimum Obsidian remains 1.10.0. Validation and installed limitations are recorded in [3.6.14 release notes](release-notes/3.6.14.md).
+
+Final validation: 105 focused, 1,348 declared-suite and 197 supplemental tests passed with no failures/skips. TypeScript and the separate production build deployed only to Test; named disable/loadManifest/enable loaded 3.6.14 with unchanged data.json. Three actual foreground template creations recorded 379/317/314 ms to visible body versus 429/460/334 ms before; Markdown enumerations before display fell from 5/5/4 to 2/1/1, with unchanged create/write counts and no measured long tasks. The two date-strip repeat dates changed to avoid archived fixture-name collisions, so operation counts are stronger evidence than these small timing samples. Core-template variables, authored titles, a subsequent body edit and reopening preserved content. Seven runtime configurations were restored, all six created notes and two templates were archived directly, hooks removed and the prior empty leaf/window restored. Physical iPhone, cold startup and native-baseline parity remain unverified. Templater is disabled in this test vault. An independently reproduced date-strip filename fallback can open an unrelated archived note; that routing bug is recorded separately and is unchanged by this readiness patch.
+
 ## 3.6.13 — Settle titles when filename edits finish
 
 A title-driven filename rename now refreshes the matching open title at core rename completion. Core could replace an already refreshed authored title with the sanitized or date-prefixed filename, leaving it wrong until the existing periodic title pass. The completion refresh reuses the current metadata renderer, stays read-only, and never rebuilds the note body or scans other notes. Unchanged filenames do not request another render.
@@ -131,7 +139,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.6.9](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.9) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.6.14](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.14) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 

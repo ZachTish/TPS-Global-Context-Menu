@@ -517,6 +517,84 @@ test('startup reconciliation waits for initialized metadata before trusting a no
   assert.deepEqual(harness.renames, [{ oldPath: path, targetPath: 'Sat, Aug 29 2026.md' }]);
 });
 
+function useMetadataReadinessOwner(harness, ready = true) {
+  const owner = {
+    ready,
+    calls: 0,
+    isDailyNoteMetadataCacheReady() {
+      this.calls++;
+      return this.ready && harness.app.metadataCache.initialized !== false;
+    },
+  };
+  harness.app.plugins = { plugins: { 'tps-global-context-menu': { fileNamingService: owner } } };
+  return owner;
+}
+
+test('settled Daily Note reconciliation reuses readiness across 100 absent lookups', async () => {
+  const harness = createHarness(Array.from({ length: 1000 }, (_, i) => ({ path: `Project ${i}.md` })));
+  useMetadataReadinessOwner(harness);
+  for (let i = 0; i < 100; i++) {
+    assert.deepEqual(await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-29'), { status: 'absent', file: null });
+  }
+  assert.equal(harness.markdownScanCount, 1, 'only the initial candidate index enumerates files');
+  assert.equal(harness.vaultReadCount, 0);
+  assert.deepEqual(harness.renames, []);
+});
+
+test('settled canonical lookups skip readiness scans but still validate current source every time', async () => {
+  const path = 'Sat, Aug 29 2026.md';
+  const harness = createHarness([{ path }]);
+  useMetadataReadinessOwner(harness);
+  for (let i = 0; i < 100; i++) {
+    const result = await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-29');
+    assert.equal(result.status, 'found');
+    assert.equal(result.file, harness.files.get(path));
+  }
+  assert.equal(harness.markdownScanCount, 1);
+  assert.equal(harness.vaultReadCount, 100, 'readiness never authorizes trusting stale source identity');
+  harness.contents.set(path, '---\nkind: workout-session\n---\nConcurrent workout body');
+  assert.deepEqual(await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-29'), {
+    status: 'blocked', file: null, reason: 'source-identity-changed',
+  });
+  assert.equal(harness.vaultReadCount, 101);
+  assert.deepEqual(harness.renames, []);
+});
+
+test('readiness reuse retains dirty-generation checks when an edit supersedes an in-flight read', async () => {
+  const path = 'Planning.md';
+  let changed = false;
+  const harness = createHarness([{ path, frontmatter: { kind: 'project' } }], {
+    onRead({ app, file, contents }) {
+      if (changed) return;
+      changed = true;
+      contents.set(path, '---\nkind: dailynote\nscheduled: 2026-08-29\n---\nNewer body');
+      identity.markDailyNoteCandidatePathDirty(app, file);
+    },
+  });
+  useMetadataReadinessOwner(harness);
+  identity.markDailyNoteCandidatePathDirty(harness.app, harness.files.get(path));
+  const result = await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-29');
+  assert.equal(result.status, 'found');
+  assert.equal(result.file.path, 'Sat, Aug 29 2026.md');
+  assert.equal(harness.contents.get(result.file.path), '---\nkind: dailynote\nscheduled: 2026-08-29\n---\nNewer body');
+  assert.equal(harness.vaultReadCount, 3, 'older read, newer dirty generation, then final authoritative source');
+});
+
+test('unready owner retains the existing unresolved-metadata gate', async () => {
+  const path = 'Planning.md';
+  const harness = createHarness([{ path, frontmatter: { kind: 'dailynote', scheduled: '2026-08-29' } }]);
+  useMetadataReadinessOwner(harness, false);
+  const getCache = harness.app.metadataCache.getFileCache.bind(harness.app.metadataCache);
+  let ready = false;
+  harness.app.metadataCache.getFileCache = file => ready ? getCache(file) : null;
+  const pending = identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-29');
+  assert.equal(harness.renames.length, 0);
+  setTimeout(() => { ready = true; }, 30);
+  const result = await pending;
+  assert.equal(result.status, 'found');
+  assert.equal(result.file.path, 'Sat, Aug 29 2026.md');
+});
+
 test('a newer dirty generation supersedes an older async source read', async () => {
   const path = 'Concurrent planning.md';
   let changedDuringRead = false;
