@@ -26,6 +26,7 @@ const bundle = await build({
       "export { FrontmatterMutationService } from './src/services/frontmatter-mutation-service.ts';",
       "export { BulkEditService } from './src/services/bulk-edit-service.ts';",
       "export { MenuBuilder } from './src/menu/menu-builder.ts';",
+      "export { wasChecklistCompletionPromptRecentlyHandled } from './src/handlers/checklist-handler.ts';",
       "export { NoteTitleRenderService } from './src/services/note-title-render-service.ts';",
     ].join('\n'),
     resolveDir: fileURLToPath(new URL('..', import.meta.url)),
@@ -44,13 +45,17 @@ const bundle = await build({
         ['../modals/MultiFileSelectModal', 'export class MultiFileSelectModal {}'],
         ['../modals/file-properties-relink-modal', 'export const promptFilePropertiesRelink = () => {};'],
         ['../services/subitem-creation-service', 'export const promptAndCreateSubitemForParent = () => {};'],
+        ['../modals/checklist-prompt-modal', `export class ChecklistPromptModal {
+          constructor(_app, items, submit) { this.items = items; this.submit = submit; }
+          open() { const prompt = globalThis.checklistOwnershipPrompt; prompt.calls.push([...this.items]); prompt.beforeAnswer?.(); this.submit(prompt.action); }
+        }`],
       ]);
       builder.onResolve({ filter: /.*/u }, args => contextUiStubs.has(args.path) ? { path: args.path, namespace: 'context-ui' } : null);
       builder.onLoad({ filter: /.*/, namespace: 'context-ui' }, args => ({ loader: 'js', contents: contextUiStubs.get(args.path) }));
-      builder.onResolve({ filter: /(?:text-input-modal|checklist-handler|parent-link-handler)$/u }, args => ({ path: args.path.split('/').at(-1), namespace: 'mutation-ui' }));
+      builder.onResolve({ filter: /(?:text-input-modal|parent-link-handler)$/u }, args => ({ path: args.path.split('/').at(-1), namespace: 'mutation-ui' }));
       builder.onLoad({ filter: /.*/, namespace: 'mutation-ui' }, args => ({ loader: 'js', contents: args.path === 'text-input-modal'
         ? `export class TextInputModal { constructor(_app, _label, _value, submit) { globalThis.mutationTitleSubmit = submit; } open() {} }`
-        : `export class ChecklistHandler {} export class ParentLinkHandler {}` }));
+        : `export class ParentLinkHandler {}` }));
       builder.onResolve({ filter: /^obsidian$/u }, () => ({ path: 'obsidian', namespace: 'title-ownership' }));
       builder.onLoad({ filter: /.*/, namespace: 'title-ownership' }, () => ({
         loader: 'js',
@@ -73,7 +78,7 @@ const bundle = await build({
     },
   }],
 });
-const { FileNamingService, FrontmatterMutationService, BulkEditService, NoteTitleRenderService, MenuBuilder } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
+const { FileNamingService, FrontmatterMutationService, BulkEditService, NoteTitleRenderService, MenuBuilder, wasChecklistCompletionPromptRecentlyHandled } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
 
 function fixture(t, { title = 'Before', autoRename = true, extension = 'md' } = {}) {
   // Expected write failures are asserted below; suppress their bundled data-URL stacks.
@@ -399,4 +404,142 @@ test('attachment context edits retain the existing delegated event and delayed m
   f.flush();
   assert.deepEqual(f.delayedRefreshes, [f.file.path]);
   assert.equal(h.rules.length, 1);
+});
+
+function completionHarness(t, { action = 'ignore', body = '- [ ] Keep incomplete item\n', key = 'status' } = {}) {
+  const f = fixture(t, { autoRename: false });
+  f.plugin.settings.checkOpenChecklistItems = true;
+  f.plugin.sharedServices = { status: { getStatusPropertyKey: () => key } };
+  f.sources.set(f.file, `---\ntitle: Before\n${key}: todo\n---\n${body}`);
+  const initial = f.sources.get(f.file);
+  const prompt = { action, calls: [] };
+  globalThis.checklistOwnershipPrompt = prompt;
+  t.after(() => { delete globalThis.checklistOwnershipPrompt; });
+  const handler = f.plugin.bulkEditService.checklistHandler;
+  const scans = t.mock.method(handler, 'scanChecklistItems');
+  const handles = t.mock.method(handler, 'handleChecklistCompletion');
+  t.mock.method(window, 'moment', value => value === undefined
+    ? { format: () => '2026-09-28T12:00:00' } : momentForTest(value));
+  return { ...f, initial, body, prompt, scans, handles, bulk: f.plugin.bulkEditService };
+}
+
+test('status completion checks once and accepts Ignore without a second prompt', async t => {
+  const f = completionHarness(t);
+  assert.equal(await f.bulk.setStatus([f.file], 'complete'), 1);
+  assert.equal(f.handles.mock.callCount(), 1);
+  assert.equal(f.scans.mock.callCount(), 1);
+  assert.equal(f.prompt.calls.length, 1);
+  assert.equal(f.stats.modifies, 1);
+  assert.equal(f.events.length, 1);
+  assert.match(f.sources.get(f.file), /status: complete/);
+  assert.ok(f.sources.get(f.file).endsWith(f.body));
+});
+
+test('completion without open items scans once per action and unchanged bursts do not write', async t => {
+  const f = completionHarness(t, { body: '- [x] Already completed item\n' });
+  assert.equal(await f.bulk.setStatus([f.file], 'complete'), 1);
+  for (let i = 0; i < 20; i++) assert.equal(await f.bulk.setStatus([f.file], 'complete'), 0);
+  assert.equal(f.scans.mock.callCount(), 21, 'one configured check per explicit action');
+  assert.equal(f.prompt.calls.length, 0);
+  assert.equal(f.stats.modifies, 1);
+  assert.equal(f.events.length, 1);
+  assert.ok(f.sources.get(f.file).endsWith(f.body));
+});
+
+for (const action of ['cancel', 'open']) {
+  test(`checklist ${action} aborts completion without changing the source`, async t => {
+    const f = completionHarness(t, { action });
+    const opened = [];
+    f.plugin.app.workspace.getLeaf = () => ({ async openFile(file) { opened.push(file); } });
+    assert.equal(await f.bulk.setStatus([f.file], 'complete'), 0);
+    assert.equal(f.scans.mock.callCount(), 1);
+    assert.equal(f.prompt.calls.length, 1);
+    assert.equal(f.sources.get(f.file), f.initial);
+    assert.equal(f.stats.modifies + f.events.length, 0);
+    assert.deepEqual(opened, action === 'open' ? [f.file] : []);
+  });
+}
+
+for (const [action, marker] of [['complete', 'x'], ['canceled', '-']]) {
+  test(`checklist ${action} changes items and status without a redundant second scan`, async t => {
+    const f = completionHarness(t, { action });
+    assert.equal(await f.bulk.setStatus([f.file], 'complete'), 1);
+    assert.equal(f.scans.mock.callCount(), 1);
+    assert.equal(f.prompt.calls.length, 1);
+    assert.equal(f.stats.modifies, 2, 'one checklist body write and one status write');
+    assert.ok(f.sources.get(f.file).endsWith(`- [${marker}] Keep incomplete item\n`));
+    assert.match(f.sources.get(f.file), /status: complete/);
+  });
+}
+
+test('direct mapped-status frontmatter completion retains the same checklist gate', async t => {
+  const f = completionHarness(t, { key: 'taskStatus' });
+  assert.equal(await f.bulk.updateFrontmatter([f.file], { TASKSTATUS: 'complete' }), 1);
+  assert.equal(f.scans.mock.callCount(), 1);
+  assert.equal(f.prompt.calls.length, 1);
+  assert.match(f.sources.get(f.file), /taskStatus: complete/i);
+  assert.ok(f.sources.get(f.file).endsWith(f.body));
+});
+
+test('completion rechecks a write guard changed while the checklist prompt is open', async t => {
+  const f = completionHarness(t, { action: 'complete' });
+  let allowed = true;
+  f.prompt.beforeAnswer = () => { allowed = false; };
+  assert.equal(await f.bulk.setStatus([f.file], 'complete', { writeGuard: () => allowed }), 0);
+  assert.equal(f.prompt.calls.length, 1);
+  assert.equal(f.sources.get(f.file), f.initial);
+  assert.equal(f.stats.modifies + f.events.length, 0);
+});
+
+test('parent cancellation still happens before the shared checklist owner', async t => {
+  const f = completionHarness(t);
+  f.plugin.settings.checkParentLinkStatuses = true;
+  f.plugin.parentLinkResolutionService = { isRelationshipTarget: () => true };
+  f.bulk.parentLinkHandler.isCompletionStatus = () => true;
+  f.bulk.parentLinkHandler.handleParentLinkCompletion = async () => false;
+  assert.equal(await f.bulk.setStatus([f.file], 'complete'), 0);
+  assert.equal(f.scans.mock.callCount(), 0);
+  assert.equal(f.sources.get(f.file), f.initial);
+});
+
+test('Ignore preserves a concurrent body edit made while the prompt is open', async t => {
+  const f = completionHarness(t);
+  f.prompt.beforeAnswer = () => { f.sources.set(f.file, f.sources.get(f.file) + 'Concurrent body edit\n'); };
+  assert.equal(await f.bulk.setStatus([f.file], 'complete'), 1);
+  assert.equal(f.prompt.calls.length, 1);
+  assert.ok(f.sources.get(f.file).endsWith(f.body + 'Concurrent body edit\n'));
+  assert.equal(f.stats.modifies, 1);
+});
+
+test('a slow checklist decision remains recognized by the external-status listener', async t => {
+  const f = completionHarness(t);
+  let now = Date.now();
+  t.mock.method(Date, 'now', () => now);
+  f.prompt.beforeAnswer = () => { now += 10_000; };
+  assert.equal(await f.bulk.setStatus([f.file], 'complete'), 1);
+  assert.equal(f.prompt.calls.length, 1);
+  assert.equal(wasChecklistCompletionPromptRecentlyHandled(f.file), true,
+    'the existing external-status guard must see the completed decision, not an expired prompt-start timestamp');
+  now += 4_001;
+  assert.equal(wasChecklistCompletionPromptRecentlyHandled(f.file), false,
+    'independent future external completions retain the existing expiration');
+});
+
+test('multi-file completion retains the existing no-prompt policy', async t => {
+  const f = completionHarness(t);
+  f.add('Second completion');
+  assert.equal(await f.bulk.setStatus(f.files, 'complete'), 2);
+  assert.equal(f.scans.mock.callCount(), 0);
+  assert.equal(f.prompt.calls.length, 0);
+  assert.equal(f.stats.modifies, 2);
+});
+
+test('disabled checklist checks and non-completion statuses do not scan', async t => {
+  const f = completionHarness(t);
+  await f.bulk.setStatus([f.file], 'working');
+  f.plugin.settings.checkOpenChecklistItems = false;
+  await f.bulk.setStatus([f.file], 'complete');
+  assert.equal(f.scans.mock.callCount(), 0);
+  assert.equal(f.prompt.calls.length, 0);
+  assert.ok(f.sources.get(f.file).endsWith(f.body));
 });

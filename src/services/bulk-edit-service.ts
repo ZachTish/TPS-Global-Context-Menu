@@ -1234,22 +1234,7 @@ export class BulkEditService {
             }
         }
 
-        // Checklist Prompt Logic (Single file only to avoid spam)
-        if (
-            this.plugin.settings.checkOpenChecklistItems &&
-            this.isChecklistCompletionStatus(status) &&
-            files.length === 1 &&
-            files[0].extension?.toLowerCase() === 'md'
-        ) {
-            const canProceed = await this.checklistHandler.handleChecklistCompletion(
-                files[0],
-                options.writeGuard ? () => options.writeGuard?.(files[0]) !== false : undefined,
-            );
-            if (!canProceed) {
-                return 0;
-            }
-        }
-
+        // The shared writer owns the checklist decision for every status route.
         return this.updateFrontmatter(
             files,
             { [this.getWorkflowStatusKey()]: status },

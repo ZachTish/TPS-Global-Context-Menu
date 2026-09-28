@@ -84,11 +84,11 @@ export class ChecklistHandler {
    */
   async handleChecklistCompletion(file: TFile, writeGuard?: () => boolean): Promise<boolean> {
     if (writeGuard?.() === false) return false;
-    markChecklistCompletionPromptHandled(file);
     const incompleteItems = await this.scanChecklistItems(file);
     if (writeGuard?.() === false) return false;
 
     if (incompleteItems.length === 0) {
+      markChecklistCompletionPromptHandled(file);
       return true;
     }
 
@@ -119,6 +119,7 @@ export class ChecklistHandler {
     }
     if (writeGuard?.() === false) return false;
     // 'ignore' falls through to set status
+    markChecklistCompletionPromptHandled(file);
     return true;
   }
 }
