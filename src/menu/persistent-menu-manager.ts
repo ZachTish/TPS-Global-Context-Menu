@@ -7343,8 +7343,9 @@ export class PersistentMenuManager {
     }
     const shouldRebuildInlineSubitems = options.rebuildInlineSubitems === true;
 
-    for (const [view, instances] of this.menus.entries()) {
+    for (const view of new Set([...this.menus.keys(), ...this.topParentNavs.keys()])) {
       if (view.file?.path === file.path) {
+        const instances = this.menus.get(view);
         const deferStructuralRefresh = this.shouldDeferStructuralRefreshForTyping(view, file);
         if (deferStructuralRefresh) {
           this.schedulePostTypingStructuralRefresh(file);
@@ -7353,7 +7354,7 @@ export class PersistentMenuManager {
         // Update header badges in-place instead of recreating the entire menu
         // This prevents visual jitter/movement
 
-        if (instances.live) {
+        if (instances?.live) {
           this.applyPersistentMenuGeometry(view, instances.live);
           this.applyMenuVisibility(instances.live);
           this.ensureSwipeGestureTracking(view);
@@ -7366,7 +7367,7 @@ export class PersistentMenuManager {
           }
         }
 
-        if (instances.reading) {
+        if (instances?.reading) {
           this.applyPersistentMenuGeometry(view, instances.reading);
           this.applyMenuVisibility(instances.reading);
           this.ensureSwipeGestureTracking(view);
@@ -7490,13 +7491,13 @@ export class PersistentMenuManager {
         this.schedulePostTypingStructuralRefresh(file);
         return;
       }
-      for (const [view] of this.menus.entries()) {
+      for (const view of new Set([...this.menus.keys(), ...this.topParentNavs.keys()])) {
         if (view.file?.path === file.path && this.isViewEditorFocused(view)) {
           this.schedulePostTypingStructuralRefresh(file);
           return;
         }
       }
-      for (const [view] of this.menus.entries()) {
+      for (const view of new Set([...this.menus.keys(), ...this.topParentNavs.keys()])) {
         if (view.file?.path !== file.path) continue;
         this.removeNoteReferencesPanel(view);
         this.removeNoteGraphPanel(view);

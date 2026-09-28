@@ -25,6 +25,7 @@ const bundle = await build({
       "export { FileNamingService } from './src/services/file-naming-service.ts';",
       "export { FrontmatterMutationService } from './src/services/frontmatter-mutation-service.ts';",
       "export { BulkEditService } from './src/services/bulk-edit-service.ts';",
+      "export { MenuBuilder } from './src/menu/menu-builder.ts';",
       "export { NoteTitleRenderService } from './src/services/note-title-render-service.ts';",
     ].join('\n'),
     resolveDir: fileURLToPath(new URL('..', import.meta.url)),
@@ -38,6 +39,14 @@ const bundle = await build({
   plugins: [{
     name: 'title-ownership-obsidian',
     setup(builder) {
+      const contextUiStubs = new Map([
+        ['../modals/FileSuggestModal', 'export class FileSuggestModal {}'],
+        ['../modals/MultiFileSelectModal', 'export class MultiFileSelectModal {}'],
+        ['../modals/file-properties-relink-modal', 'export const promptFilePropertiesRelink = () => {};'],
+        ['../services/subitem-creation-service', 'export const promptAndCreateSubitemForParent = () => {};'],
+      ]);
+      builder.onResolve({ filter: /.*/u }, args => contextUiStubs.has(args.path) ? { path: args.path, namespace: 'context-ui' } : null);
+      builder.onLoad({ filter: /.*/, namespace: 'context-ui' }, args => ({ loader: 'js', contents: contextUiStubs.get(args.path) }));
       builder.onResolve({ filter: /(?:text-input-modal|checklist-handler|parent-link-handler)$/u }, args => ({ path: args.path.split('/').at(-1), namespace: 'mutation-ui' }));
       builder.onLoad({ filter: /.*/, namespace: 'mutation-ui' }, args => ({ loader: 'js', contents: args.path === 'text-input-modal'
         ? `export class TextInputModal { constructor(_app, _label, _value, submit) { globalThis.mutationTitleSubmit = submit; } open() {} }`
@@ -50,6 +59,10 @@ const bundle = await build({
           export class TFolder {}
           export class MarkdownView {}
           export class Menu {}
+          export class MenuItem {}
+          export class App {}
+          export class FuzzySuggestModal {}
+          export const getAllTags = () => [];
           export class Notice {}
           export const parseYaml = globalThis.titleOwnershipYaml.parse;
           export const stringifyYaml = globalThis.titleOwnershipYaml.stringify;
@@ -60,7 +73,7 @@ const bundle = await build({
     },
   }],
 });
-const { FileNamingService, FrontmatterMutationService, BulkEditService, NoteTitleRenderService } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
+const { FileNamingService, FrontmatterMutationService, BulkEditService, NoteTitleRenderService, MenuBuilder } = await import(`data:text/javascript;base64,${Buffer.from(bundle.outputFiles[0].text).toString('base64')}`);
 
 function fixture(t, { title = 'Before', autoRename = true, extension = 'md' } = {}) {
   // Expected write failures are asserted below; suppress their bundled data-URL stacks.
@@ -305,4 +318,85 @@ test('committed-rename display restores the authored title while incoming links 
   assert.equal(f.stats.renames, 1);
   for (let i = 0; i < 100; i++) await f.plugin.fileNamingService.updateFilenameIfNeeded(f.file);
   assert.deepEqual(renders, [view, view], 'unchanged filenames do not add title renders');
+});
+
+
+function contextHarness(f) {
+  const rules = [];
+  f.plugin.notebookNavigatorRuleService = {
+    async applyRulesToFile(file, options) { rules.push({ file, options }); return false; },
+  };
+  const builder = new MenuBuilder(f.plugin, {});
+  const entries = () => f.files.map(file => ({ file, frontmatter: {} }));
+  return { builder, entries, rules };
+}
+
+test('context property burst announces each successful Markdown write once and keeps explicit rules', async t => {
+  const f = fixture(t);
+  for (let i = 1; i < 20; i++) f.add(`Context ${i}`);
+  const rejected = f.files.at(-1);
+  const modify = f.plugin.app.vault.modify;
+  f.plugin.app.vault.modify = async (file, source) => {
+    if (file === rejected) throw Error('Expected selected-file write failure');
+    return modify(file, source);
+  };
+  const h = contextHarness(f);
+  assert.equal(await h.builder.setContextPropertyValue(h.entries(), { key: 'priority' }, 'high', 'context-priority'), 19);
+  assert.equal(f.stats.modifies, 19);
+  assert.equal(f.events.length, 19, 'the menu must not announce the entire selection a second time');
+  assert.deepEqual(f.events.flatMap(event => event.paths), f.files.slice(0, -1).map(file => file.path));
+  assert.equal(f.explicit.length, 19);
+  assert.equal(h.rules.length, 20, 'existing explicit rule selection remains unchanged');
+  assert.ok(h.rules.every(({ options }) => options.force && options.bypassCreationGrace && options.reason === 'context-priority'));
+  assert.deepEqual(f.delayedRefreshes, [], 'Markdown consumes writer/rule notifications, not a forced menu refresh');
+  f.flush();
+  assert.deepEqual(f.delayedRefreshes, []);
+  for (const file of f.files) assert.ok(f.sources.get(file).endsWith('Keep body marker\n'));
+});
+
+test('unchanged context property bursts produce no mutation, notification, rule or forced render', async t => {
+  const f = fixture(t);
+  for (let i = 1; i < 20; i++) f.add(`No change ${i}`);
+  const h = contextHarness(f);
+  await h.builder.setContextPropertyValue(h.entries(), { key: 'priority' }, 'high', 'context-priority');
+  f.events.length = f.explicit.length = f.delayedRefreshes.length = h.rules.length = 0;
+  const writes = f.stats.modifies;
+  for (let i = 0; i < 5; i++) assert.equal(await h.builder.setContextPropertyValue(h.entries(), { key: 'priority' }, 'high', 'context-priority'), 0);
+  assert.equal(f.stats.modifies, writes);
+  assert.equal(f.events.length + f.explicit.length + f.delayedRefreshes.length + h.rules.length, 0);
+});
+
+test('context property rule mutations retain their separate writer notification', async t => {
+  const f = fixture(t);
+  const h = contextHarness(f);
+  f.plugin.notebookNavigatorRuleService.applyRulesToFile = async file => {
+    await f.plugin.frontmatterMutationService.process(file, fm => { fm.icon = 'flag'; }, { kind: 'automation', surface: 'configured-rule' });
+    return true;
+  };
+  assert.equal(await h.builder.setContextPropertyValue(h.entries(), { key: 'priority' }, 'high', 'context-priority'), 1);
+  assert.equal(f.stats.modifies, 2);
+  assert.equal(f.events.length, 2, 'one property write and one actual rule write, no final menu broadcast');
+  assert.equal(f.explicit.length, 1, 'the automated rule is not a second user action');
+  assert.match(f.sources.get(f.file), /icon: flag/);
+  assert.deepEqual(f.delayedRefreshes, []);
+});
+
+test('attachment context edits retain the existing delegated event and delayed menu refresh', async t => {
+  const f = fixture(t, { extension: 'pdf' });
+  f.plugin.filePropertiesService = {
+    isCompanionFile: () => false,
+    isPropertyTarget: () => true,
+    async process(file) {
+      f.plugin.eventService.emitFilesUpdated([file.path, 'Companions/Attachment.md']);
+      f.plugin.eventService.emitExplicitAction([file.path], { source: 'file-property' });
+      return true;
+    },
+  };
+  const h = contextHarness(f);
+  assert.equal(await h.builder.setContextPropertyValue(h.entries(), { key: 'priority' }, 'high', 'context-priority'), 1);
+  assert.deepEqual(f.events.map(event => event.paths), [[f.file.path, 'Companions/Attachment.md']]);
+  assert.deepEqual(f.delayedRefreshes, [], 'do not precede the owning attachment refresh with another forced refresh');
+  f.flush();
+  assert.deepEqual(f.delayedRefreshes, [f.file.path]);
+  assert.equal(h.rules.length, 1);
 });

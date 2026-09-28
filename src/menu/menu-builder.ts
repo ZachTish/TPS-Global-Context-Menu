@@ -180,16 +180,9 @@ export class MenuBuilder {
       }),
     ));
 
-    for (const file of files) {
-      this.plugin.persistentMenuManager?.refreshMenusForFile(file, true);
-    }
-
-    try {
-      const paths = files.map((file) => file.path);
-      this.plugin.eventService.emitFilesUpdated(paths);
-    } catch (error) {
-      logger.warn('[TPS GCM] Failed to trigger context menu refresh after property write', { reason, error });
-    }
+    // Property and rule writers announce their own committed changes. Markdown
+    // displays consume those events; BulkEditService owns attachment refreshes.
+    // Re-announcing this selection also marks failed/unchanged files as changed.
   }
 
   private async setContextPropertyValue(entries: any[], prop: any, value: unknown, reason: string): Promise<number> {

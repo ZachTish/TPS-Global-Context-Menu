@@ -357,6 +357,83 @@ function loadPreviewBridgeMethods() {
 }
 const previewBridgeMethods = loadPreviewBridgeMethods();
 
+function createMountedPropertyRefreshHarness() {
+  const path = '../src/menu/persistent-menu-manager.ts';
+  const ast = ts.createSourceFile(path, readFileSync(new URL(path, import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+  const methods = [];
+  const visit = node => {
+    if (ts.isMethodDeclaration(node) && ['refreshMenusForFile', 'schedulePostTypingStructuralRefresh'].includes(node.name?.getText(ast))) methods.push(node.getText(ast));
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  assert.equal(methods.length, 2);
+  const code = ts.transpileModule(`export class TFile { constructor(public path: string) {} } export class Manager { ${methods.join('\n')} }`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText;
+  const exports = {}, timers = new Map(), renders = [];
+  let timerId = 0, focused = false;
+  new Function('exports', 'window', code)(exports, {
+    setTimeout(fn) { const id = ++timerId; timers.set(id, fn); return id; },
+    clearTimeout(id) { timers.delete(id); },
+  });
+  const file = new exports.TFile('Inbox/Properties only.md');
+  const view = { file }, otherView = { file: new exports.TFile('Inbox/Other.md') };
+  const manager = Object.assign(new exports.Manager(), {
+    plugin: { app: { workspace: { getActiveFile: () => file } } },
+    menus: new Map(), topParentNavs: new Map([[view, {}], [otherView, {}]]), postTypingStructuralRefreshTimers: new Map(),
+    refreshLinkedContextForChangedFile() {}, shouldDeferStructuralRefreshForTyping: () => focused,
+    getLastEditorChangeAt: () => 0, getTypingQuietWindowMs: () => 1600, isViewEditorFocused: () => focused,
+    removeNoteReferencesPanel() {}, removeNoteGraphPanel() {}, ensureInlineTitleIcon() {},
+    removeInlineSubitemsPanel() {}, removeStrayInlineSubitemsPanels() {},
+    ensureTopParentNav(view, options) { renders.push({ view, options }); },
+  });
+  return { manager, file, view, otherView, renders, timers, setFocused(value) { focused = value; },
+    tick() { const [id, fn] = timers.entries().next().value; timers.delete(id); fn(); },
+  };
+}
+
+test('changed file refresh reaches a title property panel without an inline menu', () => {
+  const h = createMountedPropertyRefreshHarness();
+  h.manager.refreshMenusForFile(h.file, true);
+  assert.deepEqual(h.renders, [{ view: h.view, options: { force: true } }]);
+  for (let i = 0; i < 100; i++) h.manager.refreshMenusForFile({ path: 'Inbox/Unrelated.md' }, true);
+  assert.equal(h.renders.length, 1, 'unrelated bursts do not rebuild mounted properties');
+});
+
+test('a view tracked by both menu and title properties refreshes only once', () => {
+  const h = createMountedPropertyRefreshHarness();
+  h.manager.menus.set(h.view, {});
+  h.manager.refreshMenusForFile(h.file, true);
+  assert.equal(h.renders.length, 1);
+});
+
+test('property-only view keeps typing protection and refreshes after focus leaves', () => {
+  const h = createMountedPropertyRefreshHarness();
+  h.setFocused(true);
+  h.manager.refreshMenusForFile(h.file, true);
+  assert.equal(h.renders.length, 0);
+  assert.equal(h.timers.size, 1);
+  h.tick();
+  assert.equal(h.renders.length, 0);
+  assert.equal(h.timers.size, 1, 'existing deferred owner must still respect property-only editor focus');
+  h.setFocused(false);
+  h.tick();
+  assert.equal(h.renders.length, 1);
+  assert.equal(h.timers.size, 0);
+});
+
+test('deferred title property refresh cannot repaint a view that changed files', () => {
+  const h = createMountedPropertyRefreshHarness();
+  h.setFocused(true);
+  h.manager.refreshMenusForFile(h.file, true);
+  assert.equal(h.timers.size, 1);
+  h.view.file = h.otherView.file;
+  h.setFocused(false);
+  h.tick();
+  assert.equal(h.renders.length, 0);
+  assert.equal(h.timers.size, 0);
+});
+
 function createPreviewBridgeHarness() {
   let nextTimer = 0, now = 0, builds = 0, queries = 0, mounted = null;
   const timers = new Map(), handlers = {};
