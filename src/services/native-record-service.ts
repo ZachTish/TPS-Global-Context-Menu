@@ -1499,20 +1499,17 @@ export class NativeRecordService {
   ): Promise<TpsNativeRecordHandle | null> {
     if (this.plugin.propertyMigrationService?.active || (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock)) return null;
     this.assertEnabled();
-    const record = await this.resolve(reference);
+    let record = await (internalPlanKey ? this.resolveIdentity(reference) : this.resolve(reference));
     if (!record) return null;
-    if (!this.hasUniquePathOwnership(record.id, record.path)) {
-      this.rebuildIndex();
-      if (!this.hasUniquePathOwnership(record.id, record.path)) return null;
-    }
     const nextPath = this.availableRecordPath(record.kind, record.id, fileName, record.file);
     if (nextPath === record.file.path) return record;
     const oldPath = record.file.path;
     await this.ensureParentFolder(nextPath);
-    await this.refreshIdentityIndexFromVaultSource();
-    if (!this.recordsByPath.has(oldPath)) {
-      this.indexFile(record.file, record.frontmatter);
-    }
+    const confirmed = await (internalPlanKey ? this.resolveIdentity(reference) : this.resolve(reference));
+    if (!confirmed || confirmed.file !== record.file || confirmed.path !== oldPath
+      || confirmed.id !== record.id || confirmed.kind !== record.kind) return null;
+    if (this.availableRecordPath(confirmed.kind, confirmed.id, fileName, confirmed.file) !== nextPath) return null;
+    record = confirmed;
     if (!this.hasUniquePathOwnership(record.id, oldPath)) return null;
     if (this.plugin.app.vault.getFileByPath(oldPath) !== record.file) return null;
     await this.withInternalIdentityWrite([oldPath, nextPath], () => (
@@ -1577,7 +1574,47 @@ export class NativeRecordService {
     return this.resolveAssetCached(source);
   }
 
+  /** A selected path owns a local edit; ID discovery owns global verification. */
   async resolve(reference: NativeRecordReference): Promise<TpsNativeRecordHandle | null> {
+    const directFile = reference instanceof TFile
+      ? reference
+      : typeof reference === 'string'
+        ? this.plugin.app.vault.getFileByPath(normalizePath(reference))
+        : reference?.path != null
+          ? this.plugin.app.vault.getFileByPath(normalizePath(String(reference.path)))
+          : null;
+    const hasExplicitPath = reference instanceof TFile
+      || (typeof reference === 'object' && reference?.path != null);
+    if (!directFile && !hasExplicitPath) return this.resolveIdentity(reference);
+    if (!(directFile instanceof TFile) || directFile.extension !== 'md') return null;
+    const path = directFile.path;
+    const { mtime, size } = directFile.stat;
+    const profiles = this.getInspectionProfiles();
+    if (this.plugin.app.vault.getFileByPath(path) !== directFile) return null;
+    const parsed = parseNativeRecordDocument(await this.readVaultSource(directFile));
+    if (
+      !parsed
+      || directFile.path !== path
+      || directFile.stat.mtime !== mtime
+      || directFile.stat.size !== size
+      || this.plugin.app.vault.getFileByPath(path) !== directFile
+      || this.getInspectionProfiles() !== profiles
+    ) return null;
+    this.indexFile(directFile, parsed.frontmatter);
+    const record = this.recordsByPath.get(path);
+    const expectedId = typeof reference === 'object' && !(reference instanceof TFile)
+      ? String(reference?.id || reference?.tpsId || '').trim()
+      : '';
+    if (
+      !record
+      || (expectedId && this.idKey(expectedId) !== this.idKey(record.tpsId))
+      || !this.hasUniquePathOwnership(record.tpsId, path)
+    ) return null;
+    return this.toHandle(directFile, record);
+  }
+
+  /** Identity plans must verify the complete namespace even with a path hint. */
+  private async resolveIdentity(reference: NativeRecordReference): Promise<TpsNativeRecordHandle | null> {
     while (true) {
       await this.refreshIdentityIndexFromVaultSource();
       const generation = this.identitySourceGeneration;
@@ -1588,6 +1625,8 @@ export class NativeRecordService {
           : reference?.path
             ? this.plugin.app.vault.getFileByPath(normalizePath(String(reference.path)))
             : null;
+      if (reference instanceof TFile && this.plugin.app.vault.getFileByPath(reference.path) !== reference) return null;
+      if (!directFile && typeof reference === 'object' && reference?.path != null) return null;
       let resolved: TpsNativeRecordHandle | null = null;
       if (directFile instanceof TFile) {
         const referenceId = (
@@ -1636,13 +1675,8 @@ export class NativeRecordService {
     if (this.plugin.propertyMigrationService?.active || (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock)) return null;
     this.assertValidStorageProfile();
     if (!this.isUpdatePayloadShapeSafe(updates)) return null;
-    await this.refreshIdentityIndexFromVaultSource();
-    const record = await this.resolve(reference);
+    const record = await (internalPlanKey ? this.resolveIdentity(reference) : this.resolve(reference));
     if (!record) return null;
-    if (!this.hasUniquePathOwnership(record.id, record.path)) {
-      this.rebuildIndex();
-      if (!this.hasUniquePathOwnership(record.id, record.path)) return null;
-    }
     const writeProfile = this.getStorageProfile(record.kind);
     const readableProfiles = this.getIdentityEvidenceProfiles();
     const ownedKeys = this.uniquePropertyKeys([
@@ -1659,6 +1693,7 @@ export class NativeRecordService {
         record.file,
         ownedKeys,
         (frontmatter) => {
+        if (record.file.path !== record.path || this.plugin.app.vault.getFileByPath(record.path) !== record.file) return;
         // MetadataCache can lag a preceding source-preserving mutation (for
         // example, reidentify followed immediately by cleanup). Reindex the
         // authoritative Vault.process frontmatter before checking ownership.
@@ -1948,7 +1983,7 @@ export class NativeRecordService {
         continue;
       }
       const source = operation === 'reidentify' && entry.reference != null
-        ? await this.resolve(entry.reference)
+        ? await this.resolveIdentity(entry.reference)
         : null;
       if (
         operation !== 'reidentify'
@@ -2005,7 +2040,7 @@ export class NativeRecordService {
         });
         continue;
       }
-      const source = await this.resolve(entry.reference);
+      const source = await this.resolveIdentity(entry.reference);
       if (!source) return null;
       let expectedPath = source.path;
       if (entry.fileName != null) {
@@ -2143,7 +2178,7 @@ export class NativeRecordService {
     nextId: string,
     updates: readonly Record<string, unknown>[] = [],
   ): Promise<boolean> {
-    const record = await this.resolve(reference);
+    const record = await this.resolveIdentity(reference);
     if (!record) return false;
     const expectedReferenceId = (
       reference
@@ -2465,7 +2500,7 @@ export class NativeRecordService {
       if (!Number.isSafeInteger(options.planToken) || options.planToken !== this.identitySourceGeneration) return null;
     }
 
-    const record = await this.resolve(reference);
+    const record = await this.resolveIdentity(reference);
     if (!record) return null;
     const expectedReferenceId = (
       reference

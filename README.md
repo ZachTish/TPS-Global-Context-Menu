@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 4.0.0 — Selected-file edits stay local
+
+Native `resolve`, `update`, `rename` and `archive` treat a `TFile`, existing file-path string or `{path, id?}` as a selected file. They read that file's current source and reject known identity conflicts, mismatched expected IDs, detached file objects and moved/replaced targets. A missing explicit object path never falls back to another ID owner. Source-preserving updates recheck identity and target at the atomic writer; filename changes recheck after folder preparation. Ordinary title editing uses a separate writer and retains 3.6.16's display fix.
+
+**Authority contract change:** a selected-file handle no longer proves that no unseen duplicate exists elsewhere in the vault. This is a major release for callers relying on that prior guarantee. ID-only references, explicit-ID creation, snapshots/listing, reidentification and migration/reconciliation plans still verify the full namespace. Plans retain global checks even when their source is expressed as a path. Known conflicts remain blocked; no records are merged, repaired or deduplicated. NativeRecords API v6 method shapes remain compatible, with `capabilities.selectedFileAuthority: true` advertising the new semantics. Callers needing global ownership must use an ID reference or the existing snapshot/identity-plan APIs, not a selected-file reference.
+
+Health's local activity/food/workout edits and Calendar's direct event edits already supply selected files. Controller calendar reconciliation uses snapshots and guarded identity plans. No consumer code, persisted settings, note schema, minimum Obsidian (1.10.0), cache, watcher, timer or retry is added. Caller-owned automatic-write exclusions remain at their existing boundary; this change does not broaden the generic storage API into another policy owner. Validation passed 131 native-record checks, 1,359 declared-suite checks and 209 supplemental checks, with zero failures/skips, TypeScript and the separate normal Test build. Named reload verified 4.0.0 with unchanged data.json. In a foreground installed Health dashboard, the first activity save fell from 3,652 ms and 11,131 identity reads to 12 ms and two selected-file reads; repeats were 3 ms before and 8 ms after. One target write preserved body/ID; all consumers remained enabled. A separate installed duplicate-ID lookup still read 11,135 sources and rejected lookup, reidentification and a known-conflict edit. Seven settings hashes were unchanged, probes removed and fixtures archived. These are small warm-process desktop samples, not physical iPhone, native-baseline or overall 80% goal acceptance. Full semantics, evidence and limits are in [4.0.0 release notes](release-notes/4.0.0.md).
+
 ## 3.6.16 — Refresh titles at filename commit
 
 The existing Markdown rename listener now refreshes the matching open title in a microtask after core commits the filename. This lets every synchronous view listener finish before GCM restores the authored title, regardless of listener registration order. The previous completion callback waited for all incoming link rewrites, so a sanitized filename could replace the authored title for hundreds of milliseconds even after the title itself was saved. The existing metadata renderer supplies the current title and retains its source-mode/focus/no-op guards. Folder-only moves do not request a title refresh; companion handling and controller-only filename-to-title writes retain their existing authority.
@@ -155,7 +163,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.6.16](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.16) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [4.0.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/4.0.0) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 

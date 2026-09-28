@@ -1838,7 +1838,7 @@ test('casefolded in-flight create reservations allow exactly one concurrent expl
   assert.equal(owners.length, 1);
 });
 
-test('rename refuses a direct path when its stable ID has multiple owners', async () => {
+test('rename refuses a direct path when its stable ID has multiple known owners', async () => {
   const { service, contents, entries, events, addFile } = createHarness();
   const first = addFile('_records/tasks/rename-duplicate-one.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'First rename body', frontmatter: {
@@ -1850,6 +1850,8 @@ test('rename refuses a direct path when its stable ID has multiple owners', asyn
       tpsId: 'task-rename-duplicate', tpsSchemaVersion: 1, kind: 'task', title: 'Rename two',
     },
   }));
+  service.indexFile(first);
+  service.indexFile(second);
   const firstBefore = contents.get(first);
   const secondBefore = contents.get(second);
   assert.equal(await service.rename(first, 'Forbidden rename'), null);
@@ -2219,7 +2221,7 @@ test('resolve refreshes stale identity state from Vault bytes and rejects every 
   assert.equal(await service.resolve(owner), null);
   assert.equal(await service.resolve({ path: owner.path, id: 'calendar-resolve-owner' }), null);
   assert.equal(await service.resolve(changed), null);
-  assert.equal(authoritativeReads, 1, 'subsequent ambiguous resolves reuse the current authoritative index');
+  assert.equal(authoritativeReads, 4, 'each selected path rereads only its source and retains the known conflict');
   await assert.rejects(() => service.snapshot(), /identity conflicts must be resolved/u);
 });
 
@@ -3594,7 +3596,7 @@ test('native profile is explicit, default-off, and removes legacy active paths o
 });
 
 test('public GCM API exposes versioned generic and task record contracts', () => {
-  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true, freshIdentityCreates: true \}\)/u);
+  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true, freshIdentityCreates: true, selectedFileAuthority: true \}\)/u);
   assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
   assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 6;/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);
@@ -4332,3 +4334,136 @@ test('old files and fully prepared native creations are not adopted at the hando
   }
   assert.equal(writes, 0);
 });
+
+for (const shape of ['file', 'path', 'path+id']) {
+  test(`selected-file ${shape} edits inspect only their source, including a 100-read burst`, async () => {
+    const h = createHarness();
+    for (let i = 0; i < 1000; i++) h.addFile(`Inbox/ordinary-${i}.md`, 'Unrelated body\n');
+    const file = h.addFile('Inbox/Selected.md', '---\ntpsId: selected-id\nkind: food-entry\ntitle: Selected\n---\nKeep this body\n');
+    const reference = shape === 'file' ? file : shape === 'path' ? file.path : { path: file.path, id: 'selected-id' };
+    let scans = 0, reads = 0, writes = 0;
+    const enumerate = h.vault.getMarkdownFiles, read = h.vault.read, process = h.vault.process;
+    h.vault.getMarkdownFiles = () => { scans++; return enumerate(); };
+    h.vault.read = async target => { reads++; assert.equal(target, file); return read(target); };
+    h.vault.process = async (...args) => { writes++; return process(...args); };
+    for (let i = 0; i < 100; i++) assert.equal((await h.service.resolve(reference))?.id, 'selected-id');
+    assert.deepEqual({scans, reads, writes}, {scans: 0, reads: 100, writes: 0});
+    assert.equal((await h.service.update(reference, {calories: 150}))?.frontmatter.calories, 150);
+    assert.equal(scans, 0);
+    assert.equal(writes, 1);
+    assert.equal(h.service.authoritativeSourceCache.size, 0, 'local reads do not claim globally verified identity');
+    assert.ok(h.contents.get(file).endsWith('Keep this body\n'));
+  });
+}
+
+test('selected-file authority does not conceal unseen duplicates from later global operations', async () => {
+  const h = createHarness();
+  const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+  const file = h.addFile('Inbox/Selected.md', source);
+  const duplicate = h.addFile('Inbox/Uncached duplicate.md', source);
+  h.metadata.delete(duplicate);
+  assert.equal((await h.service.update(file, {calories: 20}))?.frontmatter.calories, 20);
+  assert.equal(h.contents.get(duplicate), source);
+  assert.equal(await h.service.resolve('selected-owner'), null, 'ID lookup must still discover the duplicate');
+  assert.equal(await h.service.update(file, {calories: 30}), null, 'known conflicts remain blocked');
+  assert.equal(await h.service.reidentify(file, 'replacement-id'), null);
+  assert.equal(await h.service.canCreateIdentity('selected-owner'), false);
+});
+
+test('selected-file references never redirect a missing path or detached TFile to another owner', async () => {
+  const h = createHarness();
+  const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+  const file = h.addFile('Inbox/Selected.md', source);
+  const replacement = h.addFile(file.path, source);
+  for (const reference of [file, {path: 'Inbox/Missing.md', id: 'selected-owner'}, {path: replacement.path, id: 'stale-owner'}]) {
+    assert.equal(await h.service.resolve(reference), null);
+    assert.equal(await h.service.update(reference, {calories: 20}), null);
+  }
+  assert.equal(h.contents.get(replacement), source);
+});
+
+test('selected-file updates preserve concurrent body edits and reject changed identity at the atomic boundary', async () => {
+  for (const changeIdentity of [false, true]) {
+    const h = createHarness();
+    const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+    const file = h.addFile('Inbox/Selected.md', source);
+    const process = h.vault.process;
+    h.vault.process = async (...args) => {
+      h.contents.set(file, source.replace('Body', 'Concurrent body').replace('selected-owner', changeIdentity ? 'new-owner' : 'selected-owner'));
+      return process(...args);
+    };
+    const updated = await h.service.update(file, {calories: 20});
+    assert.equal(updated?.id || null, changeIdentity ? null : 'selected-owner');
+    assert.ok(h.contents.get(file).endsWith('Concurrent body\n'));
+    if (changeIdentity) assert.doesNotMatch(h.contents.get(file), /calories:/);
+  }
+});
+
+test('selected-file rename remains local and rechecks identity after folder preparation', async () => {
+  for (const changeIdentity of [false, true]) {
+    const h = createHarness();
+    const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+    const file = h.addFile('Inbox/Selected.md', source);
+    let scans = 0;
+    const enumerate = h.vault.getMarkdownFiles;
+    h.vault.getMarkdownFiles = () => { scans++; return enumerate(); };
+    const prepare = h.service.ensureParentFolder.bind(h.service);
+    h.service.ensureParentFolder = async path => {
+      await prepare(path);
+      if (changeIdentity) h.contents.set(file, source.replace('selected-owner', 'new-owner'));
+    };
+    const renamed = await h.service.rename(file, 'Renamed');
+    assert.equal(!!renamed, !changeIdentity);
+    assert.equal(scans, 0);
+    assert.equal(file.path, changeIdentity ? 'Inbox/Selected.md' : '_records/food-entries/Renamed.md');
+  }
+});
+
+test('selected-file read rejects replacement, movement and configuration changes without rescanning', async () => {
+  for (const race of ['replacement', 'move', 'mapping']) {
+    const h = createHarness();
+    const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+    const file = h.addFile('Inbox/Selected.md', source);
+    h.vault.getMarkdownFiles = () => { throw Error('No global scan'); };
+    h.vault.read = async () => {
+      if (race === 'replacement') h.addFile(file.path, source);
+      if (race === 'move') await h.vault.rename(file, 'Inbox/Moved.md');
+      if (race === 'mapping') h.plugin.settings.nativeRecordIdentityPropertyKey = 'otherId';
+      return source;
+    };
+    assert.equal(await h.service.resolve(file), null);
+  }
+});
+
+test('selected-file edits reject a moved target at the atomic boundary', async () => {
+  const h = createHarness();
+  const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+  const file = h.addFile('Inbox/Selected.md', source);
+  const process = h.vault.process;
+  h.vault.process = async (...args) => {
+    await h.vault.rename(file, 'Inbox/Moved.md');
+    return process(...args);
+  };
+  assert.equal(await h.service.update(file, {calories: 20}), null);
+  assert.equal(h.contents.get(file), source);
+});
+
+for (const operation of ['canReidentify', 'reidentify', 'canApplyIdentityPlan']) {
+  test(`selected-file ${operation} still verifies unknown duplicate identities`, async () => {
+    const h = createHarness();
+    const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+    const file = h.addFile('Inbox/Selected.md', source);
+    const other = h.addFile('Inbox/Unknown.md', source);
+    h.metadata.delete(other);
+    let scans = 0;
+    const enumerate = h.vault.getMarkdownFiles;
+    h.vault.getMarkdownFiles = () => { scans++; return enumerate(); };
+    const result = operation === 'canApplyIdentityPlan'
+      ? await h.service.canApplyIdentityPlan([{operation:'reidentify',reference:file,nextId:'new-id',updates:[]}])
+      : await h.service[operation](file, 'new-id');
+    assert.equal(result, operation === 'reidentify' ? null : false);
+    assert.ok(scans > 0);
+    assert.equal(h.contents.get(file), source);
+    assert.equal(h.contents.get(other), source);
+  });
+}
