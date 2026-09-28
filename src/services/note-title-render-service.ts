@@ -30,6 +30,17 @@ export class NoteTitleRenderService {
     this.linkTitleCache.clear();
   }
 
+  handleMetadataChanged(file: TFile): void {
+    this.clearTitleCache(file.path);
+    // Metadata now owns the saved title. Refresh only its open views instead
+    // of waiting for the periodic title/link remount pass.
+    for (const leaf of this.plugin.app.workspace.getLeavesOfType('markdown')) {
+      const view = leaf.view as MarkdownView;
+      if (view.file?.path !== file.path) continue;
+      this.refreshInlineTitleForView(view);
+    }
+  }
+
   processRenderedNoteLinks(root: HTMLElement, sourcePath?: string): void {
     const links = Array.from(root.querySelectorAll<HTMLElement>(
       [

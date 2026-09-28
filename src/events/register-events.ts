@@ -591,10 +591,10 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             if (file instanceof TFile && file.extension?.toLocaleLowerCase() === 'canvas') {
                 plugin.filePropertiesService.invalidateLegacyCanvas(file);
             }
-            // Clear the title cache when metadata changes to prevent stale titles
+            // Refresh saved titles when their metadata arrives.
             if (file instanceof TFile) {
                 plugin.menuController.panelBuilder?.clearFileTitleCache(file.path);
-                plugin.noteTitleRenderService?.clearTitleCache(file.path);
+                plugin.noteTitleRenderService?.handleMetadataChanged(file);
             }
             // Queue each file in the shared batch; a single-argument debounce
             // both lost earlier files and caused a second delayed forced render.

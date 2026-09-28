@@ -302,7 +302,7 @@ function createHarness({
       detach: noop,
       hideMenu: noop,
     },
-    noteTitleRenderService: { clearTitleCache: noop },
+    noteTitleRenderService: { handleMetadataChanged: noop },
     persistentMenuManager: {
       detach: noop,
       invalidateLinkedContextSourcePaths: noop,
