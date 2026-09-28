@@ -689,3 +689,38 @@ for (const disabled of ['setting', 'automation']) {
     h.cleanup();
   });
 }
+
+for (const background of [false, true]) {
+  test(`a committed Markdown filename change refreshes its title before link settlement (background=${background})`, async () => {
+    const h = createHarness();
+    h.plugin.canRunBackgroundAutomation = () => background;
+    const file = h.addFile('Inbox/Question.md', { title: 'Question: why?' });
+    const pendingLinks = deferred();
+    h.plugin.filePropertiesService.handlePendingMarkdownTargetRename = () => pendingLinks.promise;
+    const rendered = [];
+    let visibleTitle = 'Question';
+    h.plugin.noteTitleRenderService.handleMetadataChanged = f => { rendered.push([f.path, f.frontmatter.title]); visibleTitle = f.frontmatter.title; };
+    h.plugin.app.vault.read = async () => { throw Error('Display must not read source'); };
+    h.renameFile(file, file.path, 'Inbox/Question why.md');
+    // A view created after GCM registers its core listener later in this event.
+    visibleTitle = 'Question why';
+    await Promise.resolve();
+    assert.equal(visibleTitle, 'Question: why?');
+    assert.deepEqual(rendered, [['Inbox/Question why.md', 'Question: why?']]);
+    assert.equal(h.mutations.length, 0);
+    pendingLinks.resolve();
+    h.cleanup();
+  });
+}
+
+test('100 folder-only moves do not request redundant title renders or source mutations', async () => {
+  const h = createHarness();
+  let renders = 0, reads = 0;
+  h.plugin.noteTitleRenderService.handleMetadataChanged = () => renders++;
+  h.plugin.app.vault.read = async () => { reads++; return ''; };
+  const file = h.addFile('Inbox/Named.md', { title: 'Named' });
+  for (let i = 0; i < 100; i++) h.renameFile(file, file.path, `Inbox/Folder${i}/Named.md`);
+  await Promise.resolve();
+  assert.deepEqual([renders, reads, h.mutations.length], [0, 0, 0]);
+  h.cleanup();
+});

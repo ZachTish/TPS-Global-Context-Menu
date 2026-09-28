@@ -265,7 +265,7 @@ for (const title of ['After', 'Question: why?']) {
   });
 }
 
-test('title-driven filename completion restores authored text after core overwrites the view title', async t => {
+test('committed-rename display restores the authored title while incoming links are still updating', async t => {
   const f = fixture(t);
   const view = { file: f.file, title: 'Before' };
   const other = { file: f.add('Unrelated'), title: 'Unrelated' };
@@ -275,14 +275,28 @@ test('title-driven filename completion restores authored text after core overwri
     renders.push(target);
     target.title = parse(f.sources.get(target.file).split('---')[1]).title;
   };
+  let committed, finishLinks;
+  const committedGate = new Promise(resolve => { committed = resolve; });
+  const linksGate = new Promise(resolve => { finishLinks = resolve; });
   const rename = f.plugin.app.fileManager.renameFile;
   f.plugin.app.fileManager.renameFile = async (file, path) => {
     // Metadata for the authored title can arrive before core's rename finishes.
     f.plugin.noteTitleRenderService.handleMetadataChanged(file);
     await rename(file, path);
     view.title = file.basename;
+    // Mock the committed core rename event. The actual register-events wiring
+    // is covered separately by test-completed-date-event-batching.
+    queueMicrotask(() => f.plugin.noteTitleRenderService.handleMetadataChanged(file));
+    committed();
+    await linksGate;
   };
-  await f.prompt('Question: why?');
+  let saved = false;
+  const save = f.prompt('Question: why?').then(() => { saved = true; });
+  await committedGate;
+  assert.equal(saved, false, 'link rewriting must still be pending');
+  assert.equal(view.title, 'Question: why?');
+  finishLinks();
+  await save;
   assert.equal(f.file.basename, 'Question why');
   assert.equal(view.title, 'Question: why?');
   assert.equal(other.title, 'Unrelated');

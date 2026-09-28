@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 3.6.16 — Refresh titles at filename commit
+
+The existing Markdown rename listener now refreshes the matching open title in a microtask after core commits the filename. This lets every synchronous view listener finish before GCM restores the authored title, regardless of listener registration order. The previous completion callback waited for all incoming link rewrites, so a sanitized filename could replace the authored title for hundreds of milliseconds even after the title itself was saved. The existing metadata renderer supplies the current title and retains its source-mode/focus/no-op guards. Folder-only moves do not request a title refresh; companion handling and controller-only filename-to-title writes retain their existing authority.
+
+The refresh moves between existing owners; no new watcher, timer, cache, retry or repair is added. Link updates still finish through Obsidian before a save reports completion. No settings, schema, API or minimum-version change. Minimum Obsidian stays 1.10.0. Three regression cases cover immediate User/controller display and 100 folder-only moves without source reads, writes or redundant renders; the composed title test holds incoming-link completion pending. Final validation passed 86 focused, 1,359 declared-suite and 197 supplemental checks with zero failures/skips, TypeScript and the separate normal Test build. Named reload preserved data.json. Installed foreground title saves with 100 incoming references kept the authored title correct at 57–60 ms in two uniquely named controls; before the change, sanitized filenames replaced authored titles until 251/607 ms in two cases. All 100 links and note bodies survived. This fixes display ownership; core link rewriting still took 740–744 ms in the final controls. Seven settings files and the prior leaf were restored, diagnostic hooks removed and fixtures archived. Minimum-version/mobile/native-performance and measurement limits are in [3.6.16 release notes](release-notes/3.6.16.md).
+
 ## 3.6.15 — One Daily Note navigation authority
 
 The date strip now resolves existing notes and creation paths through the same Daily Notes API used by Navigator. A filename match elsewhere in the vault no longer substitutes an unrelated or archived non-Daily note. Recognized legacy Daily Notes still open in their current location without reconciliation or a write. Existing canonical notes retain the API's read-only observation behavior while other metadata is pending. If identity is not ready and no note can be observed, navigation reports that condition without starting creation.
@@ -149,7 +155,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [3.6.15](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.15) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [3.6.16](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/3.6.16) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 

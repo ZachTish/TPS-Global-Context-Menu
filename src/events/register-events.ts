@@ -798,6 +798,12 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                             error,
                         });
                     });
+                // Finish the synchronous rename event before refreshing: a
+                // later core view listener can replace the title with its basename.
+                // Do not wait for renameFile's unrelated incoming link rewrites.
+                if (oldPath.split('/').pop() !== file.path.split('/').pop()) {
+                    queueMicrotask(() => plugin.noteTitleRenderService?.handleMetadataChanged(file));
+                }
                 // Companion bookkeeping must not swallow ordinary filename edits.
                 // The committed rename owns title synchronization; no navigation
                 // settlement timer or unrelated maintenance is needed here.

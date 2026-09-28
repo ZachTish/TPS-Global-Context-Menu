@@ -1192,9 +1192,6 @@ export class FileNamingService {
             const previousBasename = finalFile.basename;
             const previousPath = finalFile.path;
             await this.plugin.app.fileManager.renameFile(finalFile, expectedPath);
-            // Core can replace the visible title with the filename after the
-            // title metadata event. Repaint at this operation's completion.
-            this.plugin.noteTitleRenderService?.handleMetadataChanged(finalFile);
             logger.log(`[TPS GCM] Renamed file from "${previousBasename}" to "${expectedBasename}" (${previousPath} -> ${expectedPath})`);
         } catch (error) {
             if (this.isLikelyMissingFileError(error)) return;
