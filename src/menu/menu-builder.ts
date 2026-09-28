@@ -94,7 +94,9 @@ export class MenuBuilder {
 
   private resolveChildFilesFor(file: TFile): TFile[] {
     const children = new Map<string, TFile>();
-    const indexed = this.plugin.parentLinkResolutionService.getRelationshipCandidates().filter((candidate) =>
+    // hasParent applies the child and parent ignore rules using the same
+    // logical frontmatter it resolves, so candidate discovery need not repeat it.
+    const indexed = this.plugin.parentLinkResolutionService.getRelationshipCandidates({ includeIgnored: true }).filter((candidate) =>
       this.plugin.parentLinkResolutionService.hasParent(candidate, file),
     );
     for (const child of indexed) {

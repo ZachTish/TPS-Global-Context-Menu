@@ -29,6 +29,8 @@ async function loadMenuBuilderModule() {
       contents: `
         export { MenuBuilder } from './src/menu/menu-builder.ts';
         export { PropertyRowService } from './src/services/property-row-service.ts';
+        export { ParentLinkResolutionService } from './src/services/parent-link-resolution-service.ts';
+        export { FilePropertiesService } from './src/services/file-properties-service.ts';
         export { TFile } from 'obsidian';
       `,
       resolveDir: fileURLToPath(new URL("..", import.meta.url)),
@@ -58,6 +60,9 @@ async function loadMenuBuilderModule() {
               export class Menu {}
               export class MenuItem {}
               export class Notice { constructor() {} }
+              export class TFolder {}
+              export const parseYaml = value => JSON.parse(value || '{}');
+              export const stringifyYaml = value => JSON.stringify(value);
               export class TFile {
                 constructor(path, ctime = 1) {
                   this.path = path;
@@ -201,7 +206,7 @@ function createBuilderHarness(MenuBuilder, TFile) {
     frontmatter.set(path, {});
     return file;
   };
-  return { builder: new MenuBuilder(plugin, delegates), addFile, plugin, frontmatter };
+  return { builder: new MenuBuilder(plugin, delegates), addFile, plugin, frontmatter, files };
 }
 
 function buildTitles(builder, targets, options) {
@@ -309,6 +314,109 @@ test("relationship snapshots are local to one menu and a later menu reads fresh 
   const ignored = buildMenu(builder, [root], bridgeOptions([root]));
   assert.equal(ignored.items.some(item => /^Link (?:Children|to Parent)/u.test(item.title)), false);
   assert.equal(scans, 2, 'ignored roots do not enumerate relationships');
+});
+
+function useRealRelationshipServices(h, { ParentLinkResolutionService, FilePropertiesService }) {
+  const reads = new Map();
+  h.plugin.app.vault.getAllLoadedFiles = () => [...h.files.values()];
+  h.plugin.app.vault.getAbstractFileByPath = path => h.files.get(path) || h.files.get(`${path}.md`) || null;
+  h.plugin.app.metadataCache.getFirstLinkpathDest = target => h.files.get(target)
+    || h.files.get(`${target}.md`) || [...h.files.values()].find(file => file.basename === target) || null;
+  h.plugin.app.metadataCache.getFileCache = file => {
+    reads.set(file.path, (reads.get(file.path) || 0) + 1);
+    return { frontmatter: h.frontmatter.get(file.path) || {} };
+  };
+  h.plugin.app.vault.read = h.plugin.app.vault.cachedRead = () => { throw new Error('Relationship display must not read source bodies'); };
+  h.plugin.app.vault.modify = h.plugin.app.vault.process = () => { throw new Error('Relationship display must not write notes'); };
+  h.plugin.settings.parentLinkFrontmatterKey = 'childOf';
+  h.plugin.settings.enableParentChildIgnoreRule = true;
+  h.plugin.settings.parentChildIgnoreFrontmatterKey = 'relationshipMode';
+  h.plugin.settings.parentChildIgnoreFrontmatterValue = 'ignore';
+  h.plugin.filePropertiesService = new FilePropertiesService(h.plugin);
+  h.plugin.parentLinkResolutionService = new ParentLinkResolutionService(h.plugin);
+  return reads;
+}
+
+test('the real relationship scan reads each unrelated candidate three times, not nine', async () => {
+  const module = await loadMenuBuilderModule();
+  const h = createBuilderHarness(module.MenuBuilder, module.TFile);
+  h.plugin.settings.dataArchitectureMode = 'native-records';
+  const root = h.addFile('Notes/Root.md');
+  const child = h.addFile('Notes/Child.md');
+  const ignored = h.addFile('Notes/Ignored.md');
+  const companion = h.addFile('Notes/Moved companion.md');
+  const ordinary = Array.from({ length: 1024 }, (_, i) => h.addFile(`Notes/ordinary-${i}.md`));
+  h.frontmatter.set(child.path, { childOf: ['[[Notes/Root]]', '[[Notes/Child]]'] });
+  h.frontmatter.set(ignored.path, { parent: '[[Notes/Root]]', relationshipMode: 'ignore' });
+  h.frontmatter.set(companion.path, { tpsGcmFileProperties: 1, tpsGcmFileId: 'companion', tpsGcmSourcePath: 'Attachment.pdf', parent: '[[Notes/Root]]' });
+  const reads = useRealRelationshipServices(h, module);
+  const menu = buildMenu(h.builder, [root], bridgeOptions([root]));
+  const children = menu.items.find(item => item.title === 'Link Children (1)')?.submenu;
+  assert.ok(children?.items.some(item => item.title === child.basename));
+  assert.equal(children.items.some(item => item.title === ignored.basename || item.title === companion.basename), false);
+  for (const file of ordinary) assert.equal(reads.get(file.path), 3, `${file.path}: target eligibility plus one logical frontmatter lookup`);
+  assert.equal(h.frontmatter.get(child.path).childOf.length, 2, 'read filtering preserves persisted self-links');
+});
+
+test('parent resolution shares one logical source within the call and refreshes it on the next call', async () => {
+  const module = await loadMenuBuilderModule();
+  const h = createBuilderHarness(module.MenuBuilder, module.TFile);
+  const parent = h.addFile('Notes/Parent.md');
+  const child = h.addFile('Notes/Child.md');
+  h.frontmatter.set(child.path, { ChildOf: ['[[Notes/Parent]]', '[[Notes/Child]]'] });
+  const reads = useRealRelationshipServices(h, module);
+  const service = h.plugin.parentLinkResolutionService;
+  assert.deepEqual(service.getParentsForChild(child).map(entry => entry.file), [parent]);
+  assert.equal(reads.get(child.path), 2, 'ignore and persisted links share one logical lookup');
+
+  h.frontmatter.set(child.path, { parents: '[[Notes/Parent]]', relationshipMode: 'IGNORE' });
+  reads.clear();
+  assert.deepEqual(service.getParentsForChild(child), []);
+  assert.equal(reads.get(child.path), 2);
+  assert.deepEqual(service.getStoredParentsForChild(child).map(entry => entry.file), [parent], 'explicit unlink still sees ignored stored relationships');
+  h.frontmatter.set(child.path, { PARENT: '[[Notes/Parent]]' });
+  h.frontmatter.set(parent.path, { relationshipMode: 'ignore' });
+  assert.deepEqual(service.getParentsForChild(child), [], 'parent ignore remains authoritative');
+  h.plugin.settings.enableParentChildIgnoreRule = false;
+  assert.deepEqual(service.getParentsForChild(child).map(entry => entry.file), [parent], 'new calls observe current settings');
+  h.frontmatter.set(child.path, {});
+  assert.deepEqual(service.getParentsForChild(child), [], 'removed links do not survive in retained state');
+});
+
+test('one logical lookup preserves real companion routing, exclusions and architecture changes', async () => {
+  const module = await loadMenuBuilderModule();
+  const h = createBuilderHarness(module.MenuBuilder, module.TFile);
+  const parent = h.addFile('Views/Parent.base');
+  const child = h.addFile('Attachments/Child.pdf');
+  useRealRelationshipServices(h, module);
+  const files = h.plugin.filePropertiesService;
+  const parentCompanion = h.addFile(files.getCompanionPath(parent));
+  const childCompanion = h.addFile(files.getCompanionPath(child));
+  h.frontmatter.set(parentCompanion.path, { tpsGcmFileProperties: 1, tpsGcmFileId: 'parent', tpsGcmSourcePath: parent.path });
+  h.frontmatter.set(childCompanion.path, {
+    tpsGcmFileProperties: 1, tpsGcmFileId: 'child', tpsGcmSourcePath: child.path,
+    CHILDOf: ['[[Views/Parent.base]]', '[[Attachments/Child.pdf]]'],
+  });
+  let childReads = 0;
+  const read = files.read.bind(files);
+  files.read = file => { if (file === child) childReads++; return read(file); };
+  const service = h.plugin.parentLinkResolutionService;
+  assert.deepEqual(service.getParentsForChild(child).map(entry => [entry.file, entry.kind]), [[parent, 'base-parent']]);
+  assert.equal(childReads, 1, 'ignore and link resolution must not reopen the same logical companion');
+  assert.deepEqual(service.getRelationshipCandidates(), [parent, child], 'companion files stay hidden');
+
+  h.frontmatter.get(childCompanion.path).relationshipMode = 'ignore';
+  childCompanion.stat.mtime++;
+  assert.deepEqual(service.getParentsForChild(child), []);
+  assert.deepEqual(service.getStoredParentsForChild(child).map(entry => entry.file), [parent]);
+  delete h.frontmatter.get(childCompanion.path).relationshipMode;
+  childCompanion.stat.mtime++;
+  h.frontmatter.get(parentCompanion.path).relationshipMode = 'ignore';
+  parentCompanion.stat.mtime++;
+  assert.deepEqual(service.getParentsForChild(child), []);
+  h.plugin.settings.dataArchitectureMode = 'native-records';
+  assert.deepEqual(service.getRelationshipCandidates(), [], 'native mode does not revive attachment-backed relationships');
+  assert.equal(h.frontmatter.get(childCompanion.path).CHILDOf.length, 2, 'inspection never removes stored self-links');
 });
 
 test("note time tracking exposes one inferred-target start action instead of task-vs-note modes", async () => {

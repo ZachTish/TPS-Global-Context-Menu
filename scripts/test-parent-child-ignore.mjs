@@ -639,7 +639,7 @@ test('relationship consumers share logical frontmatter and opt in to all-file pi
     (persistent.match(/parentLinkResolutionService\.getRelationshipCandidates\(\)/gu) || []).length >= 2,
     'persistent relationship paths and child rows must share logical candidate enumeration',
   );
-  assert.match(menuBuilder, /resolveChildFilesFor[\s\S]{0,300}getRelationshipCandidates\(\)/u);
+  assert.match(menuBuilder, /resolveChildFilesFor[\s\S]{0,500}getRelationshipCandidates\(\{ includeIgnored: true \}\)[\s\S]{0,150}hasParent\(candidate, file\)/u);
   assert.ok(
     (panel.match(/parentLinkResolutionService\.getLogicalFrontmatter\(/gu) || []).length >= 3,
     'panel sorting and both archive/ignore tag reads use logical frontmatter',

@@ -68,14 +68,17 @@ export class ParentLinkResolutionService {
   }
 
   getParentsForChild(childFile: TFile): ResolvedParentLink[] {
-    if (this.isIgnoredFile(childFile)) return [];
-    return this.getStoredParentsForChild(childFile)
+    const frontmatter = this.getLogicalFrontmatter(childFile);
+    if (this.isIgnoredFrontmatter(frontmatter)) return [];
+    return this.getStoredParentsForChild(childFile, frontmatter)
       .filter((entry) => !this.isIgnoredFile(entry.file));
   }
 
   /** Read persisted relationships without applying the display/automation ignore rule. */
-  getStoredParentsForChild(childFile: TFile): ResolvedParentLink[] {
-    const frontmatter = this.getLogicalFrontmatter(childFile);
+  getStoredParentsForChild(
+    childFile: TFile,
+    frontmatter: Record<string, unknown> = this.getLogicalFrontmatter(childFile),
+  ): ResolvedParentLink[] {
     const values = this.getParentValuesFromFrontmatter(frontmatter);
     const results = new Map<string, ResolvedParentLink>();
     for (const file of this.resolveFilesFromFrontmatterValue(values, childFile.path)) {
