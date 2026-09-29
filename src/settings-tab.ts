@@ -2492,7 +2492,10 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       if (this.sectionState.get(stateKey) ?? false) details.setAttr('open', 'true');
       details.addEventListener('toggle', () => {
         this.sectionState.set(stateKey, details.open);
-        if (details.open) for (const card of cards) if (card.element !== details) card.element.open = false;
+        if (details.open) {
+          this.renderCustomPropertyEditor(details, prop, index);
+          for (const card of cards) if (card.element !== details) card.element.open = false;
+        }
       });
 
       const summary = details.createEl('summary', { cls: 'tps-collapsible-section-summary' });
@@ -2504,471 +2507,472 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       summaryTitle.createEl('strong', { text: prop.label || 'Unnamed Property' });
       summaryTitle.createSpan({ text: `  ${prop.key || '(no key)'} · ${prop.type || 'text'}` });
 
-      const div = details.createDiv({ cls: 'tps-collapsible-section-content' });
-      let valueSettingsHost: HTMLElement | null = null;
-      div.style.padding = '10px';
-      div.style.display = 'flex';
-      div.style.flexDirection = 'column';
-      div.style.gap = '10px';
+      if (details.open) this.renderCustomPropertyEditor(details, prop, index);
+    });
+    applyFilter();
+  }
 
-      const controls = div.createDiv();
-      controls.style.display = 'flex';
-      controls.style.gap = '6px';
-      controls.style.justifyContent = 'flex-end';
+  private renderCustomPropertyEditor(details: HTMLDetailsElement, prop: CustomProperty, index: number): void {
+    // Keep an opened editor mounted so collapsing a card preserves unapplied drafts.
+    if (details.querySelector('.tps-collapsible-section-content')) return;
+    const div = details.createDiv({ cls: 'tps-collapsible-section-content' });
+    let valueSettingsHost: HTMLElement | null = null;
+    div.style.padding = '10px';
+    div.style.display = 'flex';
+    div.style.flexDirection = 'column';
+    div.style.gap = '10px';
 
-      // Move Up
-      if (index > 0) {
-        const upBtn = controls.createEl('button', { text: '↑' });
-        upBtn.onclick = async () => {
-          const temp = this.plugin.settings.properties[index - 1];
-          this.plugin.settings.properties[index - 1] = prop;
-          this.plugin.settings.properties[index] = temp;
-          await this.plugin.saveSettings();
-          this.display();
-        };
-      }
+    const controls = div.createDiv();
+    controls.style.display = 'flex';
+    controls.style.gap = '6px';
+    controls.style.justifyContent = 'flex-end';
 
-      // Move Down
-      if (index < this.plugin.settings.properties.length - 1) {
-        const downBtn = controls.createEl('button', { text: '↓' });
-        downBtn.onclick = async () => {
-          const temp = this.plugin.settings.properties[index + 1];
-          this.plugin.settings.properties[index + 1] = prop;
-          this.plugin.settings.properties[index] = temp;
-          await this.plugin.saveSettings();
-          this.display();
-        };
-      }
-
-      const delBtn = controls.createEl('button', { text: 'Delete' });
-      delBtn.onclick = async () => {
-        this.plugin.settings.properties.splice(index, 1);
+    // Move Up
+    if (index > 0) {
+      const upBtn = controls.createEl('button', { text: '↑' });
+      upBtn.onclick = async () => {
+        const temp = this.plugin.settings.properties[index - 1];
+        this.plugin.settings.properties[index - 1] = prop;
+        this.plugin.settings.properties[index] = temp;
         await this.plugin.saveSettings();
         this.display();
       };
+    }
 
-      // Edit Fields
-      const fields = div.createDiv();
-      fields.style.display = 'grid';
-      fields.style.gridTemplateColumns = '1fr 1fr';
-      fields.style.gap = '10px';
+    // Move Down
+    if (index < this.plugin.settings.properties.length - 1) {
+      const downBtn = controls.createEl('button', { text: '↓' });
+      downBtn.onclick = async () => {
+        const temp = this.plugin.settings.properties[index + 1];
+        this.plugin.settings.properties[index + 1] = prop;
+        this.plugin.settings.properties[index] = temp;
+        await this.plugin.saveSettings();
+        this.display();
+      };
+    }
 
-      // Label
-      new Setting(fields)
-        .setName('Label')
-        .addText(text => text
-          .setValue(prop.label)
-          .onChange(async (value) => {
-            prop.label = value;
-            await this.plugin.saveSettings();
-          }));
+    const delBtn = controls.createEl('button', { text: 'Delete' });
+    delBtn.onclick = async () => {
+      this.plugin.settings.properties.splice(index, 1);
+      await this.plugin.saveSettings();
+      this.display();
+    };
 
-      // Key edits are drafts until a migration has been reviewed and confirmed.
-      let nextKey = prop.key;
-      const keySetting = new Setting(fields)
-        .setName('Frontmatter Key')
-        .setDesc('Required and unique. Apply previews existing notes before saving.')
-        .addText(text => text.setValue(prop.key).onChange(value => {
-          nextKey = value.trim();
-          const diagnostic = getPropertyKeyDiagnostic(this.plugin.settings.properties, index, nextKey);
-          text.inputEl.setAttribute('aria-invalid', diagnostic ? 'true' : 'false');
-          keySetting.settingEl.toggleClass('tps-gcm-setting-item--invalid', !!diagnostic);
-          keySetting.descEl.setText(diagnostic ? 'Enter a non-empty, unique property key. The saved key was not changed.' : 'Apply previews existing notes before saving.');
-        }))
-        .addButton(button => button.setButtonText('Apply').onClick(async () => {
-          if (getPropertyKeyDiagnostic(this.plugin.settings.properties, index, nextKey)) { new Notice('Enter a non-empty, unique property key.'); return; }
-          button.setDisabled(true);
-          try {
-            if (await this.migrateProperty({ kind: 'key', from: prop.key, to: nextKey }, settings => { settings.properties[index].key = nextKey; })) this.display();
-          } finally { button.setDisabled(false); }
+    // Edit Fields
+    const fields = div.createDiv();
+    fields.style.display = 'grid';
+    fields.style.gridTemplateColumns = '1fr 1fr';
+    fields.style.gap = '10px';
+
+    // Label
+    new Setting(fields)
+      .setName('Label')
+      .addText(text => text
+        .setValue(prop.label)
+        .onChange(async (value) => {
+          prop.label = value;
+          await this.plugin.saveSettings();
         }));
-      const persistedKeyDiagnostic = getPropertyKeyDiagnostic(this.plugin.settings.properties, index);
-      keySetting.settingEl.toggleClass('tps-gcm-setting-item--invalid', !!persistedKeyDiagnostic);
-      keySetting.controlEl.querySelector('input')?.setAttribute('aria-invalid', persistedKeyDiagnostic ? 'true' : 'false');
 
-      // Type
-      new Setting(fields)
-        .setName('Type')
-        .addDropdown(drop => drop
-          .addOption('text', 'Text')
-          .addOption('number', 'Number')
-          .addOption('datetime', 'Date/Time')
-          .addOption('selector', 'Selector (Dropdown)')
-          .addOption('kind', 'Kind (Entity identity)')
-          .addOption('list', 'List')
-          .addOption('checkbox', 'Checkbox')
-          .addOption('recurrence', 'Recurrence')
-          .addOption('folder', 'Folder')
-          .addOption('snooze', 'Snooze')
-          .setValue(prop.type)
-          .onChange(async (value: any) => {
-            prop.type = value;
-            if (value === 'kind') {
-              delete prop.acceptsKind;
-              prop.optionSources = getPropertyOptionSources(prop)
-                .filter((source) => source !== 'entity');
-              prop.allowInlineSet = false;
-            } else if (value === 'list' && isEntityOnlyProperty(prop)) {
-              prop.listItemType = 'link';
+    // Key edits are drafts until a migration has been reviewed and confirmed.
+    let nextKey = prop.key;
+    const keySetting = new Setting(fields)
+      .setName('Frontmatter Key')
+      .setDesc('Required and unique. Apply previews existing notes before saving.')
+      .addText(text => text.setValue(prop.key).onChange(value => {
+        nextKey = value.trim();
+        const diagnostic = getPropertyKeyDiagnostic(this.plugin.settings.properties, index, nextKey);
+        text.inputEl.setAttribute('aria-invalid', diagnostic ? 'true' : 'false');
+        keySetting.settingEl.toggleClass('tps-gcm-setting-item--invalid', !!diagnostic);
+        keySetting.descEl.setText(diagnostic ? 'Enter a non-empty, unique property key. The saved key was not changed.' : 'Apply previews existing notes before saving.');
+      }))
+      .addButton(button => button.setButtonText('Apply').onClick(async () => {
+        if (getPropertyKeyDiagnostic(this.plugin.settings.properties, index, nextKey)) { new Notice('Enter a non-empty, unique property key.'); return; }
+        button.setDisabled(true);
+        try {
+          if (await this.migrateProperty({ kind: 'key', from: prop.key, to: nextKey }, settings => { settings.properties[index].key = nextKey; })) this.display();
+        } finally { button.setDisabled(false); }
+      }));
+    const persistedKeyDiagnostic = getPropertyKeyDiagnostic(this.plugin.settings.properties, index);
+    keySetting.settingEl.toggleClass('tps-gcm-setting-item--invalid', !!persistedKeyDiagnostic);
+    keySetting.controlEl.querySelector('input')?.setAttribute('aria-invalid', persistedKeyDiagnostic ? 'true' : 'false');
+
+    // Type
+    new Setting(fields)
+      .setName('Type')
+      .addDropdown(drop => drop
+        .addOption('text', 'Text')
+        .addOption('number', 'Number')
+        .addOption('datetime', 'Date/Time')
+        .addOption('selector', 'Selector (Dropdown)')
+        .addOption('kind', 'Kind (Entity identity)')
+        .addOption('list', 'List')
+        .addOption('checkbox', 'Checkbox')
+        .addOption('recurrence', 'Recurrence')
+        .addOption('folder', 'Folder')
+        .addOption('snooze', 'Snooze')
+        .setValue(prop.type)
+        .onChange(async (value: any) => {
+          prop.type = value;
+          if (value === 'kind') {
+            delete prop.acceptsKind;
+            prop.optionSources = getPropertyOptionSources(prop)
+              .filter((source) => source !== 'entity');
+            prop.allowInlineSet = false;
+          } else if (value === 'list' && isEntityOnlyProperty(prop)) {
+            prop.listItemType = 'link';
+          }
+          await this.plugin.saveSettings();
+          this.display();
+        }));
+
+    if (prop.type !== 'kind') {
+      const acceptedKindsSetting = new Setting(fields)
+        .setName('Accepted kinds')
+        .setDesc('Optional. Enter one or more Kind identities separated by commas or new lines, including Kinds that have no matching entities yet. First setting accepted Kinds defaults this field to Entities only. Use Value sources below to combine entities with manual or discovered vault values.')
+        .addTextArea((text) => {
+          let committedAcceptedKinds = normalizeAcceptedKindSetting(prop.acceptsKind);
+          let draftAcceptedKinds = committedAcceptedKinds;
+          let lastAcceptedKindSources = committedAcceptedKinds
+            ? getPropertyOptionSources(prop)
+            : null;
+          const applyAcceptedKindsDraft = (value: unknown): string => {
+            const currentAcceptedKinds = normalizeAcceptedKindSetting(prop.acceptsKind);
+            if (currentAcceptedKinds) {
+              lastAcceptedKindSources = getPropertyOptionSources(prop);
             }
-            await this.plugin.saveSettings();
-            this.display();
-          }));
-
-      if (prop.type !== 'kind') {
-        const knownKinds = this.plugin.entityIndexService?.getDimensionValues('kind') || [];
-        const acceptedKindsSetting = new Setting(fields)
-          .setName('Accepted kinds')
-          .setDesc([
-            'Optional. Enter one or more Kind identities separated by commas or new lines. First setting accepted Kinds defaults this field to Entities only. Use Value sources below to combine entities with manual or discovered vault values.',
-            knownKinds.length > 0 ? `Known: ${knownKinds.slice(0, 8).join(', ')}${knownKinds.length > 8 ? ', …' : ''}` : 'You can name a Kind before matching entities exist.',
-          ].join(' '))
-          .addTextArea((text) => {
-            let committedAcceptedKinds = normalizeAcceptedKindSetting(prop.acceptsKind);
-            let draftAcceptedKinds = committedAcceptedKinds;
-            let lastAcceptedKindSources = committedAcceptedKinds
-              ? getPropertyOptionSources(prop)
-              : null;
-            const applyAcceptedKindsDraft = (value: unknown): string => {
-              const currentAcceptedKinds = normalizeAcceptedKindSetting(prop.acceptsKind);
-              if (currentAcceptedKinds) {
-                lastAcceptedKindSources = getPropertyOptionSources(prop);
+            const previousListItemType = prop.listItemType;
+            const nextAcceptedKinds = normalizeAcceptedKindSetting(value);
+            applyAcceptedKindSetting(prop, nextAcceptedKinds);
+            if (nextAcceptedKinds && lastAcceptedKindSources) {
+              prop.optionSources = [...lastAcceptedKindSources];
+              prop.optionsSource = prop.optionSources.includes('vault') ? 'vault' : 'manual';
+              if (prop.type === 'list' && !isEntityOnlyProperty(prop)) {
+                prop.listItemType = previousListItemType;
               }
-              const previousListItemType = prop.listItemType;
-              const nextAcceptedKinds = normalizeAcceptedKindSetting(value);
-              applyAcceptedKindSetting(prop, nextAcceptedKinds);
-              if (nextAcceptedKinds && lastAcceptedKindSources) {
-                prop.optionSources = [...lastAcceptedKindSources];
-                prop.optionsSource = prop.optionSources.includes('vault') ? 'vault' : 'manual';
-                if (prop.type === 'list' && !isEntityOnlyProperty(prop)) {
-                  prop.listItemType = previousListItemType;
-                }
-              }
-              return nextAcceptedKinds;
-            };
-            const commitAcceptedKinds = async (nextFocus: EventTarget | null): Promise<void> => {
-              const nextAcceptedKinds = normalizeAcceptedKindSetting(draftAcceptedKinds);
-              const currentAcceptedKinds = normalizeAcceptedKindSetting(prop.acceptsKind);
-              if (
-                nextAcceptedKinds === committedAcceptedKinds
-                && currentAcceptedKinds === committedAcceptedKinds
-              ) {
-                draftAcceptedKinds = committedAcceptedKinds;
-                text.setValue(committedAcceptedKinds);
-                return;
-              }
-
-              applyAcceptedKindsDraft(nextAcceptedKinds);
-              committedAcceptedKinds = normalizeAcceptedKindSetting(prop.acceptsKind);
+            }
+            return nextAcceptedKinds;
+          };
+          const commitAcceptedKinds = async (nextFocus: EventTarget | null): Promise<void> => {
+            const nextAcceptedKinds = normalizeAcceptedKindSetting(draftAcceptedKinds);
+            const currentAcceptedKinds = normalizeAcceptedKindSetting(prop.acceptsKind);
+            if (
+              nextAcceptedKinds === committedAcceptedKinds
+              && currentAcceptedKinds === committedAcceptedKinds
+            ) {
               draftAcceptedKinds = committedAcceptedKinds;
               text.setValue(committedAcceptedKinds);
-              if (valueSettingsHost) {
-                const sourceSelectUpdated = this.syncPropertyValueSourceSelect(valueSettingsHost, prop);
-                if (!sourceSelectUpdated) {
-                  this.refreshCustomPropertyValueSettings(valueSettingsHost, prop);
-                } else if (nextFocus instanceof Node && valueSettingsHost.contains(nextFocus)) {
-                  this.refreshPropertyValueSettingsWhenFocusLeaves(valueSettingsHost, prop);
-                } else {
-                  this.refreshCustomPropertyValueSettings(valueSettingsHost, prop);
-                }
-              }
-              await this.plugin.saveSettings();
-            };
+              return;
+            }
 
-            text
-              .setPlaceholder('project, area')
-              .setValue(committedAcceptedKinds)
-              .onChange(async (value) => {
-                draftAcceptedKinds = value;
-                applyAcceptedKindsDraft(value);
-                await this.plugin.saveSettings();
-              });
-            text.inputEl.rows = 2;
-            text.inputEl.style.minHeight = '3.5em';
-            text.inputEl.style.resize = 'vertical';
-            text.inputEl.addEventListener('blur', (event: FocusEvent) => {
-              void commitAcceptedKinds(event.relatedTarget);
-            });
-            text.inputEl.addEventListener('keydown', (event: KeyboardEvent) => {
-              if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
-                event.preventDefault();
-                text.inputEl.blur();
-                return;
+            applyAcceptedKindsDraft(nextAcceptedKinds);
+            committedAcceptedKinds = normalizeAcceptedKindSetting(prop.acceptsKind);
+            draftAcceptedKinds = committedAcceptedKinds;
+            text.setValue(committedAcceptedKinds);
+            if (valueSettingsHost) {
+              const sourceSelectUpdated = this.syncPropertyValueSourceSelect(valueSettingsHost, prop);
+              if (!sourceSelectUpdated) {
+                this.refreshCustomPropertyValueSettings(valueSettingsHost, prop);
+              } else if (nextFocus instanceof Node && valueSettingsHost.contains(nextFocus)) {
+                this.refreshPropertyValueSettingsWhenFocusLeaves(valueSettingsHost, prop);
+              } else {
+                this.refreshCustomPropertyValueSettings(valueSettingsHost, prop);
               }
-              if (event.key === 'Escape') {
-                event.preventDefault();
-                draftAcceptedKinds = committedAcceptedKinds;
-                text.setValue(committedAcceptedKinds);
-                text.inputEl.blur();
-              }
+            }
+            await this.plugin.saveSettings();
+          };
+
+          text
+            .setPlaceholder('project, area')
+            .setValue(committedAcceptedKinds)
+            .onChange(async (value) => {
+              draftAcceptedKinds = value;
+              applyAcceptedKindsDraft(value);
+              await this.plugin.saveSettings();
             });
+          text.inputEl.rows = 2;
+          text.inputEl.style.minHeight = '3.5em';
+          text.inputEl.style.resize = 'vertical';
+          text.inputEl.addEventListener('blur', (event: FocusEvent) => {
+            void commitAcceptedKinds(event.relatedTarget);
           });
-        acceptedKindsSetting.settingEl.style.gridColumn = '1 / -1';
-      }
+          text.inputEl.addEventListener('keydown', (event: KeyboardEvent) => {
+            if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) {
+              event.preventDefault();
+              text.inputEl.blur();
+              return;
+            }
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              draftAcceptedKinds = committedAcceptedKinds;
+              text.setValue(committedAcceptedKinds);
+              text.inputEl.blur();
+            }
+          });
+        });
+      acceptedKindsSetting.settingEl.style.gridColumn = '1 / -1';
+    }
 
-      // Icon
-      new Setting(fields)
-        .setName('Icon')
-        .addText(text => text
-          .setValue(prop.icon || '')
-          .setPlaceholder('lucide-icon-name')
+    // Icon
+    new Setting(fields)
+      .setName('Icon')
+      .addText(text => text
+        .setValue(prop.icon || '')
+        .setPlaceholder('lucide-icon-name')
+        .onChange(async (value) => {
+          prop.icon = value;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(fields)
+      .setName('Show on inline menu')
+      .setDesc('Show this property in the inline header panel')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(prop.showInCollapsed !== false)
           .onChange(async (value) => {
-            prop.icon = value;
+            prop.showInCollapsed = value;
             await this.plugin.saveSettings();
-          }));
+          })
+      );
 
-      new Setting(fields)
-        .setName('Show on inline menu')
-        .setDesc('Show this property in the inline header panel')
-        .addToggle((toggle) =>
-          toggle
-            .setValue(prop.showInCollapsed !== false)
-            .onChange(async (value) => {
-              prop.showInCollapsed = value;
-              await this.plugin.saveSettings();
-            })
-        );
-
-      new Setting(fields)
-        .setName('Show in context menu')
-        .setDesc('Show this property in the right-click context menu')
-        .addToggle((toggle) =>
-          toggle
-            .setValue(prop.showInContextMenu !== false)
-            .onChange(async (value) => {
-              prop.showInContextMenu = value;
-              await this.plugin.saveSettings();
-            })
-        );
-
-      new Setting(fields)
-        .setName('Allow @@ inline set')
-        .setDesc('Allow this property in the task-line @@ picker. Disable for fields like title, parent, or folder.')
-        .addToggle((toggle) =>
-          toggle
-            .setValue(prop.allowInlineSet !== false)
-            .onChange(async (value) => {
-              prop.allowInlineSet = value;
-              await this.plugin.saveSettings();
-            })
-        );
-
-      new Setting(fields)
-        .setName('Property visibility')
-        .setDesc('Default key/value visibility rule for this property. Inline and context menu can override it below.')
-        .addDropdown((drop) => drop
-          .addOption('always', 'Always show')
-          .addOption('populated', 'Only when key has value')
-          .addOption('exists', 'Only when key exists')
-          .addOption('blank', 'Only when key exists but is empty')
-          .addOption('missing', 'Only when key is missing')
-          .addOption('empty', 'Only when missing or empty')
-          .addOption('never', 'Never show')
-          .setValue(prop.hidden === true ? 'never' : prop.showWhen || 'always')
-          .onChange(async (value: CustomProperty['showWhen']) => {
-            prop.showWhen = value || 'always';
-            prop.hidden = value === 'never';
+    new Setting(fields)
+      .setName('Show in context menu')
+      .setDesc('Show this property in the right-click context menu')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(prop.showInContextMenu !== false)
+          .onChange(async (value) => {
+            prop.showInContextMenu = value;
             await this.plugin.saveSettings();
-          }));
+          })
+      );
 
-      new Setting(fields)
-        .setName('Inline visibility')
-        .setDesc('Optional override for the inline/header property chip. Use this to hide missing keys inline while still showing them in the context menu.')
-        .addDropdown((drop) => drop
-          .addOption('', 'Use property visibility')
-          .addOption('always', 'Always show')
-          .addOption('populated', 'Only when key has value')
-          .addOption('exists', 'Only when key exists')
-          .addOption('blank', 'Only when key exists but is empty')
-          .addOption('missing', 'Only when key is missing')
-          .addOption('empty', 'Only when missing or empty')
-          .addOption('never', 'Never show')
-          .setValue(prop.inlineShowWhen || '')
-          .onChange(async (value: '' | CustomProperty['showWhen']) => {
-            if (value) prop.inlineShowWhen = value;
-            else delete prop.inlineShowWhen;
+    new Setting(fields)
+      .setName('Allow @@ inline set')
+      .setDesc('Allow this property in the task-line @@ picker. Disable for fields like title, parent, or folder.')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(prop.allowInlineSet !== false)
+          .onChange(async (value) => {
+            prop.allowInlineSet = value;
             await this.plugin.saveSettings();
-          }));
+          })
+      );
 
-      new Setting(fields)
-        .setName('Context menu visibility')
-        .setDesc('Optional override for the right-click context menu.')
-        .addDropdown((drop) => drop
-          .addOption('', 'Use property visibility')
-          .addOption('always', 'Always show')
-          .addOption('populated', 'Only when key has value')
-          .addOption('exists', 'Only when key exists')
-          .addOption('blank', 'Only when key exists but is empty')
-          .addOption('missing', 'Only when key is missing')
-          .addOption('empty', 'Only when missing or empty')
-          .addOption('never', 'Never show')
-          .setValue(prop.contextMenuShowWhen || '')
-          .onChange(async (value: '' | CustomProperty['showWhen']) => {
-            if (value) prop.contextMenuShowWhen = value;
-            else delete prop.contextMenuShowWhen;
+    new Setting(fields)
+      .setName('Property visibility')
+      .setDesc('Default key/value visibility rule for this property. Inline and context menu can override it below.')
+      .addDropdown((drop) => drop
+        .addOption('always', 'Always show')
+        .addOption('populated', 'Only when key has value')
+        .addOption('exists', 'Only when key exists')
+        .addOption('blank', 'Only when key exists but is empty')
+        .addOption('missing', 'Only when key is missing')
+        .addOption('empty', 'Only when missing or empty')
+        .addOption('never', 'Never show')
+        .setValue(prop.hidden === true ? 'never' : prop.showWhen || 'always')
+        .onChange(async (value: CustomProperty['showWhen']) => {
+          prop.showWhen = value || 'always';
+          prop.hidden = value === 'never';
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(fields)
+      .setName('Inline visibility')
+      .setDesc('Optional override for the inline/header property chip. Use this to hide missing keys inline while still showing them in the context menu.')
+      .addDropdown((drop) => drop
+        .addOption('', 'Use property visibility')
+        .addOption('always', 'Always show')
+        .addOption('populated', 'Only when key has value')
+        .addOption('exists', 'Only when key exists')
+        .addOption('blank', 'Only when key exists but is empty')
+        .addOption('missing', 'Only when key is missing')
+        .addOption('empty', 'Only when missing or empty')
+        .addOption('never', 'Never show')
+        .setValue(prop.inlineShowWhen || '')
+        .onChange(async (value: '' | CustomProperty['showWhen']) => {
+          if (value) prop.inlineShowWhen = value;
+          else delete prop.inlineShowWhen;
+          await this.plugin.saveSettings();
+        }));
+
+    new Setting(fields)
+      .setName('Context menu visibility')
+      .setDesc('Optional override for the right-click context menu.')
+      .addDropdown((drop) => drop
+        .addOption('', 'Use property visibility')
+        .addOption('always', 'Always show')
+        .addOption('populated', 'Only when key has value')
+        .addOption('exists', 'Only when key exists')
+        .addOption('blank', 'Only when key exists but is empty')
+        .addOption('missing', 'Only when key is missing')
+        .addOption('empty', 'Only when missing or empty')
+        .addOption('never', 'Never show')
+        .setValue(prop.contextMenuShowWhen || '')
+        .onChange(async (value: '' | CustomProperty['showWhen']) => {
+          if (value) prop.contextMenuShowWhen = value;
+          else delete prop.contextMenuShowWhen;
+          await this.plugin.saveSettings();
+        }));
+
+    renderNavigatorPropertyVisibility(fields, this.app, () => prop.key);
+
+    const scopeDiv = div.createDiv();
+    scopeDiv.style.gridColumn = '1 / -1';
+    new Setting(scopeDiv)
+      .setName('Show only for kinds')
+      .setDesc('Optional comma/newline list of logical note or line kinds, such as task, exercise, food-entry, or workout-session.')
+      .addTextArea((text) => {
+        text
+          .setPlaceholder('task, workout-session')
+          .setValue((prop.scopeKinds || []).join(', '))
+          .onChange(async (value) => {
+            prop.scopeKinds = value
+              .split(/[,\n]/u)
+              .map((kind) => kind.trim().toLocaleLowerCase())
+              .filter(Boolean);
             await this.plugin.saveSettings();
-          }));
+          });
+        text.inputEl.rows = 2;
+        text.inputEl.cols = 30;
+      });
 
-      renderNavigatorPropertyVisibility(fields, this.app, () => prop.key);
-
-      const scopeDiv = div.createDiv();
-      scopeDiv.style.gridColumn = '1 / -1';
-      new Setting(scopeDiv)
-        .setName('Show only for kinds')
-        .setDesc('Optional comma/newline list of logical note or line kinds, such as task, exercise, food-entry, or workout-session.')
-        .addTextArea((text) => {
-          text
-            .setPlaceholder('task, workout-session')
-            .setValue((prop.scopeKinds || []).join(', '))
-            .onChange(async (value) => {
-              prop.scopeKinds = value
-                .split(/[,\n]/u)
-                .map((kind) => kind.trim().toLocaleLowerCase())
-                .filter(Boolean);
-              await this.plugin.saveSettings();
-            });
-          text.inputEl.rows = 2;
-          text.inputEl.cols = 30;
-        });
-
-      new Setting(scopeDiv)
-        .setName('Hide for kinds')
-        .setDesc('Optional comma/newline list. Matching logical note or line kinds never show this property.')
-        .addTextArea((text) => {
-          text
-            .setPlaceholder('area, asset')
-            .setValue((prop.excludeKinds || []).join(', '))
-            .onChange(async (value) => {
-              prop.excludeKinds = value
-                .split(/[,\n]/u)
-                .map((kind) => kind.trim().toLocaleLowerCase())
-                .filter(Boolean);
-              await this.plugin.saveSettings();
-            });
-          text.inputEl.rows = 2;
-          text.inputEl.cols = 30;
-        });
-
-      new Setting(scopeDiv)
-        .setName('Show only for tags')
-        .setDesc('Optional comma/newline list. When set, this property only appears on notes with matching tags, for example type/shopping-item.')
-        .addTextArea((text) => {
-          text
-            .setPlaceholder('type/task, type/project')
-            .setValue((prop.scopeTags || []).join(', '))
-            .onChange(async (value) => {
-              prop.scopeTags = value
-                .split(/[,\n]/)
-                .map((tag) => tag.trim().replace(/^#/, ''))
-                .filter(Boolean);
-              await this.plugin.saveSettings();
-            });
-          text.inputEl.rows = 2;
-          text.inputEl.cols = 30;
-        });
-
-      new Setting(scopeDiv)
-        .setName('Scope matching')
-        .setDesc('Any is usually best for type tags. All requires every listed tag.')
-        .addDropdown((drop) => drop
-          .addOption('any', 'Any listed tag')
-          .addOption('all', 'All listed tags')
-          .setValue(prop.scopeMode || 'any')
-          .onChange(async (value: 'any' | 'all') => {
-            prop.scopeMode = value;
+    new Setting(scopeDiv)
+      .setName('Hide for kinds')
+      .setDesc('Optional comma/newline list. Matching logical note or line kinds never show this property.')
+      .addTextArea((text) => {
+        text
+          .setPlaceholder('area, asset')
+          .setValue((prop.excludeKinds || []).join(', '))
+          .onChange(async (value) => {
+            prop.excludeKinds = value
+              .split(/[,\n]/u)
+              .map((kind) => kind.trim().toLocaleLowerCase())
+              .filter(Boolean);
             await this.plugin.saveSettings();
-          }));
+          });
+        text.inputEl.rows = 2;
+        text.inputEl.cols = 30;
+      });
 
-      new Setting(scopeDiv)
-        .setName('Hide for tags')
-        .setDesc('Optional comma/newline list. Matching notes will not show this property.')
-        .addTextArea((text) => {
-          text
-            .setPlaceholder('type/shopping-item')
-            .setValue((prop.excludeTags || []).join(', '))
-            .onChange(async (value) => {
-              prop.excludeTags = value
-                .split(/[,\n]/)
-                .map((tag) => tag.trim().replace(/^#/, ''))
-                .filter(Boolean);
-              await this.plugin.saveSettings();
-            });
-          text.inputEl.rows = 2;
-          text.inputEl.cols = 30;
-        });
+    new Setting(scopeDiv)
+      .setName('Show only for tags')
+      .setDesc('Optional comma/newline list. When set, this property only appears on notes with matching tags, for example type/shopping-item.')
+      .addTextArea((text) => {
+        text
+          .setPlaceholder('type/task, type/project')
+          .setValue((prop.scopeTags || []).join(', '))
+          .onChange(async (value) => {
+            prop.scopeTags = value
+              .split(/[,\n]/)
+              .map((tag) => tag.trim().replace(/^#/, ''))
+              .filter(Boolean);
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.rows = 2;
+        text.inputEl.cols = 30;
+      });
 
-      new Setting(scopeDiv)
-        .setName('Show only for folders / paths')
-        .setDesc('Optional comma/newline list. Matching is prefix-based and supports *, so _* matches underscore-prefixed folders.')
-        .addTextArea((text) => {
-          text
-            .setPlaceholder('Shopping, Areas/Home')
-            .setValue((prop.scopePaths || []).join(', '))
-            .onChange(async (value) => {
-              prop.scopePaths = value
-                .split(/[,\n]/)
-                .map((path) => path.trim())
-                .filter(Boolean);
-              await this.plugin.saveSettings();
-            });
-          text.inputEl.rows = 2;
-          text.inputEl.cols = 30;
-        });
+    new Setting(scopeDiv)
+      .setName('Scope matching')
+      .setDesc('Any is usually best for type tags. All requires every listed tag.')
+      .addDropdown((drop) => drop
+        .addOption('any', 'Any listed tag')
+        .addOption('all', 'All listed tags')
+        .setValue(prop.scopeMode || 'any')
+        .onChange(async (value: 'any' | 'all') => {
+          prop.scopeMode = value;
+          await this.plugin.saveSettings();
+        }));
 
-      new Setting(scopeDiv)
-        .setName('Hide for folders / paths')
-        .setDesc('Optional comma/newline list. Matching notes will not show this property. Supports *, so _* matches underscore-prefixed folders.')
-        .addTextArea((text) => {
-          text
-            .setPlaceholder('Shopping')
-            .setValue((prop.excludePaths || []).join(', '))
-            .onChange(async (value) => {
-              prop.excludePaths = value
-                .split(/[,\n]/)
-                .map((path) => path.trim())
-                .filter(Boolean);
-              await this.plugin.saveSettings();
-            });
-          text.inputEl.rows = 2;
-          text.inputEl.cols = 30;
-        });
+    new Setting(scopeDiv)
+      .setName('Hide for tags')
+      .setDesc('Optional comma/newline list. Matching notes will not show this property.')
+      .addTextArea((text) => {
+        text
+          .setPlaceholder('type/shopping-item')
+          .setValue((prop.excludeTags || []).join(', '))
+          .onChange(async (value) => {
+            prop.excludeTags = value
+              .split(/[,\n]/)
+              .map((tag) => tag.trim().replace(/^#/, ''))
+              .filter(Boolean);
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.rows = 2;
+        text.inputEl.cols = 30;
+      });
 
-      new Setting(scopeDiv)
-        .setName('Show only for properties')
-        .setDesc('One condition per line: key=value, key contains value, key exists, key missing, key!=value. Example: type=shopping-item.')
-        .addTextArea((text) => {
-          text
-            .setPlaceholder('type=shopping-item\nobjectType contains shopping')
-            .setValue((prop.scopeProperties || []).map((condition) => this.serializePropertyScopeCondition(condition)).join('\n'))
-            .onChange(async (value) => {
-              prop.scopeProperties = this.parsePropertyScopeConditions(value);
-              await this.plugin.saveSettings();
-            });
-          text.inputEl.rows = 3;
-          text.inputEl.cols = 30;
-        });
+    new Setting(scopeDiv)
+      .setName('Show only for folders / paths')
+      .setDesc('Optional comma/newline list. Matching is prefix-based and supports *, so _* matches underscore-prefixed folders.')
+      .addTextArea((text) => {
+        text
+          .setPlaceholder('Shopping, Areas/Home')
+          .setValue((prop.scopePaths || []).join(', '))
+          .onChange(async (value) => {
+            prop.scopePaths = value
+              .split(/[,\n]/)
+              .map((path) => path.trim())
+              .filter(Boolean);
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.rows = 2;
+        text.inputEl.cols = 30;
+      });
 
-      new Setting(scopeDiv)
-        .setName('Hide when properties match')
-        .setDesc('One condition per line. Any matching logical frontmatter condition hides this field without deleting its value. Example: kind=area hides Status on areas.')
-        .addTextArea((text) => {
-          text
-            .setPlaceholder('kind=area\nworkflowState=archived')
-            .setValue((prop.hideWhenProperties || []).map((condition) => this.serializePropertyScopeCondition(condition)).join('\n'))
-            .onChange(async (value) => {
-              prop.hideWhenProperties = this.parsePropertyScopeConditions(value);
-              await this.plugin.saveSettings();
-            });
-          text.inputEl.rows = 3;
-          text.inputEl.cols = 30;
-        });
+    new Setting(scopeDiv)
+      .setName('Hide for folders / paths')
+      .setDesc('Optional comma/newline list. Matching notes will not show this property. Supports *, so _* matches underscore-prefixed folders.')
+      .addTextArea((text) => {
+        text
+          .setPlaceholder('Shopping')
+          .setValue((prop.excludePaths || []).join(', '))
+          .onChange(async (value) => {
+            prop.excludePaths = value
+              .split(/[,\n]/)
+              .map((path) => path.trim())
+              .filter(Boolean);
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.rows = 2;
+        text.inputEl.cols = 30;
+      });
 
-      valueSettingsHost = div.createDiv({ cls: 'tps-gcm-property-value-settings' });
-      valueSettingsHost.style.gridColumn = '1 / -1';
-      this.renderCustomPropertyValueSettings(valueSettingsHost, prop);
+    new Setting(scopeDiv)
+      .setName('Show only for properties')
+      .setDesc('One condition per line: key=value, key contains value, key exists, key missing, key!=value. Example: type=shopping-item.')
+      .addTextArea((text) => {
+        text
+          .setPlaceholder('type=shopping-item\nobjectType contains shopping')
+          .setValue((prop.scopeProperties || []).map((condition) => this.serializePropertyScopeCondition(condition)).join('\n'))
+          .onChange(async (value) => {
+            prop.scopeProperties = this.parsePropertyScopeConditions(value);
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.rows = 3;
+        text.inputEl.cols = 30;
+      });
 
-    });
-    applyFilter();
+    new Setting(scopeDiv)
+      .setName('Hide when properties match')
+      .setDesc('One condition per line. Any matching logical frontmatter condition hides this field without deleting its value. Example: kind=area hides Status on areas.')
+      .addTextArea((text) => {
+        text
+          .setPlaceholder('kind=area\nworkflowState=archived')
+          .setValue((prop.hideWhenProperties || []).map((condition) => this.serializePropertyScopeCondition(condition)).join('\n'))
+          .onChange(async (value) => {
+            prop.hideWhenProperties = this.parsePropertyScopeConditions(value);
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.rows = 3;
+        text.inputEl.cols = 30;
+      });
+
+    valueSettingsHost = div.createDiv({ cls: 'tps-gcm-property-value-settings' });
+    valueSettingsHost.style.gridColumn = '1 / -1';
+    this.renderCustomPropertyValueSettings(valueSettingsHost, prop);
   }
 
   private renderBaseQueryGuide(container: HTMLElement): void {
@@ -3177,9 +3181,11 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   ): void {
     const optionsDiv = container.createDiv();
     optionsDiv.style.gridColumn = '1 / -1';
-    const vaultOptions = prop.type === 'kind'
-      ? this.plugin.entityIndexService?.getDimensionValues('kind') || collectVaultPropertyOptions(this.app, prop)
-      : collectVaultPropertyOptions(this.app, prop);
+    const vaultOptions = !propertyUsesVaultOptions(prop)
+      ? []
+      : prop.type === 'kind'
+        ? this.plugin.entityIndexService?.getDimensionValues('kind') || collectVaultPropertyOptions(this.app, prop)
+        : collectVaultPropertyOptions(this.app, prop);
     const manualOptions = normalizeManualPropertyOptions(prop.options || [], prop);
     const effectiveOptions = getEffectivePropertyOptions(this.app, prop);
     const sources = getPropertyOptionSources(prop);
