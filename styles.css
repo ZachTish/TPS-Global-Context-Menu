@@ -703,6 +703,49 @@
 
 body details.tps-gcm-property-card[hidden] { display: none !important; }
 
+/* Property editors size columns from their available pane, including pop-out settings. */
+.tps-gcm-settings-property-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
+  gap: 10px;
+}
+
+.tps-gcm-settings-property-editor .setting-item {
+  min-width: 0;
+  flex-wrap: wrap;
+}
+
+.tps-gcm-settings-property-editor .setting-item-info {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.tps-gcm-settings-property-editor .setting-item-control {
+  min-width: 0;
+  max-width: 100%;
+  flex-wrap: wrap;
+}
+
+.tps-gcm-settings-property-editor input,
+.tps-gcm-settings-property-editor select,
+.tps-gcm-settings-property-editor textarea {
+  max-width: 100%;
+}
+
+.tps-gcm-settings-property-editor button {
+  height: auto;
+  min-height: 44px;
+  white-space: normal;
+}
+
+@media (max-width: 700px) {
+  .tps-gcm-settings-property-editor input:not([type="checkbox"]),
+  .tps-gcm-settings-property-editor select {
+    min-height: 44px;
+  }
+}
+
+
 /* Confirmed property migrations: keep the review usable on narrow screens. */
 .tps-gcm-property-migration-modal .setting-item-control { flex-wrap: wrap; gap: 8px; }
 .tps-gcm-property-migration-modal button { height: auto; min-height: 44px; white-space: normal; }

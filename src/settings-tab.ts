@@ -2515,7 +2515,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   private renderCustomPropertyEditor(details: HTMLDetailsElement, prop: CustomProperty, index: number): void {
     // Keep an opened editor mounted so collapsing a card preserves unapplied drafts.
     if (details.querySelector('.tps-collapsible-section-content')) return;
-    const div = details.createDiv({ cls: 'tps-collapsible-section-content' });
+    const div = details.createDiv({ cls: 'tps-collapsible-section-content tps-gcm-settings-property-editor' });
     let valueSettingsHost: HTMLElement | null = null;
     div.style.padding = '10px';
     div.style.display = 'flex';
@@ -2559,10 +2559,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     };
 
     // Edit Fields
-    const fields = div.createDiv();
-    fields.style.display = 'grid';
-    fields.style.gridTemplateColumns = '1fr 1fr';
-    fields.style.gap = '10px';
+    const fields = div.createDiv({ cls: 'tps-gcm-settings-property-fields' });
 
     // Label
     new Setting(fields)
