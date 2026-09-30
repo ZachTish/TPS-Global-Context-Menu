@@ -113,17 +113,14 @@ export class FileNamingService {
                 // Startup metadata owns that initial identity; only real creates
                 // need the current-source refresh used for subsequent mutations.
                 if (event === 'create' && this.plugin.app.workspace?.layoutReady === false) return;
-                invalidateDailyNoteCandidateIndex(this.plugin.app);
-                // Folder and attachment events can never be followed by a
-                // Markdown metadata-cache event. They still invalidate the
-                // candidate index, but must not leave synchronous Daily Note
-                // identity disabled indefinitely.
+                // The candidate index contains only Markdown files. A changed
+                // Markdown path is checked after its current source is read.
                 if (!(file instanceof TFile) || file.extension.toLowerCase() !== 'md') return;
                 if (event === 'delete') {
-                    markDailyNoteCandidateMetadataReady(this.plugin.app, file);
+                    markDailyNoteCandidateMetadataReady(this.plugin.app, file, this.plugin.settings);
                 } else {
                     if (event === 'rename' && oldPath) {
-                        markDailyNoteCandidateMetadataReady(this.plugin.app, oldPath);
+                        markDailyNoteCandidateMetadataReady(this.plugin.app, oldPath, this.plugin.settings);
                     }
                     markDailyNoteCandidatePathDirty(this.plugin.app, file);
                     // Only an identity consumer that observes blocked readiness
@@ -137,18 +134,28 @@ export class FileNamingService {
         for (const event of ['changed', 'deleted', 'resolve', 'resolved']) {
             const ref = (this.plugin.app.metadataCache as any)?.on?.(event, async (file?: unknown) => {
                 const refreshEpoch = ++this.dailyNoteMetadataRefreshEpoch;
+                if ((this.plugin.app.metadataCache as any)?.initialized === false) {
+                    // A whole-cache rebuild revokes the previous global proof
+                    // even if no API consumer queries readiness during it.
+                    this.dailyNoteMetadataGlobalResolutionObserved = false;
+                    this.dailyNoteMetadataReady = false;
+                }
+                const firstGlobalResolution = event === 'resolved'
+                    && !this.dailyNoteMetadataGlobalResolutionObserved;
                 if (event === 'resolved') {
                     // Public MetadataCache contract: every file has completed
                     // resolution. Some empty files still intentionally have
                     // no CachedMetadata entry, so this event is stronger than
                     // scanning getFileCache() for universal non-null values.
+                    // Later `resolved` events also follow ordinary file edits;
+                    // those paths were already handled by per-file callbacks.
                     this.dailyNoteMetadataGlobalResolutionObserved = true;
                 }
                 if (file instanceof TFile) {
-                    markDailyNoteCandidateMetadataReady(this.plugin.app, file);
-                } else if (event === 'resolved') {
+                    markDailyNoteCandidateMetadataReady(this.plugin.app, file, this.plugin.settings);
+                } else if (firstGlobalResolution) {
                     markDailyNoteCandidateMetadataReady(this.plugin.app);
-                } else {
+                } else if (event !== 'resolved') {
                     invalidateDailyNoteCandidateIndex(this.plugin.app);
                 }
                 this.dailyNoteMetadataReady = false;

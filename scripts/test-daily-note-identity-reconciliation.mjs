@@ -828,6 +828,94 @@ test('candidate lookup scans once across dates and invalidates after a vault cha
   assert.equal(harness.markdownScanCount, 2);
 });
 
+test('current-byte edits rebuild only when a path enters or leaves Daily Note identity or conflict', async () => {
+  const path = 'Journal/Imported transaction.md';
+  const harness = createHarness([{
+    path,
+    frontmatter: { kind: 'transaction' },
+    content: '---\nkind: transaction\n---\nOriginal',
+  }], { folder: 'Journal', format: 'YYYY-MM-DD' });
+  const file = harness.files.get(path);
+  useMetadataReadinessOwner(harness);
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), null);
+  assert.equal(harness.markdownScanCount, 1);
+
+  const edit = async (source) => {
+    harness.contents.set(path, source);
+    identity.markDailyNoteCandidatePathDirty(harness.app, file);
+    identity.markDailyNoteCandidateMetadataReady(harness.app, file, {});
+    assert.equal(identity.hasPendingDailyNoteCandidatePathRefresh(harness.app), true);
+    assert.equal(await identity.refreshPendingDailyNoteCandidatePaths(harness.app, {}), true);
+  };
+  await edit('---\nkind: transaction\n---\nCategorized');
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), null);
+  assert.equal(harness.markdownScanCount, 1, 'an unchanged non-Daily identity keeps the warm index');
+  assert.equal(harness.vaultReadCount, 1);
+
+  await edit('---\nkind: dailynote\nscheduled: 2026-08-25\n---\nConverted');
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), file);
+  assert.equal(harness.markdownScanCount, 2, 'a new Daily candidate enters the index');
+
+  await edit('---\nkind: dailynote\nscheduled: 2026-08-25\ntitle: 2026-08-26\n---\nConflicting');
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), null);
+  assert.deepEqual(await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-26'), {
+    status: 'blocked', file: null, reason: 'conflicting-identity-signals',
+  });
+  assert.equal(harness.markdownScanCount, 3, 'conflicting dates remain indexed as blockers');
+
+  await edit('---\nkind: transaction\n---\nReclassified');
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), null);
+  assert.deepEqual(await identity.reconcileExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-26'), {
+    status: 'absent', file: null,
+  });
+  assert.equal(harness.markdownScanCount, 4, 'leaving a conflict removes its indexed blocker');
+  assert.equal(harness.vaultReadCount, 4);
+});
+
+test('metadata-only transitions, renamed candidates and deletion invalidate their indexed paths', async () => {
+  const path = 'Legacy journal.md';
+  const harness = createHarness([{ path, frontmatter: { kind: 'project' } }]);
+  const file = harness.files.get(path);
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), null);
+  assert.equal(harness.markdownScanCount, 1);
+
+  harness.frontmatter.set(path, { kind: 'dailynote', scheduled: '2026-08-25' });
+  identity.markDailyNoteCandidateMetadataReady(harness.app, file, {});
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), file);
+  assert.equal(harness.markdownScanCount, 2);
+
+  const renamedPath = 'Renamed journal.md';
+  harness.files.delete(path);
+  harness.frontmatter.delete(path);
+  harness.files.set(renamedPath, file);
+  harness.frontmatter.set(renamedPath, { kind: 'dailynote', scheduled: '2026-08-25' });
+  file.path = renamedPath;
+  file.name = 'Renamed journal.md';
+  file.basename = 'Renamed journal';
+  identity.markDailyNoteCandidateMetadataReady(harness.app, path, {});
+  identity.markDailyNoteCandidateMetadataReady(harness.app, file, {});
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), file);
+  assert.equal(harness.markdownScanCount, 3);
+
+  harness.frontmatter.set(renamedPath, { kind: 'project' });
+  identity.markDailyNoteCandidateMetadataReady(harness.app, file, {});
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), null);
+  assert.equal(harness.markdownScanCount, 4);
+
+  harness.frontmatter.set(renamedPath, { kind: 'dailynote', scheduled: '2026-08-25' });
+  identity.markDailyNoteCandidateMetadataReady(harness.app, file, {});
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), file);
+  assert.equal(harness.markdownScanCount, 5);
+  harness.files.delete(renamedPath);
+  identity.markDailyNoteCandidateMetadataReady(harness.app, renamedPath, {});
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), null);
+  assert.equal(harness.markdownScanCount, 6);
+
+  harness.coreOptions.folder = 'New Journal';
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), null);
+  assert.equal(harness.markdownScanCount, 7, 'a changed Daily Notes configuration uses a fresh index');
+});
+
 test('zero-byte canonical Daily Notes do not wait for an impossible metadata entry', async () => {
   const path = 'Inbox/Daily/2026-08-25.md';
   const harness = createHarness(

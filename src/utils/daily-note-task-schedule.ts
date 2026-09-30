@@ -30,6 +30,7 @@ type DailyNoteCandidateIndex = {
   dirty: boolean;
   byDate: Map<string, Array<{ file: TFile; identity: DailyNoteIdentity }>>;
   conflictsByDate: Map<string, number>;
+  candidatePaths: Set<string>;
   scanCount: number;
 };
 
@@ -494,12 +495,7 @@ function getDailyNoteCandidatesForDate(
   settings: unknown,
   isoDate: string,
 ): { candidates: Array<{ file: TFile; identity: DailyNoteIdentity }>; conflictCount: number } {
-  const signature = [
-    normalizeDailyFolder(getDailyNoteFolder(app)),
-    getDailyNoteDateFormat(app, settings),
-    JSON.stringify((settings as { nativeRecordKindPropertyKeys?: KindMappings })?.nativeRecordKindPropertyKeys || {}),
-    String((settings as { nativeRecordKindPropertyKey?: string } | null | undefined)?.nativeRecordKindPropertyKey || '').trim().toLowerCase(),
-  ].join('\u0000');
+  const signature = getDailyNoteCandidateSignature(app, settings);
   let indexes = dailyNoteCandidateIndexes.get(app as object);
   if (!indexes) {
     indexes = new Map();
@@ -508,12 +504,13 @@ function getDailyNoteCandidatesForDate(
   let index = indexes.get(signature);
   if (!index) {
     if (indexes.size >= 4) indexes.delete(indexes.keys().next().value as string);
-    index = { dirty: true, byDate: new Map(), conflictsByDate: new Map(), scanCount: 0 };
+    index = { dirty: true, byDate: new Map(), conflictsByDate: new Map(), candidatePaths: new Set(), scanCount: 0 };
     indexes.set(signature, index);
   }
   if (index.dirty) {
     const byDate = new Map<string, Array<{ file: TFile; identity: DailyNoteIdentity }>>();
     const conflictsByDate = new Map<string, number>();
+    const candidatePaths = new Set<string>();
     const liveOverrides = liveDailyNoteCandidateOverrides.get(app as object);
     for (const file of app.vault.getMarkdownFiles()) {
       if (isManagedFilePropertiesCompanion(app, file)) continue;
@@ -521,6 +518,9 @@ function getDailyNoteCandidatesForDate(
       const analysis = override?.file === file
         ? analyzeDailyNoteFile(app, settings, file, override.frontmatter)
         : analyzeDailyNoteFile(app, settings, file);
+      if (analysis.identity || analysis.conflictingDates.length > 0) {
+        candidatePaths.add(normalizePath(file.path));
+      }
       for (const date of analysis.conflictingDates) {
         conflictsByDate.set(date, (conflictsByDate.get(date) || 0) + 1);
       }
@@ -535,6 +535,7 @@ function getDailyNoteCandidatesForDate(
     }
     index.byDate = byDate;
     index.conflictsByDate = conflictsByDate;
+    index.candidatePaths = candidatePaths;
     index.scanCount += 1;
     index.dirty = false;
   }
@@ -542,6 +543,15 @@ function getDailyNoteCandidatesForDate(
     candidates: [...(index.byDate.get(isoDate) || [])],
     conflictCount: index.conflictsByDate.get(isoDate) || 0,
   };
+}
+
+function getDailyNoteCandidateSignature(app: App, settings: unknown): string {
+  return [
+    normalizeDailyFolder(getDailyNoteFolder(app)),
+    getDailyNoteDateFormat(app, settings),
+    JSON.stringify((settings as { nativeRecordKindPropertyKeys?: KindMappings })?.nativeRecordKindPropertyKeys || {}),
+    String((settings as { nativeRecordKindPropertyKey?: string } | null | undefined)?.nativeRecordKindPropertyKey || '').trim().toLowerCase(),
+  ].join('\u0000');
 }
 
 async function migrateResolvedDailyNoteCandidate(
@@ -917,6 +927,38 @@ export function invalidateDailyNoteCandidateIndex(app: App): void {
   for (const index of indexes.values()) index.dirty = true;
 }
 
+/** Keep a warm index when a changed path was and remains unrelated to Daily Notes. */
+function invalidateDailyNoteCandidateIndexForPath(
+  app: App,
+  settings: unknown,
+  path: string,
+  frontmatter?: Record<string, unknown> | null,
+  inspectCurrent = true,
+): void {
+  const indexes = dailyNoteCandidateIndexes.get(app as object);
+  if (!indexes) return;
+  const signature = getDailyNoteCandidateSignature(app, settings);
+  let currentCandidate: boolean | undefined;
+  for (const [indexedSignature, index] of indexes) {
+    if (index.dirty) continue;
+    if (indexedSignature !== signature || index.candidatePaths.has(path)) {
+      index.dirty = true;
+      continue;
+    }
+    if (!inspectCurrent) continue;
+    if (currentCandidate === undefined) {
+      const live = app.vault.getAbstractFileByPath(path);
+      if (!(live instanceof TFile) || live.extension.toLowerCase() !== 'md' || isFilePropertiesCompanionPath(path)) {
+        currentCandidate = false;
+      } else {
+        const analysis = analyzeDailyNoteFile(app, settings, live, frontmatter);
+        currentCandidate = analysis.identity !== null || analysis.conflictingDates.length > 0;
+      }
+    }
+    if (currentCandidate) index.dirty = true;
+  }
+}
+
 /** Sync API identity reads must stay fail-closed until current bytes have won. */
 export function hasPendingDailyNoteCandidatePathRefresh(app: App): boolean {
   return (dirtyDailyNoteCandidatePaths.get(app as object)?.size || 0) > 0;
@@ -941,7 +983,14 @@ export function markDailyNoteCandidatePathDirty(app: App, fileOrPath: FileLike |
   dirty.set(path, generation);
   blockedDailyNoteCandidatePaths.get(appKey)?.delete(path);
   liveDailyNoteCandidateOverrides.get(appKey)?.delete(path);
-  invalidateDailyNoteCandidateIndex(app);
+  // The old membership must be discarded now. A new candidate is checked
+  // against current bytes when this generation is refreshed.
+  const indexes = dailyNoteCandidateIndexes.get(appKey);
+  if (indexes) {
+    for (const index of indexes.values()) {
+      if (index.candidatePaths.has(path)) index.dirty = true;
+    }
+  }
 }
 
 /**
@@ -955,12 +1004,19 @@ export function markDailyNoteCandidatePathDirty(app: App, fileOrPath: FileLike |
 export function markDailyNoteCandidateMetadataReady(
   app: App,
   fileOrPath?: FileLike | string | null,
+  settings?: unknown,
 ): void {
-  if (fileOrPath != null) {
-    const path = normalizePath(typeof fileOrPath === 'string' ? fileOrPath : fileOrPath?.path);
-    if (!path) return;
+  if (fileOrPath == null) {
+    invalidateDailyNoteCandidateIndex(app);
+    return;
   }
-  invalidateDailyNoteCandidateIndex(app);
+  const path = normalizePath(typeof fileOrPath === 'string' ? fileOrPath : fileOrPath?.path);
+  if (!path) return;
+  // A pending Vault generation has not yet supplied authoritative bytes.
+  // Its prior indexed membership may be removed, but a new one must wait for
+  // the current-source refresh rather than trusting MetadataCache ordering.
+  const pending = dirtyDailyNoteCandidatePaths.get(app as object)?.has(path) === true;
+  invalidateDailyNoteCandidateIndexForPath(app, settings, path, undefined, !pending);
 }
 
 /** Invalid non-Daily documents must not veto every Daily Note in the vault. */
@@ -1023,7 +1079,6 @@ async function refreshDirtyDailyNoteCandidatePaths(
     liveDailyNoteCandidateOverrides.set(appKey, overrides);
   }
 
-  let changed = false;
   const deadline = Date.now() + 5_000;
   while (dirty.size > 0 && Date.now() < deadline) {
     const next = dirty.entries().next().value as [string, number] | undefined;
@@ -1036,7 +1091,7 @@ async function refreshDirtyDailyNoteCandidatePaths(
         blocked?.delete(path);
         overrides.delete(path);
       }
-      changed = true;
+      invalidateDailyNoteCandidateIndexForPath(app, settings, path);
       continue;
     }
     let current = '';
@@ -1068,7 +1123,7 @@ async function refreshDirtyDailyNoteCandidatePaths(
       });
       blocked.add(path);
       dirty.delete(path);
-      changed = true;
+      invalidateDailyNoteCandidateIndexForPath(app, settings, path, null);
       continue;
     }
     blocked?.delete(path);
@@ -1077,14 +1132,13 @@ async function refreshDirtyDailyNoteCandidatePaths(
       frontmatter: inspected.frontmatter,
     });
     dirty.delete(path);
-    changed = true;
+    invalidateDailyNoteCandidateIndexForPath(app, settings, path, inspected.frontmatter);
   }
   if (dirty.size > 0) return 'blocked';
   if (blocked?.size === 0) {
     blockedDailyNoteCandidatePaths.delete(appKey);
     blocked = undefined;
   }
-  if (changed) invalidateDailyNoteCandidateIndex(app);
   return hasBlockingMalformedDailyNoteCandidate(app, settings) ? 'blocked' : 'ready';
 }
 

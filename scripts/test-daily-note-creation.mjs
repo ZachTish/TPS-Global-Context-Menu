@@ -1073,6 +1073,110 @@ test('settled note edits refresh Daily Note identity without broadcasting an unc
   }
 });
 
+test('ordinary transaction create and metadata bursts preserve the warm Daily Note index', async () => {
+  const priorWindow = globalThis.window;
+  const priorParseYaml = globalThis.filenameTestParseYaml;
+  globalThis.filenameTestParseYaml = parseYaml;
+  installDailyNoteMoment();
+  const parseMoment = globalThis.window.moment;
+  let momentCalls = 0;
+  const countedMoment = (...args) => {
+    momentCalls += 1;
+    return parseMoment(...args);
+  };
+  countedMoment.ISO_8601 = parseMoment.ISO_8601;
+  countedMoment.invalid = parseMoment.invalid;
+  globalThis.window.moment = countedMoment;
+  try {
+    const { FileNamingService, findExistingDailyNoteForIsoDate } = await loadFileNamingService();
+    const vaultEvents = new Map();
+    const metadataEvents = new Map();
+    const files = new Map();
+    const sources = new Map();
+    const frontmatter = new Map();
+    let enumerations = 0;
+    let rawReads = 0;
+    const addFile = (path, fields = {}, content = '') => {
+      const basename = path.split('/').pop().slice(0, -3);
+      const file = { __isTestTFile: true, path, basename, extension: 'md', stat: { size: content.length } };
+      files.set(path, file);
+      frontmatter.set(path, fields);
+      sources.set(path, content);
+      return file;
+    };
+    for (let index = 0; index < 300; index++) {
+      addFile(`Journal/Undated ${index}.md`);
+    }
+    addFile('Journal/2026-09-27.md', { kind: 'dailynote', scheduled: '2026-09-27' });
+    const plugin = {
+      settings: { dailyNoteDateFormat: 'YYYY-MM-DD' },
+      registerEvent() {},
+      app: {
+        workspace: { layoutReady: true },
+        internalPlugins: { getPluginById: () => ({ enabled: true, instance: {
+          options: { folder: 'Journal', format: 'YYYY-MM-DD', template: '' },
+        } }) },
+        plugins: { getPlugin: () => null, plugins: {} },
+        vault: {
+          getFiles: () => [...files.values()],
+          getMarkdownFiles: () => { enumerations += 1; return [...files.values()]; },
+          getAbstractFileByPath: path => files.get(path) ?? null,
+          read: async file => { rawReads += 1; return sources.get(file.path); },
+          adapter: { read: async () => { throw new Error('no persisted configuration'); } },
+          on: (event, callback) => { vaultEvents.set(event, callback); return { event }; },
+        },
+        metadataCache: {
+          initialized: true,
+          getFileCache: file => ({ frontmatter: frontmatter.get(file.path) ?? {} }),
+          on: (event, callback) => { metadataEvents.set(event, callback); return { event }; },
+        },
+      },
+    };
+    const service = new FileNamingService(plugin);
+    await service.whenDailyNoteConfigurationReady();
+    assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+    assert.equal(findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, '2026-09-27')?.path, 'Journal/2026-09-27.md');
+    assert.equal(findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, '2026-09-28'), null);
+    assert.equal(enumerations, 1);
+    const warmMomentCalls = momentCalls;
+
+    for (let index = 0; index < 20; index++) {
+      const path = `Finances/Transaction ${index}.md`;
+      const file = addFile(path, { kind: 'transaction' }, '---\nkind: transaction\n---\nImported');
+      vaultEvents.get('create')(file);
+      assert.equal(service.isDailyNoteMetadataCacheReady(), false, 'pending current bytes still block identity reads');
+      await metadataEvents.get('changed')(file);
+      await metadataEvents.get('resolve')(file);
+      await metadataEvents.get('resolved')();
+      assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+      assert.equal(findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, '2026-09-28'), null);
+
+      sources.set(path, '---\nkind: transaction\n---\nImported and categorized');
+      vaultEvents.get('modify')(file);
+      await metadataEvents.get('changed')(file);
+      await metadataEvents.get('resolve')(file);
+      await metadataEvents.get('resolved')();
+      assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+      assert.equal(findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, '2026-09-28'), null);
+    }
+    assert.equal(enumerations, 1, 'changed, resolve and per-edit resolved callbacks keep the warm index');
+    assert.equal(rawReads, 40, 'each changed transaction still receives its one current-source read');
+    assert.ok(momentCalls - warmMomentCalls < 200, 'warm date queries must not reparse all 300 unrelated note names');
+
+    plugin.app.metadataCache.initialized = false;
+    await metadataEvents.get('resolve')(files.get('Finances/Transaction 0.md'));
+    assert.equal(service.isDailyNoteMetadataCacheReady(), false);
+    plugin.app.metadataCache.initialized = true;
+    await metadataEvents.get('resolved')();
+    assert.equal(service.isDailyNoteMetadataCacheReady(), true);
+    assert.equal(findExistingDailyNoteForIsoDate(plugin.app, plugin.settings, '2026-09-28'), null);
+    assert.equal(enumerations, 2, 'the first global resolution after a cache rebuild invalidates the old index');
+  } finally {
+    globalThis.window = priorWindow;
+    globalThis.filenameTestParseYaml = priorParseYaml;
+  }
+});
+
 test('startup create announcements do not turn cached Daily Note identity into a vault-wide raw-read queue', async () => {
   const priorWindow = globalThis.window;
   const priorParseYaml = globalThis.filenameTestParseYaml;
