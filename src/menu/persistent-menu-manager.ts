@@ -6298,7 +6298,8 @@ export class PersistentMenuManager {
     }
 
     // Include reverse-only relationships if one direction is missing.
-    for (const candidate of this.plugin.parentLinkResolutionService.getRelationshipCandidates()) {
+    // hasParent already applies both child and parent ignore rules.
+    for (const candidate of this.plugin.parentLinkResolutionService.getRelationshipCandidates({ includeIgnored: true })) {
       if (candidate.path === file.path) continue;
       if (this.plugin.parentLinkResolutionService.hasParent(candidate, file)) {
         relationshipPaths.add(candidate.path);
@@ -6310,7 +6311,8 @@ export class PersistentMenuManager {
 
   private resolveChildFiles(file: TFile): TFile[] {
     const childFiles = new Map<string, TFile>();
-    for (const candidate of this.plugin.parentLinkResolutionService.getRelationshipCandidates()) {
+    // hasParent already applies both child and parent ignore rules.
+    for (const candidate of this.plugin.parentLinkResolutionService.getRelationshipCandidates({ includeIgnored: true })) {
       if (candidate.path === file.path) continue;
       if (this.plugin.parentLinkResolutionService.hasParent(candidate, file)) {
         childFiles.set(candidate.path, candidate);

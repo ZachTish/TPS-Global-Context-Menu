@@ -261,6 +261,26 @@ async function importTopChildResolverHarness() {
   return import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
 }
 
+async function importPersistentChildLookupHarness() {
+  const sourcePath = fileURLToPath(new URL('../src/menu/persistent-menu-manager.ts', import.meta.url));
+  const source = readFileSync(sourcePath, 'utf8');
+  const relationshipPathsMethod = extractMethod(source, 'getParentChildRelationshipPaths', sourcePath);
+  const childFilesMethod = extractMethod(source, 'resolveChildFiles', sourcePath);
+  const virtualSource = `
+    export class PersistentChildLookupHarness {
+      constructor(plugin) { this.plugin = plugin; }
+      ${relationshipPathsMethod}
+      ${childFilesMethod}
+      getChildPaths(file) { return this.resolveChildFiles(file).map((child) => child.path); }
+      getRelationshipPaths(file) { return [...this.getParentChildRelationshipPaths(file, [])]; }
+    }
+  `;
+  const output = ts.transpileModule(virtualSource, {
+    compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
+  }).outputText;
+  return import(`data:text/javascript;base64,${Buffer.from(output).toString('base64')}`);
+}
+
 async function importTagInheritanceHarness() {
   const sourcePath = fileURLToPath(new URL('../src/services/bulk-edit-service.ts', import.meta.url));
   const source = readFileSync(sourcePath, 'utf8');
@@ -636,8 +656,8 @@ test('relationship consumers share logical frontmatter and opt in to all-file pi
   assert.match(metadata, /buildParentToChildrenIndex[\s\S]{0,700}getRelationshipCandidates\(\)/u);
   assert.match(metadata, /getResolvedFrontmatter[\s\S]{0,260}getLogicalFrontmatter\(file\)/u);
   assert.ok(
-    (persistent.match(/parentLinkResolutionService\.getRelationshipCandidates\(\)/gu) || []).length >= 2,
-    'persistent relationship paths and child rows must share logical candidate enumeration',
+    (persistent.match(/parentLinkResolutionService\.getRelationshipCandidates\(\{ includeIgnored: true \}\)/gu) || []).length >= 2,
+    'persistent relationship paths and child rows defer ignore filtering to hasParent',
   );
   assert.match(menuBuilder, /resolveChildFilesFor[\s\S]{0,500}getRelationshipCandidates\(\{ includeIgnored: true \}\)[\s\S]{0,150}hasParent\(candidate, file\)/u);
   assert.ok(
@@ -647,6 +667,75 @@ test('relationship consumers share logical frontmatter and opt in to all-file pi
   assert.match(fileSuggest, /candidateFiles\?: readonly TFile\[\][\s\S]{0,180}includeAllExtensions\?: boolean/u);
   assert.match(fileSuggest, /const source = this\.candidateFiles \?\? this\.app\.vault\.getAllLoadedFiles\(\)/u);
   assert.match(multiSelect, /candidateFiles\?: readonly TFile\[\][\s\S]{0,260}this\.app\.vault\.getMarkdownFiles\(\)/u);
+});
+
+test('persistent child lookups preserve ignore results without repeating candidate metadata checks', async () => {
+  const { ParentLinkResolutionService, TFile } = await importParentLinkResolutionService();
+  const { PersistentChildLookupHarness } = await importPersistentChildLookupHarness();
+  const parent = new TFile('Parent.md');
+  const visibleChild = new TFile('Visible.md');
+  const ignoredChild = new TFile('Ignored.md');
+  const companion = new TFile('_assets/TPS File Properties/Companion.md');
+  const unrelated = Array.from({ length: 120 }, (_, index) => new TFile(`Unrelated ${index}.md`));
+  const loaded = [parent, visibleChild, ignoredChild, companion, ...unrelated];
+  const files = new Map(loaded.map((file) => [file.path, file]));
+  const frontmatter = new Map([
+    [parent.path, {}],
+    [visibleChild.path, { childOf: ['[[Parent]]'] }],
+    [ignoredChild.path, { childOf: ['[[Parent]]'], relationshipMode: 'ignore' }],
+  ]);
+  let metadataCalls = 0;
+  const metadataCache = {
+    getFileCache: (file) => {
+      metadataCalls += 1;
+      return { frontmatter: frontmatter.get(file.path) ?? {} };
+    },
+    getFirstLinkpathDest: (target) => files.get(`${String(target).replace(/^\[\[|\]\]$/gu, '')}.md`) ?? null,
+  };
+  const plugin = {
+    settings: {
+      parentLinkFrontmatterKey: 'childOf',
+      enableParentChildIgnoreRule: true,
+      parentChildIgnoreFrontmatterKey: 'relationshipMode',
+      parentChildIgnoreFrontmatterValue: 'ignore',
+    },
+    app: {
+      vault: {
+        getAllLoadedFiles: () => loaded,
+        getAbstractFileByPath: (path) => files.get(path) ?? files.get(`${path}.md`) ?? null,
+      },
+      metadataCache,
+    },
+    filePropertiesService: {
+      isCompanionFile: (file) => {
+        metadataCache.getFileCache(file);
+        return file === companion;
+      },
+      isPropertyTarget: () => false,
+    },
+  };
+  plugin.parentLinkResolutionService = new ParentLinkResolutionService(plugin);
+  const harness = new PersistentChildLookupHarness(plugin);
+  const oldLookup = () => plugin.parentLinkResolutionService.getRelationshipCandidates()
+    .filter((candidate) => plugin.parentLinkResolutionService.hasParent(candidate, parent))
+    .map((file) => file.path);
+
+  metadataCalls = 0;
+  const oldPaths = oldLookup();
+  const oldCalls = metadataCalls;
+  metadataCalls = 0;
+  assert.deepEqual(harness.getChildPaths(parent), oldPaths);
+  const childCalls = metadataCalls;
+  metadataCalls = 0;
+  assert.deepEqual(harness.getRelationshipPaths(parent), oldPaths);
+  const relationshipCalls = metadataCalls;
+  assert.deepEqual(oldPaths, [visibleChild.path]);
+  assert.ok(childCalls < oldCalls * 0.6, `child lookup should avoid duplicate ignore reads (${childCalls} vs ${oldCalls})`);
+  assert.ok(relationshipCalls < oldCalls * 0.6, `relationship lookup should avoid duplicate ignore reads (${relationshipCalls} vs ${oldCalls})`);
+
+  frontmatter.set(parent.path, { relationshipMode: 'ignore' });
+  assert.deepEqual(harness.getChildPaths(parent), []);
+  assert.deepEqual(harness.getRelationshipPaths(parent), []);
 });
 
 test('body-only ignored children and ignored roots never reach the top Children popover', async () => {
