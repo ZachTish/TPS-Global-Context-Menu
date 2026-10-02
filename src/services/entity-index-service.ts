@@ -119,13 +119,9 @@ export class EntityIndexService {
       metadataCache.on('resolved', () => {
         const isFirstResolution = !this.hasObservedMetadataResolution;
         this.hasObservedMetadataResolution = true;
-        if (!isFirstResolution) {
-          // `resolved` can fire again after ordinary file changes. The matching
-          // `changed` event already upserts those notes, so later broad signals
-          // only need to recover an index that is currently stale.
-          if (!this.isBuilt) this.rebuild();
-          return;
-        }
+        // With no query yet, the first read can build from resolved metadata.
+        // Later broad signals do not need to build an unused index either.
+        if (!this.isBuilt || !isFirstResolution) return;
 
         // A Base or picker can query during startup before MetadataCache has
         // populated every file's frontmatter. That lazy read still marks the

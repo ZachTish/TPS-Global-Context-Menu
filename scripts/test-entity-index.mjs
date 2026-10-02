@@ -1233,6 +1233,12 @@ function createServiceHost(TFile, initialNotes = []) {
   const contentByFile = new Map(
     files.map((file, index) => [file, initialNotes[index].content ?? '']),
   );
+  const operations = {
+    markdownEnumerations: 0,
+    metadataLookups: 0,
+    cachedReads: 0,
+    reads: 0,
+  };
   const register = (group, event, handler) => {
     const handlers = group.get(event) ?? [];
     handlers.push(handler);
@@ -1241,14 +1247,26 @@ function createServiceHost(TFile, initialNotes = []) {
   };
   const metadataCache = {
     on: (event, handler) => register(eventHandlers.metadata, event, handler),
-    getFileCache: (file) => ({ frontmatter: frontmatterByFile.get(file) }),
+    getFileCache: (file) => {
+      operations.metadataLookups += 1;
+      return { frontmatter: frontmatterByFile.get(file) };
+    },
   };
   const vault = {
     on: (event, handler) => register(eventHandlers.vault, event, handler),
-    getMarkdownFiles: () => files.filter((file) => file.extension.toLowerCase() === 'md'),
+    getMarkdownFiles: () => {
+      operations.markdownEnumerations += 1;
+      return files.filter((file) => file.extension.toLowerCase() === 'md');
+    },
     getAbstractFileByPath: (path) => files.find((file) => file.path === path) ?? null,
-    cachedRead: async (file) => contentByFile.get(file) ?? '',
-    read: async (file) => contentByFile.get(file) ?? '',
+    cachedRead: async (file) => {
+      operations.cachedReads += 1;
+      return contentByFile.get(file) ?? '';
+    },
+    read: async (file) => {
+      operations.reads += 1;
+      return contentByFile.get(file) ?? '';
+    },
     process: async (file, transform) => {
       const next = transform(contentByFile.get(file) ?? '');
       contentByFile.set(file, next);
@@ -1268,11 +1286,69 @@ function createServiceHost(TFile, initialNotes = []) {
     files,
     frontmatterByFile,
     contentByFile,
+    operations,
     registeredEvents,
     emitMetadata: (event, ...args) => emit('metadata', event, ...args),
     emitVault: (event, ...args) => emit('vault', event, ...args),
   };
 }
+
+test('idle metadata resolutions leave the note index cold until a query needs current records', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Seed.md',
+    basename: 'Seed',
+    frontmatter: { kind: 'Old' },
+  }]);
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  service.setup();
+  const initialRevision = service.getRevision();
+  const notifications = [];
+  service.onChanged((revision) => notifications.push(revision));
+
+  fixture.emitMetadata('resolved');
+  fixture.emitMetadata('resolved');
+  assert.deepEqual(fixture.operations, {
+    markdownEnumerations: 0,
+    metadataLookups: 0,
+    cachedReads: 0,
+    reads: 0,
+  });
+  assert.equal(service.getRevision(), initialRevision);
+  assert.deepEqual(notifications, []);
+
+  const seed = fixture.files[0];
+  fixture.frontmatterByFile.set(seed, { kind: 'Current' });
+  fixture.emitMetadata('changed', seed, null, { frontmatter: { kind: 'Current' } });
+  const created = new TFile('Entities/Created.md', 'Created');
+  fixture.files.push(created);
+  fixture.frontmatterByFile.set(created, { kind: 'Current' });
+  fixture.emitVault('create', created);
+  assert.equal(fixture.operations.markdownEnumerations, 0, 'pre-build events remain lazy');
+
+  assert.deepEqual(
+    service.query({ dimensions: { kind: 'Current' } }).map(({ path }) => path),
+    ['Entities/Created.md', 'Entities/Seed.md'],
+  );
+  assert.deepEqual(fixture.operations, {
+    markdownEnumerations: 1,
+    metadataLookups: 2,
+    cachedReads: 0,
+    reads: 0,
+  });
+
+  fixture.frontmatterByFile.set(seed, { kind: 'Updated' });
+  fixture.emitMetadata('changed', seed, null, { frontmatter: { kind: 'Updated' } });
+  fixture.emitMetadata('resolved');
+  assert.deepEqual(
+    service.query({ dimensions: { kind: 'Updated' } }).map(({ path }) => path),
+    ['Entities/Seed.md'],
+  );
+  assert.equal(fixture.operations.markdownEnumerations, 1, 'late resolution does not rescan the vault');
+  assert.equal(fixture.operations.metadataLookups, 2);
+  assert.equal(fixture.operations.cachedReads + fixture.operations.reads, 0);
+});
 
 test('service preserves external dimensions across configured-dimension refreshes', async () => {
   const { EntityIndexService, TFile } = await servicePromise;
@@ -1450,6 +1526,12 @@ test('first metadata resolution repairs an index built before frontmatter was re
     [],
     'an early lazy build reproduces the partially populated startup cache',
   );
+  assert.deepEqual(fixture.operations, {
+    markdownEnumerations: 1,
+    metadataLookups: 1,
+    cachedReads: 0,
+    reads: 0,
+  });
   assert.deepEqual(Object.keys(service.getByPath(file.path)?.dimensions ?? {}), []);
 
   fixture.frontmatterByFile.set(file, { kind: 'Project' });
@@ -1462,6 +1544,12 @@ test('first metadata resolution repairs an index built before frontmatter was re
     'the first authoritative resolution rebuilds already-created note records',
   );
   assert.ok(service.getRevision() > revisionBeforeResolution);
+  assert.deepEqual(fixture.operations, {
+    markdownEnumerations: 2,
+    metadataLookups: 2,
+    cachedReads: 0,
+    reads: 0,
+  }, 'early queries still receive one authoritative metadata rebuild');
 
   const revisionAfterResolution = service.getRevision();
   const cachedAfterResolution = service.query({ dimensions: { kind: 'project' } });
@@ -1476,6 +1564,7 @@ test('first metadata resolution repairs an index built before frontmatter was re
     cachedAfterResolution,
     'later metadata resolution events preserve the revision-scoped query cache',
   );
+  assert.equal(fixture.operations.markdownEnumerations, 2);
 });
 
 test('first metadata resolution rebuilds an active line index without ghosts or duplicates', async () => {
@@ -1498,10 +1587,18 @@ test('first metadata resolution rebuilds an active line index without ghosts or 
     [{ entityType: 'block', blockId: 'startup-project' }],
     'an early async query reproduces line readiness beside incomplete note metadata',
   );
+  assert.equal(fixture.operations.markdownEnumerations, 2);
+  assert.equal(fixture.operations.metadataLookups, 1);
+  assert.equal(fixture.operations.cachedReads, 1);
+  assert.equal(fixture.operations.reads, 0);
 
   fixture.frontmatterByFile.set(file, { kind: 'Project' });
   fixture.emitMetadata('resolved');
   await service.ensureReady();
+  assert.equal(fixture.operations.markdownEnumerations, 4);
+  assert.equal(fixture.operations.metadataLookups, 2);
+  assert.equal(fixture.operations.cachedReads, 2);
+  assert.equal(fixture.operations.reads, 0);
 
   const repaired = await service.queryAsync({ dimensions: { kind: 'Project' } });
   assert.deepEqual(
@@ -1546,6 +1643,8 @@ test('first metadata resolution rebuilds an active line index without ghosts or 
     cachedAfterRepair,
     'later metadata resolution preserves the combined entity query cache',
   );
+  assert.equal(fixture.operations.markdownEnumerations, 4);
+  assert.equal(fixture.operations.cachedReads, 2);
 });
 
 test('metadata and vault events incrementally refresh, rename, and remove indexed notes', async () => {
