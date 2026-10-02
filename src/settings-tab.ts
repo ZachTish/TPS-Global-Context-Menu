@@ -1,4 +1,4 @@
-import { normalizeClassificationTag } from './utils/kind-classification';
+import { kindClassification, normalizeClassificationTag, type KindClassification } from './utils/kind-classification';
 import { renderNavigatorPropertyVisibility } from './integrations/notebook-navigator-property-visibility';
 import { MIGRATABLE_KEY_SETTINGS, PropertyMigration } from './utils/property-migration';
 import { PropertyMigrationModal } from './modals/property-migration-modal';
@@ -1219,31 +1219,76 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     if (this.activeSettingsPage === 'rules-fields' && this.activeRulesFieldsPage === 'custom-fields') {
       const propertyConfig = activePage.createDiv({ cls: 'tps-gcm-settings-editor-page' });
       propertyConfig.dataset.tpsSettingsRoute = 'custom-fields';
-      const tagMappings = Object.entries(this.plugin.settings.nativeRecordKindPropertyKeys || {})
-        .filter((entry): entry is [string, { tag: string }] => typeof entry[1] === 'object' && 'tag' in entry[1]);
-      if (tagMappings.length) {
-        propertyConfig.createEl('h4', { text: 'Record tags' });
-        propertyConfig.createEl('p', { cls: 'setting-item-description', text: 'Each record type uses one complete tag. Subtag names and depth are yours to choose. Apply previews an exact frontmatter tag rename; review Base filters separately.' });
-        let selected = tagMappings[0][0];
-        let draft = tagMappings[0][1].tag;
-        let input: import('obsidian').TextComponent;
+      const classifications = Object.keys(this.plugin.settings.nativeRecordKindPropertyKeys || {})
+        .map(kind => [kind, kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, kind)] as const)
+        .filter((entry): entry is readonly [string, KindClassification] => entry[1] !== null);
+      if (classifications.length) {
+        propertyConfig.createEl('h4', { text: 'Record classifications' });
+        propertyConfig.createEl('p', { cls: 'setting-item-description', text: 'Choose whether each record type uses one complete tag or a kind and subkind property pair. Apply previews matching notes before changing the mapping.' });
+        let selected = classifications[0][0];
+        let current = classifications[0][1];
+        let mode: 'tag' | 'property' = 'tag' in current ? 'tag' : 'property';
+        let draftTag = 'tag' in current ? current.tag : '';
+        let draftParent = 'key' in current ? current.parentKind : 'note';
+        let draftKey = 'key' in current ? current.key : '';
+        let draftValue = 'key' in current ? current.value : '';
+        let modeInput: import('obsidian').DropdownComponent;
+        let tagInput: import('obsidian').TextComponent;
+        let parentInput: import('obsidian').DropdownComponent;
+        let keyInput: import('obsidian').TextComponent;
+        let valueInput: import('obsidian').TextComponent;
+        let tagSetting: Setting, parentSetting: Setting, keySetting: Setting, valueSetting: Setting;
+        const showMode = () => {
+          tagSetting.settingEl.style.display = mode === 'tag' ? '' : 'none';
+          for (const setting of [parentSetting, keySetting, valueSetting]) setting.settingEl.style.display = mode === 'property' ? '' : 'none';
+        };
         new Setting(propertyConfig).setName('Record type').addDropdown(dropdown => {
-          for (const [kind] of tagMappings) dropdown.addOption(kind, kind);
-          dropdown.onChange(kind => { selected = kind; draft = tagMappings.find(([key]) => key === kind)![1].tag; input.setValue(draft); });
+          dropdown.selectEl.setAttribute('aria-label', 'Record type classification');
+          for (const [kind] of classifications) dropdown.addOption(kind, kind);
+          dropdown.onChange(kind => {
+            selected = kind; current = classifications.find(([key]) => key === kind)![1];
+            mode = 'tag' in current ? 'tag' : 'property';
+            draftTag = 'tag' in current ? current.tag : '';
+            draftParent = 'key' in current ? current.parentKind : 'note';
+            draftKey = 'key' in current ? current.key : '';
+            draftValue = 'key' in current ? current.value : '';
+            modeInput.setValue(mode); tagInput.setValue(draftTag); parentInput.setValue(draftParent);
+            keyInput.setValue(draftKey); valueInput.setValue(draftValue); showMode();
+          });
         });
-        new Setting(propertyConfig).setName('Tag').addText(text => {
-          input = text; text.setValue(draft).onChange(value => { draft = value; });
+        new Setting(propertyConfig).setName('Store type as').addDropdown(dropdown => {
+          modeInput = dropdown;
+          dropdown.addOption('tag', 'Tag').addOption('property', 'Kind and subkind properties')
+            .setValue(mode).onChange(value => { mode = value === 'property' ? 'property' : 'tag'; showMode(); });
+          dropdown.selectEl.setAttribute('aria-label', 'Record classification storage');
+        });
+        tagSetting = new Setting(propertyConfig).setName('Tag').addText(text => {
+          tagInput = text; text.setValue(draftTag).onChange(value => { draftTag = value; });
           text.inputEl.setAttribute('aria-label', 'Record classification tag');
-        }).addButton(button => button.setButtonText('Apply').onClick(async () => {
+        });
+        parentSetting = new Setting(propertyConfig).setName('Parent kind').addDropdown(dropdown => {
+          parentInput = dropdown;
+          for (const parent of ['task', 'note', 'entity', 'collection', 'transaction']) dropdown.addOption(parent, parent);
+          dropdown.setValue(draftParent).onChange(value => { draftParent = value; });
+        });
+        keySetting = new Setting(propertyConfig).setName('Subkind property').addText(text => {
+          keyInput = text; text.setValue(draftKey).onChange(value => { draftKey = value.trim(); });
+        });
+        valueSetting = new Setting(propertyConfig).setName('Subkind value').addText(text => {
+          valueInput = text; text.setValue(draftValue).onChange(value => { draftValue = value.trim(); });
+        });
+        showMode();
+        new Setting(propertyConfig).setName('Apply record classification')
+          .setDesc('Review existing notes before saving. Record IDs and note bodies stay unchanged.')
+          .addButton(button => button.setButtonText('Apply').onClick(async () => {
           button.setDisabled(true);
           try {
-            const to = normalizeClassificationTag(draft);
-            const current = this.plugin.settings.nativeRecordKindPropertyKeys[selected];
-            if (!current || typeof current !== 'object' || !('tag' in current)) throw new Error('The record mapping changed. Reopen settings.');
-            if (Object.entries(this.plugin.settings.nativeRecordKindPropertyKeys).some(([kind, value]) => kind !== selected && typeof value === 'object' && 'tag' in value && value.tag.toLowerCase() === to.toLowerCase())) throw new Error('Another record type already uses that tag.');
-            if (await this.plugin.propertyMigrationService.request({ kind: 'value', key: 'tags', from: current.tag, to }, settings => {
-              settings.nativeRecordKindPropertyKeys[selected] = { tag: to };
-            })) this.display();
+            const from = kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, selected);
+            if (!from || JSON.stringify(from) !== JSON.stringify(current)) throw new Error('The record mapping changed. Reopen settings.');
+            const to: KindClassification = mode === 'tag' ? { tag: normalizeClassificationTag(draftTag) }
+              : { parentKind: draftParent, key: draftKey, value: draftValue };
+            if (JSON.stringify(from) === JSON.stringify(to)) throw new Error('No classification change to apply.');
+            if (await this.plugin.propertyMigrationService.requestClassification({ kind: 'classification', recordKind: selected, from, to })) this.display();
           } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
           finally { button.setDisabled(false); }
         }));

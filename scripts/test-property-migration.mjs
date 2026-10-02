@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { readFileSync } from 'node:fs';
-const bundle = await build({ stdin: { contents: `export * from './src/utils/property-migration'; export * from './src/services/property-migration-service'; export * from './src/modals/property-migration-modal'; export {TFile} from 'obsidian';`, resolveDir: process.cwd() }, bundle: true, format: 'esm', platform: 'browser', write: false, plugins: [{name:'obsidian-test', setup(b){ b.onResolve({filter:/^obsidian$/},()=>({path:'obsidian',namespace:'test'})); b.onLoad({filter:/.*/,namespace:'test'},()=>({contents:`export class TFile { constructor(path){this.path=path;this.extension='md';} } export class Notice {} export class Modal {} export class Setting {}` })); }}] });
-const { migrateNoteProperties: migrate, updateMigrationReferences: references, PropertyMigrationService, PropertyMigrationModal, TFile } = await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+const bundle = await build({ stdin: { contents: `export * from './src/utils/property-migration'; export * from './src/utils/kind-classification-migration'; export * from './src/services/property-migration-service'; export * from './src/modals/property-migration-modal'; export {TFile} from 'obsidian';`, resolveDir: process.cwd() }, bundle: true, format: 'esm', platform: 'browser', write: false, plugins: [{name:'obsidian-test', setup(b){ b.onResolve({filter:/^obsidian$/},()=>({path:'obsidian',namespace:'test'}));b.onLoad({filter:/.*/,namespace:'test'},()=>({contents:`export class TFile { constructor(path){this.path=path;this.extension=path.split('.').at(-1);} } export class Notice {} export class Modal {} export class Setting {}` })); }}] });
+const { migrateNoteProperties: migrate, migrateNoteClassification, updateMigrationReferences: references, PropertyMigrationService, PropertyMigrationModal, TFile } = await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
 const key = {kind:'key',from:'status',to:'taskStatus'};
 const value = {kind:'value',key:'status',from:'todo',to:'ready'};
 const fm = text => `---\n${text}\n---\nBody status: todo [status:: todo]\n`;
@@ -46,10 +46,90 @@ test('status value rename keeps options, classifications, checkbox targets and e
 });
 function harness(entries={'Inbox/a.md':fm('status: todo')}) {
  const files=new Map(Object.keys(entries).map(path=>[path,new TFile(path)]));const data=new Map(Object.entries(entries));const storage=new Map();let saves=0;const writes=[];
- const plugin={manifest:{id:'tps-global-context-menu',dir:'.obsidian/plugins/tps-global-context-menu'},settings:{properties:[{id:'status',key:'status',options:['todo']}],unrelated:'keep'},app:{vault:{getMarkdownFiles:()=>[...files.values()],getAbstractFileByPath:path=>files.get(path),read:async file=>data.get(file.path),adapter:{exists:async path=>storage.has(path),write:async(path,text)=>storage.set(path,text),read:async path=>storage.get(path),remove:async path=>storage.delete(path)}}},frontmatterMutationService:{applyMigrationSource:async(file,before,after)=>{const current=data.get(file.path);if(current===after)return;if(current!==before)throw Error('stale');writes.push(file.path);data.set(file.path,after);}},saveSettings:async()=>{saves++;},eventService:{emitFilesUpdated(){}},notebookNavigatorRuleService:{invalidateNotebookNavigatorPresentation(){}}};
+ const plugin={manifest:{id:'tps-global-context-menu',dir:'.obsidian/plugins/tps-global-context-menu'},settings:{properties:[{id:'status',key:'status',options:['todo']}],unrelated:'keep'},app:{vault:{getMarkdownFiles:()=>[...files.values()].filter(file=>file.extension==='md'),getAbstractFileByPath:path=>files.get(path),read:async file=>data.get(file.path),process:async(file,update)=>{const before=data.get(file.path),after=update(before);if(before!==after){writes.push(file.path);data.set(file.path,after);}return after;},adapter:{exists:async path=>storage.has(path),write:async(path,text)=>storage.set(path,text),read:async path=>storage.get(path),remove:async path=>storage.delete(path)}}},frontmatterMutationService:{applyMigrationSource:async(file,before,after)=>{const current=data.get(file.path);if(current===after)return;if(current!==before)throw Error('stale');writes.push(file.path);data.set(file.path,after);}},saveSettings:async()=>{saves++;},eventService:{emitFilesUpdated(){}},notebookNavigatorRuleService:{invalidateNotebookNavigatorPresentation(){}}};
  const service=new PropertyMigrationService(plugin);plugin.propertyMigrationService=service;
  return {plugin,service,data,storage,writes,files,get saves(){return saves;}};
 }
+test('record classification converts exact tag to property and back without changing body, IDs or other tags',()=>{
+ const source=fm('tpsId: finance-1\ntags:\n  - kind/finance/transaction\n  - personal\ntitle: Lunch');
+ const toProperty={kind:'classification',recordKind:'finance-transaction',from:{tag:'kind/finance/transaction'},to:{parentKind:'transaction',key:'transactionKind',value:'financial'}};
+ const mapped={'finance-transaction':toProperty.from};
+ const property=migrateNoteClassification(source,toProperty,mapped);
+ assert.match(property,/kind: transaction/);assert.match(property,/transactionKind: financial/);
+ assert.match(property,/personal/);assert.doesNotMatch(property,/kind\/finance\/transaction/);
+ assert.match(property,/tpsId: finance-1/);assert.ok(property.endsWith('Body status: todo [status:: todo]\n'));
+ const toTag={...toProperty,from:toProperty.to,to:toProperty.from};
+ const restored=migrateNoteClassification(property,toTag,{'finance-transaction':toTag.from});
+ assert.match(restored,/kind\/finance\/transaction/);assert.doesNotMatch(restored,/transactionKind:/);
+ assert.match(restored,/personal/);assert.ok(restored.endsWith('Body status: todo [status:: todo]\n'));
+});
+test('record classification blocks conflicting destination, ambiguity and unrelated malformed notes stay untouched',()=>{
+ const change={kind:'classification',recordKind:'food-entry',from:{tag:'kind/food/transaction'},to:{parentKind:'transaction',key:'transactionKind',value:'food'}};
+ const mappings={'food-entry':change.from};
+ assert.throws(()=>migrateNoteClassification(fm('tags: [kind/food/transaction]\nkind: note'),change,mappings),/different value/);
+ assert.throws(()=>migrateNoteClassification(fm('tags: [kind/food/transaction]\ntransactionKind: other'),change,mappings),/different value/);
+ assert.throws(()=>migrateNoteClassification(fm('tags: [kind/food/transaction]\nTransactionKind: other'),change,mappings),/case-variant/);
+ assert.throws(()=>migrateNoteClassification(fm('tags: [kind/food/transaction]\nKind: note'),change,mappings),/case-variant/);
+ assert.throws(()=>migrateNoteClassification(fm('tags: [kind/food/transaction]\ntags: [personal]'),change,mappings),/Duplicate/);
+ assert.equal(migrateNoteClassification(fm('unrelated: [oops'),change,mappings),fm('unrelated: [oops'));
+ assert.equal(migrateNoteClassification(fm('tags: [kind/food/transaction/extra]'),change,mappings),fm('tags: [kind/food/transaction/extra]'));
+});
+test('Finance classification cannot strand generated Bases on an older Finance plugin',async()=>{
+ const change={kind:'classification',recordKind:'finance-transaction',from:{tag:'kind/finance/transaction'},to:{parentKind:'transaction',key:'transactionKind',value:'financial'}};
+ const h=harness({'Inbox/a.md':fm('tags: [kind/finance/transaction]')});
+ h.plugin.settings.nativeRecordKindPropertyKeys={'finance-transaction':change.from};
+ h.plugin.app.plugins={plugins:{'tps-finances':{api:{}}}};
+ await assert.rejects(h.service.requestClassification(change),/Update TPS Finances/);
+ assert.equal(h.writes.length,0);assert.equal(h.storage.size,0);
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'],change.from);
+});
+test('confirmed record classification migration commits configuration after notes and cancellation changes nothing',async()=>{
+ const change={kind:'classification',recordKind:'finance-transaction',from:{tag:'kind/finance/transaction'},to:{parentKind:'transaction',key:'transactionKind',value:'financial'}};
+ for(const accept of [false,true]){
+  const source=fm('tpsId: finance-1\ntags: [kind/finance/transaction, personal]');
+  const h=harness({'Inbox/a.md':source});h.plugin.settings.nativeRecordKindPropertyKeys={'finance-transaction':change.from};
+  PropertyMigrationModal.confirm=async()=>accept;
+  assert.equal(await h.service.requestClassification(change),accept);
+  assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].tag,accept?undefined:change.from.tag);
+  assert.equal(h.writes.length,accept?1:0);assert.equal(h.storage.size,0);
+  assert.ok(accept?h.data.get('Inbox/a.md').includes('transactionKind: financial'):h.data.get('Inbox/a.md')===source);
+ }
+});
+test('classification migration includes exact generated Bases in the same reviewed recovery batch',async()=>{
+ const change={kind:'classification',recordKind:'finance-transaction',from:{tag:'kind/finance/transaction'},to:{parentKind:'transaction',key:'transactionKind',value:'financial'}};
+ const h=harness({'Inbox/a.md':fm('tpsId: finance-1\ntags: [kind/finance/transaction]')});
+ h.plugin.settings.nativeRecordKindPropertyKeys={'finance-transaction':change.from};
+ h.files.set('Transactions.base',new TFile('Transactions.base'));h.data.set('Transactions.base','old generated filter');
+ h.plugin.app.plugins={plugins:{'tps-finances':{api:{classificationBases:{version:1,settingsSignature:()=> 'unchanged',preview:async()=>h.data.get('Transactions.base')==='old generated filter'?[{path:'Transactions.base',before:'old generated filter',after:'new generated filter'}]:[]}}}}};
+ PropertyMigrationModal.confirm=async(_app,_title,_desc,paths)=>{assert.deepEqual(paths,['Inbox/a.md','Transactions.base']);return true;};
+ assert.equal(await h.service.requestClassification(change),true);
+ assert.equal(h.data.get('Transactions.base'),'new generated filter');
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].parentKind,'transaction');
+ assert.deepEqual(h.writes,['Inbox/a.md','Transactions.base']);assert.equal(h.storage.size,0);
+});
+test('changing a classification tag updates its GCM references with the reviewed notes',async()=>{
+ const change={kind:'classification',recordKind:'finance-transaction',from:{tag:'kind/finance/transaction'},to:{tag:'kind/money/transaction'}};
+ const h=harness({'Inbox/a.md':fm('tags: [kind/finance/transaction, personal]')});
+ h.plugin.settings.nativeRecordKindPropertyKeys={'finance-transaction':change.from};
+ h.plugin.settings.properties=[{key:'category',scopeTags:['kind/finance/transaction']}];
+ PropertyMigrationModal.confirm=async()=>true;
+ assert.equal(await h.service.requestClassification(change),true);
+ assert.deepEqual(h.plugin.settings.properties[0].scopeTags,['kind/money/transaction']);
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].tag,'kind/money/transaction');
+ assert.match(h.data.get('Inbox/a.md'),/kind\/money\/transaction/);
+ assert.doesNotMatch(h.data.get('Inbox/a.md'),/kind\/finance\/transaction/);
+});
+test('confirmed property-to-tag migration recognizes the saved property pair and new tag',async()=>{
+ const change={kind:'classification',recordKind:'finance-transaction',from:{parentKind:'transaction',key:'transactionKind',value:'financial'},to:{tag:'kind/finance/transaction'}};
+ const h=harness({'Inbox/a.md':fm('tpsId: finance-1\nkind: transaction\ntransactionKind: financial\ntags: [personal]')});
+ h.plugin.settings.nativeRecordKindPropertyKeys={'finance-transaction':change.from};
+ PropertyMigrationModal.confirm=async()=>true;
+ assert.equal(await h.service.requestClassification(change),true);
+ assert.match(h.data.get('Inbox/a.md'),/kind\/finance\/transaction/);
+ assert.match(h.data.get('Inbox/a.md'),/personal/);
+ assert.doesNotMatch(h.data.get('Inbox/a.md'),/transactionKind:/);
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].tag,'kind/finance/transaction');
+});
 const configure=settings=>{settings.properties[0].key='taskStatus';};
 test('cancel leaves notes, configuration and recovery storage untouched',async()=>{
  const h=harness();PropertyMigrationModal.confirm=async()=>false;assert.equal(await h.service.request(key,configure),false);assert.equal(h.saves,0);assert.equal(h.writes.length,0);assert.equal(h.storage.size,0);assert.equal(h.plugin.settings.properties[0].key,'status');

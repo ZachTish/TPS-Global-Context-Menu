@@ -4,11 +4,14 @@ import { Notice, TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { PropertyMigrationModal } from '../modals/property-migration-modal';
 import { migrateNoteProperties, PropertyMigration, SettingsPatch, settingsPatches, updateMigrationReferences, validateMigration, validateMigrationSettings } from '../utils/property-migration';
+import { migrateNoteClassification, validateKindClassificationMigration, type KindClassificationMigration } from '../utils/kind-classification-migration';
 import * as logger from '../logger';
 
 interface NoteChange { path: string; before: string; after: string }
-interface MigrationPlan { notes: NoteChange[]; blocked: string[] }
+interface MigrationPlan { notes: NoteChange[]; blocked: string[]; financeSettings?: string }
 interface RecoveryRecord { version: 1; notes: NoteChange[]; patches: SettingsPatch[]; plugins?: PluginSettingsPatch[] }
+type MigrationRequest = PropertyMigration | KindClassificationMigration;
+const financeRecordKinds = new Set(['account', 'finance-transaction', 'investment-transaction', 'holding', 'ledger', 'finance-rule', 'finance-budget']);
 const clone = <T>(value: T): T => value === undefined ? value : JSON.parse(JSON.stringify(value));
 const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
 
@@ -27,7 +30,7 @@ export class PropertyMigrationService {
   }
   dispose(): void { this.disposed = true; this.cancelScan?.(); }
   hasRecovery(): boolean { return this.recoveryPending; }
-  async preview(change: PropertyMigration): Promise<MigrationPlan> {
+  async preview(change: MigrationRequest): Promise<MigrationPlan> {
     const notes: NoteChange[] = [], blocked: string[] = [];
     const files = this.plugin.app.vault.getMarkdownFiles();
     const progress = new Notice(`Scanning note properties: 0 / ${files.length}`, 0);
@@ -46,7 +49,9 @@ export class PropertyMigrationService {
         try {
           const before = await this.plugin.app.vault.read(file);
           if (cancelled) return;
-          const after = migrateNoteProperties(before, change);
+          const after = change.kind === 'classification'
+            ? migrateNoteClassification(before, change, this.plugin.settings.nativeRecordKindPropertyKeys)
+            : migrateNoteProperties(before, change);
           if (after !== before) notes.push({ path: file.path, before, after });
         } catch (error) { blocked.push(`${file.path}: ${error instanceof Error ? error.message : String(error)}`); }
         completed++;
@@ -55,9 +60,25 @@ export class PropertyMigrationService {
     };
     try { await Promise.race([Promise.all(Array.from({ length: Math.min(8, files.length) }, worker)), cancellation]); }
     finally { this.cancelScan = null; progress.hide?.(); }
+    let financeSettings: string | undefined;
+    if (change.kind === 'classification') {
+      const finance = this.consumer('tps-finances');
+      const bases = finance?.api?.classificationBases;
+      if (finance && financeRecordKinds.has(change.recordKind)
+        && (bases?.version !== 1 || typeof bases.preview !== 'function' || typeof bases.settingsSignature !== 'function')) {
+        throw new Error('Update TPS Finances to 1.15.0 or later before changing a Finance record classification.');
+      }
+      if (bases?.version === 1 && typeof bases.preview === 'function') {
+        financeSettings = bases.settingsSignature?.();
+        for (const entry of await bases.preview(change)) {
+          if (typeof entry.path !== 'string' || !entry.path.endsWith('.base') || typeof entry.before !== 'string' || typeof entry.after !== 'string') throw new Error('Finances returned an invalid generated Base preview.');
+          notes.push(entry);
+        }
+      }
+    }
     notes.sort((a, b) => a.path.localeCompare(b.path));
     blocked.sort();
-    return { notes, blocked };
+    return { notes, blocked, financeSettings };
   }
   private consumer(id: string): any { return (this.plugin.app as any).plugins?.plugins?.[id]; }
   async requestPluginKey(pluginId: string, settingKey: string, to: string): Promise<boolean> {
@@ -104,35 +125,46 @@ export class PropertyMigrationService {
       owner.nativeRecordService?.refreshConfiguration?.();
     }
   }
-  async request(change: PropertyMigration, configure: (settings: typeof this.plugin.settings) => void): Promise<boolean> {
+  async requestClassification(change: KindClassificationMigration): Promise<boolean> {
+    validateKindClassificationMigration(change, this.plugin.settings.nativeRecordKindPropertyKeys);
+    return this.request(change, settings => { settings.nativeRecordKindPropertyKeys[change.recordKind] = change.to; });
+  }
+  async request(change: MigrationRequest, configure: (settings: typeof this.plugin.settings) => void): Promise<boolean> {
     if (this.disposed) throw new Error('GCM was reloaded. Reopen its settings before migrating.');
     if (this.busy || this.recoveryPending) throw new Error('Finish or restore the previous property migration first.');
     if (change.kind === 'key' && !change.recordKinds) {
-      const field = MANAGED_NOTE_FIELDS.find(field => managedNoteFieldKey(this.plugin.settings, field).toLowerCase() === change.from.toLowerCase());
+      const from = change.from;
+      const field = MANAGED_NOTE_FIELDS.find(field => managedNoteFieldKey(this.plugin.settings, field).toLowerCase() === from.toLowerCase());
       if (field) change = { ...change, previousKeys: [field, ...(this.plugin.settings.managedNoteFieldAliases?.[field] || [])] };
     }
-    validateMigration(change);
-    validateMigrationSettings(this.plugin.settings, change);
+    if (change.kind === 'classification') validateKindClassificationMigration(change, this.plugin.settings.nativeRecordKindPropertyKeys);
+    else { validateMigration(change); validateMigrationSettings(this.plugin.settings, change); }
     this.busy = true;
     try {
       const beforeSettings = clone(this.plugin.settings);
       const afterSettings = clone(beforeSettings);
-      updateMigrationReferences(afterSettings, change);
+      if (change.kind !== 'classification') updateMigrationReferences(afterSettings, change);
+      else if ('tag' in change.from && 'tag' in change.to) updateMigrationReferences(afterSettings,
+        { kind: 'value', key: 'tags', from: change.from.tag, to: change.to.tag });
       configure(afterSettings);
       const patches = settingsPatches(beforeSettings, afterSettings);
-      const plugins = (change.kind === 'key' && change.recordKinds ? [] : Object.keys(PLUGIN_MAPPING_FIELDS)).flatMap(pluginId => {
+      const plugins = (change.kind === 'classification' || (change.kind === 'key' && change.recordKinds) ? [] : Object.keys(PLUGIN_MAPPING_FIELDS)).flatMap(pluginId => {
         const owner = this.consumer(pluginId);
         if (!owner?.settings) return [];
-        const patches = pluginMappingPatches(pluginId, owner.settings, change);
+        const patches = pluginMappingPatches(pluginId, owner.settings, change as PropertyMigration);
         return patches.length ? [{ pluginId, patches }] : [];
       });
       const healthKinds = change.kind === 'key' && change.recordKinds ? JSON.stringify(this.consumer('tps-health')?.settings?.nativeRecordKinds) : null;
       const plan = await this.preview(change);
       if (this.disposed) throw new Error('GCM was reloaded. Apply again to review a fresh preview.');
       const scope = change.kind === 'key' && change.recordKinds ? 'Only logged Health entries and workout sessions are included; reusable templates and other record types keep their keys.' : 'Includes archived notes and templates.';
-      const name = change.kind === 'key' ? `Rename property “${change.from}” → “${change.to}”` : `Rename ${change.key} value “${change.from}” → “${change.to}”`;
+      const name = change.kind === 'classification' ? `Change ${change.recordKind} from ${'tag' in change.from ? 'tag' : 'property'} to ${'tag' in change.to ? 'tag' : 'property'}`
+        : change.kind === 'key' ? `Rename property “${change.from}” → “${change.to}”` : `Rename ${change.key} value “${change.from}” → “${change.to}”`;
+      const explanation = change.kind === 'classification'
+        ? `${plan.notes.length} notes and generated Bases will change. ${scope} This converts the exact record classification in frontmatter and preserves note bodies and inline fields. Customized Base filters and custom rules should be reviewed separately. A temporary local recovery copy is kept until completion.`
+        : `${plan.notes.length} Markdown notes will change. ${scope} This updates frontmatter only. Exact string values and list items match; note bodies, inline fields, and Base formulas are not rewritten. Matching mappings in enabled TPS plugins update together; disabled plugins must be enabled before migrating their fields. ${patches.length} GCM settings groups and ${plugins.length} TPS plugins will update. A temporary local recovery copy is kept until completion.`;
       const confirmed = await PropertyMigrationModal.confirm(this.plugin.app, name,
-        `${plan.notes.length} Markdown notes will change. ${scope} This updates frontmatter only. Exact string values and list items match; note bodies, inline fields, and Base formulas are not rewritten. Matching mappings in enabled TPS plugins update together; disabled plugins must be enabled before migrating their fields. ${patches.length} GCM settings groups and ${plugins.length} TPS plugins will update. A temporary local recovery copy is kept until completion.`,
+        explanation,
         plan.notes.map(note => note.path), plan.blocked);
       if (!confirmed) return false;
       if (this.disposed) throw new Error('GCM was reloaded. Apply again to review a fresh preview.');
@@ -141,6 +173,7 @@ export class PropertyMigrationService {
       this.assertConsumers(plugins);
       const fresh = await this.preview(change);
       if (fresh.blocked.length || !equal(plan.notes, fresh.notes)) throw new Error('Notes changed during preview. Apply again to review a fresh preview.');
+      if (plan.financeSettings !== fresh.financeSettings) throw new Error('Finances settings changed during preview. Apply again to review a fresh preview.');
       const record: RecoveryRecord = { version: 1, notes: plan.notes, patches, plugins };
       if (this.consumer('tps-controller')?.autoCreateService?.isSyncing) throw new Error('Wait for calendar synchronization to finish, then apply again.');
       if (this.consumer('tps-health')?.settings?.activeWorkoutId || this.consumer('tps-health')?.settings?.activeWorkoutPath) throw new Error('Finish the active workout before migrating shared properties.');
@@ -164,6 +197,7 @@ export class PropertyMigrationService {
         }
         const remaining = await this.preview(change);
         if (remaining.notes.length || remaining.blocked.length) throw new Error('New matching notes appeared during migration. Restoring the migration.');
+        if (plan.financeSettings !== remaining.financeSettings) throw new Error('Finances settings changed during migration. Restoring the migration.');
         if (!equal(beforeSettings, this.plugin.settings)) throw new Error('Settings changed while notes were updating. Restoring the migration.');
         if (healthKinds && healthKinds !== JSON.stringify(this.consumer('tps-health')?.settings?.nativeRecordKinds)) throw new Error('Health kinds changed. Review the migration again.');
         this.assertConsumers(plugins);
@@ -231,14 +265,20 @@ export class PropertyMigrationService {
   private async write(note: NoteChange, restore: boolean): Promise<void> {
     if (this.disposed) throw new Error('GCM was unloaded; recovery is available on the next load.');
     const file = this.plugin.app.vault.getAbstractFileByPath(note.path);
-    if (!(file instanceof TFile) || file.extension !== 'md') throw new Error(`Note moved or deleted: ${note.path}`);
-    await this.plugin.frontmatterMutationService.applyMigrationSource(file, restore ? note.after : note.before, restore ? note.before : note.after);
+    if (!(file instanceof TFile) || !['md', 'base'].includes(file.extension)) throw new Error(`Note or Base moved or deleted: ${note.path}`);
+    const expected = restore ? note.after : note.before, replacement = restore ? note.before : note.after;
+    if (file.extension === 'base') await this.plugin.app.vault.process(file, current => {
+      if (current === replacement) return current;
+      if (current !== expected) throw new Error(`Base changed since preview: ${file.path}`);
+      return replacement;
+    });
+    else await this.plugin.frontmatterMutationService.applyMigrationSource(file, expected, replacement);
   }
   private refresh(notes: NoteChange[]): void {
     try {
       this.plugin.nativeRecordService?.refreshConfiguration();
       this.consumer('tps-health')?.nativeRecordService?.refreshConfiguration?.();
-      this.plugin.eventService.emitFilesUpdated(notes.map(note => note.path), { sourcePluginId: this.plugin.manifest.id });
+      this.plugin.eventService.emitFilesUpdated(notes.filter(note => note.path.endsWith('.md')).map(note => note.path), { sourcePluginId: this.plugin.manifest.id });
       this.plugin.notebookNavigatorRuleService?.invalidateNotebookNavigatorPresentation();
     } catch { logger.warn('[property-migration] refresh deferred until next open'); }
   }

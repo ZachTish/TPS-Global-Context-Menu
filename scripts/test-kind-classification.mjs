@@ -27,3 +27,10 @@ test('existing property mappings remain compatible; mapping changes are authorit
  assert.deepEqual(decodeKind(old,encodeKind(old,{kind:'food',title:'Food'})),{kind:'food',title:'Food'});
  assert.equal(decodeKind({food:{tag:'new'}},{tags:['library/Food']}).kind,undefined);
 });
+test('property classifications cannot overwrite existing record fields or shared keys',()=>{
+ const map={transaction:{parentKind:'transaction',key:'transactionKind',value:'financial'}};
+ assert.throws(()=>encodeKind(map,{kind:'transaction',transactionKind:'food',amount:12}),/conflicts with an existing field/);
+ assert.throws(()=>encodeKind(map,{kind:'transaction',TransactionKind:'food'}),/conflicts with an existing field/);
+ assert.deepEqual(encodeKind(map,{kind:'transaction',amount:12}),{kind:'transaction',transactionKind:'financial',amount:12});
+ assert.throws(()=>encodeKind({transaction:{parentKind:'transaction',key:'Kind',value:'financial'}},{kind:'transaction'}),/Invalid classification/);
+});

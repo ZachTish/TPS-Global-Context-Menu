@@ -28,13 +28,19 @@ export function kindClassification(mappings: KindMappings | undefined, kind: str
   const value = mappings?.[kind];
   if (!value || typeof value !== 'object') return null;
   if ('tag' in value) return { tag: normalizeClassificationTag(value.tag) };
-  if (!parents.has(value.parentKind) || !/^([a-zA-Z_][a-zA-Z0-9_-]*)$/.test(value.key) || ['kind','tpsId','title','tags'].includes(value.key) || !/^[a-zA-Z][a-zA-Z0-9-]*$/.test(value.value)) throw new Error(`Invalid classification for ${kind}.`);
+  if (!parents.has(value.parentKind) || !/^([a-zA-Z_][a-zA-Z0-9_-]*)$/.test(value.key) || ['kind','tpsid','title','tags'].includes(value.key.toLowerCase()) || !/^[a-zA-Z][a-zA-Z0-9-]*$/.test(value.value)) throw new Error(`Invalid classification for ${kind}.`);
   return { key: value.key, value: value.value, parentKind: value.parentKind };
 }
 export function encodeKind(mappings: KindMappings | undefined, fields: Record<string, any>): Record<string, any> {
   const definition = kindClassification(mappings, String(fields.kind || ''));
   if (!definition) return { ...fields };
-  if (!('tag' in definition)) return { ...fields, kind: definition.parentKind, [definition.key]: definition.value };
+  if (!('tag' in definition)) {
+    const occupied = Object.keys(fields).find(key => key.toLowerCase() === definition.key.toLowerCase());
+    if (occupied && (occupied !== definition.key || (fields[occupied] !== undefined && fields[occupied] !== definition.value))) {
+      throw new Error(`Record classification property “${definition.key}” conflicts with an existing field.`);
+    }
+    return { ...fields, kind: definition.parentKind, [definition.key]: definition.value };
+  }
   const next = { ...fields };
   delete next.kind;
   const tags = classificationTags(next.tags);
