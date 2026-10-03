@@ -85,3 +85,14 @@ test('shared visible kind paths use an existing caller identity without inventin
  assert.throws(()=>decodeKind(mapped,raw,'missing'),/Expected record kind/u);
  assert.throws(()=>decodeKind({...mapped,other:{tag:'other/type'}},{...raw,tags:['other/type']},'investment'),/Ambiguous/u);
 });
+test('a shared kind path and its own legacy tag can be decoded with an existing caller identity',()=>{
+ const mapped={
+  purchase:{primary:{kindList:{key:'kind',value:'transaction/financial'}},aliases:[{tag:'old/purchase'}]},
+  investment:{primary:{kindList:{key:'kind',value:'transaction/financial'}},aliases:[{tag:'old/investment'}]},
+ };
+ const raw={kind:['transaction/financial'],tags:['old/investment'],type:'investment'};
+ assert.deepEqual(decodeKind(mapped,raw),raw);
+ assert.equal(decodeKind(mapped,raw,'investment').kind,'investment');
+ assert.deepEqual(encodeKind(mapped,{kind:'investment',type:'investment',tags:['old/investment']},raw),raw);
+ assert.throws(()=>decodeKind(mapped,raw,'purchase'),/Ambiguous/u);
+});

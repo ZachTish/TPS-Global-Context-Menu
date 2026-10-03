@@ -190,6 +190,18 @@ test('different record types may share a configured visible kind-list path',asyn
  assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys.investment,{kindList:{key:'kind',value:'transaction/financial'}});
  assert.equal(h.writes.length,0);
 });
+test('removing a selected record mapping changes settings without scanning or editing notes',async()=>{
+ const h=harness({'Inbox/a.md':fm('kind:\n  - qa/example\nstatus: active')});
+ const mapping={kindList:{key:'kind',value:'qa/example'}};
+ h.plugin.settings.nativeRecordKindPropertyKeys={qa:mapping,other:{kindList:{key:'kind',value:'note/example'}}};
+ await assert.rejects(h.service.removeClassification('qa',{kindList:{key:'kind',value:'wrong/path'}}),/mapping changed/u);
+ assert.equal(h.saves,0);
+ await h.service.removeClassification('qa',mapping);
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys,{other:{kindList:{key:'kind',value:'note/example'}}});
+ assert.equal(h.saves,1);
+ assert.equal(h.writes.length,0);
+ assert.equal(h.data.get('Inbox/a.md'),fm('kind:\n  - qa/example\nstatus: active'));
+});
 const configure=settings=>{settings.properties[0].key='taskStatus';};
 test('cancel leaves notes, configuration and recovery storage untouched',async()=>{
  const h=harness();PropertyMigrationModal.confirm=async()=>false;assert.equal(await h.service.request(key,configure),false);assert.equal(h.saves,0);assert.equal(h.writes.length,0);assert.equal(h.storage.size,0);assert.equal(h.plugin.settings.properties[0].key,'status');
@@ -251,6 +263,16 @@ test('a Calendar mapping confirmation updates matching Controller mappings, with
  assert.equal(await h.service.requestPluginKey('tps-calendar-base','statusKey','taskStatus'),true);
  assert.equal(calendar.settings.statusKey,'taskStatus');assert.equal(controller.settings.statusKey,'taskStatus');
  assert.equal(h.plugin.settings.properties[0].key,'taskStatus');assert.equal(h.storage.size,0);
+});
+test('a Controller calendar end-datetime key change migrates notes and the owning setting', async () => {
+ const h=harness({'Inbox/event.md':fm('end: 2026-10-03T10:00:00Z')});
+ const controller={settings:{calendarEndDateTimeProperty:'end',endProperty:'timeEstimate'},saveSettings:async()=>{}};
+ h.plugin.app.plugins={plugins:{'tps-controller':controller}};
+ PropertyMigrationModal.confirm=async()=>true;
+ assert.equal(await h.service.requestPluginKey('tps-controller','calendarEndDateTimeProperty','calendarFinishedAt'),true);
+ assert.equal(controller.settings.calendarEndDateTimeProperty,'calendarFinishedAt');
+ assert.equal(controller.settings.endProperty,'timeEstimate');
+ assert.match(h.data.get('Inbox/event.md'),/"calendarFinishedAt": 2026-10-03T10:00:00Z/u);
 });
 test('cross-plugin cancellation and concurrent edits never change notes or other owners', async () => {
  for(const cancel of [true,false]) {

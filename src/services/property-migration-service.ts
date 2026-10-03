@@ -199,6 +199,21 @@ export class PropertyMigrationService {
     this.plugin.nativeRecordService.refreshConfiguration();
   }
 
+  /** Remove only the selected mapping. Notes are not edited or scanned. */
+  async removeClassification(recordKind: string, expectedPrimary: KindClassification): Promise<void> {
+    if (this.busy || this.recoveryPending || this.disposed) throw new Error('Finish the current migration before changing record classifications.');
+    const before = this.plugin.settings.nativeRecordKindPropertyKeys;
+    if (JSON.stringify(kindClassification(before, recordKind)) !== JSON.stringify(expectedPrimary)) {
+      throw new Error('The record mapping changed. Reopen settings.');
+    }
+    const next = { ...before };
+    delete next[recordKind];
+    this.plugin.settings.nativeRecordKindPropertyKeys = next;
+    try { await this.plugin.saveSettings(); }
+    catch (error) { this.plugin.settings.nativeRecordKindPropertyKeys = before; throw error; }
+    this.plugin.nativeRecordService.refreshConfiguration();
+  }
+
   async configureClassificationWriterEnabled(recordKind: string, enabled: boolean, expectedPrimary: KindClassification): Promise<void> {
     if (this.busy || this.recoveryPending || this.disposed) throw new Error('Finish the current migration before changing record classifications.');
     const before = this.plugin.settings.nativeRecordKindPropertyKeys;

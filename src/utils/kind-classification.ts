@@ -152,10 +152,16 @@ export function decodeKind(mappings: KindMappings | undefined, fields: Record<st
   const matches = Object.keys(mappings || {}).map(kind => ({ kind, definitions: kindReadClassifications(mappings, kind)
     .filter(definition => matchesKindClassification(definition, fields)) })).filter(match => match.definitions.length);
   if (!matches.length) return { ...fields };
-  const sharedList = matches.length > 1 && matches.every(match => match.definitions.length === 1
-    && 'kindList' in match.definitions[0]
-    && JSON.stringify(match.definitions[0]).toLowerCase() === JSON.stringify(matches[0].definitions[0]).toLowerCase());
-  if (matches.length > 1 && !sharedList) throw new Error('Ambiguous frontmatter kind classification.');
+  const sharedList = matches.length > 1
+    ? matches[0].definitions.find(definition => 'kindList' in definition && matches.every(match =>
+      match.definitions.some(candidate => 'kindList' in candidate
+        && candidate.kindList.key.toLowerCase() === definition.kindList.key.toLowerCase()
+        && candidate.kindList.value.toLowerCase() === definition.kindList.value.toLowerCase())))
+    : undefined;
+  if (matches.length > 1 && (!sharedList || (expectedKind && matches.some(match => match.kind !== expectedKind
+    && match.definitions.some(definition => JSON.stringify(definition).toLowerCase() !== JSON.stringify(sharedList).toLowerCase()))))) {
+    throw new Error('Ambiguous frontmatter kind classification.');
+  }
   if (matches.length > 1 && !expectedKind) return { ...fields };
   const selected = expectedKind ? matches.find(match => match.kind === expectedKind) : matches[0];
   if (!selected) throw new Error('Expected record kind does not match its configured classification.');

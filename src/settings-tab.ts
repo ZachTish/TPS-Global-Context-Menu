@@ -1418,6 +1418,23 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
               } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); this.display(); }
             });
           });
+        new Setting(propertyConfig).setName('Remove record mapping')
+          .setDesc('Stops TPS from identifying this record type. Existing notes and their properties are not changed.')
+          .addButton(button => button.setButtonText('Remove mapping').setWarning().onClick(async () => {
+            button.setDisabled(true);
+            try {
+              const from = kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, selected);
+              if (!from || JSON.stringify(from) !== JSON.stringify(current)) throw new Error('The record mapping changed. Reopen settings.');
+              const confirmed = await PropertyMigrationModal.confirm(this.app, `Remove ${selected} mapping?`,
+                'TPS will stop identifying this record type. Existing notes and properties stay unchanged.', []);
+              if (confirmed) {
+                await this.plugin.propertyMigrationService.removeClassification(selected, from);
+                this.activeClassificationType = '';
+                this.display();
+              }
+            } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
+            finally { button.setDisabled(false); }
+          }));
       }
 
 

@@ -2,7 +2,7 @@ import type { PropertyMigration, SettingsPatch } from './property-migration';
 import { settingsPatches } from './property-migration';
 
 export const PLUGIN_MAPPING_FIELDS: Record<string, Record<string, string>> = {
-  'tps-controller': { titleKey: 'title', statusKey: 'status', previousStatusKey: 'tpsCalendarPrevStatus', startProperty: 'scheduled', endProperty: 'timeEstimate' },
+  'tps-controller': { titleKey: 'title', statusKey: 'status', previousStatusKey: 'tpsCalendarPrevStatus', startProperty: 'scheduled', endProperty: 'timeEstimate', calendarEndDateTimeProperty: 'end' },
   'tps-calendar-base': { titleKey: 'title', statusKey: 'status', previousStatusKey: 'tpsCalendarPrevStatus', frontmatterColorField: 'color', frontmatterIconField: 'icon' },
   'tps-health': { foodFrontmatterKey: 'kind', workoutFrontmatterKey: 'kind', workoutStartPropertyKey: 'scheduled', workoutIntervalPropertyKey: 'timeEstimate' },
 };
