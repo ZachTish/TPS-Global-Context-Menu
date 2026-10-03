@@ -4,22 +4,22 @@ import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 
 class TFile { constructor(path = 'Inbox/New.md') { this.path = path; this.extension = 'md'; } }
-const Platform = { isMobile: false };
 const notices = [];
-const logger = { flow() {}, flowError() {}, warn() {} };
+const platform = { isMobile: false };
+const logger = { flow() {}, flowWarn() {}, flowError() {}, warn() {} };
 function load(path, extra = {}) {
   const source = readFileSync(new URL(path, import.meta.url), 'utf8');
   const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
   const module = { exports: {} };
   Function('require', 'module', 'exports', code)(id => {
-    if (id === 'obsidian') return { TFile, Platform, Notice: class { constructor(message) { notices.push(message); } }, QueryController: class {} };
+    if (id === 'obsidian') return { TFile, Platform: platform, Notice: class { constructor(message) { notices.push(message); } }, QueryController: class {} };
     if (id === '../logger') return logger;
     if (id === 'monkey-around') return extra;
     throw new Error(id);
   }, module, module.exports);
   return module.exports;
 }
-const { NoteOpeningService, migrateNoteOpeningSettings } = load('../src/services/note-opening-service.ts');
+const { NoteOpeningService, migrateNoteOpeningSettings, normalizeNoteOpeningSettings } = load('../src/services/note-opening-service.ts');
 const { runNativeCreateWithoutOpening, supportsNativeCreateBoundary, NativeBaseNoteOpening } = load('../src/services/native-base-note-opening.ts', {
   around(prototype, wrappers) {
     const old = {};
@@ -29,35 +29,56 @@ const { runNativeCreateWithoutOpening, supportsNativeCreateBoundary, NativeBaseN
 });
 function fixture() {
   const file = new TFile();
-  const opened = [], previews = [];
-  const leaf = { view: { containerEl: { isConnected: true } } };
+  const opened = [], previewed = [], viewStates = [], renameStates = [];
+  let viewState = { type: 'markdown', state: { file: file.path, mode: 'preview' } };
+  const leaf = {
+    view: { containerEl: { isConnected: true }, setEphemeralState: state => renameStates.push(state) },
+    getViewState: () => viewState,
+    setViewState: async state => { viewStates.push(state); viewState = state; },
+  };
   const plugin = {
     nativeRecordService: { prepareCreatedNote: async () => {} },
-    settings: { notePostCreateBehavior: 'preview', noteOpenDestination: 'current-tab' },
+    settings: { notePostCreateBehavior: 'open', noteOpenDestination: 'current-tab' },
     app: { vault: { getAbstractFileByPath: path => path === file.path ? file : null }, workspace: { activeLeaf: leaf, getLeaf: context => ({ context }) } },
     openFileInLeaf: async (...args) => { opened.push(args); return true; },
-    persistentMenuManager: { showBaseLinkEditablePreview: async (...args) => { previews.push(args); return true; } }
+    findOpenLeafForFile: () => leaf,
+    showNativeNotePreview: (...args) => { previewed.push(args); return true; },
   };
-  return { plugin, file, opened, previews, service: new NoteOpeningService(plugin) };
+  return { plugin, file, leaf, opened, previewed, viewStates, renameStates, service: new NoteOpeningService(plugin) };
 }
-test('desktop and phone preview keep the current leaf and focus the new note name', async () => {
-  for (const mobile of [false, true]) {
-    Platform.isMobile = mobile;
-    const f = fixture();
-    assert.equal(await f.service.present({ filePath: f.file.path, sourcePluginId: 'test', renameTitle: true }), true);
-    assert.equal(f.opened.length, 0);
-    assert.equal(f.previews[0][2].focusTitle, true);
-    assert.equal(f.previews[0][2].focusEditor, false);
-    f.plugin.settings.noteOpenDestination = 'new-tab';
-    await f.previews[0][2].openNote();
-    assert.equal(f.opened[0][1], 'tab');
-  }
+test('desktop preview uses a connected caller anchor and event; unavailable and mobile preview use native Open', async () => {
+  const f = fixture();
+  f.plugin.settings.notePostCreateBehavior = 'preview';
+  const anchorEl = { isConnected: true }, event = { type: 'click' };
+  assert.equal(await f.service.present({ filePath: f.file.path, sourcePluginId: 'test', anchorEl, event, sourceLeaf: f.leaf }), true);
+  assert.deepEqual(f.previewed, [[f.file, anchorEl, f.leaf, event]]);
+  assert.equal(f.opened.length, 0);
+  assert.equal(await f.service.present({ filePath: f.file.path, sourcePluginId: 'test', anchorEl: { isConnected: false } }), true);
+  assert.equal(f.opened[0][1], false);
+  assert.equal(await f.service.present({ filePath: f.file.path, sourcePluginId: 'test', sourceLeaf: f.leaf }), true);
+  assert.equal(f.opened.length, 2, 'no caller anchor cannot open a preview over an unrelated note area');
+  platform.isMobile = true;
+  assert.equal(await f.service.present({ filePath: f.file.path, sourcePluginId: 'test', anchorEl }), true);
+  platform.isMobile = false;
+  assert.equal(f.opened.length, 3);
+  assert.equal(f.previewed.length, 1);
+});
+test('Open always selects Obsidian Markdown Editing mode even when the reused leaf was in Reading mode', async () => {
+  const f = fixture();
+  f.plugin.settings.noteOpenDestination = 'new-tab';
+  assert.equal(await f.service.present({ filePath: f.file.path, sourcePluginId: 'test' }), true);
+  assert.equal(f.opened[0][1], 'tab');
+  assert.equal(f.viewStates.length, 1);
+  assert.equal(f.viewStates[0].state.mode, 'source');
+  assert.equal(f.viewStates[0].state.file, f.file.path);
+  assert.equal(await f.service.open(f.file), true);
+  assert.equal(f.viewStates.length, 1, 'already Editing mode should not set view state again');
 });
 test('stay is silent, open follows destination, explicit new tab overrides stay', async () => {
   const f = fixture(); const request = { filePath: f.file.path, sourcePluginId: 'test' };
   f.plugin.settings.notePostCreateBehavior = 'stay';
   assert.equal(await f.service.present(request), true);
-  assert.equal(f.opened.length + f.previews.length, 0);
+  assert.equal(f.opened.length, 0);
   await f.service.present({ ...request, explicitDestination: 'tab' });
   assert.equal(f.opened[0][1], 'tab');
   f.plugin.settings.notePostCreateBehavior = 'open';
@@ -76,6 +97,9 @@ test('legacy preferences migrate only missing keys without writing other plugins
   assert.equal(reads, 2);
   assert.deepEqual(await migrateNoteOpeningSettings(app, { notePostCreateBehavior: 'open', noteOpenDestination: 'current-tab' }), { notePostCreateBehavior: 'open', noteOpenDestination: 'current-tab' });
   assert.equal(reads, 2);
+  assert.deepEqual(normalizeNoteOpeningSettings({ notePostCreateBehavior: 'preview' }), { notePostCreateBehavior: 'preview', noteOpenDestination: 'current-tab' });
+  app.vault.adapter.read = async () => JSON.stringify({ postCreateBehavior: 'preview' });
+  assert.deepEqual(await migrateNoteOpeningSettings(app, {}), { notePostCreateBehavior: 'preview', noteOpenDestination: 'current-tab' });
   app.vault.adapter.read = async () => '{bad';
   assert.deepEqual(await migrateNoteOpeningSettings(app, {}), { notePostCreateBehavior: 'preview', noteOpenDestination: 'current-tab' });
 });
@@ -136,15 +160,14 @@ test('a failed open is acknowledged without authorizing a second caller opening'
   assert.equal(notices.at(-1).includes('could not open'), true);
 });
 test('open can focus the created file name after the existing navigation service resolves', async () => {
-  const f = fixture(); const states = [];
+  const f = fixture();
   f.plugin.settings.notePostCreateBehavior = 'open';
-  f.plugin.findOpenLeafForFile = () => ({ view: { setEphemeralState: state => states.push(state) } });
   await f.service.present({ filePath: f.file.path, sourcePluginId: 'test', renameTitle: true });
-  assert.deepEqual(states, [{ rename: 'all' }]);
+  assert.deepEqual(f.renameStates, [{ rename: 'all' }]);
 });
 
 test('every created-note route awaits preparation and presents the final file', async () => {
-  for (const behavior of ['preview', 'open', 'stay', 'explicit-tab']) {
+  for (const behavior of ['open', 'stay', 'explicit-tab']) {
     const f = fixture();
     f.plugin.settings.notePostCreateBehavior = behavior === 'explicit-tab' ? 'stay' : behavior;
     let release;
@@ -160,11 +183,11 @@ test('every created-note route awaits preparation and presents the final file', 
     }).then(result => { settled = true; return result; });
     await Promise.resolve();
     assert.equal(settled, false);
-    assert.equal(f.opened.length + f.previews.length, 0);
+    assert.equal(f.opened.length, 0);
     release();
     assert.equal(await pending, true);
     assert.equal(prepared, true);
-    const presented = [...f.opened, ...f.previews];
+    const presented = f.opened;
     assert.equal(presented.length, behavior === 'stay' ? 0 : 1);
     if (presented.length) assert.equal(presented[0][0].path, '_records/tasks/final.md');
   }
@@ -174,7 +197,7 @@ test('failed preparation preserves the created file without opening or permittin
   const f = fixture();
   f.plugin.nativeRecordService.prepareCreatedNote = async () => { throw new Error('write failed'); };
   assert.equal(await f.service.present({ filePath: f.file.path, sourcePluginId: 'test' }), true);
-  assert.equal(f.opened.length + f.previews.length, 0);
+  assert.equal(f.opened.length, 0);
   assert.match(notices.at(-1), /task preparation failed/);
   assert.match(notices.at(-1), /Inbox\/New.md/);
 });

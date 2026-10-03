@@ -219,14 +219,14 @@ export class ContextTargetService {
 
         // Bases/Calendar entries are not always rendered as links, but they often
         // carry a resolvable data-path for the underlying note.
-        if (target.closest('.tps-calendar-entry, .bases-view, .bases-table, .bases-feed-entry, .bases-calendar-event-content, .tps-gcm-top-calendar-popover .tps-gcm-calendar-item, .tps-gcm-base-link-preview')) {
+        if (target.closest('.tps-calendar-entry, .bases-view, .bases-table, .bases-feed-entry, .bases-calendar-event-content, .tps-gcm-top-calendar-popover .tps-gcm-calendar-item')) {
             const path = this.resolveExplorerPath(target);
             if (typeof path === 'string' && path.trim().length > 0) {
                 return true;
             }
         }
 
-        const isLinkLike = !!target.closest('a.internal-link, .cm-link, [data-href], [data-linkpath], [data-file], [data-path], .tps-gcm-base-link-preview[data-path], .tps-gcm-base-link-preview [data-path]');
+        const isLinkLike = !!target.closest('a.internal-link, .cm-link, [data-href], [data-linkpath], [data-file], [data-path]');
         if (!isLinkLike) return false;
 
         return !!target.closest(
@@ -243,7 +243,6 @@ export class ContextTargetService {
                 '.bases-feed-entry',
                 '.tps-calendar-entry',
                 '.tps-gcm-top-calendar-popover',
-                '.tps-gcm-base-link-preview',
             ].join(', ')
         );
     }

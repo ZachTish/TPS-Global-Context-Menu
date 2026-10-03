@@ -410,8 +410,8 @@ test('TPS List Shift-click selects every visible row kind in one persistent DOM 
   assert.match(viewSource, /contextmenu[\s\S]{0,350}await this\.applyTpsListRowSelection\(event, row, true\)[\s\S]{0,220}openTaskLineContextMenu/u);
   assert.match(viewSource, /row\.dataset\.tpsTaskContext = 'true'/);
   assert.match(viewSource, /if \(event\.shiftKey \|\| event\.metaKey \|\| event\.ctrlKey\) \{\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);\s*void this\.applyTpsListRowSelection\(event, row\)/);
-  assert.match(mainSource, /void listView\?\.applyTpsListRowSelection\?\.\(evt, listRow\)/);
-  assert.match(mainSource, /applyTpsListRowSelection[\s\S]{0,300}openBaseNotePreviewFromClick/);
+  assert.doesNotMatch(mainSource, /openBaseLinkInHoverEditor|spawnPopover/);
+  assert.match(mainSource, /registerBasesLinkPreviewHandler\(\)/);
   assert.match(viewSource, /reconcileTpsListSelectionRows\(/);
   assert.doesNotMatch(
     viewSource,

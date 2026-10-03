@@ -325,8 +325,10 @@ export interface GcmOpenerDiagnostic {
 
 export default class TPSGlobalContextMenuPlugin extends Plugin {
   private static readonly BUILD_STAMP = '2026-07-13 base-create-owner-0.1.9';
-  private static readonly BASE_LINK_PREVIEW_SOURCE = 'tps-gcm-base-link-preview';
+  private static readonly NOTE_PREVIEW_SOURCE = 'tps-gcm-note-preview';
   private readonly startupTimestamp = Date.now();
+  private baseLinkPreviewArmedPath: string | null = null;
+  private baseLinkPreviewArmedUntil = 0;
   settings: TPSGlobalContextMenuSettings;
   menuController: MenuController;
   persistentMenuManager: PersistentMenuManager;
@@ -394,18 +396,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private basesPreviewPropertiesRefreshTimer: number | null = null;
   private viewModeSuppressedPaths: Set<string> = new Set();
   private externalActionRegistrations: Map<string, GcmExternalActionRegistration> = new Map();
-  private basesLinkPreviewArmedPath: string | null = null;
-  private basesLinkPreviewArmedUntil = 0;
-  private basesLinkPreviewSuppressClickUntil = 0;
-  private recentBaseLinkPreviewAnchorEl: HTMLElement | null = null;
-  private recentBaseLinkPreviewPointerUntil = 0;
-  private recentBaseLinkPreviewPointerPoint: { x: number; y: number } | null = null;
   noteOpeningService = new NoteOpeningService(this);
   nativeBaseNoteOpening = new NativeBaseNoteOpening(this);
-
-  private baseLinkHoverEditorLeaf: WorkspaceLeaf | null = null;
-  private baseLinkPreviewSourceLeaf: WorkspaceLeaf | null = null;
-  private openingBaseLinkHoverEditorPath: string | null = null;
   private canvasPointerSession:
     | {
         pointerId: number;
@@ -654,8 +646,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.hideCompletedCheckboxesService.attach();
     if (!this.usesNativeRecordArchitecture()) this.taskLineDragService.attach();
     this.hideCompletedCheckboxesService.applyBodyClass();
-    this.registerHoverLinkSource(TPSGlobalContextMenuPlugin.BASE_LINK_PREVIEW_SOURCE, {
-      display: 'TPS Base link preview',
+    this.registerHoverLinkSource(TPSGlobalContextMenuPlugin.NOTE_PREVIEW_SOURCE, {
+      display: 'TPS Global Context Menu',
       defaultMod: false,
     });
 
@@ -1061,462 +1053,101 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   private registerBasesLinkPreviewHandler(): void {
-    this.clearRecentBaseLinkPreviewPointer();
-    this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-      const target = evt.target instanceof HTMLElement ? evt.target : null;
-      const resolved = this.resolveBasesNoteLinkTarget(target);
-      if (!resolved) return;
-      const listRow = target?.closest<HTMLElement>(
-        '.tps-list-native-row--note[data-tps-list-selection-id]',
-      );
+    this.registerDomEvent(document, 'click', (event: MouseEvent) => {
+      if (!this.settings.enableBasesForcedLinkPreview || Platform.isMobile) return;
+      const target = event.target instanceof HTMLElement ? event.target : null;
+      if (!target || target.closest('.menu, .modal, .tps-global-context-menu')) return;
+      if (target.closest('[data-tps-table-cell-intent="property"]')) return;
+      if (target.closest('button, input, textarea, select, [aria-haspopup], [aria-expanded], .clickable-icon')) return;
+      const surface = target.closest<HTMLElement>([
+        '.bases-calendar-event-content',
+        '.tps-calendar-entry',
+        '.tps-kanban-card[data-path]',
+        '.tps-list-native-row--note[data-path]',
+        '.tps-list-native-property--source.internal-link',
+        '.tps-log-base-row a.internal-link',
+      ].join(', '));
+      if (!surface) return;
+      const link = target.closest<HTMLElement>('a.internal-link, .internal-link, [data-path], [data-file], [data-href], [data-linkpath]');
+      if (!link || !surface.contains(link)) return;
+      const rawPath = link.dataset.path || link.dataset.file || link.dataset.href || link.dataset.linkpath
+        || link.getAttribute('href') || link.textContent || '';
+      const file = this.resolveMarkdownFilePath(rawPath);
+      if (!file) return;
+      const listRow = target.closest<HTMLElement>('.tps-list-native-row--note[data-tps-list-selection-id]');
       const listView = (listRow?.closest<HTMLElement>('.tps-list-scroll') as any)?.__tpsListView as {
         applyTpsListRowSelection?: (event: MouseEvent, target: HTMLElement) => Promise<void>;
       } | undefined;
-      if (listRow && evt.button === 0 && !evt.shiftKey && !evt.metaKey && !evt.ctrlKey && !evt.altKey) {
-        void listView?.applyTpsListRowSelection?.(evt, listRow);
+      if (listRow && event.button === 0 && !event.shiftKey && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        void listView?.applyTpsListRowSelection?.(event, listRow);
       }
-      this.openBaseNotePreviewFromClick(evt, resolved.file, resolved.linkEl);
+      this.openBaseNotePreviewFromClick(event, file, link);
     }, { capture: true });
   }
 
-  openBaseNotePreviewFromClick(evt: MouseEvent, file: TFile, anchorEl: HTMLElement, force = false): boolean {
-    if ((!force && !this.isBasesForcedLinkPreviewEnabled()) || evt.button !== 0) return false;
-    if (evt.metaKey || evt.ctrlKey || evt.shiftKey || evt.altKey) return false;
-    evt.preventDefault();
-    evt.stopPropagation();
-    evt.stopImmediatePropagation();
-    const now = Date.now();
-    const repeatedClick = this.basesLinkPreviewArmedPath === file.path
-      && now <= this.basesLinkPreviewArmedUntil;
-    if (repeatedClick) {
-      this.basesLinkPreviewArmedPath = null;
-      this.basesLinkPreviewArmedUntil = 0;
-      this.closeBaseLinkHoverEditor(getPluginById(this.app, 'obsidian-hover-editor') as any);
-      void this.openFileInLeaf(file, false, () => this.getBaseLinkPreviewOpenLeaf(), { revealLeaf: true });
-      logger.flow('BasesLinkPreview', 'open-note', { path: file.path });
-      return true;
-    }
-
-    this.basesLinkPreviewArmedPath = file.path;
-    this.basesLinkPreviewArmedUntil = now + 900;
-    void this.openBaseLinkInHoverEditor(file, anchorEl).then((opened) => {
-      if (!opened) this.showNativeBaseLinkPreview(evt, file, anchorEl);
-      logger.flow('BasesLinkPreview', opened ? 'hover-editor-open' : 'native-preview-open', {
-        path: file.path,
+  showNativeNotePreview(
+    file: TFile,
+    anchorEl: HTMLElement,
+    sourceLeaf?: WorkspaceLeaf | null,
+    invokingEvent?: MouseEvent | null,
+  ): boolean {
+    if (Platform.isMobile || !anchorEl?.isConnected || !this.isOrdinaryMarkdownFile(file)) return false;
+    const ownerWindow = anchorEl.ownerDocument.defaultView;
+    const hoverParent = sourceLeaf?.view.containerEl?.isConnected ? sourceLeaf
+      : this.app.workspace.activeLeaf || this.app.workspace.getMostRecentLeaf();
+    if (!ownerWindow || !hoverParent) return false;
+    let event = invokingEvent;
+    if (!event) {
+      const rect = anchorEl.getBoundingClientRect();
+      event = new ownerWindow.MouseEvent('mouseover', {
+        bubbles: false,
+        clientX: rect.left + Math.min(rect.width / 2, 12),
+        clientY: rect.top + Math.min(rect.height / 2, 12),
+        view: ownerWindow,
       });
+      anchorEl.dispatchEvent(event);
+    }
+    this.app.workspace.trigger('hover-link', {
+      event,
+      source: TPSGlobalContextMenuPlugin.NOTE_PREVIEW_SOURCE,
+      hoverParent,
+      targetEl: anchorEl,
+      linktext: file.path,
+      sourcePath: this.app.workspace.getActiveFile()?.path || '',
     });
+    logger.flow('NoteOpening', 'native-preview:requested', { path: file.path, source: invokingEvent ? 'event' : 'anchor' });
     return true;
   }
 
-  private isBasesForcedLinkPreviewEnabled(): boolean {
-    return this.settings.enableBasesForcedLinkPreview === true;
+  openBaseNotePreviewFromClick(event: MouseEvent, file: TFile, anchorEl: HTMLElement): boolean {
+    if (!this.settings.enableBasesForcedLinkPreview || event.button !== 0) return false;
+    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return false;
+    if (Platform.isMobile || !anchorEl?.isConnected || !this.isOrdinaryMarkdownFile(file)) return false;
+    const now = Date.now();
+    const repeated = this.baseLinkPreviewArmedPath === file.path && now <= this.baseLinkPreviewArmedUntil;
+    if (!repeated && !this.showNativeNotePreview(file, anchorEl, this.app.workspace.activeLeaf, event)) return false;
+    event.preventDefault();
+    event.stopPropagation();
+    event.stopImmediatePropagation();
+    this.baseLinkPreviewArmedPath = repeated ? null : file.path;
+    this.baseLinkPreviewArmedUntil = repeated ? 0 : now + 900;
+    if (repeated) {
+      void this.noteOpeningService.open(file, false);
+      logger.flow('BasesLinkPreview', 'open-note', { path: file.path });
+    } else {
+      logger.flow('BasesLinkPreview', 'native-preview', { path: file.path });
+    }
+    return true;
   }
 
   private shouldInstallWorkspaceOpenPatch(): boolean {
     return this.settings.enableCanvasOpenGuard === true;
   }
 
-  private getActiveBaseLeafRootForTarget(target: HTMLElement | null): HTMLElement | null {
-    if (!target) return null;
-    const activeFile = this.app.workspace.getActiveFile();
-    if (!(activeFile instanceof TFile) || activeFile.extension.toLowerCase() !== 'base') return null;
-
-    const activeLeafEl = (this.app.workspace.activeLeaf as any)?.containerEl as HTMLElement | undefined;
-    const leafRoot = target.closest<HTMLElement>('.workspace-leaf-content');
-    if (!activeLeafEl || !leafRoot || !activeLeafEl.contains(leafRoot)) return null;
-    return leafRoot;
-  }
-
-  private getAllowedBaseLinkPreviewRoot(target: HTMLElement | null): HTMLElement | null {
-    if (!target) return null;
-    return target.closest<HTMLElement>(
-      [
-        '.bases-calendar-event-content',
-        '.tps-calendar-entry',
-        '.tps-kanban-card[data-path]',
-        '.tps-kanban-card .internal-link',
-        '.tps-kanban-card [data-path]',
-        '.tps-list-native-row--note[data-path]',
-        '.tps-list-native-property--source.internal-link',
-        '.tps-log-base-row a.internal-link',
-      ].join(', '),
-    );
-  }
-
-  private getBaseLinkPreviewOpenLeaf(): WorkspaceLeaf | null {
-    const sourceLeaf = this.baseLinkPreviewSourceLeaf;
-    if (sourceLeaf && this.isPinnedLeafForDifferentFile(sourceLeaf, null)) {
-      return this.app.workspace.getLeaf(true);
-    }
-    if (sourceLeaf && sourceLeaf !== this.baseLinkHoverEditorLeaf) return sourceLeaf;
-    return this.app.workspace.getLeaf(false);
-  }
-
-  private clearRecentBaseLinkPreviewPointer(): void {
-    this.recentBaseLinkPreviewAnchorEl = null;
-    this.recentBaseLinkPreviewPointerUntil = 0;
-    this.recentBaseLinkPreviewPointerPoint = null;
-  }
-
-  private getBaseLinkPreviewEventPoint(evt: MouseEvent | PointerEvent | TouchEvent): { x: number; y: number } | null {
-    if (evt instanceof TouchEvent) {
-      const touch = evt.changedTouches[0] ?? evt.touches[0];
-      return touch ? { x: touch.clientX, y: touch.clientY } : null;
-    }
-    return { x: evt.clientX, y: evt.clientY };
-  }
-
-  private async openBaseLinkInHoverEditor(file: TFile, anchorEl: HTMLElement): Promise<boolean> {
-    const hoverEditorPlugin = getPluginById(this.app, 'obsidian-hover-editor') as any;
-    const spawnPopover = hoverEditorPlugin?.spawnPopover;
-    if (typeof spawnPopover !== 'function') {
-      try {
-        const opened = await this.persistentMenuManager.showBaseLinkEditablePreview(file, anchorEl);
-        if (opened) logger.flow('BasesLinkPreview', 'local-editor-open', { path: file.path });
-        return opened;
-      } catch (error) {
-        logger.warn('Failed to open local editable Base preview', {
-          path: file.path,
-          error: getErrorMessage(error),
-        });
-        return false;
-      }
-    }
-
-    try {
-      this.closeBaseLinkHoverEditor(hoverEditorPlugin);
-      let popoverLeaf: WorkspaceLeaf | null = null;
-      popoverLeaf = spawnPopover.call(hoverEditorPlugin, anchorEl, () => {
-        if (popoverLeaf) {
-          this.app.workspace.setActiveLeaf(popoverLeaf, { focus: true });
-        }
-      }) as WorkspaceLeaf;
-
-      if (!popoverLeaf) return false;
-      this.baseLinkHoverEditorLeaf = popoverLeaf;
-      this.markBaseLinkHoverEditorPopover(popoverLeaf);
-
-      this.openingBaseLinkHoverEditorPath = file.path;
-      try {
-        await popoverLeaf.openFile(file, { active: true });
-      } finally {
-        this.openingBaseLinkHoverEditorPath = null;
-      }
-
-      this.markBaseLinkHoverEditorPopover(popoverLeaf);
-      return true;
-    } catch (error) {
-      logger.warn('Failed to open Bases link in Hover Editor', {
-        path: file.path,
-        error: getErrorMessage(error),
-      });
-      return false;
-    }
-  }
-
-  private closeBaseLinkHoverEditor(hoverEditorPlugin?: any): void {
-    const activePopovers = Array.isArray(hoverEditorPlugin?.activePopovers)
-      ? hoverEditorPlugin.activePopovers
-      : [];
-
-    for (const popover of activePopovers) {
-      const hoverEl = popover?.hoverEl as HTMLElement | undefined;
-      if (!hoverEl?.hasClass?.('tps-gcm-hover-editor-note-scale')) continue;
-      try {
-        popover.hide?.();
-      } catch (error) {
-        logger.debug('Failed to hide previous GCM Hover Editor popover', { error: getErrorMessage(error) });
-      }
-    }
-
-    if (this.baseLinkHoverEditorLeaf) {
-      try {
-        this.baseLinkHoverEditorLeaf.detach();
-      } catch (error) {
-        logger.debug('Failed to detach previous GCM Hover Editor leaf', { error: getErrorMessage(error) });
-      }
-      this.baseLinkHoverEditorLeaf = null;
-    }
-  }
-
-  private markBaseLinkHoverEditorPopover(leaf: WorkspaceLeaf): void {
-    const containerEl = (leaf as any).containerEl as HTMLElement | undefined;
-    if (!containerEl) return;
-    containerEl.addClass('tps-gcm-hover-editor-note-scale');
-    const popoverEl = containerEl.closest<HTMLElement>('.hover-editor, .hover-popover, .popover');
-    popoverEl?.addClass('tps-gcm-hover-editor-note-scale');
-  }
-
-  private scheduleBaseLinkHoverEditorPropertyCollapse(leaf: WorkspaceLeaf): void {
-    [0, 80, 220, 500].forEach((delay) => {
-      window.setTimeout(() => this.collapseBaseLinkHoverEditorProperties(leaf), delay);
-    });
-  }
-
-  private collapseBaseLinkHoverEditorProperties(leaf: WorkspaceLeaf): void {
-    if (leaf !== this.baseLinkHoverEditorLeaf) return;
-    const containerEl = (leaf as any).containerEl as HTMLElement | undefined;
-    if (!containerEl?.isConnected) return;
-
-    const root = containerEl.closest<HTMLElement>('.tps-gcm-hover-editor-note-scale') ?? containerEl;
-    const expandedHeading = root.querySelector<HTMLElement>(
-      [
-        '.metadata-properties-heading[aria-expanded="true"]',
-        '.metadata-container .metadata-properties-heading[aria-expanded="true"]',
-        '.metadata-container [aria-label="Collapse properties"]',
-        '.metadata-container [aria-label="Collapse Properties"]',
-      ].join(', '),
-    );
-
-    if (expandedHeading) {
-      expandedHeading.click();
-      return;
-    }
-
-    const metadataContainer = root.querySelector<HTMLElement>('.metadata-container, .metadata-properties');
-    const hasVisibleRows = !!metadataContainer?.querySelector<HTMLElement>('.metadata-property, .metadata-add-button');
-    const fallbackHeading = metadataContainer?.querySelector<HTMLElement>('.metadata-properties-heading');
-    if (hasVisibleRows && fallbackHeading) fallbackHeading.click();
-  }
-
-  private showNativeBaseLinkPreview(evt: MouseEvent, file: TFile, linkEl: HTMLElement): void {
-    const hoverParent = (this.app.workspace.activeLeaf || this.app.workspace.getMostRecentLeaf()) as any;
-    if (!hoverParent) {
-      void this.openFileInLeaf(file, false, () => this.app.workspace.getLeaf(false), { revealLeaf: true });
-      return;
-    }
-
-    this.app.workspace.trigger('hover-link', {
-      event: evt,
-      source: TPSGlobalContextMenuPlugin.BASE_LINK_PREVIEW_SOURCE,
-      hoverParent,
-      targetEl: linkEl,
-      linktext: file.path,
-      sourcePath: this.app.workspace.getActiveFile()?.path || '',
-    });
-  }
-
-  private resolveBasesNoteLinkTarget(target: HTMLElement | null): { file: TFile; linkEl: HTMLElement } | null {
-    if (!target) return null;
-    if (target.closest('.tps-gcm-base-link-preview, .tps-global-context-menu, .menu, .modal')) return null;
-    if (this.isBaseLinkPreviewExcludedTarget(target)) return null;
-
-    const taskSurface = target.closest<HTMLElement>(
-      '[data-tps-gcm-context="kanban-task"], [data-tps-gcm-context="calendar-task"], [data-tps-gcm-context="table-task"], .tps-list-native-row--task',
-    );
-    const explicitNoteLink = target.closest<HTMLElement>('a.internal-link, .tps-list-native-property--source.internal-link');
-    if (taskSurface && !explicitNoteLink) return null;
-
-    const basesRoot = this.getAllowedBaseLinkPreviewRoot(target);
-    if (!basesRoot) return null;
-
-    let linkEl = target.closest<HTMLElement>(
-      [
-        'a.internal-link',
-        '.internal-link',
-        '[data-href]',
-        '[data-linkpath]',
-        '[data-file]',
-        '[data-file-path]',
-        '[data-filepath]',
-        '[data-path]',
-        '.tps-kanban-card[data-path]',
-        '[data-path].internal-link',
-        'a[data-path]',
-      ].join(', '),
-    );
-
-    const interactiveControl = target.closest<HTMLElement>(
-      'button, input, textarea, select, [aria-haspopup], [aria-expanded], .clickable-icon',
-    );
-    if (
-      interactiveControl
-      && (!linkEl || interactiveControl !== linkEl)
-      && !interactiveControl.matches('a.internal-link, .internal-link')
-      && this.isBasesNonNoteControl(interactiveControl)
-    ) {
-      return null;
-    }
-
-    const resolveElement = (el: HTMLElement): { file: TFile; linkEl: HTMLElement } | null => {
-      const candidates = [
-        el.dataset.path,
-        el.dataset.file,
-        (el.dataset as any).filePath,
-        (el.dataset as any).filepath,
-        el.dataset.href,
-        el.dataset.linkpath,
-        el.getAttribute('href'),
-        el.getAttribute('data-path'),
-        el.getAttribute('data-file'),
-        el.getAttribute('data-file-path'),
-        el.getAttribute('data-filepath'),
-        el.getAttribute('data-href'),
-        el.getAttribute('data-linkpath'),
-        el.getAttribute('aria-label'),
-        el.getAttribute('title'),
-        el.textContent,
-      ];
-
-      for (const raw of candidates) {
-        const file = this.resolveLinkCandidateToMarkdownFile(raw);
-        if (file) return { file, linkEl: el };
-      }
-
-      return null;
-    };
-
-    if (linkEl) {
-      const resolved = resolveElement(linkEl);
-      if (resolved) return resolved;
-    }
-
-    let ancestor: HTMLElement | null = target;
-    while (ancestor && ancestor !== basesRoot) {
-      if (!linkEl) linkEl = ancestor;
-      const resolved = resolveElement(ancestor);
-      if (resolved) return resolved;
-      ancestor = ancestor.parentElement;
-    }
-
-    return null;
-  }
-
-  private isBaseLinkPreviewExcludedTarget(target: HTMLElement | null): boolean {
-    if (!target) return true;
-    return !!target.closest(
-      [
-        '.metadata-container',
-        '.metadata-properties',
-        '.metadata-property',
-        '.metadata-property-container',
-        '.metadata-property-key',
-        '.metadata-property-value',
-        '.metadata-property-value-input',
-        '.metadata-add-button',
-        '.tps-gcm-top-properties-panel',
-        '.tps-gcm-top-property-row',
-        '.tps-gcm-top-property-value',
-        '.tps-gcm-chip',
-        '[data-tps-table-cell-intent="property"]',
-        '.workspace-ribbon',
-        '.side-dock-ribbon',
-        '.workspace-tabs',
-        '.workspace-tab-header',
-        '.workspace-sidedock-vault-profile',
-        '.view-header',
-        '.view-actions',
-        '.nav-header',
-        '.nav-buttons-container',
-        '.nav-files-container',
-        '.nav-folder',
-        '.nav-file',
-        '.tree-item',
-        '.status-bar',
-        '.titlebar',
-        'button',
-        'input',
-        'textarea',
-        'select',
-        '[role="button"]',
-        '[aria-haspopup]',
-        '[aria-expanded]',
-        '.clickable-icon',
-      ].join(', '),
-    );
-  }
-
-  private resolveLinkCandidateToMarkdownFile(rawCandidate: string | null | undefined): TFile | null {
-    let raw = String(rawCandidate || '').trim();
-    if (!raw) return null;
-
-    try {
-      raw = decodeURI(raw);
-    } catch {
-      // Keep the original candidate if it is not URI encoded.
-    }
-
-    raw = raw
-      .replace(/^obsidian:\/\//i, '')
-      .replace(/^#/, '')
-      .replace(/^!?\[\[/, '')
-      .replace(/\]\]$/, '')
-      .replace(/^!?\[[^\]]*]\(([^)]+)\)$/, '$1')
-      .split('|')[0]
-      .split('#')[0]
-      .trim();
-    if (!raw) return null;
-
-    const embeddedMarkdownPath = raw.match(/(?:^|[\s"'([{])([^"'()[\]{}<>]+?\.md)(?:$|[\s"')\]}])/i)?.[1];
-    if (embeddedMarkdownPath) {
-      raw = embeddedMarkdownPath.trim();
-    }
-
-    const direct = this.app.vault.getAbstractFileByPath(raw);
-    if (this.isOrdinaryMarkdownFile(direct)) return direct;
-
-    const withMd = raw.toLowerCase().endsWith('.md') ? raw : `${raw}.md`;
-    const directMd = this.app.vault.getAbstractFileByPath(withMd);
-    if (this.isOrdinaryMarkdownFile(directMd)) return directMd;
-
-    const basename = raw.replace(/\.md$/i, '');
-    const basenameMatch = this.app.vault.getMarkdownFiles().find((file) => (
-      this.isOrdinaryMarkdownFile(file) && (
-        file.path === withMd ||
-        file.name.toLowerCase() === withMd.toLowerCase() ||
-        file.basename.toLowerCase() === basename.toLowerCase()
-      )
-    ));
-    if (basenameMatch) return basenameMatch;
-
-    const normalizedCandidate = raw.toLowerCase().replace(/\s+/g, '');
-    const cardTextPrefixMatch = this.app.vault.getMarkdownFiles().find((file) => {
-      if (!this.isOrdinaryMarkdownFile(file)) return false;
-      const normalizedBasename = file.basename.toLowerCase().replace(/\s+/g, '');
-      return (
-        normalizedBasename.length >= 3 &&
-        normalizedCandidate.startsWith(normalizedBasename) &&
-        normalizedCandidate.length <= normalizedBasename.length + 48
-      );
-    });
-    if (cardTextPrefixMatch) return cardTextPrefixMatch;
-
-    const linked = this.app.metadataCache.getFirstLinkpathDest(raw.replace(/\.md$/i, ''), '');
-    return this.isOrdinaryMarkdownFile(linked)
-      ? linked
-      : null;
-  }
-
   private isOrdinaryMarkdownFile(file: unknown): file is TFile {
     return file instanceof TFile
       && file.extension.toLowerCase() === 'md'
       && this.filePropertiesService?.isCompanionFile(file) !== true;
-  }
-
-  private isBasesNonNoteControl(control: HTMLElement): boolean {
-    if (control.matches('input, textarea, select')) return true;
-    const label = [
-      control.getAttribute('aria-label'),
-      control.getAttribute('title'),
-      control.textContent,
-    ].filter(Boolean).join(' ').toLowerCase();
-
-    return [
-      'add subitem',
-      'expand subitems',
-      'collapse subitems',
-      'reorder lane',
-      'rename lane',
-      'add card',
-      'switch to list',
-      'switch to table',
-      'dynamic width',
-      'sort',
-      'filter',
-      'properties',
-      'search',
-      'new',
-    ].some((needle) => label.includes(needle));
   }
 
   private installBasesPreviewPropertiesBridge(): void {
@@ -1592,13 +1223,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     document
       .querySelectorAll<HTMLElement>('.hover-popover, .popover.hover-popover, .markdown-hover-popover, .bases-hover-popover, .bases-preview, .bases-table-cell-popover')
       .forEach((root) => {
-        if (root.closest('.tps-gcm-base-link-preview, .tps-gcm-hover-editor-note-scale')) return;
         roots.add(root);
       });
     document
       .querySelectorAll<HTMLElement>('.metadata-container, .metadata-properties')
       .forEach((metadata) => {
-        if (metadata.closest('.tps-gcm-base-link-preview, .tps-gcm-hover-editor-note-scale')) return;
         if (this.isCalendarBaseEmbedElement(metadata)) return;
         const root =
           metadata.closest<HTMLElement>('.hover-popover, .popover.hover-popover, .markdown-hover-popover, .bases-hover-popover, .bases-preview, .bases-table-cell-popover')
@@ -1645,15 +1274,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   private enhanceBasesPreviewProperties(root: HTMLElement, force = false): void {
-    if (root.closest('.tps-gcm-base-link-preview') || root.matches('.tps-gcm-base-link-preview')) return;
-    if (root.closest('.tps-gcm-hover-editor-note-scale') || root.matches('.tps-gcm-hover-editor-note-scale')) return;
     if (this.isCalendarBaseEmbedElement(root)) return;
     const preview = root.querySelector<HTMLElement>('.markdown-preview-view, .markdown-rendered, .markdown-embed-content')
       || root.querySelector<HTMLElement>('.metadata-container, .metadata-properties')?.closest<HTMLElement>('.markdown-preview-view, .markdown-rendered, .markdown-embed-content')
       || root;
     if (!preview) return;
-    if (preview.closest('.tps-gcm-base-link-preview')) return;
-    if (preview.closest('.tps-gcm-hover-editor-note-scale')) return;
     if (this.isCalendarBaseEmbedElement(preview)) return;
     if (preview.closest('.markdown-source-view, .cm-editor')) return;
 
@@ -1924,7 +1549,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }
     this.basesPreviewPropertiesObserver?.disconnect();
     this.basesPreviewPropertiesObserver = null;
-    this.closeBaseLinkHoverEditor(getPluginById(this.app, 'obsidian-hover-editor') as any);
     this.tpsNotebookNavigatorMenuBridge?.stop();
     this.workspaceRibbonService?.teardown();
     delete (this as any).api;
@@ -2169,7 +1793,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.enableParentChildIgnoreRule = this.settings.enableParentChildIgnoreRule === true;
     this.settings.parentChildIgnoreFrontmatterKey = String(this.settings.parentChildIgnoreFrontmatterKey ?? '').trim();
     this.settings.parentChildIgnoreFrontmatterValue = String(this.settings.parentChildIgnoreFrontmatterValue ?? '').trim();
-    this.settings.enableBasesForcedLinkPreview = this.settings.enableBasesForcedLinkPreview === true;
+    this.settings.enableBasesForcedLinkPreview = loaded?.enableBasesForcedLinkPreview === true;
     this.settings.collapseHeadingsOnOpen = this.settings.collapseHeadingsOnOpen === true;
 
     const needsTaskVisibilityMigration = this.settings.hideCompletedCheckboxes === true
@@ -2730,6 +2354,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
+    this.settings.notePostCreateBehavior = ['preview', 'open', 'stay'].includes(this.settings.notePostCreateBehavior)
+      ? this.settings.notePostCreateBehavior : 'preview';
+    this.settings.enableBasesForcedLinkPreview = this.settings.enableBasesForcedLinkPreview === true;
     this.settings.dataArchitectureMode = 'native-records';
     this.settings.createTaskDefaultParentMode = 'standalone';
     this.settings.reconcileTaskStatusToCheckbox = false;

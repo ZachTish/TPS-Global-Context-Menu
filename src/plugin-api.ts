@@ -1190,7 +1190,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             clear: () => plugin.itemHistoryService.clear(),
         },
         ui: {
-            version: 1,
+            version: 2,
             presentCreatedNote: (request: CreatedNoteRequest) => plugin.noteOpeningService.present(request),
             handlesNativeBaseCreation: (controller: unknown) => plugin.nativeBaseNoteOpening.attach(controller),
             getNoteOpeningSettings: () => ({ behavior: plugin.settings.notePostCreateBehavior, destination: plugin.settings.noteOpenDestination }),
@@ -1241,15 +1241,13 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
                 }
 
                 try {
-                    const opened = await plugin.persistentMenuManager.showBaseLinkEditablePreview(
-                        file,
-                        normalized.anchorEl,
-                        { focusEditor: normalized.focusEditor },
-                    );
-                    logger.flow('EditableNotePreviewApi', opened ? 'open:success' : 'open:not-opened', {
+                    // Legacy callers receive Obsidian's Page Preview, with native
+                    // Markdown editing as the mobile or unavailable fallback.
+                    const previewed = plugin.showNativeNotePreview(file, normalized.anchorEl);
+                    const opened = previewed || await plugin.noteOpeningService.open(file);
+                    logger.flow('EditableNotePreviewApi', previewed ? 'native-preview:requested' : opened ? 'native-open:success' : 'native-open:not-opened', {
                         sourcePluginId: normalized.sourcePluginId,
                         path: file.path,
-                        focusEditor: normalized.focusEditor,
                     });
                     return opened === true;
                 } catch (error) {

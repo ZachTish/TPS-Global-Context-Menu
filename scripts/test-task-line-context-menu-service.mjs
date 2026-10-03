@@ -1040,7 +1040,7 @@ test('duplicate mobile status selections share one in-flight task mutation', asy
   );
 });
 
-test('mobile task and note editors share the keyboard-aware overlay contract', async () => {
+test('mobile task editor retains its keyboard-aware overlay contract', async () => {
   const { computeOverlayPlacement } = await importMobileOverlayUtility();
   const placement = computeOverlayPlacement(
     { left: 0, top: 0, width: 390, height: 360 },
@@ -1056,7 +1056,7 @@ test('mobile task and note editors share the keyboard-aware overlay contract', a
     compact: true,
   });
   assert.match(serviceSource, /new KeyboardAwareOverlay\(card, anchorEl/);
-  assert.match(persistentMenuSource, /new KeyboardAwareOverlay\(popover, anchorEl/);
+  assert.doesNotMatch(persistentMenuSource, /new KeyboardAwareOverlay\(popover, anchorEl/);
   assert.match(mobileOverlaySource, /window\.visualViewport\?\.addEventListener\('resize'/);
   assert.match(mobileOverlaySource, /const REPOSITION_DELAYS = \[0, 80, 220, 420\]/);
   assert.match(mobileOverlaySource, /const compactBottomSheet = forceCompact && this\.options\.compactBottomSheet !== false/);
@@ -1254,19 +1254,13 @@ test('mobile overlay clamps frozen viewport APIs to the native keyboard boundary
   assert.deepEqual(nativeKeyboard, { height: 0, baselineHeight: 844, baselineWidth: 390 });
 });
 
-test('custom Base note links use Hover Editor while task bodies stay task-scoped', () => {
-  assert.match(mainSource, /private registerBasesLinkPreviewHandler\(\): void/);
-  assert.match(mainSource, /openBaseNotePreviewFromClick\(evt: MouseEvent, file: TFile, anchorEl: HTMLElement, force = false\): boolean/);
-  assert.match(mainSource, /return this\.settings\.enableBasesForcedLinkPreview === true/);
-  assert.doesNotMatch(mainSource, /evt\.button !== 0 \|\| evt\.defaultPrevented/);
-  assert.match(mainSource, /this\.openBaseLinkInHoverEditor\(file, anchorEl\)/);
-  assert.match(mainSource, /this\.persistentMenuManager\.showBaseLinkEditablePreview\(file, anchorEl\)/);
-  assert.match(mainSource, /BasesLinkPreview', 'local-editor-open'/);
-  assert.match(logBaseViewSource, /this\.plugin\.openBaseNotePreviewFromClick\(event, entry\.file, link, true\)/);
-  assert.match(mainSource, /\.tps-list-native-row--note\[data-path\]/);
-  assert.match(mainSource, /\.tps-list-native-property--source\.internal-link/);
-  assert.match(mainSource, /\.tps-log-base-row a\.internal-link/);
-  assert.match(mainSource, /if \(taskSurface && !explicitNoteLink\) return null/);
+test('Base note links use the saved core-preview choice and no custom hover editor', () => {
+  assert.match(mainSource, /openBaseNotePreviewFromClick\(event: MouseEvent, file: TFile, anchorEl: HTMLElement\): boolean/);
+  assert.match(mainSource, /if \(!this\.settings\.enableBasesForcedLinkPreview \|\| event\.button !== 0\) return false;/);
+  assert.match(mainSource, /this\.showNativeNotePreview\(file, anchorEl, this\.app\.workspace\.activeLeaf, event\)/);
+  assert.doesNotMatch(mainSource, /openBaseLinkInHoverEditor|showBaseLinkEditablePreview|obsidian-hover-editor/);
+  assert.match(logBaseViewSource, /this\.plugin\.openBaseNotePreviewFromClick\(event, entry\.file, link\)/);
+  assert.match(logBaseViewSource, /if \(this\.plugin\.openBaseNotePreviewFromClick\(event, entry\.file, link\)\) return;[\s\S]{0,120}void this\.openEntry\(entry\)/);
 });
 
 test('task checkbox status menu labels the current option explicitly for mobile sheets', () => {

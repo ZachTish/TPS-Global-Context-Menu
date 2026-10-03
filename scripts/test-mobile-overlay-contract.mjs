@@ -20,12 +20,12 @@ test('every TPS Modal opts into the shared mobile input contract', () => {
   assert.deepEqual(missing, []);
 });
 
-test('editable popup cards use the shared keyboard-aware overlay', () => {
+test('remaining task popup card uses the shared keyboard-aware overlay', () => {
   const taskEditor = readFileSync(`${srcRoot}/services/task-line-context-menu-service.ts`, 'utf8');
   const notePreview = readFileSync(`${srcRoot}/menu/persistent-menu-manager.ts`, 'utf8');
   const mobileOverlay = readFileSync(`${srcRoot}/utils/mobile-overlay.ts`, 'utf8');
   assert.match(taskEditor, /new KeyboardAwareOverlay\(card, anchorEl/);
-  assert.match(notePreview, /new KeyboardAwareOverlay\(popover, anchorEl/);
+  assert.doesNotMatch(notePreview, /new KeyboardAwareOverlay\(popover, anchorEl/);
   assert.match(mobileOverlay, /NATIVE_KEYBOARD_SHOW_EVENTS = \['keyboardWillShow', 'keyboardDidShow'\]/);
   assert.match(mobileOverlay, /this\.targetWindow\.addEventListener\('keyboardDidHide', this\.keyboardDidHideHandler\)/);
   assert.match(mobileOverlay, /this\.targetWindow\.removeEventListener\('keyboardDidHide', this\.keyboardDidHideHandler\)/);
@@ -43,7 +43,6 @@ test('existing TPS plugin modal files opt into the shared mobile contract', () =
   const pluginRoots = [
     '../../TPS-Calendar-Base (Dev)/src',
     '../../TPS-Controller (Dev)/src',
-    '../../TPS-Kanban (Dev)/src',
     '../../TPS-Finances (Dev)/src',
     '../../TPS-health (Dev)/src',
     '../../tps-messager/src',

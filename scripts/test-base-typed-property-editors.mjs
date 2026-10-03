@@ -191,7 +191,7 @@ test('TPS Table property cells own their click intent and configured selectors o
   assert.match(logBase, /sharedServices\?\.status\?\.getStatusPropertyKey\?\.\(\)/);
   assert.match(logBase, /normalizedId === 'status'/);
   assert.match(logBase, /target\?\.closest\('\[data-tps-table-cell-intent="property"\]'\)/);
-  assert.match(main, /'\[data-tps-table-cell-intent="property"\]'/);
+  assert.match(main, /if \(target\.closest\('\[data-tps-table-cell-intent="property"\]'\)\) return;/);
   assert.match(taskLineContext, /openTaskStatusPicker\(/);
   assert.match(taskLineContext, /this\.setTaskStatusCheckboxState\(line, mapping\.checkboxState\)/);
   assert.match(taskLineContext, /setTaskCheckboxWorkflowState\(/);
@@ -416,10 +416,7 @@ test('empty Accepted-Kind TPS Table cells stay property-owned and open the entit
     logBase,
     /target\?\.closest\('\[data-tps-table-cell-intent="property"\]'\)[\s\S]*?evt\.preventDefault\(\)[\s\S]*?evt\.stopPropagation\(\)[\s\S]*?return/,
   );
-  assert.match(
-    main,
-    /private isBaseLinkPreviewExcludedTarget\([\s\S]*?'\[data-tps-table-cell-intent="property"\]'/,
-  );
+  assert.match(main, /if \(target\.closest\('\[data-tps-table-cell-intent="property"\]'\)\) return;/);
 });
 
 test('TPS Table selector mutations preserve line identity and sibling fields', async () => {

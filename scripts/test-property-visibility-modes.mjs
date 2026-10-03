@@ -78,7 +78,7 @@ test('property-row visibility actions target the inline override and refresh mou
   }
   assert.match(visibility, /options\.commit\(properties\);[\s\S]{0,120}options\.refresh\(\);[\s\S]{0,220}await options\.persist\(\)/);
   assert.match(persistentMenu, /refreshMountedCustomPropertyPresentationViews\([\s\S]{0,220}ensureTopParentNav\(view, options\)/);
-  assert.match(persistentMenu, /refreshBaseLinkPreviewProperties\(\)/);
+  assert.doesNotMatch(persistentMenu, /refreshBaseLinkPreviewProperties\(\)/);
   assert.match(persistentMenu, /refreshCustomPropertyPreviewSurfaces\(\)/);
 });
 

@@ -47,8 +47,8 @@ test('default note opens stay native while plugin-owned opens avoid pinned tabs'
   assert.doesNotMatch(mainSource, /source: isRecentNotebookNavigatorOpen \? 'notebook-navigator' : 'occupied-leaf'/);
   assert.doesNotMatch(mainSource, /source: 'occupied-leaf'/);
   assert.match(mainSource, /isPinnedLeafForDifferentFile\(leaf: WorkspaceLeaf, file: TFile \| null\)/);
-  assert.match(mainSource, /if \(sourceLeaf && this\.isPinnedLeafForDifferentFile\(sourceLeaf, null\)\) \{\s*return this\.app\.workspace\.getLeaf\(true\);\s*\}/);
   assert.match(mainSource, /let leaf = getLeaf\(\)/);
+  assert.match(mainSource, /if \(this\.isPinnedLeafForDifferentFile\(leaf, file\)\) \{/);
   assert.match(mainSource, /leaf = this\.app\.workspace\.getLeaf\(true\)/);
   assert.doesNotMatch(mainSource, /plugin\.getDefaultOpenSourceLeaf\(previousActiveLeaf, previousMostRecentLeaf, leaf\)/);
   assert.doesNotMatch(mainSource, /plugin\.recordDefaultOpenCreatedLeaf\(leaf, sourceLeaf\)/);

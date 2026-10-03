@@ -800,7 +800,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         .setName('After creating a note')
         .setDesc('Shared by native Bases, TPS Calendar, Navigator, and TPS note-creation actions. Background imports stay silent.')
         .addDropdown(dropdown => dropdown
-          .addOption('preview', 'Editable preview')
+          .addOption('preview', 'Obsidian Page Preview')
           .addOption('open', 'Open note')
           .addOption('stay', 'Stay in current view')
           .setValue(this.plugin.settings.notePostCreateBehavior)
@@ -810,13 +810,22 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           }));
       new Setting(activePage)
         .setName('Open destination')
-        .setDesc('Used by Open note and the preview’s Open button. Already-open notes are reused; pinned tabs are preserved.')
+        .setDesc('Used by Open note and when Page Preview cannot be shown. Already-open notes are reused; pinned tabs are preserved.')
         .addDropdown(dropdown => dropdown
           .addOption('current-tab', 'Current tab')
           .addOption('new-tab', 'New tab')
           .setValue(this.plugin.settings.noteOpenDestination)
+            .onChange(async value => {
+              this.plugin.settings.noteOpenDestination = value as 'current-tab' | 'new-tab';
+              await this.plugin.saveSettings();
+            }));
+      new Setting(activePage)
+        .setName('Force previews for Base links')
+        .setDesc('Use Obsidian Page Preview on the first click of supported Calendar, Kanban, TPS List, and TPS Table note links; a second click opens the note.')
+        .addToggle(toggle => toggle
+          .setValue(this.plugin.settings.enableBasesForcedLinkPreview === true)
           .onChange(async value => {
-            this.plugin.settings.noteOpenDestination = value as 'current-tab' | 'new-tab';
+            this.plugin.settings.enableBasesForcedLinkPreview = value;
             await this.plugin.saveSettings();
           }));
       new Setting(activePage)
@@ -829,18 +838,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             .setValue(this.plugin.settings.nativeMenuPlacement || 'tps-last')
             .onChange(async (value: 'tps-first' | 'tps-last') => {
               this.plugin.settings.nativeMenuPlacement = value;
-              await this.plugin.saveSettings();
-            })
-        );
-
-      new Setting(activePage)
-        .setName('Force previews for Base links')
-        .setDesc('Open note links in Calendar, Kanban, TPS List, and TPS Table as a preview on first click and the note on second click.')
-        .addToggle((toggle) =>
-          toggle
-            .setValue(this.plugin.settings.enableBasesForcedLinkPreview === true)
-            .onChange(async (value) => {
-              this.plugin.settings.enableBasesForcedLinkPreview = value;
               await this.plugin.saveSettings();
             })
         );

@@ -105,9 +105,9 @@ test('plugin-owned file opens reuse existing tabs or the current unpinned tab wi
     mainSource.indexOf('WorkspaceLeaf.prototype.openFile = function'),
     mainSource.indexOf('WorkspaceLeaf.prototype.open = function'),
   );
-  const baseLinkPreviewHandlerSource = mainSource.slice(
-    mainSource.indexOf('private registerBasesLinkPreviewHandler('),
-    mainSource.indexOf('private isBasesForcedLinkPreviewEnabled('),
+  const baseLinkNativeClickSource = mainSource.slice(
+    mainSource.indexOf('openBaseNotePreviewFromClick('),
+    mainSource.indexOf('private shouldInstallWorkspaceOpenPatch('),
   );
   const nativeSetViewStateSource = mainSource.slice(
     mainSource.indexOf('WorkspaceLeaf.prototype.setViewState = function'),
@@ -238,12 +238,8 @@ test('plugin-owned file opens reuse existing tabs or the current unpinned tab wi
   assert.doesNotMatch(mainSource, /source: 'occupied-leaf'/);
   assert.doesNotMatch(mainSource, /this\.logOpenerDecision\('native-pinned-reroute'/);
   assert.match(mainSource, /private getLeafMarkdownFile\(leaf: WorkspaceLeaf\): TFile \| null/);
-  assert.match(baseLinkPreviewHandlerSource, /this\.clearRecentBaseLinkPreviewPointer\(\)/);
-  assert.match(baseLinkPreviewHandlerSource, /registerDomEvent\(document, 'click'/);
-  assert.match(baseLinkPreviewHandlerSource, /this\.isBasesForcedLinkPreviewEnabled\(\)/);
-  assert.match(baseLinkPreviewHandlerSource, /this\.resolveBasesNoteLinkTarget\(target\)/);
-  assert.match(baseLinkPreviewHandlerSource, /openBaseLinkInHoverEditor/);
-  assert.match(baseLinkPreviewHandlerSource, /this\.basesLinkPreviewArmedUntil = now \+ 900/);
+  assert.match(baseLinkNativeClickSource, /if \(!this\.settings\.enableBasesForcedLinkPreview \|\| event\.button !== 0\) return false;/);
+  assert.doesNotMatch(mainSource, /openBaseLinkInHoverEditor|spawnPopover/);
   assert.match(
     mainSource,
     /private shouldInstallWorkspaceOpenPatch\(\): boolean \{\s*return this\.settings\.enableCanvasOpenGuard === true;\s*\}/,

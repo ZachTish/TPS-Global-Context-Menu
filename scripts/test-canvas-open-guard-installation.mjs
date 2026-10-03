@@ -302,7 +302,7 @@ test('default settings avoid every Canvas-open host mutation without changing na
       'if (this.shouldInstallWorkspaceOpenPatch()) {',
       mainSource.indexOf('// Capture right-click targets early'),
     );
-    const trackingEnd = mainSource.indexOf('this.registerBasesLinkPreviewHandler()', trackingStart);
+    const trackingEnd = mainSource.indexOf('this.registerInteractionHandlers()', trackingStart);
     const trackingSource = mainSource.slice(trackingStart, trackingEnd);
     assert.ok(trackingStart >= 0 && trackingEnd > trackingStart);
     assert.equal((trackingSource.match(/registerDomEvent/gu) || []).length, 9);

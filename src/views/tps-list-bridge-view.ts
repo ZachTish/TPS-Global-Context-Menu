@@ -65,7 +65,7 @@ export function createTpsListView(controller: QueryController, containerEl: HTML
     const path = link.dataset.href || link.dataset.linkpath || link.getAttribute('href') || '';
     const file = plugin.app.vault.getFileByPath(path);
     if (!file || file.extension.toLowerCase() !== 'md') return;
-    plugin.openBaseNotePreviewFromClick(event, file, link, true);
+    plugin.openBaseNotePreviewFromClick(event, file, link);
   }, { capture: true });
   return new TpsListView(controller, containerEl, createTpsListPluginShim(plugin));
 }
@@ -85,7 +85,7 @@ export function createTpsListPluginShim(plugin: TPSGlobalContextMenuPlugin): Tps
     app: plugin.app,
     gcmPlugin: plugin,
     openBaseNotePreviewFromClick: (event: MouseEvent, file: any, anchorEl: HTMLElement) =>
-      plugin.openBaseNotePreviewFromClick(event, file, anchorEl, true),
+      plugin.openBaseNotePreviewFromClick(event, file, anchorEl),
     listSettings: DEFAULT_SETTINGS,
     saveSettings: async () => {},
   };

@@ -1,6 +1,6 @@
 # Historical documentation reference
 
-Preserved from the README at 2.3.0, during the 2026-09-16 documentation cleanup. This includes earlier release notes, detailed contracts, and historical validation claims. Earlier setup steps or limitations may have been superseded. In particular, 5.0.0 retires Atomic line creation, line mutation, promotion, linked checkbox synchronization, and Daily Note scheduled-link population described below. Start with [the current README](README.md), current source, and the tagged release. Relative source links remain rooted in this repository.
+Preserved from the README at 2.3.0, during the 2026-09-16 documentation cleanup. This includes earlier release notes, detailed contracts, and historical validation claims. Earlier setup steps or limitations may have been superseded. In particular, 5.0.0 retires Atomic line creation, line mutation, promotion, linked checkbox synchronization, and Daily Note scheduled-link population described below; 6.0.0 retires the custom editable hover card, third-party Hover Editor route, and forced Base-link click preview. Start with [the current README](README.md), current source, and the tagged release. Relative source links remain rooted in this repository.
 
 ---
 

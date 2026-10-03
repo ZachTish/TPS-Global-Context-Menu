@@ -679,7 +679,8 @@ test('tag identity retirement uses serialized settings persistence without rewri
   assert.match(loadSettingsSource, /originalStorageValue\('nativeRecordIdentityPropertyKey',[\s\S]{0,900}originalStorageValue\('nativeRecordTitlePropertyKey/);
   assert.match(loadSettingsSource, /nativeRecordStorageAliases: originalStorageValue\('nativeRecordStorageAliases', \[\]\)/);
   assert.match(loadSettingsSource, /needsNativeRecordIdentityMigration = nativeRecordStorageConfiguration\.requiresSettingsMigration/);
-  assert.match(loadSettingsSource, /needsNativeRecordIdentityMigration[\s\S]{0,500}if \(needsSettingsMigration\) await this\.persistSettingsSnapshot\(\);/);
+  assert.match(loadSettingsSource, /needsSettingsMigration =\s*needsNoteOpeningMigration \|\|[\s\S]*needsNativeRecordIdentityMigration/);
+  assert.match(loadSettingsSource, /if \(needsSettingsMigration\) await this\.persistSettingsSnapshot\(\);/);
   assert.match(loadSettingsSource, /migration:native-record-property-identity'[\s\S]{0,220}noteRewrite: false/);
   assert.doesNotMatch(loadSettingsSource, /nativeRecordService\.migrateStorageProfile\(/);
 });

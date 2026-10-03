@@ -578,7 +578,6 @@ export class TaskLineContextMenuService {
       '.suggestion-container',
       '.prompt',
       '.tps-gcm-task-editor-card',
-      '.tps-gcm-base-link-preview',
     ].join(', ')));
   }
 

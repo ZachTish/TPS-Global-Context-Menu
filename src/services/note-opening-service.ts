@@ -7,6 +7,7 @@ export interface CreatedNoteRequest {
   filePath: string;
   sourcePluginId: string;
   anchorEl?: HTMLElement | null;
+  event?: MouseEvent | null;
   sourceLeaf?: WorkspaceLeaf | null;
   renameTitle?: boolean;
   explicitDestination?: 'tab' | 'split' | 'window';
@@ -63,38 +64,34 @@ export class NoteOpeningService {
     }
     const behavior = request.explicitDestination ? 'open' : this.plugin.settings.notePostCreateBehavior;
     logger.flow('NoteOpening', 'created:route', { path: file.path, source: request.sourcePluginId, behavior });
-    if (behavior === 'open' || file.extension !== 'md') {
-      const context = request.explicitDestination ?? (this.plugin.settings.noteOpenDestination === 'new-tab' ? 'tab' : false);
-      const opened = await this.open(file, context);
-      if (opened && request.renameTitle) this.plugin.findOpenLeafForFile(file)?.view.setEphemeralState({ rename: 'all' });
-      return true;
+    if (behavior === 'stay' && file.extension === 'md') return true;
+    if (behavior === 'preview' && file.extension === 'md' && !Platform.isMobile) {
+      const anchor = request.anchorEl;
+      if (anchor?.isConnected && this.plugin.showNativeNotePreview(file, anchor, request.sourceLeaf, request.event)) {
+        return true;
+      }
+      logger.flowWarn('NoteOpening', 'created:preview-unavailable', { path: file.path, source: request.sourcePluginId });
     }
-    if (behavior === 'stay') return true;
-    const anchor = request.anchorEl?.isConnected ? request.anchorEl
-      : request.sourceLeaf?.view.containerEl?.isConnected ? request.sourceLeaf.view.containerEl
-      : app.workspace.activeLeaf?.view.containerEl;
-    try {
-      if (anchor?.isConnected && await this.plugin.persistentMenuManager.showBaseLinkEditablePreview(file, anchor, {
-        focusEditor: !Platform.isMobile && !request.renameTitle,
-        focusTitle: request.renameTitle === true,
-        openNote: () => this.open(file),
-      })) return true;
-    } catch (error) {
-      logger.flowError('NoteOpening', 'created:preview-failed', error, { path: file.path });
-    }
-    const message = document.createDocumentFragment();
-    message.append('Note created. Editable preview is unavailable. ');
-    const button = document.createElement('button');
-    button.textContent = 'Open note';
-    button.addEventListener('click', () => { void this.open(file); });
-    message.append(button);
-    new Notice(message, 10000);
+    const context = request.explicitDestination ?? (this.plugin.settings.noteOpenDestination === 'new-tab' ? 'tab' : false);
+    const opened = await this.open(file, context);
+    if (opened && request.renameTitle) this.plugin.findOpenLeafForFile(file)?.view.setEphemeralState({ rename: 'all' });
     return true; // Creation was handled; callers must not open a second surface.
   }
 
   async open(file: TFile, context: 'tab' | 'split' | 'window' | false = this.plugin.settings.noteOpenDestination === 'new-tab' ? 'tab' : false): Promise<boolean> {
     try {
-      if (await this.plugin.openFileInLeaf(file, context, () => this.plugin.app.workspace.getLeaf(context), { revealLeaf: true })) return true;
+      if (await this.plugin.openFileInLeaf(file, context, () => this.plugin.app.workspace.getLeaf(context), { revealLeaf: true })) {
+        const leaf = this.plugin.findOpenLeafForFile(file);
+        const viewState = leaf?.getViewState();
+        if (leaf && viewState?.type === 'markdown' && viewState.state?.mode !== 'source') {
+          await leaf.setViewState({
+            ...viewState,
+            active: true,
+            state: { ...viewState.state, file: file.path, mode: 'source', source: false },
+          });
+        }
+        return true;
+      }
     } catch (error) {
       logger.flowError('NoteOpening', 'created:open-failed', error, { path: file.path });
     }

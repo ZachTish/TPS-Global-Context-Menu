@@ -1927,7 +1927,7 @@ export class TpsTableView extends BasesView {
         });
         link.addEventListener('click', (event: MouseEvent) => {
           if (event.shiftKey || event.metaKey || event.ctrlKey) return;
-          if (this.plugin.openBaseNotePreviewFromClick(event, entry.file, link, true)) return;
+          if (this.plugin.openBaseNotePreviewFromClick(event, entry.file, link)) return;
           event.preventDefault();
           event.stopPropagation();
           void this.openEntry(entry);
