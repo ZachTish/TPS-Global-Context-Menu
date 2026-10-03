@@ -606,12 +606,14 @@ export class LinkedSubitemCheckboxService {
   }
 
   async syncDerivedStatusForChild(childFile: TFile): Promise<boolean> {
+    if (this.plugin.settings?.dataArchitectureMode === 'native-records') return false;
     if (this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)) return false;
     const references = await this.plugin.subitemReferenceIndexService.getReferencesForChild(childFile);
     return await this.syncDerivedStatusForChildFromReferences(childFile, references);
   }
 
   async syncDerivedStatusForChildFromReferences(childFile: TFile, references: BodySubitemLink[]): Promise<boolean> {
+    if (this.plugin.settings?.dataArchitectureMode === 'native-records') return false;
     if (this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)) return false;
     const visibleReferences = references.filter((reference) => {
       const parentFile = this.plugin.app.vault.getFileByPath(reference.parentPath);
@@ -1186,6 +1188,7 @@ export class LinkedSubitemCheckboxService {
   }
 
   private async cleanupLegacyCheckboxes(file: TFile): Promise<void> {
+    if (this.plugin.settings?.dataArchitectureMode === 'native-records') return;
     await this.plugin.subitemRelationshipSyncService.mutateMarkdownBody(file, async (lines) => {
       let changed = false;
       for (let index = 0; index < lines.length; index += 1) {
@@ -1258,6 +1261,7 @@ export class LinkedSubitemCheckboxService {
     checkboxToken: string,
     sourceLine?: { file: TFile; lineNumber: number; rawLine: string },
   ): Promise<boolean> {
+    if (this.plugin.settings?.dataArchitectureMode === 'native-records') return false;
     const relationshipIsIgnored = () => (
       this.plugin.parentLinkResolutionService.isIgnoredFile(parentFile)
       || this.plugin.parentLinkResolutionService.isIgnoredFile(childFile)

@@ -690,7 +690,8 @@ export class FileNamingService {
             // Populate daily note with scheduled items if applicable
             const frontmatter = this.plugin.app.metadataCache.getFileCache(liveFile)?.frontmatter as Record<string, unknown> | undefined;
             if (
-                this.plugin.settings.enableAutoPopulateDailyNotes
+                this.plugin.settings.dataArchitectureMode !== 'native-records'
+                && this.plugin.settings.enableAutoPopulateDailyNotes
                 && !this.isProcessRunFrontmatter(frontmatter)
                 && await this.isDailyNoteFile(liveFile)
             ) {

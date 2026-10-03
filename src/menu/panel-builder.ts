@@ -3353,7 +3353,8 @@ export class PanelBuilder {
     checkbox.className = 'task-list-item-checkbox tps-gcm-checklist-toggle';
     checkbox.checked = false;
     checkbox.indeterminate = item.state === '?';
-    checkbox.title = 'Complete (right-click for more options)';
+    checkbox.disabled = this.plugin.usesNativeRecordArchitecture();
+    checkbox.title = checkbox.disabled ? 'Open this checklist item in its note to edit' : 'Complete (right-click for more options)';
     checkbox.addEventListener('click', (evt) => {
       evt.preventDefault();
       evt.stopPropagation();
@@ -3365,6 +3366,7 @@ export class PanelBuilder {
     });
 
     const showChecklistStateMenu = (x: number, y: number) => {
+      if (this.plugin.usesNativeRecordArchitecture()) return;
       const menu = new Menu();
       menu.addItem((mi) => {
         mi.setTitle('Complete')
@@ -3457,19 +3459,20 @@ export class PanelBuilder {
     lineInfo.textContent = `line ${item.lineNumber + 1}`;
     metaRow.appendChild(lineInfo);
 
-    const actions = document.createElement('div');
-    actions.className = 'tps-gcm-subitem-actions';
-    const promoteBtn = this.createSubitemActionButton('Promote', () => {
-      if (promoteBtn.disabled) return;
-      promoteBtn.disabled = true;
-      void this.promoteChecklistItemToChild(rootFile, item, onRefresh).finally(() => {
-        promoteBtn.disabled = false;
+    if (!this.plugin.usesNativeRecordArchitecture()) {
+      const actions = document.createElement('div');
+      actions.className = 'tps-gcm-subitem-actions';
+      const promoteBtn = this.createSubitemActionButton('Promote', () => {
+        if (promoteBtn.disabled) return;
+        promoteBtn.disabled = true;
+        void this.promoteChecklistItemToChild(rootFile, item, onRefresh).finally(() => {
+          promoteBtn.disabled = false;
+        });
       });
-    });
-    promoteBtn.title = 'Create a linked child note from this checklist item';
-    actions.appendChild(promoteBtn);
-
-    metaRow.appendChild(actions);
+      promoteBtn.title = 'Create a linked child note from this checklist item';
+      actions.appendChild(promoteBtn);
+      metaRow.appendChild(actions);
+    }
     textWrap.appendChild(titleLine);
     textWrap.appendChild(metaRow);
     header.appendChild(textWrap);
@@ -3485,6 +3488,7 @@ export class PanelBuilder {
     rowEl: HTMLElement,
     onRefresh: () => void
   ): void {
+    if (this.plugin.usesNativeRecordArchitecture()) return;
     new TextInputModal(this.app, 'Checkbox value', getCheckboxStateMarker(`[${item.state || ' '}]`), async (value) => {
       const token = normalizeCheckboxStateToken(value);
       if (!token) {
@@ -3512,6 +3516,7 @@ export class PanelBuilder {
     newState: ChecklistTaskState,
     onRefresh: () => void
   ): Promise<void> {
+    if (this.plugin.usesNativeRecordArchitecture()) return;
     try {
       const content = await this.app.vault.read(rootFile);
       const lines = content.split('\n');

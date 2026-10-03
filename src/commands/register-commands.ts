@@ -17,39 +17,15 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
         },
     });
 
-    plugin.addCommand({
-        id: 'promote-current-task-to-record',
-        name: 'Tasks: Promote current task to tracked record',
-        callback: async () => {
-            if (!plugin.nativeRecordService.isEnabled()) {
-                new Notice('TPS GCM: Enable Atomic note in Advanced settings, then reload Obsidian.');
-                return;
-            }
-            const view = getActiveMarkdownEditor(plugin);
-            const file = view?.file;
-            if (!view || !(file instanceof TFile)) return;
-            const lineNumber = view.editor.getCursor().line;
-            const rawLine = view.editor.getLine(lineNumber);
-            const result = await plugin.nativeRecordService.promoteTask({
-                path: file.path,
-                lineNumber,
-                rawLine,
-            }, { kind: 'user', surface: 'command-promote-task-record' });
-            if (!result.ok) {
-                new Notice(`TPS GCM: ${result.error || 'Could not promote this task.'}`);
-                return;
-            }
-            new Notice(`Promoted task to ${result.record?.path || 'a tracked record'}.`);
-        },
-    });
-
-    plugin.addCommand({
-      id: 'ai-assisted-task-creator',
-        name: 'AI assisted task creator',
-        callback: () => {
-            plugin.aiAssistedTaskService.openAiAssistedTaskModal();
-        },
-    });
+    if (plugin.settings?.dataArchitectureMode !== 'native-records') {
+        plugin.addCommand({
+          id: 'ai-assisted-task-creator',
+            name: 'AI assisted task creator',
+            callback: () => {
+                plugin.aiAssistedTaskService.openAiAssistedTaskModal();
+            },
+        });
+    }
 
     plugin.addCommand({
         id: 'normalize-native-task-identities',
@@ -64,25 +40,27 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
         },
     });
 
-    plugin.addCommand({
-        id: 'transfer-current-line-to-note',
-        name: 'Transfer current line to note',
-        callback: () => {
-            const view = getActiveMarkdownEditor(plugin);
-            if (!view) return;
-            plugin.dailyInboxLineService.promptTransferCurrentEditorLine(view.editor, view);
-        },
-    });
+    if (plugin.settings?.dataArchitectureMode !== 'native-records') {
+        plugin.addCommand({
+            id: 'transfer-current-line-to-note',
+            name: 'Transfer current line to note',
+            callback: () => {
+                const view = getActiveMarkdownEditor(plugin);
+                if (!view) return;
+                plugin.dailyInboxLineService.promptTransferCurrentEditorLine(view.editor, view);
+            },
+        });
 
-    plugin.addCommand({
-        id: 'link-current-task-line-to-note',
-        name: 'Link current task line to note',
-        callback: () => {
-            const view = getActiveMarkdownEditor(plugin);
-            if (!view) return;
-            plugin.dailyInboxLineService.promptLinkCurrentEditorTaskLine(view.editor, view);
-        },
-    });
+        plugin.addCommand({
+            id: 'link-current-task-line-to-note',
+            name: 'Link current task line to note',
+            callback: () => {
+                const view = getActiveMarkdownEditor(plugin);
+                if (!view) return;
+                plugin.dailyInboxLineService.promptLinkCurrentEditorTaskLine(view.editor, view);
+            },
+        });
+    }
 
     plugin.addCommand({
         id: 'rename-active-note-title',
@@ -97,7 +75,7 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
         },
     });
 
-    plugin.addCommand({
+    if (plugin.settings?.dataArchitectureMode !== 'native-records') plugin.addCommand({
         id: 'check-active-note-child-links',
         name: 'Child links: Check unresolved links in current note',
         checkCallback: (checking) => {

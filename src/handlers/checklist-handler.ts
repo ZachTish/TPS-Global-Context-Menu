@@ -24,7 +24,7 @@ export function wasChecklistCompletionPromptRecentlyHandled(fileOrPath: TFile | 
 export class ChecklistHandler {
   private app: App;
 
-  constructor(app: App) {
+  constructor(app: App, private readonly allowLineMutation = true) {
     this.app = app;
   }
 
@@ -60,6 +60,7 @@ export class ChecklistHandler {
     action: 'complete' | 'canceled',
     writeGuard?: () => boolean,
   ): Promise<void> {
+    if (!this.allowLineMutation) return;
     try {
       if (writeGuard?.() === false) return;
       let content = await this.app.vault.read(file);
@@ -95,7 +96,7 @@ export class ChecklistHandler {
     const userAction = await new Promise<string>((resolve) => {
       new ChecklistPromptModal(this.app, incompleteItems, (result) => {
         resolve(result);
-      }).open();
+      }, this.allowLineMutation).open();
     });
 
     if (writeGuard?.() === false) return false;
@@ -113,8 +114,10 @@ export class ChecklistHandler {
     }
 
     if (userAction === 'complete') {
+      if (!this.allowLineMutation) return false;
       await this.updateChecklistItems(file, 'complete', writeGuard);
     } else if (userAction === 'canceled') {
+      if (!this.allowLineMutation) return false;
       await this.updateChecklistItems(file, 'canceled', writeGuard);
     }
     if (writeGuard?.() === false) return false;

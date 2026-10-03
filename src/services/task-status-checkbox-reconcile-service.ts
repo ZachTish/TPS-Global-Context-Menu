@@ -48,6 +48,7 @@ export class TaskStatusCheckboxReconcileService extends Component {
   }
 
   scheduleFile(file: TFile, reason: string, delayMs = RECONCILE_DELAY_MS): void {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return;
     if (!this.isMarkdownFile(file)) return;
     if (this.filesBeingProcessed.has(file.path)) return;
     this.pendingFiles.set(file.path, file);
@@ -55,6 +56,7 @@ export class TaskStatusCheckboxReconcileService extends Component {
   }
 
   async reconcileFileNow(file: TFile): Promise<number> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return 0;
     if (!this.isMarkdownFile(file)) return 0;
     if (this.filesBeingProcessed.has(file.path)) return 0;
     if (!canAutomaticallyMutatePathWithExclusions(file, this.plugin.settings)) return 0;

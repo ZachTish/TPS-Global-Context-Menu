@@ -52,6 +52,22 @@ function harness() {
   return {service,plugin,files,bodies,metadata,add,write,emit,runStartup,reads:()=>reads,setReadHook:fn=>{readHook=fn;}};
 }
 
+test('native mode refuses task-line timers and task metadata writes', async () => {
+  const h = harness();
+  h.plugin.settings.enableTimeTracking = true;
+  h.plugin.settings.dataArchitectureMode = 'native-records';
+  const target = h.add('Task.md', { title: 'Task' }, '- [ ] Legacy task');
+  let writes = 0;
+  h.plugin.app.vault.process = async () => { writes++; };
+  assert.equal(await h.service.startDailyTaskTimer('New inline task'), null);
+  assert.equal(await h.service.startTimer({ file: target, type: 'task', lineNumber: 0, rawLine: '- [ ] Legacy task' }), null);
+  await h.service.syncTargetScheduledMetadata({ file: target, type: 'task', lineNumber: 0 }, {
+    id: 'old', targetId: 'old-task', targetType: 'task', sourcePath: target.path, start: '2026-09-22T12:00:00Z',
+  }, { mode: 'running' });
+  assert.equal(h.reads(), 0);
+  assert.equal(writes, 0);
+});
+
 test('disabled startup leaves the timer source index unread, including disable before scheduled work',async()=>{
  for(const initiallyEnabled of [false,true]){
   const h=harness();h.plugin.settings.enableTimeTracking=initiallyEnabled;

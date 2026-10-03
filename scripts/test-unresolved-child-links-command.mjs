@@ -44,7 +44,7 @@ const built = await build({
 });
 const { registerGcmCommands } = await import(`data:text/javascript;base64,${Buffer.from(built.outputFiles[0].text).toString('base64')}`);
 
-test('unresolved child-link inspection is explicit, selected-file scoped, and works in both architectures', async () => {
+test('unresolved child-link cleanup is absent in native mode and selected-file scoped in legacy mode', async () => {
   for (const mode of ['native-records', 'legacy']) {
     const commands = new Map();
     const reads = [];
@@ -63,6 +63,11 @@ test('unresolved child-link inspection is explicit, selected-file scoped, and wo
     };
     registerGcmCommands(plugin);
     const command = commands.get('check-active-note-child-links');
+    if (mode === 'native-records') {
+      assert.equal(command, undefined);
+      assert.deepEqual([reads.length, globalThis.__commandChecks.length], [0, 0]);
+      continue;
+    }
     assert.equal(command.name, 'Child links: Check unresolved links in current note');
     assert.equal(command.checkCallback(true), true);
     assert.deepEqual([reads.length, globalThis.__commandChecks.length], [0, 0], `${mode}: availability is read-only`);
@@ -86,6 +91,7 @@ test('a command read failure reports one error instead of leaving a rejected pro
   globalThis.__commandNotices = [];
   globalThis.__commandWarnings = [];
   registerGcmCommands({
+    settings: { dataArchitectureMode: 'legacy' },
     addCommand(command) { commands.set(command.id, command); },
     app: {
       workspace: { getActiveFile: () => file },

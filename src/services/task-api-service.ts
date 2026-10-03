@@ -180,10 +180,20 @@ type TaskHistoryCommit = {
 };
 
 export class TaskApiService {
-  readonly version = 3;
+  readonly version = 4;
   private readonly historyIdentityFailures = new WeakSet<object>();
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
+
+  private retiredLineMutation(action: string): GcmTaskMutationResult {
+    logger.flowWarn('TaskApi', 'mutation:retired', { action });
+    return {
+      ok: false,
+      changed: false,
+      task: null,
+      error: 'Task-line editing is unavailable. Create or edit the whole task note instead.',
+    };
+  }
 
   parseLine(path: string, lineNumber: number, rawLine: string): GcmTaskRecord | null {
     return this.recordFromLine(path, lineNumber, rawLine);
@@ -219,6 +229,9 @@ export class TaskApiService {
   }
 
   async create(input: GcmTaskCreateInput, cause?: ItemHistoryUserCause): Promise<GcmTaskMutationResult> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') {
+      return this.retiredLineMutation('create');
+    }
     const title = String(input.title || '').replace(/\s+/g, ' ').trim();
     if (!title && !String(input.rawLine || '').trim()) {
       logger.flowWarn('TaskApi', 'create:invalid-input', { hasTitle: !!title, hasRawLine: !!String(input.rawLine || '').trim() });
@@ -440,6 +453,9 @@ export class TaskApiService {
     options: TaskUpdateExecutionOptions = {},
     cause?: ItemHistoryUserCause,
   ): Promise<GcmTaskMutationResult> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') {
+      return this.retiredLineMutation('update');
+    }
     const mappingPreflight = this.preflightTaskInputMappings(input);
     if ('error' in mappingPreflight) {
       logger.flowWarn('TaskApi', 'update:unsupported-checkbox-mapping', { error: mappingPreflight.error });
@@ -713,6 +729,9 @@ export class TaskApiService {
     target: GcmTaskMoveTarget,
     cause?: ItemHistoryUserCause,
   ): Promise<GcmTaskMutationResult> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') {
+      return this.retiredLineMutation('move');
+    }
     const sourcePolicy = target?.sourcePolicy;
     if (
       sourcePolicy !== undefined
@@ -1234,6 +1253,9 @@ export class TaskApiService {
   }
 
   async delete(ref: GcmTaskRef, cause?: ItemHistoryUserCause): Promise<GcmTaskMutationResult> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') {
+      return this.retiredLineMutation('delete');
+    }
     const resolved = await this.resolveTask(ref);
     if (!resolved) {
       logger.flowWarn('TaskApi', 'delete:target-unresolved', this.summarizeRef(ref));

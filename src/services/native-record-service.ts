@@ -2823,6 +2823,10 @@ export class NativeRecordService {
     reference: GcmTaskRef,
     cause: FilePropertiesMutationCause = { kind: 'user', surface: 'task-record-promotion' },
   ): Promise<TpsTaskPromotionResult> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') {
+      logger.flowWarn('NativeRecords', 'task-promote:blocked', { reason: 'line-record-authoring-retired' });
+      return { ok: false, changed: false, record: null, sourcePath: reference.path, sourceLine: -1, error: 'Task-line promotion is unavailable. Create a whole task note instead.' };
+    }
     if (!this.isEnabled()) {
       return { ok: false, changed: false, record: null, sourcePath: reference.path, sourceLine: -1, error: 'Native record mode is not enabled.' };
     }

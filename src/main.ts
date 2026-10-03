@@ -542,7 +542,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.hideCompletedCheckboxesService = new HideCompletedCheckboxesService(this);
     this.inlinePropertyDecorationService = new InlinePropertyDecorationService(this);
     this.taskStatusCheckboxReconcileService = new TaskStatusCheckboxReconcileService(this);
-    this.addChild(this.taskStatusCheckboxReconcileService);
+    if (!this.usesNativeRecordArchitecture()) this.addChild(this.taskStatusCheckboxReconcileService);
     this.taskLineContextMenuService = new TaskLineContextMenuService(this);
     this.dailyInboxLineService = new DailyInboxLineService(this);
     this.taskLineDragService = new TaskLineDragService(this);
@@ -603,9 +603,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.registerEditorExtension(createLivePreviewBodySelectionExtension());
     this.registerEditorExtension(this.linkedSubitemCheckboxService.getEditorExtension());
     this.registerEditorExtension(this.hideCompletedCheckboxesService.getEditorExtension());
-    this.registerEditorExtension(this.inlinePropertyDecorationService.getEditorExtension());
+    if (!this.usesNativeRecordArchitecture()) {
+      this.registerEditorExtension(this.inlinePropertyDecorationService.getEditorExtension());
+    }
     this.registerMarkdownPostProcessor((el, ctx) => {
-      this.inlinePropertyDecorationService.processRenderedInlineProperties(el);
+      if (!this.usesNativeRecordArchitecture()) this.inlinePropertyDecorationService.processRenderedInlineProperties(el);
       this.noteTitleRenderService.processRenderedNoteLinks(el, ctx.sourcePath);
     });
     this.registerDomEvent(document, 'pointerdown', (event: PointerEvent) => {
@@ -623,7 +625,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.registerInterval(window.setInterval(() => {
       this.noteTitleRenderService.refreshInlineTitles();
     }, 900));
-    this.registerEditorSuggest(new InlinePropertySuggest(this));
+    if (!this.usesNativeRecordArchitecture()) this.registerEditorSuggest(new InlinePropertySuggest(this));
     this.addChild(new HeadingLinkSuggest(this));
     this.app.workspace.updateOptions();
 
@@ -650,7 +652,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     this.injectStyles();
     this.hideCompletedCheckboxesService.attach();
-    this.taskLineDragService.attach();
+    if (!this.usesNativeRecordArchitecture()) this.taskLineDragService.attach();
     this.hideCompletedCheckboxesService.applyBodyClass();
     this.registerHoverLinkSource(TPSGlobalContextMenuPlugin.BASE_LINK_PREVIEW_SOURCE, {
       display: 'TPS Base link preview',
@@ -967,7 +969,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       if (this.handleTpsTableRowContextMenu(evt)) return;
       if (this.taskCheckboxHandler.handleContextMenu(evt)) return;
       if (this.taskLineContextMenuService.handleContextMenu(evt)) return;
-      if (this.inlinePropertyDecorationService.handleRenderedInlinePropertyContextMenu(evt)) return;
+      if (!this.usesNativeRecordArchitecture() && this.inlinePropertyDecorationService.handleRenderedInlinePropertyContextMenu(evt)) return;
       void this.linkedSubitemCheckboxService.handleContextMenu(evt);
     }, { capture: true });
 
@@ -2006,9 +2008,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     Object.assign(this.settings, await migrateNoteOpeningSettings(this.app, loaded ?? {}));
     const needsNoteOpeningMigration = loaded?.notePostCreateBehavior !== this.settings.notePostCreateBehavior
       || loaded?.noteOpenDestination !== this.settings.noteOpenDestination;
-    this.settings.dataArchitectureMode = loaded?.dataArchitectureMode === 'native-records'
-      ? 'native-records'
-      : 'legacy';
+    // Atomic line is retired. A saved legacy choice must not reactivate line writers.
+    const needsArchitectureMigration = loaded?.dataArchitectureMode !== 'native-records';
+    this.settings.dataArchitectureMode = 'native-records';
     this.settings.nativeRecordRootPath = normalizeNativeRecordRoot(
       loaded?.nativeRecordRootPath ?? DEFAULT_SETTINGS.nativeRecordRootPath,
     );
@@ -2136,7 +2138,12 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     ) {
       this.settings.dailyNoteTaskMoveSourceBehavior = DEFAULT_SETTINGS.dailyNoteTaskMoveSourceBehavior;
     }
-    this.settings.enableItemHistory = this.settings.enableItemHistory !== false;
+    const needsItemHistoryMigration = this.settings.enableItemHistory !== false;
+    this.settings.enableItemHistory = false;
+    const needsLinkedSubitemCheckboxMigration = this.settings.enableLinkedSubitemCheckboxes !== false;
+    this.settings.enableLinkedSubitemCheckboxes = false;
+    const needsAutoPopulateDailyNotesMigration = this.settings.enableAutoPopulateDailyNotes !== false;
+    this.settings.enableAutoPopulateDailyNotes = false;
     const itemHistoryRetentionDays = Number(this.settings.itemHistoryRetentionDays);
     this.settings.itemHistoryRetentionDays = Number.isFinite(itemHistoryRetentionDays)
       ? Math.min(365, Math.max(1, Math.floor(itemHistoryRetentionDays)))
@@ -2165,22 +2172,25 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.enableBasesForcedLinkPreview = this.settings.enableBasesForcedLinkPreview === true;
     this.settings.collapseHeadingsOnOpen = this.settings.collapseHeadingsOnOpen === true;
 
-    this.settings.hideCompletedCheckboxes = this.settings.hideCompletedCheckboxes === true;
+    const needsTaskVisibilityMigration = this.settings.hideCompletedCheckboxes === true
+      || this.settings.hideAllTaskLinesInReadingMode === true
+      || this.settings.persistTaskVisibilityStateToFrontmatter === true;
+    this.settings.hideCompletedCheckboxes = false;
     this.settings.completedTaskHidingScope = this.settings.completedTaskHidingScope === 'reading-only'
       ? 'reading-only'
       : 'reading-and-live-preview';
-    this.settings.hideAllTaskLinesInReadingMode = this.settings.hideAllTaskLinesInReadingMode === true;
+    this.settings.hideAllTaskLinesInReadingMode = false;
     this.settings.taskHidingExclusionPatterns = String(this.settings.taskHidingExclusionPatterns ?? '').trim();
-    this.settings.persistTaskVisibilityStateToFrontmatter = this.settings.persistTaskVisibilityStateToFrontmatter === true;
+    this.settings.persistTaskVisibilityStateToFrontmatter = false;
     this.settings.taskVisibilityStateFrontmatterKey = String(this.settings.taskVisibilityStateFrontmatterKey || DEFAULT_SETTINGS.taskVisibilityStateFrontmatterKey).trim() || DEFAULT_SETTINGS.taskVisibilityStateFrontmatterKey;
     const persistedCreateTaskDefaultParentMode = loadedSettingsRecord.createTaskDefaultParentMode;
-    this.settings.createTaskDefaultParentMode = normalizeCreateTaskDefaultParentMode(
-      this.settings.createTaskDefaultParentMode,
-    );
+    this.settings.createTaskDefaultParentMode = 'standalone';
     const needsCreateTaskDefaultParentMigration = Object.prototype.hasOwnProperty.call(
       loadedSettingsRecord,
       'createTaskDefaultParentMode',
     ) && persistedCreateTaskDefaultParentMode !== this.settings.createTaskDefaultParentMode;
+    const needsTaskLineReconcileMigration = this.settings.reconcileTaskStatusToCheckbox !== false;
+    this.settings.reconcileTaskStatusToCheckbox = false;
     this.settings.tpsBaseWriteFallbackMode = normalizeTpsBaseWriteFallbackMode(this.settings.tpsBaseWriteFallbackMode);
     this.settings.tpsBaseWriteFallbackPath = normalizeTpsBaseWriteNotePath(this.settings.tpsBaseWriteFallbackPath) || '';
     this.settings.defaultStackedPropertiesClosed = this.settings.defaultStackedPropertiesClosed === true;
@@ -2292,10 +2302,16 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }
     const needsSettingsMigration =
       needsNoteOpeningMigration ||
+      needsArchitectureMigration ||
       hadRetiredHomeSettings ||
       needsCheckboxMappingMigration ||
       needsNativeRecordIdentityMigration ||
       needsCreateTaskDefaultParentMigration ||
+      needsTaskLineReconcileMigration ||
+      needsItemHistoryMigration ||
+      needsLinkedSubitemCheckboxMigration ||
+      needsAutoPopulateDailyNotesMigration ||
+      needsTaskVisibilityMigration ||
       removedRetiredPropertyCount > 0;
     this.settingsPersistence = null;
     this.ensureSettingsPersistence(
@@ -2714,6 +2730,15 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
+    this.settings.dataArchitectureMode = 'native-records';
+    this.settings.createTaskDefaultParentMode = 'standalone';
+    this.settings.reconcileTaskStatusToCheckbox = false;
+    this.settings.enableItemHistory = false;
+    this.settings.enableLinkedSubitemCheckboxes = false;
+    this.settings.enableAutoPopulateDailyNotes = false;
+    this.settings.hideCompletedCheckboxes = false;
+    this.settings.hideAllTaskLinesInReadingMode = false;
+    this.settings.persistTaskVisibilityStateToFrontmatter = false;
     this.settings.parentLinkFormat = normalizeParentLinkFormat(this.settings.parentLinkFormat);
     this.settings.dailyNavDayCount = normalizeDailyNavDayCount(this.settings.dailyNavDayCount);
     this.settings.createTaskDefaultParentMode = normalizeCreateTaskDefaultParentMode(

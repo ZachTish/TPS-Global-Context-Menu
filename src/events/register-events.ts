@@ -29,7 +29,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     const statusBeforeModifyByPath = new Map<string, string>();
     const lastKnownStatusByPath = new Map<string, string>();
     const checklistCompletionGuardTimers = new Map<string, number>();
-    const checklistCompletionGuard = new ChecklistHandler(plugin.app);
+    const checklistCompletionGuard = new ChecklistHandler(plugin.app, plugin.settings.dataArchitectureMode !== 'native-records');
     const dailyNoteTemplateInstanceCleanup = new DailyNoteTemplateInstanceCleanupService(plugin);
     plugin.register(() => dailyNoteTemplateInstanceCleanup.dispose());
 

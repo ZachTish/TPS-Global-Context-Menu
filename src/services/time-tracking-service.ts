@@ -246,6 +246,10 @@ export class TimeTrackingService {
     target: 'daily-note' | 'source-note',
     defaultTitle?: string,
   ): Promise<TimeTrackingSession | null> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') {
+      new Notice('Task-line timers are unavailable. Start a timer for the task note instead.');
+      return null;
+    }
     if (!this.ensureEnabled()) return null;
     const fallbackTitle = String(defaultTitle || (noteFile ? this.getNoteTitle(noteFile) : this.getActiveNoteTitle()) || 'Tracked work').trim() || 'Tracked work';
     const title = window.prompt('Task to track', fallbackTitle);
@@ -258,6 +262,10 @@ export class TimeTrackingService {
     noteFile: TFile | null | undefined,
     target: 'daily-note' | 'source-note',
   ): Promise<TimeTrackingSession | null> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') {
+      new Notice('Task-line timers are unavailable. Start a timer for the task note instead.');
+      return null;
+    }
     if (!this.ensureEnabled()) return null;
 
     const creationPlan = this.resolveTaskCreationCheckboxPlan('todo');
@@ -784,7 +792,8 @@ export class TimeTrackingService {
     const file = view?.file ?? this.plugin.app.workspace.getActiveFile();
     if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return null;
     const editor = view?.editor;
-    if (editor && typeof editor.getCursor === 'function' && typeof editor.getLine === 'function') {
+    if (this.plugin.settings.dataArchitectureMode !== 'native-records'
+      && editor && typeof editor.getCursor === 'function' && typeof editor.getLine === 'function') {
       const lineNumber = editor.getCursor().line;
       const rawLine = editor.getLine(lineNumber);
       if (parseTaskLine(rawLine)) {
@@ -814,6 +823,7 @@ export class TimeTrackingService {
     if (!this.isEnabled()) return;
     const active = (await this.scanStoredSessions()).filter((session) => !session.record.end);
     await this.refreshActiveTimerCache(active);
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return;
     const syncedFiles = new Set<string>();
     for (const stored of active) {
       if (await this.shouldIgnoreStoredSession(stored)) continue;
@@ -852,6 +862,7 @@ export class TimeTrackingService {
     record: TimeTrackingSessionRecord,
     options: { mode: 'running' | 'stopped'; end?: Date },
   ): Promise<void> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return;
     // A work session may target a note, but note-level scheduling remains an
     // explicit user action. Session records and their Daily Note workspace are
     // sufficient to represent note-linked time without mutating the target's
@@ -895,6 +906,7 @@ export class TimeTrackingService {
     durationMinutes: number,
     endValue: string,
   ): Promise<void> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return;
     await this.plugin.app.vault.process(file, (content) => {
       const newline = content.includes('\r\n') ? '\r\n' : '\n';
       const endsWithNewline = /\r?\n$/.test(content);
@@ -926,6 +938,7 @@ export class TimeTrackingService {
     title: string,
     creationPlan: LinkedSubitemSemanticCheckboxPlan,
   ): Promise<number | null> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return null;
     const safeTitle = String(title || '').replace(/\s+/g, ' ').trim() || 'Untitled timer';
     const taskLine = updateTaskLineTimestamps(`- ${creationPlan.checkboxState} ${safeTitle} [${TPS_ID_FIELD}:: ${tpsId}]`, {
       enabled: this.plugin.settings.autoSyncFileTimestamps === true,
@@ -977,6 +990,10 @@ export class TimeTrackingService {
   }
 
   private async resolveAndEnsureTarget(input?: TimeTrackingTargetInput): Promise<ResolvedTimeTrackingTarget | null> {
+    if (input?.type === 'task' && this.plugin.settings.dataArchitectureMode === 'native-records') {
+      new Notice('Task-line timers are unavailable. Start a timer for the task note instead.');
+      return null;
+    }
     let file = input?.file ?? null;
     if (!file && input?.filePath) {
       const abstractFile = this.plugin.app.vault.getAbstractFileByPath(normalizePath(input.filePath));
@@ -1054,6 +1071,7 @@ export class TimeTrackingService {
     title: string,
     tpsId: string,
   ): Promise<{ tpsId: string; lineNumber: number; rawLine: string } | null> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return null;
     const wanted = String(tpsId || '').trim();
     if (!wanted) return null;
     let resolved: { tpsId: string; lineNumber: number; rawLine: string } | null = null;

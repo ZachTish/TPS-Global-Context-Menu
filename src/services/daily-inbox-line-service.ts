@@ -42,7 +42,14 @@ const LIST_LINE_RE = /^(\s*(?:[-*+]|\d+[.)])\s+)(.*)$/;
 export class DailyInboxLineService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
+  private lineEditingRetired(): boolean {
+    if (this.plugin.settings.dataArchitectureMode !== 'native-records') return false;
+    new Notice('Task-line editing is unavailable. Create or edit the whole task note instead.');
+    return true;
+  }
+
   promptArchiveCurrentEditorLine(editor: Editor, view: FileBearingView): void {
+    if (this.lineEditingRetired()) return;
     const file = view.file;
     if (!(file instanceof TFile)) {
       new Notice('No active markdown file.');
@@ -60,6 +67,7 @@ export class DailyInboxLineService {
   }
 
   promptTransferCurrentEditorLine(editor: Editor, view: FileBearingView): void {
+    if (this.lineEditingRetired()) return;
     const file = view.file;
     if (!(file instanceof TFile)) {
       new Notice('No active markdown file.');
@@ -74,6 +82,7 @@ export class DailyInboxLineService {
   }
 
   promptLinkCurrentEditorTaskLine(editor: Editor, view: FileBearingView): void {
+    if (this.lineEditingRetired()) return;
     const file = view.file;
     if (!(file instanceof TFile)) {
       new Notice('No active markdown file.');
@@ -105,16 +114,19 @@ export class DailyInboxLineService {
   }
 
   async archiveTaskLine(context: LineContext): Promise<void> {
+    if (this.lineEditingRetired()) return;
     await this.updateLineInFile(context, (line) => this.archiveLine(line), 'Archived item.');
   }
 
   promptTransferTaskLine(context: LineContext): void {
+    if (this.lineEditingRetired()) return;
     this.promptTransferLine(context, (nextLine) => {
       void this.updateLineInFile(context, () => nextLine, 'Transferred item.');
     });
   }
 
   promptLinkTaskLineInFile(context: LineContext): void {
+    if (this.lineEditingRetired()) return;
     if (!parseTaskLine(context.rawLine)) {
       new Notice('Selected line is not a checkbox task.');
       return;
@@ -130,6 +142,7 @@ export class DailyInboxLineService {
   }
 
   async createNoteForLine(context: LineContext): Promise<TFile | null> {
+    if (this.lineEditingRetired()) return null;
     if (!(await this.refreshLineContext(context))) return null;
 
     const rawTitle = this.getLineSourceTitle(context.rawLine);

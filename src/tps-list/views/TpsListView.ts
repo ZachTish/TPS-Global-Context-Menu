@@ -716,6 +716,11 @@ export class TpsListView extends BasesView {
     }
     const lineKind = linePlan.kind;
     if (lineKind) {
+      if (this.usesNativeRecordArchitecture()) {
+        flowWarn('CreateFile', 'blocked', { reason: 'line-record-authoring-retired', itemKind: lineKind });
+        new Notice('This Base selects a line item. Create a whole note from a note-based Base instead.');
+        return;
+      }
       const lineDefaults = this.getTaskCreationDefaultsFromPlan(linePlan);
       const desiredTaskStatus = lineKind === 'task'
         ? lineDefaults.status || this.getDefaultMappedTaskStatus('open')
@@ -1181,6 +1186,7 @@ export class TpsListView extends BasesView {
     rawLine: string,
     title: string,
   ): Promise<void> {
+    if (this.usesNativeRecordArchitecture()) return;
     const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
     try {
       await this.app.vault.process(file, (content) => {
@@ -1243,6 +1249,7 @@ export class TpsListView extends BasesView {
     action: 'set' | 'clear' | 'remove',
     updater: (currentLine: string) => string,
   ): Promise<boolean> {
+    if (this.usesNativeRecordArchitecture()) return false;
     const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
     let resolvedLineIndex = lineIndex;
     try {
@@ -1352,6 +1359,7 @@ export class TpsListView extends BasesView {
     action: 'add' | 'remove',
     updater: (line: string) => string,
   ): Promise<void> {
+    if (this.usesNativeRecordArchitecture()) return;
     const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
     try {
       await this.app.vault.process(file, (content) => {
@@ -1423,6 +1431,14 @@ export class TpsListView extends BasesView {
       if (!revision) return;
       const { lineIndex, rawLine } = revision;
       const resolvedOneBasedLine = lineIndex + 1;
+      if (this.usesNativeRecordArchitecture()) {
+        const menu = new Menu();
+        menu.addItem((item) => item.setTitle('Open heading in note').setIcon('file-text').onClick(() => {
+          void this.openRenderedLineInNote(file, resolvedOneBasedLine, rawLine, row, 'HeadingLineMenu', 'heading');
+        }));
+        menu.showAtPosition({ x: event.clientX, y: event.clientY });
+        return;
+      }
       const plugin = this.getGcmPlugin();
       const menu = constrainGcmMenu(new Menu(), { truncateText: true });
       const addHeadingAction = (
@@ -1531,6 +1547,14 @@ export class TpsListView extends BasesView {
       if (!revision) return;
       const { lineIndex, rawLine } = revision;
       const resolvedOneBasedLine = lineIndex + 1;
+      if (this.usesNativeRecordArchitecture()) {
+        const menu = new Menu();
+        menu.addItem((item) => item.setTitle('Open line in note').setIcon('file-text').onClick(() => {
+          void this.openRenderedLineInNote(file, resolvedOneBasedLine, rawLine, undefined, 'BulletLineMenu', 'line item');
+        }));
+        menu.showAtPosition({ x: event.clientX, y: event.clientY });
+        return;
+      }
       const plugin = this.getGcmPlugin();
       const api = this.getGcmApi();
       const linkService = this.getGcmServices()?.links;
@@ -1681,6 +1705,10 @@ export class TpsListView extends BasesView {
     return plugin?.settings || this.getGcmApi()?.settings || null;
   }
 
+  private usesNativeRecordArchitecture(): boolean {
+    return this.getGcmSettings()?.dataArchitectureMode === 'native-records';
+  }
+
   private getGcmCheckboxMappings(): Array<{ checkboxState: string; statuses: string[]; toggleTargetStatus?: string; icon?: string; label?: string }> {
     const configured = this.getGcmSettings()?.linkedSubitemCheckboxMappings;
     return normalizeLinkedSubitemMappings(configured, {
@@ -1738,6 +1766,10 @@ export class TpsListView extends BasesView {
   }
 
   private requestTaskCheckboxToggle(file: TFile, task: OpenTaskSubitem, checkboxEl: HTMLInputElement): void {
+    if (this.usesNativeRecordArchitecture()) {
+      checkboxEl.checked = this.classifyDoneStatus(this.getMappedStatusForTask(task)) === true;
+      return;
+    }
     const currentState = this.getMappedCheckboxStateForTask(task);
     const currentStatus = currentState ? this.getStatusForCheckboxState(currentState) : '';
     const nextState = this.getToggleCheckboxStateForTask(task);
@@ -5537,6 +5569,7 @@ export class TpsListView extends BasesView {
     sourceLaneValues: string[] = [],
     plan: Pick<TaskDropPlan, 'filterTags' | 'filterStatus' | 'currentLine' | 'nextLine'>,
   ): Promise<boolean> {
+    if (this.usesNativeRecordArchitecture()) return false;
     const targetLine = Math.max(1, Math.floor(Number(line || 1)));
     const mutation: { outcome: 'changed' | 'unchanged' | 'stale' } = { outcome: 'unchanged' };
     let resolvedLine = targetLine;
@@ -5991,6 +6024,7 @@ export class TpsListView extends BasesView {
     expectedCurrentState: string,
     expectedRawLine: string,
   ): Promise<void> {
+    if (this.usesNativeRecordArchitecture()) return;
     const targetLine = Math.max(1, Math.floor(Number(line || 1)));
     const nextState = this.normalizeCheckboxState(checkboxState);
     const expectedState = this.normalizeCheckboxState(expectedCurrentState);
@@ -8057,6 +8091,11 @@ export class TpsListView extends BasesView {
     creationFilterRoots?: unknown[],
     resolvedCreationDefaults?: TaskCreationDefaults,
   ): Promise<void> {
+    if (this.usesNativeRecordArchitecture()) {
+      flowWarn('CreateRootTask', 'blocked', { reason: 'line-record-authoring-retired', itemKind });
+      new Notice('Line items are read-only in TPS List. Create a whole note instead.');
+      return;
+    }
     const effectiveFilterRoots = creationFilterRoots ?? await this.getBaseFilterRootsForCreation();
     const effectiveTaskFilter = creationFilterRoots
       ? taskFilter
@@ -10245,6 +10284,7 @@ export class TpsListView extends BasesView {
     updater: (currentLine: string) => string,
     logContext: Record<string, unknown> = {},
   ): Promise<boolean> {
+    if (this.usesNativeRecordArchitecture()) return false;
     const targetLine = Math.max(1, Math.floor(Number(line || 1)));
     const expectedIsHeading = parseTpsListHeadingLine(expectedLine) != null;
     const expectedItem = expectedIsHeading ? null : this.parseLineItem(expectedLine, true);

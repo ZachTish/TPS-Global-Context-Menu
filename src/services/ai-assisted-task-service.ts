@@ -77,6 +77,10 @@ export class AiAssistedTaskService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
   openAiAssistedTaskModal(): void {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') {
+      new Notice('AI-assisted task-line creation is unavailable. Use Create task for a task note.');
+      return;
+    }
     new AiAssistedTaskModal(this.plugin.app, this).open();
   }
 
@@ -152,6 +156,11 @@ export class AiAssistedTaskService {
   }
 
   async accept(proposal: AiTaskCreationProposal): Promise<TFile | null> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') {
+      logger.flowWarn('AiAssistedTask', 'line-creation:retired', {});
+      new Notice('AI-assisted task-line creation is unavailable. Use Create task for a task note.');
+      return null;
+    }
     const creationPlan = this.resolveAcceptedSemanticCheckboxPlan(
       proposal.checkboxMarker,
       proposal.semanticStatus,

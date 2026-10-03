@@ -457,6 +457,11 @@ export class TpsTableView extends BasesView {
       return true;
     }
     if (!defaults.kind) return false;
+    if (this.plugin.settings?.dataArchitectureMode === 'native-records') {
+      logger.flowWarn('TpsTableView', 'create-line:blocked', { reason: 'line-record-authoring-retired', kind: defaults.kind });
+      new Notice('This Base selects a line item. Create a whole note from a note-based Base instead.');
+      return true;
+    }
     const headingLevel = Math.max(1, Math.min(6, Number(defaults.headingLevel) || 1)) as 1 | 2 | 3 | 4 | 5 | 6;
 
     const title = await this.promptForLineTitle(defaults.kind, headingLevel);
@@ -3497,6 +3502,15 @@ export class TpsTableView extends BasesView {
 
     this.applyEntryContextSelection(evt, row);
 
+    if (this.plugin.settings?.dataArchitectureMode === 'native-records') {
+      const menu = new Menu();
+      menu.addItem((item) => item.setTitle('Open source line').setIcon('file-text').onClick(() => {
+        void this.openEntryAtLine(entry);
+      }));
+      menu.showAtPosition({ x: evt.clientX, y: evt.clientY });
+      return;
+    }
+
     const healthApi = this.getHealthFoodLogApi();
     if (isFoodLogEntry(entry) && typeof healthApi?.openFoodLogEntryMenuFromLine === 'function') {
       logger.flow('TpsTableView', 'context-menu:health-food-handoff', {
@@ -3711,6 +3725,7 @@ export class TpsTableView extends BasesView {
   }
 
   private async deleteEntry(entry: LogLineEntry): Promise<void> {
+    if (this.plugin.settings?.dataArchitectureMode === 'native-records') return;
     const isHeading = parseTpsListHeadingLine(entry.line) != null;
     const isTask = parseTaskLine(entry.line) != null;
     await requestLineItemDelete({
@@ -3737,6 +3752,7 @@ export class TpsTableView extends BasesView {
   }
 
   private async updateEntryLine(entry: LogLineEntry, updater: (line: string) => string | null): Promise<boolean> {
+    if (this.plugin.settings?.dataArchitectureMode === 'native-records') return false;
     const expectedIsTask = parseTaskLine(entry.line) != null;
     const historyService = this.plugin.itemHistoryService;
     const historyContext: DirectTaskHistoryLogContext = {

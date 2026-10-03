@@ -1585,3 +1585,30 @@ test('TPS Table uses native two-axis scrolling and restores both axes after a re
     /\.tps-log-base-table-scroll[\s\S]*?overflow-x:\s*auto !important;[\s\S]*?overflow-y:\s*auto !important;[\s\S]*?overscroll-behavior-x:\s*contain !important;[\s\S]*?overscroll-behavior-y:\s*auto !important;[\s\S]*?touch-action:\s*pan-x pan-y !important;/u,
   );
 });
+
+test('native TPS Table leaves legacy line rows read-only without a write attempt', async () => {
+  const { TpsTableView } = await loadViewModule();
+  const view = Object.create(TpsTableView.prototype);
+  let processes = 0;
+  let targetResolutions = 0;
+  view.plugin = {
+    settings: { dataArchitectureMode: 'native-records', properties: [] },
+    sharedServices: { status: { normalize: (value) => value, isDoneStatus: () => false } },
+    app: { vault: { process: async () => { processes += 1; throw new Error('unexpected line write'); } } },
+    resolveTpsBaseWriteFile: async () => { targetResolutions += 1; throw new Error('unexpected line target'); },
+  };
+  view.getEffectiveBaseFilterRoots = async () => ['kind == "task"'];
+  view.getViewName = () => 'Legacy tasks';
+  view.getBaseFile = () => null;
+  view.getTaskCheckboxMappings = () => [{ checkboxState: '[ ]', statuses: ['todo'] }];
+  view.resolveLineCreateToken = (value) => value;
+  view.promptForLineTitle = async () => { throw new Error('unexpected title prompt'); };
+  assert.equal(await view.createLineForView(), true);
+  const entry = { file: { path: 'Inbox/Legacy.md' }, lineNumber: 0, line: '- [ ] Old', fields: {} };
+  await view.deleteEntry(entry);
+  assert.equal(await view.updateEntryLine(entry, () => '- [x] Old'), false);
+  assert.equal(processes, 0);
+  assert.equal(targetResolutions, 0);
+  const createRoute = sourceBlock(logBaseViewSource, 'private async createLineForView(', 'private async getEffectiveBaseFilterRoots(');
+  assert.ok(createRoute.indexOf('line-record-authoring-retired') < createRoute.indexOf('promptForLineTitle'));
+});

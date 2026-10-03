@@ -3317,36 +3317,19 @@ test('native record rename remains indexed before MetadataCache is ready', async
   assert.equal(await service.resolve('calendar-event-cold').then((resolved) => resolved?.path), record.path);
 });
 
-test('task promotion creates one task record and replaces only the confirmed source line with a stable link', async () => {
+test('native mode rejects task-line promotion before reading or writing its source', async () => {
   const { service, plugin, addFile, contents } = createHarness();
   const sourceLine = '- [ ] Ship release #work [scheduled:: 2026-08-25 09:00:00]';
   const source = addFile('Inbox.md', `# Inbox\n${sourceLine}\n  - supporting note\n`);
-  plugin.taskApiService.get = async () => ({
-    type: 'task-line',
-    id: 'Inbox.md:2',
-    stableId: 'task-123',
-    path: source.path,
-    line: 2,
-    lineNumber: 1,
-    rawLine: sourceLine,
-    title: 'Ship release',
-    checkbox: '[ ]',
-    marker: ' ',
-    status: 'todo',
-    inlineStatus: '',
-    isComplete: false,
-    tags: ['work'],
-    fields: { scheduled: '2026-08-25 09:00:00', timeEstimate: '45' },
-    blockLineCount: 2,
-  });
+  let reads = 0;
+  plugin.taskApiService.get = async () => { reads += 1; throw new Error('unexpected task-line read'); };
 
   const result = await service.promoteTask({ path: source.path, lineNumber: 1, rawLine: sourceLine });
-  assert.equal(result.ok, true);
-  assert.equal(result.record?.path, '_records/tasks/task-123.md');
-  assert.equal(result.record?.frontmatter.timeEstimate, 45);
-  assert.equal(Object.hasOwn(result.record?.frontmatter || {}, 'sourceTaskId'), false, 'tpsId is the only task-record identity');
-  assert.equal(contents.get(source), '# Inbox\n- [[_records/tasks/task-123|Ship release]]\n  - supporting note\n');
-  assert.equal((await service.resolve('task-123'))?.path, result.record?.path);
+  assert.equal(result.ok, false);
+  assert.equal(result.changed, false);
+  assert.match(result.error, /unavailable/u);
+  assert.equal(reads, 0);
+  assert.equal(contents.get(source), `# Inbox\n${sourceLine}\n  - supporting note\n`);
 });
 
 test('standalone task creation preserves task semantics without source or parent metadata', async () => {
@@ -3581,13 +3564,13 @@ test('standalone task creation rechecks its semantic mapping after asynchronous 
   );
 });
 
-test('native profile is explicit, default-off, and removes legacy active paths only after reload', () => {
+test('native profile is mandatory and legacy active paths remain gated', () => {
   assert.match(typesSource, /TpsDataArchitectureMode = 'legacy' \| 'native-records'/u);
-  assert.match(constantsSource, /dataArchitectureMode: 'legacy'/u);
+  assert.match(constantsSource, /dataArchitectureMode: 'native-records'/u);
   assert.match(constantsSource, /nativeRecordRootPath: '_records'/u);
-  assert.match(settingsSource, /Atomic line/u);
   assert.match(settingsSource, /Atomic note/u);
-  assert.match(settingsSource, /Reload Obsidian after changing this/u);
+  assert.doesNotMatch(settingsSource, /addOption\('legacy', 'Atomic line'\)/u);
+  assert.match(mainSource, /this\.settings\.dataArchitectureMode = 'native-records'/u);
   assert.match(mainSource, /if \(!this\.usesNativeRecordArchitecture\(\)\) \{[\s\S]{0,1200}registerBasesView\(TPS_TABLE_VIEW_TYPE[\s\S]{0,1200}registerBasesView\(TPS_LIST_VIEW_TYPE/u);
   assert.match(mainSource, /if \(!this\.usesNativeRecordArchitecture\(\)\) this\.baseRowIndexService\.setup\(\)/u);
   assert.match(mainSource, /if \(!this\.usesNativeRecordArchitecture\(\)\) this\.addChild\(this\.virtualBaseEmbedService\)/u);
@@ -3600,7 +3583,7 @@ test('public GCM API exposes versioned generic and task record contracts', () =>
   assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
   assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 6;/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);
-  assert.match(apiSource, /const taskRecordsApi = \{[\s\S]{0,200}version: 1[\s\S]{0,500}promote:[\s\S]{0,900}resolve:/u);
+  assert.match(apiSource, /const taskRecordsApi = \{[\s\S]{0,200}version: 2,\s*supportsPromotion: false[\s\S]{0,500}promote:[\s\S]{0,900}resolve:/u);
   assert.match(apiSource, /nativeRecords: nativeRecordsApi,[\s\S]{0,100}taskRecords: taskRecordsApi/u);
 });
 

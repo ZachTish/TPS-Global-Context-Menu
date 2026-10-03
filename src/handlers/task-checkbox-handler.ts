@@ -75,6 +75,7 @@ export class TaskCheckboxHandler {
     }
 
     handleContextMenu(evt: MouseEvent): boolean {
+        if (this.plugin.settings.dataArchitectureMode === 'native-records') return false;
         const targetEl = evt.target instanceof HTMLElement ? evt.target : null;
         const context = this.resolveTaskCheckboxContext(targetEl);
         if (!context) return false;
@@ -88,6 +89,7 @@ export class TaskCheckboxHandler {
     }
 
     handleTouchStart(evt: TouchEvent): boolean {
+        if (this.plugin.settings.dataArchitectureMode === 'native-records') return false;
         const targetEl = evt.target instanceof HTMLElement ? evt.target : null;
         const context = this.resolveTaskCheckboxContext(targetEl);
         if (!context) return false;
@@ -181,6 +183,7 @@ export class TaskCheckboxHandler {
         token: string,
         expectedMappingSignature = this.getCheckboxMutationSignature(),
     ): Promise<void> {
+        if (this.plugin.settings.dataArchitectureMode === 'native-records') return;
         const historyContext: DirectTaskHistoryLogContext = {
             action: 'task.checkbox',
             surface: 'checkbox-context-menu',

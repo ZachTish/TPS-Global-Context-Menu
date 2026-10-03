@@ -7,7 +7,7 @@ export class ChecklistPromptModal extends Modal {
     private onResult: (result: ChecklistAction) => void;
     private resolved = false;
 
-    constructor(app: App, items: string[], onResult: (result: ChecklistAction) => void) {
+    constructor(app: App, items: string[], onResult: (result: ChecklistAction) => void, private readonly allowLineMutation = true) {
         super(app);
         this.items = items;
         this.onResult = onResult;
@@ -54,28 +54,28 @@ export class ChecklistPromptModal extends Modal {
                     this.close();
                 }));
 
-        // Complete Items
-        new Setting(buttonContainer)
-            .setClass("tps-gcm-no-border")
-            .addButton(btn => btn
-                .setButtonText("Complete Items (- [x])")
-                .setCta()
-                .onClick(() => {
-                    this.resolved = true;
-                    this.onResult("complete");
-                    this.close();
-                }));
+        if (this.allowLineMutation) {
+            new Setting(buttonContainer)
+                .setClass("tps-gcm-no-border")
+                .addButton(btn => btn
+                    .setButtonText("Complete Items (- [x])")
+                    .setCta()
+                    .onClick(() => {
+                        this.resolved = true;
+                        this.onResult("complete");
+                        this.close();
+                    }));
 
-        // Mark as Canceled
-        new Setting(buttonContainer)
-            .setClass("tps-gcm-no-border")
-            .addButton(btn => btn
-                .setButtonText('Mark as Canceled (- [-])')
-                .onClick(() => {
-                    this.resolved = true;
-                    this.onResult("canceled");
-                    this.close();
-                }));
+            new Setting(buttonContainer)
+                .setClass("tps-gcm-no-border")
+                .addButton(btn => btn
+                    .setButtonText('Mark as Canceled (- [-])')
+                    .onClick(() => {
+                        this.resolved = true;
+                        this.onResult("canceled");
+                        this.close();
+                    }));
+        }
 
         // Ignore (Just Complete Note)
         new Setting(buttonContainer)

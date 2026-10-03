@@ -3,7 +3,7 @@ import { MIGRATED_TASK_STATUS } from './constants/task-migration';
 import { DEFAULT_LINKED_SUBITEM_MAPPINGS } from './utils/linked-subitem-mapping';
 
 export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
-  dataArchitectureMode: 'legacy',
+  dataArchitectureMode: 'native-records',
   nativeRecordRootPath: '_records',
   nativeRecordLayout: 'kind-folders',
   nativeRecordIdentityMode: 'property',
@@ -118,7 +118,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   checklistCompletionPropertyKey: 'hasOpenChecklist',
   checklistFinalPromptStatuses: ['complete', 'wont-do'],
   reconcileTaskStatusToCheckbox: true,
-  enableLinkedSubitemCheckboxes: true,
+  enableLinkedSubitemCheckboxes: false,
   linkedSubitemCheckboxStyle: 'soft-link',
   linkedSubitemCheckboxMappings: DEFAULT_LINKED_SUBITEM_MAPPINGS.map((mapping) => ({
     ...mapping,
@@ -151,7 +151,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   linkedContextOpenBehavior: 'same-tab',
   linkedContextSortOrder: 'source-asc',
   dailyNavShowToday: true,
-  enableAutoPopulateDailyNotes: true,
+  enableAutoPopulateDailyNotes: false,
   inheritUnscheduledTasksFromDailyNotes: true,
 
   // Overlay ignore rules
@@ -171,7 +171,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   defaultAttachmentsPath: '',
   checklistPromotionBehavior: 'remove',
   dailyNoteTaskMoveSourceBehavior: 'mark-migrated',
-  enableItemHistory: true,
+  enableItemHistory: false,
   itemHistoryRetentionDays: 90,
   itemHistoryMaxEntries: 25000,
   createTaskDefaultParentMode: 'standalone',

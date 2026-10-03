@@ -61,6 +61,7 @@ export class TaskRecurrenceService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
   async handleTaskCompletion(context: CompletionContext): Promise<void> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return;
     if (!this.plugin.settings.enableRecurrence) return;
     if (isCompletedTaskMarker(context.previousState, this.getCompleteMarkers())) return;
     if (!isCompletedTaskMarker(context.nextState, this.getCompleteMarkers())) return;

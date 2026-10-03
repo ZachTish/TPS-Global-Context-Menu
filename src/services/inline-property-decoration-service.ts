@@ -232,10 +232,12 @@ export class InlinePropertyDecorationService {
   }
 
   public handleRenderedInlinePropertyContextMenu(event: MouseEvent): boolean {
+    if (this.plugin.settings?.dataArchitectureMode === 'native-records') return false;
     return this.handleInlinePropertyContextMenu(event, null);
   }
 
   private handleInlinePropertyContextMenu(event: MouseEvent, view: EditorView | null): boolean {
+    if (this.plugin.settings?.dataArchitectureMode === 'native-records') return false;
     const target = event.target instanceof HTMLElement ? event.target : null;
     const field = target?.closest<HTMLElement>(
       [
@@ -443,6 +445,7 @@ export class InlinePropertyDecorationService {
   }
 
   private async replaceInlinePropertyLine(targetLine: InlinePropertyLineTarget, nextLine: string): Promise<void> {
+    if (this.plugin.settings?.dataArchitectureMode === 'native-records') return;
     if (targetLine.kind === 'editor') {
       const requestedLineNumber = targetLine.lineNumber;
       try {

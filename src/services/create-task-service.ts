@@ -6,7 +6,7 @@ import {
   type CreateTaskModalResult,
 } from '../modals/create-task-modal';
 import { buildCreatedTaskLine } from '../utils/create-task-parser';
-import { insertLineAfterFrontmatter, updateTaskLineTimestamps } from '../utils/task-line-metadata';
+import { getPlainTaskTitle, insertLineAfterFrontmatter, readInlineTags, stripTaskMetadata, updateTaskLineTimestamps } from '../utils/task-line-metadata';
 import {
   abortDirectTaskHistory,
   beginDirectTaskHistory,
@@ -15,7 +15,6 @@ import {
   type DirectTaskHistoryHandle,
   type DirectTaskHistoryLogContext,
 } from '../utils/direct-task-history';
-import { ensureTaskHistoryIdentity, getTaskHistoryIdentity } from './item-history-core';
 import {
   isLinkedSubitemSemanticCheckboxPlanCurrent,
   mapStatusToSubitemCheckboxState,
@@ -32,18 +31,17 @@ export class CreateTaskService {
   }
 
   private async openCreateTaskModalWithCanonicalTarget(): Promise<void> {
-    const checkboxOptions = this.getCheckboxOptions();
-    const defaultCheckboxMarker = this.resolveCheckboxMarkerForStatus('todo');
+    const createTrackedRecord = this.plugin.nativeRecordService?.isEnabled() === true;
+    const checkboxOptions = createTrackedRecord ? this.getNativeStatusOptions() : this.getCheckboxOptions();
+    const defaultCheckboxMarker = createTrackedRecord
+      ? (checkboxOptions.find((option) => option.status === 'todo') || checkboxOptions[0])?.checkboxMarker
+      : this.resolveCheckboxMarkerForStatus('todo');
     if (!defaultCheckboxMarker || checkboxOptions.length === 0) {
-      logger.warn('[TPS GCM] Create task blocked because the todo checkbox mapping is unavailable');
-      new Notice('Create task is unavailable until Todo has a valid checkbox mapping.');
+      logger.warn('[TPS GCM] Create task blocked because no initial status is available');
+      new Notice('Create task is unavailable until at least one Status option is configured.');
       return;
     }
-    const createTrackedRecord = this.plugin.nativeRecordService?.isEnabled() === true;
-    const defaultParentMode = createTrackedRecord
-      && this.plugin.settings.createTaskDefaultParentMode !== 'today-daily-note'
-      ? 'standalone'
-      : 'note';
+    const defaultParentMode = createTrackedRecord ? 'standalone' : 'note';
     new CreateTaskModal(this.plugin.app, {
       defaultTargetFile: null,
       defaultTargetLabel: "Today's Daily Note",
@@ -75,6 +73,12 @@ export class CreateTaskService {
       new Notice('Task creation mode changed while this dialog was open. Reopen Create task and try again.');
       return null;
     }
+    if (nativeRecordModeEnabled && result.parentMode !== 'standalone') {
+      logger.flowWarn('CreateTask', 'route:line-authoring-retired', { mode: 'native-records' });
+      new Notice('Tasks are created as standalone notes. Reopen Create task and try again.');
+      return null;
+    }
+    if (nativeRecordModeEnabled) return await this.createNativeTaskNote(result, title);
 
     const configuredMappings = this.getConfiguredMappings();
     const creationPlan = resolveLinkedSubitemSemanticCheckboxPlanForState(
@@ -112,50 +116,10 @@ export class CreateTaskService {
       timeEstimate: result.timeEstimate,
     });
 
-    if (!nativeRecordModeEnabled && result.parentMode === 'standalone') {
+    if (result.parentMode === 'standalone') {
       logger.flowWarn('CreateTask', 'route:standalone-unavailable', { mode: 'legacy' });
       new Notice('Standalone task notes require Atomic note. Choose a containing note and try again.');
       return null;
-    }
-
-    if (nativeRecordModeEnabled && result.parentMode === 'standalone') {
-      try {
-        const record = await this.plugin.nativeRecordService.createStandaloneTask(
-          taskLine,
-          {
-            kind: 'user',
-            sourcePluginId: 'tps-global-context-menu',
-            surface: 'create-task-modal:standalone-native-task-record',
-          },
-          () => isLinkedSubitemSemanticCheckboxPlanCurrent(
-            this.getConfiguredMappings(),
-            creationPlan,
-            {
-              normalizeStatus: (value) => this.plugin.sharedServices.status.normalize(value),
-              normalizedMappings: true,
-            },
-          ),
-        );
-        try {
-          await this.plugin.noteOpeningService.present({ filePath: record.file.path, sourcePluginId: 'tps-global-context-menu' });
-          new Notice(`Created standalone task note ${record.path}`);
-        } catch (error) {
-          logger.flowWarn('CreateTask', 'standalone-task:open-failed', {
-            recordPath: record.path,
-            error: error instanceof Error ? error.message : String(error),
-          });
-          new Notice(`Created standalone task note ${record.path}, but it could not be opened automatically.`);
-        }
-        return record.file;
-      } catch (error) {
-        logger.flowError('CreateTask', 'standalone-task:create-failed', error);
-        if (error instanceof Error && /checkbox mapping changed/iu.test(error.message)) {
-          new Notice('The selected task checkbox is no longer configured.');
-        } else {
-          new Notice('Unable to create the standalone task note. Check console logs.');
-        }
-        return null;
-      }
     }
 
     let historyHandle: DirectTaskHistoryHandle | null = null;
@@ -196,9 +160,6 @@ export class CreateTaskService {
           rawLine: stampedTaskLine,
         },
       });
-      const nativeTaskIdentity = nativeRecordModeEnabled
-        ? String(historyHandle?.entityId || '').trim() || this.plugin.identityService.createInternalId()
-        : '';
       let mappingChanged = false;
       let modeChanged = false;
       let writeAccepted = false;
@@ -229,9 +190,6 @@ export class CreateTaskService {
           historyContext!,
         );
         insertedTaskLine = historyIdentity.line.trim();
-        if (nativeRecordModeEnabled && !getTaskHistoryIdentity(insertedTaskLine)) {
-          insertedTaskLine = ensureTaskHistoryIdentity(insertedTaskLine, nativeTaskIdentity);
-        }
         historyReady = historyReady && historyIdentity.ready;
         const trimmedContent = String(content || '').replace(/\s+$/gu, '');
         insertedLineNumber = trimmedContent ? trimmedContent.split(/\r?\n/u).length : 0;
@@ -272,41 +230,6 @@ export class CreateTaskService {
         await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
       }
       historySettled = true;
-      if (nativeRecordModeEnabled) {
-        const promotion = await this.plugin.nativeRecordService.promoteTask({
-          path: targetFile.path,
-          lineNumber: insertedLineNumber,
-          rawLine: insertedTaskLine,
-        }, {
-          kind: 'user',
-          sourcePluginId: 'tps-global-context-menu',
-          surface: 'create-task-modal:native-task-record',
-        });
-        if (promotion.ok && promotion.record) {
-          try {
-            await this.plugin.noteOpeningService.present({ filePath: promotion.record.file.path, sourcePluginId: 'tps-global-context-menu' });
-            new Notice(`Created task note ${promotion.record.path}`);
-          } catch (error) {
-            logger.flowWarn('CreateTask', 'native-task:open-failed', {
-              recordPath: promotion.record.path,
-              error: error instanceof Error ? error.message : String(error),
-            });
-            new Notice(`Created task note ${promotion.record.path}, but it could not be opened automatically.`);
-          }
-          return promotion.record.file;
-        }
-        logger.flowWarn('CreateTask', 'native-task:promotion-failed', {
-          path: targetFile.path,
-          lineNumber: insertedLineNumber + 1,
-          error: promotion.error || 'unknown',
-        });
-        if (promotion.record) {
-          new Notice(`Task note ${promotion.record.path} was created, but its stable link could not be written. The task checkbox was preserved for recovery: ${promotion.error || 'unknown error'}`);
-        } else {
-          new Notice(`The task checkbox was preserved for recovery, but task-note creation could not be completed: ${promotion.error || 'unknown error'}`);
-        }
-        return null;
-      }
       new Notice(`Created task in ${targetFile.basename}`);
       await this.focusLineBeforeInsertedTask(targetFile, insertedTaskLine);
       return targetFile;
@@ -332,6 +255,59 @@ export class CreateTaskService {
         label: `${description} ${mapping.checkboxState}`,
       };
     });
+  }
+
+  private getNativeStatusOptions(): CreateTaskCheckboxOption[] {
+    const statuses = this.plugin.sharedServices.status.getStatusOptions();
+    const seen = new Set<string>();
+    return statuses.flatMap((rawStatus) => {
+      const status = this.plugin.sharedServices.status.normalize(rawStatus);
+      if (!status || seen.has(status)) return [];
+      seen.add(status);
+      return [{ checkboxMarker: status, status, statuses: [status], label: rawStatus }];
+    });
+  }
+
+  private async createNativeTaskNote(result: CreateTaskModalResult, title: string): Promise<TFile | null> {
+    const status = this.plugin.sharedServices.status.normalize(result.checkboxStatus);
+    if (!status || !this.getNativeStatusOptions().some((option) => option.status === status)) {
+      new Notice('The selected task status is no longer configured. Reopen Create task and try again.');
+      return null;
+    }
+    const properties: Record<string, unknown> = {
+      title: getPlainTaskTitle(stripTaskMetadata(title)),
+      status,
+      tags: readInlineTags(title),
+    };
+    if (result.priority) properties.priority = result.priority;
+    if (result.scheduledValue) properties.scheduled = result.scheduledValue;
+    if (result.scheduledValue && !result.allDay && result.timeEstimate > 0) {
+      properties.timeEstimate = Math.round(result.timeEstimate);
+    }
+    try {
+      const record = await this.plugin.nativeRecordService.create('task', properties, {
+        cause: {
+          kind: 'user',
+          sourcePluginId: 'tps-global-context-menu',
+          surface: 'create-task-modal:standalone-native-task-record',
+        },
+      });
+      try {
+        await this.plugin.noteOpeningService.present({ filePath: record.file.path, sourcePluginId: 'tps-global-context-menu' });
+        new Notice(`Created standalone task note ${record.path}`);
+      } catch (error) {
+        logger.flowWarn('CreateTask', 'standalone-task:open-failed', {
+          recordPath: record.path,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        new Notice(`Created standalone task note ${record.path}, but it could not be opened automatically.`);
+      }
+      return record.file;
+    } catch (error) {
+      logger.flowError('CreateTask', 'standalone-task:create-failed', error);
+      new Notice('Unable to create task note. Check console logs.');
+      return null;
+    }
   }
 
   private resolveCheckboxMarkerForStatus(status: unknown): string | null {

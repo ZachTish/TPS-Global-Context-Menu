@@ -162,40 +162,21 @@ test('task completion metadata distinguishes absent defaults from explicit empty
   );
 });
 
-test('Daily Note move behavior and local item history have safe normalized settings', () => {
+test('retired Daily Note line moves and local line history stay disabled', () => {
   assert.match(typesSource, /DailyNoteTaskMoveSourceBehavior = 'mark-migrated' \| 'remove'/u);
   assert.match(typesSource, /dailyNoteTaskMoveSourceBehavior: DailyNoteTaskMoveSourceBehavior;/u);
   assert.match(typesSource, /enableItemHistory: boolean;/u);
   assert.match(constantsSource, /dailyNoteTaskMoveSourceBehavior: 'mark-migrated'/u);
-  assert.match(constantsSource, /enableItemHistory: true/u);
+  assert.match(constantsSource, /enableItemHistory: false/u);
   assert.match(constantsSource, /itemHistoryRetentionDays: 90/u);
   assert.match(constantsSource, /itemHistoryMaxEntries: 25000/u);
   assert.match(mainSource, /dailyNoteTaskMoveSourceBehavior !== 'mark-migrated'/u);
   assert.match(mainSource, /dailyNoteTaskMoveSourceBehavior !== 'remove'/u);
-  assert.match(mainSource, /this\.settings\.enableItemHistory = this\.settings\.enableItemHistory !== false/u);
+  assert.match(mainSource, /this\.settings\.enableItemHistory = false/u);
   assert.match(mainSource, /Math\.min\(365, Math\.max\(1, Math\.floor\(itemHistoryRetentionDays\)\)\)/u);
   assert.match(mainSource, /Math\.min\(25000, Math\.max\(100, Math\.floor\(itemHistoryMaxEntries\)\)\)/u);
-  assert.match(settingsTabSource, /After moving a task from a Daily Note/u);
-  assert.match(settingsTabSource, /Keep a migrated marker/u);
-  assert.match(settingsTabSource, /Remove the source block/u);
-  assert.match(settingsTabSource, /Keep local item history/u);
-  assert.match(settingsTabSource, /first tracked change, a surviving task receives a stable tpsId/u);
-  assert.match(settingsTabSource, /Vault-relative before\/after note paths, including filenames, are stored/u);
-  assert.match(settingsTabSource, /Raw task content and note bodies are never stored/u);
-  const historyToggle = settingsTabSource.slice(
-    settingsTabSource.indexOf(".setName('Keep local item history')"),
-    settingsTabSource.indexOf(".setName('Item history retention')"),
-  );
-  assert.match(
-    historyToggle,
-    /enableItemHistory = value;[\s\S]*updateEnabled\(value\);[\s\S]*await this\.plugin\.saveSettings\(\)/u,
-    'recording lifecycle changes before persistence so in-flight work cannot cross an opt-out',
-  );
-  assert.match(
-    historyToggle,
-    /catch \(error\) \{[\s\S]*enableItemHistory = previous;[\s\S]*updateEnabled\(previous\);/u,
-    'a failed settings save restores both the setting and the item-history lifecycle',
-  );
+  assert.doesNotMatch(settingsTabSource, /After moving a task from a Daily Note/u);
+  assert.doesNotMatch(settingsTabSource, /Keep local item history|Item history retention/u);
 });
 
 test('linked context, parent-child ignore, and completed-task scope settings normalize safely', () => {
@@ -221,8 +202,8 @@ test('linked context, parent-child ignore, and completed-task scope settings nor
   assert.match(mainSource, /enableParentChildIgnoreRule = this\.settings\.enableParentChildIgnoreRule === true/u);
   assert.match(mainSource, /parentChildIgnoreFrontmatterKey = String\([^)]*\)\.trim\(\)/u);
   assert.match(mainSource, /parentChildIgnoreFrontmatterValue = String\([^)]*\)\.trim\(\)/u);
-  assert.match(settingsTabSource, /setName\('Hide completed tasks in'\)/u);
-  assert.match(settingsTabSource, /addOption\('reading-only', 'Reading view only'\)/u);
+  assert.doesNotMatch(settingsTabSource, /setName\('Hide completed tasks in'\)/u);
+  assert.doesNotMatch(settingsTabSource, /addOption\('reading-only', 'Reading view only'\)/u);
   assert.match(linkedContextSettingsSource, /createEl\('h4', \{ text: 'Linked context' \}\)/u);
   assert.match(linkedContextSettingsSource, /setName\('Linked context order'\)/u);
   assert.match(linkedContextSettingsSource, /addOption\('source-desc', 'Source path Z → A'\)/u);
@@ -324,20 +305,11 @@ test('public checkbox mapping contract is ordered, strict, frozen, cached, and i
   assert.equal(contract.statusForState('[ ]'), '', 'blank never becomes todo unless that exact row exists in settings');
 });
 
-test('checkbox mapping settings keep drafts local and expose one explicit accessible apply path', () => {
-  const start = settingsTabSource.indexOf('private renderLinkedSubitemCheckboxSettings');
-  const end = settingsTabSource.indexOf('private serializeLinkedSubitemMappings', start);
-  const source = settingsTabSource.slice(start, end);
-  const draftSource = source.slice(source.indexOf('let fallbackDraft'));
-  assert.match(source, /Apply mappings/u);
-  assert.match(source, /Load defaults/u);
-  assert.match(source, /aria-live['"]?:\s*['"]polite/u);
-  assert.match(source, /Fallback open marker must be defined by a mapping row/u);
-  assert.match(source, /Fallback open marker must map only to open statuses/u);
-  assert.match(source, /Used only when a linked child note has no workflow status\. A nonempty unmapped status remains unsupported\./u);
-  assert.match(source, /onChange\(\(value\) => \{[\s\S]*?mappingsDraft = value;[\s\S]*?validateDraft\(\);[\s\S]*?\}\)/u);
-  assert.doesNotMatch(draftSource, /onChange\(async/u);
-  assert.equal((draftSource.match(/await this\.plugin\.saveSettings\(\)/gu) || []).length, 1);
+test('linked checkbox and Daily Note line-population settings are absent in whole-note mode', () => {
+  assert.doesNotMatch(settingsTabSource, /renderLinkedSubitemCheckboxSettings|Render child-note links as checkboxes|Child status to checkbox mappings/u);
+  assert.doesNotMatch(settingsTabSource, /Auto-Populate Scheduled Items|Completion prompt status options/u);
+  assert.match(mainSource, /this\.settings\.enableLinkedSubitemCheckboxes = false/u);
+  assert.match(mainSource, /this\.settings\.enableAutoPopulateDailyNotes = false/u);
 });
 
 test('checkbox mapping load migration uses legacy statuses and persists one canonical snapshot', () => {
@@ -771,82 +743,26 @@ test('native record settings expose one confirmed kind-key mapping and explicit 
   assert.match(nativeSettingsSource, /setButtonText\('Consolidate records'\)/);
 });
 
-test('TPS Base write fallback settings default safely and persist every Tasks workflow choice', () => {
+test('retired TPS Base line-write settings remain readable but are absent from the Tasks page', () => {
   const tasksStart = settingsTabSource.indexOf("if (this.activeWorkflowPage === 'tasks')");
   const tasksEnd = settingsTabSource.indexOf("if (this.activeWorkflowPage === 'child-notes')", tasksStart);
   const tasksSource = settingsTabSource.slice(tasksStart, tasksEnd);
 
-  assert.ok(tasksStart >= 0 && tasksEnd > tasksStart, 'Tasks workflow settings must remain directly reachable');
-  assert.match(typesSource, /export type TpsBaseWriteFallbackMode = 'filter-required' \| 'today-daily-note' \| 'specific-note';/);
+  assert.ok(tasksStart >= 0 && tasksEnd > tasksStart);
   assert.match(typesSource, /tpsBaseWriteFallbackMode: TpsBaseWriteFallbackMode;/);
   assert.match(typesSource, /tpsBaseWriteFallbackPath: string;/);
-  assert.match(constantsSource, /tpsBaseWriteFallbackMode: 'today-daily-note',/);
-  assert.match(constantsSource, /tpsBaseWriteFallbackPath: '',/);
-  assert.match(mainSource, /this\.settings\.tpsBaseWriteFallbackMode = normalizeTpsBaseWriteFallbackMode\(this\.settings\.tpsBaseWriteFallbackMode\);/);
-  assert.match(mainSource, /this\.settings\.tpsBaseWriteFallbackPath = normalizeTpsBaseWriteNotePath\(this\.settings\.tpsBaseWriteFallbackPath\) \|\| '';/);
-
-  assert.match(tasksSource, /setName\('When a Base has no write target'\)/);
-  assert.match(tasksSource, /\.addOption\('filter-required', 'Require a file\.path\/task\.path filter'\)/);
-  assert.match(tasksSource, /\.addOption\('today-daily-note', 'Today’s Daily Note'\)/);
-  assert.match(tasksSource, /\.addOption\('specific-note', 'Specific note'\)/);
-  assert.match(tasksSource, /\.setValue\(this\.plugin\.settings\.tpsBaseWriteFallbackMode\)/);
-  assert.match(
-    tasksSource,
-    /this\.plugin\.settings\.tpsBaseWriteFallbackMode = value;\s*await this\.plugin\.saveSettings\(\);\s*this\.redisplayPreservingRouteFocus\('tasks'\);/,
-  );
-
-  assert.match(tasksSource, /if \(this\.plugin\.settings\.tpsBaseWriteFallbackMode === 'specific-note'\)/);
-  assert.match(tasksSource, /setName\('Fallback write note'\)/);
-  assert.match(tasksSource, /\.setValue\(this\.plugin\.settings\.tpsBaseWriteFallbackPath\)/);
-  assert.match(
-    tasksSource,
-    /this\.plugin\.settings\.tpsBaseWriteFallbackPath = value\.trim\(\);\s*await this\.plugin\.saveSettings\(\);/,
-  );
-  assert.match(tasksSource, /new FileSuggestModal\(this\.app,[\s\S]*\{ extensions: \['md'\] \}\)\.open\(\)/);
-  assert.match(
-    tasksSource,
-    /this\.plugin\.settings\.tpsBaseWriteFallbackPath = file\.path;\s*await this\.plugin\.saveSettings\(\);\s*this\.redisplayPreservingRouteFocus\('tasks'\);/,
-  );
-  assert.doesNotMatch(
-    tasksSource,
-    /tpsBaseWriteFallbackPath\s*=\s*''/,
-    'switching away from Specific note must not erase the saved path',
-  );
+  assert.doesNotMatch(tasksSource, /When a Base has no write target|Fallback write note/);
+  assert.doesNotMatch(tasksSource, /Create task default parent/);
+  assert.match(tasksSource, /Default attachments path/);
 });
 
-test('Create task defaults to a configurable standalone parent mode', async () => {
-  const tasksStart = settingsTabSource.indexOf("if (this.activeWorkflowPage === 'tasks')");
-  const tasksEnd = settingsTabSource.indexOf("if (this.activeWorkflowPage === 'child-notes')", tasksStart);
-  const tasksSource = settingsTabSource.slice(tasksStart, tasksEnd);
+test('Create task forces a standalone note even when a saved parent choice exists', async () => {
   const { normalizeCreateTaskDefaultParentMode } = await importModule('../src/utils/create-task-default-parent.ts');
-
-  assert.equal(normalizeCreateTaskDefaultParentMode('standalone'), 'standalone');
-  assert.equal(normalizeCreateTaskDefaultParentMode('today-daily-note'), 'today-daily-note');
-  assert.equal(normalizeCreateTaskDefaultParentMode('unexpected'), 'standalone');
-  assert.equal(normalizeCreateTaskDefaultParentMode(null), 'standalone');
-
-  assert.match(typesSource, /export type CreateTaskDefaultParentMode = 'standalone' \| 'today-daily-note';/);
-  assert.match(typesSource, /createTaskDefaultParentMode: CreateTaskDefaultParentMode;/);
+  assert.equal(normalizeCreateTaskDefaultParentMode('today-daily-note'), 'today-daily-note', 'legacy data can still be read');
   assert.match(constantsSource, /createTaskDefaultParentMode: 'standalone',/);
-  assert.match(mainSource, /this\.settings\.createTaskDefaultParentMode = normalizeCreateTaskDefaultParentMode\(/);
+  assert.match(mainSource, /this\.settings\.createTaskDefaultParentMode = 'standalone'/);
   assert.match(mainSource, /needsCreateTaskDefaultParentMigration/);
-  assert.match(mainSource, /migration:create-task-default-parent/);
-  assert.equal(
-    (mainSource.match(/this\.settings\.createTaskDefaultParentMode = normalizeCreateTaskDefaultParentMode\(/g) || []).length,
-    2,
-    'load and save both normalize the setting',
-  );
-
-  const parentSettingIndex = tasksSource.indexOf("setName('Create task default parent')");
-  const baseFallbackIndex = tasksSource.indexOf("setName('When a Base has no write target')");
-  assert.ok(parentSettingIndex >= 0 && parentSettingIndex < baseFallbackIndex, 'the command default is the first Tasks workflow control');
-  assert.match(tasksSource, /Create task note starts standalone or adds a stable link in today’s Daily Note/);
-  assert.match(tasksSource, /Legacy checkbox tasks still require a destination note/);
-  assert.match(tasksSource, /addOption\('standalone', 'Standalone \(no parent\)'\)/);
-  assert.match(tasksSource, /addOption\('today-daily-note', 'Today’s Daily Note'\)/);
-  assert.match(tasksSource, /setValue\(this\.plugin\.settings\.createTaskDefaultParentMode\)/);
-  assert.match(tasksSource, /createTaskDefaultParentMode = normalizeCreateTaskDefaultParentMode\(value\);\s*await this\.plugin\.saveSettings\(\);/);
-  assert.match(tasksSource, /setAttribute\('aria-label', 'Create task default parent'\)/);
+  assert.doesNotMatch(settingsTabSource, /setName\('Create task default parent'\)/);
 });
 
 test('parent link format and notebook navigator smart sort sanitize to one canonical shape', async () => {
@@ -920,7 +836,7 @@ test('retired bundled properties migrate once', () => {
   assert.match(mainSource, /const normalizedProperties = this\.normalizeCustomProperties\(this\.settings\.properties\);/);
   assert.match(mainSource, /this\.settings\.properties = this\.removeRetiredBundledCustomProperties\(normalizedProperties\);/);
   assert.match(mainSource, /!id\.startsWith\('tps-health-'\) && !LEGACY_HEALTH_CUSTOM_PROPERTY_IDS\.has\(id\)/);
-  assert.match(mainSource, /const needsSettingsMigration =[\s\S]{0,320}removedRetiredPropertyCount > 0;/);
+  assert.match(mainSource, /const needsSettingsMigration =[\s\S]{0,600}removedRetiredPropertyCount > 0;/);
   assert.match(mainSource, /needsSettingsMigration[\s\S]{0,180}preNormalizationSettings[\s\S]{0,180}if \(needsSettingsMigration\) await this\.persistSettingsSnapshot\(\);/);
   assert.match(mainSource, /migration:removed-retired-bundled-properties'[\s\S]{0,120}count: removedRetiredPropertyCount/);
 });
@@ -1210,7 +1126,8 @@ test('frontmatter-rule settings CSS stays GCM-owned and cannot style Notebook Na
 });
 
 
-test("atomic labels preserve stored architecture values", () => {
-  assert.match(settingsTabSource, /addOption\('legacy', 'Atomic line'\)/);
-  assert.match(settingsTabSource, /addOption\('native-records', 'Atomic note'\)/);
+test('Atomic note is the only rendered architecture', () => {
+  assert.match(settingsTabSource, /TPS records use Atomic notes/);
+  assert.doesNotMatch(settingsTabSource, /addOption\('legacy', 'Atomic line'\)/);
+  assert.match(mainSource, /this\.settings\.dataArchitectureMode = 'native-records'/);
 });

@@ -39,7 +39,9 @@ test('removes Home registration, services, API, commands, settings, and CSS', ()
 
 test('Daily Note workflows and accessible settings routes remain available', () => {
   const settings = read('src/settings-tab.ts');
-  for (const label of ['Daily notes', 'Collapse headings on first open', 'Enable Daily Note Navigation', 'Auto-Populate Scheduled Items', 'Inherit Daily Note date for unscheduled tasks']) assert.ok(settings.includes(label));
+  for (const label of ['Daily notes', 'Collapse headings on first open', 'Enable Daily Note Navigation']) assert.ok(settings.includes(label));
+  assert.ok(!settings.includes('Auto-Populate Scheduled Items'));
+  assert.doesNotMatch(settings, /Inherit Daily Note date for unscheduled tasks/);
   assert.match(settings, /activeWorkflowPage: WorkflowPageId = 'daily-notes'/);
   assert.match(settings, /aria-pressed/);
   assert.match(read('styles.css'), /@media \(max-width: 700px\)/);

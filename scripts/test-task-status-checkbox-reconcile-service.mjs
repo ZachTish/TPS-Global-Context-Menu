@@ -183,8 +183,8 @@ test('task reconciliation is registered and keeps completedDate independent of s
   assert.match(serviceSource, /canAutomaticallyMutateTemplateSource\(data, this\.plugin\.settings\)/);
   assert.doesNotMatch(serviceSource, /scheduleFile[\s\S]{0,180}if \(!this\.isStatusSyncEnabled\(\)\) return/);
   assert.match(mainSource, /new TaskStatusCheckboxReconcileService\(this\)/);
-  assert.match(mainSource, /this\.addChild\(this\.taskStatusCheckboxReconcileService\)/);
-  assert.match(settingsSource, /Sync inline status to checkbox marker/);
+  assert.match(mainSource, /if \(!this\.usesNativeRecordArchitecture\(\)\) this\.addChild\(this\.taskStatusCheckboxReconcileService\)/);
+  assert.doesNotMatch(settingsSource, /Sync inline status to checkbox marker/);
 });
 
 async function importService() {

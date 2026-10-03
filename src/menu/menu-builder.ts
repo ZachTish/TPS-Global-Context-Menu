@@ -817,17 +817,19 @@ export class MenuBuilder {
         });
       }
 
-      menu.addItem((item) => {
-        const label = markdownEntries.length > 1
-          ? `Convert to list items (${markdownEntries.length})`
-          : 'Convert to list item';
-        item.setTitle(label)
-          .setIcon('list-plus')
-          .setSection('tps-props')
-          .onClick(async () => {
-            await this.plugin.noteOperationService.convertNotesToListItems(markdownFiles);
-          });
-      });
+      if (this.plugin.settings?.dataArchitectureMode !== 'native-records') {
+        menu.addItem((item) => {
+          const label = markdownEntries.length > 1
+            ? `Convert to list items (${markdownEntries.length})`
+            : 'Convert to list item';
+          item.setTitle(label)
+            .setIcon('list-plus')
+            .setSection('tps-props')
+            .onClick(async () => {
+              await this.plugin.noteOperationService.convertNotesToListItems(markdownFiles);
+            });
+        });
+      }
 
       menu.addItem((item) => {
         const label = markdownEntries.length > 1

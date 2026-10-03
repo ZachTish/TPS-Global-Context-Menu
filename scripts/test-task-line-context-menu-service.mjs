@@ -657,7 +657,7 @@ test('task clicks keep exact-line editing outside Reading View and Reading View 
   assert.match(serviceSource, /cls: 'task-list-item-checkbox tps-gcm-task-editor-checkbox'/);
   assert.match(serviceSource, /type: 'checkbox'/);
   assert.match(serviceSource, /button\.indeterminate = marker !== ' ' && !complete/);
-  assert.match(serviceSource, /handleContextMenu\(evt: MouseEvent\): boolean \{\s*const target[^\n]+\n\s*if \(this\.isTaskInteractionBoundary\(target\) \|\| this\.isTaskPropertyTarget\(target\)\) return false;/);
+  assert.match(serviceSource, /handleContextMenu\(evt: MouseEvent\): boolean \{\s*if \(this\.plugin\.settings\.dataArchitectureMode === 'native-records'\) return false;\s*const target[^\n]+\n\s*if \(this\.isTaskInteractionBoundary\(target\) \|\| this\.isTaskPropertyTarget\(target\)\) return false;/);
   assert.match(serviceSource, /private isTaskInteractionBoundary\(target: HTMLElement \| null\): boolean/);
   assert.match(serviceSource, /'\.modal'/);
   assert.match(serviceSource, /'\.menu'/);
@@ -1631,7 +1631,7 @@ test('daily note calendar popover includes scheduled task lines and note task ju
 
 test('daily note task scheduled inheritance is configurable and shared across task surfaces', () => {
   assert.match(constantsSource, /inheritUnscheduledTasksFromDailyNotes:\s*true/);
-  assert.match(settingsTabSource, /Inherit Daily Note date for unscheduled tasks/);
+  assert.doesNotMatch(settingsTabSource, /Inherit Daily Note date for unscheduled tasks/);
   assert.match(ruleEngineSource, /getInheritedDailyNoteTaskScheduledValue/);
   assert.match(ruleEngineSource, /context\.lineType !== "task"/);
   assert.match(ruleEngineSource, /hasInheritedDailyNoteTaskScheduledValue\(field, context\)/);

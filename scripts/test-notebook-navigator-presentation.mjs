@@ -408,7 +408,7 @@ test('plugin wires the exact top-level notebookNavigatorPresentation v1 contract
   assert.match(apiSource, /const notebookNavigatorPresentationApi = \{[\s\S]{0,900}version:\s*1,[\s\S]{0,900}ensure:[\s\S]{0,900}get:[\s\S]{0,900}getRevision:[\s\S]{0,900}onChanged:/u);
   assert.match(apiSource, /notebookNavigatorPresentation:\s*notebookNavigatorPresentationApi/u);
   assert.match(mainSource, /notebookNavigatorRuleService\.setupPresentationProjection\(\)/u);
-  assert.match(mainSource, /saveSettings\(\)[\s\S]{0,1800}invalidateNotebookNavigatorPresentation\(\)/u);
+  assert.match(mainSource, /async saveSettings\(\)[\s\S]{0,3200}invalidateNotebookNavigatorPresentation\(\)/u);
 });
 
 test('settled metadata does not evict unrelated presentation; per-file link resolution still invalidates dependents', async (t) => {

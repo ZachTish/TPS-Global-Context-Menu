@@ -195,8 +195,8 @@ test('reading-only completed-task scope clears Live Preview while retaining rend
   assert.match(typesSource, /completedTaskHidingScope: CompletedTaskHidingScope/);
   assert.match(constantsSource, /completedTaskHidingScope: 'reading-and-live-preview'/);
   assert.match(mainSource, /completedTaskHidingScope === 'reading-only'/);
-  assert.match(settingsSource, /Hide completed tasks in/);
-  assert.match(settingsSource, /Reading view only/);
+  assert.doesNotMatch(settingsSource, /Hide completed tasks in/);
+  assert.doesNotMatch(settingsSource, /Reading view only/);
   assert.match(source, /READING_ONLY_BODY_CLASS = 'tps-gcm-hide-completed-checkboxes-reading-only'/);
   assert.match(source, /shouldHideCompletedTasksInLivePreview\(\): boolean/);
   assert.match(source, /completedTaskHidingScope !== 'reading-only'/);
@@ -212,13 +212,14 @@ test('reading-only completed-task scope clears Live Preview while retaining rend
   assert.doesNotMatch(styles, /\.markdown-rendered \.tps-gcm-linked-context-card--terminal-task/);
 });
 
-test('task reveal state can optionally persist to one frontmatter property', () => {
+test('retired task reveal persistence has no active settings control', () => {
   assert.match(typesSource, /persistTaskVisibilityStateToFrontmatter: boolean/);
   assert.match(typesSource, /taskVisibilityStateFrontmatterKey: string/);
   assert.match(constantsSource, /persistTaskVisibilityStateToFrontmatter: false/);
   assert.match(constantsSource, /taskVisibilityStateFrontmatterKey: 'gcmTaskVisibility'/);
-  assert.match(settingsSource, /Persist task reveal state to frontmatter/);
-  assert.match(settingsSource, /Task reveal frontmatter key/);
+  assert.doesNotMatch(settingsSource, /Persist task reveal state to frontmatter/);
+  assert.doesNotMatch(settingsSource, /Task reveal frontmatter key/);
+  assert.match(mainSource, /this\.settings\.persistTaskVisibilityStateToFrontmatter = false/u);
   assert.match(syncRevealButtonSource, /this\.shouldPersistRevealState\(\)/);
   assert.match(syncRevealButtonSource, /void this\.setPersistedRevealState\(root, revealAllTasks, !revealed\)/);
   assert.match(source, /type TaskVisibilityState = \{ showCompleted\?: boolean; showTasks\?: boolean \}/);
@@ -233,20 +234,12 @@ test('task reveal state can optionally persist to one frontmatter property', () 
   assert.match(source, /const persisted = revealAllTasks \? state\?\.showTasks : state\?\.showCompleted/);
 });
 
-test('task hiding exclusions bypass completed and all-task hiding by file pattern or identifier', () => {
+test('retired line-hiding exclusions retain their schema without an active control', () => {
   assert.match(typesSource, /taskHidingExclusionPatterns: string/);
   assert.match(constantsSource, /taskHidingExclusionPatterns: ''/);
-  assert.match(settingsSource, /Task hiding exclusions/);
-  assert.match(settingsSource, /Files, folders, tags, or cssclasses where completed\/all-task hiding is disabled/);
-  assert.match(settingsSource, /name:<basename>/);
-  assert.match(settingsSource, /re:<regex>/);
-  assert.match(settingsSource, /#tag/);
-  assert.match(settingsSource, /tag:<tag>/);
-  assert.match(settingsSource, /cssclass:<class>/);
-  assert.match(settingsSource, /#tps\/workout/);
-  assert.match(settingsSource, /setValue\(this\.plugin\.settings\.taskHidingExclusionPatterns \?\? ''\)/);
-  assert.doesNotMatch(settingsSource, /setValue\(this\.plugin\.settings\.taskHidingExclusionPatterns \?\? 'Inbox\/'\)/);
-  assert.match(settingsSource, /this\.plugin\.settings\.taskHidingExclusionPatterns = value/);
+  assert.doesNotMatch(settingsSource, /Task hiding exclusions|Hide completed task lines|Hide all task lines in reading mode/u);
+  assert.match(mainSource, /this\.settings\.hideCompletedCheckboxes = false/u);
+  assert.match(mainSource, /this\.settings\.hideAllTaskLinesInReadingMode = false/u);
   assert.match(mainSource, /taskHidingExclusionPatterns = String\(this\.settings\.taskHidingExclusionPatterns \?\? ''\)\.trim\(\)/);
   assert.match(source, /TASK_HIDING_EXCLUDED_ROOT_CLASS = 'tps-gcm-task-hiding-excluded'/);
   assert.match(source, /private clearTaskHidingRoot\(root: HTMLElement\): void/);

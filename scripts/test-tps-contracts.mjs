@@ -38,8 +38,8 @@ test('GCM public capability surface owns cross-plugin configuration and task int
   assert.match(api, /dailyNotes:\s*\{[\s\S]{0,1200}version:\s*4,[\s\S]{0,1200}dateForFile:[\s\S]{0,1800}expectedPath[\s\S]{0,1800}getTaskSchedulePolicy:[\s\S]{0,1200}isDailyNote:[\s\S]{0,1200}inheritUnscheduled:/u);
   assert.match(api, /parseDailyNoteFileDate\(plugin\.app, plugin\.settings, file\) !== null/u);
   assert.match(api, /dailyNoteTaskScheduleInheritanceEnabled\(plugin\.settings\)/u);
-  assert.match(api, /taskLines:\s*\{[\s\S]{0,1500}version:\s*1,[\s\S]{0,1500}handleContextMenu:[\s\S]{0,1500}openQuickEditorForElement:/u);
-  assert.match(api, /itemProperties:\s*\{[\s\S]{0,1800}version:\s*1,[\s\S]{0,1800}listDefinitions:[\s\S]{0,1800}resolveDefinition:[\s\S]{0,1800}applyToTaskLines:/u);
+  assert.match(api, /taskLines:\s*\{[\s\S]{0,1500}version:\s*2,\s*supportsTaskLineMutation:\s*false,[\s\S]{0,1500}handleContextMenu:[\s\S]{0,1500}openQuickEditorForElement:/u);
+  assert.match(api, /itemProperties:\s*\{[\s\S]{0,1800}version:\s*2,\s*supportsTaskLineMutation:\s*false,[\s\S]{0,1800}listDefinitions:[\s\S]{0,1800}resolveDefinition:[\s\S]{0,1800}applyToTaskLines:/u);
   assert.match(api, /const taskCheckboxesApi = createLinkedSubitemCheckboxContract\(/u);
   assert.match(api, /taskCheckboxes:\s*taskCheckboxesApi/u);
   assert.doesNotMatch(api, /taskCheckboxes:[\s\S]{0,2000}return plugin\.settings\.linkedSubitemCheckboxMappings/u);

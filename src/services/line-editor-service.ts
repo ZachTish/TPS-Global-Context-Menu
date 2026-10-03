@@ -31,6 +31,7 @@ export class LineEditorService {
     zeroBasedLine: number,
     options: LineEditorOptions = {},
   ): Promise<boolean> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return false;
     if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return false;
     const content = await this.plugin.app.vault.read(file);
     const range = resolveLineRange(content, zeroBasedLine);

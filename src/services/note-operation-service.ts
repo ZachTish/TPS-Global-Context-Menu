@@ -80,6 +80,7 @@ export class NoteOperationService {
     }
 
     public async populateDailyNoteWithScheduledItems(dailyNote: TFile): Promise<void> {
+        if (this.plugin.settings.dataArchitectureMode === 'native-records') return;
         await this.plugin.fileNamingService.whenDailyNoteConfigurationReady();
         if (!this.plugin.fileNamingService.getDailyNoteConfigurationSnapshot()) return;
         if (!(await canAutomaticallyMutateTemplateFile(this.app.vault, dailyNote, this.plugin.settings))) return;
@@ -296,6 +297,11 @@ export class NoteOperationService {
     }
 
     async convertNotesToListItems(files: TFile[]) {
+        if (this.plugin.settings?.dataArchitectureMode === 'native-records') {
+            logger.flowWarn('NoteOperation', 'convert-to-line:blocked', { reason: 'line-record-authoring-retired' });
+            new Notice('Whole notes are the active record format. Conversion to list items is unavailable.');
+            return;
+        }
         try {
             const sourceFiles = files.filter((file): file is TFile =>
                 file instanceof TFile && file.extension?.toLowerCase() === "md",

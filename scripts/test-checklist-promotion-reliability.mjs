@@ -15,6 +15,7 @@ async function importServices() {
         export { createSubitemForParentWithTitle } from './src/services/subitem-creation-service.ts';
         export { LinkedSubitemCheckboxService } from './src/services/linked-subitem-checkbox-service.ts';
         export { SubitemRelationshipSyncService } from './src/services/subitem-relationship-sync-service.ts';
+        export { ChecklistHandler } from './src/handlers/checklist-handler.ts';
         export { Notice, TFile } from 'obsidian';
       `,
       resolveDir: repoRoot,
@@ -525,6 +526,25 @@ test('configured-open statusless links reject a fallback row with an authoritati
   assert.deepEqual(harness.counts, { mutations: 0, writes: 0 });
 });
 
+test('native mode rejects checklist promotion before reading or mutating the source', async () => {
+  const { TFile, promoteChecklistItemToChild } = await servicesPromise;
+  const harness = createPromotionHarness(TFile, { content: '- [ ] Legacy task' });
+  harness.plugin.settings.dataArchitectureMode = 'native-records';
+  let reads = 0;
+  harness.plugin.app.vault.cachedRead = async () => { reads += 1; throw new Error('unexpected source read'); };
+  const result = await promoteChecklistItemToChild(harness.plugin, harness.rootFile, {
+    lineNumber: 0,
+    rawLine: '- [ ] Legacy task',
+    text: 'Legacy task',
+  });
+  assert.equal(result, null);
+  assert.equal(reads, 0);
+  assert.deepEqual(harness.counts, {
+    childCreates: 0, childDeletes: 0, childModifies: 0, parentWrites: 0, statusWrites: 0, metadataWrites: 0,
+  });
+  assert.equal(harness.getParentContent(), '- [ ] Legacy task');
+});
+
 test('checklist promotion blocks stale, duplicate, and unmapped sources before every write', async () => {
   globalThis.window = { moment: null };
   const { Notice, TFile, promoteChecklistItemToChild } = await servicesPromise;
@@ -1009,4 +1029,42 @@ test('derived child status fails closed for an unmapped checkbox and clears only
     true,
   );
   assert.deepEqual(calls, { delete: 1, update: 0, refresh: 1 });
+});
+
+test('native whole-note mode rejects linked checkbox and shared line mutations before reads or writes', async () => {
+  const {
+    ChecklistHandler,
+    LinkedSubitemCheckboxService,
+    SubitemRelationshipSyncService,
+    TFile,
+  } = await servicesPromise;
+  const parent = new TFile('Parent.md');
+  const child = new TFile('Child.md');
+  const counts = { reads: 0, writes: 0, mutations: 0 };
+  const plugin = {
+    settings: { dataArchitectureMode: 'native-records' },
+    app: {
+      vault: {
+        read: async () => { counts.reads += 1; return '- [ ] [[Child]]'; },
+        modify: async () => { counts.writes += 1; },
+      },
+    },
+  };
+  const linked = Object.create(LinkedSubitemCheckboxService.prototype);
+  linked.plugin = plugin;
+  assert.equal(await linked.syncDerivedStatusForChild(child), false);
+  assert.equal(await linked.syncDerivedStatusForChildFromReferences(child, []), false);
+  assert.equal(await linked.setLinkedSubitemCheckboxState(parent, child, '[x]'), false);
+  await linked.cleanupLegacyCheckboxes(parent);
+
+  const relationship = new SubitemRelationshipSyncService(plugin);
+  assert.equal(await relationship.mutateMarkdownBody(parent, () => {
+    counts.mutations += 1;
+    return true;
+  }), false);
+
+  const checklist = new ChecklistHandler(plugin.app, false);
+  await checklist.updateChecklistItems(parent, 'complete');
+  await checklist.updateChecklistItems(parent, 'canceled');
+  assert.deepEqual(counts, { reads: 0, writes: 0, mutations: 0 });
 });

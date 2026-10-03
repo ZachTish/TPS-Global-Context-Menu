@@ -2920,3 +2920,29 @@ test('TPS List special field routing is consistent for task, bullet, heading, an
   assert.match(noteRenderer, /sourceFolderProperty[\s\S]*?\(logicalFile \?\? entry\.file\)\.parent\?\.path \|\| '\/'/u);
   assert.match(noteRenderer, /noteRecurrenceProperty[\s\S]*?&& !noteRecurrenceProperty/u);
 });
+
+test('native TPS List line actions reject before any source write or target creation', async () => {
+  const { TpsListView } = await loadTpsListViewHarness();
+  const view = Object.create(TpsListView.prototype);
+  let processes = 0;
+  let creates = 0;
+  view.plugin = { settings: { dataArchitectureMode: 'native-records' } };
+  view.app = {
+    vault: {
+      process: async () => { processes += 1; throw new Error('unexpected line write'); },
+      create: async () => { creates += 1; throw new Error('unexpected target creation'); },
+    },
+  };
+  const file = { path: 'Inbox/Legacy.md' };
+  await view.updateRenderedLineTitle('bullet', file, 0, '- Old', 'New');
+  assert.equal(await view.updateRenderedLineEntityProperty('heading', file, 0, '# Old', { key: 'project' }, 'set', () => '# New'), false);
+  await view.updateBulletLineTags(file, 0, '- Old', 'add', () => '- New');
+  assert.equal(await view.applyInlineTaskDropPlan(file, 1, 'status', 'done', [], { currentLine: '- [ ] Old', nextLine: '- [x] Old', filterTags: [], filterStatus: null }), false);
+  await view.updateTaskCheckboxState(file, 1, '[x]', '[ ]', '- [ ] Old');
+  await view.createRootTaskForLane(null, { label: 'Inbox' }, { mode: 'tasks' }, 'task');
+  assert.equal(await view.mutateRenderedTaskLine(file, 1, '- [ ] Old', 'project', 'set', () => '- [ ] New'), false);
+  assert.equal(processes, 0);
+  assert.equal(creates, 0);
+  const createRoute = sourceBlock(viewSource, 'async createFileForView(', 'private getPriorityResolvedCreationMode(');
+  assert.match(createRoute, /if \(lineKind\) \{\s*if \(this\.usesNativeRecordArchitecture\(\)\)/u);
+});

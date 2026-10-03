@@ -36,7 +36,7 @@ export function resolveCreateTaskModalCopy(createTrackedRecord: boolean): Create
     ? {
       title: 'Create task note',
       taskDescription: 'Creates a note-backed task. Natural language schedule text is parsed into its Scheduled field.',
-      targetDescription: 'Standalone creates only the task note. Choose a parent note to place its stable link there.',
+      targetDescription: 'Creates a standalone task note.',
       checkboxLabel: 'Initial status',
       submitLabel: 'Create task note',
     }
@@ -89,7 +89,7 @@ export class CreateTaskModal extends Modal {
     },
   ) {
     super(app);
-    this.parentMode = options.allowStandaloneParent && options.defaultParentMode === 'standalone'
+    this.parentMode = options.createTrackedRecord || (options.allowStandaloneParent && options.defaultParentMode === 'standalone')
       ? 'standalone'
       : 'note';
     this.targetFile = this.parentMode === 'note' ? options.defaultTargetFile : null;
@@ -124,47 +124,49 @@ export class CreateTaskModal extends Modal {
     this.previewEl = previewWrap.createDiv({ cls: 'tps-gcm-create-task-detected' });
     this.scheduledHintEl = previewWrap.createDiv({ cls: 'tps-gcm-create-task-scheduled-hint' });
 
-    const parentSetting = new Setting(contentEl)
-      .setName(this.options.allowStandaloneParent ? 'Parent' : 'Write to')
-      .setDesc(copy.targetDescription)
-      .addButton((button) => {
-        this.targetEl = button.buttonEl;
-        this.renderTargetButton();
-        button.setTooltip(this.options.allowStandaloneParent ? 'Choose parent note' : 'Choose containing note');
-        button.onClick(() => {
-          new FileSuggestModal(this.app, (file) => {
-            this.parentMode = 'note';
-            this.targetFile = file;
-            this.renderTargetButton();
-          }, { extensions: ['md'] }).open();
+    if (!this.options.createTrackedRecord) {
+      const parentSetting = new Setting(contentEl)
+        .setName(this.options.allowStandaloneParent ? 'Parent' : 'Write to')
+        .setDesc(copy.targetDescription)
+        .addButton((button) => {
+          this.targetEl = button.buttonEl;
+          this.renderTargetButton();
+          button.setTooltip(this.options.allowStandaloneParent ? 'Choose parent note' : 'Choose containing note');
+          button.onClick(() => {
+            new FileSuggestModal(this.app, (file) => {
+              this.parentMode = 'note';
+              this.targetFile = file;
+              this.renderTargetButton();
+            }, { extensions: ['md'] }).open();
+          });
         });
-      });
-    parentSetting.settingEl.addClass('tps-gcm-create-task-parent');
-    if (this.options.allowStandaloneParent) {
-      parentSetting.addButton((button) => {
-        this.todayParentButton = button;
-        button
-          .setButtonText('Today')
-          .setTooltip("Use today's Daily Note as the parent")
-          .onClick(() => {
-            this.parentMode = 'note';
-            this.targetFile = null;
-            this.renderTargetButton();
-          });
-        this.renderTargetButton();
-      });
-      parentSetting.addButton((button) => {
-        this.standaloneParentButton = button;
-        button
-          .setButtonText('Standalone')
-          .setTooltip('Create without a parent note')
-          .onClick(() => {
-            this.parentMode = 'standalone';
-            this.targetFile = null;
-            this.renderTargetButton();
-          });
-        this.renderTargetButton();
-      });
+      parentSetting.settingEl.addClass('tps-gcm-create-task-parent');
+      if (this.options.allowStandaloneParent) {
+        parentSetting.addButton((button) => {
+          this.todayParentButton = button;
+          button
+            .setButtonText('Today')
+            .setTooltip("Use today's Daily Note as the parent")
+            .onClick(() => {
+              this.parentMode = 'note';
+              this.targetFile = null;
+              this.renderTargetButton();
+            });
+          this.renderTargetButton();
+        });
+        parentSetting.addButton((button) => {
+          this.standaloneParentButton = button;
+          button
+            .setButtonText('Standalone')
+            .setTooltip('Create without a parent note')
+            .onClick(() => {
+              this.parentMode = 'standalone';
+              this.targetFile = null;
+              this.renderTargetButton();
+            });
+          this.renderTargetButton();
+        });
+      }
     }
 
     new Setting(contentEl)
@@ -219,9 +221,11 @@ export class CreateTaskModal extends Modal {
         text.onChange(() => this.updateTaskLinePreview());
       });
 
-    const taskLineWrap = contentEl.createDiv({ cls: 'tps-gcm-create-task-line-wrap' });
-    taskLineWrap.createDiv({ cls: 'tps-gcm-create-task-label', text: 'Task line' });
-    this.taskLineEl = taskLineWrap.createDiv({ cls: 'tps-gcm-create-task-line' });
+    if (!this.options.createTrackedRecord) {
+      const taskLineWrap = contentEl.createDiv({ cls: 'tps-gcm-create-task-line-wrap' });
+      taskLineWrap.createDiv({ cls: 'tps-gcm-create-task-label', text: 'Task line' });
+      this.taskLineEl = taskLineWrap.createDiv({ cls: 'tps-gcm-create-task-line' });
+    }
 
     new Setting(contentEl)
       .addButton((button) => {
@@ -306,7 +310,7 @@ export class CreateTaskModal extends Modal {
   }
 
   private async submit(): Promise<void> {
-    const taskLine = this.buildTaskLine();
+    const taskLine = this.options.createTrackedRecord ? '' : this.buildTaskLine();
     const checkboxMarker = this.checkboxInput?.value ?? '';
     const checkboxOption = this.options.checkboxOptions
       .find((option) => option.checkboxMarker === checkboxMarker);

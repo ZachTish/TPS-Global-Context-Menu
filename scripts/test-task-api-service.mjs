@@ -312,7 +312,7 @@ test('GCM exposes a strategic task API for external agents', () => {
   assert.match(pluginApiSource, /history: \{/);
   assert.match(pluginApiSource, /plugin\.itemHistoryService\.query\(reference, options\)/);
 
-  assert.match(taskApiSource, /readonly version = 3/);
+  assert.match(taskApiSource, /readonly version = 4/);
   assert.match(taskApiSource, /async list\(filter: GcmTaskListFilter = \{\}\)/);
   assert.match(taskApiSource, /async get\(ref: GcmTaskRef\)/);
   assert.match(taskApiSource, /async create\(input: GcmTaskCreateInput, cause\?: ItemHistoryUserCause\)/);
@@ -327,6 +327,30 @@ test('GCM exposes a strategic task API for external agents', () => {
   assert.match(taskApiSource, /async move\(/);
   assert.match(taskApiSource, /async delete\(ref: GcmTaskRef, cause\?: ItemHistoryUserCause\)/);
   assert.match(taskApiSource, /async focus\(ref: GcmTaskRef\)/);
+});
+
+test('native mode rejects task-line API writes before reading or processing a note', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  const fixture = createTaskApiFixture(TaskApiService);
+  fixture.plugin.settings.dataArchitectureMode = 'native-records';
+  const ref = { path: fixture.taskPath, lineNumber: 5, rawLine: '- [ ] Open task' };
+  const target = { path: fixture.dailyTaskPath };
+  const results = await Promise.all([
+    fixture.service.create({ title: 'New task', targetPath: fixture.taskPath }),
+    fixture.service.update(ref, { title: 'Changed task' }),
+    fixture.service.setCheckbox(ref, 'x'),
+    fixture.service.setCompletion(ref, true),
+    fixture.service.setStatus(ref, 'complete'),
+    fixture.service.move(ref, target),
+    fixture.service.delete(ref),
+  ]);
+  for (const result of results) {
+    assert.equal(result.ok, false);
+    assert.equal(result.changed, false);
+    assert.match(result.error || '', /whole task note/u);
+  }
+  assert.equal(fixture.reads.length, 0);
+  assert.equal(fixture.processes.length, 0);
 });
 
 test('task API v3 journals only explicit user mutations and injects identity atomically', async () => {
@@ -670,7 +694,7 @@ test('task API move preserves a Daily Note source as a migrated record', async (
     resolution: 'exact-or-identity',
   });
 
-  assert.equal(fixture.service.version, 3);
+  assert.equal(fixture.service.version, 4);
   assert.equal(result.ok, true);
   assert.equal(result.changed, true);
   assert.equal(result.task?.path, fixture.canonicalUpperFile.path);

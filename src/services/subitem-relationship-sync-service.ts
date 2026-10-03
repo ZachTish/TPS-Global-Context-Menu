@@ -558,6 +558,7 @@ export class SubitemRelationshipSyncService {
     file: TFile,
     mutator: (lines: string[], raw: string) => boolean | Promise<boolean>,
   ): Promise<boolean> {
+    if (this.plugin.settings?.dataArchitectureMode === 'native-records') return false;
     if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return false;
 
     let changed = false;

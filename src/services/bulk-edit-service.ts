@@ -72,7 +72,7 @@ export class BulkEditService {
 
     constructor(plugin: TPSGlobalContextMenuPlugin) {
         this.plugin = plugin;
-        this.checklistHandler = new ChecklistHandler(plugin.app);
+        this.checklistHandler = new ChecklistHandler(plugin.app, plugin.settings.dataArchitectureMode !== 'native-records');
         this.parentLinkHandler = new ParentLinkHandler(
             plugin.app,
             () => plugin.settings,

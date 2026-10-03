@@ -117,6 +117,7 @@ export async function checkAndPromptForUnresolvedSubitems(
   plugin: TPSGlobalContextMenuPlugin,
   parentFile: TFile,
 ): Promise<boolean> {
+  if (plugin.settings?.dataArchitectureMode === 'native-records') return false;
   if (plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) return false;
   const raw = await plugin.subitemRelationshipSyncService.readMarkdownText(parentFile, { cached: true });
   if (plugin.parentLinkResolutionService.isIgnoredFile(parentFile)) return false;

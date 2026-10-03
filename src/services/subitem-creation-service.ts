@@ -209,7 +209,7 @@ export async function createSubitemForParentWithTitle(
   }
 
   try {
-    if (options?.insertParentBodyLink !== false && parentFile.extension?.toLowerCase() === 'md') {
+    if (plugin.settings.dataArchitectureMode !== 'native-records' && options?.insertParentBodyLink !== false && parentFile.extension?.toLowerCase() === 'md') {
       const linkResult = await plugin.subitemRelationshipSyncService.insertBodyLinkForChildWorkflow(
         parentFile,
         created,

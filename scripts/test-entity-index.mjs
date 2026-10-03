@@ -1293,6 +1293,26 @@ function createServiceHost(TFile, initialNotes = []) {
   };
 }
 
+test('native note entity queries never scan note bodies or materialize line references', async () => {
+  const { EntityIndexService, TFile } = await servicePromise;
+  const fixture = createServiceHost(TFile, [{
+    path: 'Entities/Task.md',
+    basename: 'Task',
+    frontmatter: { kind: 'Task' },
+    content: '- [ ] Inline legacy task',
+  }]);
+  fixture.host.usesNativeRecordArchitecture = () => true;
+  const service = new EntityIndexService(fixture.host);
+  service.configureDimensions([{ name: 'kind', propertyKeys: ['kind'] }]);
+  const records = await service.queryAsync({ dimensions: { kind: 'Task' } });
+  assert.deepEqual(records.map(({ path }) => path), ['Entities/Task.md']);
+  await service.ensureReady();
+  assert.equal(await service.materializeReference({ id: 'missing-line', entityType: 'line' }), null);
+  assert.equal(fixture.operations.cachedReads, 0);
+  assert.equal(fixture.operations.reads, 0);
+  assert.equal(fixture.operations.markdownEnumerations, 1, 'only the note metadata index is built');
+});
+
 test('idle metadata resolutions leave the note index cold until a query needs current records', async () => {
   const { EntityIndexService, TFile } = await servicePromise;
   const fixture = createServiceHost(TFile, [{

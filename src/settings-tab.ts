@@ -3,9 +3,9 @@ import { renderNavigatorPropertyVisibility } from './integrations/notebook-navig
 import { MIGRATABLE_KEY_SETTINGS, PropertyMigration } from './utils/property-migration';
 import { PropertyMigrationModal } from './modals/property-migration-modal';
 import { MANAGED_NOTE_FIELDS, managedNoteFieldKey, configureManagedNoteField } from './utils/managed-note-fields';
-import { App, ButtonComponent, Notice, PluginSettingTab, Setting, TextAreaComponent, TextComponent } from 'obsidian';
+import { App, Notice, PluginSettingTab, Setting, TextComponent } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
-import type { AppearanceSettingKey, CreateTaskDefaultParentMode, CustomProperty, LinkedSubitemCheckboxMapping, ViewModeConditionOperator, ViewModeConditionType, ViewModeRule, ViewModeRuleCondition } from './types';
+import type { AppearanceSettingKey, CustomProperty, ViewModeConditionOperator, ViewModeConditionType, ViewModeRule, ViewModeRuleCondition } from './types';
 import { BucketSectionRenderer } from './notebook-navigator-settings/bucket-section';
 import { HideSectionRenderer } from './notebook-navigator-settings/hide-section';
 import { RulesSectionRenderer } from './notebook-navigator-settings/rules-section';
@@ -29,13 +29,6 @@ import {
   createUniquePropertyKey,
   getPropertyKeyDiagnostic,
 } from './utils/property-key-identity';
-import {
-  DEFAULT_LINKED_SUBITEM_MAPPINGS,
-  mergeLinkedSubitemMappingPresentation,
-  normalizeLinkedSubitemCheckboxState,
-  normalizeLinkedSubitemMappings,
-  parseLinkedSubitemMappingsText,
-} from './utils/linked-subitem-mapping';
 import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { FileSuggestModal } from './modals/FileSuggestModal';
 import { TagSuggestModal } from './modals/TagSuggestModal';
@@ -54,7 +47,6 @@ import {
   OBSIDIAN_BASES_SYNTAX_URL,
 } from './base-query-guide';
 import { normalizeDailyNavDayCount } from './utils/daily-note-nav-days';
-import { normalizeCreateTaskDefaultParentMode } from './utils/create-task-default-parent';
 import { collectKnownVaultTags } from './utils/known-tags';
 import {
   getAutomaticMutationTagExclusions,
@@ -665,7 +657,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       .addToggle(t => t.setValue(this.plugin.settings.autoSaveFolderPath).onChange(async v => { this.plugin.settings.autoSaveFolderPath = v; await this.plugin.saveSettings(); }));
     new Setting(advanced)
       .setName('Auto-sync file timestamps')
-      .setDesc('Keep created/modified timestamps on note frontmatter and task lines.')
+      .setDesc('Keep created/modified timestamps on note frontmatter.')
       .addToggle(t => t.setValue(this.plugin.settings.autoSyncFileTimestamps).onChange(async v => { this.plugin.settings.autoSyncFileTimestamps = v; await this.plugin.saveSettings(); }));
     this.renderMigratingKeySetting(advanced, 'Created timestamp key', 'Frontmatter key used for the file creation timestamp.', 'dateCreatedFrontmatterKey');
     this.renderMigratingKeySetting(advanced, 'Modified timestamp key', 'Frontmatter key used for the file modified timestamp.', 'dateModifiedFrontmatterKey');
@@ -1863,64 +1855,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       taskAutomation.dataset.tpsSettingsRoute = 'tasks';
       taskAutomation.createEl('h4', { text: 'Tasks' });
       taskAutomation.createEl('p', {
-        text: 'Task-note and task-line creation, hiding, checkbox/status mapping, and completion safeguards.',
+        text: 'Task-note creation, checklist display, and completion safeguards.',
         cls: 'setting-item-description',
       });
-      new Setting(taskAutomation)
-        .setName('Create task default parent')
-        .setDesc('Choose whether Create task note starts standalone or adds a stable link in today’s Daily Note. You can still choose a different parent in the dialog. Legacy checkbox tasks still require a destination note.')
-        .addDropdown((dropdown) => {
-          dropdown
-            .addOption('standalone', 'Standalone (no parent)')
-            .addOption('today-daily-note', 'Today’s Daily Note')
-            .setValue(this.plugin.settings.createTaskDefaultParentMode)
-            .onChange(async (value: CreateTaskDefaultParentMode) => {
-              this.plugin.settings.createTaskDefaultParentMode = normalizeCreateTaskDefaultParentMode(value);
-              await this.plugin.saveSettings();
-            });
-          dropdown.selectEl.setAttribute('aria-label', 'Create task default parent');
-        });
-      new Setting(taskAutomation)
-        .setName('When a Base has no write target')
-        .setDesc('Fallback write note for new TPS List/Table task and bullet lines. Today’s Daily Note is the default; an exact active-view or whole-Base file.path/task.path filter always wins.')
-        .addDropdown((dropdown) =>
-          dropdown
-            .addOption('today-daily-note', 'Today’s Daily Note')
-            .addOption('filter-required', 'Require a file.path/task.path filter')
-            .addOption('specific-note', 'Specific note')
-            .setValue(this.plugin.settings.tpsBaseWriteFallbackMode)
-            .onChange(async (value) => {
-              if (value !== 'filter-required' && value !== 'today-daily-note' && value !== 'specific-note') return;
-              this.plugin.settings.tpsBaseWriteFallbackMode = value;
-              await this.plugin.saveSettings();
-              this.redisplayPreservingRouteFocus('tasks');
-            })
-        );
-      if (this.plugin.settings.tpsBaseWriteFallbackMode === 'specific-note') {
-        new Setting(taskAutomation)
-          .setName('Fallback write note')
-          .setDesc('Existing Markdown note used only when the effective Base filters do not identify an exact write target.')
-          .addText((text) =>
-            text
-              .setPlaceholder('Inbox/Tasks.md')
-              .setValue(this.plugin.settings.tpsBaseWriteFallbackPath)
-              .onChange(async (value) => {
-                this.plugin.settings.tpsBaseWriteFallbackPath = value.trim();
-                await this.plugin.saveSettings();
-              })
-          )
-          .addButton((button) =>
-            button
-              .setButtonText('Choose note')
-              .onClick(() => {
-                new FileSuggestModal(this.app, async (file) => {
-                  this.plugin.settings.tpsBaseWriteFallbackPath = file.path;
-                  await this.plugin.saveSettings();
-                  this.redisplayPreservingRouteFocus('tasks');
-                }, { extensions: ['md'] }).open();
-              })
-          );
-      }
       new Setting(taskAutomation)
         .setName('Default attachments path')
         .setDesc('Folder where new attachment notes are created. Leave empty to use the vault root.')
@@ -1933,171 +1870,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
               await this.plugin.saveSettings();
             })
         );
-    new Setting(taskAutomation)
-      .setName('Checklist promote behavior')
-      .setDesc('When promoting a checklist item to a subitem, choose whether to remove the line, complete + link it, or keep it open as a link.')
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('complete-and-link', 'Mark complete + link')
-          .addOption('link-only', 'Link only')
-          .addOption('remove', 'Remove checklist line')
-          .setValue(this.plugin.settings.checklistPromotionBehavior ?? 'remove')
-          .onChange(async (value) => {
-            if (value === 'remove' || value === 'complete-and-link' || value === 'link-only') {
-              this.plugin.settings.checklistPromotionBehavior = value;
-              await this.plugin.saveSettings();
-            }
-          })
-      );
-    new Setting(taskAutomation)
-      .setName('After moving a task from a Daily Note')
-      .setDesc('Choose whether a cross-note move leaves a migrated scratchpad record or removes the complete source block. The destination task keeps its stable identity either way.')
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('mark-migrated', 'Keep a migrated marker')
-          .addOption('remove', 'Remove the source block')
-          .setValue(this.plugin.settings.dailyNoteTaskMoveSourceBehavior)
-          .onChange(async (value) => {
-            if (value !== 'mark-migrated' && value !== 'remove') return;
-            this.plugin.settings.dailyNoteTaskMoveSourceBehavior = value;
-            await this.plugin.saveSettings();
-          })
-      );
-    new Setting(taskAutomation)
-      .setName('Keep local item history')
-      .setDesc('Record committed user actions such as task status, priority, tag, checkbox, move, and delete changes in a private plugin datastore. On its first tracked change, a surviving task receives a stable tpsId in the same note edit so later events remain attached to that task. Vault-relative before/after note paths, including filenames, are stored; other task edits are recorded without their text. Raw task content and note bodies are never stored, background automation is excluded, and this data stays on this device.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.enableItemHistory !== false)
-          .onChange(async (value) => {
-            const previous = this.plugin.settings.enableItemHistory !== false;
-            if (Object.is(value, previous)) return;
-            this.plugin.settings.enableItemHistory = value;
-            this.plugin.itemHistoryService?.updateEnabled(value);
-            try {
-              await this.plugin.saveSettings();
-            } catch (error) {
-              this.plugin.settings.enableItemHistory = previous;
-              this.plugin.itemHistoryService?.updateEnabled(previous);
-              this.redisplayPreservingRouteFocus('tasks');
-              throw error;
-            }
-            this.redisplayPreservingRouteFocus('tasks');
-          })
-      );
-    if (this.plugin.settings.enableItemHistory !== false) {
-      new Setting(taskAutomation)
-        .setName('Item history retention')
-        .setDesc('Events are also capped at 200 per item and 25,000 across the vault. Older events are pruned locally.')
-        .addDropdown((dropdown) =>
-          dropdown
-            .addOption('30', '30 days')
-            .addOption('90', '90 days')
-            .addOption('180', '180 days')
-            .addOption('365', '1 year')
-            .setValue(String(this.plugin.settings.itemHistoryRetentionDays || 90))
-            .onChange(async (value) => {
-              const days = Number.parseInt(value, 10);
-              if (!Number.isFinite(days) || days < 1) return;
-              this.plugin.settings.itemHistoryRetentionDays = days;
-              await this.plugin.saveSettings();
-              await this.plugin.itemHistoryService?.prune();
-            })
-        );
-    }
-    new Setting(taskAutomation)
-      .setName('Hide completed task lines')
-      .setDesc('Hide completed, won’t-do, and migrated task lines. Source mode always stays unchanged, and linked context follows the same visibility rule.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.hideCompletedCheckboxes === true)
-          .onChange(async (value) => {
-            this.plugin.settings.hideCompletedCheckboxes = value;
-            await this.plugin.saveSettings();
-            this.plugin.hideCompletedCheckboxesService?.applyBodyClass();
-            this.plugin.hideCompletedCheckboxesService?.refreshAllEditors();
-            this.plugin.persistentMenuManager.ensureMenus();
-            this.redisplayPreservingRouteFocus('tasks');
-          })
-      );
-    new Setting(taskAutomation)
-      .setName('Hide completed tasks in')
-      .setDesc('Reading view only leaves Live Preview untouched. The combined option preserves the earlier behavior and includes a temporary reveal button in Live Preview.')
-      .addDropdown((dropdown) =>
-        dropdown
-          .addOption('reading-only', 'Reading view only')
-          .addOption('reading-and-live-preview', 'Reading view and Live Preview')
-          .setValue(this.plugin.settings.completedTaskHidingScope || 'reading-and-live-preview')
-          .onChange(async (value: 'reading-only' | 'reading-and-live-preview') => {
-            this.plugin.settings.completedTaskHidingScope = value;
-            await this.plugin.saveSettings();
-            this.plugin.hideCompletedCheckboxesService?.applyBodyClass();
-            this.plugin.hideCompletedCheckboxesService?.refreshAllEditors();
-            this.plugin.persistentMenuManager.ensureMenus();
-          })
-      );
-    new Setting(taskAutomation)
-      .setName('Hide all task lines in reading mode')
-      .setDesc('Hide all rendered task list lines in reading view, regardless of task status. Source mode is unchanged.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.hideAllTaskLinesInReadingMode === true)
-          .onChange(async (value) => {
-            this.plugin.settings.hideAllTaskLinesInReadingMode = value;
-            await this.plugin.saveSettings();
-          })
-      );
-    new Setting(taskAutomation)
-      .setName('Task hiding exclusions')
-      .setDesc('Files, folders, tags, or cssclasses where completed/all-task hiding is disabled. One pattern per line; supports exact paths, folder prefixes, wildcards (*), name:<basename>, re:<regex>, #tag, tag:<tag>, and cssclass:<class>.')
-      .addTextArea((text) => {
-        text
-          .setValue(this.plugin.settings.taskHidingExclusionPatterns ?? '')
-          .setPlaceholder('Inbox/\n#tps/workout\nname:Inbox')
-          .onChange(async (value) => {
-            this.plugin.settings.taskHidingExclusionPatterns = value;
-            await this.plugin.saveSettings();
-          });
-      });
-    new Setting(taskAutomation)
-      .setName('Persist task reveal state to frontmatter')
-      .setDesc('When enabled, the Show completed and Show tasks buttons write per-note reveal state to frontmatter instead of resetting per view. The default is off, so task hiding stays temporary unless this is enabled.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.persistTaskVisibilityStateToFrontmatter === true)
-          .onChange(async (value) => {
-            this.plugin.settings.persistTaskVisibilityStateToFrontmatter = value;
-            await this.plugin.saveSettings();
-            this.display();
-          })
-      );
-    if (this.plugin.settings.persistTaskVisibilityStateToFrontmatter === true) {
-      this.renderMigratingKeySetting(taskAutomation, 'Task reveal frontmatter key', 'Property used to store showCompleted and showTasks state.', 'taskVisibilityStateFrontmatterKey');
-    }
-    this.renderLinkedSubitemCheckboxSettings(taskAutomation);
-    new Setting(taskAutomation)
-      .setName('Sync inline status to checkbox marker')
-      .setDesc('When a task line has the configured status property, map it to the checkbox marker and remove the inline status field.')
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.reconcileTaskStatusToCheckbox !== false).onChange(async (v) => {
-          this.plugin.settings.reconcileTaskStatusToCheckbox = v;
-          await this.plugin.saveSettings();
-          if (v) this.plugin.taskStatusCheckboxReconcileService?.scheduleActiveFile('settings-enabled');
-        })
-      );
-    new Setting(taskAutomation).setName('Warn before completing with open subtasks').setDesc('When completing a note, warn if unchecked task lines remain in the note body.').addToggle(t => t.setValue(this.plugin.settings.checkOpenChecklistItems).onChange(async v => { this.plugin.settings.checkOpenChecklistItems = v; await this.plugin.saveSettings(); }));
+    new Setting(taskAutomation).setName('Warn before completing with open checkboxes').setDesc('When completing a whole note, warn if unchecked Markdown checkboxes remain in its body.').addToggle(t => t.setValue(this.plugin.settings.checkOpenChecklistItems).onChange(async v => { this.plugin.settings.checkOpenChecklistItems = v; await this.plugin.saveSettings(); }));
     new Setting(taskAutomation).setName('Warn before completing with open child notes').setDesc('When completing a note, warn if linked child notes still have an open status.').addToggle(t => t.setValue(this.plugin.settings.checkParentLinkStatuses).onChange(async v => { this.plugin.settings.checkParentLinkStatuses = v; await this.plugin.saveSettings(); }));
-    new Setting(taskAutomation)
-      .setName('Completion prompt status options')
-      .setDesc('When the last open checkbox is resolved on a note that already has a status, offer these note statuses, comma-separated.')
-      .addText((t) =>
-        t.setValue((this.plugin.settings.checklistFinalPromptStatuses || ['complete', 'wont-do']).join(', '))
-          .onChange(async (v) => {
-            const next = v.split(',').map((s) => s.trim()).filter(Boolean);
-            this.plugin.settings.checklistFinalPromptStatuses = next.length > 0 ? next : ['complete', 'wont-do'];
-            await this.plugin.saveSettings();
-          })
-      );
     }
 
     if (this.activeWorkflowPage === 'child-notes') {
@@ -2281,29 +2055,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           }
         }));
 
-      new Setting(navigationAutomation)
-        .setName('Auto-Populate Scheduled Items')
-        .setDesc('When opening a Daily Note, automatically scan the vault and insert links to subitems scheduled for that date into the note body.')
-        .addToggle(t => t.setValue(this.plugin.settings.enableAutoPopulateDailyNotes !== false).onChange(async v => {
-          this.plugin.settings.enableAutoPopulateDailyNotes = v;
-          await this.plugin.saveSettings();
-        }));
-
-      new Setting(navigationAutomation)
-        .setName('Inherit Daily Note date for unscheduled tasks')
-        .setDesc('Treat task lines without an explicit scheduled value inside Daily Notes as scheduled on that Daily Note date. If a different scheduled date is set from the task menu, GCM will offer to move the task block to that date\'s Daily Note.')
-        .addToggle(t => t.setValue(this.plugin.settings.inheritUnscheduledTasksFromDailyNotes !== false).onChange(async v => {
-          this.plugin.settings.inheritUnscheduledTasksFromDailyNotes = v;
-          await this.plugin.saveSettings();
-          this.plugin.eventService.emitFilesUpdated([]);
-          this.plugin.overlayRenderingService?.invalidate({
-            reason: 'daily-note-task-schedule-inheritance-setting-change',
-            surfaces: ['menus', 'linked-subitems', 'daily-nav', 'live-preview-editors'],
-            rebuildInlineSubitems: true,
-            refreshLivePreviewEditors: true,
-            delayMs: 50,
-          });
-        }));
     }
     }
     }
@@ -2313,20 +2064,10 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       const diagnostics = activePage;
       diagnostics.createEl('h4', { text: 'Data architecture' });
 
-      new Setting(diagnostics)
-        .setName('TPS data architecture')
-        .setDesc('Atomic line stores records within notes and uses TPS List/Table. Atomic note stores each record in its own Markdown note and uses core Bases. Reload Obsidian after changing this.')
-        .addDropdown((dropdown) => dropdown
-          .addOption('legacy', 'Atomic line')
-          .addOption('native-records', 'Atomic note')
-          .setValue(this.plugin.settings.dataArchitectureMode || 'legacy')
-          .onChange(async (value) => {
-            this.plugin.settings.dataArchitectureMode = value === 'native-records'
-              ? 'native-records'
-              : 'legacy';
-            await this.plugin.saveSettings();
-            new Notice('Reload Obsidian to apply the TPS data architecture change.');
-          }));
+      diagnostics.createEl('p', {
+        text: 'TPS records use Atomic notes. Each new task is a standalone Markdown note.',
+        cls: 'setting-item-description',
+      });
 
       new Setting(diagnostics)
         .setName('Atomic note root')
@@ -2790,17 +2531,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           })
       );
 
-    new Setting(fields)
-      .setName('Allow @@ inline set')
-      .setDesc('Allow this property in the task-line @@ picker. Disable for fields like title, parent, or folder.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(prop.allowInlineSet !== false)
-          .onChange(async (value) => {
-            prop.allowInlineSet = value;
-            await this.plugin.saveSettings();
-          })
-      );
 
     new Setting(fields)
       .setName('Property visibility')
@@ -3322,189 +3052,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         text: `+${displayedOptions.length - previewValues.length}`,
       });
     }
-  }
-
-  private renderLinkedSubitemCheckboxSettings(container: HTMLElement): void {
-    new Setting(container)
-      .setName('Render child-note links as checkboxes')
-      .setDesc('Child-note body links render as checkbox rows and sync from the child note status.')
-      .addToggle((t) =>
-        t.setValue(this.plugin.settings.enableLinkedSubitemCheckboxes !== false).onChange(async (v) => {
-          this.plugin.settings.enableLinkedSubitemCheckboxes = v;
-          if (!v) {
-            // Clear already-mounted Reading and Live Preview rows before future
-            // navigation stops scheduling this optional presentation work.
-            this.plugin.linkedSubitemCheckboxService.ensureForAllMarkdownViews();
-            this.plugin.linkedSubitemCheckboxService.refreshLivePreviewEditors();
-          }
-          await this.plugin.saveSettings();
-        })
-      );
-
-    new Setting(container)
-      .setName('Child checkbox style')
-      .setDesc('Visual treatment for child-note checkbox rows.')
-      .addDropdown((d) =>
-        d
-          .addOption('native', 'Native')
-          .addOption('soft-link', 'Soft link')
-          .addOption('accent', 'Accent')
-          .setValue(this.plugin.settings.linkedSubitemCheckboxStyle || 'soft-link')
-          .onChange(async (value: 'native' | 'soft-link' | 'accent') => {
-            this.plugin.settings.linkedSubitemCheckboxStyle = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    let fallbackDraft = this.plugin.settings.linkedSubitemDefaultOpenState || '[ ]';
-    let mappingsDraft = this.serializeLinkedSubitemMappings(
-      normalizeLinkedSubitemMappings(this.plugin.settings.linkedSubitemCheckboxMappings || [], {
-        enforceStrictDefaults: true,
-      }),
-    );
-    let fallbackInput: TextComponent | null = null;
-    let mappingsInput: TextAreaComponent | null = null;
-    let applyButton: ButtonComponent | null = null;
-    let validationEl: HTMLElement | null = null;
-    const validationId = 'tps-gcm-checkbox-mapping-validation';
-    const normalizeWorkflowStatus = (value: unknown): string =>
-      this.plugin.sharedServices.status.normalize(value);
-
-    const validateDraft = () => {
-      const fallbackState = normalizeLinkedSubitemCheckboxState(fallbackDraft);
-      const result = parseLinkedSubitemMappingsText(mappingsDraft, {
-        normalizeStatus: normalizeWorkflowStatus,
-        completionStatuses: this.plugin.sharedServices.status.getDoneStatuses(),
-      });
-      const fallbackMapping = fallbackState
-        ? result.mappings.find((mapping) => mapping.checkboxState === fallbackState)
-        : null;
-      const completeStatuses = new Set(
-        this.plugin.sharedServices.status.getDoneStatuses().map(normalizeWorkflowStatus),
-      );
-      const fallbackIsOpen = !!fallbackMapping
-        && fallbackState !== '[>]'
-        && fallbackMapping.statuses.every((status) => !completeStatuses.has(normalizeWorkflowStatus(status)));
-      const errors = [
-        ...(fallbackState ? [] : ['Fallback open marker must be [ ] or one checkbox character.']),
-        ...(fallbackState && !fallbackMapping ? ['Fallback open marker must be defined by a mapping row.'] : []),
-        ...(fallbackMapping && !fallbackIsOpen ? ['Fallback open marker must map only to open statuses.'] : []),
-        ...result.errors.map((issue) => `Line ${issue.line}: ${issue.message}`),
-      ];
-      fallbackInput?.inputEl.setAttribute('aria-invalid', fallbackState ? 'false' : 'true');
-      mappingsInput?.inputEl.setAttribute('aria-invalid', result.errors.length === 0 ? 'false' : 'true');
-      applyButton?.setDisabled(errors.length > 0);
-      if (validationEl) {
-        validationEl.empty();
-        validationEl.toggleClass('is-error', errors.length > 0);
-        validationEl.toggleClass('is-warning', errors.length === 0 && result.warnings.length > 0);
-        if (errors.length > 0) {
-          validationEl.setText(errors.slice(0, 4).join(' '));
-        } else if (result.warnings.length > 0) {
-          validationEl.setText(result.warnings.join(' '));
-        } else {
-          validationEl.setText('Ready to apply. The first row containing a status is its primary marker.');
-        }
-      }
-      return { fallbackState, result, errors };
-    };
-
-    const applyMappings = async (): Promise<void> => {
-      const validation = validateDraft();
-      if (!validation.fallbackState || validation.errors.length > 0) {
-        (validation.fallbackState ? mappingsInput?.inputEl : fallbackInput?.inputEl)?.focus();
-        return;
-      }
-      const merged = mergeLinkedSubitemMappingPresentation(
-        validation.result.mappings,
-        this.plugin.settings.linkedSubitemCheckboxMappings || [],
-      );
-      this.plugin.settings.linkedSubitemDefaultOpenState = validation.fallbackState;
-      this.plugin.settings.linkedSubitemCheckboxMappings = normalizeLinkedSubitemMappings(merged, {
-        enforceStrictDefaults: true,
-      });
-      await this.plugin.saveSettings();
-      fallbackDraft = this.plugin.settings.linkedSubitemDefaultOpenState;
-      mappingsDraft = this.serializeLinkedSubitemMappings(this.plugin.settings.linkedSubitemCheckboxMappings);
-      fallbackInput?.setValue(fallbackDraft);
-      mappingsInput?.setValue(mappingsDraft);
-      validateDraft();
-      new Notice('Checkbox/status mappings applied.');
-    };
-
-    const actions = new Setting(container)
-      .setName('Checkbox/status mapping changes')
-      .setDesc('Draft changes stay local until Apply mappings. Loading defaults also stays a draft until applied.')
-      .addButton((button) => {
-        applyButton = button;
-        button
-          .setButtonText('Apply mappings')
-          .setCta()
-          .onClick(() => void applyMappings());
-      })
-      .addButton((button) =>
-        button
-          .setButtonText('Load defaults')
-          .onClick(() => {
-            fallbackDraft = '[ ]';
-            mappingsDraft = this.serializeLinkedSubitemMappings(DEFAULT_LINKED_SUBITEM_MAPPINGS);
-            fallbackInput?.setValue(fallbackDraft);
-            mappingsInput?.setValue(mappingsDraft);
-            validateDraft();
-          })
-      );
-    actions.settingEl.addClass('tps-gcm-settings-checkbox-mapping-actions');
-
-    new Setting(container)
-      .setName('Fallback open marker')
-      .setDesc('Used only when a linked child note has no workflow status. A nonempty unmapped status remains unsupported. Enter [ ] or one marker character.')
-      .addText((text) => {
-        fallbackInput = text;
-        text
-          .setValue(fallbackDraft)
-          .onChange((value) => {
-            fallbackDraft = value;
-            validateDraft();
-          });
-        text.inputEl.setAttribute('aria-describedby', validationId);
-      });
-
-    const mappingEditor = new Setting(container)
-      .setName('Child status to checkbox mappings')
-      .setDesc('One row per marker: "[ ]: todo => complete". The first status is used when reading the marker; the first row containing a status is used when writing it.')
-      .addTextArea((text) => {
-        mappingsInput = text;
-        text
-          .setPlaceholder('[ ]: todo => complete\n[x]: complete => todo\n[/]: working => complete\n[\\]: working => complete\n[?]: holding => todo\n[-]: wont-do => todo\n[>]: migrated => todo')
-          .setValue(mappingsDraft)
-          .onChange((value) => {
-            mappingsDraft = value;
-            validateDraft();
-          });
-        text.inputEl.rows = 9;
-        text.inputEl.addClass('tps-gcm-settings-checkbox-mapping-textarea');
-        text.inputEl.setAttribute('aria-describedby', validationId);
-      });
-    mappingEditor.settingEl.addClass('tps-gcm-settings-checkbox-mapping-editor');
-    validationEl = mappingEditor.descEl.createDiv({
-      attr: {
-        id: validationId,
-        role: 'status',
-        'aria-live': 'polite',
-      },
-      cls: 'tps-gcm-settings-checkbox-mapping-validation',
-    });
-    validateDraft();
-  }
-
-  private serializeLinkedSubitemMappings(mappings: LinkedSubitemCheckboxMapping[]): string {
-    return mappings
-      .map((entry) => {
-        const statuses = (entry.statuses || []).join(', ');
-        const toggle = entry.toggleTargetStatus ? ` => ${entry.toggleTargetStatus}` : '';
-        return `${entry.checkboxState}: ${statuses}${toggle}`;
-      })
-      .join('\n');
   }
 
   private serializePropertyScopeCondition(condition: NonNullable<CustomProperty['scopeProperties']>[number]): string {

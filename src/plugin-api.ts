@@ -457,6 +457,11 @@ export async function promoteChecklistItemToChild(
     rootFile: TFile,
     input: ChecklistPromotionInput,
 ): Promise<TFile | null> {
+    if (plugin.settings.dataArchitectureMode === 'native-records') {
+        logger.flowWarn('ChecklistPromotion', 'blocked', { reason: 'line-record-authoring-retired' });
+        new Notice('Checklist lines are read-only here. Create a whole child note instead.');
+        return null;
+    }
     const content = await plugin.app.vault.cachedRead(rootFile);
     const lines = content.split('\n');
     const behavior = plugin.settings.checklistPromotionBehavior ?? 'remove';
@@ -824,7 +829,8 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         ) => plugin.notebookNavigatorRuleService.onNotebookNavigatorPresentationChanged(listener),
     };
     const taskRecordsApi = {
-        version: 1,
+        version: 2,
+        supportsPromotion: false,
         promote: (
             reference: Parameters<typeof plugin.nativeRecordService.promoteTask>[0],
             cause?: Parameters<typeof plugin.nativeRecordService.promoteTask>[1],
@@ -1060,6 +1066,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         configuration: {
             version: 1,
             isInlinePropertyAllowed: (key: unknown): boolean => {
+                if (plugin.usesNativeRecordArchitecture()) return false;
                 const normalizedKey = String(key ?? '').trim().toLowerCase();
                 if (!normalizedKey) return false;
                 const property = (plugin.settings.properties || []).find((candidate) => {
@@ -1082,7 +1089,8 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             }),
         },
         itemProperties: {
-            version: 1,
+            version: 2,
+            supportsTaskLineMutation: false,
             listDefinitions: () => Object.freeze((plugin.settings.properties || [])
                 .filter((property) => !property.disabled && !property.hidden)
                 .map((property) => Object.freeze({
@@ -1091,7 +1099,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
                     label: String(property.label || property.key || ''),
                     type: property.type,
                     listItemType: property.listItemType,
-                    allowInlineSet: property.allowInlineSet !== false,
+                    allowInlineSet: !plugin.usesNativeRecordArchitecture() && property.allowInlineSet !== false,
                 }))),
             resolveDefinition: (keyOrId: unknown) => {
                 const normalized = String(keyOrId ?? '').trim().toLowerCase();
@@ -1107,7 +1115,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
                     label: String(property.label || property.key || ''),
                     type: property.type,
                     listItemType: property.listItemType,
-                    allowInlineSet: property.allowInlineSet !== false,
+                    allowInlineSet: !plugin.usesNativeRecordArchitecture() && property.allowInlineSet !== false,
                 });
             },
             applyToTaskLines: (
@@ -1142,7 +1150,8 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             ) => plugin.menuController.addToNativeMenu(menu, files, options),
         },
         taskLines: {
-            version: 1,
+            version: 2,
+            supportsTaskLineMutation: false,
             handleContextMenu: (event: MouseEvent): boolean =>
                 plugin.taskLineContextMenuService.handleContextMenu(event),
             openQuickEditorForElement: (

@@ -240,6 +240,7 @@ export class TaskLineContextMenuService {
   }
 
   async openQuickEditorForElement(taskEl: HTMLElement, sourceEl: HTMLElement | null = taskEl): Promise<boolean> {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return false;
     const context = await this.resolveContext(taskEl, sourceEl);
     if (!context) {
       logger.flowWarn('TaskQuickEditor', 'open:unresolved', {
@@ -254,6 +255,7 @@ export class TaskLineContextMenuService {
   }
 
   handleContextMenu(evt: MouseEvent): boolean {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return false;
     const target = evt.target instanceof HTMLElement ? evt.target : null;
     if (this.isTaskInteractionBoundary(target) || this.isTaskPropertyTarget(target)) return false;
     const taskEl = this.resolveTaskElement(target);
@@ -280,6 +282,7 @@ export class TaskLineContextMenuService {
   }
 
   handleClick(evt: MouseEvent): boolean {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return false;
     const target = evt.target instanceof HTMLElement ? evt.target : null;
     if (this.isTaskInteractionBoundary(target)) return false;
     if (target?.matches('input.task-list-item-checkbox, input[type="checkbox"]')) return false;
@@ -1261,6 +1264,7 @@ export class TaskLineContextMenuService {
     anchor: HTMLElement,
     onChanged: () => void = () => {},
   ): void {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return;
     if (!anchor.isConnected) return;
     const menu = this.constrainTaskMenu(new Menu());
     const mappings = this.getCheckboxMappings();
@@ -2245,6 +2249,9 @@ export class TaskLineContextMenuService {
     cause?: { sourcePluginId?: string; surface?: string },
   ): Promise<GcmItemPropertyMutationResult> {
     const requested = refs.length;
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') {
+      return { ok: false, requested, updated: 0, skipped: requested, error: 'task-line-editing-retired' };
+    }
     if (requested === 0) return { ok: false, requested: 0, updated: 0, skipped: 0, error: 'no-items' };
     const property = (this.plugin.settings.properties || []).find((candidate) => (
       String(candidate.key || '').trim().toLowerCase() === String(mutation.key || '').trim().toLowerCase()
@@ -2307,6 +2314,7 @@ export class TaskLineContextMenuService {
     context: TaskLineContext,
     options: { includeTitle?: boolean; includeStatus?: boolean; includeNoteActions?: boolean; includeTags?: boolean } = {},
   ): void {
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return;
     this.constrainTaskMenu(menu);
     const includeTitle = options.includeTitle !== false;
     const includeStatus = options.includeStatus !== false;

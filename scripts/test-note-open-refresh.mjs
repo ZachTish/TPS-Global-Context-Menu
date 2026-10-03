@@ -120,8 +120,9 @@ test('turning off child-link rows clears mounted observers and decorations befor
   assert.equal(service.refreshTimers.size, 0);
 
   const settingsSource = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
-  const toggle = settingsSource.slice(settingsSource.indexOf("setName('Render child-note links as checkboxes')"));
-  assert.match(toggle, /enableLinkedSubitemCheckboxes = v;[\s\S]{0,260}ensureForAllMarkdownViews\(\);[\s\S]{0,150}refreshLivePreviewEditors\(\);/u);
+  const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(settingsSource, /Render child-note links as checkboxes/u);
+  assert.match(mainSource, /this\.settings\.enableLinkedSubitemCheckboxes = false/u);
 });
 
 test('metadata refreshes batch every changed file and parent without a second delayed render', () => {

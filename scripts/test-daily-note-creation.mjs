@@ -786,6 +786,26 @@ test('all active GCM Daily Note creation routes use the canonical creator', () =
   assert.doesNotMatch(createTaskSource, /getTodayDailyNoteIfExists/u);
 });
 
+test('native mode skips scheduled-item population before a Daily Note lookup or vault scan', async () => {
+  const { NoteOperationService } = await loadNoteOperationService();
+  const fileNamingSource = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
+  assert.match(fileNamingSource, /dataArchitectureMode !== 'native-records'\s*&& this\.plugin\.settings\.enableAutoPopulateDailyNotes/u);
+  const counts = { configuration: 0, inventory: 0, writes: 0 };
+  const plugin = {
+    settings: { dataArchitectureMode: 'native-records', enableAutoPopulateDailyNotes: true },
+    app: { vault: {
+      getMarkdownFiles: () => { counts.inventory += 1; return []; },
+      modify: async () => { counts.writes += 1; },
+    } },
+    fileNamingService: {
+      whenDailyNoteConfigurationReady: async () => { counts.configuration += 1; },
+    },
+  };
+  const service = new NoteOperationService(plugin);
+  await service.populateDailyNoteWithScheduledItems({ path: 'Daily/2026-10-03.md', extension: 'md' });
+  assert.deepEqual(counts, { configuration: 0, inventory: 0, writes: 0 });
+});
+
 test('Daily Note kind identity receives the title and filename sync exception', () => {
   const fileNamingSource = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
   const dailyNoteScheduleSource = readFileSync(new URL('../src/utils/daily-note-task-schedule.ts', import.meta.url), 'utf8');

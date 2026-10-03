@@ -53,6 +53,7 @@ export type {
 export interface EntityIndexPluginHost {
   readonly app: App;
   readonly filePropertiesService?: { isCompanionFile(file: TFile): boolean };
+  usesNativeRecordArchitecture?(): boolean;
   registerEvent(eventRef: EventRef): void;
 }
 
@@ -302,6 +303,7 @@ export class EntityIndexService {
   }
 
   async queryAsync(query: EntityIndexQuery = {}): Promise<readonly EntityIndexRecord[]> {
+    if (this.plugin.usesNativeRecordArchitecture?.()) return this.query(query);
     await this.ensureReady();
     return this.core.query(query);
   }
@@ -312,6 +314,7 @@ export class EntityIndexService {
    */
   async ensureReady(): Promise<void> {
     this.ensureBuilt();
+    if (this.plugin.usesNativeRecordArchitecture?.()) return;
     // A dimension reconfiguration can cancel a build while a caller awaits it.
     // Restart only for a genuinely newer epoch; source read failures are
     // bounded and surface explicitly instead of spinning or returning partial.
@@ -386,6 +389,7 @@ export class EntityIndexService {
       : this.core.getById(entityOrId?.id);
     if (!record) return null;
     if (record.entityType === 'note') return record;
+    if (this.plugin.usesNativeRecordArchitecture?.()) return null;
 
     const file = this.plugin.app.vault.getAbstractFileByPath(record.sourcePath);
     if (!this.isIndexableMarkdownFile(file)) return null;
