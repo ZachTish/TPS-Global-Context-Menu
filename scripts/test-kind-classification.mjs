@@ -93,6 +93,25 @@ test('a shared kind path and its own legacy tag can be decoded with an existing 
  const raw={kind:['transaction/financial'],tags:['old/investment'],type:'investment'};
  assert.deepEqual(decodeKind(mapped,raw),raw);
  assert.equal(decodeKind(mapped,raw,'investment').kind,'investment');
- assert.deepEqual(encodeKind(mapped,{kind:'investment',type:'investment',tags:['old/investment']},raw),raw);
+ assert.deepEqual(encodeKind(mapped,{kind:'investment',type:'investment',tags:['old/investment']},raw),
+  {kind:['transaction/financial'],type:'investment'});
  assert.throws(()=>decodeKind(mapped,raw,'purchase'),/Ambiguous/u);
+});
+test('a configured kind-list writer retires shared legacy tags without removing manual tags',()=>{
+ const mapped={
+  purchase:{primary:{kindList:{key:'recordKind',value:'transaction/money'}},aliases:[{tag:'legacy/purchase'}]},
+  investment:{primary:{kindList:{key:'recordKind',value:'transaction/money'}},aliases:[{tag:'legacy/investment'}]},
+  unrelated:{tag:'other/type'},
+  otherKind:{kindList:{key:'recordKind',value:'other/path'}},
+ };
+ const old={tags:['legacy/purchase','manual'],type:'investment'};
+ const input={kind:'investment',...old};
+ const written=encodeKind(mapped,input,old);
+ assert.deepEqual(written,{recordKind:['transaction/money'],tags:['manual'],type:'investment'});
+ assert.deepEqual(input,{kind:'investment',...old});
+ assert.equal(decodeKind(mapped,written,'investment').kind,'investment');
+ assert.deepEqual(encodeKind(mapped,{kind:'investment',recordKind:['transaction/money'],tags:['manual']},written),
+  {recordKind:['transaction/money'],tags:['manual']});
+ assert.throws(()=>encodeKind(mapped,{...input,tags:['legacy/purchase','other/type']},old),/Ambiguous/u);
+ assert.throws(()=>encodeKind(mapped,{...input,recordKind:['other/path']},old),/Ambiguous/u);
 });

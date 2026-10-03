@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 7.0.1 — Retire configured legacy tags on a kind-list write
+
+When a record writer uses a configured kind-list classification, GCM now removes obsolete tag aliases for record types that share that same configured list value. This includes an old transaction tag on an investment transaction whose independent Finance `type` identifies it. GCM keeps every unrelated manual tag and still rejects a tag or list value that classifies an unrelated record type. The cleanup runs only in the requested create/update write; reading or navigating a note never rewrites it, and the one-time vault migration remains separate. The mapping key, value, and retired aliases all come from GCM settings.
+
+This patch keeps the `frontmatterKinds` v2 API and all persisted settings unchanged. Minimum Obsidian remains 1.10.0. The Finance legacy investment read/update path also needs Finances 2.1.1. Focused tests cover shared aliases, manual-tag preservation, repeat writes, and conflicting classifications; the full suite and installed Test-vault verification are documented in [7.0.1 release notes](release-notes/7.0.1.md).
+
 ## 7.0.0 — Configurable list-valued kind classification
 
 GCM's **Rules & fields → Custom fields → Record classifications** remains the single place to configure how TPS record types are stored. Add any lowercase record-type name, then choose its kind-list property and nested path; no parent category or subtype path is built into the writer. The selected record editor supports a complete tag, a parent/subkind property pair, a single scalar property, or a list value. The parent field is free text. Previous forms can be added or removed as explicit read aliases. **Save writer** changes future writes without scanning notes; **Apply** retains the confirmed note-and-generated-Base migration with recovery. **Remove mapping** confirms before removing only the selected setting; it never edits notes, but those notes stop being identified by that record type. A per-type **Create new records** switch can keep an undecided legacy classification readable while refusing new writes. No default taxonomy, automatic note repair, startup scan, or note rename is introduced.

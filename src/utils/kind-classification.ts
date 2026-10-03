@@ -132,6 +132,29 @@ export function encodeKind(mappings: KindMappings | undefined, fields: Record<st
     const kept = [...new Set(values.filter(value => !legacyPaths.includes(value.toLowerCase()) || value.toLowerCase() === definition.kindList.value.toLowerCase()))];
     if (!kept.some(value => value.toLowerCase() === definition.kindList.value.toLowerCase())) kept.push(definition.kindList.value);
     next[definition.kindList.key] = kept;
+    // Retire only configured tag aliases for classifications that share this
+    // visible list value. Otherwise an old tag can contradict the caller's
+    // independent record type (for example two Finance transaction types).
+    const retiredTags = new Set(Object.keys(mappings || {}).flatMap(candidate => {
+      const candidatePrimary = kindClassification(mappings, candidate);
+      if (!candidatePrimary || !('kindList' in candidatePrimary)
+        || candidatePrimary.kindList.key.toLowerCase() !== definition.kindList.key.toLowerCase()
+        || candidatePrimary.kindList.value.toLowerCase() !== definition.kindList.value.toLowerCase()) return [];
+      return kindReadClassifications(mappings, candidate)
+        .filter((alias): alias is TagKindClassification => 'tag' in alias)
+        .map(alias => alias.tag.toLowerCase());
+    }));
+    if (retiredTags.size) {
+      const tagKey = Object.keys(next).find(key => key.toLowerCase() === 'tags');
+      if (tagKey) {
+        const tags = classificationTags(readClassificationProperty(next, 'tags'));
+        const retained = tags.filter(tag => !retiredTags.has(tag.toLowerCase()));
+        if (retained.length !== tags.length) {
+          if (retained.length) next[tagKey] = retained;
+          else delete next[tagKey];
+        }
+      }
+    }
   } else if ('scalar' in definition) {
     const current = readClassificationProperty(next, definition.scalar.key);
     if (current !== undefined && current !== definition.scalar.value) throw new Error(`Record classification property “${definition.scalar.key}” conflicts with an existing field.`);
