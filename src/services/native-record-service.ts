@@ -1,4 +1,4 @@
-import { kindClassification, kindReadClassifications, kindWriterEnabled, matchesKindClassification, classificationTags, hasClassificationTag } from '../utils/kind-classification';
+import { kindClassification, kindDiscriminator, kindReadClassifications, kindWriterEnabled, matchesKindClassification, classificationTags, hasClassificationTag } from '../utils/kind-classification';
 import { PropertyMigrationModal } from '../modals/property-migration-modal';
 import { readManagedNoteField, writeManagedNoteField } from '../utils/managed-note-fields';
 import {
@@ -275,6 +275,7 @@ export function normalizeNativeRecordStorageProfile(
       ...value.classification,
       ...('kindList' in value.classification ? { kindList: { ...value.classification.kindList } } : {}),
       ...('scalar' in value.classification ? { scalar: { ...value.classification.scalar } } : {}),
+      ...(value.classification.discriminator ? { discriminator: { ...value.classification.discriminator } } : {}),
     } } : {}),
     identityMode: value?.identityMode === 'tag' ? 'tag' : 'property',
     identityPropertyKey: normalizePropertyKey(
@@ -329,6 +330,7 @@ function validateReadableNativeRecordStorageProfile(profileValue: TpsNativeRecor
     ...(profile.classification && 'key' in profile.classification ? ['kind'] : []),
     ...(profile.classification && 'kindList' in profile.classification ? [profile.classification.kindList.key] : []),
     ...(profile.classification && 'scalar' in profile.classification ? [profile.classification.scalar.key] : []),
+    ...(profile.classification?.discriminator ? [profile.classification.discriminator.key] : []),
     profile.titlePropertyKey,
     profile.createdPropertyKey,
     profile.modifiedPropertyKey,
@@ -357,6 +359,7 @@ export function validateNativeRecordStorageProfile(profileValue: TpsNativeRecord
     ...(profile.classification && 'key' in profile.classification ? ['kind'] : []),
     ...(profile.classification && 'kindList' in profile.classification ? [profile.classification.kindList.key] : []),
     ...(profile.classification && 'scalar' in profile.classification ? [profile.classification.scalar.key] : []),
+    ...(profile.classification?.discriminator ? [profile.classification.discriminator.key] : []),
     profile.titlePropertyKey,
     profile.createdPropertyKey,
     profile.modifiedPropertyKey,
@@ -603,6 +606,8 @@ function inspectWithProfile(
     kind = 'calendar-event';
   } else if (profile.classification) {
     if (!matchesKindClassification(profile.classification, raw)) return null;
+    if (profile.classification.discriminator
+      && readValueCaseInsensitive(raw, profile.classification.discriminator.key) !== profile.classification.discriminator.value) return null;
     if ('key' in profile.classification && kind && kind !== profile.classification.value) return null;
     if ('scalar' in profile.classification && kind && kind !== profile.classification.scalar.value) return null;
     kind = profile.classification.recordKind;
@@ -649,6 +654,7 @@ function storagePropertyKeys(profile: TpsNativeRecordStorageProfile): string[] {
     ...(profile.classification && 'key' in profile.classification ? ['kind'] : []),
     ...(profile.classification && 'kindList' in profile.classification ? [profile.classification.kindList.key] : []),
     ...(profile.classification && 'scalar' in profile.classification ? [profile.classification.scalar.key] : []),
+    ...(profile.classification?.discriminator ? [profile.classification.discriminator.key] : []),
     profile.titlePropertyKey,
     profile.createdPropertyKey,
     profile.modifiedPropertyKey,
@@ -987,6 +993,9 @@ function applyEnvelopeToRawFrontmatter(
     } else {
       next.kind = profile.classification.parentKind;
       next[profile.kindPropertyKey] = profile.classification.value;
+    }
+    if (profile.classification.discriminator) {
+      next[profile.classification.discriminator.key] = profile.classification.discriminator.value;
     }
   } else if (profile.kindPropertyKey) next[profile.kindPropertyKey] = envelope.kind;
   next[profile.titlePropertyKey] = envelope.title;
@@ -1359,7 +1368,11 @@ export class NativeRecordService {
           if (definition && ('tag' in definition || 'kindList' in definition || 'scalar' in definition)) {
             const key = 'kindList' in definition ? definition.kindList.key : 'scalar' in definition ? definition.scalar.key : '';
             if (key) kindKeys[kind] = key;
-            byKind.set(kind, { ...write, kindPropertyKey: '', classification: { ...definition, recordKind: kind } });
+            const discriminator = 'kindList' in definition ? kindDiscriminator(source, kind) : null;
+            byKind.set(kind, { ...write, kindPropertyKey: '', classification: {
+              ...definition, recordKind: kind,
+              ...(discriminator ? { discriminator } : {}),
+            } });
           }
           const propertyDefinition = definition && 'key' in definition ? definition : null;
           const key = typeof value === 'string' ? value : propertyDefinition?.key;
@@ -3075,8 +3088,14 @@ export class NativeRecordService {
     const title = String(properties.title || '').replace(/\s+/gu, ' ').trim();
     if (!title) throw new Error('TPS native records require a title.');
 
+    const writeProfile = this.getStorageProfile(kind);
+    const discriminator = writeProfile.classification?.discriminator;
     const protectedKeys = new Set(
-      [...storageKeys(this.getStorageProfile()), ...(calendarTemplateRecord ? [] : Object.values(this.getKindPropertyKeys()))].map((key) => key.toLocaleLowerCase()),
+      [
+        ...storageKeys(this.getStorageProfile()),
+        ...(calendarTemplateRecord ? [] : Object.values(this.getKindPropertyKeys())),
+        ...(discriminator ? [discriminator.key] : []),
+      ].map((key) => key.toLocaleLowerCase()),
     );
     const seenPayloadKeys = new Set<string>();
     for (const key of Object.keys(properties)) {
@@ -3093,6 +3112,8 @@ export class NativeRecordService {
         }
         continue;
       }
+      if (discriminator && folded === discriminator.key.toLocaleLowerCase()
+        && properties[key] === discriminator.value) continue;
       if (CANONICAL_ENVELOPE_KEYS.has(folded) || protectedKeys.has(folded)) {
         throw new Error(`TPS native record property collides with system storage: ${key}`);
       }
@@ -3108,7 +3129,6 @@ export class NativeRecordService {
       createdDate: timestamp,
       modifiedDate: timestamp,
     };
-    const writeProfile = this.getStorageProfile(kind);
     const readableProfiles = this.getIdentityEvidenceProfiles();
     const preliminaryFrontmatter = applyEnvelopeToRawFrontmatter(
       userProperties,

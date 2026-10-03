@@ -1,4 +1,4 @@
-import { encodeKind, decodeKind, kindClassification, kindReadClassifications, kindWriterEnabled, matchesKind } from './utils/kind-classification';
+import { encodeKind, decodeKind, kindClassification, kindDiscriminator, kindReadClassifications, kindWriterEnabled, matchesKind } from './utils/kind-classification';
 import type { CreatedNoteRequest } from './services/note-opening-service';
 import { Notice, normalizePath, parseYaml, TFile, type WorkspaceLeaf } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
@@ -1011,6 +1011,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             snapshot: () => Object.fromEntries(Object.keys(plugin.settings.nativeRecordKindPropertyKeys || {}).map(kind => [kind, {
                 primary: kindClassification(plugin.settings.nativeRecordKindPropertyKeys, kind),
                 aliases: kindReadClassifications(plugin.settings.nativeRecordKindPropertyKeys, kind).slice(1),
+                discriminator: kindDiscriminator(plugin.settings.nativeRecordKindPropertyKeys, kind),
                 writerEnabled: kindWriterEnabled(plugin.settings.nativeRecordKindPropertyKeys, kind),
             }])),
         },

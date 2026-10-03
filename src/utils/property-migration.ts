@@ -131,6 +131,12 @@ export function updateMigrationReferences(settings: any, change: PropertyMigrati
   }
   const definitions = (Object.values(kindMappings) as any[]).flatMap(entry =>
     entry && typeof entry === 'object' ? 'primary' in entry ? [entry.primary, ...(Array.isArray(entry.aliases) ? entry.aliases : [])] : [entry] : []);
+  for (const entry of Object.values(kindMappings) as any[]) {
+    const discriminator = entry && typeof entry === 'object' && 'primary' in entry ? entry.discriminator : null;
+    if (!discriminator || typeof discriminator.key !== 'string') continue;
+    if (change.kind === 'key' && fold(discriminator.key) === fold(change.from)) discriminator.key = change.to;
+    if (change.kind === 'value' && fold(discriminator.key) === fold(change.key) && discriminator.value === change.from) discriminator.value = change.to;
+  }
   for (const definition of definitions) {
     if (!definition || typeof definition !== 'object') continue;
     if (change.kind === 'key') {

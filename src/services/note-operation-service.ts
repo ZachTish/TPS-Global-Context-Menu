@@ -2,7 +2,7 @@ import { App, TFile, Notice, FuzzySuggestModal, Modal, parseYaml, stringifyYaml,
 import type TPSGlobalContextMenuPlugin from "../main";
 import * as logger from "../logger";
 import { mergeNormalizedTags, normalizeTagValue } from "../utils/tag-utils";
-import { getDailyNoteScheduledValueForIsoDate, getIsoDateFromScheduledValue, hasAuthoritativeNonDailyNoteIdentity, normalizeExpectedDailyNotePath, parseDailyNoteFileDate, reconcileExistingDailyNoteForIsoDate } from "../utils/daily-note-task-schedule";
+import { getDailyNoteScheduledPropertyKey, getDailyNoteScheduledValueForIsoDate, getIsoDateFromScheduledValue, hasAuthoritativeNonDailyNoteIdentity, normalizeExpectedDailyNotePath, parseDailyNoteFileDate, reconcileExistingDailyNoteForIsoDate } from "../utils/daily-note-task-schedule";
 import type { CustomProperty } from "../types";
 import { propertyUsesEntityOptions } from "../utils/property-option-source";
 import { applyCoreDailyNoteTemplateVariables, ensureDailyNoteTitleFallback } from "../utils/daily-note-creation";
@@ -12,6 +12,7 @@ import {
     stripTemplateProtectionTagFromSource,
 } from "../utils/template-protection";
 import { isFilePropertiesCompanionRecord } from "./file-properties-service";
+import { encodeKind, kindClassification } from "../utils/kind-classification";
 
 type HeaderTarget = {
     line: number;
@@ -1050,12 +1051,23 @@ export class NoteOperationService {
             }
         }
 
-        if (!configuredTemplate) {
-            content = `---\ntitle: ${JSON.stringify(titleValue)}\ntags: [dailynote]\n---\n\n`;
-        } else if (hasFrontmatter) {
-            // The template's title and body remain authoritative.
-        } else {
-            content = `---\ntitle: ${JSON.stringify(titleValue)}\ntags: [dailynote]\n---\n\n${content}`;
+        // A template with frontmatter owns its authored title and classification.
+        if (!configuredTemplate || !hasFrontmatter) {
+            let fields: Record<string, unknown> = { title: titleValue, tags: ['dailynote'] };
+            try {
+                const mappings = this.plugin.settings.nativeRecordKindPropertyKeys;
+                if (kindClassification(mappings, 'dailynote')) {
+                    fields = encodeKind(mappings, { kind: 'dailynote', title: titleValue });
+                }
+            } catch (error) {
+                logger.warn('Configured Daily Note classification cannot be written', { path, error });
+                new Notice('TPS GCM: Configure a writable Daily Note classification before creating this note.');
+                return null;
+            }
+            const frontmatter = Object.entries(fields)
+                .map(([key, value]) => `${key}: ${JSON.stringify(value)}`)
+                .join('\n');
+            content = `---\n${frontmatter}\n---\n\n${content}`;
         }
         content = stripTemplateProtectionTagFromSource(content, this.plugin.settings);
 
@@ -1267,15 +1279,17 @@ export class NoteOperationService {
     private async normalizeCreatedDailyNote(file: TFile, titleValue: string, folder: string, isoDate: string | null = getIsoDateFromScheduledValue(titleValue)): Promise<void> {
         const targetFolder = String(folder || file.parent?.path || '/').trim() || '/';
         const scheduledValue = isoDate ? getDailyNoteScheduledValueForIsoDate(isoDate) : `${titleValue} 00:00:00`;
+        const scheduledKey = getDailyNoteScheduledPropertyKey(this.plugin.settings);
 
         await this.normalizeLeadingWhitespaceBeforeFrontmatter(file);
 
         try {
             await this.plugin.frontmatterMutationService.process(file, (fm: any) => {
                 ensureDailyNoteTitleFallback(fm, titleValue);
-                const scheduled = String(fm?.scheduled ?? '').trim();
+                const authoredKey = Object.keys(fm).find((key) => key.toLowerCase() === scheduledKey.toLowerCase()) || scheduledKey;
+                const scheduled = String(fm?.[authoredKey] ?? '').trim();
                 if (!scheduled || /<%[\s\S]*%>/.test(scheduled) || /\{\{[\s\S]*\}\}/.test(scheduled)) {
-                    fm.scheduled = scheduledValue;
+                    fm[authoredKey] = scheduledValue;
                 }
                 if (this.plugin.settings.autoSaveFolderPath) {
                     fm.folderPath = targetFolder;

@@ -4,14 +4,14 @@ import { Notice, TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { PropertyMigrationModal } from '../modals/property-migration-modal';
 import { migrateNoteProperties, PropertyMigration, SettingsPatch, settingsPatches, updateMigrationReferences, validateMigration, validateMigrationSettings } from '../utils/property-migration';
-import { migrateNoteClassification, validateKindClassificationMigration, type KindClassificationMigration } from '../utils/kind-classification-migration';
-import { kindClassification, kindReadClassifications, normalizeKindClassification, type KindClassification, type KindMappings } from '../utils/kind-classification';
+import { migrateNoteClassification, migrateNoteDiscriminator, validateKindClassificationMigration, type KindClassificationMigration, type KindDiscriminatorMigration } from '../utils/kind-classification-migration';
+import { kindClassification, kindDiscriminator, kindReadClassifications, normalizeKindClassification, type KindClassification, type KindDiscriminator, type KindMappings } from '../utils/kind-classification';
 import * as logger from '../logger';
 
 interface NoteChange { path: string; before: string; after: string }
 interface MigrationPlan { notes: NoteChange[]; blocked: string[]; financeSettings?: string }
 interface RecoveryRecord { version: 1; notes: NoteChange[]; patches: SettingsPatch[]; plugins?: PluginSettingsPatch[] }
-type MigrationRequest = PropertyMigration | KindClassificationMigration;
+type MigrationRequest = PropertyMigration | KindClassificationMigration | KindDiscriminatorMigration;
 const financeRecordKinds = new Set(['account', 'finance-transaction', 'investment-transaction', 'holding', 'ledger', 'finance-rule', 'finance-budget']);
 const clone = <T>(value: T): T => value === undefined ? value : JSON.parse(JSON.stringify(value));
 const equal = (a: unknown, b: unknown): boolean => JSON.stringify(a) === JSON.stringify(b);
@@ -52,7 +52,9 @@ export class PropertyMigrationService {
           if (cancelled) return;
           const after = change.kind === 'classification'
             ? migrateNoteClassification(before, change, this.plugin.settings.nativeRecordKindPropertyKeys)
-            : migrateNoteProperties(before, change);
+            : change.kind === 'discriminator'
+              ? migrateNoteDiscriminator(before, change, this.plugin.settings.nativeRecordKindPropertyKeys)
+              : migrateNoteProperties(before, change);
           if (after !== before) notes.push({ path: file.path, before, after });
         } catch (error) { blocked.push(`${file.path}: ${error instanceof Error ? error.message : String(error)}`); }
         completed++;
@@ -144,16 +146,33 @@ export class PropertyMigrationService {
     const aliases = previous.filter(definition => JSON.stringify(definition).toLowerCase() !== JSON.stringify(primary).toLowerCase());
     const entry = mappings[change.recordKind];
     const writeDisabled = Boolean(entry && typeof entry === 'object' && 'primary' in entry && entry.writeDisabled);
-    return { primary, aliases, ...(writeDisabled ? { writeDisabled: true } : {}) };
+    const discriminator = 'kindList' in primary ? kindDiscriminator(mappings, change.recordKind) : null;
+    const next = { primary, aliases, ...(discriminator ? { discriminator } : {}), ...(writeDisabled ? { writeDisabled: true } : {}) };
+    if (discriminator) kindDiscriminator({ ...mappings, [change.recordKind]: next }, change.recordKind);
+    return next;
   }
 
   private assertUniqueClassifications(mappings: KindMappings): void {
     const used = new Map<string, string>();
+    const sharedLists = new Map<string, Map<string, string>>();
     for (const kind of Object.keys(mappings)) for (const definition of kindReadClassifications(mappings, kind)) {
       const key = JSON.stringify(definition).toLowerCase();
       const prior = used.get(key);
       if (prior && prior !== kind && !('kindList' in definition)) throw new Error(`This classification is already assigned to ${prior}.`);
       used.set(key, kind);
+      if (!('kindList' in definition) || JSON.stringify(definition).toLowerCase()
+        !== JSON.stringify(kindClassification(mappings, kind)).toLowerCase()) continue;
+      const discriminator = kindDiscriminator(mappings, kind);
+      if (!discriminator) continue;
+      const listKey = `${definition.kindList.key.toLowerCase()}\u0000${definition.kindList.value.toLowerCase()}`;
+      const identities = sharedLists.get(listKey) || new Map<string, string>();
+      const identity = `${discriminator.key.toLowerCase()}\u0000${discriminator.value}`;
+      const priorKind = identities.get(identity);
+      if (priorKind && priorKind !== kind) {
+        throw new Error(`Shared kind-list path needs distinct identity values; check ${priorKind} and ${kind}.`);
+      }
+      identities.set(identity, kind);
+      sharedLists.set(listKey, identities);
     }
   }
 
@@ -178,7 +197,9 @@ export class PropertyMigrationService {
     const normalized = aliases.map(alias => normalizeKindClassification(alias, recordKind));
     const entry = before[recordKind];
     const writeDisabled = Boolean(entry && typeof entry === 'object' && 'primary' in entry && entry.writeDisabled);
-    const next: KindMappings = { ...before, [recordKind]: { primary, aliases: normalized, ...(writeDisabled ? { writeDisabled: true } : {}) } };
+    const discriminator = kindDiscriminator(before, recordKind);
+    const next: KindMappings = { ...before, [recordKind]: { primary, aliases: normalized,
+      ...(discriminator ? { discriminator } : {}), ...(writeDisabled ? { writeDisabled: true } : {}) } };
     this.assertUniqueClassifications(next);
     this.plugin.settings.nativeRecordKindPropertyKeys = next;
     try { await this.plugin.saveSettings(); }
@@ -218,15 +239,49 @@ export class PropertyMigrationService {
     if (this.busy || this.recoveryPending || this.disposed) throw new Error('Finish the current migration before changing record classifications.');
     const before = this.plugin.settings.nativeRecordKindPropertyKeys;
     if (JSON.stringify(kindClassification(before, recordKind)) !== JSON.stringify(expectedPrimary)) throw new Error('The record mapping changed. Reopen settings.');
+    const discriminator = kindDiscriminator(before, recordKind);
     const next = { ...before, [recordKind]: {
       primary: expectedPrimary,
       aliases: kindReadClassifications(before, recordKind).slice(1),
+      ...(discriminator ? { discriminator } : {}),
       ...(!enabled ? { writeDisabled: true } : {}),
     } };
     this.plugin.settings.nativeRecordKindPropertyKeys = next;
     try { await this.plugin.saveSettings(); }
     catch (error) { this.plugin.settings.nativeRecordKindPropertyKeys = before; throw error; }
     this.plugin.nativeRecordService.refreshConfiguration();
+  }
+
+  async configureClassificationDiscriminator(
+    recordKind: string,
+    discriminator: KindDiscriminator | null,
+    expectedPrimary: KindClassification,
+  ): Promise<boolean> {
+    if (this.busy || this.recoveryPending || this.disposed) throw new Error('Finish the current migration before changing record classifications.');
+    const before = this.plugin.settings.nativeRecordKindPropertyKeys;
+    const primary = kindClassification(before, recordKind);
+    if (!primary || JSON.stringify(primary) !== JSON.stringify(expectedPrimary)) throw new Error('The record mapping changed. Reopen settings.');
+    if (discriminator && !('kindList' in primary)) throw new Error('An additional identity field requires a kind-list mapping.');
+    const entry = before[recordKind];
+    const oldDiscriminator = kindDiscriminator(before, recordKind);
+    if (equal(oldDiscriminator, discriminator)) return false;
+    const writeDisabled = Boolean(entry && typeof entry === 'object' && 'primary' in entry && entry.writeDisabled);
+    const next: KindMappings = { ...before, [recordKind]: { primary,
+      aliases: kindReadClassifications(before, recordKind).slice(1),
+      ...(discriminator ? { discriminator } : {}),
+      ...(writeDisabled ? { writeDisabled: true } : {}),
+    } };
+    if (discriminator) kindDiscriminator(next, recordKind);
+    this.assertUniqueClassifications(next);
+    if (!discriminator && Object.keys(next).some(kind => kind !== recordKind && kindReadClassifications(next, kind)
+      .some(definition => 'kindList' in definition && 'kindList' in primary
+        && definition.kindList.key.toLowerCase() === primary.kindList.key.toLowerCase()
+        && definition.kindList.value.toLowerCase() === primary.kindList.value.toLowerCase()))) {
+      throw new Error('A shared kind-list path needs an identity property for every record type.');
+    }
+    return this.request({ kind: 'discriminator', recordKind, primary, from: oldDiscriminator, to: discriminator }, settings => {
+      settings.nativeRecordKindPropertyKeys = next;
+    });
   }
   async request(change: MigrationRequest, configure: (settings: typeof this.plugin.settings) => void): Promise<boolean> {
     if (this.disposed) throw new Error('GCM was reloaded. Reopen its settings before migrating.');
@@ -237,17 +292,23 @@ export class PropertyMigrationService {
       if (field) change = { ...change, previousKeys: [field, ...(this.plugin.settings.managedNoteFieldAliases?.[field] || [])] };
     }
     if (change.kind === 'classification') validateKindClassificationMigration(change, this.plugin.settings.nativeRecordKindPropertyKeys);
-    else { validateMigration(change); validateMigrationSettings(this.plugin.settings, change); }
+    else if (change.kind === 'discriminator') {
+      if (!equal(kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, change.recordKind), change.primary)
+        || !equal(kindDiscriminator(this.plugin.settings.nativeRecordKindPropertyKeys, change.recordKind), change.from)) {
+        throw new Error('The record mapping changed. Reopen settings.');
+      }
+    } else { validateMigration(change); validateMigrationSettings(this.plugin.settings, change); }
     this.busy = true;
     try {
       const beforeSettings = clone(this.plugin.settings);
       const afterSettings = clone(beforeSettings);
-      if (change.kind !== 'classification') updateMigrationReferences(afterSettings, change);
-      else if ('tag' in change.from && 'tag' in change.to) updateMigrationReferences(afterSettings,
+      if (change.kind === 'key' || change.kind === 'value') updateMigrationReferences(afterSettings, change);
+      else if (change.kind === 'classification' && 'tag' in change.from && 'tag' in change.to) updateMigrationReferences(afterSettings,
         { kind: 'value', key: 'tags', from: change.from.tag, to: change.to.tag });
       configure(afterSettings);
+      if (change.kind === 'key' || change.kind === 'value') this.assertUniqueClassifications(afterSettings.nativeRecordKindPropertyKeys || {});
       const patches = settingsPatches(beforeSettings, afterSettings);
-      const plugins = (change.kind === 'classification' || (change.kind === 'key' && change.recordKinds) ? [] : Object.keys(PLUGIN_MAPPING_FIELDS)).flatMap(pluginId => {
+      const plugins = (change.kind === 'classification' || change.kind === 'discriminator' || (change.kind === 'key' && change.recordKinds) ? [] : Object.keys(PLUGIN_MAPPING_FIELDS)).flatMap(pluginId => {
         const owner = this.consumer(pluginId);
         if (!owner?.settings) return [];
         const patches = pluginMappingPatches(pluginId, owner.settings, change as PropertyMigration);
@@ -258,9 +319,12 @@ export class PropertyMigrationService {
       if (this.disposed) throw new Error('GCM was reloaded. Apply again to review a fresh preview.');
       const scope = change.kind === 'key' && change.recordKinds ? 'Only logged Health entries and workout sessions are included; reusable templates and other record types keep their keys.' : 'Includes archived notes and templates.';
       const name = change.kind === 'classification' ? `Change ${change.recordKind} from ${'tag' in change.from ? 'tag' : 'property'} to ${'tag' in change.to ? 'tag' : 'property'}`
-        : change.kind === 'key' ? `Rename property “${change.from}” → “${change.to}”` : `Rename ${change.key} value “${change.from}” → “${change.to}”`;
+        : change.kind === 'discriminator' ? `Change ${change.recordKind} shared-path identity`
+          : change.kind === 'key' ? `Rename property “${change.from}” → “${change.to}”` : `Rename ${change.key} value “${change.from}” → “${change.to}”`;
       const explanation = change.kind === 'classification'
         ? `${plan.notes.length} notes and generated Bases will change. ${scope} This converts the exact record classification in frontmatter and preserves note bodies and inline fields. Customized Base filters and custom rules should be reviewed separately. A temporary local recovery copy is kept until completion.`
+        : change.kind === 'discriminator'
+          ? `${plan.notes.length} Markdown notes will change. ${scope} This changes only the selected record type’s identity field in frontmatter and preserves note bodies. Notes whose shared path cannot identify one record type block the change. A temporary local recovery copy is kept until completion.`
         : `${plan.notes.length} Markdown notes will change. ${scope} This updates frontmatter only. Exact string values and list items match; note bodies, inline fields, and Base formulas are not rewritten. Matching mappings in enabled TPS plugins update together; disabled plugins must be enabled before migrating their fields. ${patches.length} GCM settings groups and ${plugins.length} TPS plugins will update. A temporary local recovery copy is kept until completion.`;
       const confirmed = await PropertyMigrationModal.confirm(this.plugin.app, name,
         explanation,

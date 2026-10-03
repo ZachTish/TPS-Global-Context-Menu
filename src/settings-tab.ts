@@ -1,4 +1,4 @@
-import { kindClassification, kindReadClassifications, kindWriterEnabled, normalizeClassificationTag, normalizeKindClassification, type KindClassification } from './utils/kind-classification';
+import { kindClassification, kindDiscriminator, kindReadClassifications, kindWriterEnabled, normalizeClassificationTag, normalizeKindClassification, type KindClassification } from './utils/kind-classification';
 import { renderNavigatorPropertyVisibility } from './integrations/notebook-navigator-property-visibility';
 import { MIGRATABLE_KEY_SETTINGS, PropertyMigration } from './utils/property-migration';
 import { PropertyMigrationModal } from './modals/property-migration-modal';
@@ -1257,6 +1257,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         let draftListValue = 'kindList' in current ? current.kindList.value : '';
         let draftScalarKey = 'scalar' in current ? current.scalar.key : this.plugin.settings.nativeRecordKindPropertyKey;
         let draftScalarValue = 'scalar' in current ? current.scalar.value : '';
+        let draftDiscriminatorKey = kindDiscriminator(this.plugin.settings.nativeRecordKindPropertyKeys, selected)?.key || '';
+        let draftDiscriminatorValue = kindDiscriminator(this.plugin.settings.nativeRecordKindPropertyKeys, selected)?.value || '';
         let modeInput: import('obsidian').DropdownComponent;
         let tagInput: import('obsidian').TextComponent;
         let parentInput: import('obsidian').TextComponent;
@@ -1266,13 +1268,15 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         let listValueInput: import('obsidian').TextComponent;
         let scalarKeyInput: import('obsidian').TextComponent;
         let scalarValueInput: import('obsidian').TextComponent;
+        let discriminatorKeyInput: import('obsidian').TextComponent;
+        let discriminatorValueInput: import('obsidian').TextComponent;
         let writerToggle: import('obsidian').ToggleComponent;
-        let tagSetting: Setting, parentSetting: Setting, keySetting: Setting, valueSetting: Setting, listKeySetting: Setting, listValueSetting: Setting, scalarKeySetting: Setting, scalarValueSetting: Setting;
+        let tagSetting: Setting, parentSetting: Setting, keySetting: Setting, valueSetting: Setting, listKeySetting: Setting, listValueSetting: Setting, scalarKeySetting: Setting, scalarValueSetting: Setting, discriminatorKeySetting: Setting, discriminatorValueSetting: Setting, discriminatorSaveSetting: Setting;
         let renderAliases = () => {};
         const showMode = () => {
           tagSetting.settingEl.style.display = mode === 'tag' ? '' : 'none';
           for (const setting of [parentSetting, keySetting, valueSetting]) setting.settingEl.style.display = mode === 'property' ? '' : 'none';
-          for (const setting of [listKeySetting, listValueSetting]) setting.settingEl.style.display = mode === 'kind-list' ? '' : 'none';
+          for (const setting of [listKeySetting, listValueSetting, discriminatorKeySetting, discriminatorValueSetting, discriminatorSaveSetting]) setting.settingEl.style.display = mode === 'kind-list' ? '' : 'none';
           for (const setting of [scalarKeySetting, scalarValueSetting]) setting.settingEl.style.display = mode === 'scalar' ? '' : 'none';
         };
         new Setting(propertyConfig).setName('Record type').addDropdown(dropdown => {
@@ -1291,9 +1295,13 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             draftListValue = 'kindList' in current ? current.kindList.value : '';
             draftScalarKey = 'scalar' in current ? current.scalar.key : this.plugin.settings.nativeRecordKindPropertyKey;
             draftScalarValue = 'scalar' in current ? current.scalar.value : '';
+            draftDiscriminatorKey = kindDiscriminator(this.plugin.settings.nativeRecordKindPropertyKeys, selected)?.key || '';
+            draftDiscriminatorValue = kindDiscriminator(this.plugin.settings.nativeRecordKindPropertyKeys, selected)?.value || '';
             modeInput.setValue(mode); tagInput.setValue(draftTag); parentInput.setValue(draftParent);
             keyInput.setValue(draftKey); valueInput.setValue(draftValue); listKeyInput.setValue(draftListKey);
-            listValueInput.setValue(draftListValue); scalarKeyInput.setValue(draftScalarKey); scalarValueInput.setValue(draftScalarValue); showMode(); renderAliases();
+            listValueInput.setValue(draftListValue); scalarKeyInput.setValue(draftScalarKey); scalarValueInput.setValue(draftScalarValue);
+            discriminatorKeyInput.setValue(draftDiscriminatorKey); discriminatorValueInput.setValue(draftDiscriminatorValue);
+            showMode(); renderAliases();
             writerToggle.setValue(kindWriterEnabled(this.plugin.settings.nativeRecordKindPropertyKeys, selected));
           });
         });
@@ -1336,6 +1344,28 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           scalarValueInput = text; text.setValue(draftScalarValue).onChange(value => { draftScalarValue = value.trim(); });
           text.inputEl.setAttribute('aria-label', 'Single-value property value');
         });
+        discriminatorKeySetting = new Setting(propertyConfig).setName('Shared-path identity property')
+          .setDesc('When record types use the same kind-list path, choose an additional property that identifies this internal type.')
+          .addText(text => {
+            discriminatorKeyInput = text; text.setValue(draftDiscriminatorKey).onChange(value => { draftDiscriminatorKey = value.trim(); });
+            text.inputEl.setAttribute('aria-label', 'Shared-path identity property key');
+          });
+        discriminatorValueSetting = new Setting(propertyConfig).setName('Shared-path identity value').addText(text => {
+          discriminatorValueInput = text; text.setValue(draftDiscriminatorValue).onChange(value => { draftDiscriminatorValue = value.trim(); });
+          text.inputEl.setAttribute('aria-label', 'Shared-path identity property value');
+        });
+        discriminatorSaveSetting = new Setting(propertyConfig).setName('Save shared-path identity')
+          .setDesc('Review affected notes, then update their frontmatter and this mapping together. Ambiguous records block the change.')
+          .addButton(button => button.setButtonText('Save identity').onClick(async () => {
+            button.setDisabled(true);
+            try {
+              await this.plugin.propertyMigrationService.configureClassificationDiscriminator(selected,
+                !draftDiscriminatorKey && !draftDiscriminatorValue ? null
+                  : { key: draftDiscriminatorKey, value: draftDiscriminatorValue }, current);
+              this.display();
+            } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
+            finally { button.setDisabled(false); }
+          }));
         showMode();
         const draftDefinition = (): KindClassification => normalizeKindClassification(
           mode === 'tag' ? { tag: normalizeClassificationTag(draftTag) }

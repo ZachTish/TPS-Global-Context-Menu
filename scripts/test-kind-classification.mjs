@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 const bundle=await build({entryPoints:['src/utils/kind-classification.ts'],bundle:true,platform:'node',format:'esm',write:false});
-const {encodeKind,decodeKind,normalizeClassificationTag,kindReadClassifications,matchesKind}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+const {encodeKind,decodeKind,kindDiscriminator,normalizeClassificationTag,kindReadClassifications,matchesKind}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
 const mappings={'food-entry':{tag:'kind/food/transaction'},food:{tag:'library/Food'}};
 test('full tags encode/decode without a required depth and preserve unrelated fields',()=>{
  const before={kind:'food-entry',title:'Lunch',tags:['personal'],calories:100};
@@ -114,4 +114,50 @@ test('a configured kind-list writer retires shared legacy tags without removing 
   {recordKind:['transaction/money'],tags:['manual']});
  assert.throws(()=>encodeKind(mapped,{...input,tags:['legacy/purchase','other/type']},old),/Ambiguous/u);
  assert.throws(()=>encodeKind(mapped,{...input,recordKind:['other/path']},old),/Ambiguous/u);
+});
+
+test('configured discriminator resolves shared list paths and is written without a built-in key or value',()=>{
+ const mapped={
+  purchase:{primary:{kindList:{key:'category',value:'transaction/money'}},aliases:[{tag:'old/purchase'}],discriminator:{key:'recordType',value:'ordinary'}},
+  investment:{primary:{kindList:{key:'category',value:'transaction/money'}},aliases:[{tag:'old/investment'}],discriminator:{key:'recordType',value:'investment'}},
+ };
+ const investment={category:['transaction/money'],recordType:'investment',amount:20};
+ assert.deepEqual(kindDiscriminator(mapped,'investment'),{key:'recordType',value:'investment'});
+ assert.equal(decodeKind(mapped,investment).kind,'investment');
+ assert.equal(decodeKind(mapped,{...investment,recordType:'ordinary'}).kind,'purchase');
+ assert.deepEqual(decodeKind(mapped,{category:['transaction/money'],amount:20}),{category:['transaction/money'],amount:20});
+ assert.equal(matchesKind(mapped,investment,'investment'),true);
+ assert.equal(matchesKind(mapped,investment,'purchase'),false);
+ assert.equal(matchesKind(mapped,{category:['transaction/money']},'investment'),false);
+ assert.equal(matchesKind(mapped,{tags:['old/investment']},'investment'),true);
+ assert.throws(()=>decodeKind({investment:mapped.investment},{category:['transaction/money']}),/discriminator/u);
+ assert.deepEqual(encodeKind(mapped,{kind:'investment',amount:20}),investment);
+ assert.throws(()=>encodeKind(mapped,{kind:'investment',recordType:'ordinary',amount:20}),/discriminator property/u);
+ assert.throws(()=>encodeKind(mapped,{kind:'investment',amount:20},{recordType:'ordinary'}),/discriminator property/u);
+ assert.throws(()=>decodeKind(mapped,investment,'purchase'),/Ambiguous|discriminator/u);
+ assert.equal(decodeKind(mapped,{tags:['old/investment'],amount:20}).kind,'investment','a unique legacy alias stays readable');
+ assert.throws(()=>kindDiscriminator({investment:{...mapped.investment,discriminator:{key:'category',value:'x'}}},'investment'),/Invalid shared kind discriminator/u);
+ assert.throws(()=>kindDiscriminator({investment:{...mapped.investment,discriminator:{key:'recordType',value:'  '}}},'investment'),/Invalid shared kind discriminator/u);
+});
+
+test('the planned shared-path configuration encodes and decodes every record type without legacy tags',()=>{
+ const groups={
+  'transaction/financial':{ 'finance-transaction':['type','transaction'], 'investment-transaction':['type','investmentTransaction'] },
+  'entity/food':{food:['tpsRecordType','food'],meal:['tpsRecordType','meal'],recipe:['tpsRecordType','recipe']},
+  'transaction/macros':{'food-entry':['tpsRecordType','food-entry'],'meal-entry':['tpsRecordType','meal-entry']},
+  'transaction/workout':{'workout-session':['tpsRecordType','workout-session'],'workout-exercise':['tpsRecordType','workout-exercise']},
+  'task/project':{project:['tpsRecordType','project'],collection:['tpsRecordType','collection']},
+ };
+ const configured=Object.fromEntries(Object.entries(groups).flatMap(([path,kinds])=>Object.entries(kinds).map(([kind,[key,value]])=>[
+  kind,{primary:{kindList:{key:'kind',value:path}},aliases:[],discriminator:{key,value}},
+ ])));
+ for(const [path,kinds] of Object.entries(groups))for(const [kind,[key,value]] of Object.entries(kinds)){
+  const raw=encodeKind(configured,{kind,title:kind});
+  assert.deepEqual(raw.kind,[path]);
+  assert.equal(raw[key],value);
+  assert.equal(Object.hasOwn(raw,'tags'),false);
+  assert.equal(decodeKind(configured,raw).kind,kind);
+  assert.equal(matchesKind(configured,raw,kind),true);
+  for(const other of Object.keys(kinds).filter(candidate=>candidate!==kind))assert.equal(matchesKind(configured,raw,other),false);
+ }
 });

@@ -4028,6 +4028,105 @@ test('configured kind list creates native records and reads explicit legacy tag/
  assert.equal(contents.get(conflicting),before,'an occupied non-legacy scalar is never replaced by a list');
 });
 
+test('configured shared kind-list identity keeps native record subtypes distinct', async () => {
+ const {service,plugin,contents}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={
+  'finance-transaction':{
+   primary:{kindList:{key:'category',value:'transaction/money'}},
+   aliases:[{tag:'legacy/finance'}],
+   discriminator:{key:'recordType',value:'ordinary'},
+  },
+  'investment-transaction':{
+   primary:{kindList:{key:'category',value:'transaction/money'}},
+   aliases:[{tag:'legacy/investment'}],
+   discriminator:{key:'recordType',value:'investment'},
+  },
+ };
+ const ordinary={tpsId:'ordinary-one',title:'Coffee',category:['transaction/money'],recordType:'ordinary'};
+ const investment={tpsId:'investment-one',title:'Shares',category:['transaction/money'],recordType:'investment'};
+ assert.equal(service.inspect(ordinary)?.kind,'finance-transaction');
+ assert.equal(service.inspect(investment)?.kind,'investment-transaction');
+ assert.equal(service.inspect({...ordinary,recordType:'other'}),null);
+ assert.equal(service.inspect({tpsId:'unknown',title:'Unknown',category:['transaction/money']}),null);
+ assert.equal(service.inspect({tpsId:'old',title:'Old',tags:['legacy/investment']})?.kind,'investment-transaction');
+ const created=await service.create('investment-transaction',{title:'New shares'},{id:'investment-new'});
+ const persisted=parseNativeRecordDocument(contents.get(created.file)).frontmatter;
+ assert.deepEqual(persisted.category,['transaction/money']);
+ assert.equal(persisted.recordType,'investment');
+ assert.equal(service.inspect(persisted)?.kind,'investment-transaction');
+ assert.equal((await service.update(created.path,{title:'Updated shares'}))?.kind,'investment-transaction');
+ assert.equal(parseNativeRecordDocument(contents.get(created.file)).frontmatter.recordType,'investment');
+ await assert.rejects(service.create('finance-transaction',{title:'Wrong',recordType:'investment'},{id:'wrong'}),/collides|conflicting/u);
+});
+
+test('cold index resolves migrated scalar records through configured list and subtype fields', async () => {
+ const {service,plugin,addFile}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={
+  'finance-transaction':{
+   primary:{kindList:{key:'kind',value:'transaction/financial'}},
+   aliases:[{scalar:{key:'kind',value:'finance-transaction'}}],
+   discriminator:{key:'type',value:'transaction'},
+  },
+  'investment-transaction':{
+   primary:{kindList:{key:'kind',value:'transaction/financial'}},
+   aliases:[{scalar:{key:'kind',value:'investment-transaction'}}],
+   discriminator:{key:'type',value:'investmentTransaction'},
+  },
+  'activity-entry':{
+   primary:{kindList:{key:'kind',value:'transaction/activity'}},
+   aliases:[{scalar:{key:'kind',value:'activity-entry'}}],
+  },
+ };
+ const finance=addFile('Inbox/migrated-finance.md',serializeNativeRecordDocument({
+  bom:'',newline:'\n',closer:'---',body:'Finance body',frontmatter:{
+   tpsId:'wallet:migrated-one',title:'Coffee',kind:['transaction/financial'],type:'transaction',amount:5,
+  },
+ }));
+ const activity=addFile('Inbox/migrated-activity.md',serializeNativeRecordDocument({
+  bom:'',newline:'\n',closer:'---',body:'Activity body',frontmatter:{
+   tpsId:'activity:migrated-one',title:'Walk',kind:['transaction/activity'],distance:2,
+  },
+ }));
+ service.refreshConfiguration();
+ assert.equal(service.inspect({tpsId:'wallet:migrated-one',title:'Coffee',kind:['transaction/financial'],type:'transaction'})?.kind,'finance-transaction');
+ assert.equal(service.inspect({tpsId:'activity:migrated-one',title:'Walk',kind:['transaction/activity']})?.kind,'activity-entry');
+ assert.equal((await service.resolve('wallet:migrated-one'))?.file,finance);
+ assert.equal((await service.resolve('activity:migrated-one'))?.file,activity);
+ assert.equal((await service.resolve(finance))?.kind,'finance-transaction');
+ assert.equal((await service.resolve(activity))?.kind,'activity-entry');
+ assert.deepEqual((await service.snapshot()).records.map(record=>record.id).sort(),['activity:migrated-one','wallet:migrated-one']);
+});
+
+test('all configured shared-path groups create and resolve without legacy tags after a cold index',async()=>{
+ const {service,plugin,contents}=createHarness();
+ const groups={
+  'transaction/financial':{'finance-transaction':['type','transaction'],'investment-transaction':['type','investmentTransaction']},
+  'entity/food':{food:['tpsRecordType','food'],meal:['tpsRecordType','meal'],recipe:['tpsRecordType','recipe']},
+  'transaction/macros':{'food-entry':['tpsRecordType','food-entry'],'meal-entry':['tpsRecordType','meal-entry']},
+  'transaction/workout':{'workout-session':['tpsRecordType','workout-session'],'workout-exercise':['tpsRecordType','workout-exercise']},
+  'task/project':{project:['tpsRecordType','project'],collection:['tpsRecordType','collection']},
+ };
+ plugin.settings.nativeRecordKindPropertyKeys=Object.fromEntries(Object.entries(groups).flatMap(([path,kinds])=>Object.entries(kinds).map(([kind,[key,value]])=>[
+  kind,{primary:{kindList:{key:'kind',value:path}},aliases:[{tag:`legacy/${kind}`}],discriminator:{key,value}},
+ ])));
+ const created=[];
+ for(const [path,kinds] of Object.entries(groups))for(const [kind,[key,value]] of Object.entries(kinds)){
+  const record=await service.create(kind,{title:`New ${kind}`},{id:`sample:${kind}`});
+  const persisted=parseNativeRecordDocument(contents.get(record.file)).frontmatter;
+  assert.deepEqual(persisted.kind,[path]);
+  assert.equal(persisted[key],value);
+  assert.equal(Object.hasOwn(persisted,'tags'),false);
+  assert.equal(service.inspect(persisted)?.kind,kind);
+  created.push(record);
+ }
+ service.refreshConfiguration();
+ for(const record of created){
+  assert.equal((await service.resolve(record.id))?.kind,record.kind);
+  assert.equal((await service.resolve(record.file))?.kind,record.kind);
+ }
+ assert.equal((await service.snapshot()).records.length,created.length);
+});
+
 test('canonical calendar records preserve template-authored kind lists', async () => {
  const {service,contents}=createHarness();
  const event=await service.create('calendar-event',{title:'Meeting',kind:['transaction/event','user/visible']},

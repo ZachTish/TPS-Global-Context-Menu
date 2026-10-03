@@ -209,7 +209,8 @@ async function loadNoteOperationService() {
                 const match = line.match(/^([^:#]+):\\s*(.*)$/);
                 if (!match) continue;
                 let value = match[2].trim();
-                if (/^(['"]).*\\1$/.test(value)) value = value.slice(1, -1);
+                try { value = JSON.parse(value); }
+                catch { if (/^(['"]).*\\1$/.test(value)) value = value.slice(1, -1); }
                 parsed[match[1].trim()] = value;
               }
               return parsed;
@@ -342,7 +343,8 @@ function createDailyNoteServiceHarness(TFile, {
       const match = line.match(/^([^:#]+):\s*(.*)$/);
       if (!match) continue;
       let value = match[2].trim();
-      if (/^(['"]).*\1$/.test(value)) value = value.slice(1, -1);
+      try { value = JSON.parse(value); }
+      catch { if (/^(['"]).*\1$/.test(value)) value = value.slice(1, -1); }
       frontmatter[match[1].trim()] = value;
     }
     return { frontmatter, body: normalized.slice(end + 4) };
@@ -804,6 +806,50 @@ test('native mode skips scheduled-item population before a Daily Note lookup or 
   const service = new NoteOperationService(plugin);
   await service.populateDailyNoteWithScheduledItems({ path: 'Daily/2026-10-03.md', extension: 'md' });
   assert.deepEqual(counts, { configuration: 0, inventory: 0, writes: 0 });
+});
+
+test('GCM-owned Daily Note creation fills the configured Scheduled key', async () => {
+  const { NoteOperationService } = await loadNoteOperationService();
+  const fields = { kind: ['journal/day'], startsAt: '{{date}} 00:00:00' };
+  const plugin = {
+    settings: { properties: [{ id: 'scheduled', key: 'startsAt' }], autoSaveFolderPath: false },
+    app: { vault: { getAbstractFileByPath: () => null } },
+    frontmatterMutationService: { async process(_file, mutate) { mutate(fields); } },
+    fileNamingService: { async processFileOnOpen() {} },
+    notebookNavigatorRuleService: { async applyRulesToFile() {} },
+  };
+  const file = { path: 'Daily/2026-10-10.md', basename: '2026-10-10', parent: { path: 'Daily' } };
+  await new NoteOperationService(plugin).normalizeCreatedDailyNote(file, '2026-10-10', 'Daily', '2026-10-10');
+  assert.equal(fields.startsAt, '2026-10-10 00:00:00');
+  assert.equal(Object.hasOwn(fields, 'scheduled'), false);
+});
+
+test('template-less Daily Note creation writes its configured list identity without an automatic tag', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = 'md';
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.slice(0, path.lastIndexOf('/')) || '/' };
+    }
+  }
+  const harness = createDailyNoteServiceHarness(FakeFile, {
+    templateContent: null,
+    runtimeDailyNotes: { folder: 'Daily', format: 'YYYY-MM-DD', template: '' },
+  });
+  harness.plugin.settings.nativeRecordKindPropertyKeys = {
+    dailynote: { primary: { kindList: { key: 'category', value: 'journal/day' } }, aliases: [{ tag: 'dailynote' }] },
+  };
+  harness.plugin.settings.properties = [{ id: 'scheduled', key: 'startsAt' }];
+  const file = await new NoteOperationService(harness.plugin).ensureDailyNote('2026-10-11 00:00:00');
+  assert.equal(file?.path, 'Daily/2026-10-11.md');
+  const frontmatter = parseYaml(harness.files.get(file.path).split('---')[1]);
+  assert.deepEqual(frontmatter.category, ['journal/day']);
+  assert.equal(frontmatter.startsAt, '2026-10-11 00:00:00');
+  assert.equal(Object.hasOwn(frontmatter, 'tags'), false);
+  assert.equal(Object.hasOwn(frontmatter, 'scheduled'), false);
 });
 
 test('Daily Note kind identity receives the title and filename sync exception', () => {
@@ -2029,7 +2075,7 @@ test('Templater auto-create settlement also protects a new template-less Daily N
   );
   await harness.waitForAutoHooks();
 
-  assert.match(harness.files.get(file.path), /tags: "\[dailynote\]"/);
+  assert.match(harness.files.get(file.path), /tags: \["dailynote"\]/);
   assert.match(harness.files.get(file.path), /capture after template-less creation/);
 });
 

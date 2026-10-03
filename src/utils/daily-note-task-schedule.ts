@@ -1,4 +1,4 @@
-import { decodeKind, type KindMappings } from './kind-classification';
+import { decodeKind, kindReadClassifications, matchesKind, type KindMappings } from './kind-classification';
 import { App, TFile, moment, normalizePath, parseYaml } from 'obsidian';
 import { parseDateFromFilename, parseStrictDateFromFilename } from './daily-file-date';
 import { getDailyNotePathDateCandidate } from './daily-note-creation';
@@ -204,6 +204,14 @@ export function normalizeExpectedDailyNotePath(value: unknown): string | null {
   return normalizePath(text).replace(/^\/+/, '');
 }
 
+export function getDailyNoteScheduledPropertyKey(settings: unknown): string {
+  const properties = (settings as { properties?: Array<{ id: string; key: string }> } | null | undefined)?.properties;
+  const configured = Array.isArray(properties)
+    ? properties.find((property) => property?.id === 'scheduled')?.key
+    : undefined;
+  return String(configured || '').trim() || 'scheduled';
+}
+
 /** The broad note kind identifies a Daily Note only with its explicit subtype. */
 function hasTwoLevelDailyNoteIdentity(frontmatter: Record<string, unknown>): boolean {
   return String(getFrontmatterValue(frontmatter, 'kind') ?? '').trim().toLowerCase() === 'note'
@@ -216,7 +224,11 @@ export function hasExplicitDailyNoteIdentity(
 ): boolean {
   if (!frontmatter || isProcessRunFrontmatter(frontmatter)) return false;
   try {
-    const decoded = decodeKind((settings as { nativeRecordKindPropertyKeys?: KindMappings })?.nativeRecordKindPropertyKeys, frontmatter);
+    const mappings = (settings as { nativeRecordKindPropertyKeys?: KindMappings })?.nativeRecordKindPropertyKeys;
+    const decoded = decodeKind(mappings, frontmatter);
+    // A list path shared by multiple record types cannot identify a Daily
+    // Note on its own, even when it happens to resemble a legacy marker.
+    if (matchesKind(mappings, frontmatter, 'dailynote')) return decoded.kind === 'dailynote';
     if (decoded.kind === 'dailynote') return true;
   } catch { return false; }
   if (hasTwoLevelDailyNoteIdentity(frontmatter)) return true;
@@ -290,9 +302,11 @@ function analyzeDailyNoteFile(
     const basenameDate = parseStrictDailyNoteDate(file.basename, getDailyNoteDateFormat(app, settings));
     if (basenameDate) signals.push({ isoDate: basenameDate, source: 'frontmatter' });
 
-    const scheduled = getFrontmatterValue(frontmatter!, 'scheduled');
-    const scheduledDate = getIsoDateFromScheduledValue(String(scheduled ?? ''));
-    if (scheduledDate) signals.push({ isoDate: scheduledDate, source: 'frontmatter' });
+    for (const key of new Set([getDailyNoteScheduledPropertyKey(settings), 'scheduled'])) {
+      const scheduled = getFrontmatterValue(frontmatter!, key);
+      const scheduledDate = getIsoDateFromScheduledValue(String(scheduled ?? ''));
+      if (scheduledDate) signals.push({ isoDate: scheduledDate, source: 'frontmatter' });
+    }
 
     const title = getFrontmatterValue(frontmatter!, 'title');
     const titleDate = parseStrictDailyNoteDate(String(title ?? ''), getDailyNoteDateFormat(app, settings));
@@ -551,6 +565,7 @@ function getDailyNoteCandidateSignature(app: App, settings: unknown): string {
     getDailyNoteDateFormat(app, settings),
     JSON.stringify((settings as { nativeRecordKindPropertyKeys?: KindMappings })?.nativeRecordKindPropertyKeys || {}),
     String((settings as { nativeRecordKindPropertyKey?: string } | null | undefined)?.nativeRecordKindPropertyKey || '').trim().toLowerCase(),
+    getDailyNoteScheduledPropertyKey(settings).toLowerCase(),
   ].join('\u0000');
 }
 
@@ -789,24 +804,45 @@ export function hasAuthoritativeNonDailyNoteIdentity(
   settings: unknown,
 ): boolean {
   if (isProcessRunFrontmatter(frontmatter)) return true;
+  let configuredDaily = false;
+  let configuredDailyMarkers = new Map<string, Set<string>>();
   try {
-    const decoded = decodeKind((settings as { nativeRecordKindPropertyKeys?: KindMappings })?.nativeRecordKindPropertyKeys, frontmatter);
-    if (decoded.kind && decoded.kind !== frontmatter.kind) return decoded.kind !== 'dailynote';
+    const mappings = (settings as { nativeRecordKindPropertyKeys?: KindMappings })?.nativeRecordKindPropertyKeys;
+    const decoded = decodeKind(mappings, frontmatter);
+    configuredDaily = matchesKind(mappings, frontmatter, 'dailynote');
+    if (configuredDaily && decoded.kind !== 'dailynote') return true;
+    if (decoded.kind && decoded.kind !== frontmatter.kind && decoded.kind !== 'dailynote') return true;
+    if (configuredDaily) {
+      configuredDailyMarkers = new Map();
+      const add = (key: string, value: string) => {
+        const normalizedKey = key.toLowerCase();
+        const markers = configuredDailyMarkers.get(normalizedKey) || new Set<string>();
+        markers.add(normalizeDailyNoteMarker(value));
+        configuredDailyMarkers.set(normalizedKey, markers);
+      };
+      for (const definition of kindReadClassifications(mappings, 'dailynote')) {
+        if ('kindList' in definition) add(definition.kindList.key, definition.kindList.value);
+        else if ('scalar' in definition) add(definition.scalar.key, definition.scalar.value);
+        else if ('key' in definition) {
+          add('kind', definition.parentKind);
+          add(definition.key, definition.value);
+        }
+      }
+    }
   } catch { return true; }
   const configuredKindKey = String(
     (settings as { nativeRecordKindPropertyKey?: string } | null | undefined)?.nativeRecordKindPropertyKey || '',
   ).trim();
-  const authoredKindKeys = Array.from(new Set(['kind', 'kinds', configuredKindKey].filter(Boolean)));
-  const authoredKindMarkers = authoredKindKeys
-    .flatMap((key) => normalizeFrontmatterList(getFrontmatterValue(frontmatter, key)))
-    .map(normalizeDailyNoteMarker);
+  const authoredKindKeys = Array.from(new Set(['kind', 'kinds', configuredKindKey, ...configuredDailyMarkers.keys()].filter(Boolean)));
   // `kind`, `kinds`, and the configured native kind key are record identity,
   // not an extensible allowlist. The note/daily pair permits only the broad
   // "note" marker; other mixed Daily/non-Daily values still fail closed.
   const twoLevelDaily = hasTwoLevelDailyNoteIdentity(frontmatter);
-  if (authoredKindMarkers.some((marker) =>
-    !isAcceptedDailyNoteMarker(marker) && !(twoLevelDaily && marker === 'note')
-  )) return true;
+  if (authoredKindKeys.some((key) => normalizeFrontmatterList(getFrontmatterValue(frontmatter, key))
+    .map(normalizeDailyNoteMarker)
+    .some((marker) => !isAcceptedDailyNoteMarker(marker)
+      && !(twoLevelDaily && key.toLowerCase() === 'kind' && marker === 'note')
+      && !(configuredDaily && configuredDailyMarkers.get(key.toLowerCase())?.has(marker))))) return true;
 
   // `type`/`types` predate the native record contract and remain a deliberate
   // compatibility surface: accepted Daily aliases opt in, while only known

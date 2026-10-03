@@ -316,6 +316,61 @@ test('two-level note/daily identity resolves canonical and named Daily Notes', (
   }
 });
 
+test('Daily Note identity follows its configured kind-list path and Scheduled property', () => {
+  const settings = {
+    nativeRecordKindPropertyKeys: {
+      dailynote: { primary: { kindList: { key: 'category', value: 'journal/day' } }, aliases: [{ tag: 'kind/daily/note' }] },
+      'calendar-event': { primary: { kindList: { key: 'category', value: 'transaction/event' } }, aliases: [] },
+    },
+    properties: [{ id: 'scheduled', key: 'startsAt' }],
+  };
+  const harness = createHarness([
+    { path: 'Journal.md', frontmatter: { category: ['journal/day'], startsAt: '2026-10-01' } },
+    { path: 'Old Journal.md', frontmatter: { category: ['journal/day'], scheduled: '2026-10-02' } },
+    { path: 'Conflicting dates.md', frontmatter: { category: ['journal/day'], startsAt: '2026-10-03', scheduled: '2026-10-04' } },
+    { path: 'Mixed kinds.md', frontmatter: { category: ['journal/day', 'transaction/event'], startsAt: '2026-10-05' } },
+    { path: 'Unknown kind.md', frontmatter: { category: ['journal/day', 'journal/other'], startsAt: '2026-10-06' } },
+  ], { format: 'YYYY-MM-DD' });
+  assert.equal(identity.parseDailyNoteFileDate(harness.app, settings, harness.files.get('Journal.md')), '2026-10-01');
+  assert.equal(identity.getInheritedDailyNoteTaskScheduledValue(harness.app, settings, harness.files.get('Journal.md')), '2026-10-01');
+  assert.equal(identity.parseDailyNoteFileDate(harness.app, settings, harness.files.get('Old Journal.md')), '2026-10-02');
+  for (const path of ['Conflicting dates.md', 'Mixed kinds.md', 'Unknown kind.md']) {
+    assert.equal(identity.parseDailyNoteFileDate(harness.app, settings, harness.files.get(path)), null, path);
+  }
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, settings, '2026-10-01'), harness.files.get('Journal.md'));
+});
+
+test('Daily candidate index refreshes when the configured Scheduled key changes', () => {
+  const settings = {
+    nativeRecordKindPropertyKeys: {
+      dailynote: { primary: { kindList: { key: 'category', value: 'journal/day' } }, aliases: [] },
+    },
+    properties: [{ id: 'scheduled', key: 'startsAt' }],
+  };
+  const harness = createHarness([{ path: 'Journal.md', frontmatter: {
+    category: ['journal/day'], startsAt: '2026-10-07', happensAt: '2026-10-08',
+  } }], { format: 'YYYY-MM-DD' });
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, settings, '2026-10-07'), harness.files.get('Journal.md'));
+  settings.properties[0].key = 'happensAt';
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, settings, '2026-10-08'), harness.files.get('Journal.md'));
+  assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, settings, '2026-10-07'), null);
+});
+
+test('shared configured Daily kind-list path stays ambiguous without independent identity', () => {
+  const settings = {
+    nativeRecordKindPropertyKeys: {
+      dailynote: { primary: { kindList: { key: 'category', value: 'journal/day' } }, aliases: [] },
+      note: { primary: { kindList: { key: 'category', value: 'journal/day' } }, aliases: [] },
+    },
+    properties: [{ id: 'scheduled', key: 'startsAt' }],
+  };
+  const harness = createHarness([{ path: 'Journal.md', frontmatter: {
+    category: ['journal/day'], startsAt: '2026-10-09',
+  } }], { format: 'YYYY-MM-DD' });
+  assert.equal(identity.hasExplicitDailyNoteIdentity(harness.frontmatter.get('Journal.md'), settings), false);
+  assert.equal(identity.parseDailyNoteFileDate(harness.app, settings, harness.files.get('Journal.md')), null);
+});
+
 test('two-level Daily Note reconciliation preserves both authored properties', async () => {
   const fields = { kind: 'note', noteKind: 'daily', scheduled: '2026-09-20 00:00:00' };
   const harness = createHarness([{ path: 'Journal.md', frontmatter: fields }], { format: 'YYYY-MM-DD' });

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 import { readFileSync } from 'node:fs';
 const bundle = await build({ stdin: { contents: `export * from './src/utils/property-migration'; export * from './src/utils/kind-classification-migration'; export * from './src/services/property-migration-service'; export * from './src/modals/property-migration-modal'; export {TFile} from 'obsidian';`, resolveDir: process.cwd() }, bundle: true, format: 'esm', platform: 'browser', write: false, plugins: [{name:'obsidian-test', setup(b){ b.onResolve({filter:/^obsidian$/},()=>({path:'obsidian',namespace:'test'}));b.onLoad({filter:/.*/,namespace:'test'},()=>({contents:`export class TFile { constructor(path){this.path=path;this.extension=path.split('.').at(-1);} } export class Notice {} export class Modal {} export class Setting {}` })); }}] });
-const { migrateNoteProperties: migrate, migrateNoteClassification, updateMigrationReferences: references, PropertyMigrationService, PropertyMigrationModal, TFile } = await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+const { migrateNoteProperties: migrate, migrateNoteClassification, migrateNoteDiscriminator, updateMigrationReferences: references, PropertyMigrationService, PropertyMigrationModal, TFile } = await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
 const key = {kind:'key',from:'status',to:'taskStatus'};
 const value = {kind:'value',key:'status',from:'todo',to:'ready'};
 const fm = text => `---\n${text}\n---\nBody status: todo [status:: todo]\n`;
@@ -45,13 +45,36 @@ test('status value rename keeps options, classifications, checkbox targets and e
  references(settings,value); assert.deepEqual(settings.properties[0].options,['ready','done']);assert.equal(settings.properties[0].hideWhenProperties[0].value,'todo');assert.deepEqual(settings.activeStatusValues,['ready']);assert.deepEqual(settings.linkedSubitemCheckboxMappings[0],{statuses:['ready'],toggleTargetStatus:'ready'});assert.equal(settings.parentChildIgnoreFrontmatterValue,'ready');
 });
 test('property migrations update configured kind-list writers and legacy aliases',()=>{
- const settings={nativeRecordKindPropertyKeys:{'food-entry':{primary:{kindList:{key:'kind',value:'transaction/macros'}},aliases:[{scalar:{key:'oldKind',value:'food-entry'}},{tag:'kind/food/transaction'}]}}};
+ const settings={nativeRecordKindPropertyKeys:{'food-entry':{primary:{kindList:{key:'kind',value:'transaction/macros'}},aliases:[{scalar:{key:'oldKind',value:'food-entry'}},{tag:'kind/food/transaction'}],discriminator:{key:'recordType',value:'food-entry'}}}};
  references(settings,{kind:'key',from:'kind',to:'recordKinds'});
  assert.equal(settings.nativeRecordKindPropertyKeys['food-entry'].primary.kindList.key,'recordKinds');
  references(settings,{kind:'value',key:'recordKinds',from:'transaction/macros',to:'transaction/meal'});
  assert.equal(settings.nativeRecordKindPropertyKeys['food-entry'].primary.kindList.value,'transaction/meal');
  references(settings,{kind:'value',key:'tags',from:'kind/food/transaction',to:'archive/food'});
  assert.equal(settings.nativeRecordKindPropertyKeys['food-entry'].aliases[1].tag,'archive/food');
+ references(settings,{kind:'key',from:'recordType',to:'entryType'});
+ assert.equal(settings.nativeRecordKindPropertyKeys['food-entry'].discriminator.key,'entryType');
+ references(settings,{kind:'value',key:'entryType',from:'food-entry',to:'meal-entry'});
+ assert.equal(settings.nativeRecordKindPropertyKeys['food-entry'].discriminator.value,'meal-entry');
+});
+test('confirmed custom Kind key migration keeps note lists and record mappings aligned',async()=>{
+ const source=fm('kind: [transaction/macros]\ntpsRecordType: food-entry\ntitle: Lunch');
+ const h=harness({'Inbox/lunch.md':source});
+ h.plugin.settings.properties=[{id:'kind',key:'kind'}];
+ h.plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{
+  primary:{kindList:{key:'kind',value:'transaction/macros'}},aliases:[],
+  discriminator:{key:'tpsRecordType',value:'food-entry'},
+ }};
+ PropertyMigrationModal.confirm=async()=>true;
+ assert.equal(await h.service.request({kind:'key',from:'kind',to:'categories'},settings=>{
+  settings.properties[0].key='categories';
+ }),true);
+ assert.match(h.data.get('Inbox/lunch.md'),/"categories": \[transaction\/macros\]/u);
+ assert.doesNotMatch(h.data.get('Inbox/lunch.md'),/^kind:/mu);
+ assert.equal(h.plugin.settings.properties[0].key,'categories');
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['food-entry'].primary.kindList.key,'categories');
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys['food-entry'].discriminator,
+  {key:'tpsRecordType',value:'food-entry'});
 });
 function harness(entries={'Inbox/a.md':fm('status: todo')}) {
  const files=new Map(Object.keys(entries).map(path=>[path,new TFile(path)]));const data=new Map(Object.entries(entries));const storage=new Map();let saves=0;const writes=[];
@@ -189,6 +212,112 @@ test('different record types may share a configured visible kind-list path',asyn
  await h.service.configureNewClassification('investment',{kindList:{key:'kind',value:'transaction/financial'}});
  assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys.investment,{kindList:{key:'kind',value:'transaction/financial'}});
  assert.equal(h.writes.length,0);
+});
+test('shared-list identity is configurable, persisted, and retained across mapping edits',async()=>{
+ const h=harness({});
+ const primary={kindList:{key:'kind',value:'transaction/financial'}};
+ h.plugin.settings.nativeRecordKindPropertyKeys={
+  purchase:{primary,aliases:[{scalar:{key:'kind',value:'purchase'}}]},
+  investment:{primary,aliases:[]},
+ };
+ PropertyMigrationModal.confirm=async()=>true;
+ await h.service.configureClassificationDiscriminator('purchase',{key:'type',value:'transaction'},primary);
+ await h.service.configureClassificationDiscriminator('investment',{key:'type',value:'investmentTransaction'},primary);
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys.purchase.discriminator,{key:'type',value:'transaction'});
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys.investment.discriminator,{key:'type',value:'investmentTransaction'});
+ await assert.rejects(h.service.configureClassificationDiscriminator('investment',{key:'type',value:'transaction'},primary),/distinct identity values/u);
+ await h.service.configureClassificationDiscriminator('investment',{key:'recordType',value:'investment'},primary);
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys.investment.discriminator,{key:'recordType',value:'investment'});
+ await assert.rejects(h.service.configureClassificationDiscriminator('investment',{key:'kind',value:'investment'},primary),/Invalid shared kind discriminator/u);
+ await h.service.configureClassificationAliases('purchase',[{scalar:{key:'kind',value:'old-purchase'}}],primary);
+ await h.service.configureClassificationWriterEnabled('purchase',false,primary);
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys.purchase.discriminator,{key:'type',value:'transaction'});
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys.purchase.writeDisabled,true);
+ assert.equal(h.writes.length,0,'an empty vault needs no note writes');
+});
+test('reviewed shared identity change updates only the selected record type and preserves note bodies',async()=>{
+ const primary={kindList:{key:'kind',value:'transaction/financial'}};
+ const mappings={
+  'finance-transaction':{primary,aliases:[],discriminator:{key:'type',value:'transaction'}},
+  'investment-transaction':{primary,aliases:[],discriminator:{key:'type',value:'investmentTransaction'}},
+ };
+ const before=fm('tpsId: wallet:one\nkind: [transaction/financial]\ntype: transaction\ntitle: Coffee');
+ const second=fm('tpsId: wallet:three\nkind: [transaction/financial]\ntype: transaction\ntitle: Tea');
+ const other=fm('tpsId: finance:two\nkind: [transaction/financial]\ntype: investmentTransaction\ntitle: Shares');
+ const change={kind:'discriminator',recordKind:'finance-transaction',primary,from:{key:'type',value:'transaction'},to:{key:'recordType',value:'purchase'}};
+ const converted=migrateNoteDiscriminator(before,change,mappings);
+ assert.match(converted,/recordType: purchase/u);
+ assert.doesNotMatch(converted,/^type:/mu);
+ assert.ok(converted.endsWith('Body status: todo [status:: todo]\n'));
+ assert.equal(migrateNoteDiscriminator(other,change,mappings),other);
+ assert.equal(migrateNoteDiscriminator(converted,change,mappings),converted);
+ assert.throws(()=>migrateNoteDiscriminator(fm('kind: [transaction/financial]\ntype: transaction\nrecordType: occupied'),change,mappings),/already exists/u);
+ const uniquePrimary={kindList:{key:'kind',value:'entity/food'}};
+ const uniqueSource=fm('kind: [entity/food]\ntitle: Apple');
+ const add={kind:'discriminator',recordKind:'food',primary:uniquePrimary,from:null,to:{key:'subtype',value:'food'}};
+ const withIdentity=migrateNoteDiscriminator(uniqueSource,add,{food:{primary:uniquePrimary,aliases:[]}});
+ assert.match(withIdentity,/subtype: food/u);
+ assert.equal(migrateNoteDiscriminator(withIdentity,{...add,from:add.to,to:null},
+  {food:{primary:uniquePrimary,aliases:[],discriminator:add.to}}).includes('subtype:'),false);
+ const h=harness({'Inbox/coffee.md':before,'Inbox/tea.md':second,'Inbox/shares.md':other});
+ h.plugin.settings.nativeRecordKindPropertyKeys=mappings;
+ PropertyMigrationModal.confirm=async(_app,_title,_description,paths)=>{
+  assert.deepEqual(paths,['Inbox/coffee.md','Inbox/tea.md']);
+  return false;
+ };
+ assert.equal(await h.service.configureClassificationDiscriminator('finance-transaction',change.to,primary),false);
+ assert.equal(h.data.get('Inbox/coffee.md'),before);
+ assert.equal(h.data.get('Inbox/tea.md'),second);
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys,mappings);
+ PropertyMigrationModal.confirm=async()=>true;
+ assert.equal(await h.service.configureClassificationDiscriminator('finance-transaction',change.to,primary),true);
+ assert.match(h.data.get('Inbox/coffee.md'),/recordType: purchase/u);
+ assert.match(h.data.get('Inbox/tea.md'),/recordType: purchase/u);
+ assert.equal(h.data.get('Inbox/shares.md'),other);
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].discriminator,change.to);
+ assert.deepEqual(h.writes,['Inbox/coffee.md','Inbox/tea.md']);
+ assert.equal(h.storage.size,0);
+});
+test('shared identity changes fail closed for ambiguous and concurrently edited notes',async()=>{
+ const primary={kindList:{key:'kind',value:'entity/food'}};
+ const mappings={food:{primary,aliases:[]},recipe:{primary,aliases:[]}};
+ const source=fm('kind: [entity/food]\ntitle: Unassigned');
+ const change={kind:'discriminator',recordKind:'food',primary,from:null,to:{key:'tpsRecordType',value:'food'}};
+ assert.throws(()=>migrateNoteDiscriminator(source,change,mappings),/needs independent record identity/u);
+ const ambiguous=harness({'Inbox/food.md':source});
+ ambiguous.plugin.settings.nativeRecordKindPropertyKeys=mappings;
+ PropertyMigrationModal.confirm=async()=>true;
+ await assert.rejects(ambiguous.service.configureClassificationDiscriminator('food',change.to,primary),/Notes changed|blocked|identity/u);
+ assert.equal(ambiguous.data.get('Inbox/food.md'),source);
+ assert.equal(ambiguous.saves,0);
+
+ const unique=harness({'Inbox/food.md':fm('kind: [entity/food]\ntitle: Apple')});
+ unique.plugin.settings.nativeRecordKindPropertyKeys={food:{primary,aliases:[]}};
+ PropertyMigrationModal.confirm=async()=>{
+  unique.data.set('Inbox/food.md',fm('kind: [entity/food]\ntitle: Edited concurrently'));
+  return true;
+ };
+ await assert.rejects(unique.service.configureClassificationDiscriminator('food',change.to,primary),/Notes changed/u);
+ assert.equal(unique.saves,0);
+ assert.equal(unique.writes.length,0);
+});
+test('a failed shared identity write restores prior notes and leaves the mapping unchanged',async()=>{
+ const primary={kindList:{key:'kind',value:'transaction/financial'}};
+ const source=fm('kind: [transaction/financial]\ntype: transaction\ntitle: Coffee');
+ const h=harness({'Inbox/a.md':source,'Inbox/b.md':source});
+ h.plugin.settings.nativeRecordKindPropertyKeys={purchase:{primary,aliases:[],discriminator:{key:'type',value:'transaction'}}};
+ const original=h.plugin.frontmatterMutationService.applyMigrationSource;
+ let failed=false;
+ h.plugin.frontmatterMutationService.applyMigrationSource=async(file,before,after)=>{
+  if(file.path==='Inbox/b.md'&&!failed){failed=true;throw new Error('synthetic write failure');}
+  return original(file,before,after);
+ };
+ PropertyMigrationModal.confirm=async()=>true;
+ await assert.rejects(h.service.configureClassificationDiscriminator('purchase',{key:'type',value:'purchase'},primary),/synthetic write failure/u);
+ assert.equal(h.data.get('Inbox/a.md'),source);
+ assert.equal(h.data.get('Inbox/b.md'),source);
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys.purchase.discriminator,{key:'type',value:'transaction'});
+ assert.equal(h.storage.size,0);
 });
 test('removing a selected record mapping changes settings without scanning or editing notes',async()=>{
  const h=harness({'Inbox/a.md':fm('kind:\n  - qa/example\nstatus: active')});

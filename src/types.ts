@@ -1,4 +1,4 @@
-import type { KindClassification, KindMappings } from './utils/kind-classification';
+import type { KindClassification, KindDiscriminator, KindMappings } from './utils/kind-classification';
 import { TFile, MarkdownView } from 'obsidian';
 
 export interface CustomPropertyCondition {
@@ -81,7 +81,7 @@ export interface TpsNativeRecordStorageProfile {
   schemaPropertyKey: string;
   identityTagPrefix: string;
   kindPropertyKey: string;
-  classification?: KindClassification & { recordKind: string };
+  classification?: KindClassification & { recordKind: string; discriminator?: KindDiscriminator };
   titlePropertyKey: string;
   createdPropertyKey: string;
   modifiedPropertyKey: string;
