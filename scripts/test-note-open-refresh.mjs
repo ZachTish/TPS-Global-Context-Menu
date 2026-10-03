@@ -76,6 +76,54 @@ test('navigation refreshes widget roots without reconfiguring other editors; set
   assert.match(poll, /refreshAllEditors\(\{ reconfigureEditors: false \}\)/);
 });
 
+test('turning off child-link rows clears mounted observers and decorations before skipping later refreshes', () => {
+  const path = '../src/services/linked-subitem-checkbox-service.ts';
+  const methods = ['ensureForAllMarkdownViews', 'ensureForView', 'removeForView'].map(name => method(path, name)).join('\n');
+  const output = ts.transpileModule(`export class LinkedRows { ${methods} }`, {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText;
+  const module = {};
+  class MarkdownView {}
+  const document = { body: { dataset: {} } };
+  const clearedTimers = [];
+  const window = { clearTimeout: id => clearedTimers.push(id) };
+  new Function('exports', 'MarkdownView', 'TFile', 'document', 'window', output)(
+    module, MarkdownView, exports.TFile, document, window,
+  );
+
+  const view = new MarkdownView();
+  view.file = new exports.TFile('Inbox/Child links.md');
+  view.file.extension = 'md';
+  let disconnects = 0;
+  const clearedViews = [];
+  const settings = { enableLinkedSubitemCheckboxes: true };
+  const service = Object.assign(new module.LinkedRows(), {
+    plugin: {
+      settings,
+      app: { workspace: {
+        getActiveViewOfType: () => view,
+        getLeavesOfType: () => [{ view }],
+      } },
+    },
+    observers: new Map([[view, { disconnect() { disconnects++; } }]]),
+    refreshTimers: new Map([[view, 42]]),
+    clearDecorations(target) { clearedViews.push(target); },
+    taskTrace() {},
+  });
+
+  settings.enableLinkedSubitemCheckboxes = false;
+  service.ensureForAllMarkdownViews();
+  assert.equal(disconnects, 1);
+  assert.deepEqual(clearedViews, [view]);
+  assert.deepEqual(clearedTimers, [42]);
+  assert.equal(service.observers.size, 0);
+  assert.equal(service.refreshTimers.size, 0);
+
+  const settingsSource = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
+  const toggle = settingsSource.slice(settingsSource.indexOf("setName('Render child-note links as checkboxes')"));
+  assert.match(toggle, /enableLinkedSubitemCheckboxes = v;[\s\S]{0,260}ensureForAllMarkdownViews\(\);[\s\S]{0,150}refreshLivePreviewEditors\(\);/u);
+});
+
 test('metadata refreshes batch every changed file and parent without a second delayed render', () => {
   const eventPath = '../src/events/register-events.ts';
   const sourceText = readFileSync(new URL(eventPath, import.meta.url), 'utf8');

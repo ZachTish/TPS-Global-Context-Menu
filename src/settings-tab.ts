@@ -3331,6 +3331,12 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       .addToggle((t) =>
         t.setValue(this.plugin.settings.enableLinkedSubitemCheckboxes !== false).onChange(async (v) => {
           this.plugin.settings.enableLinkedSubitemCheckboxes = v;
+          if (!v) {
+            // Clear already-mounted Reading and Live Preview rows before future
+            // navigation stops scheduling this optional presentation work.
+            this.plugin.linkedSubitemCheckboxService.ensureForAllMarkdownViews();
+            this.plugin.linkedSubitemCheckboxService.refreshLivePreviewEditors();
+          }
           await this.plugin.saveSettings();
         })
       );

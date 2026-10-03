@@ -1,6 +1,7 @@
 import { MarkdownView, Notice, TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { promptFilePropertiesRelink } from '../modals/file-properties-relink-modal';
+import { checkAndPromptForUnresolvedSubitems } from '../services/unresolved-subitem-modal';
 import * as logger from '../logger';
 
 /**
@@ -93,6 +94,22 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
                 return;
             }
             await plugin.noteTitleRenderService.promptRenameTitle(file);
+        },
+    });
+
+    plugin.addCommand({
+        id: 'check-active-note-child-links',
+        name: 'Child links: Check unresolved links in current note',
+        checkCallback: (checking) => {
+            const file = plugin.app.workspace.getActiveFile();
+            if (!(file instanceof TFile) || file.extension !== 'md') return false;
+            if (!checking) {
+                void checkAndPromptForUnresolvedSubitems(plugin, file).catch((error) => {
+                    logger.warn('[TPS GCM] Could not inspect unresolved child links', { path: file.path, error });
+                    new Notice('TPS GCM: Could not inspect child links in this note.');
+                });
+            }
+            return true;
         },
     });
 

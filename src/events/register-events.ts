@@ -3,7 +3,6 @@ import { resolveLinkValueToFile } from '../handlers/parent-link-format';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { ViewModeService } from '../services/view-mode-service';
 import { RemoveHiddenSubitemsModal } from '../modals/remove-hidden-subitems-modal';
-import { checkAndPromptForUnresolvedSubitems } from '../services/unresolved-subitem-modal';
 import type { BodySubitemLink } from '../services/subitem-types';
 import * as logger from '../logger';
 import { currentCompletedDateStamp, getCompletedDateValue, setCompletedDateValue } from '../utils/completed-date-utils';
@@ -166,7 +165,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     // Unified subitem refresh function to consolidate multiple triggers
     const scheduleSubitemRefresh = (file: TFile | null, opts: { delay?: number } = {}) => {
-        if (!(file instanceof TFile) || file.extension !== 'md') return;
+        if (!(file instanceof TFile) || file.extension !== 'md' || plugin.settings.enableLinkedSubitemCheckboxes === false) return;
         overlayRendering.scheduleSubitemRefresh(file, 'subitem-refresh', {
             delayMs: typeof opts.delay === 'number' ? opts.delay : 200,
             refreshLivePreviewEditors: true,
@@ -174,6 +173,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     };
 
     const throttledEnsureLinkedSubitemCheckboxes = debounce(() => {
+        if (plugin.settings.enableLinkedSubitemCheckboxes === false) return;
         overlayRendering.invalidate({
             reason: 'ensure-linked-subitems',
             surfaces: ['linked-subitems'],
@@ -393,14 +393,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                         bypassCreationGrace: true,
                     });
                 }
-                // Check for unresolved/deleted subitem links and prompt user
-                // Run after a short delay to let the file fully load
-                setTimeout(() => {
-                    if (!plugin.canRunBackgroundAutomation() || plugin.app.workspace.getActiveFile() !== file) return;
-                    void logger.timeAsync('file-open:checkAndPromptForUnresolvedSubitems', { file: file.path }, () =>
-                        checkAndPromptForUnresolvedSubitems(plugin, file)
-                    );
-                }, 800);
             }
         }),
     );
@@ -960,7 +952,9 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     // Initial menu setup
     overlayRendering.invalidate({
         reason: 'initial-setup',
-        surfaces: ['menus', 'inline-task-controls', 'linked-subitems'],
+        surfaces: plugin.settings.enableLinkedSubitemCheckboxes === false
+            ? ['menus', 'inline-task-controls']
+            : ['menus', 'inline-task-controls', 'linked-subitems'],
         delayMs: 0,
     });
 }

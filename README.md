@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 4.1.2 — Inspect unresolved child links on request
+
+Opening a note no longer schedules an eight-hundred-millisecond unresolved child-link inspection. That inspection read the selected body and could offer to remove link lines during ordinary navigation. Use **Child links: Check unresolved links in current note** from the command palette when you want the existing inspection and confirmation flow. The command is available only for an active Markdown note and reads that note when invoked. It does not run automatically in either native whole-note or legacy line mode.
+
+The independent **Render child-note links as checkboxes** setting still controls whole-note child-link presentation. When it is off, file-open and related events do not schedule its linked-row rendering, and turning it off clears rows already mounted in Reading and Live Preview. When it is on, child-note checkboxes continue to render in both architecture modes. No note content, settings schema, writer, public API, or minimum Obsidian version (1.10.0) changes. Whole-note parent/child navigation still looks across the vault for relationship candidates; that separate discovery cost remains.
+
+Focused tests cover file-open operation counts across both architecture modes and checkbox setting values, mobile event scheduling, command availability/invocation, and mounted-row cleanup after toggling the setting off. The full declared suite, installed Test-vault check, and artifact hashes are recorded in [4.1.2 release notes](release-notes/4.1.2.md). Physical iPhone performance remains to be measured.
+
 ## 4.1.1 — Build the entity index only when requested
 
 The entity index no longer enumerates every Markdown note when Obsidian first reports that metadata is resolved and no caller has used the index. A first note-entity query builds from the current metadata; a line-entity picker still builds its content-backed index on demand. If a query ran before initial metadata resolution, the first `resolved` event still rebuilds its note records and restarts any active line index so incomplete startup frontmatter cannot persist. Later broad `resolved` events leave a healthy index alone. This changes no setting, record format, writer, public API or minimum Obsidian version (1.10.0).

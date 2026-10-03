@@ -56,6 +56,7 @@ async function loadRegisterEvents() {
                   export class MarkdownView {}
                   export class WorkspaceLeaf {}
                   export const Platform = { isMobile: false };
+                  globalThis.__GcmEventPlatform = Platform;
                   export function normalizePath(value) {
                     return String(value ?? '')
                       .replace(/\\\\/g, '/')
@@ -96,7 +97,7 @@ async function loadRegisterEvents() {
               return { loader: 'js', contents: 'export class RemoveHiddenSubitemsModal { open() {} }' };
             }
             if (args.path.endsWith('unresolved-subitem-modal')) {
-              return { loader: 'js', contents: 'export async function checkAndPromptForUnresolvedSubitems() {}' };
+              return { loader: 'js', contents: 'export async function checkAndPromptForUnresolvedSubitems(plugin, file) { globalThis.__GcmUnresolvedChecks++; await plugin.app.vault.cachedRead(file); }' };
             }
             if (args.path === '../logger') {
               return {
@@ -167,12 +168,16 @@ function createHarness({
   failedPaths = [],
   completionStatuses = ['complete', 'wont-do'],
   mutationGates = new Map(),
+  enableLinkedSubitemCheckboxes = true,
 } = {}) {
   const listeners = new Map();
   const cleanups = [];
   const filesByPath = new Map();
   const cachedFrontmatterByFile = new Map();
   const mutations = [];
+  const invalidations = [];
+  let selectedBodyReads = 0;
+  let linkedRefreshes = 0;
   const failures = new Set(failedPaths);
   const scaledSetTimeout = (callback, delay = 0) => setTimeout(callback, Math.max(1, Math.ceil(delay / 100)));
   const normalizeStatus = (value) => {
@@ -229,6 +234,7 @@ function createHarness({
       enableAutoRename: false,
       autoSyncTitleFromFilename: false,
       enableAutoInsertBlankLineOnOpen: false,
+      enableLinkedSubitemCheckboxes,
     },
     viewModeSuppressedPaths: new Set(),
     registerEvent() {},
@@ -261,6 +267,10 @@ function createHarness({
         async read() {
           return '';
         },
+        async cachedRead() {
+          selectedBodyReads++;
+          return '';
+        },
         async modify() {},
       },
       fileManager: {
@@ -289,9 +299,9 @@ function createHarness({
     },
     overlayRenderingService: {
       scheduleMenus: noop,
-      scheduleSubitemRefresh: noop,
+      scheduleSubitemRefresh: () => { linkedRefreshes++; },
       scheduleFileRefresh: noop,
-      invalidate: noop,
+      invalidate: (options) => { invalidations.push(options); },
     },
     contextTargetService: {
       peekRecentContextTarget: () => null,
@@ -356,6 +366,8 @@ function createHarness({
   return {
     plugin,
     mutations,
+    invalidations,
+    navigationCounts: () => ({ selectedBodyReads, linkedRefreshes }),
     emit(scope, event, ...args) {
       for (const callback of listeners.get(`${scope}:${event}`) || []) callback(...args);
     },
@@ -868,4 +880,66 @@ test('lifecycle dispatch reads the current architecture setting at each event', 
     h.emit('vault', 'delete', folder);
     assert.deepEqual(calls, ['handleSourceFolderRename']);
   } finally { h.cleanup(); }
+});
+
+test('opening a note never inspects unresolved child lines; configured child display still refreshes', async () => {
+  for (const dataArchitectureMode of ['native-records', 'legacy']) {
+    for (const enableLinkedSubitemCheckboxes of [true, false]) {
+      const h = createHarness();
+      const file = h.addFile('Inbox/Selected.md');
+      h.plugin.settings.dataArchitectureMode = dataArchitectureMode;
+      h.plugin.settings.enableLinkedSubitemCheckboxes = enableLinkedSubitemCheckboxes;
+      h.plugin.app.workspace.getActiveFile = () => file;
+      globalThis.__GcmUnresolvedChecks = 0;
+      try {
+        h.emit('workspace', 'file-open', file);
+        await new Promise((resolve) => setTimeout(resolve, 25));
+        assert.equal(globalThis.__GcmUnresolvedChecks, 0, `${dataArchitectureMode}: no automatic repair prompt`);
+        assert.deepEqual(h.navigationCounts(), {
+          selectedBodyReads: 0,
+          linkedRefreshes: enableLinkedSubitemCheckboxes ? 1 : 0,
+        }, `${dataArchitectureMode}: keep only enabled child-link presentation`);
+      } finally {
+        h.cleanup();
+      }
+    }
+  }
+});
+
+test('disabled child-link presentation keeps independent initial task controls', () => {
+  for (const enabled of [true, false]) {
+    const h = createHarness({ enableLinkedSubitemCheckboxes: enabled });
+    assert.deepEqual(h.invalidations.find((entry) => entry.reason === 'initial-setup')?.surfaces,
+      enabled
+        ? ['menus', 'inline-task-controls', 'linked-subitems']
+        : ['menus', 'inline-task-controls']);
+    h.cleanup();
+  }
+});
+
+test('mobile opening retains enabled child display but skips both refreshes when disabled', async () => {
+  globalThis.__GcmEventPlatform.isMobile = true;
+  try {
+    for (const enableLinkedSubitemCheckboxes of [true, false]) {
+      const h = createHarness();
+      const file = h.addFile('Inbox/Mobile.md');
+      h.plugin.settings.dataArchitectureMode = 'native-records';
+      h.plugin.settings.enableLinkedSubitemCheckboxes = enableLinkedSubitemCheckboxes;
+      h.plugin.app.workspace.getActiveFile = () => file;
+      globalThis.__GcmUnresolvedChecks = 0;
+      try {
+        h.emit('workspace', 'file-open', file);
+        await new Promise(resolve => setTimeout(resolve, 525));
+        assert.deepEqual(h.navigationCounts(), {
+          selectedBodyReads: 0,
+          linkedRefreshes: enableLinkedSubitemCheckboxes ? 2 : 0,
+        });
+        assert.equal(globalThis.__GcmUnresolvedChecks, 0);
+      } finally {
+        h.cleanup();
+      }
+    }
+  } finally {
+    globalThis.__GcmEventPlatform.isMobile = false;
+  }
 });
