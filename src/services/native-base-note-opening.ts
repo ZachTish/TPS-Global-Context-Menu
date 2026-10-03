@@ -1,7 +1,8 @@
-import { QueryController, TFile } from 'obsidian';
+import { Notice, QueryController, TFile } from 'obsidian';
 import { around } from 'monkey-around';
 import type TPSGlobalContextMenuPlugin from '../main';
 import * as logger from '../logger';
+import { findNativeBaseCreateRoute } from '../utils/native-base-create-routes';
 
 /** The 1.14 native menu writes frontmatter immediately before its platform-specific UI. */
 export function supportsNativeCreateBoundary(open: Function): boolean {
@@ -110,6 +111,35 @@ export class NativeBaseNoteOpening {
         owner.inFlight.add(this);
         const sourceLeaf = owner.plugin.app.workspace.activeLeaf;
         try {
+          const base = this.query.file;
+          const route = base instanceof TFile && base.extension === 'base'
+            ? findNativeBaseCreateRoute(owner.plugin.settings.nativeBaseCreateRoutes, base.path, this.viewConfig.name)
+            : null;
+          if (route) {
+            if (owner.plugin.app.vault.getAbstractFileByPath(base.path) !== base) {
+              throw new Error(`Base file ${base.path} is no longer available.`);
+            }
+            if (this.query.newItemTemplate) {
+              throw new Error(`Remove the Base new-note template before routing ${base.path} / ${route.viewName} through GCM.`);
+            }
+            logger.flow('BaseCreateRoute', 'create:start', {
+              basePath: route.basePath, viewName: route.viewName, recordKind: route.recordKind,
+            });
+            // GCM owns the entire envelope and the single create write. Core's inferred
+            // filter defaults cannot safely produce a native record for an OR filter.
+            const handle = await owner.plugin.nativeRecordService.createFresh(
+              route.recordKind, { title: 'Untitled' },
+              { fileName: 'Untitled', cause: { kind: 'user' } },
+            );
+            logger.flow('BaseCreateRoute', 'create:done', {
+              basePath: route.basePath, viewName: route.viewName, recordKind: route.recordKind, path: handle.path,
+            });
+            if (owner.active) await owner.plugin.noteOpeningService.present({
+              filePath: handle.path, sourcePluginId: 'obsidian-bases', anchorEl: this.containerEl,
+              sourceLeaf, renameTitle: true,
+            });
+            return;
+          }
           const file = await runNativeCreateWithoutOpening(this, original, args);
           if (file && owner.active) await owner.plugin.noteOpeningService.present({
             filePath: file.path, sourcePluginId: 'obsidian-bases', anchorEl: this.containerEl,
@@ -118,7 +148,7 @@ export class NativeBaseNoteOpening {
         } catch (error) {
           // Never retry a creation that may already have written its file.
           logger.flowError('NoteOpening', 'native-base:create-failed', error);
-          throw error;
+          new Notice(`Base note creation failed: ${error instanceof Error ? error.message : String(error)}`, 10000);
         } finally { owner.inFlight.delete(this); }
       },
     }));

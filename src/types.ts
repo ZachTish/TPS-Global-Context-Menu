@@ -475,6 +475,15 @@ export function createDefaultConditionGroup(): ConditionGroup {
   };
 }
 
+export interface NativeBaseCreateRoute {
+  /** Vault-relative path to one physical .base file. */
+  basePath: string;
+  /** Exact view name inside that Base. */
+  viewName: string;
+  /** Internal native-record type; its frontmatter comes from the current mapping. */
+  recordKind: string;
+}
+
 export interface TPSGlobalContextMenuSettings {
   /**
    * `legacy` preserves the existing TPS custom Base/companion behavior.
@@ -490,6 +499,7 @@ export interface TPSGlobalContextMenuSettings {
   nativeRecordIdentityTagPrefix: string;
   nativeRecordKindPropertyKey: string;
   nativeRecordKindPropertyKeys: KindMappings;
+  nativeBaseCreateRoutes: NativeBaseCreateRoute[];
   nativeRecordTitlePropertyKey: string;
   nativeRecordCreatedPropertyKey: string;
   nativeRecordModifiedPropertyKey: string;

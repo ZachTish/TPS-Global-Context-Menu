@@ -1,9 +1,10 @@
 import { kindClassification, kindDiscriminator, kindReadClassifications, kindWriterEnabled, normalizeClassificationTag, normalizeKindClassification, type KindClassification } from './utils/kind-classification';
+import { validateNativeBaseCreateRoute } from './utils/native-base-create-routes';
 import { renderNavigatorPropertyVisibility } from './integrations/notebook-navigator-property-visibility';
 import { MIGRATABLE_KEY_SETTINGS, PropertyMigration } from './utils/property-migration';
 import { PropertyMigrationModal } from './modals/property-migration-modal';
 import { MANAGED_NOTE_FIELDS, managedNoteFieldKey, configureManagedNoteField } from './utils/managed-note-fields';
-import { App, Notice, PluginSettingTab, Setting, TextComponent } from 'obsidian';
+import { App, Notice, PluginSettingTab, Setting, TextComponent, TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
 import type { AppearanceSettingKey, CustomProperty, ViewModeConditionOperator, ViewModeConditionType, ViewModeRule, ViewModeRuleCondition } from './types';
 import { BucketSectionRenderer } from './notebook-navigator-settings/bucket-section';
@@ -118,6 +119,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   private activeFrontmatterEditor: FrontmatterEditorId = 'sort';
   private activeWorkflowPage: WorkflowPageId = 'daily-notes';
   private activeClassificationType = '';
+  private activeBaseCreateRouteIndex = -1;
   private activeBaseQuerySection = BASE_QUERY_GUIDE_SECTIONS[0]?.title || '';
   private readonly nnTextCommitTimers = new Map<string, number>();
 
@@ -1467,6 +1469,101 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           }));
       }
 
+
+      propertyConfig.createEl('h4', { text: 'Base new-note routes' });
+      propertyConfig.createEl('p', {
+        cls: 'setting-item-description',
+        text: 'Choose the record type created by New in one exact Base view. The record uses its current classification and GCM atomic note root/layout; other Base views keep Obsidian creation. Routed views cannot use a Base new-note template.',
+      });
+      const baseRoutes = Array.isArray(this.plugin.settings.nativeBaseCreateRoutes)
+        ? this.plugin.settings.nativeBaseCreateRoutes : [];
+      new Setting(propertyConfig).setName('Add Base route')
+        .setDesc('A route is saved only after you choose a Base file, view, and writable record type.')
+        .addButton(button => button.setButtonText('Add route').onClick(() => {
+          this.activeBaseCreateRouteIndex = baseRoutes.length;
+          this.display();
+          this.containerEl.querySelector<HTMLInputElement>('[aria-label="Base file path"]')?.focus();
+        }));
+      if (!baseRoutes.length) propertyConfig.createEl('p', {
+        cls: 'setting-item-description', text: 'No Base new-note routes. Obsidian handles every Base New action.',
+      });
+      for (const [index, route] of baseRoutes.entries()) {
+        new Setting(propertyConfig)
+          .setName(`${route.basePath || 'Missing Base'} / ${route.viewName || 'Missing view'}`)
+          .setDesc(`Creates ${route.recordKind || 'an unconfigured record type'}`)
+          .addButton(button => button.setButtonText('Edit').onClick(() => {
+            this.activeBaseCreateRouteIndex = index;
+            this.display();
+            this.containerEl.querySelector<HTMLInputElement>('[aria-label="Base file path"]')?.focus();
+          }));
+      }
+      const routeIndex = this.activeBaseCreateRouteIndex;
+      if (routeIndex >= 0 && routeIndex <= baseRoutes.length) {
+        const existing = baseRoutes[routeIndex];
+        let draftBasePath = existing?.basePath || '';
+        let draftViewName = existing?.viewName || '';
+        let draftRecordKind = existing?.recordKind || classifications[0]?.[0] || '';
+        propertyConfig.createEl('h5', { text: existing ? 'Edit Base route' : 'New Base route' });
+        new Setting(propertyConfig).setName('Base file path')
+          .setDesc('Vault-relative path, including .base. The file must exist when New is clicked.')
+          .addText(text => {
+            text.setPlaceholder('Folder/Food Log.base').setValue(draftBasePath)
+              .onChange(value => { draftBasePath = value; });
+            text.inputEl.setAttribute('aria-label', 'Base file path');
+          });
+        new Setting(propertyConfig).setName('View name')
+          .setDesc('Exact name shown for this view inside the Base.')
+          .addText(text => {
+            text.setPlaceholder('Food Log').setValue(draftViewName)
+              .onChange(value => { draftViewName = value; });
+            text.inputEl.setAttribute('aria-label', 'Base view name');
+          });
+        new Setting(propertyConfig).setName('Record type')
+          .setDesc('Select an internal GCM record type; its classification mapping determines the written kind path and any shared-path identity.')
+          .addDropdown(dropdown => {
+            dropdown.addOption('', 'Choose record type');
+            for (const [kind] of classifications) dropdown.addOption(kind, kind);
+            dropdown.setValue(draftRecordKind);
+            dropdown.onChange(value => { draftRecordKind = value; });
+            dropdown.selectEl.setAttribute('aria-label', 'Base route record type');
+          });
+        new Setting(propertyConfig).setName('Save Base route')
+          .addButton(button => button.setButtonText('Save route').setCta().onClick(async () => {
+            button.setDisabled(true);
+            try {
+              const route = validateNativeBaseCreateRoute({
+                basePath: draftBasePath, viewName: draftViewName, recordKind: draftRecordKind,
+              });
+              if (!(this.app.vault.getAbstractFileByPath(route.basePath) instanceof TFile)) {
+                throw new Error('The selected Base file does not exist in this vault.');
+              }
+              if (!kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, route.recordKind)
+                || !kindWriterEnabled(this.plugin.settings.nativeRecordKindPropertyKeys, route.recordKind)) {
+                throw new Error('Choose a record type with an enabled writer in Record classifications.');
+              }
+              if (baseRoutes.some((item, index) => index !== routeIndex
+                && item.basePath === route.basePath && item.viewName === route.viewName)) {
+                throw new Error('That Base view already has a creation route.');
+              }
+              const next = [...baseRoutes];
+              if (existing) next[routeIndex] = route;
+              else next.push(route);
+              this.plugin.settings.nativeBaseCreateRoutes = next;
+              await this.plugin.saveSettings();
+              this.activeBaseCreateRouteIndex = -1;
+              this.display();
+            } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
+            finally { button.setDisabled(false); }
+          }));
+        if (existing) new Setting(propertyConfig).setName('Remove Base route')
+          .setDesc('Obsidian will handle New in this view again; existing notes are unchanged.')
+          .addButton(button => button.setButtonText('Remove route').setWarning().onClick(async () => {
+            this.plugin.settings.nativeBaseCreateRoutes = baseRoutes.filter((_, index) => index !== routeIndex);
+            await this.plugin.saveSettings();
+            this.activeBaseCreateRouteIndex = -1;
+            this.display();
+          }));
+      }
 
       new Setting(propertyConfig)
         .setName('Show custom fields in inline UI')

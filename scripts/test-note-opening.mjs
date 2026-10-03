@@ -3,7 +3,7 @@ import test from 'node:test';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 
-class TFile { constructor(path = 'Inbox/New.md') { this.path = path; this.extension = 'md'; } }
+class TFile { constructor(path = 'Inbox/New.md') { this.path = path; this.extension = path.split('.').at(-1); } }
 const notices = [];
 const platform = { isMobile: false };
 const logger = { flow() {}, flowWarn() {}, flowError() {}, warn() {} };
@@ -14,12 +14,15 @@ function load(path, extra = {}) {
   Function('require', 'module', 'exports', code)(id => {
     if (id === 'obsidian') return { TFile, Platform: platform, Notice: class { constructor(message) { notices.push(message); } }, QueryController: class {} };
     if (id === '../logger') return logger;
+    if (id === '../utils/native-base-create-routes') return routeExports;
     if (id === 'monkey-around') return extra;
     throw new Error(id);
   }, module, module.exports);
   return module.exports;
 }
 const { NoteOpeningService, migrateNoteOpeningSettings, normalizeNoteOpeningSettings } = load('../src/services/note-opening-service.ts');
+const routeExports = load('../src/utils/native-base-create-routes.ts');
+const { findNativeBaseCreateRoute, validateNativeBaseCreateRoute } = routeExports;
 const { runNativeCreateWithoutOpening, supportsNativeCreateBoundary, NativeBaseNoteOpening } = load('../src/services/native-base-note-opening.ts', {
   around(prototype, wrappers) {
     const old = {};
@@ -106,7 +109,7 @@ test('legacy preferences migrate only missing keys without writing other plugins
 function nativeFixture() {
   const writes = [], openings = [];
   const file = new TFile();
-  const app = { fileManager: {
+  const app = { vault: { getAbstractFileByPath: () => null }, fileManager: {
     createNewFile: async (...args) => { writes.push(args); return file; },
     processFrontMatter: async (created, callback) => { const fm = { template: true }; callback(fm, created); writes.push(fm); }
   }, workspace: { getLeaf: () => ({ openFile: async f => openings.push(f) }) } };
@@ -150,6 +153,117 @@ test('adapter deduplicates repeated create taps and restores native behavior on 
   adapter.dispose();
   await f.menu.open('Three');
   assert.equal(f.openings.length, 1);
+});
+
+test('Base route validation requires exact vault-relative file, view, and configured type', () => {
+  assert.deepEqual(validateNativeBaseCreateRoute({ basePath: ' Inbox/Food.base ', viewName: ' Food Log ', recordKind: ' food-entry ' }),
+    { basePath: 'Inbox/Food.base', viewName: 'Food Log', recordKind: 'food-entry' });
+  for (const basePath of ['/Inbox/Food.base', '../Food.base', 'Inbox\\Food.base', 'Inbox/Food.md']) {
+    assert.throws(() => validateNativeBaseCreateRoute({ basePath, viewName: 'Food Log', recordKind: 'food-entry' }));
+  }
+  assert.equal(findNativeBaseCreateRoute([{ basePath: 'Inbox/Food.base', viewName: 'Food Log', recordKind: 'food-entry' }],
+    'Inbox/Food.base', 'Other'), null);
+  assert.throws(() => findNativeBaseCreateRoute([
+    { basePath: 'Inbox/Food.base', viewName: 'Food Log', recordKind: 'food-entry' },
+    { basePath: 'Inbox/Food.base', viewName: 'Food Log', recordKind: 'task' },
+  ], 'Inbox/Food.base', 'Food Log'), /More than one/);
+});
+
+test('exact routed Base New creates one complete native record and presents through shared mobile-safe opening', async () => {
+  const f = nativeFixture();
+  const base = new TFile('Inbox/Food.base');
+  f.menu.query = { file: base };
+  f.menu.viewConfig = { name: 'Food Log' };
+  f.app.vault.getAbstractFileByPath = path => path === base.path ? base : null;
+  const created = [], presented = [];
+  const plugin = {
+    app: f.app,
+    settings: { nativeBaseCreateRoutes: [{ basePath: base.path, viewName: 'Food Log', recordKind: 'food-entry' }] },
+    nativeRecordService: { createFresh: async (...args) => {
+      created.push(args);
+      return { path: '_records/food-entries/Untitled.md' };
+    } },
+    noteOpeningService: { present: async request => { presented.push(request); } },
+  };
+  const adapter = new NativeBaseNoteOpening(plugin);
+  assert.equal(adapter.attach({ newItemMenu: f.menu }), true);
+  await Promise.all([f.menu.open('One'), f.menu.open('Two')]);
+  assert.deepEqual(created, [['food-entry', { title: 'Untitled' }, { fileName: 'Untitled', cause: { kind: 'user' } }]]);
+  assert.equal(f.writes.length, 0, 'routed creation never creates a core draft');
+  assert.equal(f.openings.length, 0);
+  assert.equal(presented.length, 1);
+  assert.equal(presented[0].filePath, '_records/food-entries/Untitled.md');
+  assert.equal(presented[0].renameTitle, true);
+  adapter.dispose();
+});
+
+test('changing a saved Base route selects the new record writer on the next New action', async () => {
+  const f = nativeFixture();
+  const base = new TFile('Inbox/Food.base');
+  f.menu.query = { file: base };
+  f.menu.viewConfig = { name: 'Food Log' };
+  f.app.vault.getAbstractFileByPath = () => base;
+  const kinds = [];
+  const plugin = {
+    app: f.app,
+    settings: { nativeBaseCreateRoutes: [{ basePath: base.path, viewName: 'Food Log', recordKind: 'food-entry' }] },
+    nativeRecordService: { createFresh: async kind => {
+      kinds.push(kind);
+      return { path: `_records/${kind}/Untitled.md` };
+    } },
+    noteOpeningService: { present: async () => {} },
+  };
+  const adapter = new NativeBaseNoteOpening(plugin);
+  adapter.attach({ newItemMenu: f.menu });
+  await f.menu.open();
+  plugin.settings.nativeBaseCreateRoutes = [{ basePath: base.path, viewName: 'Food Log', recordKind: 'food-log' }];
+  await f.menu.open();
+  assert.deepEqual(kinds, ['food-entry', 'food-log']);
+  assert.equal(f.writes.length, 0);
+  adapter.dispose();
+});
+
+test('invalid configured route blocks native New before any file is created', async () => {
+  const f = nativeFixture();
+  const base = new TFile('Inbox/Food.base');
+  f.menu.query = { file: base };
+  f.menu.viewConfig = { name: 'Food Log' };
+  f.app.vault.getAbstractFileByPath = () => base;
+  let attempts = 0;
+  const plugin = {
+    app: f.app,
+    settings: { nativeBaseCreateRoutes: [{ basePath: base.path, viewName: 'Food Log', recordKind: 'missing-writer' }] },
+    nativeRecordService: { createFresh: async () => { attempts++; throw new Error('writer not configured'); } },
+    noteOpeningService: { present: async () => assert.fail('must not present') },
+  };
+  const adapter = new NativeBaseNoteOpening(plugin);
+  adapter.attach({ newItemMenu: f.menu });
+  await f.menu.open('One');
+  assert.equal(attempts, 1);
+  assert.equal(f.writes.length, 0);
+  assert.match(notices.at(-1), /writer not configured/);
+  f.menu.query.newItemTemplate = 'Templates/Food.md';
+  await f.menu.open('Two');
+  assert.equal(attempts, 1, 'a configured template blocks before the record creator');
+  assert.equal(f.writes.length, 0);
+  adapter.dispose();
+});
+
+test('nonmatching Base view keeps core New unchanged', async () => {
+  const f = nativeFixture();
+  f.menu.query = { file: new TFile('Inbox/Food.base') };
+  f.menu.viewConfig = { name: 'Other' };
+  let presented = 0;
+  const adapter = new NativeBaseNoteOpening({ app: f.app,
+    settings: { nativeBaseCreateRoutes: [{ basePath: 'Inbox/Food.base', viewName: 'Food Log', recordKind: 'food-entry' }] },
+    nativeRecordService: { createFresh: async () => assert.fail('wrong view') },
+    noteOpeningService: { present: async () => { presented++; } },
+  });
+  adapter.attach({ newItemMenu: f.menu });
+  await f.menu.open('One');
+  assert.equal(f.writes.length, 2);
+  assert.equal(presented, 1);
+  adapter.dispose();
 });
 
 test('a failed open is acknowledged without authorizing a second caller opening', async () => {
