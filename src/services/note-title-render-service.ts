@@ -31,13 +31,19 @@ export class NoteTitleRenderService {
   }
 
   handleMetadataChanged(file: TFile): void {
+    const previousTitle = this.linkTitleCache.get(file.path);
     this.clearTitleCache(file.path);
+    if (previousTitle !== undefined && previousTitle === this.getDisplayTitle(file)) return;
     // Metadata now owns the saved title. Refresh only its open views instead
-    // of waiting for the periodic title/link remount pass.
+    // of waiting for the periodic title/link remount pass. Body-only metadata
+    // events with an unchanged cached title need no title DOM work.
     for (const leaf of this.plugin.app.workspace.getLeavesOfType('markdown')) {
       const view = leaf.view as MarkdownView;
       if (view.file?.path !== file.path) continue;
       this.refreshInlineTitleForView(view);
+    }
+    if (previousTitle !== undefined) {
+      this.refreshRenderedNoteLinks();
     }
   }
 
@@ -57,24 +63,38 @@ export class NoteTitleRenderService {
   }
 
   refreshInlineTitles(): void {
-    const renderedRootSelector =
-      '.markdown-preview-view, .markdown-reading-view, .markdown-rendered, .markdown-preview-section';
     for (const leaf of this.plugin.app.workspace.getLeavesOfType('markdown')) {
       const view = leaf.view as MarkdownView;
       if (!(view?.file instanceof TFile) || !(view?.contentEl instanceof HTMLElement)) continue;
       this.refreshInlineTitleAndIcon(view);
-      const renderedRoots = Array.from(
-        view.contentEl.querySelectorAll<HTMLElement>(renderedRootSelector),
-      );
-      const renderedRootSet = new Set(renderedRoots);
-      for (const renderedRoot of renderedRoots) {
-        let ancestor = renderedRoot.parentElement;
-        while (ancestor && !renderedRootSet.has(ancestor)) {
-          ancestor = ancestor.parentElement;
-        }
-        if (ancestor) continue;
-        this.processRenderedNoteLinks(renderedRoot, view.file.path);
+      this.refreshRenderedNoteLinksForView(view);
+    }
+  }
+
+  private refreshRenderedNoteLinks(): void {
+    for (const leaf of this.plugin.app.workspace.getLeavesOfType('markdown')) {
+      const view = leaf.view as MarkdownView;
+      if (!(view?.file instanceof TFile) || !view.contentEl || !(view.contentEl instanceof HTMLElement)) continue;
+      this.refreshRenderedNoteLinksForView(view);
+    }
+  }
+
+  private refreshRenderedNoteLinksForView(view: MarkdownView): void {
+    const file = view.file;
+    if (!(file instanceof TFile)) return;
+    const renderedRootSelector =
+      '.markdown-preview-view, .markdown-reading-view, .markdown-rendered, .markdown-preview-section';
+    const renderedRoots = Array.from(
+      view.contentEl.querySelectorAll<HTMLElement>(renderedRootSelector),
+    );
+    const renderedRootSet = new Set(renderedRoots);
+    for (const renderedRoot of renderedRoots) {
+      let ancestor = renderedRoot.parentElement;
+      while (ancestor && !renderedRootSet.has(ancestor)) {
+        ancestor = ancestor.parentElement;
       }
+      if (ancestor) continue;
+      this.processRenderedNoteLinks(renderedRoot, file.path);
     }
   }
 
@@ -211,6 +231,7 @@ export class NoteTitleRenderService {
   private isUnaliasedFilenameRender(link: HTMLElement, file: TFile): boolean {
     const visible = String(link.textContent || '').replace(/\s+/g, ' ').trim();
     if (!visible) return false;
+    if (link.dataset.tpsGcmRenderedTitle === visible && link.dataset.tpsGcmOriginalText) return true;
     if (visible === file.basename || visible === file.name || visible === file.path) return true;
     const target = this.getRawLinkTarget(link).replace(/\.md$/i, '').replace(/^\/+/, '').trim();
     const targetBasename = target.split('/').pop() || target;

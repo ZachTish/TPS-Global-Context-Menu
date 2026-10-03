@@ -249,7 +249,9 @@ function createHarness({
     app: {
       workspace: {
         on: on('workspace'),
+        onLayoutReady() {},
         activeLeaf: null,
+        getActiveViewOfType() { return null; },
         getActiveFile() {
           return null;
         },

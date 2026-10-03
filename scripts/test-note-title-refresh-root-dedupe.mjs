@@ -244,6 +244,7 @@ function createHarness(contentRoots) {
 function createRealServiceHarness(contentEl, { viewPath = 'Notes/Benchmark.md' } = {}) {
   const targetFile = new TestTFile('Notes/Target.md');
   const viewFile = new TestTFile(viewPath);
+  let targetTitle = 'Rendered Target';
   let metadataResolutions = 0;
   const resolutionSources = [];
   const service = new serviceModule.NoteTitleRenderService({
@@ -257,7 +258,7 @@ function createRealServiceHarness(contentEl, { viewPath = 'Notes/Benchmark.md' }
       metadataCache: {
         getFileCache(file) {
           return file === targetFile
-            ? { frontmatter: { title: 'Rendered Target' } }
+            ? { frontmatter: { title: targetTitle } }
             : null;
         },
         getFirstLinkpathDest(rawTarget, sourcePath) {
@@ -278,6 +279,7 @@ function createRealServiceHarness(contentEl, { viewPath = 'Notes/Benchmark.md' }
     service,
     targetFile,
     viewFile,
+    setTargetTitle(value) { targetTitle = value; },
     resolutionSources,
     get metadataResolutions() {
       return metadataResolutions;
@@ -518,7 +520,7 @@ if (process.env.TPS_NOTE_TITLE_BENCHMARK === '1') {
     );
     assert.match(
       mainSource,
-      /registerInterval\(window\.setInterval\(\(\) => \{\s*this\.noteTitleRenderService\.refreshInlineTitles\(\);\s*\}, 900\)\);/u,
+      /if \(Platform\.isMobile\) \{\s*this\.registerInterval\(window\.setInterval\(\(\) => \{\s*this\.noteTitleRenderService\.refreshInlineTitles\(\);\s*\}, 900\)\);\s*\}/u,
     );
   });
 }
@@ -664,7 +666,7 @@ test('an exception during title editing leaves the filename alone and reports fa
 function metadataTitleHarness(t) {
   const file = new TestTFile('Inbox/Native.md');
   const other = new TestTFile('Inbox/Other.md');
-  const counts = { reads: 0, writes: 0, timers: 0, links: 0, textWrites: 0, metadata: 0 };
+  const counts = { reads: 0, writes: 0, timers: 0, links: 0, textWrites: 0, titleLookups: 0, metadata: 0 };
   let title = 'Before';
   const makeView = file => {
     const element = new FakeElement('title', ['inline-title']);
@@ -677,7 +679,7 @@ function metadataTitleHarness(t) {
   };
   const first = makeView(file), second = makeView(file), unrelated = makeView(other);
   const leaves = [first, second, unrelated, { file: null }].map(view => ({ view }));
-  const service = new serviceModule.NoteTitleRenderService({ app: {
+  const service = new serviceModule.NoteTitleRenderService({ settings: { enableInlinePersistentMenus: false }, app: {
     workspace: { getLeavesOfType(type) { assert.equal(type, 'markdown'); return leaves; } },
     metadataCache: { getFileCache(target) { counts.metadata++; return { frontmatter: { title: target === file ? title : 'Other' } }; } },
     vault: { read() { counts.reads++; }, cachedRead() { counts.reads++; }, modify() { counts.writes++; }, getMarkdownFiles() { throw Error('No vault scan'); } },
@@ -686,7 +688,7 @@ function metadataTitleHarness(t) {
   globalThis.document = { activeElement: null };
   globalThis.window = { setTimeout() { counts.timers++; } };
   t.after(() => { globalThis.document = previousDocument; globalThis.window = previousWindow; });
-  service.resolveInlineTitleElement = view => view.element;
+  service.resolveInlineTitleElement = view => { counts.titleLookups++; return view.element; };
   service.setInlineTitleText = (element, next) => { counts.textWrites++; element.textContent = next; };
   service.processRenderedNoteLinks = () => { counts.links++; };
   service.getDisplayTitle(file); // Populate the old display cache before metadata changes.
@@ -695,6 +697,18 @@ function metadataTitleHarness(t) {
   return { service, file, other, counts, first, second, unrelated, setTitle(value) { title = value; } };
 }
 
+test('an uncached already-open desktop title paints without inline menus or a timer', t => {
+  const h = metadataTitleHarness(t);
+  h.service.clearTitleCache(h.file.path);
+  h.first.element.textContent = 'Native';
+  h.service.refreshInlineTitle(h.first);
+  assert.equal(h.first.element.textContent, 'Before');
+  assert.equal(h.counts.textWrites, 1);
+  assert.equal(h.counts.timers, 0);
+  assert.equal(h.counts.reads, 0);
+  assert.equal(h.counts.writes, 0);
+});
+
 test('metadata arrival refreshes every open title for that file synchronously', t => {
   const h = metadataTitleHarness(t);
   h.setTitle('After');
@@ -702,29 +716,51 @@ test('metadata arrival refreshes every open title for that file synchronously', 
   assert.equal(h.first.element.textContent, 'After');
   assert.equal(h.second.element.textContent, 'After');
   assert.equal(h.unrelated.element.textContent, 'Other');
-  assert.deepEqual(h.counts, { reads: 0, writes: 0, timers: 0, links: 0, textWrites: 2, metadata: 1 });
+  assert.deepEqual(h.counts, { reads: 0, writes: 0, timers: 0, links: 0, textWrites: 2, titleLookups: 2, metadata: 1 });
 });
 
-test('unchanged metadata bursts cause no repeated DOM writes, file reads or timers', t => {
+test('unchanged metadata bursts cause no title lookups, DOM writes, file reads or timers', t => {
   const h = metadataTitleHarness(t);
   for (let i = 0; i < 100; i++) h.service.handleMetadataChanged(h.file);
-  assert.deepEqual(h.counts, { reads: 0, writes: 0, timers: 0, links: 0, textWrites: 0, metadata: 100 });
+  assert.deepEqual(h.counts, { reads: 0, writes: 0, timers: 0, links: 0, textWrites: 0, titleLookups: 0, metadata: 100 });
   h.setTitle('First'); h.service.handleMetadataChanged(h.file);
   h.setTitle('Latest'); h.service.handleMetadataChanged(h.file);
   assert.equal(h.first.element.textContent, 'Latest');
   assert.equal(h.counts.textWrites, 4);
+  assert.equal(h.counts.titleLookups, 4);
 });
 
-test('metadata for unopened notes invalidates their cache without rendering open views', t => {
+test('unchanged metadata for an unopened note avoids rendered DOM work', t => {
   const h = metadataTitleHarness(t);
   const closed = new TestTFile('Inbox/Closed.md');
   h.service.getDisplayTitle(closed);
   const before = h.counts.metadata;
   for (let i = 0; i < 100; i++) h.service.handleMetadataChanged(closed);
-  assert.equal(h.counts.metadata, before);
+  assert.equal(h.counts.metadata, before + 100);
   assert.equal(h.counts.textWrites, 0);
-  assert.equal(h.service.linkTitleCache.has(closed.path), false);
+  assert.equal(h.counts.links, 0);
+  assert.equal(h.service.linkTitleCache.has(closed.path), true);
   assert.equal(h.service.linkTitleCache.has(h.other.path), true);
+});
+
+test('a real target-title change refreshes existing rendered links without a recurring timer', () => {
+  const content = new FakeElement('content');
+  const reading = content.append(new FakeElement('reading', ['markdown-reading-view']));
+  const link = reading.append(makeLink('target-link'));
+  const h = createRealServiceHarness(content);
+  h.service.refreshInlineTitles();
+  assert.equal(link.textContent, 'Rendered Target');
+  const queriesBefore = querySelectorAllCalls;
+  const resolutionsBefore = h.metadataResolutions;
+
+  for (let i = 0; i < 100; i++) h.service.handleMetadataChanged(h.targetFile);
+  assert.equal(querySelectorAllCalls, queriesBefore);
+  assert.equal(h.metadataResolutions, resolutionsBefore);
+
+  h.setTargetTitle('Renamed Target');
+  h.service.handleMetadataChanged(h.targetFile);
+  assert.equal(link.textContent, 'Renamed Target');
+  assert.equal(h.metadataResolutions, resolutionsBefore + 1);
 });
 
 test('metadata refresh preserves active title editing and strict-source filename display', t => {

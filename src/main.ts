@@ -614,9 +614,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.registerDomEvent(document, 'keyup', (event: KeyboardEvent) => {
       this.noteTitleRenderService.handleInlineTitleKeyup(event);
     }, { capture: true });
-    this.registerInterval(window.setInterval(() => {
-      this.noteTitleRenderService.refreshInlineTitles();
-    }, 900));
+    if (Platform.isMobile) {
+      this.registerInterval(window.setInterval(() => {
+        this.noteTitleRenderService.refreshInlineTitles();
+      }, 900));
+    }
     if (!this.usesNativeRecordArchitecture()) this.registerEditorSuggest(new InlinePropertySuggest(this));
     this.addChild(new HeadingLinkSuggest(this));
     this.app.workspace.updateOptions();

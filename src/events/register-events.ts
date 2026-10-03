@@ -161,6 +161,11 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     const throttledEnsureMenus = debounce(() => {
         overlayRendering.scheduleMenus('workspace-layout', 0);
     }, 500, false);
+    const refreshActiveInlineTitle = () => {
+        const view = plugin.app.workspace.getActiveViewOfType(MarkdownView);
+        if (view?.file instanceof TFile) plugin.noteTitleRenderService.refreshInlineTitle(view);
+    };
+    plugin.app.workspace.onLayoutReady(refreshActiveInlineTitle);
 
     // Unified subitem refresh function to consolidate multiple triggers
     const scheduleSubitemRefresh = (file: TFile | null, opts: { delay?: number } = {}) => {
@@ -179,10 +184,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             delayMs: 0,
         });
     }, 120, false);
-    const debouncedLiveMarkdownParentReconcile = debounce((file: TFile, raw: string) => {
-        if (!plugin.canRunBackgroundAutomation()) return;
-        void plugin.subitemRelationshipSyncService?.reconcileMarkdownParentText(file, raw);
-    }, 250, false);
     const scheduleResponsiveMenuRefresh = (
         file: TFile,
         opts: { ensureMenus?: boolean; force?: boolean; rebuildInlineSubitems?: boolean; delayMs?: number; lateDelayMs?: number } = {}
@@ -201,6 +202,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.registerEvent(plugin.app.workspace.on('layout-change', () => {
         throttledEnsureMenus();
+        refreshActiveInlineTitle();
     }));
 
     let lastActiveModeSignature = '';
@@ -230,7 +232,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     }, 750));
 
     plugin.registerEvent(
-        plugin.app.workspace.on('editor-change', (editor, info) => {
+        plugin.app.workspace.on('editor-change', (_editor, info) => {
             const file = (info as any)?.file;
             if (!(file instanceof TFile) || file.extension !== 'md') return;
             const active = plugin.app.workspace.getActiveFile();
@@ -244,9 +246,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                     && !!activeElement.closest('.cm-editor, .markdown-source-view.mod-cm6, .canvas-node-content');
             };
             plugin.notebookNavigatorRuleService.markUserEdited(file);
-            const raw = typeof (editor as any)?.getValue === 'function' ? (editor as any).getValue() : null;
-            if (typeof raw !== 'string') return;
-            debouncedLiveMarkdownParentReconcile(file, raw);
         }),
     );
 
@@ -256,6 +255,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 active: plugin.app.workspace.getActiveFile()?.path || null,
             });
             throttledEnsureMenus();
+            refreshActiveInlineTitle();
             throttledEnsureLinkedSubitemCheckboxes();
             const activePath = plugin.app.workspace.getActiveFile()?.path || null;
             for (const path of Array.from((plugin as any).viewModeSuppressedPaths as Set<string>)) {
@@ -364,6 +364,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     plugin.registerEvent(
         plugin.app.workspace.on('file-open', (file) => {
             logger.perf('file-open:start', { file: file instanceof TFile ? file.path : null });
+            refreshActiveInlineTitle();
             overlayRendering.scheduleMenus('file-open', 0);
 
             // Single unified subitem refresh call
