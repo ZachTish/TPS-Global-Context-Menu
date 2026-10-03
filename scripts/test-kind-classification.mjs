@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { build } from 'esbuild';
 const bundle=await build({entryPoints:['src/utils/kind-classification.ts'],bundle:true,platform:'node',format:'esm',write:false});
-const {encodeKind,decodeKind,normalizeClassificationTag}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
+const {encodeKind,decodeKind,normalizeClassificationTag,kindReadClassifications,matchesKind}=await import('data:text/javascript;base64,'+Buffer.from(bundle.outputFiles[0].text).toString('base64'));
 const mappings={'food-entry':{tag:'kind/food/transaction'},food:{tag:'library/Food'}};
 test('full tags encode/decode without a required depth and preserve unrelated fields',()=>{
  const before={kind:'food-entry',title:'Lunch',tags:['personal'],calories:100};
@@ -33,4 +33,55 @@ test('property classifications cannot overwrite existing record fields or shared
  assert.throws(()=>encodeKind(map,{kind:'transaction',TransactionKind:'food'}),/conflicts with an existing field/);
  assert.deepEqual(encodeKind(map,{kind:'transaction',amount:12}),{kind:'transaction',transactionKind:'financial',amount:12});
  assert.throws(()=>encodeKind({transaction:{parentKind:'transaction',key:'Kind',value:'financial'}},{kind:'transaction'}),/Invalid classification/);
+});
+
+test('configured kind-list writer preserves unrelated kind values and reads explicit legacy forms',()=>{
+ const mapped={'food-entry':{primary:{kindList:{key:'kind',value:'transaction/macros'}},aliases:[
+  {tag:'kind/food/transaction'},{scalar:{key:'kind',value:'food-entry'}},
+  {key:'transactionKind',parentKind:'transaction',value:'food'},
+ ]}};
+ const original={kind:['transaction/macros','user/special'],title:'Lunch',tags:['manual']};
+ const decoded=decodeKind(mapped,original);
+ assert.equal(decoded.kind,'food-entry');
+ assert.deepEqual(encodeKind(mapped,decoded,original),original);
+ assert.deepEqual(encodeKind(mapped,{kind:'food-entry',title:'Old lunch',tags:['manual']},{kind:'food-entry'}),
+  {kind:['transaction/macros'],title:'Old lunch',tags:['manual']});
+ assert.equal(decodeKind(mapped,{kind:'food-entry'}).kind,'food-entry');
+ assert.equal(decodeKind(mapped,{tags:['kind/food/transaction']}).kind,'food-entry');
+ assert.equal(decodeKind(mapped,{kind:'transaction',transactionKind:'food'}).kind,'food-entry');
+ assert.equal(matchesKind(mapped,{kind:['transaction/macros','user/special']},'food-entry'),true);
+ assert.equal(kindReadClassifications(mapped,'food-entry').length,4);
+ assert.throws(()=>encodeKind(mapped,{kind:'food-entry'},{kind:'wrong'}),/must be a list/u);
+ assert.throws(()=>decodeKind({...mapped,other:{kindList:{key:'kind',value:'user/special'}}},original),/Ambiguous/u);
+});
+
+test('kind-list paths and property keys come from mappings, not built-in taxonomy',()=>{
+ const mapped={arbitrary:{kindList:{key:'myKinds',value:'alpha/beta/gamma'}}};
+ assert.deepEqual(encodeKind(mapped,{kind:'arbitrary',title:'Entry'}),{myKinds:['alpha/beta/gamma'],title:'Entry'});
+ assert.equal(decodeKind(mapped,{myKinds:['alpha/beta/gamma']}).kind,'arbitrary');
+ for(const invalid of ['', 'alpha', 'alpha//beta', 'alpha/beta space'])
+  assert.throws(()=>encodeKind({arbitrary:{kindList:{key:'myKinds',value:invalid}}},{kind:'arbitrary'}),/Invalid kind list/u);
+ for(const reserved of ['tpsId','tpsSchemaVersion','title','createdDate','modifiedDate','tags']) {
+  assert.throws(()=>encodeKind({arbitrary:{kindList:{key:reserved,value:'alpha/beta'}}},{kind:'arbitrary'}),/Invalid kind list/u);
+  assert.throws(()=>decodeKind({arbitrary:{scalar:{key:reserved,value:'alpha'}}},{[reserved]:'alpha'}),/Invalid scalar/u);
+ }
+});
+
+test('a disabled writer continues to read its configured legacy classification',()=>{
+ const mapped={undecided:{primary:{tag:'kind/physical'},aliases:[{scalar:{key:'kind',value:'physical'}}],writeDisabled:true}};
+ assert.equal(decodeKind(mapped,{tags:['kind/physical']}).kind,'undecided');
+ assert.equal(decodeKind(mapped,{kind:'physical'}).kind,'undecided');
+ assert.throws(()=>encodeKind(mapped,{kind:'undecided',title:'Item'}),/disabled until a writer is configured/u);
+});
+
+test('shared visible kind paths use an existing caller identity without inventing a new property',()=>{
+ const mapped={purchase:{kindList:{key:'kind',value:'transaction/financial'}},investment:{kindList:{key:'kind',value:'transaction/financial'}}};
+ const raw={kind:['transaction/financial','user/reviewed'],type:'investment',amount:20};
+ assert.deepEqual(decodeKind(mapped,raw),raw,'a shared path alone cannot identify one internal record type');
+ assert.equal(decodeKind(mapped,raw,'investment').kind,'investment');
+ assert.equal(matchesKind(mapped,raw,'purchase'),true);
+ assert.equal(matchesKind(mapped,raw,'investment'),true);
+ assert.deepEqual(encodeKind(mapped,{kind:'investment',type:'investment',amount:20},raw),raw);
+ assert.throws(()=>decodeKind(mapped,raw,'missing'),/Expected record kind/u);
+ assert.throws(()=>decodeKind({...mapped,other:{tag:'other/type'}},{...raw,tags:['other/type']},'investment'),/Ambiguous/u);
 });

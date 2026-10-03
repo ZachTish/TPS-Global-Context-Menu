@@ -1,4 +1,4 @@
-import { encodeKind, decodeKind, kindClassification } from './utils/kind-classification';
+import { encodeKind, decodeKind, kindClassification, kindReadClassifications, kindWriterEnabled, matchesKind } from './utils/kind-classification';
 import type { CreatedNoteRequest } from './services/note-opening-service';
 import { Notice, normalizePath, parseYaml, TFile, type WorkspaceLeaf } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
@@ -999,10 +999,20 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             register: (action: any) => plugin.registerExternalAction(action),
         },
         frontmatterKinds: {
-            version: 1,
-            encode: (fields: Record<string, any>) => encodeKind(plugin.settings.nativeRecordKindPropertyKeys, fields),
-            decode: (fields: Record<string, any>) => decodeKind(plugin.settings.nativeRecordKindPropertyKeys, fields),
+            version: 2,
+            encode: (fields: Record<string, any>, existingRaw?: Record<string, unknown>) => encodeKind(plugin.settings.nativeRecordKindPropertyKeys, fields, existingRaw),
+            decode: (fields: Record<string, any>, expectedKind?: string) => decodeKind(plugin.settings.nativeRecordKindPropertyKeys, fields, expectedKind),
             definition: (kind: string) => kindClassification(plugin.settings.nativeRecordKindPropertyKeys, kind),
+            readDefinitions: (kind: string) => kindReadClassifications(plugin.settings.nativeRecordKindPropertyKeys, kind),
+            matches: (fields: Record<string, unknown>, kind: string) => matchesKind(plugin.settings.nativeRecordKindPropertyKeys, fields, kind),
+            writerEnabled: (kind: string) => kindWriterEnabled(plugin.settings.nativeRecordKindPropertyKeys, kind),
+            propertyKey: (id: string) => plugin.settings.properties.find(property => property.id === id)?.key || null,
+            listTypes: () => Object.keys(plugin.settings.nativeRecordKindPropertyKeys || {}),
+            snapshot: () => Object.fromEntries(Object.keys(plugin.settings.nativeRecordKindPropertyKeys || {}).map(kind => [kind, {
+                primary: kindClassification(plugin.settings.nativeRecordKindPropertyKeys, kind),
+                aliases: kindReadClassifications(plugin.settings.nativeRecordKindPropertyKeys, kind).slice(1),
+                writerEnabled: kindWriterEnabled(plugin.settings.nativeRecordKindPropertyKeys, kind),
+            }])),
         },
         dailyNotes: {
             version: 4,

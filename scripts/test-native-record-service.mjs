@@ -138,7 +138,7 @@ async function loadModule() {
         builder.onResolve({ filter: /^\.\.\/logger$/u }, () => ({ path: 'logger', namespace: 'native-record-test' }));
         builder.onLoad({ filter: /.*/, namespace: 'native-record-test' }, (args) => {
           if (args.path === 'logger') {
-            return { loader: 'js', contents: 'export const flow = () => {}; export const flowError = () => {}; export const perf = () => {}; export const warn = () => {}; export const error = () => {}; export const debug = () => {};' };
+            return { loader: 'js', contents: 'export const flow = () => {}; export const flowWarn = () => {}; export const flowError = () => {}; export const perf = () => {}; export const warn = () => {}; export const error = () => {}; export const debug = () => {};' };
           }
           return {
             loader: 'js',
@@ -427,7 +427,7 @@ test('calendar template authority requires the exact canonical ID grammar', asyn
   }
   await assert.rejects(service.create('calendar-event', { title: 'Copied ID', tpsId: 'template-id' }, { id: calendarId() }), /collides with system storage/u);
   await assert.rejects(service.create('calendar-event', { title: 'Invalid body' }, { id: calendarId(), body: null }), /canonical calendar record ID/u);
-  await assert.rejects(service.create('calendar-event', { title: 'Invalid kind', kind: ['meeting'] }, { id: calendarId() }), /kind must be a string/u);
+  await assert.rejects(service.create('calendar-event', { title: 'Invalid kind', kind: [42] }, { id: calendarId() }), /kind must be text or a list of text/u);
   await assert.rejects(service.create('task', { title: 'Unchanged task contract' }, { id: 'task-body', body: 'Body' }), /canonical calendar record ID/u);
   assert.equal([...entries.values()].filter((entry) => entry instanceof TFile).length, 0);
 });
@@ -3990,6 +3990,62 @@ test('configured hierarchy creates and updates a Health record without confusing
  await assert.rejects(service.create('task',{title:'Duplicate'},{id:'hierarchy-food'}));
  const renamed=await service.reidentify(created.path,'hierarchy-food-new');assert.equal(renamed.kind,'food-entry');
  assert.match(contents.get(created.file),/^transactionKind: food-entry$/m);
+});
+
+test('configured kind list creates native records and reads explicit legacy tag/scalar aliases', async () => {
+ const {service,plugin,contents,addFile,vault}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{
+  primary:{kindList:{key:'kind',value:'transaction/macros'}},
+  aliases:[{tag:'kind/food/transaction'},{scalar:{key:'kind',value:'food-entry'}}],
+ }};
+ const created=await service.create('food-entry',{title:'Lunch',calories:120,tags:['lunch']},{id:'kind-list-food'});
+ const source=contents.get(created.file);
+ assert.match(source,/kind:\s*\n\s*- transaction\/macros/u);
+ assert.doesNotMatch(source,/kind\/food\/transaction/u);
+ assert.equal(service.inspect({tpsId:'kind-list-food',title:'Lunch',kind:['transaction/macros','user/custom']})?.kind,'food-entry');
+ assert.equal(service.inspect({tpsId:'legacy-food',title:'Old lunch',tags:['kind/food/transaction']})?.kind,'food-entry');
+ assert.equal(service.inspect({tpsId:'legacy-scalar',title:'Old lunch',kind:'food-entry'})?.kind,'food-entry');
+ const updated=await service.update(created.path,{calories:180});
+ assert.equal(updated.kind,'food-entry');
+ assert.match(contents.get(created.file),/kind:\s*\n\s*- transaction\/macros/u);
+ const legacy=addFile('_records/food-entries/legacy-kind.md',serializeNativeRecordDocument({
+  bom:'',newline:'\n',closer:'---',body:'Authored body',frontmatter:{
+   tpsId:'legacy-kind',tpsSchemaVersion:1,kind:'food-entry',title:'Old lunch',calories:100,
+  },
+ }));
+ vault.emit('modify',legacy);
+ assert.equal((await service.update(legacy,{calories:150}))?.kind,'food-entry');
+ assert.match(contents.get(legacy),/^kind: food-entry$/mu,'an ordinary metadata edit does not silently migrate legacy notes');
+ assert.match(contents.get(legacy),/Authored body$/u);
+ const conflicting=addFile('_records/food-entries/conflicting-kind.md',serializeNativeRecordDocument({
+  bom:'',newline:'\n',closer:'---',body:'Unchanged body',frontmatter:{
+   tpsId:'conflicting-kind',tpsSchemaVersion:1,kind:'unrelated',title:'Other lunch',tags:['kind/food/transaction'],calories:100,
+  },
+ }));
+ vault.emit('modify',conflicting);
+ const before=contents.get(conflicting);
+ assert.equal(await service.update(conflicting,{calories:150}),null);
+ assert.equal(contents.get(conflicting),before,'an occupied non-legacy scalar is never replaced by a list');
+});
+
+test('canonical calendar records preserve template-authored kind lists', async () => {
+ const {service,contents}=createHarness();
+ const event=await service.create('calendar-event',{title:'Meeting',kind:['transaction/event','user/visible']},
+  {id:'calendar:v1:abcdefghijklmnop:abcdefghijklmnopqrstuvwxyz7'});
+ assert.match(contents.get(event.file),/transaction\/event/u);
+ await service.update(event.path,{scheduled:'2026-10-03'});
+ assert.match(contents.get(event.file),/user\/visible/u);
+ assert.equal((await service.resolve(event.path))?.kind,'calendar-event');
+});
+
+test('disabled kind writer rejects native creation while older matching notes remain readable', async () => {
+ const {service,plugin,entries}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{
+  primary:{tag:'kind/food/transaction'},aliases:[{scalar:{key:'kind',value:'food-entry'}}],writeDisabled:true,
+ }};
+ assert.equal(service.inspect({tpsId:'older-food',title:'Lunch',tags:['kind/food/transaction']})?.kind,'food-entry');
+ await assert.rejects(service.create('food-entry',{title:'New lunch'}),/disabled until a writer is configured/u);
+ assert.equal([...entries.values()].filter(entry=>entry instanceof TFile).length,0);
 });
 
 test('configured subtype values decode to canonical record kinds and reject conflicting hierarchy identities',async()=>{

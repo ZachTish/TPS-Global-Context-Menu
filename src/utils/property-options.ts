@@ -22,7 +22,7 @@ const vaultOptionCache = new WeakMap<App, Map<string, { createdAt: number; value
 type OptionProperty = Pick<
   CustomProperty,
   'type' | 'listItemType' | 'acceptsKind' | 'optionSources' | 'optionsSource'
->;
+> & { id?: string };
 
 function normalizeOption(value: unknown, property?: OptionProperty): string {
   if (value === null || value === undefined || value === false) return '';
@@ -151,7 +151,7 @@ export function getEffectivePropertyOptions(
   property: Pick<
     CustomProperty,
     'key' | 'type' | 'listItemType' | 'options' | 'optionSources' | 'optionsSource' | 'acceptsKind'
-  > | null | undefined,
+  > & { id?: string } | null | undefined,
 ): string[] {
   if (!property) return [];
   const manual = propertyUsesManualOptions(property)
@@ -160,7 +160,7 @@ export function getEffectivePropertyOptions(
   if (!propertyUsesVaultOptions(property)) return manual;
 
   const merged = new Map<string, string>();
-  const discovered = property.type === 'kind'
+  const discovered = property.type === 'kind' || property.id === 'kind'
     ? getIndexedKindValues(app) ?? collectVaultPropertyOptions(app, property)
     : collectVaultPropertyOptions(app, property);
   for (const value of [...manual, ...discovered]) {

@@ -1,4 +1,4 @@
-import { kindClassification, normalizeClassificationTag, type KindClassification } from './utils/kind-classification';
+import { kindClassification, kindReadClassifications, kindWriterEnabled, normalizeClassificationTag, normalizeKindClassification, type KindClassification } from './utils/kind-classification';
 import { renderNavigatorPropertyVisibility } from './integrations/notebook-navigator-property-visibility';
 import { MIGRATABLE_KEY_SETTINGS, PropertyMigration } from './utils/property-migration';
 import { PropertyMigrationModal } from './modals/property-migration-modal';
@@ -117,6 +117,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   private activeRulesFieldsPage: RulesFieldsPageId = 'frontmatter';
   private activeFrontmatterEditor: FrontmatterEditorId = 'sort';
   private activeWorkflowPage: WorkflowPageId = 'daily-notes';
+  private activeClassificationType = '';
   private activeBaseQuerySection = BASE_QUERY_GUIDE_SECTIONS[0]?.title || '';
   private readonly nnTextCommitTimers = new Map<string, number>();
 
@@ -1211,76 +1212,212 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       const classifications = Object.keys(this.plugin.settings.nativeRecordKindPropertyKeys || {})
         .map(kind => [kind, kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, kind)] as const)
         .filter((entry): entry is readonly [string, KindClassification] => entry[1] !== null);
+      propertyConfig.createEl('h4', { text: 'Record classifications' });
+      propertyConfig.createEl('p', { cls: 'setting-item-description', text: 'Map each named record type to the frontmatter that identifies it. Kind paths and property names are chosen here, including types used by other TPS plugins.' });
+      let newRecordType = '';
+      let newKindKey = this.plugin.settings.nativeRecordKindPropertyKey;
+      let newKindPath = '';
+      new Setting(propertyConfig).setName('New record type').addText(text => {
+        text.setPlaceholder('record-type').onChange(value => { newRecordType = value.trim(); });
+        text.inputEl.setAttribute('aria-label', 'New record type name');
+      });
+      new Setting(propertyConfig).setName('Its kind list property').addText(text => {
+        text.setValue(newKindKey).onChange(value => { newKindKey = value.trim(); });
+        text.inputEl.setAttribute('aria-label', 'New record kind list property');
+      });
+      new Setting(propertyConfig).setName('Its kind list path').addText(text => {
+        text.setPlaceholder('category/subtype').onChange(value => { newKindPath = value.trim(); });
+        text.inputEl.setAttribute('aria-label', 'New record kind list path');
+      });
+      new Setting(propertyConfig).setName('Add record type').setDesc('Saves a mapping for future writes. It does not change existing notes.')
+        .addButton(button => button.setButtonText('Add mapping').onClick(async () => {
+          button.setDisabled(true);
+          try {
+            await this.plugin.propertyMigrationService.configureNewClassification(newRecordType,
+              { kindList: { key: newKindKey, value: newKindPath } });
+            this.activeClassificationType = newRecordType;
+            this.display();
+          } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
+          finally { button.setDisabled(false); }
+        }));
       if (classifications.length) {
-        propertyConfig.createEl('h4', { text: 'Record classifications' });
-        propertyConfig.createEl('p', { cls: 'setting-item-description', text: 'Choose whether each record type uses one complete tag or a kind and subkind property pair. Apply previews matching notes before changing the mapping.' });
-        let selected = classifications[0][0];
-        let current = classifications[0][1];
-        let mode: 'tag' | 'property' = 'tag' in current ? 'tag' : 'property';
+        propertyConfig.createEl('p', { cls: 'setting-item-description', text: 'Choose how each record type is stored. Kind lists can contain more than one value. Previous classifications stay readable when the writer changes.' });
+        let selected = classifications.some(([kind]) => kind === this.activeClassificationType)
+          ? this.activeClassificationType : classifications[0][0];
+        this.activeClassificationType = selected;
+        let current = classifications.find(([kind]) => kind === selected)![1];
+        type ClassificationMode = 'tag' | 'property' | 'kind-list' | 'scalar';
+        const modeFor = (definition: KindClassification): ClassificationMode => 'tag' in definition ? 'tag' : 'kindList' in definition ? 'kind-list' : 'scalar' in definition ? 'scalar' : 'property';
+        let mode: ClassificationMode = modeFor(current);
         let draftTag = 'tag' in current ? current.tag : '';
-        let draftParent = 'key' in current ? current.parentKind : 'note';
+        let draftParent = 'key' in current ? current.parentKind : '';
         let draftKey = 'key' in current ? current.key : '';
         let draftValue = 'key' in current ? current.value : '';
+        let draftListKey = 'kindList' in current ? current.kindList.key : this.plugin.settings.nativeRecordKindPropertyKey;
+        let draftListValue = 'kindList' in current ? current.kindList.value : '';
+        let draftScalarKey = 'scalar' in current ? current.scalar.key : this.plugin.settings.nativeRecordKindPropertyKey;
+        let draftScalarValue = 'scalar' in current ? current.scalar.value : '';
         let modeInput: import('obsidian').DropdownComponent;
         let tagInput: import('obsidian').TextComponent;
-        let parentInput: import('obsidian').DropdownComponent;
+        let parentInput: import('obsidian').TextComponent;
         let keyInput: import('obsidian').TextComponent;
         let valueInput: import('obsidian').TextComponent;
-        let tagSetting: Setting, parentSetting: Setting, keySetting: Setting, valueSetting: Setting;
+        let listKeyInput: import('obsidian').TextComponent;
+        let listValueInput: import('obsidian').TextComponent;
+        let scalarKeyInput: import('obsidian').TextComponent;
+        let scalarValueInput: import('obsidian').TextComponent;
+        let writerToggle: import('obsidian').ToggleComponent;
+        let tagSetting: Setting, parentSetting: Setting, keySetting: Setting, valueSetting: Setting, listKeySetting: Setting, listValueSetting: Setting, scalarKeySetting: Setting, scalarValueSetting: Setting;
+        let renderAliases = () => {};
         const showMode = () => {
           tagSetting.settingEl.style.display = mode === 'tag' ? '' : 'none';
           for (const setting of [parentSetting, keySetting, valueSetting]) setting.settingEl.style.display = mode === 'property' ? '' : 'none';
+          for (const setting of [listKeySetting, listValueSetting]) setting.settingEl.style.display = mode === 'kind-list' ? '' : 'none';
+          for (const setting of [scalarKeySetting, scalarValueSetting]) setting.settingEl.style.display = mode === 'scalar' ? '' : 'none';
         };
         new Setting(propertyConfig).setName('Record type').addDropdown(dropdown => {
           dropdown.selectEl.setAttribute('aria-label', 'Record type classification');
           for (const [kind] of classifications) dropdown.addOption(kind, kind);
+          dropdown.setValue(selected);
           dropdown.onChange(kind => {
-            selected = kind; current = classifications.find(([key]) => key === kind)![1];
-            mode = 'tag' in current ? 'tag' : 'property';
+            selected = kind; this.activeClassificationType = kind;
+            current = classifications.find(([key]) => key === kind)![1];
+            mode = modeFor(current);
             draftTag = 'tag' in current ? current.tag : '';
-            draftParent = 'key' in current ? current.parentKind : 'note';
+            draftParent = 'key' in current ? current.parentKind : '';
             draftKey = 'key' in current ? current.key : '';
             draftValue = 'key' in current ? current.value : '';
+            draftListKey = 'kindList' in current ? current.kindList.key : this.plugin.settings.nativeRecordKindPropertyKey;
+            draftListValue = 'kindList' in current ? current.kindList.value : '';
+            draftScalarKey = 'scalar' in current ? current.scalar.key : this.plugin.settings.nativeRecordKindPropertyKey;
+            draftScalarValue = 'scalar' in current ? current.scalar.value : '';
             modeInput.setValue(mode); tagInput.setValue(draftTag); parentInput.setValue(draftParent);
-            keyInput.setValue(draftKey); valueInput.setValue(draftValue); showMode();
+            keyInput.setValue(draftKey); valueInput.setValue(draftValue); listKeyInput.setValue(draftListKey);
+            listValueInput.setValue(draftListValue); scalarKeyInput.setValue(draftScalarKey); scalarValueInput.setValue(draftScalarValue); showMode(); renderAliases();
+            writerToggle.setValue(kindWriterEnabled(this.plugin.settings.nativeRecordKindPropertyKeys, selected));
           });
         });
         new Setting(propertyConfig).setName('Store type as').addDropdown(dropdown => {
           modeInput = dropdown;
           dropdown.addOption('tag', 'Tag').addOption('property', 'Kind and subkind properties')
-            .setValue(mode).onChange(value => { mode = value === 'property' ? 'property' : 'tag'; showMode(); });
+            .addOption('kind-list', 'Kind list').addOption('scalar', 'Single property value')
+            .setValue(mode).onChange(value => { mode = value as ClassificationMode; showMode(); });
           dropdown.selectEl.setAttribute('aria-label', 'Record classification storage');
         });
         tagSetting = new Setting(propertyConfig).setName('Tag').addText(text => {
           tagInput = text; text.setValue(draftTag).onChange(value => { draftTag = value; });
           text.inputEl.setAttribute('aria-label', 'Record classification tag');
         });
-        parentSetting = new Setting(propertyConfig).setName('Parent kind').addDropdown(dropdown => {
-          parentInput = dropdown;
-          for (const parent of ['task', 'note', 'entity', 'collection', 'transaction']) dropdown.addOption(parent, parent);
-          dropdown.setValue(draftParent).onChange(value => { draftParent = value; });
+        parentSetting = new Setting(propertyConfig).setName('Parent kind').addText(text => {
+          parentInput = text; text.setValue(draftParent).onChange(value => { draftParent = value.trim(); });
+          text.inputEl.setAttribute('aria-label', 'Parent kind value');
         });
         keySetting = new Setting(propertyConfig).setName('Subkind property').addText(text => {
           keyInput = text; text.setValue(draftKey).onChange(value => { draftKey = value.trim(); });
+          text.inputEl.setAttribute('aria-label', 'Subkind property key');
         });
         valueSetting = new Setting(propertyConfig).setName('Subkind value').addText(text => {
           valueInput = text; text.setValue(draftValue).onChange(value => { draftValue = value.trim(); });
+          text.inputEl.setAttribute('aria-label', 'Subkind property value');
+        });
+        listKeySetting = new Setting(propertyConfig).setName('Kind list property').addText(text => {
+          listKeyInput = text; text.setValue(draftListKey).onChange(value => { draftListKey = value.trim(); });
+          text.inputEl.setAttribute('aria-label', 'Kind list property key');
+        });
+        listValueSetting = new Setting(propertyConfig).setName('Kind list value').setDesc('Nested path for this record type, such as category/subtype.').addText(text => {
+          listValueInput = text; text.setValue(draftListValue).onChange(value => { draftListValue = value.trim(); });
+          text.inputEl.setAttribute('aria-label', 'Kind list path');
+        });
+        scalarKeySetting = new Setting(propertyConfig).setName('Single-value property').addText(text => {
+          scalarKeyInput = text; text.setValue(draftScalarKey).onChange(value => { draftScalarKey = value.trim(); });
+          text.inputEl.setAttribute('aria-label', 'Single-value property key');
+        });
+        scalarValueSetting = new Setting(propertyConfig).setName('Single-value match').addText(text => {
+          scalarValueInput = text; text.setValue(draftScalarValue).onChange(value => { draftScalarValue = value.trim(); });
+          text.inputEl.setAttribute('aria-label', 'Single-value property value');
         });
         showMode();
+        const draftDefinition = (): KindClassification => normalizeKindClassification(
+          mode === 'tag' ? { tag: normalizeClassificationTag(draftTag) }
+            : mode === 'kind-list' ? { kindList: { key: draftListKey, value: draftListValue } }
+              : mode === 'scalar' ? { scalar: { key: draftScalarKey, value: draftScalarValue } }
+                : { parentKind: draftParent, key: draftKey, value: draftValue }, selected);
+        new Setting(propertyConfig).setName('Use for new records')
+          .setDesc('Save this writer without editing existing notes. Previous classifications remain readable until you migrate them.')
+          .addButton(button => button.setButtonText('Save writer').onClick(async () => {
+            button.setDisabled(true);
+            try {
+              const from = kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, selected);
+              if (!from || JSON.stringify(from) !== JSON.stringify(current)) throw new Error('The record mapping changed. Reopen settings.');
+              await this.plugin.propertyMigrationService.configureClassificationWriter({ kind: 'classification', recordKind: selected, from, to: draftDefinition() });
+              this.display();
+            } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
+            finally { button.setDisabled(false); }
+          }));
         new Setting(propertyConfig).setName('Apply record classification')
-          .setDesc('Review existing notes before saving. Record IDs and note bodies stay unchanged.')
+          .setDesc('Review existing notes and generated Bases before converting the exact old classification. Record IDs and note bodies stay unchanged.')
           .addButton(button => button.setButtonText('Apply').onClick(async () => {
           button.setDisabled(true);
           try {
             const from = kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, selected);
             if (!from || JSON.stringify(from) !== JSON.stringify(current)) throw new Error('The record mapping changed. Reopen settings.');
-            const to: KindClassification = mode === 'tag' ? { tag: normalizeClassificationTag(draftTag) }
-              : { parentKind: draftParent, key: draftKey, value: draftValue };
+            const to = draftDefinition();
             if (JSON.stringify(from) === JSON.stringify(to)) throw new Error('No classification change to apply.');
             if (await this.plugin.propertyMigrationService.requestClassification({ kind: 'classification', recordKind: selected, from, to })) this.display();
           } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
           finally { button.setDisabled(false); }
         }));
+        const aliasesContainer = propertyConfig.createDiv({ cls: 'tps-gcm-settings-classification-aliases' });
+        const describeDefinition = (definition: KindClassification): string => 'tag' in definition ? `Tag: ${definition.tag}`
+          : 'kindList' in definition ? `Kind list: ${definition.kindList.key} contains ${definition.kindList.value}`
+            : 'scalar' in definition ? `Property: ${definition.scalar.key} = ${definition.scalar.value}`
+              : `Properties: kind = ${definition.parentKind}, ${definition.key} = ${definition.value}`;
+        renderAliases = () => {
+          aliasesContainer.empty();
+          const aliases = kindReadClassifications(this.plugin.settings.nativeRecordKindPropertyKeys, selected).slice(1);
+          aliasesContainer.createEl('h5', { text: 'Earlier classifications to read' });
+          aliasesContainer.createEl('p', { cls: 'setting-item-description', text: 'These values still identify older notes. Removing an alias can hide unmigrated records.' });
+          if (!aliases.length) aliasesContainer.createEl('p', { cls: 'setting-item-description', text: 'No earlier classifications.' });
+          for (const [index, alias] of aliases.entries()) new Setting(aliasesContainer)
+            .setName(describeDefinition(alias))
+            .addButton(button => button.setButtonText('Remove').setWarning().onClick(async () => {
+              button.setDisabled(true);
+              try {
+                await this.plugin.propertyMigrationService.configureClassificationAliases(selected,
+                  aliases.filter((_, position) => position !== index), current);
+                this.display();
+              } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
+              finally { button.setDisabled(false); }
+            }));
+        };
+        renderAliases();
+        new Setting(propertyConfig).setName('Add earlier classification')
+          .setDesc('Enter its form in the controls above, then add it as a read-only alias. No notes are edited.')
+          .addButton(button => button.setButtonText('Add read alias').onClick(async () => {
+            button.setDisabled(true);
+            try {
+              const alias = draftDefinition();
+              const aliases = kindReadClassifications(this.plugin.settings.nativeRecordKindPropertyKeys, selected);
+              if (aliases.some(existing => JSON.stringify(existing).toLowerCase() === JSON.stringify(alias).toLowerCase())) throw new Error('This classification is already readable.');
+              await this.plugin.propertyMigrationService.configureClassificationAliases(selected, [...aliases.slice(1), alias], current);
+              this.display();
+            } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
+            finally { button.setDisabled(false); }
+          }));
+        new Setting(propertyConfig).setName('Create new records with this mapping')
+          .setDesc('Turn off while this type has no chosen new kind path. Existing notes remain readable through its classification and aliases.')
+          .addToggle(toggle => {
+            writerToggle = toggle;
+            toggle.setValue(kindWriterEnabled(this.plugin.settings.nativeRecordKindPropertyKeys, selected));
+            toggle.toggleEl.setAttribute('aria-label', 'Create new records with selected classification');
+            toggle.onChange(async enabled => {
+              if (enabled === kindWriterEnabled(this.plugin.settings.nativeRecordKindPropertyKeys, selected)) return;
+              try {
+                await this.plugin.propertyMigrationService.configureClassificationWriterEnabled(selected, enabled, current);
+                this.display();
+              } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); this.display(); }
+            });
+          });
       }
 
 
@@ -2591,7 +2728,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     scopeDiv.style.gridColumn = '1 / -1';
     new Setting(scopeDiv)
       .setName('Show only for kinds')
-      .setDesc('Optional comma/newline list of logical note or line kinds, such as task, exercise, food-entry, or workout-session.')
+      .setDesc('Optional comma/newline list of logical record types or exact values in a kind list. Each list value is matched separately.')
       .addTextArea((text) => {
         text
           .setPlaceholder('task, workout-session')
@@ -2952,7 +3089,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     optionsDiv.style.gridColumn = '1 / -1';
     const vaultOptions = !propertyUsesVaultOptions(prop)
       ? []
-      : prop.type === 'kind'
+      : prop.type === 'kind' || prop.id === 'kind'
         ? this.plugin.entityIndexService?.getDimensionValues('kind') || collectVaultPropertyOptions(this.app, prop)
         : collectVaultPropertyOptions(this.app, prop);
     const manualOptions = normalizeManualPropertyOptions(prop.options || [], prop);

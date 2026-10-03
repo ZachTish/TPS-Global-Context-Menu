@@ -5,6 +5,7 @@ import type TPSGlobalContextMenuPlugin from '../main';
 import { PropertyMigrationModal } from '../modals/property-migration-modal';
 import { migrateNoteProperties, PropertyMigration, SettingsPatch, settingsPatches, updateMigrationReferences, validateMigration, validateMigrationSettings } from '../utils/property-migration';
 import { migrateNoteClassification, validateKindClassificationMigration, type KindClassificationMigration } from '../utils/kind-classification-migration';
+import { kindClassification, kindReadClassifications, normalizeKindClassification, type KindClassification, type KindMappings } from '../utils/kind-classification';
 import * as logger from '../logger';
 
 interface NoteChange { path: string; before: string; after: string }
@@ -94,7 +95,7 @@ export class PropertyMigrationService {
     if (!kinds.length) throw new Error('Enable Health before changing its record key.');
     to = to.trim();
     if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(to)) throw new Error('Enter a valid frontmatter key.');
-    if (kinds.some(kind => { const mapping = this.plugin.settings.nativeRecordKindPropertyKeys?.[kind]; return mapping && typeof mapping === 'object' && 'tag' in mapping; })) throw new Error('These records use tags. Change their tags in GCM → Rules & fields → Custom fields.');
+    if (kinds.some(kind => { const mapping = kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, kind); return mapping && !('key' in mapping); })) throw new Error('These records use a configured classification. Change it in GCM → Rules & fields → Custom fields.');
     const fromKeys = [...new Set(kinds.map(kind => this.plugin.nativeRecordService.getStorageProfile(kind).kindPropertyKey))];
     if (fromKeys.length !== 1) throw new Error('Health records have inconsistent key mappings. Repair these before migrating.');
     if (fromKeys[0] === to) return false;
@@ -103,7 +104,13 @@ export class PropertyMigrationService {
     if (Object.values(health.settings.nativeRecordProperties || {}).some(key => String(key).toLowerCase() === to.toLowerCase())
       || [health.settings.workoutStartPropertyKey, health.settings.workoutIntervalPropertyKey].some(key => String(key).toLowerCase() === to.toLowerCase())) throw new Error('Another Health field already uses this key.');
     return this.request({ kind: 'key', from: fromKeys[0], to, recordKinds: kinds }, settings => {
-      settings.nativeRecordKindPropertyKeys = { ...settings.nativeRecordKindPropertyKeys, ...Object.fromEntries(kinds.map(kind => [kind, typeof settings.nativeRecordKindPropertyKeys?.[kind] === "object" ? { ...settings.nativeRecordKindPropertyKeys[kind] as import("../utils/kind-classification").KindClassification, key: to } : to])) };
+      settings.nativeRecordKindPropertyKeys = { ...settings.nativeRecordKindPropertyKeys, ...Object.fromEntries(kinds.map(kind => {
+        const previous = settings.nativeRecordKindPropertyKeys?.[kind];
+        if (previous && typeof previous === 'object' && 'primary' in previous && 'key' in previous.primary) {
+          return [kind, { ...previous, primary: { ...previous.primary, key: to } }];
+        }
+        return [kind, previous && typeof previous === 'object' && 'key' in previous ? { ...previous, key: to } : to];
+      })) };
     });
   }
   private assertConsumers(plans: PluginSettingsPatch[]): void {
@@ -127,7 +134,84 @@ export class PropertyMigrationService {
   }
   async requestClassification(change: KindClassificationMigration): Promise<boolean> {
     validateKindClassificationMigration(change, this.plugin.settings.nativeRecordKindPropertyKeys);
-    return this.request(change, settings => { settings.nativeRecordKindPropertyKeys[change.recordKind] = change.to; });
+    const priorMappings = this.plugin.settings.nativeRecordKindPropertyKeys;
+    return this.request(change, settings => { settings.nativeRecordKindPropertyKeys[change.recordKind] = this.mappingWithPriorAlias(change, priorMappings); });
+  }
+
+  private mappingWithPriorAlias(change: KindClassificationMigration, mappings: KindMappings) {
+    const previous = kindReadClassifications(mappings, change.recordKind);
+    const primary = normalizeKindClassification(change.to, change.recordKind);
+    const aliases = previous.filter(definition => JSON.stringify(definition).toLowerCase() !== JSON.stringify(primary).toLowerCase());
+    const entry = mappings[change.recordKind];
+    const writeDisabled = Boolean(entry && typeof entry === 'object' && 'primary' in entry && entry.writeDisabled);
+    return { primary, aliases, ...(writeDisabled ? { writeDisabled: true } : {}) };
+  }
+
+  private assertUniqueClassifications(mappings: KindMappings): void {
+    const used = new Map<string, string>();
+    for (const kind of Object.keys(mappings)) for (const definition of kindReadClassifications(mappings, kind)) {
+      const key = JSON.stringify(definition).toLowerCase();
+      const prior = used.get(key);
+      if (prior && prior !== kind && !('kindList' in definition)) throw new Error(`This classification is already assigned to ${prior}.`);
+      used.set(key, kind);
+    }
+  }
+
+  /** Switch only the writer; old notes remain visible through explicit read aliases. */
+  async configureClassificationWriter(change: KindClassificationMigration): Promise<void> {
+    if (this.busy || this.recoveryPending || this.disposed) throw new Error('Finish the current migration before changing record classifications.');
+    validateKindClassificationMigration(change, this.plugin.settings.nativeRecordKindPropertyKeys);
+    const before = this.plugin.settings.nativeRecordKindPropertyKeys;
+    const next = { ...before, [change.recordKind]: this.mappingWithPriorAlias(change, before) };
+    this.assertUniqueClassifications(next);
+    this.plugin.settings.nativeRecordKindPropertyKeys = next;
+    try { await this.plugin.saveSettings(); }
+    catch (error) { this.plugin.settings.nativeRecordKindPropertyKeys = before; throw error; }
+    this.plugin.nativeRecordService.refreshConfiguration();
+  }
+
+  async configureClassificationAliases(recordKind: string, aliases: KindClassification[], expectedPrimary: KindClassification): Promise<void> {
+    if (this.busy || this.recoveryPending || this.disposed) throw new Error('Finish the current migration before changing record classifications.');
+    const before = this.plugin.settings.nativeRecordKindPropertyKeys;
+    const primary = kindClassification(before, recordKind);
+    if (!primary || JSON.stringify(primary) !== JSON.stringify(expectedPrimary)) throw new Error('The record mapping changed. Reopen settings.');
+    const normalized = aliases.map(alias => normalizeKindClassification(alias, recordKind));
+    const entry = before[recordKind];
+    const writeDisabled = Boolean(entry && typeof entry === 'object' && 'primary' in entry && entry.writeDisabled);
+    const next: KindMappings = { ...before, [recordKind]: { primary, aliases: normalized, ...(writeDisabled ? { writeDisabled: true } : {}) } };
+    this.assertUniqueClassifications(next);
+    this.plugin.settings.nativeRecordKindPropertyKeys = next;
+    try { await this.plugin.saveSettings(); }
+    catch (error) { this.plugin.settings.nativeRecordKindPropertyKeys = before; throw error; }
+    this.plugin.nativeRecordService.refreshConfiguration();
+  }
+
+  async configureNewClassification(recordKind: string, definition: KindClassification): Promise<void> {
+    if (this.busy || this.recoveryPending || this.disposed) throw new Error('Finish the current migration before changing record classifications.');
+    if (!/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(recordKind)) throw new Error('Choose a lowercase record type name with letters, numbers and hyphens.');
+    const before = this.plugin.settings.nativeRecordKindPropertyKeys;
+    if (Object.prototype.hasOwnProperty.call(before, recordKind)) throw new Error('That record type already has a mapping.');
+    const next = { ...before, [recordKind]: normalizeKindClassification(definition, recordKind) };
+    this.assertUniqueClassifications(next);
+    this.plugin.settings.nativeRecordKindPropertyKeys = next;
+    try { await this.plugin.saveSettings(); }
+    catch (error) { this.plugin.settings.nativeRecordKindPropertyKeys = before; throw error; }
+    this.plugin.nativeRecordService.refreshConfiguration();
+  }
+
+  async configureClassificationWriterEnabled(recordKind: string, enabled: boolean, expectedPrimary: KindClassification): Promise<void> {
+    if (this.busy || this.recoveryPending || this.disposed) throw new Error('Finish the current migration before changing record classifications.');
+    const before = this.plugin.settings.nativeRecordKindPropertyKeys;
+    if (JSON.stringify(kindClassification(before, recordKind)) !== JSON.stringify(expectedPrimary)) throw new Error('The record mapping changed. Reopen settings.');
+    const next = { ...before, [recordKind]: {
+      primary: expectedPrimary,
+      aliases: kindReadClassifications(before, recordKind).slice(1),
+      ...(!enabled ? { writeDisabled: true } : {}),
+    } };
+    this.plugin.settings.nativeRecordKindPropertyKeys = next;
+    try { await this.plugin.saveSettings(); }
+    catch (error) { this.plugin.settings.nativeRecordKindPropertyKeys = before; throw error; }
+    this.plugin.nativeRecordService.refreshConfiguration();
   }
   async request(change: MigrationRequest, configure: (settings: typeof this.plugin.settings) => void): Promise<boolean> {
     if (this.disposed) throw new Error('GCM was reloaded. Reopen its settings before migrating.');

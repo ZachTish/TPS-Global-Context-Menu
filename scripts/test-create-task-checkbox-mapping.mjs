@@ -380,7 +380,6 @@ test('native standalone Create task writes only one task record and never resolv
     title: 'Standalone task',
     status: 'review',
     tags: ['work'],
-    priority: 'high',
     scheduled: '2026-08-29 09:00:00',
     timeEstimate: 45,
   });

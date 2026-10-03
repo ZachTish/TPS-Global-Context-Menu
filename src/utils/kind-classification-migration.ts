@@ -1,6 +1,7 @@
 import { isMap, parseDocument, visit } from 'yaml';
 import {
-  classificationTags, decodeKind, kindClassification, normalizeClassificationTag,
+  classificationTags, decodeKind, kindClassification, kindReadClassifications,
+  matchesKindClassification, normalizeKindClassification,
   type KindClassification, type KindMappings,
 } from './kind-classification';
 
@@ -13,36 +14,88 @@ export interface KindClassificationMigration {
 
 export function validateKindClassificationMigration(change: KindClassificationMigration, mappings: KindMappings): void {
   const current = kindClassification(mappings, change.recordKind);
-  const from = kindClassification({ [change.recordKind]: change.from }, change.recordKind);
-  if (!change.recordKind || !current || !from || JSON.stringify(current) !== JSON.stringify(from)) {
+  const from = normalizeKindClassification(change.from, change.recordKind);
+  if (!change.recordKind || !current || JSON.stringify(current) !== JSON.stringify(from)) {
     throw new Error('The record classification changed. Reopen settings.');
   }
-  const to = kindClassification({ [change.recordKind]: change.to }, change.recordKind);
-  if (!to || JSON.stringify(from) === JSON.stringify(to)) throw new Error('Choose a different record classification.');
-  if ('key' in to && ['kind', 'tags', 'tpsid', 'title'].includes(to.key.toLowerCase())) throw new Error('Choose a subkind property outside the shared record envelope.');
-  for (const [kind] of Object.entries(mappings)) {
+  const to = normalizeKindClassification(change.to, change.recordKind);
+  if (JSON.stringify(from) === JSON.stringify(to)) throw new Error('Choose a different record classification.');
+  for (const kind of Object.keys(mappings)) {
     if (kind === change.recordKind) continue;
-    const other = kindClassification(mappings, kind);
-    if (!other) continue;
-    if ('tag' in to && 'tag' in other && normalizeClassificationTag(other.tag).toLowerCase() === to.tag.toLowerCase()) {
-      throw new Error('Another record type already uses that tag.');
-    }
-    if ('key' in to && 'key' in other && to.parentKind === other.parentKind && to.key.toLowerCase() === other.key.toLowerCase() && to.value === other.value) {
-      throw new Error('Another record type already uses that property pair.');
+    for (const other of kindReadClassifications(mappings, kind)) {
+      if (JSON.stringify(other).toLowerCase() === JSON.stringify(to).toLowerCase()) {
+        if ('kindList' in to) continue;
+        throw new Error('Another record type already uses that classification.');
+      }
     }
   }
 }
 
-/** Convert only the selected frontmatter classification; never edit the note body. */
+function removeDefinition(doc: ReturnType<typeof parseDocument>, raw: Record<string, unknown>, definition: KindClassification): void {
+  if ('tag' in definition) {
+    const tags = classificationTags(raw.tags).filter(tag => tag.toLowerCase() !== definition.tag.toLowerCase());
+    if (tags.length) doc.set('tags', tags); else doc.delete('tags');
+  } else if ('kindList' in definition) {
+    const values = raw[definition.kindList.key];
+    if (!Array.isArray(values) || !values.every(value => typeof value === 'string')) throw new Error('Resolve the kind list before migration.');
+    const remaining = values.filter(value => value.toLowerCase() !== definition.kindList.value.toLowerCase());
+    if (remaining.length) doc.set(definition.kindList.key, remaining); else doc.delete(definition.kindList.key);
+  } else if ('scalar' in definition) {
+    doc.delete(definition.scalar.key);
+  } else {
+    doc.delete('kind');
+    doc.delete(definition.key);
+  }
+}
+
+function addDefinition(doc: ReturnType<typeof parseDocument>, definition: KindClassification): void {
+  const state = doc.toJS({ maxAliasCount: 0 }) as Record<string, unknown>;
+  const assertExactKey = (key: string) => {
+    const variant = Object.keys(state).find(existing => existing.toLowerCase() === key.toLowerCase() && existing !== key);
+    if (variant) throw new Error(`Destination “${key}” has a case-variant key.`);
+  };
+  if ('tag' in definition) {
+    assertExactKey('tags');
+    const tags = classificationTags(state.tags);
+    if (!tags.some(tag => tag.toLowerCase() === definition.tag.toLowerCase())) tags.push(definition.tag);
+    doc.set('tags', tags);
+  } else if ('kindList' in definition) {
+    assertExactKey(definition.kindList.key);
+    const existing = state[definition.kindList.key];
+    if (existing !== undefined && (!Array.isArray(existing) || !existing.every(value => typeof value === 'string'))) {
+      throw new Error(`Destination “${definition.kindList.key}” must be a list of text values.`);
+    }
+    const values: string[] = Array.isArray(existing) ? [...existing] : [];
+    if (!values.some(value => value.toLowerCase() === definition.kindList.value.toLowerCase())) values.push(definition.kindList.value);
+    doc.set(definition.kindList.key, values);
+  } else if ('scalar' in definition) {
+    assertExactKey(definition.scalar.key);
+    if (state[definition.scalar.key] !== undefined && state[definition.scalar.key] !== definition.scalar.value) {
+      throw new Error(`Destination “${definition.scalar.key}” has a different value.`);
+    }
+    doc.set(definition.scalar.key, definition.scalar.value);
+  } else {
+    assertExactKey('kind');
+    assertExactKey(definition.key);
+    if (state.kind !== undefined && state.kind !== definition.parentKind) throw new Error('Destination kind has a different value.');
+    if (state[definition.key] !== undefined && state[definition.key] !== definition.value) {
+      throw new Error(`Destination “${definition.key}” has a different value.`);
+    }
+    doc.set('kind', definition.parentKind);
+    doc.set(definition.key, definition.value);
+  }
+}
+
+/** Convert only the selected configured classification; never edit the note body. */
 export function migrateNoteClassification(source: string, change: KindClassificationMigration, mappings: KindMappings): string {
   const opening = /^(?:\uFEFF)?---[ \t]*\r?\n/.exec(source);
   if (!opening) return source;
   const rest = source.slice(opening[0].length);
   const closing = /^(?:---|\.\.\.)[ \t]*(?:\r?\n|$)/m.exec(rest);
   const yaml = closing ? rest.slice(0, closing.index) : rest;
-  const lowered = yaml.toLowerCase();
-  const mayContain = 'tag' in change.from ? lowered.includes(change.from.tag.toLowerCase())
-    : lowered.includes(change.from.key.toLowerCase()) && lowered.includes(change.from.value.toLowerCase());
+  const from = normalizeKindClassification(change.from, change.recordKind);
+  const target = 'tag' in from ? from.tag : 'kindList' in from ? from.kindList.value : 'scalar' in from ? from.scalar.value : from.value;
+  const mayContain = yaml.toLowerCase().includes(target.toLowerCase());
   if (!closing) {
     if (mayContain) throw new Error('Malformed frontmatter may contain this record classification.');
     return source;
@@ -71,41 +124,18 @@ export function migrateNoteClassification(source: string, change: KindClassifica
     return source;
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return source;
-  const from = change.from, to = change.to;
-  const matches = 'tag' in from
-    ? (() => { try { return classificationTags(raw.tags).some(tag => tag.toLowerCase() === from.tag.toLowerCase()); } catch { if (mayContain) throw new Error('Resolve the tags property before changing this record classification.'); return false; } })()
-    : raw.kind === from.parentKind && raw[from.key] === from.value;
-  if (!matches) return source;
-  if (decodeKind(mappings, raw).kind !== change.recordKind) throw new Error('The note has conflicting record classifications.');
-
-  let tags: string[];
-  try { tags = classificationTags(raw.tags); }
-  catch { throw new Error('Resolve the tags property before changing this record classification.'); }
-  if ('tag' in from) {
-    tags = tags.filter(tag => tag.toLowerCase() !== from.tag.toLowerCase());
-    if (tags.length) doc.set('tags', tags); else doc.delete('tags');
-  } else {
-    doc.delete('kind');
-    doc.delete(from.key);
+  if ('tag' in from && mayContain) {
+    try { classificationTags(raw.tags); }
+    catch { throw new Error('Resolve the tags property before changing this record classification.'); }
   }
-  if ('tag' in to) {
-    if (!tags.some(tag => tag.toLowerCase() === to.tag.toLowerCase())) tags.push(to.tag);
-    doc.set('tags', tags);
-  } else {
-    const keys = Object.keys(raw);
-    const kindKey = keys.find(key => key.toLowerCase() === 'kind');
-    const destinationKey = keys.find(key => key.toLowerCase() === to.key.toLowerCase());
-    if (kindKey && kindKey !== 'kind') throw new Error('Destination kind property has a case-variant key.');
-    if (destinationKey && destinationKey !== to.key && destinationKey !== ('key' in from ? from.key : '')) {
-      throw new Error(`Destination property “${to.key}” has a case-variant key.`);
-    }
-    const previousKind = raw.kind;
-    const previousValue = raw[to.key];
-    if ('tag' in from && previousKind !== undefined && previousKind !== to.parentKind) throw new Error('Destination kind property has a different value.');
-    if (previousValue !== undefined && previousValue !== to.value && to.key !== ('key' in from ? from.key : '')) throw new Error(`Destination property “${to.key}” has a different value.`);
-    doc.set('kind', to.parentKind);
-    doc.set(to.key, to.value);
+  if (!matchesKindClassification(from, raw)) return source;
+  const decoded = decodeKind(mappings, raw);
+  if (decoded.kind !== change.recordKind) {
+    if (Array.isArray(decoded.kind)) throw new Error('This shared kind path needs a record-specific migration filter.');
+    throw new Error('The note has conflicting record classifications.');
   }
+  removeDefinition(doc, raw, from);
+  addDefinition(doc, normalizeKindClassification(change.to, change.recordKind));
   let nextYaml = doc.toString({ lineWidth: 0 });
   if (yaml.includes('\r\n')) nextYaml = nextYaml.replace(/\n/g, '\r\n');
   const next = opening[0] + nextYaml + rest.slice(closing.index);

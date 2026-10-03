@@ -3,7 +3,6 @@ import { MIGRATED_TASK_STATUS } from '../constants/task-migration';
 
 export const TASK_RECORD_PROPERTY_IDS = new Set([
   'status',
-  'priority',
   'scheduled',
   'due',
   'time-estimate',
@@ -17,11 +16,6 @@ const TASK_RECORD_PROPERTIES: CustomProperty[] = [
     id: 'status', label: 'Status', key: 'status', type: 'selector', icon: 'circle-check',
     options: ['todo', 'working', 'holding', 'wont-do', 'complete', MIGRATED_TASK_STATUS],
     scopeKinds: ['task'], showInCollapsed: true, showInContextMenu: true, allowInlineSet: true,
-  },
-  {
-    id: 'priority', label: 'Priority', key: 'priority', type: 'selector', icon: 'flag',
-    options: ['high', 'medium', 'normal', 'low'], scopeKinds: ['task'],
-    showInCollapsed: true, showInContextMenu: true, allowInlineSet: true,
   },
   {
     id: 'scheduled', label: 'Scheduled', key: 'scheduled', type: 'datetime', icon: 'calendar',

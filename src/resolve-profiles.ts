@@ -21,7 +21,7 @@ export function resolveCustomProperties(
         tags: collectEntryTags(entry),
         // A file row is structurally a "note", but its authored kind is the
         // domain identity used by scoped fields (task, food-entry, exercise…).
-        kind: normalizeKindValue(entry?.frontmatter?.kind || entry?.kind || entry?.itemKind),
+        kinds: collectEntryKinds(entry),
         path: normalizePathValue(entry?.file?.path || ''),
         frontmatter: entry?.frontmatter || {},
     }));
@@ -35,7 +35,7 @@ export function resolveCustomProperties(
         }
 
         const excludedKinds = normalizeScopeKinds(property.excludeKinds || []);
-        if (excludedKinds.length > 0 && entryContexts.some((context) => excludedKinds.includes(context.kind))) {
+        if (excludedKinds.length > 0 && entryContexts.some((context) => excludedKinds.some(kind => context.kinds.has(kind)))) {
             return false;
         }
 
@@ -67,7 +67,7 @@ export function resolveCustomProperties(
                         : required.some((tag) => context.tags.has(tag)));
                 }
                 if (requiredKinds.length > 0) {
-                    checks.push(requiredKinds.includes(context.kind));
+                    checks.push(requiredKinds.some(kind => context.kinds.has(kind)));
                 }
                 if (requiredPaths.length > 0) {
                     checks.push(matchesAnyPathScope(context.path, requiredPaths));
@@ -90,6 +90,13 @@ export function resolveCustomProperties(
 
 function normalizeKindValue(value: unknown): string {
     return String(value || '').trim().toLocaleLowerCase();
+}
+
+function collectEntryKinds(entry: any): Set<string> {
+    const authored = entry?.frontmatter?.kind;
+    const values = Array.isArray(authored) ? authored : authored ? [authored] : [];
+    const selected = values.length > 0 ? values : [entry?.kind || entry?.itemKind];
+    return new Set(selected.filter((value): value is string => typeof value === 'string').map(normalizeKindValue).filter(Boolean));
 }
 
 function normalizeScopeKinds(kinds: unknown): string[] {

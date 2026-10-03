@@ -101,6 +101,18 @@ const {
   normalizeAcceptedKindSetting,
 } = settingHelpers;
 
+test('list-valued Kind choices reuse the configured lazy index without a second vault scan', async () => {
+  const { getEffectivePropertyOptions } = await importModule('../src/utils/property-options.ts', { stubObsidian: true });
+  const app = {
+    plugins: { plugins: { 'tps-global-context-menu': { entityIndexService: {
+      getDimensionValues(name) { assert.equal(name, 'kind'); return ['transaction/financial', 'entity/food']; },
+    } } } },
+    vault: { getMarkdownFiles() { throw new Error('unexpected duplicate vault scan'); } },
+  };
+  const property = { id: 'kind', key: 'kind', type: 'list', listItemType: 'text', optionSources: ['vault'] };
+  assert.deepEqual(getEffectivePropertyOptions(app, property), ['transaction/financial', 'entity/food']);
+});
+
 function sourceBlock(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
   assert.notEqual(start, -1, `missing source marker: ${startMarker}`);

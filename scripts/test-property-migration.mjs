@@ -44,9 +44,18 @@ test('status value rename keeps options, classifications, checkbox targets and e
  const settings={properties:[{id:'status',key:'status',options:['todo','done'],hideWhenProperties:[{key:'status',operator:'contains',value:'todo'}]}],activeStatusValues:['todo'],linkedSubitemCheckboxMappings:[{statuses:['todo'],toggleTargetStatus:'todo'}],parentChildIgnoreFrontmatterKey:'status',parentChildIgnoreFrontmatterValue:'todo'};
  references(settings,value); assert.deepEqual(settings.properties[0].options,['ready','done']);assert.equal(settings.properties[0].hideWhenProperties[0].value,'todo');assert.deepEqual(settings.activeStatusValues,['ready']);assert.deepEqual(settings.linkedSubitemCheckboxMappings[0],{statuses:['ready'],toggleTargetStatus:'ready'});assert.equal(settings.parentChildIgnoreFrontmatterValue,'ready');
 });
+test('property migrations update configured kind-list writers and legacy aliases',()=>{
+ const settings={nativeRecordKindPropertyKeys:{'food-entry':{primary:{kindList:{key:'kind',value:'transaction/macros'}},aliases:[{scalar:{key:'oldKind',value:'food-entry'}},{tag:'kind/food/transaction'}]}}};
+ references(settings,{kind:'key',from:'kind',to:'recordKinds'});
+ assert.equal(settings.nativeRecordKindPropertyKeys['food-entry'].primary.kindList.key,'recordKinds');
+ references(settings,{kind:'value',key:'recordKinds',from:'transaction/macros',to:'transaction/meal'});
+ assert.equal(settings.nativeRecordKindPropertyKeys['food-entry'].primary.kindList.value,'transaction/meal');
+ references(settings,{kind:'value',key:'tags',from:'kind/food/transaction',to:'archive/food'});
+ assert.equal(settings.nativeRecordKindPropertyKeys['food-entry'].aliases[1].tag,'archive/food');
+});
 function harness(entries={'Inbox/a.md':fm('status: todo')}) {
  const files=new Map(Object.keys(entries).map(path=>[path,new TFile(path)]));const data=new Map(Object.entries(entries));const storage=new Map();let saves=0;const writes=[];
- const plugin={manifest:{id:'tps-global-context-menu',dir:'.obsidian/plugins/tps-global-context-menu'},settings:{properties:[{id:'status',key:'status',options:['todo']}],unrelated:'keep'},app:{vault:{getMarkdownFiles:()=>[...files.values()].filter(file=>file.extension==='md'),getAbstractFileByPath:path=>files.get(path),read:async file=>data.get(file.path),process:async(file,update)=>{const before=data.get(file.path),after=update(before);if(before!==after){writes.push(file.path);data.set(file.path,after);}return after;},adapter:{exists:async path=>storage.has(path),write:async(path,text)=>storage.set(path,text),read:async path=>storage.get(path),remove:async path=>storage.delete(path)}}},frontmatterMutationService:{applyMigrationSource:async(file,before,after)=>{const current=data.get(file.path);if(current===after)return;if(current!==before)throw Error('stale');writes.push(file.path);data.set(file.path,after);}},saveSettings:async()=>{saves++;},eventService:{emitFilesUpdated(){}},notebookNavigatorRuleService:{invalidateNotebookNavigatorPresentation(){}}};
+ const plugin={manifest:{id:'tps-global-context-menu',dir:'.obsidian/plugins/tps-global-context-menu'},settings:{properties:[{id:'status',key:'status',options:['todo']}],unrelated:'keep'},app:{vault:{getMarkdownFiles:()=>[...files.values()].filter(file=>file.extension==='md'),getAbstractFileByPath:path=>files.get(path),read:async file=>data.get(file.path),process:async(file,update)=>{const before=data.get(file.path),after=update(before);if(before!==after){writes.push(file.path);data.set(file.path,after);}return after;},adapter:{exists:async path=>storage.has(path),write:async(path,text)=>storage.set(path,text),read:async path=>storage.get(path),remove:async path=>storage.delete(path)}}},frontmatterMutationService:{applyMigrationSource:async(file,before,after)=>{const current=data.get(file.path);if(current===after)return;if(current!==before)throw Error('stale');writes.push(file.path);data.set(file.path,after);}},saveSettings:async()=>{saves++;},eventService:{emitFilesUpdated(){}},notebookNavigatorRuleService:{invalidateNotebookNavigatorPresentation(){}},nativeRecordService:{refreshConfiguration(){}}};
  const service=new PropertyMigrationService(plugin);plugin.propertyMigrationService=service;
  return {plugin,service,data,storage,writes,files,get saves(){return saves;}};
 }
@@ -63,13 +72,37 @@ test('record classification converts exact tag to property and back without chan
  assert.match(restored,/kind\/finance\/transaction/);assert.doesNotMatch(restored,/transactionKind:/);
  assert.match(restored,/personal/);assert.ok(restored.endsWith('Body status: todo [status:: todo]\n'));
 });
+test('record classification moves configured tags and scalar kinds into lists without changing body or manual tags',()=>{
+ const tagChange={kind:'classification',recordKind:'food-entry',from:{tag:'kind/food/transaction'},to:{kindList:{key:'kind',value:'transaction/macros'}}};
+ const tagged=fm('tpsId: food-1\ntags: [kind/food/transaction, personal]\ncalories: 180');
+ const converted=migrateNoteClassification(tagged,tagChange,{'food-entry':tagChange.from});
+ assert.match(converted,/kind:\s*\n\s*- transaction\/macros/u);
+ assert.match(converted,/personal/u);assert.doesNotMatch(converted,/kind\/food\/transaction/u);
+ assert.ok(converted.endsWith('Body status: todo [status:: todo]\n'));
+ const scalarChange={...tagChange,from:{scalar:{key:'kind',value:'food-entry'}}};
+ const scalar=fm('kind: food-entry\ntitle: Lunch\ntags: [personal]');
+ const convertedScalar=migrateNoteClassification(scalar,scalarChange,{'food-entry':scalarChange.from});
+ assert.match(convertedScalar,/kind:\s*\n\s*- transaction\/macros/u);
+ assert.match(convertedScalar,/personal/u);
+ assert.equal(migrateNoteClassification(convertedScalar,scalarChange,{'food-entry':scalarChange.from}),convertedScalar);
+});
+test('list classification conversion preserves unrelated list values and refuses malformed occupied fields',()=>{
+ const change={kind:'classification',recordKind:'food-entry',from:{kindList:{key:'kind',value:'old/food'}},to:{kindList:{key:'kind',value:'transaction/macros'}}};
+ const source=fm('kind: [old/food, user/special]\ntitle: Lunch');
+ const converted=migrateNoteClassification(source,change,{'food-entry':change.from});
+ assert.match(converted,/user\/special/u);assert.match(converted,/transaction\/macros/u);
+ assert.doesNotMatch(converted,/old\/food/u);assert.ok(converted.endsWith('Body status: todo [status:: todo]\n'));
+ assert.throws(()=>migrateNoteClassification(fm('tags: [kind/food/transaction]\nkind: wrong'),
+  {...change,from:{tag:'kind/food/transaction'}},{'food-entry':{tag:'kind/food/transaction'}}),/must be a list/u);
+});
 test('record classification blocks conflicting destination, ambiguity and unrelated malformed notes stay untouched',()=>{
  const change={kind:'classification',recordKind:'food-entry',from:{tag:'kind/food/transaction'},to:{parentKind:'transaction',key:'transactionKind',value:'food'}};
  const mappings={'food-entry':change.from};
  assert.throws(()=>migrateNoteClassification(fm('tags: [kind/food/transaction]\nkind: note'),change,mappings),/different value/);
  assert.throws(()=>migrateNoteClassification(fm('tags: [kind/food/transaction]\ntransactionKind: other'),change,mappings),/different value/);
- assert.throws(()=>migrateNoteClassification(fm('tags: [kind/food/transaction]\nTransactionKind: other'),change,mappings),/case-variant/);
+ assert.throws(()=>migrateNoteClassification(fm('tags: [kind/food/transaction]\nTransactionKind: other'),change,mappings),/case-variant|Ambiguous/);
  assert.throws(()=>migrateNoteClassification(fm('tags: [kind/food/transaction]\nKind: note'),change,mappings),/case-variant/);
+ assert.throws(()=>migrateNoteClassification(fm('tags: {nested: kind/food/transaction}'),change,mappings),/Resolve the tags property/);
  assert.throws(()=>migrateNoteClassification(fm('tags: [kind/food/transaction]\ntags: [personal]'),change,mappings),/Duplicate/);
  assert.equal(migrateNoteClassification(fm('unrelated: [oops'),change,mappings),fm('unrelated: [oops'));
  assert.equal(migrateNoteClassification(fm('tags: [kind/food/transaction/extra]'),change,mappings),fm('tags: [kind/food/transaction/extra]'));
@@ -90,7 +123,8 @@ test('confirmed record classification migration commits configuration after note
   const h=harness({'Inbox/a.md':source});h.plugin.settings.nativeRecordKindPropertyKeys={'finance-transaction':change.from};
   PropertyMigrationModal.confirm=async()=>accept;
   assert.equal(await h.service.requestClassification(change),accept);
-  assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].tag,accept?undefined:change.from.tag);
+  assert.equal(accept?h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].primary.parentKind:h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].tag,
+    accept?'transaction':change.from.tag);
   assert.equal(h.writes.length,accept?1:0);assert.equal(h.storage.size,0);
   assert.ok(accept?h.data.get('Inbox/a.md').includes('transactionKind: financial'):h.data.get('Inbox/a.md')===source);
  }
@@ -104,7 +138,7 @@ test('classification migration includes exact generated Bases in the same review
  PropertyMigrationModal.confirm=async(_app,_title,_desc,paths)=>{assert.deepEqual(paths,['Inbox/a.md','Transactions.base']);return true;};
  assert.equal(await h.service.requestClassification(change),true);
  assert.equal(h.data.get('Transactions.base'),'new generated filter');
- assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].parentKind,'transaction');
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].primary.parentKind,'transaction');
  assert.deepEqual(h.writes,['Inbox/a.md','Transactions.base']);assert.equal(h.storage.size,0);
 });
 test('changing a classification tag updates its GCM references with the reviewed notes',async()=>{
@@ -115,7 +149,8 @@ test('changing a classification tag updates its GCM references with the reviewed
  PropertyMigrationModal.confirm=async()=>true;
  assert.equal(await h.service.requestClassification(change),true);
  assert.deepEqual(h.plugin.settings.properties[0].scopeTags,['kind/money/transaction']);
- assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].tag,'kind/money/transaction');
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].primary.tag,'kind/money/transaction');
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].aliases,[change.from]);
  assert.match(h.data.get('Inbox/a.md'),/kind\/money\/transaction/);
  assert.doesNotMatch(h.data.get('Inbox/a.md'),/kind\/finance\/transaction/);
 });
@@ -128,7 +163,32 @@ test('confirmed property-to-tag migration recognizes the saved property pair and
  assert.match(h.data.get('Inbox/a.md'),/kind\/finance\/transaction/);
  assert.match(h.data.get('Inbox/a.md'),/personal/);
  assert.doesNotMatch(h.data.get('Inbox/a.md'),/transactionKind:/);
- assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].tag,'kind/finance/transaction');
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['finance-transaction'].primary.tag,'kind/finance/transaction');
+});
+test('writer-only switch retains prior classification as an alias without scanning or writing notes',async()=>{
+ const h=harness({'Inbox/a.md':fm('tags: [kind/food/transaction]')});
+ h.plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{tag:'kind/food/transaction'}};
+ await h.service.configureClassificationWriter({kind:'classification',recordKind:'food-entry',
+  from:{tag:'kind/food/transaction'},to:{kindList:{key:'kind',value:'transaction/macros'}}});
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys['food-entry'],{
+  primary:{kindList:{key:'kind',value:'transaction/macros'}},aliases:[{tag:'kind/food/transaction'}],
+ });
+ assert.equal(h.writes.length,0);assert.equal(h.data.get('Inbox/a.md'),fm('tags: [kind/food/transaction]'));
+ assert.equal(h.saves,1);
+ await h.service.configureClassificationWriterEnabled('food-entry',false,{kindList:{key:'kind',value:'transaction/macros'}});
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['food-entry'].writeDisabled,true);
+ await h.service.configureClassificationWriter({kind:'classification',recordKind:'food-entry',
+  from:{kindList:{key:'kind',value:'transaction/macros'}},to:{kindList:{key:'kind',value:'transaction/meal'}}});
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['food-entry'].writeDisabled,true,
+  'editing a disabled mapping does not silently enable new writes');
+ assert.equal(h.writes.length,0);
+});
+test('different record types may share a configured visible kind-list path',async()=>{
+ const h=harness({});
+ h.plugin.settings.nativeRecordKindPropertyKeys={purchase:{kindList:{key:'kind',value:'transaction/financial'}}};
+ await h.service.configureNewClassification('investment',{kindList:{key:'kind',value:'transaction/financial'}});
+ assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys.investment,{kindList:{key:'kind',value:'transaction/financial'}});
+ assert.equal(h.writes.length,0);
 });
 const configure=settings=>{settings.properties[0].key='taskStatus';};
 test('cancel leaves notes, configuration and recovery storage untouched',async()=>{

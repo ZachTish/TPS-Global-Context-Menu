@@ -61,7 +61,6 @@ export class CreateTaskModal extends Modal {
   private scheduledInput!: TextComponent;
   private timeEstimateInput!: TextComponent;
   private allDayToggle!: ToggleComponent;
-  private priorityInput!: HTMLSelectElement;
   private checkboxInput!: HTMLSelectElement;
   private targetFile: TFile | null;
   private parentMode: CreateTaskParentMode;
@@ -181,19 +180,6 @@ export class CreateTaskModal extends Modal {
       });
 
     new Setting(contentEl)
-      .setName('Priority')
-      .addDropdown((dropdown) => {
-        this.priorityInput = dropdown.selectEl;
-        dropdown
-          .addOption('', 'None')
-          .addOption('low', 'Low')
-          .addOption('normal', 'Normal')
-          .addOption('medium', 'Medium')
-          .addOption('high', 'High');
-        dropdown.onChange(() => this.updateTaskLinePreview());
-      });
-
-    new Setting(contentEl)
       .setName('Scheduled')
       .addText((text) => {
         this.scheduledInput = text;
@@ -286,7 +272,7 @@ export class CreateTaskModal extends Modal {
     return buildCreatedTaskLine({
       title: this.parsed.title || this.titleInput?.getValue?.() || '',
       checkboxMarker: this.checkboxInput?.value ?? '',
-      priority: this.priorityInput?.value || '',
+      priority: '',
       scheduledValue: this.scheduledInput?.getValue?.() || '',
       allDay: this.allDayToggle?.getValue?.() || false,
       timeEstimate: Number(this.timeEstimateInput?.getValue?.() || 0),
@@ -322,7 +308,7 @@ export class CreateTaskModal extends Modal {
       checkboxMarker,
       checkboxStatus: checkboxOption?.status ?? '',
       checkboxStatuses: [...(checkboxOption?.statuses ?? [])],
-      priority: this.priorityInput?.value || '',
+      priority: '',
       scheduledValue: this.scheduledInput?.getValue?.() || '',
       allDay: this.allDayToggle?.getValue?.() || false,
       timeEstimate: Number(this.timeEstimateInput?.getValue?.() || 0),

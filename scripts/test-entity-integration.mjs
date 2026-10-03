@@ -57,7 +57,7 @@ async function importBundled(relativePath) {
 test('Kind is a first-class property identity and settings normalization migrates legacy Kind fields', () => {
   assert.match(
     sources.constants,
-    /\{\s*id:\s*'kind',\s*label:\s*'Kind',\s*key:\s*'kind',\s*type:\s*'kind'[\s\S]*?allowInlineSet:\s*false\s*\}/,
+    /\{\s*id:\s*'kind',\s*label:\s*'Kind',\s*key:\s*'kind',\s*type:\s*'list',\s*listItemType:\s*'text'[\s\S]*?allowInlineSet:\s*false\s*\}/,
   );
   assert.match(sources.types, /type:\s*'text'\s*\|[\s\S]*?\|\s*'kind';/);
   assert.match(sources.types, /acceptsKind\?:\s*string;/);
@@ -72,8 +72,8 @@ test('Kind is a first-class property identity and settings normalization migrate
   );
   assert.match(
     normalization,
-    /\(normalizedKey === 'kind' \|\| normalizedId === 'kind'\) && normalizedType !== 'kind'[\s\S]*?\?\s*'kind'/,
-    'a legacy property identified by key or id must migrate to the Kind type',
+    /\(normalizedKey === 'kind' \|\| normalizedId === 'kind'\) && normalizedType !== 'kind' && normalizedType !== 'list'[\s\S]*?\?\s*'kind'/,
+    'a legacy Kind field remains supported while a configured text-list editor stays a list',
   );
   assert.match(
     normalization,
@@ -116,7 +116,7 @@ test('the generic entity index is configured from every Kind property and is exp
     'private configureEntityIndexDimensions(',
     'isInMobileStartupGracePeriod(',
   );
-  assert.match(dimensionConfiguration, /\.filter\(\(property\) => property\?\.type === 'kind'\)/);
+  assert.match(dimensionConfiguration, /\.filter\(\(property\) => property\?\.type === 'kind' \|\| property\?\.id === 'kind'\)/);
   assert.match(dimensionConfiguration, /\.map\(\(property\) => String\(property\.key \|\| ''\)\.trim\(\)\)/);
   assert.match(dimensionConfiguration, /\{\s*name:\s*'kind',\s*propertyKeys\s*\}/);
 

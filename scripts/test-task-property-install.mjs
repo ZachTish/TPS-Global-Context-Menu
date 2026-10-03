@@ -24,9 +24,10 @@ test('task field installation is scoped, complete, merge-safe, and idempotent', 
   const first = installTaskRecordProperties(existing);
   const second = installTaskRecordProperties(first.properties);
   const keys = new Set(first.properties.map((property) => property.key));
-  for (const key of ['status', 'priority', 'scheduled', 'due', 'timeEstimate', 'parents', 'recurrenceRule', 'completedDate']) {
+  for (const key of ['status', 'scheduled', 'due', 'timeEstimate', 'parents', 'recurrenceRule', 'completedDate']) {
     assert.equal(keys.has(key), true, `missing ${key}`);
   }
+  assert.equal(keys.has('priority'), false, 'manual priority tags are not installed as a property');
   const status = first.properties.find((property) => property.key === 'status');
   assert.deepEqual(status.scopeKinds, ['workout-session', 'task']);
   assert.deepEqual(status.options, ['todo', 'working', 'holding', 'wont-do', 'complete', 'migrated', 'active']);

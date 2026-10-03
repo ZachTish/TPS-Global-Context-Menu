@@ -125,12 +125,25 @@ export function migrateNoteProperties(source: string, change: PropertyMigration)
 /** Update known GCM references, not arbitrary text, formulas, or other plugins. */
 export function updateMigrationReferences(settings: any, change: PropertyMigration): void {
   if (change.kind === 'key' && change.recordKinds) return;
-  if (change.kind === 'key' && settings.nativeRecordKindPropertyKeys) {
-    for (const [kind, key] of Object.entries(settings.nativeRecordKindPropertyKeys)) if (typeof key === 'string' && fold(key) === fold(change.from)) settings.nativeRecordKindPropertyKeys[kind] = change.to; else if (key && typeof key === 'object' && typeof (key as any).key === 'string' && fold((key as any).key) === fold(change.from)) (key as any).key = change.to;
+  const kindMappings = settings.nativeRecordKindPropertyKeys || {};
+  if (change.kind === 'key') for (const [kind, entry] of Object.entries(kindMappings) as [string, any][]) {
+    if (typeof entry === 'string' && fold(entry) === fold(change.from)) kindMappings[kind] = change.to;
   }
-  if (change.kind === 'value') for (const definition of Object.values(settings.nativeRecordKindPropertyKeys || {}) as any[]) {
-    if (definition && typeof definition === 'object' && change.key === 'tags' && definition.tag === change.from) definition.tag = change.to;
-    if (definition && typeof definition === 'object' && typeof definition.key === 'string' && fold(definition.key) === fold(change.key) && definition.value === change.from) definition.value = change.to;
+  const definitions = (Object.values(kindMappings) as any[]).flatMap(entry =>
+    entry && typeof entry === 'object' ? 'primary' in entry ? [entry.primary, ...(Array.isArray(entry.aliases) ? entry.aliases : [])] : [entry] : []);
+  for (const definition of definitions) {
+    if (!definition || typeof definition !== 'object') continue;
+    if (change.kind === 'key') {
+      if (typeof definition.key === 'string' && fold(definition.key) === fold(change.from)) definition.key = change.to;
+      if (definition.kindList && fold(definition.kindList.key) === fold(change.from)) definition.kindList.key = change.to;
+      if (definition.scalar && fold(definition.scalar.key) === fold(change.from)) definition.scalar.key = change.to;
+    } else {
+      if (fold(change.key) === 'tags' && definition.tag === change.from) definition.tag = change.to;
+      if (typeof definition.key === 'string' && fold(definition.key) === fold(change.key) && definition.value === change.from) definition.value = change.to;
+      if (definition.kindList && fold(definition.kindList.key) === fold(change.key) && definition.kindList.value === change.from) definition.kindList.value = change.to;
+      if (definition.scalar && fold(definition.scalar.key) === fold(change.key) && definition.scalar.value === change.from) definition.scalar.value = change.to;
+      if (fold(change.key) === 'kind' && definition.parentKind === change.from) definition.parentKind = change.to;
+    }
   }
   const key = change.kind === 'key' ? change.from : change.key;
   const renameKey = (value: any) => typeof value === 'string' && fold(value) === fold(key) ? change.to : value;

@@ -1979,7 +1979,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       const normalizedId = String(normalized.id || '').trim().toLowerCase();
       const normalizedType = String(normalized.type || '').trim().toLowerCase();
       normalized.type = (
-        (normalizedKey === 'kind' || normalizedId === 'kind') && normalizedType !== 'kind'
+        (normalizedKey === 'kind' || normalizedId === 'kind') && normalizedType !== 'kind' && normalizedType !== 'list'
           ? 'kind'
           : CUSTOM_PROPERTY_TYPES.has(normalizedType)
             ? normalizedType
@@ -2421,7 +2421,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private configureEntityIndexDimensions(): void {
     if (!this.entityIndexService) return;
     const propertyKeys = (this.settings.properties || [])
-      .filter((property) => property?.type === 'kind')
+      .filter((property) => property?.type === 'kind' || property?.id === 'kind')
       .map((property) => String(property.key || '').trim())
       .filter(Boolean);
     this.entityIndexService.configureDimensions([

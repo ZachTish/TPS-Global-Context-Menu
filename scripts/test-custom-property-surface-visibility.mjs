@@ -235,6 +235,18 @@ test("kind scopes distinguish note records from structural task lines", async ()
   );
 });
 
+test("kind scopes match exact configured members of a multi-value kind list", async () => {
+  const { resolveCustomProperties } = await loadVisibilityModule();
+  const properties = [
+    { id: "meal", key: "calories", type: "number", scopeKinds: ["transaction/macros"] },
+    { id: "purchase", key: "amount", type: "number", scopeKinds: ["transaction/financial"] },
+    { id: "hidden", key: "memo", type: "text", excludeKinds: ["user/private"] },
+    { id: "ancestor", key: "other", type: "text", scopeKinds: ["transaction"] },
+  ];
+  const entries = [{ kind: "note", frontmatter: { kind: ["TRANSACTION/MACROS", "user/private"] } }];
+  assert.deepEqual(resolveCustomProperties(properties, entries, {}, "any").map(property => property.id), ["meal"]);
+});
+
 test("mounted views refresh once, continue after one renderer throws, and never block persistence", async () => {
   const {
     applyCustomPropertyVisibilityUpdate,

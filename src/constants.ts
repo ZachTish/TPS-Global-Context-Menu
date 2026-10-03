@@ -42,9 +42,8 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   persistTaskVisibilityStateToFrontmatter: false,
   taskVisibilityStateFrontmatterKey: 'gcmTaskVisibility',
   properties: [
-    { id: 'kind', label: 'Kind', key: 'kind', type: 'kind', optionsSource: 'vault', icon: 'shapes', showInCollapsed: true, allowInlineSet: false },
+    { id: 'kind', label: 'Kind', key: 'kind', type: 'list', listItemType: 'text', optionsSource: 'vault', icon: 'shapes', showInCollapsed: true, allowInlineSet: false },
     { id: 'status', label: 'Status', key: 'status', type: 'selector', options: ['todo', 'working', 'holding', 'wont-do', 'complete', MIGRATED_TASK_STATUS], icon: 'circle-check', showInCollapsed: true, allowInlineSet: true, scopeKinds: ['task'] },
-    { id: 'priority', label: 'Priority', key: 'priority', type: 'selector', options: ['high', 'medium', 'normal', 'low'], icon: 'flag', showInCollapsed: true, allowInlineSet: true, scopeKinds: ['task'] },
     { id: 'tags', label: 'Tags', key: 'tags', type: 'list', listItemType: 'tag', icon: 'tag', showInCollapsed: true, allowInlineSet: true },
     { id: 'recurrence', label: 'Recurrence', key: 'recurrenceRule', type: 'recurrence', icon: 'repeat', showInCollapsed: true, allowInlineSet: true, scopeKinds: ['task'] },
     { id: 'scheduled', label: 'Scheduled', key: 'scheduled', type: 'datetime', icon: 'calendar', showInCollapsed: true, allowInlineSet: true, scopeKinds: ['task'] },

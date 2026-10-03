@@ -279,7 +279,6 @@ export class CreateTaskService {
       status,
       tags: readInlineTags(title),
     };
-    if (result.priority) properties.priority = result.priority;
     if (result.scheduledValue) properties.scheduled = result.scheduledValue;
     if (result.scheduledValue && !result.allDay && result.timeEstimate > 0) {
       properties.timeEstimate = Math.round(result.timeEstimate);
