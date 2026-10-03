@@ -129,30 +129,35 @@ test('metadata refreshes batch every changed file and parent without a second de
   const sourceText = readFileSync(new URL(eventPath, import.meta.url), 'utf8');
   const source = ts.createSourceFile(eventPath, sourceText, ts.ScriptTarget.Latest, true);
   let initializer;
+  let parentRefreshInitializer;
   const visit = node => {
     if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'scheduleMetadataMenuRefresh') initializer = node.initializer.getText(source);
+    if (ts.isVariableDeclaration(node) && node.name.getText(source) === 'refreshRelatedParentMenus') parentRefreshInitializer = node.initializer.getText(source);
     ts.forEachChild(node, visit);
   };
-  visit(source); assert.ok(initializer);
+  visit(source); assert.ok(initializer); assert.ok(parentRefreshInitializer);
   const overlay = readFileSync(new URL('../src/services/overlay-rendering-service.ts', import.meta.url), 'utf8').replace(/^import .*;\n/gm, '');
   const output = ts.transpileModule(`
     class Component {}
     export class TFile { extension = 'md'; constructor(public path: string) {} }
     const logger = { perf() {}, taskTrace() {}, error() {} };
     ${overlay}
-    export function metadataScheduler(plugin, overlayRendering, resolveLinkValueToFile) { return ${initializer}; }
+    export function metadataScheduler(plugin, overlayRendering) {
+      const refreshRelatedParentMenus = ${parentRefreshInitializer};
+      return ${initializer};
+    }
   `, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
   const module = {}; let nextId = 0; const timers = new Map();
   const window = { setTimeout(fn) { const id = ++nextId; timers.set(id, fn); return id; }, clearTimeout(id) { timers.delete(id); } };
   new Function('exports', 'window', output)(module, window);
   const a = new module.TFile('A.md'), b = new module.TFile('B.md'), parent = new module.TFile('Parent.md');
   const refreshed = [];
-  const plugin = { settings: {}, app: { metadataCache: { getFileCache: () => ({ frontmatter: { childOf: 'Parent' } }) } },
+  const plugin = { settings: {}, app: { vault: { getFileByPath: path => path === parent.path ? parent : null } },
     persistentMenuManager: { refreshMenusForFile(file, force) { refreshed.push([file.path, force]); } } };
   const service = new module.OverlayRenderingService(plugin);
-  const schedule = module.metadataScheduler(plugin, service, () => parent);
+  const schedule = module.metadataScheduler(plugin, service);
   service.scheduleFileRefresh(a, 'vault-modify', { force: true, delayMs: 400 });
-  schedule(a); schedule(b);
+  schedule(a, [parent.path]); schedule(b, [parent.path]);
   assert.equal(timers.size, 1);
   for (const [id, run] of [...timers]) { timers.delete(id); run(); }
   assert.deepEqual(refreshed, [['A.md', true], ['Parent.md', true], ['B.md', true]]);

@@ -232,10 +232,11 @@ async function importTopChildResolverHarness() {
     }
     const logger = { warn: () => undefined };
     export class TopChildResolverHarness {
-      constructor(bodyLinks, ignoredPaths, reverseChildren = []) {
+      constructor(bodyLinks, ignoredPaths, reverseChildren = [], dataArchitectureMode = 'legacy') {
         this.scanCount = 0;
         this.reverseChildren = reverseChildren;
         this.plugin = {
+          settings: { dataArchitectureMode },
           parentLinkResolutionService: {
             isIgnoredFile: (file) => ignoredPaths.has(file.path),
           },
@@ -656,10 +657,10 @@ test('relationship consumers share logical frontmatter and opt in to all-file pi
   assert.match(metadata, /buildParentToChildrenIndex[\s\S]{0,700}getRelationshipCandidates\(\)/u);
   assert.match(metadata, /getResolvedFrontmatter[\s\S]{0,260}getLogicalFrontmatter\(file\)/u);
   assert.ok(
-    (persistent.match(/parentLinkResolutionService\.getRelationshipCandidates\(\{ includeIgnored: true \}\)/gu) || []).length >= 2,
-    'persistent relationship paths and child rows defer ignore filtering to hasParent',
+    (persistent.match(/parentLinkResolutionService\.getChildrenForParent\(file\)/gu) || []).length >= 2,
+    'persistent relationship paths and child rows use indexed children',
   );
-  assert.match(menuBuilder, /resolveChildFilesFor[\s\S]{0,500}getRelationshipCandidates\(\{ includeIgnored: true \}\)[\s\S]{0,150}hasParent\(candidate, file\)/u);
+  assert.match(menuBuilder, /resolveChildFilesFor[\s\S]{0,180}getChildrenForParent\(file\)/u);
   assert.ok(
     (panel.match(/parentLinkResolutionService\.getLogicalFrontmatter\(/gu) || []).length >= 3,
     'panel sorting and both archive/ignore tag reads use logical frontmatter',
@@ -715,6 +716,7 @@ test('persistent child lookups preserve ignore results without repeating candida
     },
   };
   plugin.parentLinkResolutionService = new ParentLinkResolutionService(plugin);
+  plugin.parentLinkResolutionService.rebuildRelationshipIndex();
   const harness = new PersistentChildLookupHarness(plugin);
   const oldLookup = () => plugin.parentLinkResolutionService.getRelationshipCandidates()
     .filter((candidate) => plugin.parentLinkResolutionService.hasParent(candidate, parent))
@@ -757,6 +759,18 @@ test('body-only ignored children and ignored roots never reach the top Children 
   const ignoredRootHarness = new TopChildResolverHarness(bodyLinks, new Set([root.path]));
   assert.deepEqual(await ignoredRootHarness.run(root), []);
   assert.equal(ignoredRootHarness.scanCount, 0, 'an ignored root is rejected before body-link discovery');
+});
+
+test('native whole-note top Children lookup never reads body lines', async () => {
+  const { TopChildResolverHarness, TFile } = await importTopChildResolverHarness();
+  const root = new TFile('Root.md');
+  const frontmatterChild = new TFile('Frontmatter child.md');
+  const bodyOnlyChild = new TFile('Body-only child.md');
+  const harness = new TopChildResolverHarness(
+    [{ childFile: bodyOnlyChild }], new Set(), [frontmatterChild], 'native-records',
+  );
+  assert.deepEqual((await harness.run(root)).map((file) => file.path), [frontmatterChild.path]);
+  assert.equal(harness.scanCount, 0, 'native note-open navigation never reads the note body');
 });
 
 test('unresolved-link cleanup rechecks ignored parents before opening and at every write boundary', async () => {

@@ -178,6 +178,7 @@ function createHarness({
   const invalidations = [];
   let selectedBodyReads = 0;
   let linkedRefreshes = 0;
+  let filesUpdatedHandler = null;
   const failures = new Set(failedPaths);
   const scaledSetTimeout = (callback, delay = 0) => setTimeout(callback, Math.max(1, Math.ceil(delay / 100)));
   const normalizeStatus = (value) => {
@@ -296,6 +297,8 @@ function createHarness({
       handleCompanionMetadataChanged: async () => null,
       invalidatePendingMarkdownTarget: () => {},
       invalidateLegacyCanvas: () => {},
+      hasCompanion: () => false,
+      primeLegacyCanvasCache: async () => 0,
     },
     overlayRenderingService: {
       scheduleMenus: noop,
@@ -343,7 +346,14 @@ function createHarness({
       repairBrokenBodyLinksForParent: async () => 0,
       reconcileMarkdownParent: async () => {},
     },
-    parentLinkResolutionService: { getParentsForChild: () => [] },
+    parentLinkResolutionService: {
+      getParentsForChild: () => [],
+      isRelationshipTarget: (file) => file.extension === 'md',
+      onMetadataChanged: () => [],
+      onFileCreated: () => [],
+      onFileRenamed: () => [],
+      onFileDeleted: () => [],
+    },
     linkedSubitemCheckboxService: { refreshReferencesForChild: async () => {} },
     fileNamingService: {
       isCalendarEventFile: () => false,
@@ -355,7 +365,7 @@ function createHarness({
     bodySubitemLinkService: { scanFile: async () => [] },
     bulkEditService: { cleanupLinksForDeletedFile: async () => 0 },
     eventService: {
-      onFilesUpdated: () => noop,
+      onFilesUpdated: (callback) => { filesUpdatedHandler = callback; return noop; },
       emitFilesUpdated: noop,
       emitDeleteComplete: noop,
     },
@@ -371,6 +381,7 @@ function createHarness({
     emit(scope, event, ...args) {
       for (const callback of listeners.get(`${scope}:${event}`) || []) callback(...args);
     },
+    emitFilesUpdated(paths) { filesUpdatedHandler?.(paths); },
     addFile(path, frontmatter = {}) {
       const file = new TFile(path, frontmatter);
       filesByPath.set(path, file);
@@ -879,6 +890,103 @@ test('lifecycle dispatch reads the current architecture setting at each event', 
     h.plugin.settings.dataArchitectureMode = 'native-records';
     h.emit('vault', 'delete', folder);
     assert.deepEqual(calls, ['handleSourceFolderRename']);
+  } finally { h.cleanup(); }
+});
+
+test('Canvas metadata invalidates its legacy cache before reindexing and refreshes linked Markdown parents', () => {
+  const h = createHarness();
+  h.plugin.settings.dataArchitectureMode = 'legacy';
+  const parent = h.addFile('Inbox/Parent.md');
+  const canvas = h.addFile('Inbox/Board.canvas');
+  const calls = [];
+  h.plugin.filePropertiesService.invalidateLegacyCanvas = (file) => {
+    assert.equal(file, canvas);
+    calls.push('invalidate');
+  };
+  h.plugin.parentLinkResolutionService.onMetadataChanged = (file) => {
+    assert.equal(file, canvas);
+    calls.push('reindex');
+    return [parent.path];
+  };
+  h.plugin.overlayRenderingService.scheduleFileRefresh = (file, reason) => {
+    if (reason === 'metadata-parent-menu-refresh') calls.push(`refresh:${file.path}`);
+  };
+  try {
+    h.metadataChanged(canvas);
+    assert.deepEqual(calls, ['invalidate', 'reindex', `refresh:${parent.path}`]);
+  } finally { h.cleanup(); }
+});
+
+test('a Canvas JSON modify without a companion reads current properties before reindexing', async () => {
+  const h = createHarness();
+  h.plugin.settings.dataArchitectureMode = 'legacy';
+  const parent = h.addFile('Inbox/Parent.md');
+  const canvas = h.addFile('Inbox/Board.canvas');
+  const calls = [];
+  h.plugin.filePropertiesService.invalidateLegacyCanvas = () => calls.push('invalidate');
+  h.plugin.filePropertiesService.primeLegacyCanvasCache = async (files) => {
+    assert.deepEqual(files, [canvas]);
+    calls.push('read-current-canvas');
+    return 1;
+  };
+  h.plugin.parentLinkResolutionService.onMetadataChanged = (file) => {
+    assert.equal(file, canvas);
+    calls.push('reindex');
+    return [parent.path];
+  };
+  h.plugin.overlayRenderingService.scheduleFileRefresh = (file, reason) => {
+    if (reason === 'canvas-parent-menu-refresh') calls.push(`refresh:${file.path}`);
+  };
+  try {
+    h.emit('vault', 'modify', canvas);
+    await Promise.resolve();
+    assert.deepEqual(calls, ['invalidate', 'read-current-canvas', 'reindex', `refresh:${parent.path}`]);
+  } finally { h.cleanup(); }
+});
+
+test('a Canvas modify with a companion reindexes its current logical properties without a JSON read', () => {
+  const h = createHarness();
+  h.plugin.settings.dataArchitectureMode = 'legacy';
+  const parent = h.addFile('Inbox/Parent.md');
+  const canvas = h.addFile('Inbox/Board.canvas');
+  const calls = [];
+  h.plugin.filePropertiesService.hasCompanion = () => true;
+  h.plugin.filePropertiesService.invalidateLegacyCanvas = () => calls.push('invalidate');
+  h.plugin.filePropertiesService.primeLegacyCanvasCache = async () => {
+    throw new Error('companion-backed Canvas must not read its JSON on modify');
+  };
+  h.plugin.parentLinkResolutionService.onMetadataChanged = (file) => {
+    assert.equal(file, canvas);
+    calls.push('reindex');
+    return [parent.path];
+  };
+  h.plugin.overlayRenderingService.scheduleFileRefresh = (file, reason) => {
+    if (reason === 'canvas-parent-menu-refresh') calls.push(`refresh:${file.path}`);
+  };
+  try {
+    h.emit('vault', 'modify', canvas);
+    assert.deepEqual(calls, ['invalidate', 'reindex', `refresh:${parent.path}`]);
+  } finally { h.cleanup(); }
+});
+
+test('migration-style Markdown filesUpdated reindexes changed parent values after metadata events were suppressed', () => {
+  const h = createHarness();
+  const parent = h.addFile('Inbox/Parent.md');
+  const child = h.addFile('Inbox/Child.md');
+  h.plugin.propertyMigrationService = { active: true };
+  const calls = [];
+  h.plugin.parentLinkResolutionService.onMetadataChanged = (file) => {
+    calls.push(`reindex:${file.path}`);
+    return [parent.path];
+  };
+  h.plugin.overlayRenderingService.scheduleFileRefresh = (file, reason) => {
+    if (reason === 'file-update-parent-menu-refresh') calls.push(`refresh:${file.path}`);
+  };
+  try {
+    h.metadataChanged(child);
+    assert.deepEqual(calls, []);
+    h.emitFilesUpdated([child.path]);
+    assert.deepEqual(calls, [`reindex:${child.path}`, `refresh:${parent.path}`]);
   } finally { h.cleanup(); }
 });
 

@@ -12,7 +12,7 @@ async function loadMenuBuilderModule() {
     ["../modals/FileSuggestModal", "export class FileSuggestModal { constructor(_app, choose, options) { globalThis.__tpsLatestFileSuggestChoose = choose; globalThis.__tpsLatestFileSuggestOptions = options; } open() {} }"],
     ["../modals/MultiFileSelectModal", "export class MultiFileSelectModal { constructor(_app, _choose, options) { globalThis.__tpsLatestMultiFileOptions = options; } open() {} }"],
     ["../modals/file-properties-relink-modal", "export const promptFilePropertiesRelink = () => {};"],
-    ["../logger", "export const warn = () => {}; export const flow = () => {};"],
+    ["../logger", "export const warn = () => {}; export const flow = () => {}; export const perf = () => {};"],
     ["../resolve-profiles", "export const resolveCustomProperties = (properties) => properties.filter((property) => !property.hidden);"],
     ["../services/view-mode-service", "export class ViewModeService {}"],
     ["../services/link-target-service", "export const parseLinksFromFrontmatterValue = () => [];"],
@@ -150,6 +150,7 @@ function createBuilderHarness(MenuBuilder, TFile) {
       getParentKey: () => "parent",
       getParentsForChild: () => [],
       hasParent: () => false,
+      getChildrenForParent: () => [],
       isIgnoredFile: () => false,
       isRelationshipTarget: (file) => !file.path.startsWith("_assets/TPS File Properties/"),
       getRelationshipCandidates: () => [...files.values()].filter((file) => (
@@ -254,20 +255,16 @@ test("relationship counts and submenu contents share one lookup per menu constru
   const attachment = addFile("Reference/Attachment.pdf");
   for (let i = 0; i < 1024; i++) addFile(`Notes/unrelated-${i}.md`);
   let parentLookups = 0;
-  let childScans = 0;
-  let childChecks = 0;
-  const candidates = plugin.parentLinkResolutionService.getRelationshipCandidates;
-  const allCandidates = candidates();
+  let childLookups = 0;
   plugin.parentLinkResolutionService.getParentsForChild = file => {
     assert.equal(file, root);
     parentLookups++;
     return [{ file: parent }];
   };
-  plugin.parentLinkResolutionService.getRelationshipCandidates = () => { childScans++; return candidates(); };
-  plugin.parentLinkResolutionService.hasParent = (candidate, file) => {
+  plugin.parentLinkResolutionService.getChildrenForParent = file => {
     assert.equal(file, root);
-    childChecks++;
-    return candidate === child || candidate === attachment;
+    childLookups++;
+    return [child, attachment];
   };
 
   const menu = buildMenu(builder, [root], bridgeOptions([root]));
@@ -277,13 +274,40 @@ test("relationship counts and submenu contents share one lookup per menu constru
   assert.ok(childItem?.submenu);
   assert.equal(parentItem.submenu.items.filter(item => item.title === parent.basename).length, 2);
   for (const file of [child, attachment]) {
-    assert.equal(childItem.submenu.items.filter(item => item.title === file.basename).length, 2);
+    assert.equal(childItem.submenu.items.filter(item => item.title === file.basename).length, 1);
+    assert.equal(childItem.submenu.items.filter(item => item.title === `Unlink ${file.basename}`).length, 1);
   }
   assert.equal(childItem.submenu.items.some(item => item.title === 'Create new child...'), true);
   assert.equal(childItem.submenu.items.some(item => item.title === 'Link existing child...'), true);
   assert.equal(parentLookups, 1, 'count and submenu must not resolve the same parents twice');
-  assert.equal(childScans, 1, 'count and submenu must not enumerate the vault twice');
-  assert.equal(childChecks, allCandidates.length, 'each candidate is examined once per menu');
+  assert.equal(childLookups, 1, 'count and submenu share one indexed child lookup');
+});
+
+test('one linked child has distinct open and unlink rows with the same child count', async () => {
+  const { MenuBuilder, TFile } = await loadMenuBuilderModule();
+  const { builder, addFile, plugin } = createBuilderHarness(MenuBuilder, TFile);
+  const parent = addFile('Notes/Parent.md');
+  const child = addFile('Notes/Child.md');
+  plugin.parentLinkResolutionService.getChildrenForParent = () => [child];
+  let opened = null;
+  let unlinked = null;
+  plugin.openFileInLeaf = async file => { opened = file; };
+  plugin.bulkEditService.unlinkFromParent = async (childFile, parentFile) => {
+    unlinked = [childFile, parentFile];
+  };
+
+  const menu = buildMenu(builder, [parent], bridgeOptions([parent]));
+  const children = menu.items.find(item => item.title === 'Link Children (1)')?.submenu;
+  assert.ok(children);
+  const openRows = children.items.filter(item => item.title === child.basename);
+  const unlinkRows = children.items.filter(item => item.title === `Unlink ${child.basename}`);
+  assert.equal(openRows.length, 1);
+  assert.equal(unlinkRows.length, 1);
+
+  openRows[0].click();
+  await unlinkRows[0].click();
+  assert.equal(opened, child);
+  assert.deepEqual(unlinked, [child, parent]);
 });
 
 test("relationship snapshots are local to one menu and a later menu reads fresh relationships", async () => {
@@ -294,11 +318,9 @@ test("relationship snapshots are local to one menu and a later menu reads fresh 
   const child = addFile("Notes/Child.md");
   let parentFiles = [];
   const childFiles = new Set();
-  let scans = 0;
-  const candidates = plugin.parentLinkResolutionService.getRelationshipCandidates;
+  let lookups = 0;
   plugin.parentLinkResolutionService.getParentsForChild = () => parentFiles.map(file => ({ file }));
-  plugin.parentLinkResolutionService.hasParent = candidate => childFiles.has(candidate);
-  plugin.parentLinkResolutionService.getRelationshipCandidates = () => { scans++; return candidates(); };
+  plugin.parentLinkResolutionService.getChildrenForParent = () => { lookups++; return [...childFiles]; };
 
   const first = buildMenu(builder, [root], bridgeOptions([root]));
   assert.equal(first.items.find(item => item.title === 'Link Children').submenu.items.some(item => item.title === 'No linked children'), true);
@@ -308,12 +330,12 @@ test("relationship snapshots are local to one menu and a later menu reads fresh 
   const second = buildMenu(builder, [root], bridgeOptions([root]));
   assert.ok(second.items.find(item => item.title === 'Link Children (1)').submenu.items.find(item => item.title === child.basename));
   assert.ok(second.items.find(item => item.title === 'Link to Parent (1)').submenu.items.find(item => item.title === parent.basename));
-  assert.equal(scans, 2, 'each new menu owns one fresh scan; no retained relationship cache');
+  assert.equal(lookups, 2, 'each new menu reads the current relationship index');
 
   plugin.parentLinkResolutionService.isIgnoredFile = file => file === root;
   const ignored = buildMenu(builder, [root], bridgeOptions([root]));
   assert.equal(ignored.items.some(item => /^Link (?:Children|to Parent)/u.test(item.title)), false);
-  assert.equal(scans, 2, 'ignored roots do not enumerate relationships');
+  assert.equal(lookups, 2, 'ignored roots do not query child relationships');
 });
 
 function useRealRelationshipServices(h, { ParentLinkResolutionService, FilePropertiesService }) {
@@ -337,7 +359,7 @@ function useRealRelationshipServices(h, { ParentLinkResolutionService, FilePrope
   return reads;
 }
 
-test('the real relationship scan reads each unrelated candidate three times, not nine', async () => {
+test('the real relationship index does not inspect unrelated notes while building a menu', async () => {
   const module = await loadMenuBuilderModule();
   const h = createBuilderHarness(module.MenuBuilder, module.TFile);
   h.plugin.settings.dataArchitectureMode = 'native-records';
@@ -350,11 +372,13 @@ test('the real relationship scan reads each unrelated candidate three times, not
   h.frontmatter.set(ignored.path, { parent: '[[Notes/Root]]', relationshipMode: 'ignore' });
   h.frontmatter.set(companion.path, { tpsGcmFileProperties: 1, tpsGcmFileId: 'companion', tpsGcmSourcePath: 'Attachment.pdf', parent: '[[Notes/Root]]' });
   const reads = useRealRelationshipServices(h, module);
+  h.plugin.parentLinkResolutionService.rebuildRelationshipIndex();
+  reads.clear();
   const menu = buildMenu(h.builder, [root], bridgeOptions([root]));
   const children = menu.items.find(item => item.title === 'Link Children (1)')?.submenu;
   assert.ok(children?.items.some(item => item.title === child.basename));
   assert.equal(children.items.some(item => item.title === ignored.basename || item.title === companion.basename), false);
-  for (const file of ordinary) assert.equal(reads.get(file.path), 3, `${file.path}: target eligibility plus one logical frontmatter lookup`);
+  for (const file of ordinary) assert.equal(reads.get(file.path) || 0, 0, `${file.path}: unrelated metadata is not inspected`);
   assert.equal(h.frontmatter.get(child.path).childOf.length, 2, 'read filtering preserves persisted self-links');
 });
 

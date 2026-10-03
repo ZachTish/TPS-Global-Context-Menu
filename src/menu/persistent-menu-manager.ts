@@ -584,6 +584,14 @@ export class PersistentMenuManager {
     }
   }
 
+  /** True only when the normal file refresh can update an existing menu. */
+  hasMountedMenuForFile(file: TFile): boolean {
+    for (const view of new Set([...this.menus.keys(), ...this.topParentNavs.keys()])) {
+      if (view.file?.path === file.path) return true;
+    }
+    return false;
+  }
+
   /**
    * Ensure menus exist only for the active markdown view.
    * Rendering fixed menus for every markdown leaf causes off-screen overlays.
@@ -6298,33 +6306,22 @@ export class PersistentMenuManager {
     }
 
     // Include reverse-only relationships if one direction is missing.
-    // hasParent already applies both child and parent ignore rules.
-    for (const candidate of this.plugin.parentLinkResolutionService.getRelationshipCandidates({ includeIgnored: true })) {
-      if (candidate.path === file.path) continue;
-      if (this.plugin.parentLinkResolutionService.hasParent(candidate, file)) {
-        relationshipPaths.add(candidate.path);
-      }
+    for (const child of this.plugin.parentLinkResolutionService.getChildrenForParent(file)) {
+      relationshipPaths.add(child.path);
     }
 
     return relationshipPaths;
   }
 
   private resolveChildFiles(file: TFile): TFile[] {
-    const childFiles = new Map<string, TFile>();
-    // hasParent already applies both child and parent ignore rules.
-    for (const candidate of this.plugin.parentLinkResolutionService.getRelationshipCandidates({ includeIgnored: true })) {
-      if (candidate.path === file.path) continue;
-      if (this.plugin.parentLinkResolutionService.hasParent(candidate, file)) {
-        childFiles.set(candidate.path, candidate);
-      }
-    }
-    return Array.from(childFiles.values());
+    return this.plugin.parentLinkResolutionService.getChildrenForParent(file);
   }
 
   private async resolveChildFilesForTopButton(file: TFile, knownChildren?: readonly TFile[]): Promise<TFile[]> {
     if (this.plugin.parentLinkResolutionService.isIgnoredFile(file)) return [];
     const childFiles = new Map<string, TFile>();
-    if (file.extension?.toLowerCase() === 'md') {
+    if (file.extension?.toLowerCase() === 'md'
+      && this.plugin.settings.dataArchitectureMode !== 'native-records') {
       try {
         const bodyLinks = await this.plugin.bodySubitemLinkService.scanFile(file);
         for (const link of bodyLinks) {

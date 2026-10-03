@@ -1,5 +1,4 @@
 import { TFile, TFolder, Platform, debounce, MarkdownView, Notice, WorkspaceLeaf } from 'obsidian';
-import { resolveLinkValueToFile } from '../handlers/parent-link-format';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { ViewModeService } from '../services/view-mode-service';
 import { RemoveHiddenSubitemsModal } from '../modals/remove-hidden-subitems-modal';
@@ -503,25 +502,21 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     // ── Debounced frontmatter/filename sync ──────────────────────────────────
 
-    const scheduleMetadataMenuRefresh = (file: TFile) => {
+    const refreshRelatedParentMenus = (paths: readonly string[], reason: string) => {
+        for (const path of new Set(paths)) {
+            const parent = plugin.app.vault.getFileByPath(path);
+            if (parent instanceof TFile && parent.extension === 'md') {
+                overlayRendering.scheduleFileRefresh(parent, reason, { force: true, delayMs: 300 });
+            }
+        }
+    };
+
+    const scheduleMetadataMenuRefresh = (file: TFile, parentPaths: readonly string[]) => {
         if (file && file.extension === 'md') {
             // Force refresh so frontmatter edits made while typing are reflected immediately.
             overlayRendering.scheduleFileRefresh(file, 'metadata-menu-refresh', { force: true, rebuildInlineSubitems: true, delayMs: 300 });
-
-            const parentKey = String(plugin.settings.parentLinkFrontmatterKey || 'childOf').trim() || 'childOf';
-            const fm = (plugin.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, any>;
-            const fmParentKey = Object.keys(fm).find((k) => k.toLowerCase() === parentKey.toLowerCase());
-            if (fmParentKey !== undefined) {
-                const parentRaw = fm[fmParentKey];
-                const parentValues = Array.isArray(parentRaw) ? parentRaw : [parentRaw];
-                for (const pv of parentValues) {
-                    const parentFile = resolveLinkValueToFile(plugin.app, pv, file.path);
-                    if (parentFile instanceof TFile && parentFile.path !== file.path) {
-                        overlayRendering.scheduleFileRefresh(parentFile, 'metadata-parent-menu-refresh', { force: true, delayMs: 300 });
-                    }
-                }
-            }
         }
+        refreshRelatedParentMenus(parentPaths, 'metadata-parent-menu-refresh');
     };
 
     const debouncedFilenameSync = debounce((file: TFile) => {
@@ -561,6 +556,13 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
         plugin.app.metadataCache.on('changed', (file) => {
             if (plugin.propertyMigrationService?.active) return;
             const useLegacyFileProperties = plugin.settings.dataArchitectureMode !== 'native-records';
+            if (useLegacyFileProperties
+                && file instanceof TFile && file.extension?.toLocaleLowerCase() === 'canvas') {
+                plugin.filePropertiesService.invalidateLegacyCanvas(file);
+            }
+            const changedParentPaths = file instanceof TFile
+                ? plugin.parentLinkResolutionService.onMetadataChanged(file)
+                : [];
             logger.perf('metadataCache.changed', { file: file instanceof TFile ? file.path : null });
             if (file instanceof TFile && plugin.filePropertiesService?.isCompanionFile(file)) {
                 if (!useLegacyFileProperties) return;
@@ -582,10 +584,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                     });
                 return;
             }
-            if (useLegacyFileProperties
-                && file instanceof TFile && file.extension?.toLocaleLowerCase() === 'canvas') {
-                plugin.filePropertiesService.invalidateLegacyCanvas(file);
-            }
             // Refresh saved titles when their metadata arrives.
             if (file instanceof TFile) {
                 plugin.menuController.panelBuilder?.clearFileTitleCache(file.path);
@@ -593,7 +591,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             }
             // Queue each file in the shared batch; a single-argument debounce
             // both lost earlier files and caused a second delayed forced render.
-            scheduleMetadataMenuRefresh(file);
+            scheduleMetadataMenuRefresh(file, changedParentPaths);
             debouncedFilenameSync(file);
             if (file instanceof TFile) {
                 if (plugin.canRunBackgroundAutomation() && plugin.notebookNavigatorRuleService.shouldAutoApplyOnMetadataChange()) {
@@ -623,6 +621,18 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             if (plugin.settings.dataArchitectureMode !== 'native-records'
                 && file instanceof TFile && file.extension?.toLocaleLowerCase() === 'canvas') {
                 plugin.filePropertiesService.invalidateLegacyCanvas(file);
+                if (plugin.filePropertiesService.hasCompanion(file)) {
+                    refreshRelatedParentMenus(plugin.parentLinkResolutionService.onMetadataChanged(file), 'canvas-parent-menu-refresh');
+                } else {
+                    // Canvas JSON has no Markdown metadata event. Its modify event
+                    // owns the authoritative compatibility read before reindexing.
+                    void plugin.filePropertiesService.primeLegacyCanvasCache([file]).then(() => {
+                        if (plugin.app.vault.getFileByPath(file.path) !== file) return;
+                        refreshRelatedParentMenus(plugin.parentLinkResolutionService.onMetadataChanged(file), 'canvas-parent-menu-refresh');
+                    }).catch((error) => {
+                        logger.error('[TPS GCM] Could not index modified Canvas parent links', { file: file.path, error });
+                    });
+                }
             }
             if (!(file instanceof TFile) || file.extension !== 'md') return;
             if (plugin.filePropertiesService?.isCompanionFile(file)) return;
@@ -654,6 +664,9 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
         for (const path of paths) {
             const f = plugin.app.vault.getFileByPath(path);
             if (!f) continue;
+            if (plugin.parentLinkResolutionService.isRelationshipTarget(f)) {
+                refreshRelatedParentMenus(plugin.parentLinkResolutionService.onMetadataChanged(f), 'file-update-parent-menu-refresh');
+            }
             scheduleResponsiveMenuRefresh(f, { rebuildInlineSubitems: true, delayMs: 50, lateDelayMs: 320 });
         }
     }));
@@ -718,6 +731,9 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.registerEvent(
         plugin.app.vault.on('create', (file) => {
+            if (file instanceof TFile) {
+                refreshRelatedParentMenus(plugin.parentLinkResolutionService.onFileCreated(file), 'created-parent-menu-refresh');
+            }
             // Initial vault loading announces existing files as creates. Their
             // startup indexes already have owners; they are not new-note work.
             if (plugin.app.workspace.layoutReady === false) return;
@@ -753,6 +769,9 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
 
     plugin.registerEvent(
         plugin.app.vault.on('rename', (file, oldPath) => {
+            if (file instanceof TFile || file instanceof TFolder) {
+                refreshRelatedParentMenus(plugin.parentLinkResolutionService.onFileRenamed(file, oldPath), 'renamed-parent-menu-refresh');
+            }
             // Match startup ownership: native records do not use the legacy
             // companion index. Keep ordinary title/link handling below active.
             const useLegacyFileProperties = plugin.settings.dataArchitectureMode !== 'native-records';
@@ -892,6 +911,9 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     plugin.register(() => plugin.menuController.detach());
     plugin.registerEvent(
         plugin.app.vault.on('delete', (file) => {
+            if (file instanceof TFile || file instanceof TFolder) {
+                refreshRelatedParentMenus(plugin.parentLinkResolutionService.onFileDeleted(file), 'deleted-parent-menu-refresh');
+            }
             const useLegacyFileProperties = plugin.settings.dataArchitectureMode !== 'native-records';
             if (useLegacyFileProperties && !(file instanceof TFile)) {
                 void plugin.filePropertiesService.handleSourceFolderDelete(file.path).catch((error) => {

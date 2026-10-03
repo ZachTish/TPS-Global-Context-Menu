@@ -93,17 +93,7 @@ export class MenuBuilder {
   }
 
   private resolveChildFilesFor(file: TFile): TFile[] {
-    const children = new Map<string, TFile>();
-    // hasParent applies the child and parent ignore rules using the same
-    // logical frontmatter it resolves, so candidate discovery need not repeat it.
-    const indexed = this.plugin.parentLinkResolutionService.getRelationshipCandidates({ includeIgnored: true }).filter((candidate) =>
-      this.plugin.parentLinkResolutionService.hasParent(candidate, file),
-    );
-    for (const child of indexed) {
-      if (child.path !== file.path) children.set(child.path, child);
-    }
-
-    return Array.from(children.values());
+    return this.plugin.parentLinkResolutionService.getChildrenForParent(file);
   }
 
   private getFileDisplayTitle(file: TFile): string {
@@ -418,7 +408,7 @@ export class MenuBuilder {
       });
 
       menu.addItem((sub) => {
-        sub.setTitle(this.getFileDisplayTitle(childFile))
+        sub.setTitle(`Unlink ${this.getFileDisplayTitle(childFile)}`)
           .setIcon('x')
           .onClick(async () => {
             await this.plugin.bulkEditService.unlinkFromParent(childFile, file);

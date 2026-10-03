@@ -667,6 +667,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     });
 
     // Register all workspace/vault events (includes initial ensureMenus call)
+    this.parentLinkResolutionService.setup();
     registerGcmEvents(this);
     if (this.canRunBackgroundAutomation()) {
       this.startArchiveTagAutomation();
@@ -2741,6 +2742,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       this.stopArchiveTagAutomation();
     }
     await this.persistSettingsSnapshot();
+    await this.parentLinkResolutionService?.onRelationshipSettingsChanged();
     this.emitGcmApiChanged(true);
     this.notebookNavigatorRuleService?.invalidateNotebookNavigatorPresentation();
     this.tpsNotebookNavigatorMenuBridge?.refresh();
