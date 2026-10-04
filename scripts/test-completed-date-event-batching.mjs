@@ -421,214 +421,49 @@ async function settleDebounces() {
   await new Promise((resolve) => setTimeout(resolve, 80));
 }
 
-test('a metadata burst reconciles every distinct markdown file exactly once', async () => {
-  const harness = createHarness();
-  const files = Array.from({ length: 100 }, (_value, index) =>
-    harness.addFile(`Inbox/file-${index}.md`, { status: 'complete' }));
+test('startup metadata and modify bursts do not add completion dates or attempt frontmatter writes', async () => {
+  const h = createHarness();
+  const files = Array.from({ length: 100 }, (_value, index) => h.addFile(
+    `Inbox/existing-${index}.md`,
+    index % 3 === 0
+      ? { kind: ['transaction/workout'], status: 'complete' }
+      : index % 3 === 1
+        ? { kind: ['transaction/event'], status: 'cancelled' }
+        : { status: 'todo', completedDate: '2026-09-24T18:00:00' },
+  ));
+  const before = files.map((file) => JSON.stringify(file.frontmatter));
 
-  for (const file of files) harness.metadataChanged(file);
-  await settleDebounces();
-
-  assert.equal(harness.mutations.length, 100);
-  assert.deepEqual(
-    new Set(harness.mutations.map(({ path }) => path)),
-    new Set(files.map(({ path }) => path)),
-  );
-  assert.ok(harness.mutations.every(({ source }) => source === 'service'));
-  harness.cleanup();
-});
-
-test('repeated events for one file still coalesce into one mutation', async () => {
-  const harness = createHarness();
-  const file = harness.addFile('Inbox/repeated.md', { status: 'complete' });
-
-  for (let index = 0; index < 100; index += 1) harness.metadataChanged(file);
-  await settleDebounces();
-
-  assert.equal(harness.mutations.length, 1);
-  assert.equal(harness.mutations[0].file, file);
-  harness.cleanup();
-});
-
-test('a queued path resolves the current live file before mutation', async () => {
-  const harness = createHarness();
-  const staleFile = harness.addFile('Inbox/replaced.md', { status: 'complete' });
-  harness.metadataChanged(staleFile);
-  const liveFile = harness.replaceFile('Inbox/replaced.md', { status: 'complete' });
-  await settleDebounces();
-
-  assert.equal(harness.mutations.length, 1);
-  assert.equal(harness.mutations[0].file, liveFile);
-  harness.cleanup();
-});
-
-test('rename migrates a queued path and delete removes queued work', async () => {
-  const renameHarness = createHarness();
-  const renamedFile = renameHarness.addFile('Inbox/old-name.md', { status: 'complete' });
-  renameHarness.metadataChanged(renamedFile);
-  renameHarness.renameFile(renamedFile, 'Inbox/old-name.md', 'Inbox/new-name.md');
-  await settleDebounces();
-
-  assert.deepEqual(renameHarness.mutations.map(({ path }) => path), ['Inbox/new-name.md']);
-  renameHarness.cleanup();
-
-  const deleteHarness = createHarness();
-  const deletedFile = deleteHarness.addFile('Inbox/deleted.md', { status: 'complete' });
-  deleteHarness.metadataChanged(deletedFile);
-  deleteHarness.deleteFile(deletedFile);
-  await settleDebounces();
-
-  assert.equal(deleteHarness.mutations.length, 0);
-  deleteHarness.cleanup();
-});
-
-test('plugin cleanup cancels pending completed-date work', async () => {
-  const harness = createHarness();
-  const file = harness.addFile('Inbox/unload.md', { status: 'complete' });
-  harness.metadataChanged(file);
-  harness.cleanup();
-  await settleDebounces();
-
-  assert.equal(harness.mutations.length, 0);
-});
-
-test('one failed mutation cannot prevent other queued files from reconciling', async () => {
-  const harness = createHarness({ failedPaths: ['Inbox/bad.md'] });
-  const files = [
-    harness.addFile('Inbox/good-a.md', { status: 'complete' }),
-    harness.addFile('Inbox/bad.md', { status: 'complete' }),
-    harness.addFile('Inbox/good-b.md', { status: 'complete' }),
-  ];
-  for (const file of files) harness.metadataChanged(file);
-  await settleDebounces();
-
-  assert.deepEqual(
-    harness.mutations.map(({ path }) => path),
-    files.map(({ path }) => path),
-  );
-  assert.match(files[0].frontmatter.completedDate, /^2026-07-30T/);
-  assert.equal(files[1].frontmatter.completedDate, undefined);
-  assert.match(files[2].frontmatter.completedDate, /^2026-07-30T/);
-  harness.cleanup();
-});
-
-test('a queued batch re-resolves rename, delete, and replacement state between slow mutations', async () => {
-  const slowGate = { entered: deferred(), release: deferred() };
-  const harness = createHarness({
-    mutationGates: new Map([['Inbox/slow.md', slowGate]]),
-  });
-  const slowFile = harness.addFile('Inbox/slow.md', { status: 'complete' });
-  const renamedFile = harness.addFile('Inbox/rename-before-turn.md', { status: 'complete' });
-  const deletedFile = harness.addFile('Inbox/delete-before-turn.md', { status: 'complete' });
-  const replacedFile = harness.addFile('Inbox/replace-before-turn.md', { status: 'complete' });
-
-  harness.metadataChanged(slowFile);
-  harness.metadataChanged(renamedFile);
-  harness.metadataChanged(deletedFile);
-  harness.metadataChanged(replacedFile);
-  await slowGate.entered.promise;
-
-  harness.renameFile(renamedFile, 'Inbox/rename-before-turn.md', 'Inbox/renamed-before-turn.md');
-  harness.deleteFile(deletedFile);
-  const liveReplacement = harness.replaceFile('Inbox/replace-before-turn.md', { status: 'complete' });
-  slowGate.release.resolve();
-  await settleDebounces();
-
-  assert.deepEqual(
-    harness.mutations.map(({ path }) => path),
-    ['Inbox/slow.md', 'Inbox/renamed-before-turn.md', 'Inbox/replace-before-turn.md'],
-  );
-  assert.equal(harness.mutations[2].file, liveReplacement);
-  assert.equal(deletedFile.frontmatter.completedDate, undefined);
-  harness.cleanup();
-});
-
-test('separate timer batches never overlap their frontmatter mutations', async () => {
-  const slowGate = { entered: deferred(), release: deferred() };
-  const harness = createHarness({
-    mutationGates: new Map([['Inbox/slow-batch-a.md', slowGate]]),
-  });
-  const batchA = harness.addFile('Inbox/slow-batch-a.md', { status: 'complete' });
-  const batchB = harness.addFile('Inbox/batch-b.md', { status: 'complete' });
-
-  harness.metadataChanged(batchA);
-  await slowGate.entered.promise;
-  harness.metadataChanged(batchB);
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  assert.deepEqual(harness.mutations.map(({ path }) => path), ['Inbox/slow-batch-a.md']);
-  assert.equal(batchB.frontmatter.completedDate, undefined);
-
-  slowGate.release.resolve();
-  await settleDebounces();
-
-  assert.deepEqual(
-    harness.mutations.map(({ path }) => path),
-    ['Inbox/slow-batch-a.md', 'Inbox/batch-b.md'],
-  );
-  assert.equal(batchB.frontmatter.completedDate, '2026-07-30T12:34:56');
-  harness.cleanup();
-});
-
-test('live frontmatter is rechecked before a cached add or removal is applied', async () => {
-  const harness = createHarness();
-  const staleAdd = harness.addFile('Inbox/stale-add.md', { status: 'todo' });
-  harness.setCachedFrontmatter(staleAdd, { status: 'complete' });
-  const staleRemove = harness.addFile('Inbox/stale-remove.md', {
-    status: 'complete',
-    completedDate: '2026-07-29T10:00:00',
-  });
-  harness.setCachedFrontmatter(staleRemove, {
-    status: 'todo',
-    completedDate: '2026-07-29T10:00:00',
-  });
-
-  harness.metadataChanged(staleAdd);
-  harness.metadataChanged(staleRemove);
-  await settleDebounces();
-
-  assert.equal(staleAdd.frontmatter.completedDate, undefined);
-  assert.equal(staleRemove.frontmatter.completedDate, '2026-07-29T10:00:00');
-  assert.ok(harness.mutations.every(({ source }) => source === 'service'));
-  harness.cleanup();
-});
-
-test('configured completion aliases use the shared canonical status contract', async () => {
-  const harness = createHarness({ completionStatuses: ['done'] });
-  const file = harness.addFile('Inbox/done-alias.md', { status: 'done' });
-  harness.metadataChanged(file);
-  await settleDebounces();
-
-  assert.equal(file.frontmatter.completedDate, '2026-07-30T12:34:56');
-  assert.equal(harness.mutations.length, 1);
-  assert.equal(harness.mutations[0].source, 'service');
-  harness.cleanup();
-});
-
-test('completedDate set, normalize, remove, and preserve semantics remain unchanged', async () => {
-  const harness = createHarness();
-  const cases = [
-    harness.addFile('Inbox/complete.md', { status: 'complete' }),
-    harness.addFile('Inbox/wont-do.md', { status: 'wont-do', completedDate: ['2026-07-29T10:00:00', '2026-07-30T10:00:00'] }),
-    harness.addFile('Inbox/reopened.md', { status: 'todo', completedDate: '2026-07-29T10:00:00' }),
-    harness.addFile('Inbox/statusless.md', { completedDate: '2026-07-29T10:00:00' }),
-    harness.addFile('Inbox/already-complete.md', { status: 'complete', completedDate: '2026-07-28T10:00:00' }),
-  ];
-
-  for (const file of cases) {
-    harness.metadataChanged(file);
-    await settleDebounces();
+  for (const file of files) {
+    h.emit('vault', 'modify', file);
+    h.metadataChanged(file);
   }
+  await settleDebounces();
 
-  assert.equal(cases[0].frontmatter.completedDate, '2026-07-30T12:34:56');
-  assert.equal(cases[1].frontmatter.completedDate, '2026-07-30T10:00:00');
-  assert.equal(cases[2].frontmatter.completedDate, undefined);
-  assert.equal(cases[3].frontmatter.completedDate, '2026-07-29T10:00:00');
-  assert.equal(cases[4].frontmatter.completedDate, '2026-07-28T10:00:00');
-  assert.equal(harness.mutations.length, 3);
-  harness.cleanup();
+  assert.equal(h.mutations.length, 0, 'ordinary metadata changes must never call a frontmatter writer');
+  assert.deepEqual(files.map((file) => JSON.stringify(file.frontmatter)), before);
+  assert.equal(h.navigationCounts().selectedBodyReads, 0);
+  h.cleanup();
 });
 
+test('external status and filename changes do not silently reconcile completedDate', async () => {
+  const h = createHarness();
+  const workout = h.addFile('Inbox/workout.md', { status: 'todo' });
+  const event = h.addFile('Inbox/event.md', { status: 'todo' });
+
+  workout.frontmatter.status = 'complete';
+  event.frontmatter.status = 'cancelled';
+  h.emit('vault', 'modify', workout);
+  h.metadataChanged(workout);
+  h.emit('vault', 'modify', event);
+  h.metadataChanged(event);
+  h.renameFile(event, 'Inbox/event.md', 'Inbox/renamed-event.md');
+  await settleDebounces();
+
+  assert.equal(h.mutations.length, 0);
+  assert.equal(workout.frontmatter.completedDate, undefined);
+  assert.equal(event.frontmatter.completedDate, undefined);
+  h.cleanup();
+});
 
 test('switching notes never schedules checklist writes or retired link repairs', async () => {
   const h = createHarness();

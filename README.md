@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 7.3.1 — Keep metadata refreshes read-only for completion dates
+
+Metadata refreshes, file modifications, and renames no longer infer or remove a note-level completedDate from its status. The retired background reconciler could timestamp an old complete or cancelled note during startup or after an unrelated Kind migration, making the refresh look like a new completion. GCM now leaves an authored or missing date alone until a status-edit action owns the change.
+
+GCM's explicit whole-note status controls and status API still add a completion date when setting a completion status and remove it when reopening a note. A direct YAML edit or another plugin that changes only status must also manage completedDate if it needs one. Existing settings, stored note format, and the minimum Obsidian version (1.10.0) are unchanged; there is no automatic backfill or cleanup of existing notes.
+
+Focused regressions execute startup-style metadata and modify bursts, an external status change, and an explicit GCM status edit. The full declared suite, final build, Test-vault deployment/reload, runtime-state preservation, and artifact hashes are recorded in [7.3.1 release notes](release-notes/7.3.1.md). The Test vault confirms the shipped artifact; production installation remains the user's BRAT pull.
+
 ## 7.3.0 — Migrate configured kind references together
 
 **Rules & fields → Custom fields → Record classifications → Apply** now previews and moves dependent configuration when a configured kind-list path changes. Exact GCM Navigator rule conditions, Custom field kind scopes and property conditions, TPS Notebook Navigator saved searches, hidden property entries and property appearances, and literal native Base `list(<configured key>).contains("<old path>")` filters follow the selected mapping. **Rename stored value** on a configured list-valued Kind field also carries those references when it renames that path globally. A shared path moves only record-specific rules with an AND-matched identity; generic references block with their location for review. Discriminator edits move paired rule and Base filter conditions and exact Navigator identity references. Global **Rename property key** also moves recognized Base filter/formula/view property references and Navigator property visibility, search, sorting, grouping and appearance keys. No taxonomy path, discriminator value, or frontmatter key is built into the migration code.

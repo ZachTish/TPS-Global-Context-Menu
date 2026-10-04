@@ -4,7 +4,7 @@ import { ViewModeService } from '../services/view-mode-service';
 import { RemoveHiddenSubitemsModal } from '../modals/remove-hidden-subitems-modal';
 import type { BodySubitemLink } from '../services/subitem-types';
 import * as logger from '../logger';
-import { currentCompletedDateStamp, getCompletedDateValue, setCompletedDateValue } from '../utils/completed-date-utils';
+import { currentCompletedDateStamp } from '../utils/completed-date-utils';
 import {
     ChecklistHandler,
     markChecklistCompletionPromptHandled,
@@ -397,110 +397,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
         }),
     );
 
-    // ── Reactive completedDate sync ──────────────────────────────────────────
-    // Watches for status changes from ANY source (direct edit, bases, notification modal,
-    // kanban, canvas, etc.) and keeps completedDate aligned with current status.
-    const pendingCompletedDateSyncFiles = new Map<string, TFile>();
-    let completedDateSyncTimer: number | null = null;
-    let completedDateSyncQueue: Promise<void> = Promise.resolve();
-    let completedDateSyncDisposed = false;
-
-    const getCompletedDateSyncAction = (
-        frontmatter: Record<string, any>,
-        doneStatuses: Set<string>,
-    ): 'set' | 'remove' | null => {
-        const currentStatus = readConfiguredStatus(frontmatter);
-        const completedDateKey = Object.keys(frontmatter).find((candidate) => candidate.toLowerCase() === 'completeddate');
-        const completedDateValue = getCompletedDateValue(frontmatter);
-
-        if (doneStatuses.has(currentStatus) && (!completedDateValue || (completedDateKey && Array.isArray(frontmatter[completedDateKey])))) {
-            return 'set';
-        }
-        if (!doneStatuses.has(currentStatus) && completedDateValue && currentStatus) {
-            return 'remove';
-        }
-        return null;
-    };
-
-    const reconcileCompletedDate = async (file: TFile, doneStatuses: Set<string>): Promise<boolean> => {
-        if (!plugin.canRunBackgroundAutomation()) return false;
-        if (!file || file.extension !== 'md') return false;
-
-        const cache = plugin.app.metadataCache.getFileCache(file);
-        const fm = (cache?.frontmatter || {}) as Record<string, any>;
-        if (!getCompletedDateSyncAction(fm, doneStatuses)) return false;
-        if (!(await canAutomaticallyMutateTemplateFile(plugin.app.vault, file, plugin.settings))) return false;
-
-        return await plugin.frontmatterMutationService.process(file, (frontmatter) => {
-            if (!canAutomaticallyMutateTemplateFrontmatter(frontmatter, plugin.settings)) return;
-            const action = getCompletedDateSyncAction(frontmatter, doneStatuses);
-            if (action === 'set') {
-                setCompletedDateValue(frontmatter, getCompletedDateValue(frontmatter) || undefined);
-            } else if (action === 'remove') {
-                const key = Object.keys(frontmatter).find((candidate) => candidate.toLowerCase() === 'completeddate');
-                if (key) delete frontmatter[key];
-            }
-        });
-    };
-
-    const reconcileCompletedDateBatch = async (queuedFiles: TFile[]): Promise<void> => {
-        if (completedDateSyncDisposed || queuedFiles.length === 0) return;
-        const startedAt = performance.now();
-        let changedCount = 0;
-        let failedCount = 0;
-        try {
-            const processedPaths = new Set<string>();
-            const doneStatuses = new Set(plugin.sharedServices.status.getDoneStatuses());
-            for (const queuedFile of queuedFiles) {
-                if (completedDateSyncDisposed || !plugin.canRunBackgroundAutomation()) break;
-                const liveFile = plugin.app.vault.getFileByPath(queuedFile.path);
-                if (!(liveFile instanceof TFile) || liveFile.extension !== 'md' || processedPaths.has(liveFile.path)) continue;
-                processedPaths.add(liveFile.path);
-                try {
-                    if (await reconcileCompletedDate(liveFile, doneStatuses)) changedCount += 1;
-                } catch (error) {
-                    failedCount += 1;
-                    logger.flowError('CompletedDateSync', 'failed', error, { file: liveFile.path });
-                }
-            }
-        } catch (error) {
-            failedCount += 1;
-            logger.flowError('CompletedDateSync', 'batch-failed', error);
-        } finally {
-            logger.perf('completedDateSync:flush', {
-                queued: queuedFiles.length,
-                changed: changedCount,
-                failed: failedCount,
-                durationMs: Math.round(performance.now() - startedAt),
-            });
-        }
-    };
-
-    const scheduleCompletedDateSync = (file: TFile): void => {
-        if (completedDateSyncDisposed || !(file instanceof TFile) || file.extension !== 'md') return;
-        pendingCompletedDateSyncFiles.set(file.path, file);
-        if (completedDateSyncTimer !== null) window.clearTimeout(completedDateSyncTimer);
-        completedDateSyncTimer = window.setTimeout(() => {
-            completedDateSyncTimer = null;
-            const queuedFiles = Array.from(pendingCompletedDateSyncFiles.values());
-            pendingCompletedDateSyncFiles.clear();
-            completedDateSyncQueue = completedDateSyncQueue.then(
-                () => reconcileCompletedDateBatch(queuedFiles),
-            ).catch((error) => {
-                logger.flowError('CompletedDateSync', 'queue-failed', error);
-            });
-        }, 400);
-    };
-
-    plugin.register(() => {
-        completedDateSyncDisposed = true;
-        if (completedDateSyncTimer !== null) {
-            window.clearTimeout(completedDateSyncTimer);
-            completedDateSyncTimer = null;
-        }
-        pendingCompletedDateSyncFiles.clear();
-    });
-
     // ── Debounced frontmatter/filename sync ──────────────────────────────────
 
     const refreshRelatedParentMenus = (paths: readonly string[], reason: string) => {
@@ -609,9 +505,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 statusBeforeModifyByPath.delete(file.path);
                 lastKnownStatusByPath.set(file.path, currentStatus);
                 scheduleExternalChecklistCompletionGuard(file, previousStatus, currentStatus);
-                if (plugin.canRunBackgroundAutomation()) {
-                    scheduleCompletedDateSync(file);
-                }
             }
         }),
     );
@@ -874,9 +767,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                     { removedPaths: [oldPath] },
                 );
             }
-            if (file instanceof TFile && pendingCompletedDateSyncFiles.delete(oldPath)) {
-                scheduleCompletedDateSync(file);
-            }
             if (file instanceof TFile && plugin.canRunBackgroundAutomation()) {
                 runAfterNavigationRenameSettles(() => {
                     const liveFile = plugin.app.vault.getFileByPath(file.path);
@@ -956,7 +846,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                     [file.path],
                     { removedPaths: [file.path] },
                 );
-                pendingCompletedDateSyncFiles.delete(file.path);
             }
             try {
                 if (document.activeElement instanceof HTMLElement) {

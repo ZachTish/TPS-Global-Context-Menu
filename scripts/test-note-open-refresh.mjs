@@ -164,7 +164,7 @@ test('metadata refreshes batch every changed file and parent without a second de
   assert.deepEqual(refreshed, [['A.md', true], ['Parent.md', true], ['B.md', true]]);
   assert.equal(timers.size, 0, 'there must be no second 350 ms debounce render');
   service.onunload();
-  const openHandler = sourceText.slice(sourceText.indexOf("plugin.app.workspace.on('file-open'"), sourceText.indexOf('// ── Reactive completedDate sync'));
+  const openHandler = sourceText.slice(sourceText.indexOf("plugin.app.workspace.on('file-open'"), sourceText.indexOf('// ── Debounced frontmatter/filename sync'));
   assert.match(openHandler, /scheduleMenus\('file-open', 0\)/);
   assert.doesNotMatch(openHandler, /scheduleResponsiveMenuRefresh/);
 });

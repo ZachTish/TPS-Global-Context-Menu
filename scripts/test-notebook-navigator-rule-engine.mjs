@@ -273,7 +273,7 @@ test('visual repair owns only icon/color while sort remains virtual and semantic
   const fileOpenGate = sourceBlock(
     registerEventsSource,
     "plugin.app.workspace.on('file-open'",
-    '// ── Reactive completedDate sync',
+    '// ── Debounced frontmatter/filename sync',
   );
   const applyBlock = sourceBlock(
     serviceSource,

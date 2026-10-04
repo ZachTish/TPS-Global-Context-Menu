@@ -352,10 +352,6 @@ test('automatic background writers recheck explicit exclusions at their mutation
     /writeConfiguredStatus[\s\S]{0,240}canAutomaticallyMutateTemplateFile[\s\S]{0,420}canAutomaticallyMutateTemplateFrontmatter/u,
   );
   assert.match(
-    events,
-    /reconcileCompletedDate[\s\S]{0,600}canAutomaticallyMutateTemplateFile[\s\S]{0,600}canAutomaticallyMutateTemplateFrontmatter/u,
-  );
-  assert.match(
     nativeRecords,
     /adoptNewTaskDraftInternal[\s\S]{0,650}canAutomaticallyMutateTemplateSource[\s\S]{0,1300}vault\.process[\s\S]{0,220}canAutomaticallyMutateTemplateSource/u,
   );

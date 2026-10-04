@@ -137,6 +137,41 @@ test('shared status service resolves only authoritative checkbox mappings and al
   assert.equal(service.statusToCheckboxState('working'), '');
 });
 
+test('explicit status edits own completion-date writes', async () => {
+  const { SharedStatusService } = await sharedStatusPromise;
+  const frontmatter = { status: 'todo' };
+  const writes = [];
+  const file = { path: 'Inbox/Status.md' };
+  const service = new SharedStatusService({
+    settings: {
+      properties: [{ id: 'status', key: 'status', type: 'selector' }],
+      recurrenceCompletionStatuses: ['complete', 'wont-do'],
+    },
+    frontmatterMutationService: {
+      async process(_file, mutator) {
+        const before = JSON.stringify(frontmatter);
+        await mutator(frontmatter);
+        writes.push(JSON.stringify(frontmatter));
+        return JSON.stringify(frontmatter) !== before;
+      },
+    },
+    eventService: { emitFilesUpdated() {} },
+  });
+  const previousWindow = globalThis.window;
+  globalThis.window = { moment: () => ({ format: () => '2026-10-04T12:34:56' }) };
+  try {
+    assert.equal(await service.setFileStatus(file, 'complete'), true);
+    assert.deepEqual(frontmatter, { status: 'complete', completedDate: '2026-10-04T12:34:56' });
+    assert.equal(await service.setFileStatus(file, 'todo'), true);
+    assert.deepEqual(frontmatter, { status: 'todo' });
+    assert.equal(await service.setFileStatus(file, 'cancelled'), true);
+    assert.deepEqual(frontmatter, { status: 'wont-do', completedDate: '2026-10-04T12:34:56' });
+    assert.equal(writes.length, 3);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
 test('linked child rows derive status, completion, and icon presentation from the configured mapping', () => {
   const modelSource = readFileSync(new URL('../src/services/subitem-line-model.ts', import.meta.url), 'utf8');
   const rowSource = readFileSync(new URL('../src/services/linked-subitem-row-builder.ts', import.meta.url), 'utf8');
@@ -1264,14 +1299,7 @@ test('note workflow and recurrence services never treat relational status as che
     recurrenceSource,
     /private readWorkflowStatus\([\s\S]*?getStatusPropertyKey\?\.\(\)/u,
   );
-  assert.match(
-    eventSource,
-    /const currentStatus = readConfiguredStatus\(frontmatter\);/u,
-  );
-  assert.match(
-    eventSource,
-    /const doneStatuses = new Set\(plugin\.sharedServices\.status\.getDoneStatuses\(\)\);/u,
-  );
+  assert.doesNotMatch(eventSource, /scheduleCompletedDateSync|reconcileCompletedDate/u);
   assert.match(
     eventSource,
     /plugin\.frontmatterMutationService\.process\(file,/u,
