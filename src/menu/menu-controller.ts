@@ -13,6 +13,7 @@ import { formatFileWikilink, isLinkListProperty, parseStringListInput } from '..
 import { isEntityReferenceProperty } from '../utils/entity-property';
 import { openPropertyValueSuggestModal } from '../modals/PropertyValueSuggestModal';
 import { getEffectivePropertyOptions } from '../utils/property-options';
+import { createCustomPropertyEntry } from '../utils/custom-property-entry';
 import { BadgeRenderer, hashStringToHue } from './badge-renderer';
 import { PanelBuilder } from './panel-builder';
 import { MenuBuilder, type GcmMenuSink, type NativeMenuLabelOptions } from './menu-builder';
@@ -191,12 +192,8 @@ export class MenuController {
       const storedFrontmatter = f.extension?.toLowerCase() !== 'md' && this.plugin.filePropertiesService?.isPropertyTarget(f)
         ? this.plugin.filePropertiesService.read(f)
         : this.app.metadataCache.getFileCache(f)?.frontmatter || {};
-      const frontmatter = this.plugin.nativeRecordService.inspect(storedFrontmatter)?.frontmatter
-        || storedFrontmatter;
-      return [{
-        file: f,
-        frontmatter,
-      }];
+      const inspection = this.plugin.nativeRecordService.inspect(storedFrontmatter);
+      return [createCustomPropertyEntry(f, storedFrontmatter, inspection?.kind)];
     });
   }
 

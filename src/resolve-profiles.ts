@@ -1,6 +1,7 @@
 import { CustomProperty } from './types';
 import { ViewModeService } from './services/view-mode-service';
 import { normalizeTagValue } from './utils/tag-utils';
+import { readClassificationProperty } from './utils/kind-classification';
 import {
     getCustomPropertySurfaceVisibilityMode,
     type CustomPropertySurface,
@@ -16,12 +17,13 @@ export function resolveCustomProperties(
     surface: CustomPropertySurface = 'any',
 ): (CustomProperty & { disabled?: boolean; hidden?: boolean })[] {
     void viewModeService;
+    const kindPropertyKey = properties.find(property => property.id === 'kind' || property.type === 'kind')?.key || 'kind';
     const entryContexts = (entries || []).map((entry) => ({
         entry,
         tags: collectEntryTags(entry),
         // A file row is structurally a "note", but its authored kind is the
         // domain identity used by scoped fields (task, food-entry, exercise…).
-        kinds: collectEntryKinds(entry),
+        kinds: collectEntryKinds(entry, kindPropertyKey),
         path: normalizePathValue(entry?.file?.path || ''),
         frontmatter: entry?.frontmatter || {},
     }));
@@ -92,10 +94,13 @@ function normalizeKindValue(value: unknown): string {
     return String(value || '').trim().toLocaleLowerCase();
 }
 
-function collectEntryKinds(entry: any): Set<string> {
-    const authored = entry?.frontmatter?.kind;
+function collectEntryKinds(entry: any, kindPropertyKey: string): Set<string> {
+    let authored: unknown;
+    try { authored = readClassificationProperty(entry?.frontmatter || {}, kindPropertyKey); }
+    catch { return new Set(); }
     const values = Array.isArray(authored) ? authored : authored ? [authored] : [];
-    const selected = values.length > 0 ? values : [entry?.kind || entry?.itemKind];
+    const selected = [...values, ...(typeof entry?.nativeRecordKind === 'string' ? [entry.nativeRecordKind] : [])];
+    if (!selected.length) selected.push(entry?.kind || entry?.itemKind);
     return new Set(selected.filter((value): value is string => typeof value === 'string').map(normalizeKindValue).filter(Boolean));
 }
 

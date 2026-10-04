@@ -25,6 +25,8 @@ import {
 } from '../services/custom-property-visibility';
 import { getTaskDisplayTitle, parseTaskLine, readInlineFieldValue } from '../utils/task-line-metadata';
 import { resolveTaskScheduledValue } from '../utils/daily-note-task-schedule';
+import { kindClassification, matchesKind } from '../utils/kind-classification';
+import { createCustomPropertyEntry } from '../utils/custom-property-entry';
 import * as logger from '../logger';
 import {
   getLinkedContextRecoveryIdleDelay,
@@ -3623,10 +3625,11 @@ export class PersistentMenuManager {
   private isTpsHealthFoodPropertyRecord(file: TFile): boolean {
     const cache = this.plugin.app.metadataCache.getFileCache(file);
     const storedFrontmatter = (cache?.frontmatter || {}) as Record<string, unknown>;
-    const frontmatter = this.plugin.nativeRecordService.inspect(storedFrontmatter)?.frontmatter
-      || storedFrontmatter;
-    const kind = String(frontmatter.kind || '').trim().toLowerCase();
-    if (kind === 'food') return true;
+    const inspection = this.plugin.nativeRecordService.inspect(storedFrontmatter);
+    const frontmatter = storedFrontmatter;
+    if (inspection?.kind === 'food' || matchesKind(this.plugin.settings.nativeRecordKindPropertyKeys, frontmatter, 'food')) return true;
+    if (!kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, 'food')
+      && String(frontmatter.kind || '').trim().toLowerCase() === 'food') return true;
 
     const frontmatterTags = Array.isArray(frontmatter.tags)
       ? frontmatter.tags
@@ -4080,9 +4083,8 @@ export class PersistentMenuManager {
     if (this.nativePropertyInitializationInFlight.has(file.path)) return;
 
     const storedFrontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter || {};
-    const frontmatter = this.plugin.nativeRecordService.inspect(storedFrontmatter)?.frontmatter
-      || storedFrontmatter;
-    const entries = [{ file, frontmatter }];
+    const frontmatter = storedFrontmatter;
+    const entries = [createCustomPropertyEntry(file, frontmatter, this.plugin.nativeRecordService.inspect(storedFrontmatter)?.kind)];
     const applicableProperties = resolveCustomProperties(
       this.plugin.settings.properties || [],
       entries,

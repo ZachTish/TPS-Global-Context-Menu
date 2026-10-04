@@ -59,12 +59,17 @@ test('property migrations update configured kind-list writers and legacy aliases
 });
 test('confirmed custom Kind key migration keeps note lists and record mappings aligned',async()=>{
  const source=fm('kind: [transaction/macros]\ntpsRecordType: food-entry\ntitle: Lunch');
- const h=harness({'Inbox/lunch.md':source});
+ const base='filters:\n  and:\n    - list(kind).contains("transaction/macros")\nviews:\n  - type: table\n    order:\n      - kind\n';
+ const h=harness({'Inbox/lunch.md':source,'Meals.base':base});
  h.plugin.settings.properties=[{id:'kind',key:'kind'}];
  h.plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{
   primary:{kindList:{key:'kind',value:'transaction/macros'}},aliases:[],
   discriminator:{key:'tpsRecordType',value:'food-entry'},
  }};
+ const navigator={settings:{propertySortKey:'kind',vaultProfiles:[{propertyKeys:[{key:'kind',showInNavigation:true}],
+  hiddenFileProperties:['kind=transaction/macros'],shortcuts:[{type:'search',query:'.kind=transaction/macros'}]}],
+  propertyAppearances:{'key:kind=transaction/macros':{titleRows:2}}},saves:0,async saveSettingsAndUpdate(){this.saves++;}};
+ h.plugin.app.plugins={plugins:{'tps-notebook-navigator':navigator}};
  PropertyMigrationModal.confirm=async()=>true;
  assert.equal(await h.service.request({kind:'key',from:'kind',to:'categories'},settings=>{
   settings.properties[0].key='categories';
@@ -73,15 +78,88 @@ test('confirmed custom Kind key migration keeps note lists and record mappings a
  assert.doesNotMatch(h.data.get('Inbox/lunch.md'),/^kind:/mu);
  assert.equal(h.plugin.settings.properties[0].key,'categories');
  assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys['food-entry'].primary.kindList.key,'categories');
+ assert.equal(h.data.get('Meals.base'),base.replace('list(kind)','list(categories)').replace('      - kind','      - categories'));
+ assert.equal(navigator.settings.propertySortKey,'categories');
+ assert.equal(navigator.settings.vaultProfiles[0].propertyKeys[0].key,'categories');
+ assert.equal(navigator.settings.vaultProfiles[0].shortcuts[0].query,'.categories=transaction/macros');
+ assert.equal(navigator.saves,1);
  assert.deepEqual(h.plugin.settings.nativeRecordKindPropertyKeys['food-entry'].discriminator,
   {key:'tpsRecordType',value:'food-entry'});
 });
 function harness(entries={'Inbox/a.md':fm('status: todo')}) {
  const files=new Map(Object.keys(entries).map(path=>[path,new TFile(path)]));const data=new Map(Object.entries(entries));const storage=new Map();let saves=0;const writes=[];
- const plugin={manifest:{id:'tps-global-context-menu',dir:'.obsidian/plugins/tps-global-context-menu'},settings:{properties:[{id:'status',key:'status',options:['todo']}],unrelated:'keep'},app:{vault:{getMarkdownFiles:()=>[...files.values()].filter(file=>file.extension==='md'),getAbstractFileByPath:path=>files.get(path),read:async file=>data.get(file.path),process:async(file,update)=>{const before=data.get(file.path),after=update(before);if(before!==after){writes.push(file.path);data.set(file.path,after);}return after;},adapter:{exists:async path=>storage.has(path),write:async(path,text)=>storage.set(path,text),read:async path=>storage.get(path),remove:async path=>storage.delete(path)}}},frontmatterMutationService:{applyMigrationSource:async(file,before,after)=>{const current=data.get(file.path);if(current===after)return;if(current!==before)throw Error('stale');writes.push(file.path);data.set(file.path,after);}},saveSettings:async()=>{saves++;},eventService:{emitFilesUpdated(){}},notebookNavigatorRuleService:{invalidateNotebookNavigatorPresentation(){}},nativeRecordService:{refreshConfiguration(){}}};
+ const plugin={manifest:{id:'tps-global-context-menu',dir:'.obsidian/plugins/tps-global-context-menu'},settings:{properties:[{id:'status',key:'status',options:['todo']}],unrelated:'keep'},app:{vault:{getFiles:()=>[...files.values()],getMarkdownFiles:()=>[...files.values()].filter(file=>file.extension==='md'),getAbstractFileByPath:path=>files.get(path),read:async file=>data.get(file.path),process:async(file,update)=>{const before=data.get(file.path),after=update(before);if(before!==after){writes.push(file.path);data.set(file.path,after);}return after;},adapter:{exists:async path=>storage.has(path),write:async(path,text)=>storage.set(path,text),read:async path=>storage.get(path),remove:async path=>storage.delete(path)}}},frontmatterMutationService:{applyMigrationSource:async(file,before,after)=>{const current=data.get(file.path);if(current===after)return;if(current!==before)throw Error('stale');writes.push(file.path);data.set(file.path,after);}},saveSettings:async()=>{saves++;},eventService:{emitFilesUpdated(){}},notebookNavigatorRuleService:{invalidateNotebookNavigatorPresentation(){}},nativeRecordService:{refreshConfiguration(){}}};
  const service=new PropertyMigrationService(plugin);plugin.propertyMigrationService=service;
  return {plugin,service,data,storage,writes,files,get saves(){return saves;}};
 }
+test('one confirmed kind-path migration updates notes, custom Base filters, GCM scopes and Navigator settings together',async()=>{
+ const primary={kindList:{key:'kind',value:'entity/food'}};
+ const change={kind:'classification',recordKind:'food',from:primary,to:{kindList:{key:'kind',value:'entity/ingredient'}}};
+ const note=fm('kind: [entity/food]\ntitle: Apple');
+ const base='filters:\n  and:\n    - list(kind).contains("entity/food")\nformulas:\n  label: title + "!"\n';
+ const h=harness({'Inbox/apple.md':note,'Foods.base':base});
+ h.plugin.settings.nativeRecordKindPropertyKeys={food:primary};
+ h.plugin.settings.properties=[{id:'parents',key:'parents',type:'list',scopeKinds:['entity/food']}];
+ h.plugin.settings.notebookNavigatorRules={rules:[{id:'food',match:'all',conditions:[{source:'frontmatter',field:'kind',operator:'is',value:'entity/food'}]}]};
+ const navigator={settings:{vaultProfiles:[{hiddenFileProperties:['kind=entity/food'],shortcuts:[{type:'search',query:'.kind=entity/food'}]}],propertyAppearances:{'key:kind=entity/food':{titleRows:2}}},saves:0,async saveSettingsAndUpdate(){this.saves++;}};
+ h.plugin.app.plugins={plugins:{'tps-notebook-navigator':navigator}};
+ PropertyMigrationModal.confirm=async(_app,_name,_description,paths,blocked)=>{
+  assert.deepEqual(blocked,[]);assert.ok(paths.includes('Foods.base'));assert.ok(paths.includes('Inbox/apple.md'));
+  assert.ok(paths.some(path=>path.includes('TPS Notebook Navigator')));return true;
+ };
+ assert.equal(await h.service.requestClassification(change),true);
+ assert.match(h.data.get('Inbox/apple.md'),/entity\/ingredient/u);
+ assert.equal(h.data.get('Foods.base'),base.replace('entity/food','entity/ingredient'));
+ assert.equal(h.plugin.settings.properties[0].scopeKinds[0],'entity/ingredient');
+ assert.equal(h.plugin.settings.notebookNavigatorRules.rules[0].conditions[0].value,'entity/ingredient');
+ assert.equal(navigator.settings.vaultProfiles[0].shortcuts[0].query,'.kind=entity/ingredient');
+ assert.ok(navigator.settings.propertyAppearances['key:kind=entity/ingredient']);
+ assert.equal(navigator.saves,1);assert.equal(h.storage.size,0);
+ assert.deepEqual(h.writes,['Foods.base','Inbox/apple.md']);
+});
+test('ambiguous shared-path Base filters block a migration even if confirmation is incorrectly granted',async()=>{
+ const primary={kindList:{key:'kind',value:'entity/food'}};
+ const change={kind:'classification',recordKind:'food',from:primary,to:{kindList:{key:'kind',value:'entity/ingredient'}}};
+ const h=harness({'Foods.base':'filters:\n  and:\n    - list(kind).contains("entity/food")\n'});
+ h.plugin.settings.nativeRecordKindPropertyKeys={food:{primary,aliases:[],discriminator:{key:'tpsRecordType',value:'food'}},recipe:{primary,aliases:[],discriminator:{key:'tpsRecordType',value:'recipe'}}};
+ let conflicts=[];
+ PropertyMigrationModal.confirm=async(_app,_name,_description,_paths,blocked)=>{conflicts=blocked;return true;};
+ await assert.rejects(h.service.requestClassification(change),/Resolve the listed migration conflicts/u);
+ assert.match(conflicts.join(' '),/Foods.base.*shared kind path/u);
+ assert.equal(h.data.get('Foods.base'),'filters:\n  and:\n    - list(kind).contains("entity/food")\n');
+ assert.deepEqual(h.writes,[]);assert.equal(h.storage.size,0);
+});
+test('Rename stored value on a list-valued Kind field carries its configured path references too',async()=>{
+ const primary={kindList:{key:'category',value:'pantry/food'}};
+ const h=harness({'Inbox/apple.md':fm('category: [pantry/food]'),
+  'Custom/Foods.base':'filters:\n  and:\n    - list(category).contains("pantry/food")\n'});
+ h.plugin.settings.nativeRecordKindPropertyKeys={food:primary};
+ h.plugin.settings.properties=[{id:'kind',type:'list',key:'category',scopeKinds:['pantry/food']}];
+ const navigator={settings:{vaultProfiles:[{hiddenFileProperties:['category=pantry/food'],shortcuts:[{type:'search',query:'.category=pantry/food'}]}]},async saveSettingsAndUpdate(){}};
+ h.plugin.app.plugins={plugins:{'tps-notebook-navigator':navigator}};
+ PropertyMigrationModal.confirm=async(_app,_name,_description,_paths,blocked)=>{assert.deepEqual(blocked,[]);return true;};
+ assert.equal(await h.service.request({kind:'value',key:'category',from:'pantry/food',to:'pantry/ingredient'},()=>{}),true);
+ assert.match(h.data.get('Inbox/apple.md'),/pantry\/ingredient/u);
+ assert.match(h.data.get('Custom/Foods.base'),/pantry\/ingredient/u);
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys.food.kindList.value,'pantry/ingredient');
+ assert.equal(h.plugin.settings.properties[0].scopeKinds[0],'pantry/ingredient');
+ assert.equal(navigator.settings.vaultProfiles[0].shortcuts[0].query,'.category=pantry/ingredient');
+});
+test('Rename stored discriminator value carries exact Base and Navigator identity references',async()=>{
+ const primary={kindList:{key:'kind',value:'entity/food'}};
+ const h=harness({'Inbox/apple.md':fm('kind: [entity/food]\ntpsRecordType: food'),
+  'Custom/Foods.base':'filters:\n  and:\n    - list(kind).contains("entity/food") && tpsRecordType == "food"\n'});
+ h.plugin.settings.nativeRecordKindPropertyKeys={food:{primary,aliases:[],discriminator:{key:'tpsRecordType',value:'food'}}};
+ h.plugin.settings.properties=[{id:'kind',type:'list',key:'kind'}];
+ const navigator={settings:{vaultProfiles:[{hiddenFileProperties:['tpsRecordType=food'],shortcuts:[{type:'search',query:'.tpsRecordType=food'}]}]},async saveSettingsAndUpdate(){}};
+ h.plugin.app.plugins={plugins:{'tps-notebook-navigator':navigator}};
+ PropertyMigrationModal.confirm=async(_app,_name,_description,_paths,blocked)=>{assert.deepEqual(blocked,[]);return true;};
+ assert.equal(await h.service.request({kind:'value',key:'tpsRecordType',from:'food',to:'ingredient'},()=>{}),true);
+ assert.match(h.data.get('Inbox/apple.md'),/tpsRecordType: "ingredient"/u);
+ assert.match(h.data.get('Custom/Foods.base'),/tpsRecordType == "ingredient"/u);
+ assert.equal(h.plugin.settings.nativeRecordKindPropertyKeys.food.discriminator.value,'ingredient');
+ assert.equal(navigator.settings.vaultProfiles[0].shortcuts[0].query,'.tpsRecordType=ingredient');
+});
 test('record classification converts exact tag to property and back without changing body, IDs or other tags',()=>{
  const source=fm('tpsId: finance-1\ntags:\n  - kind/finance/transaction\n  - personal\ntitle: Lunch');
  const toProperty={kind:'classification',recordKind:'finance-transaction',from:{tag:'kind/finance/transaction'},to:{parentKind:'transaction',key:'transactionKind',value:'financial'}};
@@ -108,6 +186,21 @@ test('record classification moves configured tags and scalar kinds into lists wi
  assert.match(convertedScalar,/kind:\s*\n\s*- transaction\/macros/u);
  assert.match(convertedScalar,/personal/u);
  assert.equal(migrateNoteClassification(convertedScalar,scalarChange,{'food-entry':scalarChange.from}),convertedScalar);
+});
+test('kind-list path edits preserve Daily Note and Calendar Event template bodies and manual template tags',()=>{
+ for (const [recordKind,from,to,body] of [
+  ['dailynote','note/daily','journal/day','## Calendar\n![[Calendar.base]]\n'],
+  ['calendar-event','transaction/event','schedule/event','## Event details\n'],
+ ]) {
+  const template=`---\ntags:\n  - template\nkind:\n  - ${from}\n---\n${body}`;
+  const mapping={kindList:{key:'kind',value:from}};
+  const output=migrateNoteClassification(template,{kind:'classification',recordKind,from:mapping,
+    to:{kindList:{key:'kind',value:to}}},{[recordKind]:mapping});
+  assert.match(output,new RegExp(to.replace('/','\\/'),'u'));
+  assert.match(output,/tags:\n\s*- template/u);
+  assert.ok(output.endsWith(body));
+  assert.doesNotMatch(output,new RegExp(from.replace('/','\\/'),'u'));
+ }
 });
 test('list classification conversion preserves unrelated list values and refuses malformed occupied fields',()=>{
  const change={kind:'classification',recordKind:'food-entry',from:{kindList:{key:'kind',value:'old/food'}},to:{kindList:{key:'kind',value:'transaction/macros'}}};
@@ -287,7 +380,7 @@ test('shared identity changes fail closed for ambiguous and concurrently edited 
  const ambiguous=harness({'Inbox/food.md':source});
  ambiguous.plugin.settings.nativeRecordKindPropertyKeys=mappings;
  PropertyMigrationModal.confirm=async()=>true;
- await assert.rejects(ambiguous.service.configureClassificationDiscriminator('food',change.to,primary),/Notes changed|blocked|identity/u);
+ await assert.rejects(ambiguous.service.configureClassificationDiscriminator('food',change.to,primary),/Notes changed|blocked|identity|conflicts/u);
  assert.equal(ambiguous.data.get('Inbox/food.md'),source);
  assert.equal(ambiguous.saves,0);
 

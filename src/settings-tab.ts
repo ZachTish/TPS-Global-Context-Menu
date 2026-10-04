@@ -1357,7 +1357,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           text.inputEl.setAttribute('aria-label', 'Shared-path identity property value');
         });
         discriminatorSaveSetting = new Setting(propertyConfig).setName('Save shared-path identity')
-          .setDesc('Review affected notes, then update their frontmatter and this mapping together. Ambiguous records block the change.')
+          .setDesc('Review affected notes, Base filters, and dependent rules before updating this identity. Ambiguous references block the change.')
           .addButton(button => button.setButtonText('Save identity').onClick(async () => {
             button.setDisabled(true);
             try {
@@ -1387,7 +1387,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             finally { button.setDisabled(false); }
           }));
         new Setting(propertyConfig).setName('Apply record classification')
-          .setDesc('Review existing notes and generated Bases before converting the exact old classification. Record IDs and note bodies stay unchanged.')
+          .setDesc('Review notes, exact Base filters, and dependent settings before converting the old classification. Record IDs and note bodies stay unchanged.')
           .addButton(button => button.setButtonText('Apply').onClick(async () => {
           button.setDisabled(true);
           try {

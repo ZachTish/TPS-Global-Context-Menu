@@ -6,6 +6,8 @@ const managerSource = readFileSync(new URL('../src/menu/persistent-menu-manager.
 const eventSource = readFileSync(new URL('../src/events/register-events.ts', import.meta.url), 'utf8');
 const stylesSource = readFileSync(new URL('../src/plugin-styles.ts', import.meta.url), 'utf8');
 const panelBuilderSource = readFileSync(new URL('../src/menu/panel-builder.ts', import.meta.url), 'utf8');
+const menuControllerSource = readFileSync(new URL('../src/menu/menu-controller.ts', import.meta.url), 'utf8');
+const menuBuilderSource = readFileSync(new URL('../src/menu/menu-builder.ts', import.meta.url), 'utf8');
 const propertyRowSource = readFileSync(new URL('../src/services/property-row-service.ts', import.meta.url), 'utf8');
 const fieldInitializationSource = readFileSync(new URL('../src/services/field-initialization-service.ts', import.meta.url), 'utf8');
 const webLinkUtilsSource = readFileSync(new URL('../src/utils/web-link-utils.ts', import.meta.url), 'utf8');
@@ -321,6 +323,8 @@ test('TPS Health food notes can show stacked properties despite asset ignore rul
   assert.match(managerSource, /keepStackedPropertiesForIgnoredFile/);
   assert.match(managerSource, /this\.isTpsHealthFoodPropertyRecord\(file\)/);
   assert.match(managerSource, /kind === 'food'/);
+  assert.match(managerSource, /matchesKind\(this\.plugin\.settings\.nativeRecordKindPropertyKeys, frontmatter, 'food'\)/);
+  assert.match(managerSource, /const frontmatter = storedFrontmatter/);
   assert.match(managerSource, /includes\('tps\/food'\)/);
   assert.match(managerSource, /const showStackedProperties = wantsTopProperties && !this\.isStrictSourceMode\(view\)/);
   assert.doesNotMatch(managerSource, /shouldSuppressStackedPropertiesForNativeProperties/);
@@ -330,6 +334,13 @@ test('TPS Health food notes can show stacked properties despite asset ignore rul
     /\.tps-gcm-stacked-properties-active \.metadata-container\s*\{[\s\S]{0,120}display: none !important/,
     'GCM stacked properties should hide the native metadata block to avoid duplicate property sections',
   );
+});
+
+test('custom Kind list controls use the authored entry on stacked and context surfaces', () => {
+  assert.match(menuControllerSource, /createCustomPropertyEntry\(f, storedFrontmatter, inspection\?\.kind\)/);
+  assert.match(panelBuilderSource, /this\.populateStackedPropertyValue\(value, entries, prop, frontmatter\)/);
+  assert.match(panelBuilderSource, /const frontmatter = \(entry\?\.frontmatter \|\| \{\}\)/);
+  assert.match(menuBuilderSource, /const listValues = this\.getValueCaseInsensitive\(entries\[0\]\.frontmatter, prop\.key\)/);
 });
 
 test('custom property renderers recognize external web links', () => {

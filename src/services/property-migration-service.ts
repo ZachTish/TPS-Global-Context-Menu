@@ -6,6 +6,7 @@ import { PropertyMigrationModal } from '../modals/property-migration-modal';
 import { migrateNoteProperties, PropertyMigration, SettingsPatch, settingsPatches, updateMigrationReferences, validateMigration, validateMigrationSettings } from '../utils/property-migration';
 import { migrateNoteClassification, migrateNoteDiscriminator, validateKindClassificationMigration, type KindClassificationMigration, type KindDiscriminatorMigration } from '../utils/kind-classification-migration';
 import { kindClassification, kindDiscriminator, kindReadClassifications, normalizeKindClassification, type KindClassification, type KindDiscriminator, type KindMappings } from '../utils/kind-classification';
+import { planKindBaseReferences, planKindReferenceSettings, planPropertyKeyBaseReferences, planPropertyKeyNavigatorReferences } from '../utils/kind-reference-migration';
 import * as logger from '../logger';
 
 interface NoteChange { path: string; before: string; after: string }
@@ -31,6 +32,31 @@ export class PropertyMigrationService {
   }
   dispose(): void { this.disposed = true; this.cancelScan?.(); }
   hasRecovery(): boolean { return this.recoveryPending; }
+  private kindValuePathChange(change: MigrationRequest): KindClassificationMigration | null {
+    if (change.kind !== 'value') return null;
+    for (const recordKind of Object.keys(this.plugin.settings.nativeRecordKindPropertyKeys || {})) {
+      const primary = kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, recordKind);
+      if (primary && 'kindList' in primary && primary.kindList.key.toLowerCase() === change.key.toLowerCase()
+        && primary.kindList.value === change.from) {
+        return { kind: 'classification', recordKind, from: primary,
+          to: { kindList: { key: primary.kindList.key, value: change.to } } };
+      }
+    }
+    return null;
+  }
+  private discriminatorValueChange(change: MigrationRequest): KindDiscriminatorMigration | null {
+    if (change.kind !== 'value') return null;
+    for (const recordKind of Object.keys(this.plugin.settings.nativeRecordKindPropertyKeys || {})) {
+      const primary = kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, recordKind);
+      const discriminator = kindDiscriminator(this.plugin.settings.nativeRecordKindPropertyKeys, recordKind);
+      if (primary && 'kindList' in primary && discriminator && discriminator.key.toLowerCase() === change.key.toLowerCase()
+        && discriminator.value === change.from) {
+        return { kind: 'discriminator', recordKind, primary, from: discriminator,
+          to: { key: discriminator.key, value: change.to } };
+      }
+    }
+    return null;
+  }
   async preview(change: MigrationRequest): Promise<MigrationPlan> {
     const notes: NoteChange[] = [], blocked: string[] = [];
     const files = this.plugin.app.vault.getMarkdownFiles();
@@ -77,6 +103,35 @@ export class PropertyMigrationService {
           if (typeof entry.path !== 'string' || !entry.path.endsWith('.base') || typeof entry.before !== 'string' || typeof entry.after !== 'string') throw new Error('Finances returned an invalid generated Base preview.');
           notes.push(entry);
         }
+      }
+    }
+    const baseReferenceChange = this.kindValuePathChange(change) || this.discriminatorValueChange(change) ||
+      (change.kind === 'classification' || change.kind === 'discriminator' ? change : null);
+    if (baseReferenceChange && (baseReferenceChange.kind === 'discriminator' ||
+      ('kindList' in baseReferenceChange.from && 'kindList' in baseReferenceChange.to))) {
+      const referenceMappings = change.kind === 'value' && baseReferenceChange.kind === 'classification'
+        ? { [baseReferenceChange.recordKind]: this.plugin.settings.nativeRecordKindPropertyKeys[baseReferenceChange.recordKind] }
+        : this.plugin.settings.nativeRecordKindPropertyKeys;
+      for (const file of this.plugin.app.vault.getFiles?.().filter(file => file.extension === 'base') || []) {
+        try {
+          const existing = notes.find(note => note.path === file.path);
+          const before = existing?.before || await this.plugin.app.vault.read(file);
+          const proposed = existing?.after || before;
+          const result = planKindBaseReferences(proposed, baseReferenceChange, referenceMappings);
+          blocked.push(...result.blocked.map(reason => `${file.path}: ${reason}`));
+          if (existing) existing.after = result.after;
+          else if (result.after !== before) notes.push({ path: file.path, before, after: result.after });
+        } catch (error) { blocked.push(`${file.path}: ${error instanceof Error ? error.message : String(error)}`); }
+      }
+    }
+    if (change.kind === 'key' && !change.recordKinds) {
+      for (const file of this.plugin.app.vault.getFiles?.().filter(file => file.extension === 'base') || []) {
+        try {
+          const before = await this.plugin.app.vault.read(file);
+          const result = planPropertyKeyBaseReferences(before, change.from, change.to);
+          blocked.push(...result.blocked.map(reason => `${file.path}: ${reason}`));
+          if (result.after !== before) notes.push({ path: file.path, before, after: result.after });
+        } catch (error) { blocked.push(`${file.path}: ${error instanceof Error ? error.message : String(error)}`); }
       }
     }
     notes.sort((a, b) => a.path.localeCompare(b.path));
@@ -130,7 +185,10 @@ export class PropertyMigrationService {
         const value = patch[restore ? 'before' : 'after'];
         if (value === undefined) delete owner.settings[patch.key]; else owner.settings[patch.key] = clone(value);
       }
-      await owner.saveSettings();
+      if (plan.pluginId === 'tps-notebook-navigator') {
+        if (typeof owner.saveSettingsAndUpdate !== 'function') throw new Error('Update TPS Notebook Navigator before migrating kind references.');
+        await owner.saveSettingsAndUpdate();
+      } else await owner.saveSettings();
       owner.nativeRecordService?.refreshConfiguration?.();
     }
   }
@@ -301,10 +359,27 @@ export class PropertyMigrationService {
     this.busy = true;
     try {
       const beforeSettings = clone(this.plugin.settings);
-      const afterSettings = clone(beforeSettings);
+      let afterSettings = clone(beforeSettings);
+      const navigator = this.consumer('tps-notebook-navigator');
+      const kindValueChange = this.kindValuePathChange(change);
+      const discriminatorValueChange = this.discriminatorValueChange(change);
+      const dependentChange = kindValueChange || discriminatorValueChange ||
+        (change.kind === 'classification' || change.kind === 'discriminator' ? change : null);
       if (change.kind === 'key' || change.kind === 'value') updateMigrationReferences(afterSettings, change);
       else if (change.kind === 'classification' && 'tag' in change.from && 'tag' in change.to) updateMigrationReferences(afterSettings,
         { kind: 'value', key: 'tags', from: change.from.tag, to: change.to.tag });
+      const referenceMappings = kindValueChange
+        ? { [kindValueChange.recordKind]: this.plugin.settings.nativeRecordKindPropertyKeys[kindValueChange.recordKind] }
+        : this.plugin.settings.nativeRecordKindPropertyKeys;
+      const kindReferences = dependentChange
+        ? planKindReferenceSettings(afterSettings, navigator?.settings || null, dependentChange, referenceMappings) : null;
+      const keyReferences = change.kind === 'key' && !change.recordKinds
+        ? planPropertyKeyNavigatorReferences(navigator?.settings || null, change.from, change.to) : null;
+      if (kindReferences) afterSettings = kindReferences.gcm;
+      if ((dependentChange || keyReferences) && !navigator && (this.plugin.app as any).plugins?.manifests?.['tps-notebook-navigator'])
+        kindReferences?.blocked.push('TPS Notebook Navigator is installed but disabled; enable it to migrate its kind references.');
+      if (keyReferences && !navigator && (this.plugin.app as any).plugins?.manifests?.['tps-notebook-navigator'])
+        keyReferences.blocked.push('TPS Notebook Navigator is installed but disabled; enable it to migrate property-key references.');
       configure(afterSettings);
       if (change.kind === 'key' || change.kind === 'value') this.assertUniqueClassifications(afterSettings.nativeRecordKindPropertyKeys || {});
       const patches = settingsPatches(beforeSettings, afterSettings);
@@ -314,6 +389,14 @@ export class PropertyMigrationService {
         const patches = pluginMappingPatches(pluginId, owner.settings, change as PropertyMigration);
         return patches.length ? [{ pluginId, patches }] : [];
       });
+      if (navigator && kindReferences?.navigator) {
+        const navigatorPatches = settingsPatches(navigator.settings, kindReferences.navigator);
+        if (navigatorPatches.length) plugins.push({ pluginId: 'tps-notebook-navigator', patches: navigatorPatches });
+      }
+      if (navigator && keyReferences?.navigator) {
+        const navigatorPatches = settingsPatches(navigator.settings, keyReferences.navigator);
+        if (navigatorPatches.length) plugins.push({ pluginId: 'tps-notebook-navigator', patches: navigatorPatches });
+      }
       const healthKinds = change.kind === 'key' && change.recordKinds ? JSON.stringify(this.consumer('tps-health')?.settings?.nativeRecordKinds) : null;
       const plan = await this.preview(change);
       if (this.disposed) throw new Error('GCM was reloaded. Apply again to review a fresh preview.');
@@ -322,14 +405,16 @@ export class PropertyMigrationService {
         : change.kind === 'discriminator' ? `Change ${change.recordKind} shared-path identity`
           : change.kind === 'key' ? `Rename property “${change.from}” → “${change.to}”` : `Rename ${change.key} value “${change.from}” → “${change.to}”`;
       const explanation = change.kind === 'classification'
-        ? `${plan.notes.length} notes and generated Bases will change. ${scope} This converts the exact record classification in frontmatter and preserves note bodies and inline fields. Customized Base filters and custom rules should be reviewed separately. A temporary local recovery copy is kept until completion.`
+        ? `${plan.notes.length} notes and Bases may change, with ${kindReferences?.changed.length || 0} dependent setting references. ${scope} This converts the exact record classification in frontmatter and updates recognized dependent filters and settings. Ambiguous references block the change. A temporary local recovery copy is kept until completion.`
         : change.kind === 'discriminator'
-          ? `${plan.notes.length} Markdown notes will change. ${scope} This changes only the selected record type’s identity field in frontmatter and preserves note bodies. Notes whose shared path cannot identify one record type block the change. A temporary local recovery copy is kept until completion.`
-        : `${plan.notes.length} Markdown notes will change. ${scope} This updates frontmatter only. Exact string values and list items match; note bodies, inline fields, and Base formulas are not rewritten. Matching mappings in enabled TPS plugins update together; disabled plugins must be enabled before migrating their fields. ${patches.length} GCM settings groups and ${plugins.length} TPS plugins will update. A temporary local recovery copy is kept until completion.`;
+          ? `${plan.notes.length} notes and Bases may change, with ${kindReferences?.changed.length || 0} dependent setting references. ${scope} This changes the selected record type’s identity field and its recognized dependent rules. Ambiguous references block the change. A temporary local recovery copy is kept until completion.`
+        : `${plan.notes.length} notes or Bases may change. ${scope} Exact string values and list items match; note bodies and inline fields are not rewritten. ${kindValueChange ? 'Recognized kind-path filters and dependent Navigator settings update together. ' : ''}${keyReferences ? 'Recognized Base and Navigator property-key references update together. ' : ''}Matching mappings in enabled TPS plugins update together; disabled plugins must be enabled before migrating their fields. ${patches.length} GCM settings groups and ${plugins.length} TPS plugins will update. A temporary local recovery copy is kept until completion.`;
       const confirmed = await PropertyMigrationModal.confirm(this.plugin.app, name,
         explanation,
-        plan.notes.map(note => note.path), plan.blocked);
+        [...plan.notes.map(note => note.path), ...(kindReferences?.changed || []), ...(keyReferences?.changed || [])],
+        [...plan.blocked, ...(kindReferences?.blocked || []), ...(keyReferences?.blocked || [])]);
       if (!confirmed) return false;
+      if (plan.blocked.length || kindReferences?.blocked.length || keyReferences?.blocked.length) throw new Error('Resolve the listed migration conflicts before applying.');
       if (this.disposed) throw new Error('GCM was reloaded. Apply again to review a fresh preview.');
       if (!equal(beforeSettings, this.plugin.settings)) throw new Error('Settings changed during preview. Apply again to review a fresh preview.');
       if (healthKinds && healthKinds !== JSON.stringify(this.consumer('tps-health')?.settings?.nativeRecordKinds)) throw new Error('Health kinds changed. Review the migration again.');
@@ -388,7 +473,7 @@ export class PropertyMigrationService {
       if (record.version !== 1 || !Array.isArray(record.notes) || !Array.isArray(record.patches)
         || record.notes.some(note => typeof note.path !== 'string' || typeof note.before !== 'string' || typeof note.after !== 'string')
         || record.patches.some(patch => typeof patch.key !== 'string' || ['__proto__', 'constructor', 'prototype'].includes(patch.key))) throw new Error('Invalid migration recovery file. Preserve it for manual recovery.');
-      if (record.plugins?.some(plan => !Object.prototype.hasOwnProperty.call(PLUGIN_MAPPING_FIELDS, plan.pluginId) || !Array.isArray(plan.patches) || plan.patches.some(patch => ['__proto__', 'constructor', 'prototype'].includes(patch.key)))) throw new Error('Invalid plugin mapping recovery.');
+      if (record.plugins?.some(plan => ![...Object.keys(PLUGIN_MAPPING_FIELDS), 'tps-notebook-navigator'].includes(plan.pluginId) || !Array.isArray(plan.patches) || plan.patches.some(patch => ['__proto__', 'constructor', 'prototype'].includes(patch.key)))) throw new Error('Invalid plugin mapping recovery.');
       if (!await PropertyMigrationModal.confirm(this.plugin.app, 'Restore interrupted property migration',
         'Restore the original note properties and GCM configuration. Notes or settings changed since the migration will be left untouched and reported for manual recovery.', record.notes.map(note => note.path))) return;
       this.active = true;

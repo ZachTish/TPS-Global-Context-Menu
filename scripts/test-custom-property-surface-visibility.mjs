@@ -12,6 +12,7 @@ async function loadVisibilityModule() {
       contents: `
         export * from './src/services/custom-property-visibility.ts';
         export { resolveCustomProperties } from './src/resolve-profiles.ts';
+        export { createCustomPropertyEntry } from './src/utils/custom-property-entry.ts';
       `,
       resolveDir: fileURLToPath(new URL("..", import.meta.url)),
       sourcefile: "custom-property-surface-visibility-test-entry.ts",
@@ -245,6 +246,32 @@ test("kind scopes match exact configured members of a multi-value kind list", as
   ];
   const entries = [{ kind: "note", frontmatter: { kind: ["TRANSACTION/MACROS", "user/private"] } }];
   assert.deepEqual(resolveCustomProperties(properties, entries, {}, "any").map(property => property.id), ["meal"]);
+});
+
+test("kind scopes use the configured property key with case-insensitive frontmatter lookup", async () => {
+  const { resolveCustomProperties, createCustomPropertyEntry } = await loadVisibilityModule();
+  const properties = [
+    { id: "kind", key: "RecordKinds", type: "list" },
+    { id: "meal", key: "calories", type: "number", scopeKinds: ["transaction/macros"] },
+  ];
+  const note = [{ kind: "note", frontmatter: { recordkinds: ["TRANSACTION/MACROS"] } }];
+  assert.deepEqual(resolveCustomProperties(properties, note, {}, "any").map(property => property.id), ["kind", "meal"]);
+  assert.deepEqual(resolveCustomProperties(properties, [{ frontmatter: {
+    RecordKinds: ["transaction/macros"], recordkinds: ["transaction/financial"],
+  } }], {}, "any").map(property => property.id), ["kind"],
+  "ambiguous authored keys must not select a scoped property or break the panel");
+  const authored = { kind: ["task/todo"], tpsId: "task-1" };
+  const entry = createCustomPropertyEntry({ path: "Inbox/Test.md" }, authored, "task");
+  assert.equal(entry.frontmatter, authored, "stacked and context controls must read the authored list, not the inspector envelope");
+  assert.deepEqual(entry.frontmatter.kind, ["task/todo"]);
+  const scoped = [{ id: "parents", key: "parents", scopeKinds: ["task/todo"] },
+    { id: "taskOnly", key: "taskKind", scopeKinds: ["task"] },
+    { id: "rawCondition", key: "review", scopeProperties: [{ key: "kind", operator: "contains", value: "task/todo" }] },
+    { id: "other", key: "food", scopeKinds: ["entity/food"] }];
+  assert.deepEqual(resolveCustomProperties(scoped, [entry], {}, "inline").map(property => property.id),
+    ["parents", "taskOnly", "rawCondition"]);
+  assert.deepEqual(resolveCustomProperties(scoped, [createCustomPropertyEntry({}, { kind: ["entity/food"] }, "food")], {}, "context")
+    .map(property => property.id), ["other"]);
 });
 
 test("mounted views refresh once, continue after one renderer throws, and never block persistence", async () => {

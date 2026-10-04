@@ -92,6 +92,7 @@ import { TPS_EVENTS } from './tps-contracts';
 import { createSharedServices, type GcmSharedServices } from './services/shared';
 import { ViewModeService } from './services/view-mode-service';
 import { resolveCustomProperties } from './resolve-profiles';
+import { createCustomPropertyEntry } from './utils/custom-property-entry';
 import { normalizeParentLinkFormat } from './handlers/parent-link-format';
 import { installVisibleViewportContract } from './utils/mobile-overlay';
 import {
@@ -1348,8 +1349,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   private getPreviewPropertiesSignature(file: TFile): string {
     const storedFrontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
-    const frontmatter = this.nativeRecordService.inspect(storedFrontmatter)?.frontmatter
-      || storedFrontmatter;
+    const frontmatter = storedFrontmatter;
     // Visibility rules can depend on keys that are not themselves displayed.
     // Cache positions are parser metadata, not property values.
     const values: Record<string, unknown> = {};
@@ -1361,9 +1361,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   private applyNativePreviewPropertyVisibility(root: HTMLElement, file: TFile, isNativeHoverPopover: boolean): void {
     const storedFrontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
-    const frontmatter = this.nativeRecordService.inspect(storedFrontmatter)?.frontmatter
-      || storedFrontmatter;
-    const entries = [{ file, frontmatter }];
+    const frontmatter = storedFrontmatter;
+    const entries = [createCustomPropertyEntry(file, frontmatter, this.nativeRecordService.inspect(storedFrontmatter)?.kind)];
     const configuredKeys = new Set<string>();
     for (const property of this.settings.properties || []) {
       const key = String(property?.key || '').trim().toLowerCase();

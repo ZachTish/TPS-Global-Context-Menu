@@ -131,6 +131,10 @@ export function updateMigrationReferences(settings: any, change: PropertyMigrati
   }
   const definitions = (Object.values(kindMappings) as any[]).flatMap(entry =>
     entry && typeof entry === 'object' ? 'primary' in entry ? [entry.primary, ...(Array.isArray(entry.aliases) ? entry.aliases : [])] : [entry] : []);
+  const renamesKindValue = change.kind === 'value' && (
+    (settings.properties || []).some((property: any) => property.type === 'kind' && fold(property.key || '') === fold(change.key))
+    || definitions.some((definition: any) => definition?.kindList && fold(definition.kindList.key) === fold(change.key)
+      && definition.kindList.value === change.from));
   for (const entry of Object.values(kindMappings) as any[]) {
     const discriminator = entry && typeof entry === 'object' && 'primary' in entry ? entry.discriminator : null;
     if (!discriminator || typeof discriminator.key !== 'string') continue;
@@ -161,7 +165,6 @@ export function updateMigrationReferences(settings: any, change: PropertyMigrati
     if (change.kind === 'key') item.key = change.to;
     else if (!item.operator || ['equals', 'not-equals'].includes(item.operator)) item.value = renameValue(item.value);
   };
-  const renamesKindValue = change.kind === 'value' && (settings.properties || []).some((property: any) => property.type === 'kind' && fold(property.key || '') === fold(key));
   for (const property of settings.properties || []) {
     if (change.kind === 'key') property.key = renameKey(property.key);
     else if (fold(property.key || '') === fold(key)) property.options = property.options?.map(renameValue);

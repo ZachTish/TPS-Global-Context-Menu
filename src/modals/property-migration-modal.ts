@@ -12,7 +12,7 @@ export class PropertyMigrationModal extends Modal {
     const list = this.contentEl.createEl('ul');
     list.style.maxHeight = '40vh'; list.style.overflowY = 'auto'; list.style.overflowWrap = 'anywhere';
     for (const path of this.blocked.length ? this.blocked : this.paths) list.createEl('li', { text: path });
-    this.contentEl.createEl('p', { text: `${this.paths.length} affected notes${this.blocked.length ? ` · ${this.blocked.length} conflicts` : ''}`, attr: { 'aria-live': 'polite' } });
+    this.contentEl.createEl('p', { text: `${this.paths.length} affected files or settings references${this.blocked.length ? ` · ${this.blocked.length} conflicts` : ''}`, attr: { 'aria-live': 'polite' } });
     new Setting(this.contentEl)
       .addButton(button => button.setButtonText('Cancel').onClick(() => this.close()))
       .addButton(button => button.setButtonText('Confirm update').setCta().setDisabled(this.blocked.length > 0).onClick(() => { this.accepted = true; this.close(); }));
