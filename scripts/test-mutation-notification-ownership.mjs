@@ -132,6 +132,13 @@ function fixture(t, { title = 'Before', autoRename = true, extension = 'md' } = 
         getFileByPath: path => files.find(file => file.path === path) || null,
         cachedRead: async file => sources.get(file), read: async file => sources.get(file),
         modify: async (file, next) => { stats.modifies++; sources.set(file, next); order.push('write'); }, on: () => ({}),
+        process: async (file, update) => {
+          const current = sources.get(file);
+          if (current === undefined) throw new Error('ENOENT: synthetic note missing');
+          const next = update(current);
+          if (next !== current) await plugin.app.vault.modify(file, next);
+          return next;
+        },
       },
       metadataCache: { initialized: true, getFileCache: file => ({ frontmatter: frontmatter(file) }), on: () => ({}) },
       workspace: { getActiveFile: () => null, getLeavesOfType: () => [] },

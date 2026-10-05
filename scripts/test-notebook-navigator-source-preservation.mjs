@@ -223,6 +223,7 @@ function makeFixture(initialContent = pocRecord) {
           activeProcesses -= 1;
           return content;
         },
+        getAbstractFileByPath: path => path === file.path ? file : null,
         getFileByPath: () => file,
         getMarkdownFiles: () => [file],
       },

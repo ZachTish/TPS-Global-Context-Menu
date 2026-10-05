@@ -11,6 +11,7 @@ import type { FilePropertiesMutationCause } from './file-properties-service';
 type FrontmatterRecord = Record<string, unknown>;
 type FrontmatterMutator = (frontmatter: FrontmatterRecord) => void | Promise<void>;
 type SynchronousFrontmatterMutator = (frontmatter: FrontmatterRecord) => void;
+type NormalizedSource = { bom: string; content: string; fullContent: string; originalContent: string };
 type SourcePreservingMutationOptions = {
   emitEvents?: boolean;
   updateEntityIndex?: boolean;
@@ -136,7 +137,7 @@ export class FrontmatterMutationService {
           });
           return;
         }
-        await this.writeContent(file, nextContent, normalized.fullContent, editorView);
+        await this.writeContent(file, nextContent, normalized.fullContent, editorView, normalized.originalContent);
         indexedFrontmatter = { ...sorted };
         changed = true;
       }
@@ -948,7 +949,7 @@ export class FrontmatterMutationService {
     }
   }
 
-  private async readNormalized(file: TFile): Promise<{ bom: string; content: string; fullContent: string } | null> {
+  private async readNormalized(file: TFile): Promise<NormalizedSource | null> {
     try {
       const fullContent = await this.plugin.app.vault.read(file);
       return this.normalizeSource(fullContent);
@@ -958,10 +959,10 @@ export class FrontmatterMutationService {
     }
   }
 
-  private normalizeSource(source: string): { bom: string; content: string; fullContent: string } {
+  private normalizeSource(source: string): NormalizedSource {
     const fullContent = source.replace(/\r\n/g, '\n');
     const bom = fullContent.startsWith('\uFEFF') ? '\uFEFF' : '';
-    return { bom, content: fullContent.slice(bom.length), fullContent };
+    return { bom, content: fullContent.slice(bom.length), fullContent, originalContent: source };
   }
 
   private sourceHeader(source: string): string {
@@ -975,6 +976,7 @@ export class FrontmatterMutationService {
     nextContent: string,
     expectedContent: string,
     originalView: MarkdownView | null,
+    expectedRawContent: string,
   ): Promise<void> {
     const started = performance.now();
     const view = this.getOpenMarkdownViewForFile(file);
@@ -995,11 +997,31 @@ export class FrontmatterMutationService {
         view.setViewData(nextSource, false);
       });
     } else {
-      await this.plugin.app.vault.modify(file, nextContent);
+      const vault = this.plugin.app.vault;
+      const targetPath = file.path;
+      await vault.process(file, current => {
+        // modify() captures its path before the adapter queue. If a pending
+        // rename wins that queue, its write can recreate the old note. process()
+        // reads at the atomic boundary instead; a missing source rejects.
+        if (file.path !== targetPath || vault.getAbstractFileByPath(targetPath) !== file) {
+          throw new Error('The edited note changed targets before its property change could be applied.');
+        }
+        if (current !== expectedRawContent) {
+          throw new Error('The note changed while the property action was pending.');
+        }
+        // Parsing normalizes CRLF. Map the original header boundary back to its
+        // raw bytes so even mixed body line endings survive a property edit.
+        const expectedHeader = this.sourceHeader(expectedContent);
+        const headerLines = expectedHeader.split('\n').length - 1;
+        const rawHeaderLength = expectedHeader.length
+          + current.split('\n', headerLines).filter(line => line.endsWith('\r')).length;
+        const newline = current.slice(0, rawHeaderLength).includes('\r\n') ? '\r\n' : '\n';
+        return this.sourceHeader(nextContent).replace(/\n/g, newline) + current.slice(rawHeaderLength);
+      });
     }
     logger.perf('frontmatterMutation.writeContent', {
       file: file.path,
-      mode: view ? 'editor' : 'vault.modify',
+      mode: view ? 'editor' : 'vault.process',
       durationMs: Math.round(performance.now() - started),
     });
   }
@@ -1048,13 +1070,13 @@ export class FrontmatterMutationService {
   }
 
   private async readParsedWithRetries(file: TFile): Promise<{
-    normalized: { bom: string; content: string; fullContent: string };
+    normalized: NormalizedSource;
     parsed:
       | { ok: true; frontmatter: FrontmatterRecord; body: string }
       | { ok: false; reason: string; error?: unknown };
   } | null> {
     let last: {
-      normalized: { bom: string; content: string; fullContent: string };
+      normalized: NormalizedSource;
       parsed:
         | { ok: true; frontmatter: FrontmatterRecord; body: string }
         | { ok: false; reason: string; error?: unknown };
