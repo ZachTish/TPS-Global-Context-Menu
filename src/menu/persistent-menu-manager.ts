@@ -152,6 +152,8 @@ export class PersistentMenuManager {
   private visualViewportScrollHandler: (() => void) | null = null;
   private keyboardFocusInHandler: ((evt: Event) => void) | null = null;
   private keyboardFocusOutHandler: (() => void) | null = null;
+  private mobileOverlayTouchStartHandler: ((evt: TouchEvent) => void) | null = null;
+  private mobileOverlayPointerDownHandler: ((evt: PointerEvent) => void) | null = null;
   private mobileOverlayInteractionUntil = 0;
   private keyboardFocusTimer: number | null = null;
   private baseHeight: number = window.innerHeight;
@@ -455,15 +457,17 @@ export class PersistentMenuManager {
     document.addEventListener('focusin', this.keyboardFocusInHandler, { passive: true, capture: true });
     document.addEventListener('focusout', this.keyboardFocusOutHandler, { passive: true, capture: true });
 
-    document.addEventListener('touchstart', (evt) => {
+    this.mobileOverlayTouchStartHandler = (evt) => {
       const target = evt.target as HTMLElement | null;
       if (target && this.isInsideMobileStableOverlay(target)) this.markMobileOverlayInteraction();
-    }, { passive: true, capture: true });
+    };
+    document.addEventListener('touchstart', this.mobileOverlayTouchStartHandler, { passive: true, capture: true });
 
-    document.addEventListener('pointerdown', (evt) => {
+    this.mobileOverlayPointerDownHandler = (evt) => {
       const target = evt.target as HTMLElement | null;
       if (target && this.isInsideMobileStableOverlay(target)) this.markMobileOverlayInteraction();
-    }, { passive: true, capture: true });
+    };
+    document.addEventListener('pointerdown', this.mobileOverlayPointerDownHandler, { passive: true, capture: true });
 
     evaluateKeyboardState();
   }
@@ -491,6 +495,14 @@ export class PersistentMenuManager {
     if (this.keyboardFocusOutHandler) {
       document.removeEventListener('focusout', this.keyboardFocusOutHandler, { capture: true });
       this.keyboardFocusOutHandler = null;
+    }
+    if (this.mobileOverlayTouchStartHandler) {
+      document.removeEventListener('touchstart', this.mobileOverlayTouchStartHandler, { capture: true });
+      this.mobileOverlayTouchStartHandler = null;
+    }
+    if (this.mobileOverlayPointerDownHandler) {
+      document.removeEventListener('pointerdown', this.mobileOverlayPointerDownHandler, { capture: true });
+      this.mobileOverlayPointerDownHandler = null;
     }
     if (this.keyboardFocusTimer !== null) {
       window.clearTimeout(this.keyboardFocusTimer);
@@ -1489,6 +1501,9 @@ export class PersistentMenuManager {
     if (menu) {
       this.ensureBottomParentNav(view, menu);
       attachContainer.appendChild(menu);
+      if (Platform.isMobile && !menu.classList.contains('tps-global-context-menu--mobile-pane')) {
+        this.updateMobileBottomOffsets();
+      }
       this.applyPersistentMenuGeometry(view, menu);
       this.applyMenuVisibility(menu);
       instances.reading = menu;
@@ -1561,6 +1576,9 @@ export class PersistentMenuManager {
     if (menu) {
       this.ensureBottomParentNav(view, menu);
       attachContainer.appendChild(menu);
+      if (Platform.isMobile && !menu.classList.contains('tps-global-context-menu--mobile-pane')) {
+        this.updateMobileBottomOffsets();
+      }
       this.applyPersistentMenuGeometry(view, menu);
       this.applyMenuVisibility(menu);
       instances.live = menu;
@@ -6105,12 +6123,21 @@ export class PersistentMenuManager {
     }
   }
 
-  private updateMobileBottomOffsets(): void {
+  /** Measure clearance only for surfaces that actually use the shared offset. */
+  updateMobileBottomOffsets(): void {
     if (typeof document === 'undefined') return;
     if (!Platform.isMobile) {
       document.documentElement.style.setProperty('--tps-gcm-mobile-toolbar-offset', '0px');
       return;
     }
+    // Pane-mounted mobile menus use their own 58px/safe-area anchor. Ordinary
+    // note navigation therefore needs no document-wide style measurement.
+    // Hover/fallback owners call again after inserting their first consumer.
+    if (!document.querySelector([
+      '.tps-gcm-virtual-base-embed--hover',
+      '.tps-global-context-menu--reading:not(.tps-global-context-menu--mobile-pane)',
+      '.tps-global-context-menu--live:not(.tps-global-context-menu--mobile-pane)',
+    ].join(', '))) return;
     const viewportHeight = window.innerHeight || document.documentElement.clientHeight || 0;
     let maxObstruction = 0;
     const candidates = Array.from(document.body?.querySelectorAll<HTMLElement>('*') || []);

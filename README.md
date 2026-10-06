@@ -1,5 +1,40 @@
 # TPS Global Context Menu
 
+## 7.3.9 — Measure mobile clearance only for its consumers
+
+Ordinary mobile note navigation no longer measures every document element's
+computed style merely to maintain an unused bottom offset. Pane-mounted mobile
+menus use their existing 58px/safe-area anchor. The shared offset is measured
+only while a connected hover Base or fallback fixed menu actually consumes it.
+Their first mounts request measurement immediately after insertion and before
+positioning/rendering; existing keyboard/layout updates and obstruction
+geometry remain intact. Hidden connected consumers conservatively retain
+measurement. No new cache, watcher, timer, setting, note write or public API is
+added. The separate 900ms title/link sweep is unchanged.
+
+Mobile touch/pointer handlers used for keyboard-overlay interaction are now
+removed during teardown, preventing callbacks from accumulating across reloads.
+Seven before-failing regressions cover unused-offset scans, first-mount
+ownership and listener cleanup. Twelve focused tests and 55 adjacent checks
+pass, plus TypeScript and independent review. A 10,000-element synthetic
+fixture's 12 unchanged navigation passes now do zero whole-document inventories,
+computed-style reads or geometry reads with ordinary menus enabled or disabled.
+Actual hover/fallback consumers preserve their previous clearance results.
+These are source-method counts with modeled DOM boundaries, not physical
+mobile/Windows latency measurements or a claim that all navigation stalls are
+fixed.
+
+This backward-compatible patch keeps minimum Obsidian 1.10.0. The final versioned
+declared suite passes 1,597 tests and the sequential supplemental suite passes
+214, with no failures or skips. The separate final build deployed to the Test
+vault and a targeted reload confirmed 7.3.9. Exact loaded-method comparisons in
+isolated mobile fixtures reproduce 120,000 style reads becoming zero and five
+leaked touch/pointer callbacks becoming zero, with unchanged clearance results.
+These are modeled host tests, not physical mobile measurements. Installed
+desktop Live Preview navigation retained Health widgets, made no note mutation
+attempts and preserved settings. Details and hashes are in the
+[7.3.9 release notes](release-notes/7.3.9.md); production remains the user's BRAT pull.
+
 ## 7.3.8 — Reuse prepared profiles during native-record inspection
 
 Native-record inspection now shares the existing prepared profile objects across

@@ -121,6 +121,7 @@ export class VirtualBaseEmbedService extends Component {
     if (targetsByPlacement.hover.length) {
       const host = this.createHost('hover', file, targetsByPlacement.hover);
       this.insertTopHost(surface, host);
+      this.plugin.persistentMenuManager?.updateMobileBottomOffsets();
       const mount = await this.renderHost(host, file, targetsByPlacement.hover, surface.mode);
       this.installHostRemovalWatcher(surface.root, mount);
       mounts.push(mount);
