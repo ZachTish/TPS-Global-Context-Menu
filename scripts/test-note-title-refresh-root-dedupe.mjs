@@ -5,7 +5,8 @@ import { performance } from 'node:perf_hooks';
 import { resolve } from 'node:path';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { build } from 'esbuild';
+import { build, transform } from 'esbuild';
+import ts from 'typescript';
 
 const renderedRootSelector =
   '.markdown-preview-view, .markdown-reading-view, .markdown-rendered, .markdown-preview-section';
@@ -14,6 +15,11 @@ const sourceRoot = process.env.TPS_NOTE_TITLE_SOURCE_ROOT
   : fileURLToPath(new URL('..', import.meta.url));
 const serviceEntry = resolve(sourceRoot, 'src/services/note-title-render-service.ts');
 const mainSource = readFileSync(resolve(sourceRoot, 'src/main.ts'), 'utf8');
+const leafResolverSource = readFileSync(resolve(sourceRoot, 'src/services/leaf-resolver.ts'), 'utf8');
+const visibilityHelperSource = leafResolverSource.slice(
+  leafResolverSource.indexOf('export function isLeafVisible('),
+  leafResolverSource.indexOf('export function isSideDockLeaf('),
+);
 let querySelectorAllCalls = 0;
 
 class FakeElement {
@@ -27,6 +33,9 @@ class FakeElement {
     this.textContent = '';
     this.title = '';
     this.queryObserver = null;
+    this.isConnected = true;
+    this.rect = { width: 800, height: 600 };
+    this.computedStyle = { display: 'block', visibility: 'visible' };
   }
 
   append(child) {
@@ -84,9 +93,53 @@ class FakeElement {
     for (const child of this.children) count += child.countLinks();
     return count;
   }
+
+  getBoundingClientRect() {
+    this.geometryObserver?.('rect');
+    return this.rect;
+  }
+
+  querySelector(selector) {
+    return this.querySelectorAll(selector.replace(':scope > ', ''))[0] ?? null;
+  }
+
+  contains(target) {
+    return target === this || this.children.some(child => child.contains?.(target));
+  }
+
+  addClass(name) { this.classes.add(name); }
+  removeClass(name) { this.classes.delete(name); }
+  setAttribute() {}
+  set className(value) { this.classes = new Set(value.split(' ')); }
+  get firstElementChild() { return this.children[0] ?? null; }
+
+  prepend(child) {
+    child.remove();
+    child.parentElement = this;
+    child.isConnected = this.isConnected;
+    this.children.unshift(child);
+  }
+
+  remove() {
+    if (this.parentElement) {
+      this.parentElement.children = this.parentElement.children.filter(child => child !== this);
+    }
+    this.parentElement = null;
+    this.isConnected = false;
+  }
 }
 
 globalThis.HTMLElement = FakeElement;
+globalThis.window = {
+  getComputedStyle(element) {
+    element.geometryObserver?.('style');
+    return element.computedStyle;
+  },
+};
+
+function makeLeaf(view) {
+  return { view, containerEl: new FakeElement('leaf') };
+}
 
 const serviceBuild = await build({
   entryPoints: [serviceEntry],
@@ -140,7 +193,11 @@ const serviceBuild = await build({
           return { contents: 'export class TextInputModal { constructor(app, label, initialValue, submit) { globalThis.__tpsTitleSubmit = submit; } open() {} }' };
         }
         if (args.path === 'leaf-resolver') {
-          return { contents: 'export function isStrictSourceMode(view) { return view.strictSource === true; }' };
+          return {
+            loader: 'ts',
+            // Execute the actual eligibility helper; only editor mode is modeled.
+            contents: `export function isStrictSourceMode(view) { return view.strictSource === true; }\n${visibilityHelperSource}`,
+          };
         }
         if (args.path === 'logger') {
           return {
@@ -208,11 +265,9 @@ function createHarness(contentRoots) {
   const titleRefreshes = [];
   const processedRoots = [];
   let linkVisits = 0;
-  const leaves = contentRoots.map((contentEl, index) => ({
-    view: {
-      file: new TestTFile(`Notes/View ${index + 1}.md`),
-      contentEl,
-    },
+  const leaves = contentRoots.map((contentEl, index) => makeLeaf({
+    file: new TestTFile(`Notes/View ${index + 1}.md`),
+    contentEl,
   }));
   const service = new serviceModule.NoteTitleRenderService({
     app: {
@@ -252,7 +307,7 @@ function createRealServiceHarness(contentEl, { viewPath = 'Notes/Benchmark.md' }
     app: {
       workspace: {
         getLeavesOfType() {
-          return [{ view: { file: viewFile, contentEl } }];
+          return [makeLeaf({ file: viewFile, contentEl })];
         },
       },
       metadataCache: {
@@ -414,7 +469,7 @@ if (process.env.TPS_NOTE_TITLE_BENCHMARK === '1') {
       { view: { file: { path: 'Notes/Not a TFile.md' }, contentEl: invalidFileContent } },
       { view: { file: new TestTFile('Notes/Invalid content.md'), contentEl: invalidContent } },
       { view: { file: new TestTFile('Notes/Second.md'), contentEl: second } },
-    ];
+    ].map(({ view }) => makeLeaf(view));
     const lifecycle = [];
     first.queryObserver = () => lifecycle.push('query:first');
     second.queryObserver = () => lifecycle.push('query:second');
@@ -467,7 +522,7 @@ if (process.env.TPS_NOTE_TITLE_BENCHMARK === '1') {
       app: {
         workspace: {
           getLeavesOfType() {
-            return [{ view }];
+            return [makeLeaf(view)];
           },
         },
       },
@@ -779,4 +834,280 @@ test('the existing metadata listener owns immediate title display refresh', () =
   const source = readFileSync(resolve(sourceRoot, 'src/events/register-events.ts'), 'utf8');
   const handler = source.slice(source.indexOf("plugin.app.metadataCache.on('changed'"), source.indexOf("plugin.app.vault.on('modify'"));
   assert.match(handler, /noteTitleRenderService\?\.handleMetadataChanged\(file\)/u);
+});
+
+// These cases execute the real title service and visibility predicate. The three
+// unchanged icon lifecycle methods run too; DOM, icon painting, file metadata,
+// and editor-mode reporting are modeled rather than an Obsidian/mobile host.
+const menuSource = readFileSync(resolve(sourceRoot, 'src/menu/persistent-menu-manager.ts'), 'utf8');
+const parsedMenu = ts.createSourceFile('persistent-menu-manager.ts', menuSource, ts.ScriptTarget.Latest, true);
+const iconMethodNames = new Set(['refreshInlineTitleIcon', 'ensureInlineTitleIcon', 'removeInlineTitleIcon']);
+const iconMethods = [];
+function collectIconMethods(node) {
+  if (ts.isMethodDeclaration(node) && iconMethodNames.has(node.name.getText(parsedMenu))) {
+    iconMethods.push(node.getText(parsedMenu));
+  }
+  ts.forEachChild(node, collectIconMethods);
+}
+collectIconMethods(parsedMenu);
+assert.equal(iconMethods.length, 3);
+const iconClass = await transform(`class IconHarness { ${iconMethods.join('\n')} }`, { loader: 'ts' });
+
+function sweepHarness(t, { architecture = 'native-records', inlineMenus = true } = {}) {
+  const previousDocument = globalThis.document, previousWindow = globalThis.window;
+  const events = [], leaves = [], targets = new Map(), titles = new Map(), timers = [];
+  const counts = { resolutions: 0, metadata: 0, titleLookups: 0, titleWrites: 0, icons: 0, paints: 0 };
+  globalThis.document = {
+    activeElement: null,
+    createElement() {
+      const element = new FakeElement('icon');
+      element.style = { removeProperty() {} };
+      return element;
+    },
+  };
+  globalThis.window = {
+    ...previousWindow,
+    setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; },
+  };
+  t.after(() => { globalThis.document = previousDocument; globalThis.window = previousWindow; });
+  const plugin = {
+    settings: { dataArchitectureMode: architecture, enableInlinePersistentMenus: inlineMenus },
+    app: {
+      workspace: { getLeavesOfType() { return leaves; }, activeLeaf: null },
+      metadataCache: {
+        getFileCache(file) { counts.metadata++; return { frontmatter: { title: titles.get(file.path) ?? file.basename } }; },
+        getFirstLinkpathDest(raw, sourcePath) {
+          counts.resolutions++; events.push(`link:${sourcePath}`);
+          return targets.get(raw) ?? null;
+        },
+      },
+      vault: {
+        getFileByPath(path) { return [...targets.values()].find(file => file.path === path) ?? null; },
+        getMarkdownFiles() { throw Error('No vault inventory'); },
+        read() { throw Error('No body read'); },
+        cachedRead() { throw Error('No body read'); },
+        modify() { throw Error('No source mutation'); },
+      },
+    },
+  };
+  const service = new serviceModule.NoteTitleRenderService(plugin);
+  service.resolveInlineTitleElement = view => { counts.titleLookups++; return view.inlineTitle; };
+  service.setInlineTitleText = (element, next) => {
+    events.push(`write:${element.name}`); counts.titleWrites++; element.textContent = next;
+  };
+  const IconHarness = new Function('TFile', 'isStrictSourceMode', `${iconClass.code}; return IconHarness;`)(
+    TestTFile, view => view.strictSource === true,
+  );
+  const icons = new IconHarness();
+  Object.assign(icons, {
+    plugin, titleIcons: new Map(), resolveInlineTitleElement: view => view.inlineTitle,
+    resolveInlineTitleIconValue: () => 'file-text', resolveTitleIconColor: () => '',
+    renderInlineTitleIcon() { counts.paints++; },
+  });
+  const refreshIcon = icons.refreshInlineTitleIcon.bind(icons);
+  icons.refreshInlineTitleIcon = view => { counts.icons++; events.push(`icon:${view.file.path}`); refreshIcon(view); };
+  plugin.persistentMenuManager = icons;
+  function addTarget(path, title) {
+    const file = new TestTFile(path);
+    targets.set(file.basename, file); targets.set(file.path, file); titles.set(file.path, title);
+    return file;
+  }
+  function addLeaf({ path, links = 1, connected = true, display = 'block', visibility = 'visible', width = 800, height = 600, strictSource = false } = {}) {
+    const tree = makeNestedTree({ sectionCount: 1, linksPerSection: links });
+    const file = addTarget(path ?? `Notes/View ${leaves.length}.md`, `Authored ${leaves.length}`);
+    const inlineTitle = new FakeElement(file.path, ['inline-title']);
+    inlineTitle.textContent = file.basename;
+    const leaf = makeLeaf({ file, contentEl: tree.content, inlineTitle, strictSource });
+    leaf.containerEl.isConnected = connected;
+    leaf.containerEl.computedStyle = { display, visibility };
+    leaf.containerEl.rect = { width, height };
+    leaf.containerEl.geometryObserver = kind => events.push(`${kind}:${file.path}`);
+    leaves.push(leaf);
+    return { leaf, tree, view: leaf.view, link: tree.sections[0].children[0] };
+  }
+  return { service, plugin, icons, counts, events, leaves, targets, titles, timers, addTarget, addLeaf };
+}
+
+for (const architecture of ['native-records', 'legacy']) {
+  test(`recurring sweep skips hidden/detached DOM across cold and warm bursts (${architecture})`, t => {
+    const h = sweepHarness(t, { architecture });
+    h.addTarget('Notes/Target.md', 'Rendered Target');
+    h.addLeaf({ links: 1000, display: 'none' });
+    h.addLeaf({ links: 1000, visibility: 'hidden' });
+    h.addLeaf({ links: 1000, connected: false });
+    querySelectorAllCalls = 0;
+    for (let tick = 0; tick < 12; tick++) h.service.refreshInlineTitles();
+    assert.deepEqual(h.counts, { resolutions: 0, metadata: 0, titleLookups: 0, titleWrites: 0, icons: 0, paints: 0 });
+    assert.equal(querySelectorAllCalls, 0, 'ineligible leaves must not query title or rendered-link DOM');
+    assert.equal(h.events.filter(event => event.startsWith('rect:')).length, 24);
+    assert.equal(h.events.filter(event => event.startsWith('style:')).length, 24);
+    assert.equal(h.timers.length, 0, 'the refresh must not schedule replacement work');
+  });
+}
+
+test('every visible split pane refreshes while hidden retained links do no work', t => {
+  const h = sweepHarness(t);
+  h.addTarget('Notes/Target.md', 'Rendered Target');
+  const first = h.addLeaf({ links: 200 }), second = h.addLeaf({ links: 300 });
+  h.addLeaf({ links: 4000, display: 'none' });
+  h.addLeaf({ links: 5000, connected: false });
+  h.plugin.app.workspace.activeLeaf = first.leaf;
+  h.service.refreshInlineTitles();
+  assert.equal(h.counts.resolutions, 500);
+  assert.equal(h.counts.icons, 2);
+  assert.equal(second.link.textContent, 'Rendered Target', 'nonactive visible panes remain consumers');
+  assert.equal(h.icons.titleIcons.size, 2);
+  h.service.refreshInlineTitles();
+  assert.equal(h.counts.resolutions, 1000, 'visible links retain their existing warm fallback');
+  assert.equal(h.counts.titleWrites, 2, 'unchanged titles remain mounted');
+  assert.equal(h.counts.paints, 2, 'unchanged icons remain mounted');
+  h.plugin.settings.dataArchitectureMode = 'legacy';
+  h.service.refreshInlineTitles();
+  assert.equal(h.counts.resolutions, 1500, 'legacy mode refreshes the same two visible panes');
+  assert.equal(h.counts.icons, 6);
+  assert.equal(h.counts.titleWrites, 2);
+  assert.equal(h.counts.paints, 2);
+});
+
+test('all eligibility geometry/style reads finish before title, icon or link work', t => {
+  const h = sweepHarness(t);
+  h.addTarget('Notes/Target.md', 'Rendered Target');
+  const first = h.addLeaf(), hidden = h.addLeaf({ display: 'none' }), second = h.addLeaf();
+  h.service.refreshInlineTitles();
+  const eligibility = [first, hidden, second].flatMap(({ view }) => [`rect:${view.file.path}`, `style:${view.file.path}`]);
+  assert.deepEqual(h.events.slice(0, eligibility.length), eligibility);
+  assert.ok(h.events.slice(eligibility.length).every(event => !/^(rect|style):/u.test(event)));
+  assert.equal(h.counts.resolutions, 2);
+});
+
+test('shared eligibility honors connection, size and computed visibility without active-leaf narrowing', t => {
+  const h = sweepHarness(t);
+  const smallWidth = h.addLeaf({ width: 39 }), smallHeight = h.addLeaf({ height: 39 });
+  const boundary = h.addLeaf({ width: 40, height: 40 }), missing = h.addLeaf();
+  delete missing.leaf.containerEl;
+  h.service.refreshInlineTitles();
+  assert.equal(h.counts.icons, 1);
+  assert.equal(boundary.view.inlineTitle.textContent, 'Authored 2');
+  assert.equal(smallWidth.view.inlineTitle.textContent, smallWidth.view.file.basename);
+  assert.equal(smallHeight.view.inlineTitle.textContent, smallHeight.view.file.basename);
+});
+
+test('a hidden retained root catches up on its next visible tick without a metadata event', t => {
+  const h = sweepHarness(t);
+  h.addTarget('Notes/Target.md', 'Rendered Target');
+  const pane = h.addLeaf({ display: 'none' });
+  const alias = pane.tree.sections[0].append(makeLink('alias')); alias.textContent = 'Authored alias';
+  h.service.refreshInlineTitles();
+  assert.equal(pane.link.textContent, 'Target');
+  assert.equal(h.counts.resolutions, 0);
+  pane.leaf.containerEl.computedStyle.display = 'block';
+  h.service.refreshInlineTitles();
+  assert.equal(pane.link.textContent, 'Rendered Target');
+  assert.equal(alias.textContent, 'Authored alias');
+  assert.equal(pane.link.dataset.href, 'Target');
+  assert.equal(h.counts.resolutions, 2);
+});
+
+for (const lifecycle of ['new target', 'renamed target']) {
+  test(`uncached ${lifecycle} is retitled when its retained hidden pane becomes visible`, t => {
+    const h = sweepHarness(t);
+    const pane = h.addLeaf();
+    let target;
+    if (lifecycle === 'renamed target') {
+      target = h.addTarget('Notes/Target.md', 'Before rename');
+      h.service.refreshInlineTitles();
+      assert.equal(pane.link.textContent, 'Before rename');
+      h.targets.delete(target.path); h.targets.delete(target.basename);
+      target.path = 'Notes/Arrived.md'; target.basename = 'Arrived'; target.name = 'Arrived.md';
+      pane.link.dataset.href = 'Arrived'; // Core's own incoming-link target update.
+      h.targets.set('Arrived', target); h.targets.set(target.path, target);
+      h.titles.set(target.path, 'After rename');
+    } else {
+      h.service.processRenderedNoteLinks(pane.tree.reading, pane.view.file.path);
+      assert.equal(pane.link.textContent, 'Target');
+      target = h.addTarget('Notes/Target.md', 'Newly available');
+    }
+    pane.leaf.containerEl.computedStyle.display = 'none';
+    assert.equal(h.service.linkTitleCache.has(target.path), false);
+    const before = pane.link.textContent;
+    h.service.handleMetadataChanged(target);
+    assert.equal(pane.link.textContent, before, 'uncached target metadata has no prior rendered-link ownership');
+    const calls = h.counts.resolutions;
+    h.service.refreshInlineTitles();
+    assert.equal(h.counts.resolutions, calls);
+    pane.leaf.containerEl.computedStyle.display = 'block';
+    h.service.refreshInlineTitles();
+    assert.equal(pane.link.textContent, lifecycle === 'new target' ? 'Newly available' : 'After rename');
+  });
+}
+
+test('delayed title and icon remounts retain both the existing tick and direct refresh owners', t => {
+  const h = sweepHarness(t);
+  const pane = h.addLeaf({ links: 0 });
+  h.service.refreshInlineTitles();
+  const originalIcon = h.icons.titleIcons.get(pane.view);
+  const replaceTitle = () => {
+    const title = new FakeElement(pane.view.file.path, ['inline-title']);
+    title.textContent = pane.view.file.basename;
+    pane.view.inlineTitle = title;
+    return title;
+  };
+  const replacement = replaceTitle();
+  h.service.refreshInlineTitles();
+  assert.equal(replacement.textContent, 'Authored 0');
+  assert.equal(h.icons.titleIcons.get(pane.view).parentElement, replacement);
+  assert.notEqual(h.icons.titleIcons.get(pane.view), originalIcon);
+  assert.equal(originalIcon.isConnected, false);
+  pane.leaf.containerEl.computedStyle.display = 'none';
+  const delayed = replaceTitle();
+  h.service.scheduleInlineTitleRefresh(pane.view);
+  assert.deepEqual(h.timers.map(timer => timer.delay), [0, 120, 400]);
+  for (const timer of h.timers) timer.callback();
+  assert.equal(delayed.textContent, 'Authored 0', 'direct owners are not visibility-gated');
+  assert.equal(h.icons.titleIcons.get(pane.view).parentElement, delayed);
+});
+
+test('visible strict Source and active title editing retain text and icon protections', t => {
+  const h = sweepHarness(t);
+  h.addTarget('Notes/Target.md', 'Rendered Target');
+  const pane = h.addLeaf();
+  h.service.refreshInlineTitles();
+  pane.view.strictSource = true;
+  h.service.refreshInlineTitles();
+  assert.equal(pane.view.inlineTitle.textContent, pane.view.file.basename);
+  assert.equal(h.icons.titleIcons.has(pane.view), false);
+  assert.equal(h.counts.resolutions, 2, 'strict Source does not silently exclude retained rendered roots');
+  pane.view.strictSource = false;
+  pane.view.inlineTitle.textContent = 'Currently typing';
+  globalThis.document.activeElement = pane.view.inlineTitle;
+  h.service.refreshInlineTitles();
+  assert.equal(pane.view.inlineTitle.textContent, 'Currently typing');
+  assert.equal(h.icons.titleIcons.has(pane.view), false);
+  globalThis.document.activeElement = null;
+  h.service.refreshInlineTitles();
+  assert.equal(pane.view.inlineTitle.textContent, 'Authored 0');
+  assert.equal(h.icons.titleIcons.size, 1);
+});
+
+test('disabled inline menus still refresh eligible text and links without icons', t => {
+  const h = sweepHarness(t, { inlineMenus: false });
+  h.addTarget('Notes/Target.md', 'Rendered Target');
+  const pane = h.addLeaf();
+  h.service.refreshInlineTitles();
+  assert.equal(pane.view.inlineTitle.textContent, 'Authored 0');
+  assert.equal(pane.link.textContent, 'Rendered Target');
+  assert.equal(h.icons.titleIcons.size, 0);
+  assert.equal(h.counts.paints, 0);
+});
+
+test('metadata and postprocessor owners still update hidden rendered links independently', t => {
+  const h = sweepHarness(t);
+  const target = h.addTarget('Notes/Target.md', 'Before');
+  const pane = h.addLeaf({ display: 'none' });
+  h.service.processRenderedNoteLinks(pane.tree.reading, pane.view.file.path);
+  assert.equal(pane.link.textContent, 'Before');
+  h.titles.set(target.path, 'After');
+  h.service.handleMetadataChanged(target);
+  assert.equal(pane.link.textContent, 'After');
+  assert.equal(h.events.some(event => /^(rect|style):/u.test(event)), false);
 });

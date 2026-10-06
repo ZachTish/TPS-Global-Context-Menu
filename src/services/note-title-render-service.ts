@@ -1,7 +1,7 @@
 import { MarkdownView, Notice, TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { TextInputModal } from '../modals/text-input-modal';
-import { isStrictSourceMode } from './leaf-resolver';
+import { isLeafVisible, isStrictSourceMode } from './leaf-resolver';
 import * as logger from '../logger';
 import { getPlainDisplayTitle } from '../utils/display-title';
 
@@ -63,9 +63,14 @@ export class NoteTitleRenderService {
   }
 
   refreshInlineTitles(): void {
-    for (const leaf of this.plugin.app.workspace.getLeavesOfType('markdown')) {
+    // Measure eligibility before any title/icon writes. Retained hidden panes
+    // catch up on a later visible tick; explicit render/metadata owners stay live.
+    const visibleLeaves = this.plugin.app.workspace.getLeavesOfType('markdown').filter((leaf) => {
       const view = leaf.view as MarkdownView;
-      if (!(view?.file instanceof TFile) || !(view?.contentEl instanceof HTMLElement)) continue;
+      return view?.file instanceof TFile && view?.contentEl instanceof HTMLElement && isLeafVisible(leaf);
+    });
+    for (const leaf of visibleLeaves) {
+      const view = leaf.view as MarkdownView;
       this.refreshInlineTitleAndIcon(view);
       this.refreshRenderedNoteLinksForView(view);
     }

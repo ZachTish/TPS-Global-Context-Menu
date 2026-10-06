@@ -19,7 +19,7 @@ test('strict source mode is detected separately from live preview', () => {
 });
 
 test('frontmatter title rendering restores filename in strict source mode', () => {
-  assert.match(noteTitleSource, /import \{ isStrictSourceMode \} from '\.\/leaf-resolver';/);
+  assert.match(noteTitleSource, /import \{ isLeafVisible, isStrictSourceMode \} from '\.\/leaf-resolver';/);
   assert.match(noteTitleSource, /refreshInlineTitle\(view: MarkdownView\): void/);
   assert.match(noteTitleSource, /scheduleInlineTitleRefresh\(view: MarkdownView/);
   assert.match(noteTitleSource, /\.markdown-source-view \[aria-label\*="click to edit title"\]/);

@@ -1,5 +1,50 @@
 # TPS Global Context Menu
 
+## 7.3.10 — Keep recurring title work in visible panes
+
+The existing mobile 900ms title/link refresh now uses the shared leaf visibility
+predicate before inspecting titles, icons or rendered links. Retained hidden,
+detached and collapsed Markdown panes no longer traverse their rendered link
+trees each tick. Every eligible split pane still refreshes, including panes
+other than the active tab. Eligibility geometry and computed-style reads finish
+for the batch before title, icon or link work begins.
+
+A retained hidden pane catches up on the next existing tick after it becomes
+eligible. This preserves mobile title/icon remounts and links whose target first
+appears or becomes available at a renamed path. Direct refreshes, scheduled
+remount callbacks, Markdown postprocessors and metadata-driven updates retain
+their existing owners. Authored aliases, focused title editing, strict Source
+filename display, disabled inline menus and native/legacy mode behavior remain
+intact. The predicate checks connection, minimum dimensions and computed
+display/visibility; it does not establish viewport intersection or foreground
+focus. Settings, APIs, note content and minimum Obsidian 1.10.0 are unchanged.
+No cache, watcher or timer is added.
+
+Operation-count and lifecycle regressions execute the actual title service,
+shared visibility helper and icon lifecycle methods with modeled DOM/Obsidian
+boundaries. The final versioned declared suite passes 1,609 tests; the sequential
+supplemental suite passes 214, with zero failures or skips. TypeScript and the
+production-mode suite build pass with deployment suppressed. A separate normal
+build deployed only changed main.js and manifest.json to the Test vault, and a
+targeted reload confirmed 7.3.10 with unchanged runtime settings.
+
+Exact loaded-method replay on an isolated service with real synthetic DOM and
+the visibility helper compares 12 ticks over two eligible panes, one hidden
+pane and one detached pane. Link resolutions fall from 48,000 to 24,000 and
+rendered-root/title-icon owner calls from 48 to 24. With every pane hidden or
+detached, 48,000 resolutions become zero. Activating the retained hidden pane
+refreshes all three eligible panes on the next tick. This models workspace,
+metadata and the title/icon owner; it does not patch the live service. Installed
+desktop Live Preview smoke checks retain observed Health widgets through six
+tab switches and two remounts, with no measured long tasks, Health render errors
+or navigation note-mutation attempts. Settings remain unchanged and exact-byte
+fixtures are archived. Results, boundaries and artifact hashes are recorded in
+[7.3.10 release notes](release-notes/7.3.10.md). Physical mobile and Windows
+responsiveness require separate validation; these checks do not establish that
+all swipe, tab-switch or loading stalls are fixed. The smoke-test host was hidden
+and unfocused; cold startup and Reading rendering remain unverified. Production
+installation remains the user's BRAT pull.
+
 ## 7.3.9 — Measure mobile clearance only for its consumers
 
 Ordinary mobile note navigation no longer measures every document element's
