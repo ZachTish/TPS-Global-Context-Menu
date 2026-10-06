@@ -540,3 +540,271 @@ test('real legacy Canvas compatibility reads current JSON before changing the ch
   assert.equal(h.counters.rawReads, 2, 'one authoritative Canvas JSON read per edit, none on navigation');
   assert.equal(h.counters.scans, 1, 'the edit does not enumerate the vault');
 });
+
+// Compose both actual services so relationship operation counts include the
+// real companion classifier, including its existing positive ownership.
+
+async function makeActualParentPropertiesHarness(options = {}) {
+  const h = await makeHarness({ initialized: true, ...options });
+  const { FilePropertiesService } = await modulePromise;
+  h.plugin.filePropertiesService = new FilePropertiesService(h.plugin);
+  for (const method of ['setup', 'handleMetadataResolved', 'rebuildCompanionIndexUnlocked']) {
+    assert.equal(typeof h.plugin.filePropertiesService[method], 'function', `${method} must be an actual catalog owner`);
+    h.plugin.filePropertiesService[method] = () => {
+      h.counters.catalogBuilds++;
+      throw new Error(`Metadata-only relationship work must not request FileProperties.${method}`);
+    };
+  }
+  // Parent must continue to own plain stored metadata, not resolve Native APIs.
+  h.plugin.nativeRecordService = new Proxy({}, {
+    get: (_target, key) => { throw new Error(`Parent must not access Native service: ${String(key)}`); },
+  });
+  return h;
+}
+
+function actualParentCompanionRecord(sourcePath, id, properties = {}) {
+  return {
+    tpsGcmFileProperties: 1,
+    tpsGcmFileId: id,
+    tpsGcmSourcePath: sourcePath,
+    ...properties,
+  };
+}
+
+function assertActualParentReadOnly(h) {
+  assert.equal(h.counters.rawReads, 0, 'relationship/classification operations never read source bodies');
+  assert.equal(h.counters.writes, 0, 'relationship/classification operations never enqueue mutations');
+  assert.equal(h.counters.catalogBuilds, 0, 'direct metadata operations do not request legacy catalog rebuilds');
+}
+
+test('actual FileProperties: ordinary metadata reindex consumes one current cache read', async () => {
+  const h = await makeActualParentPropertiesHarness();
+  const first = h.add('First.md');
+  const second = h.add('Second.md');
+  const child = h.add('Child.md', { parent: '[[First]]' });
+  h.service.rebuildRelationshipIndex();
+  const updated = { parent: '[[Second]]', title: 'Current title', custom: { retained: true } };
+  h.frontmatter.set(child, updated);
+  h.counters.metadata = 0;
+  assert.deepEqual(new Set(h.service.onMetadataChanged(child)), new Set([first.path, second.path]));
+  assert.equal(h.counters.metadata, 1, 'published baseline performs 3 reads for one ordinary reindex');
+  assert.deepEqual(h.service.getChildrenForParent(first), []);
+  assert.deepEqual(h.service.getChildrenForParent(second), [child]);
+  assert.equal(h.service.getLogicalFrontmatter(child), updated);
+  assertActualParentReadOnly(h);
+});
+
+test('actual FileProperties: one public logical read preserves the exact current frontmatter object', async () => {
+  const h = await makeActualParentPropertiesHarness();
+  const frontmatter = { title: 'Current', tags: ['a'], nested: { value: 1 } };
+  const file = h.add('Current.md', frontmatter);
+  assert.equal(h.service.getLogicalFrontmatter(file), frontmatter);
+  assert.equal(h.counters.metadata, 1, 'published baseline performs classifier plus logical cache reads');
+  assertActualParentReadOnly(h);
+});
+
+test('actual FileProperties: a missing cache is consumed once and a later operation remains fresh', async () => {
+  const h = await makeActualParentPropertiesHarness();
+  const parent = h.add('Parent.md');
+  const child = h.add('Missing.md', { parent: '[[Parent]]' });
+  h.service.rebuildRelationshipIndex();
+  h.missingCache.add(child);
+  h.counters.metadata = 0;
+  h.service.onMetadataChanged(child);
+  assert.equal(h.counters.metadata, 1, 'undefined/null must be distinguished from an unread operation-local cache');
+  assert.deepEqual(h.service.getChildrenForParent(parent), []);
+  const current = { parent: '[[Parent]]', title: 'Resolved later' };
+  h.missingCache.delete(child);
+  h.frontmatter.set(child, current);
+  h.service.onMetadataChanged(child);
+  assert.deepEqual(h.service.getChildrenForParent(parent), [child]);
+  assert.equal(h.service.getLogicalFrontmatter(child), current);
+  assertActualParentReadOnly(h);
+});
+
+test('actual FileProperties: a 10k metadata seed uses one inventory and one read per ordinary Markdown file', async () => {
+  const h = await makeActualParentPropertiesHarness();
+  const parent = h.add('Parent.md');
+  const child = h.add('Child.md', { parent: '[[Parent]]' });
+  for (let index = 0; index < 9_998; index++) h.add(`Ordinary/${index}.md`);
+  const input = [...h.frontmatter].map(([file, frontmatter]) => [file, frontmatter]);
+  h.service.rebuildRelationshipIndex();
+  assert.equal(h.counters.scans, 1);
+  assert.equal(h.counters.metadata, 10_000, 'real published classifier triples the existing stubbed-harness count');
+  assert.equal(h.service.seedDirectCacheLookups, 10_000, 'seed telemetry counts actual Parent-owned cache acquisitions');
+  assert.deepEqual(h.service.getChildrenForParent(parent), [child]);
+  assert.equal(h.counters.scans, 1, 'querying existing relationships does not acquire another inventory');
+  for (const [file, frontmatter] of input) assert.equal(h.frontmatter.get(file), frontmatter);
+  assertActualParentReadOnly(h);
+});
+
+test('actual FileProperties: managed paths and positive raw ownership never invoke a metadata reader', async () => {
+  const h = await makeActualParentPropertiesHarness();
+  const managed = h.add('_assets/TPS File Properties/Unmarked.md', { parent: '[[Parent]]' });
+  const moved = h.add('Moved/Owned.md', actualParentCompanionRecord('File.pdf', 'owned', { parent: '[[Parent]]' }));
+  assert.equal(h.plugin.filePropertiesService.isCompanionFile(moved), true, 'prime the existing positive owner through its public classifier');
+  h.frontmatter.set(moved, { parent: '[[Parent]]', nowOrdinary: true });
+  h.service.rebuildRelationshipIndex();
+  h.counters.metadata = 0;
+  const originalRead = h.plugin.app.metadataCache.getFileCache;
+  let suppliedReaderCalls = 0;
+  h.plugin.app.metadataCache.getFileCache = () => { throw new Error('Known positive must not touch metadata'); };
+  try {
+    for (const file of [managed, moved]) {
+      assert.equal(h.plugin.filePropertiesService.isCompanionFile(file, () => {
+        suppliedReaderCalls++;
+        throw new Error('Known positive must remain lazy');
+      }), true);
+      assert.equal(h.service.isRelationshipTarget(file), false);
+      assert.deepEqual(h.service.getLogicalFrontmatter(file), {});
+      h.service.onMetadataChanged(file);
+    }
+  } finally {
+    h.plugin.app.metadataCache.getFileCache = originalRead;
+  }
+  assert.equal(suppliedReaderCalls, 0);
+  assert.equal(h.counters.metadata, 0);
+  assertActualParentReadOnly(h);
+});
+
+test('actual FileProperties: case-insensitive moved ownership becomes current ordinary metadata only after forget', async () => {
+  const h = await makeActualParentPropertiesHarness();
+  const parent = h.add('Parent.md');
+  const moved = h.add('Moved/Casefold.md', {
+    TPSGCMFILEPROPERTIES: '1', TPSGCMFILEID: 'case-id', TPSGCMSOURCEPATH: 'File.pdf',
+    parent: '[[Parent]]',
+  });
+  h.service.rebuildRelationshipIndex();
+  assert.deepEqual(h.service.getChildrenForParent(parent), []);
+  const ordinary = { parent: '[[Parent]]', title: 'Ordinary after owner removal' };
+  h.frontmatter.set(moved, ordinary);
+  h.counters.metadata = 0;
+  h.service.onMetadataChanged(moved);
+  assert.equal(h.counters.metadata, 0, 'existing positive ownership still wins until its owner is forgotten');
+  assert.deepEqual(h.service.getChildrenForParent(parent), []);
+  h.plugin.filePropertiesService.forgetCompanion(moved);
+  h.counters.metadata = 0;
+  h.service.onMetadataChanged(moved);
+  assert.equal(h.counters.metadata, 1, 'the forgotten path gets one fresh ordinary metadata read');
+  assert.deepEqual(h.service.getChildrenForParent(parent), [moved]);
+  assert.equal(h.service.getLogicalFrontmatter(moved), ordinary);
+  assertActualParentReadOnly(h);
+});
+
+test('actual FileProperties: separate public logical operations never retain a prior metadata result', async () => {
+  const h = await makeActualParentPropertiesHarness();
+  const first = { title: 'First', status: 'todo', parent: '[[One]]' };
+  const file = h.add('Fresh.md', first);
+  assert.equal(h.service.getLogicalFrontmatter(file), first);
+  const second = { title: 'Second', status: 'complete', parent: '[[Two]]' };
+  h.frontmatter.set(file, second);
+  assert.equal(h.service.getLogicalFrontmatter(file), second, 'direct callers do not require an event to read the next cache object');
+  second.title = 'Mutated current object';
+  assert.equal(h.service.getLogicalFrontmatter(file), second);
+  assert.equal(h.service.getLogicalFrontmatter(file).title, 'Mutated current object');
+  assert.deepEqual(first, { title: 'First', status: 'todo', parent: '[[One]]' });
+  assertActualParentReadOnly(h);
+});
+
+test('actual FileProperties: native asset Markdown owns its properties while a native PDF is not indexed', async () => {
+  const h = await makeActualParentPropertiesHarness();
+  const parent = h.add('Parent.md');
+  const assetProperties = {
+    tpsId: 'asset-1', kind: 'asset', title: 'Native asset', sourcePath: 'File.pdf',
+    sourceExtension: 'pdf', parent: '[[Parent]]', custom: { value: 5 },
+  };
+  const asset = h.add('_records/assets/asset-1.md', assetProperties);
+  const pdfProperties = { parent: '[[Parent]]', title: 'Existing PDF cache value' };
+  const pdf = h.add('File.pdf', pdfProperties);
+  h.service.rebuildRelationshipIndex();
+  assert.deepEqual(h.service.getChildrenForParent(parent), [asset]);
+  assert.equal(h.service.isRelationshipTarget(pdf), false);
+  assert.equal(h.service.getLogicalFrontmatter(asset), assetProperties);
+  assert.equal(h.service.getLogicalFrontmatter(pdf), pdfProperties,
+    'public logical reads preserve the old cache-valued contract even for files excluded from native indexing');
+  assert.equal(h.frontmatter.get(asset), assetProperties);
+  assertActualParentReadOnly(h);
+});
+
+test('actual FileProperties: legacy PDF logical reads use the existing mapped companion and fail closed on duplicates', async () => {
+  const h = await makeActualParentPropertiesHarness({ mode: 'legacy' });
+  const parent = h.add('Parent.md');
+  const pdf = h.add('Attachments/File.pdf', { parent: '[[Wrong]]', shouldNotLeak: true });
+  const companionRaw = actualParentCompanionRecord(pdf.path, 'first-id', { parent: '[[Parent]]', status: 'todo' });
+  const companion = h.add('Moved/PDF properties.md', companionRaw);
+  assert.equal(h.plugin.filePropertiesService.isCompanionFile(companion), true);
+  h.service.rebuildRelationshipIndex();
+  assert.deepEqual(h.service.getChildrenForParent(parent), [pdf]);
+  assert.deepEqual(h.service.getLogicalFrontmatter(pdf), { parent: '[[Parent]]', status: 'todo' });
+  assert.deepEqual(h.service.getLogicalFrontmatter(companion), {});
+  const duplicate = h.add('Moved/Duplicate properties.md', actualParentCompanionRecord(pdf.path, 'second-id', {
+    parent: '[[Parent]]', status: 'must-not-leak',
+  }));
+  assert.equal(h.plugin.filePropertiesService.isCompanionFile(duplicate), true, 'the public marker classifier owns index evidence');
+  h.service.onMetadataChanged(pdf);
+  assert.deepEqual(h.service.getLogicalFrontmatter(pdf), {});
+  assert.deepEqual(h.service.getChildrenForParent(parent), []);
+  h.files.delete(duplicate.path);
+  h.plugin.filePropertiesService.forgetCompanion(duplicate);
+  h.service.onMetadataChanged(pdf);
+  assert.deepEqual(h.service.getLogicalFrontmatter(pdf), { parent: '[[Parent]]', status: 'todo' });
+  assert.deepEqual(h.service.getChildrenForParent(parent), [pdf]);
+  assert.equal(h.frontmatter.get(companion), companionRaw, 'raw storage and reserved markers remain owned by FileProperties');
+  assertActualParentReadOnly(h);
+});
+
+test('actual FileProperties: default public companion classification stays current without a supplied reader', async () => {
+  const h = await makeActualParentPropertiesHarness();
+  const file = h.add('Public.md', {});
+  assert.equal(h.plugin.filePropertiesService.isCompanionFile(file), false);
+  assert.equal(h.plugin.filePropertiesService.isCompanionFile(file), false);
+  assert.equal(h.counters.metadata, 2, 'negative classification is not persistently cached');
+  h.frontmatter.set(file, actualParentCompanionRecord('File.pdf', 'public-id'));
+  assert.equal(h.plugin.filePropertiesService.isCompanionFile(file), true, 'next default call sees new marker values');
+  h.frontmatter.set(file, {});
+  const reads = h.counters.metadata;
+  assert.equal(h.plugin.filePropertiesService.isCompanionFile(file), true, 'existing positive raw owner is retained');
+  assert.equal(h.counters.metadata, reads);
+  h.plugin.filePropertiesService.forgetCompanion(file);
+  assert.equal(h.plugin.filePropertiesService.isCompanionFile(file), false);
+  assert.equal(h.counters.metadata, reads + 1);
+  assertActualParentReadOnly(h);
+});
+
+test('actual FileProperties: a supplied classifier reader is lazy and does not perform an independent cache lookup', async () => {
+  const h = await makeActualParentPropertiesHarness();
+  const file = h.add('Reader.md', {});
+  const raw = actualParentCompanionRecord('File.pdf', 'reader-id');
+  let reads = 0;
+  assert.equal(h.plugin.filePropertiesService.isCompanionFile(file, () => { reads++; return raw; }), true);
+  assert.equal(reads, 1, 'classifier consumes the supplied frontmatter exactly once when needed');
+  assert.equal(h.counters.metadata, 0, 'classifier must not also perform its own cache lookup');
+  assert.deepEqual(h.service.getLogicalFrontmatter(file), {}, 'supplied positive evidence uses the unchanged companion owner');
+  assertActualParentReadOnly(h);
+});
+
+test('actual FileProperties: current-TFile replacement and late stale-object events preserve relationship ownership', async () => {
+  const h = await makeActualParentPropertiesHarness();
+  const first = h.add('First.md');
+  const second = h.add('Second.md');
+  const stale = h.add('Child.md', { parent: '[[First]]' });
+  h.service.rebuildRelationshipIndex();
+  const current = new h.TFile(stale.path);
+  h.files.set(current.path, current);
+  const currentProperties = { parent: '[[Second]]', title: 'Replacement' };
+  h.frontmatter.set(current, currentProperties);
+  h.service.onMetadataChanged(current);
+  h.service.onFileDeleted(stale);
+  h.service.onMetadataChanged(stale);
+  assert.deepEqual(h.service.getChildrenForParent(first), []);
+  assert.deepEqual(h.service.getChildrenForParent(second), [current]);
+  assert.equal(h.service.getLogicalFrontmatter(current), currentProperties);
+  assert.equal(h.service.knownFilePaths.has(stale), false);
+  const oldPath = h.rename(current, 'Moved/Child.md');
+  h.service.onFileRenamed(current, oldPath);
+  assert.deepEqual(h.service.getChildrenForParent(second), [current]);
+  h.files.delete(current.path);
+  h.service.onFileDeleted(current);
+  assert.deepEqual(h.service.getChildrenForParent(second), []);
+  assertActualParentReadOnly(h);
+});

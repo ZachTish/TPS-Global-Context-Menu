@@ -391,12 +391,12 @@ test('parent resolution shares one logical source within the call and refreshes 
   const reads = useRealRelationshipServices(h, module);
   const service = h.plugin.parentLinkResolutionService;
   assert.deepEqual(service.getParentsForChild(child).map(entry => entry.file), [parent]);
-  assert.equal(reads.get(child.path), 2, 'ignore and persisted links share one logical lookup');
+  assert.equal(reads.get(child.path), 1, 'ignore and persisted links share one current metadata acquisition');
 
   h.frontmatter.set(child.path, { parents: '[[Notes/Parent]]', relationshipMode: 'IGNORE' });
   reads.clear();
   assert.deepEqual(service.getParentsForChild(child), []);
-  assert.equal(reads.get(child.path), 2);
+  assert.equal(reads.get(child.path), 1, 'the next operation acquires current ignored metadata once');
   assert.deepEqual(service.getStoredParentsForChild(child).map(entry => entry.file), [parent], 'explicit unlink still sees ignored stored relationships');
   h.frontmatter.set(child.path, { PARENT: '[[Notes/Parent]]' });
   h.frontmatter.set(parent.path, { relationshipMode: 'ignore' });

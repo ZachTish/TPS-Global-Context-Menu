@@ -271,12 +271,14 @@ export class FilePropertiesService {
     return isFilePropertiesCompanionPath(path);
   }
 
-  isCompanionFile(file: unknown): file is TFile {
+  isCompanionFile(file: unknown, readMetadata?: () => unknown): file is TFile {
     if (!(file instanceof TFile) || String(file.extension || '').toLocaleLowerCase() !== 'md') return false;
     if (this.isCompanionPath(file.path)) return true;
     const cached = this.cachedRawByCompanionPath.get(this.pathKey(file.path))?.raw;
     if (cached && this.isCompanionRecord(cached)) return true;
-    const metadata = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
+    const metadata = readMetadata
+      ? readMetadata()
+      : this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
     if (!isFilePropertiesCompanionRecord(metadata)) return false;
     this.cacheRawFrontmatter(file, metadata);
     return true;

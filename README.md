@@ -1,5 +1,54 @@
 # TPS Global Context Menu
 
+## 7.3.15 — Read relationship metadata once per operation
+
+Relationship reindexing now shares one lazy metadata acquisition between the
+existing companion classifier and logical-property reader. Ordinary Markdown
+reindexing falls from three cache accesses to one; a public logical-property
+read falls from two to one. The value lives only within that synchronous call.
+The next operation reads current metadata again, including null/missing caches.
+No persistent cache/index, watcher, poller, new event handler, writer or async
+seed is introduced.
+
+Managed companion paths and existing positive companion ownership still skip
+metadata reads. Moved case-insensitive markers, explicit owner forgetting,
+legacy PDF/Canvas routing, duplicate-mapping rejection, native asset Markdown
+properties and public native-PDF cache reads retain their existing behavior.
+Live-file replacement, delete/rename, ignore rules and provisional resolution
+keep their current owners. Seed telemetry counts actual Parent-owned cache
+acquisitions, not every lookup inside other services.
+
+Twelve actual-Parent/actual-FileProperties regressions reproduce six failures
+before correction. The focused 25 Parent and 62 related checks pass. Final
+versioned declared tests pass 1,628 checks and the explicit supplemental gate
+passes 303, with zero failures, cancellations or skips; TypeScript passes.
+The suite and separate post-documentation build-only gates pass with deployment
+suppressed. The new 10,000-note fixture retains one inventory while cache
+accesses fall from 30,000
+to 10,000, with zero source reads/writes and unchanged input objects.
+
+Paired installed TEST warm reloads use the same 16,875 Markdown paths and retain
+2,733 GCM/182 Health records and the same relationship graph. Application-wide
+metadata accesses fall from 84,708 to 50,913; both samples keep the same
+inventories, 37 cached/one raw source reads and zero source writes. In this one
+hidden, unfocused desktop pair, reload return changes from 830.1 to 390.3 ms,
+API readiness from 1,107.2 to 631.6 ms and the longest Node heartbeat gap from
+544.1 to 147.7 ms. These are descriptive warm-host samples, not physical input
+or cold-start benchmarks. The 13-phase Live Preview check passes six tab
+switches and two remounts, observing 24 food/39 activity rows with zero render
+errors, observed long tasks or note-mutation attempts. One Navigator-owned
+first-use Markdown inventory and three normal workspace-only adapter writes
+remain; all eight consumers' saved data and enabled state stay unchanged.
+Build, reload and installed acceptance details are recorded in
+[7.3.15 release notes](release-notes/7.3.15.md).
+
+The relationship seed remains synchronous and still visits the full inventory;
+this removes duplicate reads, not all startup work. The remaining 147.7 ms
+heartbeat gap is not resolved by this patch. Physical mobile/Windows,
+foreground input-to-paint, Reading-mode rendering and overall UI-speed
+improvement remain unverified. Settings, public APIs, stored schema and minimum
+Obsidian 1.10.0 are unchanged. Production remains untouched.
+
 ## 7.3.14 — Cooperate during authoritative source verification
 
 The existing authoritative native-record refresh now releases a real task when
@@ -859,7 +908,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [4.0.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/4.0.0) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [7.3.15](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/7.3.15) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 

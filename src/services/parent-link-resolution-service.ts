@@ -1,5 +1,5 @@
 import { TFile, TFolder, normalizePath } from 'obsidian';
-import type { MarkdownView } from 'obsidian';
+import type { CachedMetadata, MarkdownView } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { buildParentFrontmatterLinkValue, extractLinkTarget, resolveLinkValueToFile } from '../handlers/parent-link-format';
 import type { ParentLinkKind, ResolvedParentLink } from './subitem-types';
@@ -241,7 +241,8 @@ export class ParentLinkResolutionService {
     }
     this.knownFilesByPath.set(child.path, child);
     this.knownFilePaths.set(child, child.path);
-    if (!this.isRelationshipTarget(child)) return changedParents;
+    if (String(child.extension || '').trim().toLowerCase() !== 'md'
+      && this.plugin.filePropertiesService?.isPropertyTarget(child) !== true) return changedParents;
     const frontmatter = this.getLogicalFrontmatter(child);
     const values = this.getParentValuesFromFrontmatter(frontmatter);
     if (!values.length) return changedParents;
@@ -341,12 +342,21 @@ export class ParentLinkResolutionService {
    */
   getLogicalFrontmatter(file: TFile): Record<string, unknown> {
     if (!(file instanceof TFile)) return {};
-    if (this.plugin.filePropertiesService?.isCompanionFile(file)) return {};
+    let cache: CachedMetadata | null | undefined;
+    let cacheRead = false;
+    const readCache = () => {
+      if (!cacheRead) {
+        cacheRead = true;
+        if (this.seedingIndex) this.seedDirectCacheLookups++;
+        cache = this.plugin.app.metadataCache.getFileCache(file);
+      }
+      return cache;
+    };
+    if (this.plugin.filePropertiesService?.isCompanionFile(file, () => readCache()?.frontmatter)) return {};
     if (this.plugin.filePropertiesService?.isPropertyTarget(file)) {
       return this.plugin.filePropertiesService.read(file) as Record<string, unknown>;
     }
-    if (this.seedingIndex) this.seedDirectCacheLookups++;
-    const cache = this.plugin.app.metadataCache.getFileCache(file);
+    cache = readCache();
     if (this.provisionalStartupSeed && !cache) this.pendingResolutionChildren.add(file);
     return (cache?.frontmatter || {}) as Record<string, unknown>;
   }
