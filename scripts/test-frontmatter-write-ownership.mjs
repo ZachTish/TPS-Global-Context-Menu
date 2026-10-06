@@ -81,7 +81,6 @@ test('Markdown and non-Markdown mutations use their explicit owned storage bound
 
 test('all established Markdown owners still route through the canonical mutation service', () => {
   const directOwners = [
-    'src/events/register-events.ts',
     'src/handlers/task-checkbox-handler.ts',
     'src/plugin-api.ts',
     'src/services/archive-file-service.ts',
@@ -94,4 +93,9 @@ test('all established Markdown owners still route through the canonical mutation
   for (const path of directOwners) {
     assert.match(read(path), /frontmatterMutationService\.process\(/u, `${path} must use the owned service`);
   }
+  assert.doesNotMatch(
+    read('src/events/register-events.ts'),
+    /frontmatterMutationService\.process\(/u,
+    'passive metadata observers no longer own status or completion-date writes',
+  );
 });

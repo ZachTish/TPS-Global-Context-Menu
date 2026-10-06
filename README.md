@@ -1,5 +1,13 @@
 # TPS Global Context Menu
 
+## 7.3.3 — Keep synced completions completed
+
+Metadata and file-change observers no longer roll a completed note back to its previous status when its body contains unchecked items. The old external checklist guard removed the authored status and completion date before displaying a modal. A completion received through Sync, another editor, or another plugin could therefore become overdue again even though its writer saved it correctly. The fix removes that post-save rollback observer and its status-history/timer machinery; it does not add a repair pass, deduplication, retry, suppression store, or sync protocol.
+
+The existing **Check for open checklist items** preference still applies before GCM-owned status actions save. Their Ignore, Cancel, Open, parent-check, and write-guard behavior is unchanged. A passive metadata refresh cannot reopen a saved note or ask the user to reapprove a completion from another device. Authored `status`, `completedDate`, other frontmatter, and body bytes are left intact; direct YAML or third-party writers still own their completion date. Settings and the minimum Obsidian version (1.10.0) are unchanged. This patch retains the 7.3.2 atomic write/rename protection. Use Controller 3.1.2 for confirmed, current-source reminder publication.
+
+Validation and installation evidence are recorded in [7.3.3 release notes](release-notes/7.3.3.md). A released artifact, a loaded production plugin, a Relay upload, and cancellation on a receiving phone remain separate checks.
+
 ## 7.3.2 — Keep property edits on their current note
 
 Closed-note property changes now commit through Obsidian's atomic `Vault.process` boundary. The writer checks the same live file object, captured path, and exact source bytes before applying its already-computed change. A queued automatic rename can no longer leave a write recreating the old filename; a newer completion or other edit cannot be replaced by an older property snapshot. Conflicting, deleted, or replaced targets fail without a success notification. An asynchronous mutator runs once, with no automatic retry. Source-editor behavior is unchanged, and unchanged property actions still perform no write. Successful closed-note edits retain the BOM, header line-ending style, and exact body bytes, including mixed line endings.

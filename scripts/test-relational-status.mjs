@@ -1300,9 +1300,10 @@ test('note workflow and recurrence services never treat relational status as che
     /private readWorkflowStatus\([\s\S]*?getStatusPropertyKey\?\.\(\)/u,
   );
   assert.doesNotMatch(eventSource, /scheduleCompletedDateSync|reconcileCompletedDate/u);
-  assert.match(
+  assert.doesNotMatch(
     eventSource,
     /plugin\.frontmatterMutationService\.process\(file,/u,
+    'saved workflow status is not reauthored by the passive metadata completion observer',
   );
   assert.match(
     parentLinkSource,

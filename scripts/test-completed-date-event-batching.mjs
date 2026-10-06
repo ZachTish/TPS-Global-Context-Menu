@@ -22,7 +22,7 @@ async function loadRegisterEvents() {
           namespace: 'gcm-event-batching-test-stub',
         }));
         builder.onResolve({
-          filter: /^\.\.\/(handlers\/parent-link-format|services\/view-mode-service|modals\/remove-hidden-subitems-modal|services\/unresolved-subitem-modal|logger|utils\/completed-date-utils|handlers\/checklist-handler)$/,
+          filter: /^\.\.\/(handlers\/parent-link-format|services\/view-mode-service|modals\/remove-hidden-subitems-modal|modals\/checklist-prompt-modal|services\/unresolved-subitem-modal|logger|utils\/completed-date-utils)$/,
         }, (args) => ({
           path: args.path,
           namespace: 'gcm-event-batching-test-stub',
@@ -96,6 +96,23 @@ async function loadRegisterEvents() {
             if (args.path.endsWith('remove-hidden-subitems-modal')) {
               return { loader: 'js', contents: 'export class RemoveHiddenSubitemsModal { open() {} }' };
             }
+            if (args.path.endsWith('checklist-prompt-modal')) {
+              return {
+                loader: 'js',
+                contents: `export class ChecklistPromptModal {
+                  constructor(app, items, resolve, allowLineMutation) {
+                    this.app = app;
+                    this.items = items;
+                    this.resolve = resolve;
+                    this.allowLineMutation = allowLineMutation;
+                  }
+                  open() {
+                    this.app.checklistPrompts.push({ items: this.items, allowLineMutation: this.allowLineMutation });
+                    this.resolve('cancel');
+                  }
+                }`,
+              };
+            }
             if (args.path.endsWith('unresolved-subitem-modal')) {
               return { loader: 'js', contents: 'export async function checkAndPromptForUnresolvedSubitems(plugin, file) { globalThis.__GcmUnresolvedChecks++; await plugin.app.vault.cachedRead(file); }' };
             }
@@ -132,14 +149,7 @@ async function loadRegisterEvents() {
                 `,
               };
             }
-            return {
-              loader: 'js',
-              contents: `
-                export class ChecklistHandler { async scanChecklistItems() { return []; } async handleChecklistCompletion() { return false; } }
-                export function markChecklistCompletionPromptHandled() {}
-                export function wasChecklistCompletionPromptRecentlyHandled() { return false; }
-              `,
-            };
+            throw new Error(`Unexpected event-batching test stub: ${args.path}`);
           },
         );
       },
@@ -169,6 +179,9 @@ function createHarness({
   completionStatuses = ['complete', 'wont-do'],
   mutationGates = new Map(),
   enableLinkedSubitemCheckboxes = true,
+  checkOpenChecklistItems = false,
+  dataArchitectureMode,
+  statusKey = 'status',
 } = {}) {
   const listeners = new Map();
   const cleanups = [];
@@ -177,7 +190,9 @@ function createHarness({
   const mutations = [];
   const invalidations = [];
   let selectedBodyReads = 0;
+  let rawBodyReads = 0;
   let linkedRefreshes = 0;
+  const checklistPrompts = [];
   let filesUpdatedHandler = null;
   const failures = new Set(failedPaths);
   const scaledSetTimeout = (callback, delay = 0) => setTimeout(callback, Math.max(1, Math.ceil(delay / 100)));
@@ -230,7 +245,8 @@ function createHarness({
       inlineMenuOnly: false,
       parentLinkFrontmatterKey: 'childOf',
       recurrenceCompletionStatuses: completionStatuses,
-      checkOpenChecklistItems: false,
+      checkOpenChecklistItems,
+      dataArchitectureMode,
       subitems_IgnoreRules: [],
       enableAutoRename: false,
       autoSyncTitleFromFilename: false,
@@ -247,6 +263,7 @@ function createHarness({
       return true;
     },
     app: {
+      checklistPrompts,
       workspace: {
         on: on('workspace'),
         onLayoutReady() {},
@@ -267,12 +284,13 @@ function createHarness({
         getFileByPath(path) {
           return filesByPath.get(path) || null;
         },
-        async read() {
-          return '';
+        async read(file) {
+          rawBodyReads++;
+          return file.body || '';
         },
-        async cachedRead() {
+        async cachedRead(file) {
           selectedBodyReads++;
-          return '';
+          return file.body || '';
         },
         async modify() {},
       },
@@ -334,7 +352,7 @@ function createHarness({
     taskCheckboxHandler: { scheduleChecklistPropertyUpdate: noop },
     sharedServices: {
       status: {
-        getStatusPropertyKey: () => 'status',
+        getStatusPropertyKey: () => statusKey,
         normalize: normalizeStatus,
         getDoneStatuses: () => {
           const configured = plugin.settings.recurrenceCompletionStatuses;
@@ -379,13 +397,16 @@ function createHarness({
     plugin,
     mutations,
     invalidations,
+    checklistPrompts,
+    rawBodyReads: () => rawBodyReads,
     navigationCounts: () => ({ selectedBodyReads, linkedRefreshes }),
     emit(scope, event, ...args) {
       for (const callback of listeners.get(`${scope}:${event}`) || []) callback(...args);
     },
     emitFilesUpdated(paths) { filesUpdatedHandler?.(paths); },
-    addFile(path, frontmatter = {}) {
+    addFile(path, frontmatter = {}, body = '') {
       const file = new TFile(path, frontmatter);
+      file.body = body;
       filesByPath.set(path, file);
       return file;
     },
@@ -464,6 +485,147 @@ test('external status and filename changes do not silently reconcile completedDa
   assert.equal(event.frontmatter.completedDate, undefined);
   h.cleanup();
 });
+
+test('authored completion survives metadata refresh with checklist checking enabled and an open item', async () => {
+  // The prior fixture disabled this setting and stubbed checklist scanning as
+  // empty. Use the real ChecklistHandler scanner with a real unchecked line.
+  const h = createHarness({ checkOpenChecklistItems: true, dataArchitectureMode: 'native-records' });
+  const body = '# Authored event\n- [ ] Still unchecked\nBody sentinel stays unchanged\n';
+  const file = h.addFile('Inbox/External complete with checklist.md', { kind: 'transaction', transactionKind: 'event' }, body);
+  const previous = { ...file.frontmatter };
+  h.setCachedFrontmatter(file, previous);
+  h.metadataChanged(file);
+
+  file.frontmatter = { ...previous, status: 'complete', completedDate: '2026-10-05T17:30:00' };
+  const saved = JSON.stringify(file.frontmatter);
+  // Vault modify can arrive while metadata still describes the prior source.
+  h.emit('vault', 'modify', file);
+  h.setCachedFrontmatter(file, { ...file.frontmatter });
+  h.metadataChanged(file);
+  await settleDebounces();
+
+  try {
+    assert.deepEqual({
+      mutations: h.mutations.length,
+      frontmatter: JSON.stringify(file.frontmatter),
+      body: file.body,
+      checklistReads: h.rawBodyReads(),
+      prompts: h.checklistPrompts,
+    }, {
+      mutations: 0,
+      frontmatter: saved,
+      body,
+      checklistReads: 0,
+      prompts: [],
+    }, 'saved completion is authoritative: no background rollback, checklist scan or prompt');
+  } finally { h.cleanup(); }
+});
+
+for (const [name, options, previous, completion] of [
+  ['native desktop working status', { dataArchitectureMode: 'native-records' }, { status: 'working' }, { status: 'complete' }],
+  ['legacy desktop done alias', { dataArchitectureMode: 'legacy' }, { status: 'todo' }, { status: 'done' }],
+  ['native mobile completed alias', { mobile: true, dataArchitectureMode: 'native-records' }, {}, { status: 'completed' }],
+  ['legacy mobile finished alias', { mobile: true, dataArchitectureMode: 'legacy' }, { status: 'working' }, { status: 'finished' }],
+  ['mapped case-insensitive list status', { dataArchitectureMode: 'native-records', statusKey: 'taskStatus' }, { TaskStatus: ['working'], status: 'external relation' }, { TaskStatus: ['done'] }],
+  ['mapped status and date casing', { dataArchitectureMode: 'native-records', statusKey: 'workflow' }, { WORKFLOW: 'working', status: 'external relation' }, { WORKFLOW: 'complete', CompletedDate: '2026-10-05T18:00:00' }],
+]) {
+  test(`metadata observers preserve saved completion and body for ${name}`, async () => {
+    const previousMobile = globalThis.__GcmEventPlatform.isMobile;
+    globalThis.__GcmEventPlatform.isMobile = options.mobile || false;
+    const h = createHarness({ ...options, checkOpenChecklistItems: true });
+    const body = '- [ ] User-owned checklist\nPreserved body\r\n';
+    const file = h.addFile(`Inbox/External ${name}.md`, { ...previous }, body);
+    h.setCachedFrontmatter(file, { ...previous });
+    h.metadataChanged(file);
+    file.frontmatter = { ...previous, completedDate: '2026-10-05T17:59:00', ...completion };
+    if ('CompletedDate' in completion) delete file.frontmatter.completedDate;
+    const saved = JSON.stringify(file.frontmatter);
+    h.emit('vault', 'modify', file);
+    h.setCachedFrontmatter(file, { ...file.frontmatter });
+    h.metadataChanged(file);
+    await settleDebounces();
+    try {
+      assert.equal(JSON.stringify(file.frontmatter), saved, 'authored keys, aliases and timestamps remain exact');
+      assert.equal(file.body, body);
+      assert.deepEqual([h.mutations.length, h.rawBodyReads(), h.checklistPrompts.length], [0, 0, 0]);
+    } finally {
+      h.cleanup();
+      globalThis.__GcmEventPlatform.isMobile = previousMobile;
+    }
+  });
+}
+
+test('startup and repeated completion metadata with open items never create a rollback decision', async () => {
+  const h = createHarness({ checkOpenChecklistItems: true, dataArchitectureMode: 'native-records' });
+  const file = h.addFile('Inbox/Already saved completion.md', {
+    status: 'complete', completedDate: '2026-10-04T18:00:00', title: 'Saved title',
+  }, '- [ ] Keep open\n');
+  const saved = JSON.stringify(file.frontmatter);
+  try {
+    for (let i = 0; i < 100; i++) {
+      h.emit('vault', 'modify', file);
+      h.metadataChanged(file);
+    }
+    await settleDebounces();
+    assert.equal(JSON.stringify(file.frontmatter), saved);
+    assert.equal(file.body, '- [ ] Keep open\n');
+    assert.deepEqual([h.mutations.length, h.rawBodyReads(), h.checklistPrompts.length], [0, 0, 0]);
+  } finally { h.cleanup(); }
+});
+
+test('delayed completion metadata cannot overwrite a newer authored reopen', async () => {
+  const h = createHarness({ checkOpenChecklistItems: true, dataArchitectureMode: 'native-records' });
+  const file = h.addFile('Inbox/Reopened before metadata settled.md', { status: 'todo' }, '- [ ] Still open\n');
+  h.metadataChanged(file);
+  file.frontmatter = { status: 'complete', completedDate: '2026-10-05T18:00:00' };
+  h.emit('vault', 'modify', file);
+  h.setCachedFrontmatter(file, { ...file.frontmatter });
+  h.metadataChanged(file);
+  file.frontmatter = { status: 'working', title: 'Newer user edit', completedDate: 'User-authored retained value' };
+  file.body += 'Newer body edit\n';
+  const saved = JSON.stringify(file.frontmatter);
+  const body = file.body;
+  h.emit('vault', 'modify', file);
+  // The cache still describes complete; the current source is already reopened.
+  h.metadataChanged(file);
+  await settleDebounces();
+  try {
+    assert.equal(JSON.stringify(file.frontmatter), saved);
+    assert.equal(file.body, body);
+    assert.deepEqual([h.mutations.length, h.rawBodyReads(), h.checklistPrompts.length], [0, 0, 0]);
+  } finally { h.cleanup(); }
+});
+
+for (const lifecycle of ['rename', 'replacement', 'unload']) {
+  test(`completion metadata followed by ${lifecycle} cannot carry a passive rollback writer`, async () => {
+    const h = createHarness({ checkOpenChecklistItems: true, dataArchitectureMode: 'native-records' });
+    const original = h.addFile(`Inbox/Completion ${lifecycle}.md`, { status: 'working' }, '- [ ] Original body\n');
+    h.metadataChanged(original);
+    original.frontmatter = { status: 'complete', completedDate: '2026-10-05T18:00:00' };
+    h.emit('vault', 'modify', original);
+    h.metadataChanged(original);
+    let current = original;
+    if (lifecycle === 'rename') {
+      h.renameFile(original, original.path, `Inbox/2026-10-05 Completion ${lifecycle}.md`);
+      h.metadataChanged(original);
+    } else if (lifecycle === 'replacement') {
+      h.deleteFile(original);
+      current = h.replaceFile(original.path, { status: 'complete', completedDate: '2026-10-05T19:00:00', title: 'Different file' });
+      current.body = '- [ ] Replacement body\n';
+      h.metadataChanged(current);
+    } else {
+      h.cleanup();
+    }
+    const saved = JSON.stringify(current.frontmatter);
+    const body = current.body;
+    await settleDebounces();
+    try {
+      assert.equal(JSON.stringify(current.frontmatter), saved);
+      assert.equal(current.body, body);
+      assert.deepEqual([h.mutations.length, h.rawBodyReads(), h.checklistPrompts.length], [0, 0, 0]);
+    } finally { if (lifecycle !== 'unload') h.cleanup(); }
+  });
+}
 
 test('switching notes never schedules checklist writes or retired link repairs', async () => {
   const h = createHarness();

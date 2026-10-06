@@ -4,17 +4,7 @@ import { ViewModeService } from '../services/view-mode-service';
 import { RemoveHiddenSubitemsModal } from '../modals/remove-hidden-subitems-modal';
 import type { BodySubitemLink } from '../services/subitem-types';
 import * as logger from '../logger';
-import { currentCompletedDateStamp } from '../utils/completed-date-utils';
-import {
-    ChecklistHandler,
-    markChecklistCompletionPromptHandled,
-    wasChecklistCompletionPromptRecentlyHandled,
-} from '../handlers/checklist-handler';
 import { getViewMode, isStrictSourceMode } from '../services/leaf-resolver';
-import {
-    canAutomaticallyMutateTemplateFile,
-    canAutomaticallyMutateTemplateFrontmatter,
-} from '../utils/template-protection';
 import { DailyNoteTemplateInstanceCleanupService } from '../services/daily-note-template-instance-cleanup-service';
 
 /**
@@ -26,91 +16,9 @@ import { DailyNoteTemplateInstanceCleanupService } from '../services/daily-note-
 export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     const recentEditorChangeAtByPath = new Map<string, number>();
     const timestampSyncEditorWindowMs = 15_000;
-    const statusBeforeModifyByPath = new Map<string, string>();
-    const lastKnownStatusByPath = new Map<string, string>();
-    const checklistCompletionGuardTimers = new Map<string, number>();
-    const checklistCompletionGuard = new ChecklistHandler(plugin.app, plugin.settings.dataArchitectureMode !== 'native-records');
     const dailyNoteTemplateInstanceCleanup = new DailyNoteTemplateInstanceCleanupService(plugin);
     plugin.register(() => dailyNoteTemplateInstanceCleanup.dispose());
 
-    const readConfiguredStatus = (frontmatter: Record<string, any> | null | undefined): string => {
-        if (!frontmatter || typeof frontmatter !== 'object') return '';
-        const statusKey = plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status';
-        const actualKey = Object.keys(frontmatter).find((key) => key.toLowerCase() === String(statusKey).toLowerCase());
-        const raw = actualKey ? frontmatter[actualKey] : undefined;
-        const value = Array.isArray(raw) ? raw.find((entry) => String(entry ?? '').trim()) : raw;
-        return plugin.sharedServices?.status?.normalize?.(value) || String(value ?? '').trim().toLowerCase();
-    };
-
-    const isChecklistCompletionStatus = (status: string): boolean => {
-        const normalized = plugin.sharedServices?.status?.normalize?.(status) || String(status || '').trim().toLowerCase();
-        return normalized === 'complete' || normalized === 'completed' || normalized === 'done';
-    };
-
-    const writeConfiguredStatus = async (file: TFile, status: string): Promise<void> => {
-        if (!(await canAutomaticallyMutateTemplateFile(plugin.app.vault, file, plugin.settings))) return;
-        markChecklistCompletionPromptHandled(file);
-        const statusKey = plugin.sharedServices?.status?.getStatusPropertyKey?.() || 'status';
-        await plugin.frontmatterMutationService.process(file, (frontmatter) => {
-            if (!canAutomaticallyMutateTemplateFrontmatter(frontmatter, plugin.settings)) return;
-            const actualKey = Object.keys(frontmatter).find((key) => key.toLowerCase() === String(statusKey).toLowerCase()) || statusKey;
-            const completedDateKey = Object.keys(frontmatter).find((key) => key.toLowerCase() === 'completeddate');
-            if (status) {
-                frontmatter[actualKey] = status;
-            } else {
-                delete frontmatter[actualKey];
-            }
-            if (isChecklistCompletionStatus(status)) {
-                const now = currentCompletedDateStamp();
-                frontmatter[completedDateKey || 'completedDate'] = frontmatter[completedDateKey || 'completedDate'] || now;
-            } else if (completedDateKey) {
-                delete frontmatter[completedDateKey];
-            }
-        });
-    };
-
-    const scheduleExternalChecklistCompletionGuard = (file: TFile, previousStatus: string, currentStatus: string): void => {
-        if (!plugin.settings.checkOpenChecklistItems) return;
-        if (!(file instanceof TFile) || file.extension !== 'md') return;
-        if (!isChecklistCompletionStatus(currentStatus) || isChecklistCompletionStatus(previousStatus)) return;
-        if (wasChecklistCompletionPromptRecentlyHandled(file)) return;
-
-        const existing = checklistCompletionGuardTimers.get(file.path);
-        if (existing) window.clearTimeout(existing);
-        const timer = window.setTimeout(async () => {
-            checklistCompletionGuardTimers.delete(file.path);
-            const liveFile = plugin.app.vault.getFileByPath(file.path);
-            if (!(liveFile instanceof TFile)) return;
-            if (!(await canAutomaticallyMutateTemplateFile(plugin.app.vault, liveFile, plugin.settings))) return;
-            const liveStatus = readConfiguredStatus(plugin.app.metadataCache.getFileCache(liveFile)?.frontmatter as Record<string, any> | undefined);
-            if (!isChecklistCompletionStatus(liveStatus)) return;
-            const incompleteItems = await checklistCompletionGuard.scanChecklistItems(liveFile);
-            if (incompleteItems.length === 0) return;
-            const restoreStatus = isChecklistCompletionStatus(previousStatus) ? '' : previousStatus;
-            logger.log('[TPS GCM] External checklist completion guard prompting', {
-                file: liveFile.path,
-                previousStatus,
-                restoreStatus,
-                liveStatus,
-                incompleteItems: incompleteItems.length,
-            });
-            await writeConfiguredStatus(liveFile, restoreStatus);
-            plugin.eventService.emitFilesUpdated([liveFile.path]);
-            void checklistCompletionGuard.handleChecklistCompletion(liveFile).then(async (canProceed) => {
-                if (canProceed) {
-                    await writeConfiguredStatus(liveFile, liveStatus);
-                }
-                plugin.eventService.emitFilesUpdated([liveFile.path]);
-            });
-        }, 250);
-        checklistCompletionGuardTimers.set(file.path, timer);
-    };
-    plugin.register(() => {
-        for (const timer of checklistCompletionGuardTimers.values()) {
-            window.clearTimeout(timer);
-        }
-        checklistCompletionGuardTimers.clear();
-    });
     // ── Native context menu injection ────────────────────────────────────────
 
     plugin.registerEvent(
@@ -500,11 +408,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 if (plugin.canRunBackgroundAutomation()) {
                     plugin.taskCheckboxHandler.scheduleChecklistPropertyUpdate(file);
                 }
-                const currentStatus = readConfiguredStatus(plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, any> | undefined);
-                const previousStatus = statusBeforeModifyByPath.get(file.path) ?? lastKnownStatusByPath.get(file.path) ?? '';
-                statusBeforeModifyByPath.delete(file.path);
-                lastKnownStatusByPath.set(file.path, currentStatus);
-                scheduleExternalChecklistCompletionGuard(file, previousStatus, currentStatus);
             }
         }),
     );
@@ -531,13 +434,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             if (!(file instanceof TFile) || file.extension !== 'md') return;
             if (plugin.filePropertiesService?.isCompanionFile(file)) return;
             logger.perf('vault.modify:event', { file: file.path });
-            const cachedStatus = readConfiguredStatus(plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, any> | undefined);
-            if (!statusBeforeModifyByPath.has(file.path)) {
-                statusBeforeModifyByPath.set(file.path, lastKnownStatusByPath.get(file.path) ?? cachedStatus);
-            }
-            if (!lastKnownStatusByPath.has(file.path)) {
-                lastKnownStatusByPath.set(file.path, cachedStatus);
-            }
             if (plugin.canRunBackgroundAutomation()) {
                 plugin.taskCheckboxHandler.scheduleChecklistPropertyUpdate(file);
                 void plugin.subitemRelationshipSyncService?.repairBrokenBodyLinksForParent(file);

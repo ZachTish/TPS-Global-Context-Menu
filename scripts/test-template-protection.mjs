@@ -347,9 +347,10 @@ test('automatic background writers recheck explicit exclusions at their mutation
     checkboxReconcile,
     /reconcileFileNow[\s\S]{0,350}canAutomaticallyMutatePathWithExclusions[\s\S]{0,1000}canAutomaticallyMutateTemplateSource/u,
   );
-  assert.match(
+  assert.doesNotMatch(
     events,
-    /writeConfiguredStatus[\s\S]{0,240}canAutomaticallyMutateTemplateFile[\s\S]{0,420}canAutomaticallyMutateTemplateFrontmatter/u,
+    /writeConfiguredStatus|scheduleExternalChecklistCompletionGuard|checklistCompletionGuardTimers/u,
+    'metadata observers must not contain a passive status/completion rollback writer',
   );
   assert.match(
     nativeRecords,
