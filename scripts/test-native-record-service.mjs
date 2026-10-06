@@ -4341,13 +4341,141 @@ test('profile inspection reuse rejects 1000 ordinary notes without repeated no-m
   assert.equal(evaluations, 3000, 'burst work scales with profiles, not repeated validation passes');
 });
 
+for (const mapped of [false, true]) {
+  test(`prepared profile references avoid duplicate classification in 10000 ${mapped ? 'mapped' : 'canonical'} title inspections`, () => {
+    const { service, plugin } = createHarness();
+    const kinds = ['task', 'food-entry', 'activity-entry', 'workout-session', 'workout-exercise', 'food', 'exercise', 'recipe', 'workout-plan', 'workflow', 'time-entry', 'asset'];
+    if (mapped) {
+      plugin.settings.nativeRecordKindPropertyKeys = Object.fromEntries(kinds.map(kind => [kind, {
+        primary: { kindList: { key: 'Type', value: `Records/${kind}` } },
+        aliases: [{ scalar: { key: 'LegacyType', value: kind } }],
+      }]));
+    }
+    const notes = Array.from({ length: 10000 }, (_, index) => ({
+      tpsId: `title-inspection-${index}`,
+      title: `Note ${String(10000 - index).padStart(5, '0')}`,
+      ...(mapped ? { Type: ['Records/task'] } : { kind: 'task' }),
+    }));
+    const original = structuredClone(notes);
+    let evaluations = 0;
+    let copies = 0;
+    globalThis.__nativeRecordProfileInspection = () => { evaluations++; };
+    globalThis.__nativeRecordEnvelopeCopy = () => { copies++; };
+    try {
+      let firstTitles;
+      // A body-only metadata invalidation may ask for the same live titles again.
+      // Reuse belongs inside each inspection, never across notes or passes.
+      for (let pass = 0; pass < 2; pass++) {
+        evaluations = 0;
+        copies = 0;
+        const titles = notes.map(note => {
+          const inspection = service.inspect(note);
+          assert.equal(inspection?.id, note.tpsId);
+          assert.equal(inspection?.kind, 'task');
+          assert.equal(inspection?.frontmatter.title, note.title);
+          return inspection.frontmatter.title;
+        });
+        assert.equal(evaluations, notes.length * (mapped ? 25 : 3),
+          'evidence, readable and current passes must share the prepared profiles');
+        assert.equal(copies, notes.length, 'one matching profile needs one envelope copy per note');
+        if (pass === 0) firstTitles = titles;
+        else assert.deepEqual(titles, firstTitles);
+      }
+    } finally {
+      delete globalThis.__nativeRecordProfileInspection;
+      delete globalThis.__nativeRecordEnvelopeCopy;
+    }
+    assert.deepEqual(notes, original);
+  });
+}
+
+test('prepared profile references preserve normalized aliases, key order and detached public profiles', () => {
+  const classification = { kindList: { key: 'Type', value: 'Records/task' }, recordKind: 'task' };
+  const alias = { ...DEFAULT_NATIVE_RECORD_STORAGE_PROFILE, kindPropertyKey: '', classification };
+  const reorderedAlias = Object.fromEntries(Object.entries(alias).reverse());
+  const { service, plugin } = createHarness('native-records', {
+    identityPropertyKey: ' recordId ', schemaPropertyKey: ' recordSchema ',
+    kindPropertyKey: ' recordKind ', titlePropertyKey: ' name ',
+    createdPropertyKey: ' created ', modifiedPropertyKey: ' modified ',
+    storageAliases: [alias, reorderedAlias],
+  });
+  plugin.settings.nativeRecordKindPropertyKeys = { task: { kindList: { key: 'Type', value: 'Records/task' } } };
+  service.readingMigrationSources = true;
+  const readable = service.getReadableStorageProfiles();
+  const mapped = readable.filter(profile => profile.classification?.recordKind === 'task');
+  assert.equal(mapped.length, 1, 'a reordered normalized alias must not duplicate its current classification');
+  assert.deepEqual(mapped[0].classification, { kindList: { key: 'Type', value: 'Records/task' }, recordKind: 'task' });
+  const legacy = readable.find(profile => profile.identityPropertyKey === 'recordId');
+  assert.equal(legacy.schemaPropertyKey, 'recordSchema');
+  assert.equal(legacy.kindPropertyKey, 'recordKind');
+  assert.equal(legacy.titlePropertyKey, 'name');
+  const raw = { RECORDID: 'legacy-task', RecordSchema: 1, RecordKind: 'task', NAME: 'Legacy title', created: '2026-10-01' };
+  assert.equal(service.inspect(raw)?.frontmatter.title, 'Legacy title');
+  mapped[0].classification.kindList.value = 'Poisoned/mapping';
+  legacy.titlePropertyKey = 'poisoned';
+  assert.equal(service.inspect(raw)?.frontmatter.title, 'Legacy title');
+  const current = { tpsId: 'current-task', title: 'Current title', Type: ['Records/task'] };
+  const inspection = service.inspect(current);
+  assert.equal(inspection?.kind, 'task');
+  inspection.profile.classification.kindList.value = 'Poisoned/result';
+  assert.equal(service.inspect(current)?.kind, 'task');
+  service.readingMigrationSources = false;
+  assert.equal(service.inspect(raw), null, 'legacy aliases remain migration-only');
+  assert.equal(service.inspect(current)?.kind, 'task');
+});
+
+test('prepared profile references recheck live title, status, list shape, conflicts and in-place mapping edits', () => {
+  const { service, plugin } = createHarness();
+  plugin.settings.nativeRecordKindPropertyKeys = {
+    task: {
+      primary: { kindList: { key: 'Type', value: 'Records/task' } },
+      aliases: [{ scalar: { key: 'Type', value: 'legacy-task' } }],
+    },
+    food: { kindList: { key: 'Type', value: 'Records/food' } },
+  };
+  const raw = { tpsId: 'live-task', title: 'Before', status: 'open', Type: ['Records/task'] };
+  const first = service.inspect(raw);
+  raw.title = 'After';
+  raw.status = 'complete';
+  const changed = service.inspect(raw);
+  assert.equal(changed?.frontmatter.title, 'After');
+  assert.equal(changed?.frontmatter.status, 'complete');
+  assert.equal(first?.frontmatter.title, 'Before');
+  assert.equal(first?.frontmatter.status, 'open');
+  raw.Type = 'Records/task';
+  assert.equal(service.inspect(raw), null, 'a primary list path does not accept the same scalar text');
+  raw.Type = 'legacy-task';
+  assert.equal(service.inspect(raw)?.kind, 'task');
+  plugin.settings.nativeRecordKindPropertyKeys.task.aliases[0].scalar.value = 'older-task';
+  assert.equal(service.inspect(raw), null, 'nested alias edits take effect without a settings save');
+  raw.Type = 'older-task';
+  assert.equal(service.inspect(raw)?.kind, 'task');
+  plugin.settings.nativeRecordKindPropertyKeys.task.primary.kindList.value = 'Records/action';
+  raw.Type = ['Records/task'];
+  assert.equal(service.inspect(raw), null);
+  raw.Type = ['Records/action'];
+  assert.equal(service.inspect(raw)?.kind, 'task');
+  raw.Type.push('Records/food');
+  assert.equal(service.inspect(raw), null, 'conflicting classifications remain invalid');
+  raw.Type = ['Records/action'];
+  raw.TPSID = 'conflicting-id';
+  assert.equal(service.inspect(raw), null, 'case-duplicate identity remains invalid');
+  delete raw.TPSID;
+  raw.TYPE = ['Records/action'];
+  assert.throws(() => service.inspect(raw), /Ambiguous frontmatter property/);
+  delete raw.TYPE;
+  assert.equal(service.inspect(raw)?.kind, 'task');
+});
+
 test('profile inspection reuse covers native kinds and arbitrary nested tag mappings', () => {
   const kinds = ['task', 'food-entry', 'activity-entry', 'workout-session', 'workout-exercise', 'calendar-event', 'nutrition-log'];
   const { service, plugin } = createHarness();
   for (const kind of kinds) {
     const measurement = countedRecordInspection(service, { tpsId: `fixture-${kind}`, kind, title: 'Fixture' });
     assert.equal(measurement.result?.kind, kind);
-    assertSingleProfileEvaluation(measurement, 4, 2);
+    // Readable profiles retain their prepared evidence/current identity instead
+    // of requiring a second classification and envelope for normalized clones.
+    assertSingleProfileEvaluation(measurement, 3, 1);
   }
   plugin.settings.nativeRecordKindPropertyKeys = Object.fromEntries(kinds.map(kind => [kind, { tag: `custom/${kind}` }]));
   const ordinary = countedRecordInspection(service, { title: 'Ordinary', tags: ['notes'] });
@@ -4356,25 +4484,25 @@ test('profile inspection reuse covers native kinds and arbitrary nested tag mapp
   for (const kind of kinds) {
     const measurement = countedRecordInspection(service, { tpsId: `fixture-${kind}`, title: 'Fixture', tags: [`custom/${kind}`] });
     assert.equal(measurement.result?.kind, kind);
-    assertSingleProfileEvaluation(measurement, 15, 2);
+    assertSingleProfileEvaluation(measurement, 8, 1);
   }
   const calendar = countedRecordInspection(service, {
     tpsId: 'calendar:v1:abcdefghijklmnop:abcdefghijklmnopqrstuvwxyz2', title: 'Calendar', tags: ['unrelated'],
   });
   assert.equal(calendar.result?.kind, 'calendar-event');
-  assertSingleProfileEvaluation(calendar, 18, 2);
+  assertSingleProfileEvaluation(calendar, 10, 1);
 });
 
 test('profile inspection reuse preserves current custom keys, pair mappings and legacy migration readers', () => {
   const current = createHarness('native-records', { kindPropertyKey: 'recordType', titlePropertyKey: 'name' });
   const mapped = countedRecordInspection(current.service, { tpsId: 'current-food', recordType: 'food-entry', name: 'Food' });
   assert.equal(mapped.result?.kind, 'food-entry');
-  assertSingleProfileEvaluation(mapped, 4, 2);
+  assertSingleProfileEvaluation(mapped, 3, 1);
   const pair = createHarness();
   pair.plugin.settings.nativeRecordKindPropertyKeys = { 'food-entry': { key: 'entryType', parentKind: 'transaction', value: 'food' } };
   const paired = countedRecordInspection(pair.service, { tpsId: 'food', title: 'Food', kind: 'transaction', entryType: 'food' });
   assert.equal(paired.result?.kind, 'food-entry');
-  assertSingleProfileEvaluation(paired, 3, 3);
+  assertSingleProfileEvaluation(paired, 2, 2);
   const legacy = createHarness('native-records', {
     identityPropertyKey: 'recordId', schemaPropertyKey: 'recordSchema', kindPropertyKey: 'recordType',
     titlePropertyKey: 'name', createdPropertyKey: 'created', modifiedPropertyKey: 'updated',
@@ -4384,7 +4512,7 @@ test('profile inspection reuse preserves current custom keys, pair mappings and 
   legacy.service.readingMigrationSources = true;
   const migrated = countedRecordInspection(legacy.service, raw);
   assert.equal(migrated.result?.id, 'legacy-food');
-  assertSingleProfileEvaluation(migrated, 8, 2);
+  assertSingleProfileEvaluation(migrated, 4, 1);
   legacy.service.readingMigrationSources = false;
   assert.equal(legacy.service.inspect(raw), null);
 });
@@ -4399,7 +4527,7 @@ test('profile inspection reuse keeps equivalent distinct profiles separate and r
   assert.equal(measurement.result?.id, 'duplicate-profiles');
   assert.equal(measurement.calls.get(equivalent), 1);
   assert.equal(measurement.calls.get(profiles.write), 1);
-  assertSingleProfileEvaluation(measurement, 5, 3);
+  assertSingleProfileEvaluation(measurement, 4, 2);
 });
 
 test('profile inspection reuse does not survive input edits, mapping edits or returned-value mutation', () => {

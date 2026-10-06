@@ -1,5 +1,36 @@
 # TPS Global Context Menu
 
+## 7.3.8 — Reuse prepared profiles during native-record inspection
+
+Native-record inspection now shares the existing prepared profile objects across
+its identity-evidence, readable-profile and current-kind checks. Previously the
+readable pass cloned those profiles, defeating the existing operation-local
+reuse map and repeating classification of the same frontmatter. Normalized
+alias deduplication, all identity/conflict validation, and detached public
+profile copies are preserved. Reuse still ends when one inspection returns;
+the next inspection reads current frontmatter and current settings. There is
+no new cache, index, watcher, timer, public API, setting or note write.
+
+Before-failing synthetic tests inspect 10,000 native titles twice. Per pass,
+canonical-profile classifier calls fall from 40,000 to 30,000; twelve configured
+kinds with a scalar alias each fall from 490,000 to 250,000. The classifier's
+raw-to-envelope copies fall from 20,000 to 10,000 in each fixture. These counts
+refer to that classifier copy only, not every object allocation or merge copy
+inside the API. All 142 focused native-record tests pass with exact operation
+counts. Coverage retains normalized/reordered aliases, custom mappings,
+detached results, live title/status changes, scalar-versus-list classification,
+conflicting evidence and nested settings edits without a save.
+
+This backward-compatible patch keeps minimum Obsidian 1.10.0 and changes no
+Navigator metadata invalidation or sorting behavior. Synthetic inspection and
+title-sort evidence does not establish installed mobile/Windows latency or fix
+every possible navigation stall. The final versioned declared suite passes
+1,588 tests and the supplemental suite passes 214. Installed 7.3.7/7.3.8
+comparison preserves all 30,000 synthetic inspection results, inputs and
+settings. The [7.3.8 release notes](release-notes/7.3.8.md) record the separate
+build, Test-vault reload, measurement limits and artifact hashes. Production
+installation remains the user's BRAT pull.
+
 ## 7.3.7 — Keep heading suggestions in their owning editor
 
 Heading-link suggestions search only while the active Markdown editor is focused

@@ -1392,11 +1392,13 @@ export class NativeRecordService {
       const current = [write, ...byKind.values(), ...classifiedAliases];
       const legacy = [...configuration.readAliases, LEGACY_NATIVE_RECORD_PROPERTY_PROFILE, DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE];
       const seen = new Set<string>();
+      // Keep prepared profiles shared with evidence/current checks so the
+      // operation-local inspector also reuses their results across read passes.
+      // Normalize only the deduplication key; public getters still return copies.
       const readable = [...current, ...(this.readingMigrationSources ? legacy : [])]
-        .map(profile => normalizeNativeRecordStorageProfile(profile))
         .filter(profile => {
           if (validateReadableNativeRecordStorageProfile(profile).length > 0) return false;
-          const key = profileKey(profile);
+          const key = profileKey(normalizeNativeRecordStorageProfile(profile));
           if (seen.has(key)) return false;
           seen.add(key);
           return true;
