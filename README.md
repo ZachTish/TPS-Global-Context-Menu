@@ -1,5 +1,62 @@
 # TPS Global Context Menu
 
+## 7.3.11 — Inspect each indexed record once
+
+Cold native-record indexing previously classified the same note/profile several
+times while collecting recoverable IDs, checking ambiguity and selecting its
+final envelope. Those checks now share the existing operation-local inspector
+and one prepared configuration within each synchronous file-index operation.
+The accepted inspection is reused rather than requested again. Every identity,
+read-alias, classification, timestamp, canonical-calendar and blocking check
+still runs. Public inspection results retain detached profile copies.
+
+The next file or metadata event checks its current frontmatter and the
+value-based settings signature again, including nested mapping edits made
+without a save. There is no cross-record result cache, new watcher, async
+startup, schema change, repair or note write. Setup still completes its metadata
+index synchronously. Health and Controller own their separate metadata scans;
+the async authoritative source verification required for mutations/snapshots
+is unchanged and must not be confused with this metadata-only startup pass.
+
+Three before-failing 10,000-note cold-setup regressions now require one settings
+signature per file and one classifier evaluation per exact prepared profile.
+Ordinary notes fall from 130,000 to 30,000 evaluations; canonical records from
+150,000 to 30,000; 26 mapped kinds from 1,110,000 to 270,000. The classifier's
+envelope copies fall from 60,000 to 10,000 for canonical records and from
+110,000 to 20,000 for the mapped fixture. These counts do not include every
+match-set/object copy. Each pass inventories once, reads 10,000 metadata entries
+and performs zero source reads or writes, preserving input metadata.
+
+All 146 focused native-record tests and TypeScript pass. Independent review ran
+60 relevant regressions without failures. A separate baseline/proposed corpus
+matches complete index state across 609 index operations, including conflicting
+and malformed evidence, legacy aliases/migration, classification variants,
+repeated changes and identity removal. An isolated actual-source setup probe's
+mapped synchronous elapsed time falls from about 2.27s to 1.21s on this Mac;
+this includes instrumentation and is not installed cold-start, foreground
+input-to-paint or physical mobile/Windows evidence. The final versioned declared
+suite passes 1,609 tests and the explicit sequential supplemental suite passes
+218, without failures, cancellations or skips. TypeScript, the suite's
+production-mode build and a separate final build pass with deployment
+suppressed. A normal final build deployed only main.js/manifest.json to TEST;
+targeted reload confirmed loaded 7.3.11 and unchanged settings. Exact loaded
+constructor/setup replay preserves every synthetic ID/kind/title and metadata
+input while reducing prepared-profile accesses to 10,000 in all three fixtures
+and avoiding repeated public-inspection/profile-copy wrappers. It keeps one
+inventory, 10,000 metadata accesses, one configuration resolution, zero source
+reads/writes and the same five modeled event listeners.
+
+The installed mapped setup pair falls from about 2.34s to 1.19s. This is one
+isolated replay on a hidden/unfocused desktop host, not a full cold-process or
+physical UI benchmark. Shared Live Preview smoke checks retain observed Health
+widgets through six tab switches and two remounts, with no measured long tasks,
+phase/Health errors or note-mutation attempts. Three synthetic fixtures are
+exact-byte archived; plugin settings remain unchanged. One core workspace
+adapter write observed at idle is not a note writer. Full results, boundaries
+and hashes are in [7.3.11 release notes](release-notes/7.3.11.md).
+This backward-compatible patch keeps Obsidian 1.10.0 and existing public APIs,
+settings and note schema. Production installation remains the user's BRAT pull.
+
 ## 7.3.10 — Keep recurring title work in visible panes
 
 The existing mobile 900ms title/link refresh now uses the shared leaf visibility

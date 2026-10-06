@@ -1326,6 +1326,16 @@ export class NativeRecordService {
     const raw = frontmatter as Record<string, unknown>;
     const profiles = this.getInspectionProfiles();
     const inspectProfile = createProfileInspector(raw);
+    const result = this.inspectPrepared(raw, profiles, inspectProfile);
+    // API callers may edit the returned profile; keep prepared profiles private.
+    return result ? { ...result, profile: this.copyStorageProfile(result.profile) } : null;
+  }
+
+  private inspectPrepared(
+    raw: Record<string, unknown>,
+    profiles: NonNullable<NativeRecordService['inspectionProfiles']>,
+    inspectProfile: NativeRecordProfileInspector,
+  ): TpsNativeRecordInspection | null {
     if (!inspectNativeRecordMatchSet(raw, profiles.evidence, profiles.write, inspectProfile)) return null;
     const inspection = inspectNativeRecordMatchSet(raw, profiles.readable, profiles.write, inspectProfile)?.inspection;
     if (!inspection) return null;
@@ -1333,11 +1343,9 @@ export class NativeRecordService {
       ? profiles.byKind.get(inspection.kind) || profiles.write : profiles.write;
     const currentAndAliases = isCanonicalCalendarRecordId(inspection.id) ? [current]
       : [current, ...profiles.readable.filter(profile => profile.classification?.recordKind === inspection.kind)];
-    const result = this.readingMigrationSources
+    return this.readingMigrationSources
       ? inspection
       : inspectNativeRecordMatchSet(raw, currentAndAliases, current, inspectProfile)?.inspection;
-    // API callers may edit the returned profile; keep prepared profiles private.
-    return result ? { ...result, profile: this.copyStorageProfile(result.profile) } : null;
   }
 
   private getInspectionProfiles(): NonNullable<NativeRecordService['inspectionProfiles']> {
@@ -3495,17 +3503,22 @@ export class NativeRecordService {
   private indexFile(file: TFile, frontmatter?: Record<string, unknown> | null): void {
     this.removePath(file.path);
     const resolved = frontmatter ?? this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
+    let inspection: TpsNativeRecordInspection | null = null;
     if (resolved) {
       const profiles = this.getInspectionProfiles();
+      // One synchronous file index owns evidence and the final classification.
+      // The next file/event still checks current settings and current metadata.
+      const inspectProfile = createProfileInspector(resolved);
       const readableProfiles = profiles.evidence;
       const applicableProfiles = selectApplicableReadableProfiles(
         resolved,
         readableProfiles,
         profiles.write,
+        inspectProfile,
       );
       const recoverableIds = new Set<string>();
       for (const profile of applicableProfiles) {
-        const evidence = inspectWithProfile(resolved, profile);
+        const evidence = inspectProfile(profile);
         if (evidence) recoverableIds.add(this.idKey(evidence.id));
         if (profile.identityMode === 'property') {
           for (const propertyValue of readValuesCaseInsensitive(
@@ -3530,10 +3543,18 @@ export class NativeRecordService {
         resolved,
         readableProfiles,
         profiles.write,
+        inspectProfile,
       );
+      const invalidEvidence = hasInvalidReadableIdentityEvidence(
+        resolved, applicableProfiles, profiles.write, inspectProfile,
+      );
+      if (!invalidEvidence && (recoverableIds.size === 0 || combinedMatch)
+        && typeof resolved === 'object' && !Array.isArray(resolved)) {
+        inspection = this.inspectPrepared(resolved, profiles, inspectProfile);
+      }
       if (
-        hasInvalidReadableIdentityEvidence(resolved, applicableProfiles, profiles.write)
-        || (recoverableIds.size > 0 && (!combinedMatch || !this.inspect(resolved)))
+        invalidEvidence
+        || (recoverableIds.size > 0 && (!combinedMatch || !inspection))
       ) {
         this.blockedIdentityEvidencePaths.add(file.path);
         for (const id of recoverableIds) {
@@ -3544,7 +3565,6 @@ export class NativeRecordService {
         return;
       }
     }
-    const inspection = this.inspect(resolved);
     if (!inspection) return;
     const resolvedEnvelope = inspection.frontmatter;
     const id = this.idKey(resolvedEnvelope.tpsId);

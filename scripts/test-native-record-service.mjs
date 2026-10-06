@@ -339,7 +339,7 @@ function createHarness(mode = 'native-records', options = {}) {
   };
   plugin.frontmatterMutationService = new FrontmatterMutationService(plugin);
   const service = new NativeRecordService(plugin);
-  service.setup();
+  if (!options.deferSetup) service.setup();
   return { service, plugin, vault, entries, contents, metadata, events, indexed, addFile };
 }
 
@@ -4328,6 +4328,98 @@ function assertSingleProfileEvaluation(measurement, expectedCalls, expectedCopie
   assert.equal(measurement.calls.size, expectedCalls);
   assert.equal(measurement.copies, expectedCopies);
 }
+
+for (const variant of ['ordinary', 'canonical', 'mapped-26']) {
+  test(`cold setup shares one per-file inspection across 10000 ${variant} metadata notes`, () => {
+    const h = createHarness('native-records', { deferSetup: true });
+    h.plugin.settings.nativeRecordKindPropertyKeys = variant === 'mapped-26'
+      ? Object.fromEntries(Array.from({ length: 26 }, (_, i) => [`perf-${i}`, {
+        key: 'entityKind', parentKind: 'entity', value: `type-${i}`,
+      }]))
+      : {};
+    const sources = [];
+    for (let i = 0; i < 10000; i++) {
+      const file = h.addFile(`cold-${i}.md`, '');
+      const raw = variant === 'ordinary' ? { title: `Ordinary ${i}`, tags: ['notes'] }
+        : variant === 'canonical' ? { tpsId: `cold-${i}`, kind: 'task', title: `Task ${i}` }
+        : { tpsId: `cold-${i}`, kind: 'entity', entityKind: 'type-0', title: `Entity ${i}` };
+      h.metadata.set(file, raw);
+      sources.push(raw);
+    }
+    const before = structuredClone(sources);
+    const counters = { inventories: 0, metadata: 0, reads: 0, writes: 0, profileAccesses: 0, configurations: 0, evaluations: 0, copies: 0 };
+    const perSource = new Map();
+    for (const [host, name, key] of [
+      [h.vault, 'getMarkdownFiles', 'inventories'],
+      [h.plugin.app.metadataCache, 'getFileCache', 'metadata'],
+      [h.vault, 'read', 'reads'], [h.vault, 'cachedRead', 'reads'],
+      [h.vault, 'create', 'writes'], [h.vault, 'process', 'writes'], [h.vault, 'rename', 'writes'],
+      [h.service, 'getInspectionProfiles', 'profileAccesses'],
+      [h.service, 'getStorageConfiguration', 'configurations'],
+    ]) {
+      const original = host[name];
+      host[name] = function (...args) { counters[key]++; return original.apply(this, args); };
+    }
+    globalThis.__nativeRecordProfileInspection = (raw, profile) => {
+      counters.evaluations++;
+      const profiles = perSource.get(raw) || new Map();
+      profiles.set(profile, (profiles.get(profile) || 0) + 1);
+      perSource.set(raw, profiles);
+    };
+    globalThis.__nativeRecordEnvelopeCopy = () => { counters.copies++; };
+    try { h.service.setup(); } finally {
+      delete globalThis.__nativeRecordProfileInspection;
+      delete globalThis.__nativeRecordEnvelopeCopy;
+    }
+    assert.equal(counters.inventories, 1);
+    assert.equal(counters.metadata, sources.length);
+    assert.equal(counters.reads, 0, 'cold metadata indexing is not authoritative body verification');
+    assert.equal(counters.writes, 0);
+    assert.equal(counters.configurations, 1, 'the existing configuration cache stays generation-scoped');
+    assert.equal(counters.profileAccesses, sources.length, 'one current settings signature per file, not per validation pass');
+    assert.equal(counters.evaluations, sources.length * (variant === 'mapped-26' ? 27 : 3));
+    assert.equal([...perSource.values()].every(profiles => [...profiles.values()].every(count => count === 1)), true,
+      'every exact prepared profile, including a no-match, is evaluated once per file');
+    assert.equal(counters.copies, sources.length * (variant === 'ordinary' ? 0 : variant === 'canonical' ? 1 : 2));
+    assert.equal(h.service.recordsByPath.size, variant === 'ordinary' ? 0 : sources.length);
+    assert.equal(h.service.blockedIdentityEvidencePaths.size, 0);
+    for (let i = 0; i < sources.length; i++) {
+      const indexed = h.service.recordsByPath.get(`cold-${i}.md`);
+      if (variant === 'ordinary') assert.equal(indexed, undefined);
+      else {
+        assert.equal(indexed.tpsId, sources[i].tpsId);
+        assert.equal(indexed.title, sources[i].title);
+        assert.equal(indexed.kind, variant === 'canonical' ? 'task' : 'perf-0');
+      }
+    }
+    assert.deepEqual(sources, before);
+  });
+}
+
+test('cold setup rechecks in-place mappings between files and each later metadata event', () => {
+  const h = createHarness('native-records', { deferSetup: true });
+  h.plugin.settings.nativeRecordKindPropertyKeys = { task: { tag: 'records/old' } };
+  const first = h.addFile('first.md', '');
+  const second = h.addFile('second.md', '');
+  h.metadata.set(first, { tpsId: 'first', title: 'First', tags: ['records/old'], status: 'open' });
+  h.metadata.set(second, { tpsId: 'second', title: 'Second', tags: ['records/new'], status: 'open' });
+  const readCache = h.plugin.app.metadataCache.getFileCache;
+  h.plugin.app.metadataCache.getFileCache = file => {
+    if (file === second) h.plugin.settings.nativeRecordKindPropertyKeys.task.tag = 'records/new';
+    return readCache(file);
+  };
+  h.service.setup();
+  assert.equal(h.service.recordsByPath.get(first.path)?.kind, 'task');
+  assert.equal(h.service.recordsByPath.get(second.path)?.kind, 'task');
+  h.plugin.settings.nativeRecordKindPropertyKeys.task.tag = 'records/final';
+  const completed = { tpsId: 'first', title: 'Changed', tags: ['records/final'], status: 'complete' };
+  h.plugin.app.metadataCache.emit('changed', first, '', { frontmatter: completed });
+  assert.equal(h.service.recordsByPath.get(first.path)?.title, 'Changed');
+  assert.equal(h.service.recordsByPath.get(first.path)?.status, 'complete');
+  h.plugin.app.metadataCache.emit('changed', first, '', { frontmatter: { title: 'No longer a record' } });
+  assert.equal(h.service.recordsByPath.has(first.path), false);
+  assert.equal(h.service.blockedIdentityEvidencePaths.has(first.path), false);
+});
 
 test('profile inspection reuse rejects 1000 ordinary notes without repeated no-match evaluations', () => {
   const { service } = createHarness();
