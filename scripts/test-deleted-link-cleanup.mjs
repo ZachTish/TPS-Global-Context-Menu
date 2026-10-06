@@ -49,6 +49,7 @@ async function importCleanupHarness() {
       canAutomaticallyMutateTemplateSource,
       canAutomaticallyMutatePathWithExclusions,
     } from './src/utils/template-protection.ts';
+    export { BodySubitemLinkService } from './src/services/body-subitem-link-service.ts';
 
     export class TFile {
       constructor(path) {
@@ -107,6 +108,16 @@ async function importCleanupHarness() {
     platform: "node",
     write: false,
     logLevel: "silent",
+    plugins: [{
+      name: "deleted-link-obsidian-host",
+      setup(build) {
+        build.onResolve({ filter: /^obsidian$/u }, () => ({ path: "obsidian", namespace: "deleted-link-host" }));
+        build.onLoad({ filter: /.*/u, namespace: "deleted-link-host" }, () => ({
+          contents: "export class TFile {} export const normalizePath = value => value;",
+          loader: "js",
+        }));
+      },
+    }],
   });
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString("base64")}`);
 }
@@ -126,11 +137,13 @@ function createFixture(TFile, definitions, options = {}) {
   const readPaths = [];
   const processedBodyPaths = [];
   const refreshedPaths = [];
+  const metadataPaths = [];
 
   const plugin = {
     settings: {
       parentLinkFrontmatterKey: "childOf",
       frontmatterAutoWriteExclusions: "tag:template",
+      dataArchitectureMode: options.dataArchitectureMode ?? "legacy",
     },
     app: {
       vault: {
@@ -143,6 +156,7 @@ function createFixture(TFile, definitions, options = {}) {
         cachedRead: async (file) => {
           readPaths.push(file.path);
           if (file.extension !== "md") throw new Error(`Tried to read binary body: ${file.path}`);
+          await options.beforeCachedRead?.(file, bodies, logicalFrontmatter);
           return bodies.get(file.path) ?? "";
         },
         process: async (file, mutator) => {
@@ -154,6 +168,10 @@ function createFixture(TFile, definitions, options = {}) {
         },
       },
       metadataCache: {
+        getFileCache: (file) => {
+          metadataPaths.push(file.path);
+          return options.getFileCache ? options.getFileCache(file) : { frontmatter: logicalFrontmatter.get(file.path) ?? {} };
+        },
         getFirstLinkpathDest: (target) => {
           const destination = options.linkDestinations?.[target];
           return destination ? byPath.get(destination) ?? null : null;
@@ -207,6 +225,7 @@ function createFixture(TFile, definitions, options = {}) {
     readPaths,
     processedBodyPaths,
     refreshedPaths,
+    metadataPaths,
   };
 }
 
@@ -249,7 +268,7 @@ test("GCM deletion cleanup is serialized, logical-target aware, and atomically r
   assert.match(runSource, /frontmatterMutationService\.process\(file,/u);
   assert.match(runSource, /const values = Array\.isArray\(raw\) \? raw : \(raw != null \? \[raw\] : \[\]\)/u);
   assert.match(runSource, /const isMarkdown = file\.extension\?\.toLowerCase\(\) === 'md'/u);
-  assert.match(runSource, /if \(!isMarkdown\)/u);
+  assert.match(runSource, /if \(!isMarkdown \|\| this\.plugin\.settings\.dataArchitectureMode === 'native-records'\)/u);
   assert.doesNotMatch(runSource, /getMarkdownFiles\(\)/u);
   assert.match(runSource, /classifyDeletedMarkdownLink\(linkValue, sourcePath, matchContext\)/);
   assert.match(runSource, /if \(preflight\.length !== lines\.length\) \{[\s\S]*?vault\.process\(file, \(current\) =>/);
@@ -459,18 +478,174 @@ test("unrelated deletion uses one cached source inspection and no writer attempt
   assert.equal(fixture.processedBodyPaths.length, 0);
 });
 
-test("unchanged deletion bursts never enter a file write queue", async () => {
+test("native deletion bursts never inspect bodies or enter a file write queue", async () => {
   const { DeletedLinkCleanupHarness, TFile } = await importCleanupHarness();
   const fixture = createFixture(TFile, [{
     path: "Notes/Unrelated.md", frontmatter: { parent: "[[Keep]]", attachments: "[[Keep.png]]" }, body: "unchanged",
-  }]);
+  }], { dataArchitectureMode: "native-records" });
   const service = new DeletedLinkCleanupHarness(fixture.plugin);
   await Promise.all(Array.from({ length: 20 }, (_, i) => service.cleanupLinksForDeletedFile(`Unreferenced ${i}.md`)));
   assert.equal(fixture.includeIgnoredCalls.length, 20);
   assert.equal(fixture.mutationAttempts.length, 0);
   assert.equal(fixture.rawReadPaths.length, 0);
-  assert.equal(fixture.readPaths.length, 20);
+  assert.equal(fixture.readPaths.length, 0);
   assert.equal(service.deletedLinkCleanupPending, 0);
+});
+
+test("native deletion ignores historical body links across 4,000 plain and list notes", async () => {
+  const { DeletedLinkCleanupHarness, TFile, BodySubitemLinkService } = await importCleanupHarness();
+  const fixture = createFixture(TFile, Array.from({ length: 4000 }, (_, i) => ({
+    path: `Notes/Ordinary ${i}.md`,
+    frontmatter: { title: `Ordinary ${i}`, childOf: "[[Keep]]", attachments: ["[[Keep.png]]"] },
+    body: `---\ntitle: Ordinary ${i}\nchildOf: '[[Keep]]'\nattachments: ["[[Keep.png]]"]\n---\n${i % 3 === 0 ? "[[Deleted]]" : i % 3 === 1 ? "- [ ] [[Deleted]]" : "Ordinary text"}\nBody sentinel`,
+  })), { dataArchitectureMode: "native-records" });
+  fixture.plugin.bodySubitemLinkService = new BodySubitemLinkService(fixture.plugin);
+  const before = new Map(fixture.bodies);
+  const service = new DeletedLinkCleanupHarness(fixture.plugin);
+  const result = await service.cleanupLinksForDeletedFile("Deleted.md");
+  assert.equal(result.scannedFiles, 4000);
+  assert.equal(fixture.readPaths.length, 0);
+  assert.equal(fixture.metadataPaths.length, 0, "body-link cache freshness is irrelevant to native ownership");
+  assert.equal(fixture.rawReadPaths.length, 0);
+  assert.equal(fixture.mutationAttempts.length, 0);
+  assert.equal(fixture.processedBodyPaths.length, 0);
+  assert.equal(result.touchedFiles, 0);
+  assert.deepEqual(fixture.bodies, before);
+});
+
+test("native deletion still removes scalar and array frontmatter links while preserving body and completion", async () => {
+  const { DeletedLinkCleanupHarness, TFile } = await importCleanupHarness();
+  const fixture = createFixture(TFile, [
+    { path: "Notes/Scalar.md", frontmatter: { childOf: "[[Deleted]]", status: "complete", completedDate: "2026-10-06T12:00:00" }, body: "[[Deleted]]\nKeep scalar body" },
+    { path: "Notes/Array.md", frontmatter: { attachments: ["[[Deleted]]", "[[Keep]]"], parents: ["[[Deleted]]", "[[Keep]]"] }, body: "- [ ] [[Deleted]]\nKeep array body" },
+    { path: "Notes/Unrelated.md", frontmatter: { childOf: "[[Keep]]" }, body: "Keep unrelated body" },
+  ], { dataArchitectureMode: "native-records" });
+  const service = new DeletedLinkCleanupHarness(fixture.plugin);
+  const result = await service.cleanupLinksForDeletedFile("Deleted.md");
+  assert.equal(result.touchedFiles, 2);
+  assert.deepEqual(fixture.logicalFrontmatter.get("Notes/Scalar.md"), { status: "complete", completedDate: "2026-10-06T12:00:00" });
+  assert.deepEqual(fixture.logicalFrontmatter.get("Notes/Array.md"), { attachments: ["[[Keep]]"], parents: ["[[Keep]]"] });
+  assert.equal(fixture.readPaths.includes("Notes/Unrelated.md"), false);
+  assert.equal(fixture.bodies.get("Notes/Scalar.md"), "[[Deleted]]\nKeep scalar body");
+  assert.equal(fixture.bodies.get("Notes/Array.md"), "- [ ] [[Deleted]]\nKeep array body");
+  assert.deepEqual(fixture.readPaths, ["Notes/Scalar.md", "Notes/Array.md"], "only possible frontmatter changes inspect current exclusions");
+  assert.deepEqual(fixture.processedBodyPaths, []);
+});
+
+test("legacy deletion inspects current body despite complete but stale link metadata", async () => {
+  const { DeletedLinkCleanupHarness, TFile, BodySubitemLinkService } = await importCleanupHarness();
+  const fixture = createFixture(TFile, [
+    { path: "Notes/Newly linked.md", body: "[[Deleted]]\nKeep body" },
+    { path: "Notes/Legacy malformed.md", body: "- [Deleted]]\nKeep body" },
+  ], { getFileCache: () => ({ links: [], embeds: [], listItems: [], sections: [{ type: "paragraph" }] }) });
+  fixture.plugin.bodySubitemLinkService = new BodySubitemLinkService(fixture.plugin);
+  const service = new DeletedLinkCleanupHarness(fixture.plugin);
+  const result = await service.cleanupLinksForDeletedFile("Deleted.md");
+  assert.equal(result.touchedFiles, 2);
+  assert.equal(fixture.readPaths.length, 2);
+  assert.equal(fixture.bodies.get("Notes/Newly linked.md"), "Keep body");
+  assert.equal(fixture.bodies.get("Notes/Legacy malformed.md"), "Keep body");
+});
+
+test("legacy deletion admits frontmatter metadata that arrives during cachedRead", async () => {
+  const { DeletedLinkCleanupHarness, TFile, BodySubitemLinkService } = await importCleanupHarness();
+  const fixture = createFixture(TFile, [{
+    path: "Notes/Metadata arriving.md",
+    frontmatter: {},
+    body: "---\nchildOf: '[[Deleted]]'\nstatus: complete\ncompletedDate: 2026-10-06T12:00:00\n---\nKeep body",
+  }], {
+    beforeCachedRead(file, _bodies, frontmatter) {
+      if (!frontmatter.get(file.path)?.completedDate) {
+        frontmatter.set(file.path, {
+          childOf: "[[Deleted]]",
+          status: "complete",
+          completedDate: "2026-10-06T12:00:00",
+        });
+      }
+    },
+  });
+  fixture.plugin.bodySubitemLinkService = new BodySubitemLinkService(fixture.plugin);
+  const service = new DeletedLinkCleanupHarness(fixture.plugin);
+  const result = await service.cleanupLinksForDeletedFile("Deleted.md");
+  assert.equal(result.touchedFiles, 1);
+  assert.deepEqual(fixture.logicalFrontmatter.get("Notes/Metadata arriving.md"), {
+    status: "complete",
+    completedDate: "2026-10-06T12:00:00",
+  });
+  assert.deepEqual(fixture.mutatedPaths, ["Notes/Metadata arriving.md"]);
+  assert.deepEqual(fixture.processedBodyPaths, []);
+});
+
+test("native deletion rechecks fresh frontmatter after cache candidate admission", async () => {
+  const { DeletedLinkCleanupHarness, TFile } = await importCleanupHarness();
+  const fixture = createFixture(TFile, [{
+    path: "Notes/Changed.md", frontmatter: { childOf: "[[Deleted]]" }, body: "- [[Deleted]]\nKeep body",
+  }], {
+    dataArchitectureMode: "native-records",
+    beforeFrontmatterProcess(file, _bodies, frontmatter) {
+      frontmatter.set(file.path, { childOf: "[[Keep]]", status: "complete", completedDate: "New authored date" });
+    },
+  });
+  const service = new DeletedLinkCleanupHarness(fixture.plugin);
+  const result = await service.cleanupLinksForDeletedFile("Deleted.md");
+  assert.equal(result.touchedFiles, 0);
+  assert.deepEqual(fixture.logicalFrontmatter.get("Notes/Changed.md"), { childOf: "[[Keep]]", status: "complete", completedDate: "New authored date" });
+  assert.equal(fixture.bodies.get("Notes/Changed.md"), "- [[Deleted]]\nKeep body");
+  assert.deepEqual(fixture.processedBodyPaths, []);
+  assert.deepEqual(service.notifiedPaths, []);
+});
+
+test("native frontmatter deletion cleanup still respects current tag and path exclusions", async () => {
+  const { DeletedLinkCleanupHarness, TFile } = await importCleanupHarness();
+  const fixture = createFixture(TFile, [{
+    path: "Notes/Protected.md", frontmatter: { childOf: "[[Deleted]]" }, body: "---\ntags: [keep]\n---\n[[Deleted]]",
+  }], {
+    dataArchitectureMode: "native-records",
+    beforeFrontmatterProcess(file, bodies, frontmatter) {
+      bodies.set(file.path, "---\ntags: [template]\n---\n[[Deleted]]");
+      frontmatter.set(file.path, { tags: ["template"], childOf: "[[Deleted]]" });
+    },
+  });
+  const service = new DeletedLinkCleanupHarness(fixture.plugin);
+  await service.cleanupLinksForDeletedFile("Deleted.md");
+  assert.deepEqual(fixture.logicalFrontmatter.get("Notes/Protected.md"), { tags: ["template"], childOf: "[[Deleted]]" });
+  assert.equal(fixture.bodies.get("Notes/Protected.md"), "---\ntags: [template]\n---\n[[Deleted]]");
+  assert.deepEqual(fixture.mutatedPaths, []);
+  assert.deepEqual(fixture.processedBodyPaths, []);
+  fixture.plugin.settings.frontmatterAutoWriteExclusions = "path:Notes/";
+  const reads = fixture.readPaths.length;
+  await service.cleanupLinksForDeletedFile("Deleted.md");
+  assert.equal(fixture.readPaths.length, reads);
+});
+
+test("a mode change to native at the atomic body boundary refuses a pending legacy deletion write", async () => {
+  const { DeletedLinkCleanupHarness, TFile } = await importCleanupHarness();
+  let fixture;
+  fixture = createFixture(TFile, [{ path: "Notes/Changed.md", body: "[[Deleted]]\nKeep body" }], {
+    beforeBodyProcess() { fixture.plugin.settings.dataArchitectureMode = "native-records"; },
+  });
+  const service = new DeletedLinkCleanupHarness(fixture.plugin);
+  const result = await service.cleanupLinksForDeletedFile("Deleted.md");
+  assert.equal(result.touchedFiles, 0);
+  assert.equal(result.removedReferences, 0);
+  assert.equal(fixture.bodies.get("Notes/Changed.md"), "[[Deleted]]\nKeep body");
+  assert.deepEqual(service.notifiedPaths, []);
+});
+
+test("a legacy body link resolving to another live target remains untouched", async () => {
+  const { DeletedLinkCleanupHarness, TFile, BodySubitemLinkService } = await importCleanupHarness();
+  const fixture = createFixture(TFile, [
+    { path: "Archive/A/Report.md", body: "Other report" },
+    { path: "Notes/Referrer.md", body: "[[A/Report]]\nKeep body" },
+  ], { linkDestinations: { "A/Report": "Archive/A/Report.md" } });
+  fixture.plugin.bodySubitemLinkService = new BodySubitemLinkService(fixture.plugin);
+  const service = new DeletedLinkCleanupHarness(fixture.plugin);
+  const result = await service.cleanupLinksForDeletedFile("Projects/A/Report.md");
+  assert.equal(result.touchedFiles, 0);
+  assert.equal(result.removedReferences, 0);
+  assert.deepEqual(fixture.readPaths, ["Archive/A/Report.md", "Notes/Referrer.md"]);
+  assert.deepEqual(fixture.processedBodyPaths, []);
+  assert.equal(fixture.bodies.get("Notes/Referrer.md"), "[[A/Report]]\nKeep body");
 });
 
 test("cached matching frontmatter only permits an attempt; current values still own the mutation", async () => {

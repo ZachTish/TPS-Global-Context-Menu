@@ -1,5 +1,15 @@
 # TPS Global Context Menu
 
+## 7.3.4 — Keep whole-note deletion out of legacy body cleanup
+
+Whole-note mode no longer runs the retired inline-link body cleaner after deleting a file. That route bypassed the shared body-write boundary introduced in 5.0.0 and still inspected every Markdown body. It now checks stored parent/attachment properties and invokes the existing protected writer only for matching candidates. Historical body links stay authored, including unchecked items and links to deleted notes. Current-source atomic mutations, exclusions, ambiguity handling and deletion serialization are retained. The legacy-mode body cleaner retains its original current-body behavior. No new index, watcher, cache, setting or automatic repair is introduced.
+
+Relationship cleanup is a best-effort metadata preflight, not a full-vault integrity sweep: a newly added relationship whose metadata has not arrived can remain authored. A positive cache match never authorizes a stale write; current values and exclusions are checked at the existing atomic boundary.
+
+A 4,000-note regression and a 20-request unchanged burst verify zero native body inspection/write work, including historical list links. The installed 7.3.3 baseline read 13,803 bodies and took 1,244 ms for a synthetic deletion in the background Test vault. This is an operation measurement, not a phone or foreground input-to-paint result. This patch retains 7.3.3's removal of the passive completion rollback and 7.3.2's atomic stale-write protection. Synced plugin files must actually be loaded on every device; Obsidian mobile may need a full restart after downloading an update.
+
+This backward-compatible patch keeps Obsidian 1.10.0 and all saved settings. Final suite, installed after-operation results and artifact hashes are recorded in [7.3.4 release notes](release-notes/7.3.4.md).
+
 ## 7.3.3 — Keep synced completions completed
 
 Metadata and file-change observers no longer roll a completed note back to its previous status when its body contains unchecked items. The old external checklist guard removed the authored status and completion date before displaying a modal. A completion received through Sync, another editor, or another plugin could therefore become overdue again even though its writer saved it correctly. The fix removes that post-save rollback observer and its status-history/timer machinery; it does not add a repair pass, deduplication, retry, suppression store, or sync protocol.

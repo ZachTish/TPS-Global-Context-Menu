@@ -3067,6 +3067,17 @@ export class BulkEditService {
         for (const file of files) {
             const isMarkdown = file.extension?.toLowerCase() === 'md';
             if (isMarkdown && !canAutomaticallyMutatePathWithExclusions(file, this.plugin.settings)) continue;
+            const hasMatchingFrontmatter = () => Object.entries(
+                this.plugin.parentLinkResolutionService.getLogicalFrontmatter(file),
+            ).some(([key, raw]) => {
+                if (!parentKeys.includes(key.toLowerCase()) && key.toLowerCase() !== attachmentsKey) return false;
+                const values = Array.isArray(raw) ? raw : (raw != null ? [raw] : []);
+                return values.some(value => isMatch(value, file.path));
+            });
+            // Whole-note mode owns stored relationships, not historical body
+            // lines. Match the shared body writer's retired-line boundary rather
+            // than scanning unrelated bodies or trusting stale link metadata.
+            if (isMarkdown && this.plugin.settings.dataArchitectureMode === 'native-records' && !hasMatchingFrontmatter()) continue;
             // Inspection may reject work, but only the existing atomic writers
             // below authorize changes against current source and exclusions.
             let inspectedSource = '';
@@ -3079,16 +3090,13 @@ export class BulkEditService {
                 }
                 if (!canAutomaticallyMutateTemplateSource(inspectedSource, this.plugin.settings)) continue;
             }
-            const fm = this.plugin.parentLinkResolutionService.getLogicalFrontmatter(file);
-            const hasMatchingFrontmatter = Object.entries(fm).some(([key, raw]) => {
-                if (!parentKeys.includes(key.toLowerCase()) && key.toLowerCase() !== attachmentsKey) return false;
-                const values = Array.isArray(raw) ? raw : (raw != null ? [raw] : []);
-                return values.some(value => isMatch(value, file.path));
-            });
             let frontmatterChanged = false;
             const frontmatterRemovedReferences = new Set<string>();
 
-            if (hasMatchingFrontmatter) {
+            // Fetch again after the read: the metadata cache can publish a
+            // relationship while cachedRead is suspended. Legacy cleanup must
+            // retain its original post-read admission order.
+            if (hasMatchingFrontmatter()) {
                 try {
                     await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
                         if (
@@ -3130,7 +3138,7 @@ export class BulkEditService {
             }
 
             let bodyChanged = false;
-            if (!isMarkdown) {
+            if (!isMarkdown || this.plugin.settings.dataArchitectureMode === 'native-records') {
                 if (frontmatterChanged) touchedFiles.push(file);
                 continue;
             }
@@ -3150,7 +3158,8 @@ export class BulkEditService {
                 if (preflight.length !== lines.length) {
                     const bodyRemovedReferences = new Set<string>();
                     await this.plugin.app.vault.process(file, (current) => {
-                        if (!canAutomaticallyMutatePathWithExclusions(file, this.plugin.settings)
+                        if (this.plugin.settings.dataArchitectureMode === 'native-records'
+                            || !canAutomaticallyMutatePathWithExclusions(file, this.plugin.settings)
                             || !canAutomaticallyMutateTemplateSource(current, this.plugin.settings)) return current;
                         const currentLines = current.split('\n');
                         const filtered = currentLines.filter((line) => {
