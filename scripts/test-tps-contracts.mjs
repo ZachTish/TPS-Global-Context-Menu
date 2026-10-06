@@ -24,7 +24,10 @@ test('GCM API lifecycle publishes exact available and unavailable contract versi
   const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
   assert.match(source, /interface TPSGcmApiChangedPayload[\s\S]{0,1200}tasksVersion:\s*number\s*\|\s*null;[\s\S]{0,200}nativeRecordsVersion:\s*number\s*\|\s*null;[\s\S]{0,200}itemHistoryVersion:\s*number\s*\|\s*null;[\s\S]{0,200}filePropertiesVersion:\s*number\s*\|\s*null;[\s\S]{0,200}itemPropertiesVersion:\s*number\s*\|\s*null;/u);
   assert.match(main, /emitGcmApiChanged\(available:[\s\S]{0,1800}source:\s*['"]tps-global-context-menu['"][\s\S]{0,500}api,[\s\S]{0,500}formulasVersion:[\s\S]{0,500}lineMetadataVersion:[\s\S]{0,500}entityIndexVersion:[\s\S]{0,500}configurationVersion:[\s\S]{0,500}dailyNotesVersion:[\s\S]{0,500}taskLinesVersion:[\s\S]{0,500}taskCheckboxesVersion:[\s\S]{0,500}tasksVersion:[\s\S]{0,200}nativeRecordsVersion:[\s\S]{0,200}itemHistoryVersion:[\s\S]{0,200}filePropertiesVersion:[\s\S]{0,200}itemPropertiesVersion:/u);
-  assert.match(main, /setupPluginApi\(this\);[\s\S]{0,500}workspace\.on\(TPS_EVENTS\.GCM_API_REQUEST[\s\S]{0,500}emitGcmApiChanged\(true\)/u);
+  assert.match(main, /workspace\.on\(TPS_EVENTS\.GCM_API_REQUEST[\s\S]{0,150}emitGcmApiChanged\(true\)[\s\S]{0,800}await this\.loadSettings\(\)/u,
+    'requests are handled before startup awaits so a partial API stays explicitly unavailable');
+  assert.match(main, /private async initializeStartupServices[\s\S]{0,1200}setupPluginApi\(this\);[\s\S]{0,300}emitGcmApiChanged\(true\)/u,
+    'owned completion publishes the same available contract after initialization');
   assert.match(main, /this\.emitGcmApiChanged\(true\);\s*this\.timeTrackingService\.setup\(\)/u, 'initial provider readiness remains published');
   assert.match(main, /await this\.persistSettingsSnapshot\(\);\s*await this\.parentLinkResolutionService\?\.onRelationshipSettingsChanged\(\);\s*this\.emitGcmApiChanged\(true\)/u, 'saved configuration changes refresh relationships before notifying API consumers');
   assert.match(main, /delete \(this as any\)\.api;[\s\S]{0,300}emitGcmApiChanged\(false\)/u);

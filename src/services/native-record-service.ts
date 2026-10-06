@@ -1142,6 +1142,7 @@ export class NativeRecordService {
   readonly version = 6;
   private setupPromise: Promise<boolean> | null = null;
   private initialDiscovery: {
+    started: boolean;
     queue: Set<string>;
     sourceFiles: Set<TFile>;
     complete: (ready: boolean) => void;
@@ -1194,7 +1195,7 @@ export class NativeRecordService {
     this.authoritativeIdentityGeneration = -1;
   }
 
-  setup(): Promise<boolean> {
+  setup(options: { afterLayout?: boolean } = {}): Promise<boolean> {
     if (this.disposed) return Promise.resolve(false);
     if (this.setupPromise) return this.setupPromise;
     let complete!: (ready: boolean) => void;
@@ -1203,10 +1204,14 @@ export class NativeRecordService {
     // Direct test/service callers need not await an empty startup. An owning
     // onload still receives the original rejection rather than a retry.
     void this.setupPromise.catch(() => undefined);
-    const discovery = { queue: new Set<string>(), sourceFiles: new Set<TFile>(), complete, fail };
+    const discovery = { started: false, queue: new Set<string>(), sourceFiles: new Set<TFile>(), complete, fail };
     this.initialDiscovery = discovery;
     this.plugin.registerEvent(this.plugin.app.metadataCache.on('changed', (file, _data, cache) => {
       if (this.disposed || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
+      if (this.initialDiscovery && !this.initialDiscovery.started) {
+        this.invalidateAuthoritativeSources([file.path]);
+        return;
+      }
       // A delayed cache event can still contain the pre-write identity after a
       // source-preserving internal mutation. Keep the exact authoritative
       // index while its generation is current; external Vault events invalidate
@@ -1220,6 +1225,7 @@ export class NativeRecordService {
         || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
       this.invalidateAuthoritativeSources([file.path]);
       if (!this.isInternalIdentityWrite(file.path)) this.identitySourceGeneration += 1;
+      if (this.initialDiscovery && !this.initialDiscovery.started) return;
       this.indexFile(file);
       // Vault discovery emits create for existing files before layout readiness.
       // Index those files, but never treat them as newly authored Base drafts.
@@ -1250,23 +1256,37 @@ export class NativeRecordService {
         || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
       this.pendingRenameReads.delete(file);
       this.initialDiscovery?.queue.delete(oldPath);
-      this.initialDiscovery?.sourceFiles.add(file);
       this.invalidateAuthoritativeSources([oldPath, file.path]);
       if (
         file instanceof TFile
         && !this.isInternalIdentityWrite(oldPath)
         && !this.isInternalIdentityWrite(file.path)
       ) this.identitySourceGeneration += 1;
+      if (this.initialDiscovery && !this.initialDiscovery.started) return;
+      this.initialDiscovery?.sourceFiles.add(file);
       void this.handleRecordRename(file, oldPath);
     }));
     // The existing incremental owners must be installed before this scan can
     // release its first task. Only initial discovery is cooperative.
-    void this.discoverInitialIndex(discovery).catch(error => {
-      if (this.initialDiscovery === discovery) this.initialDiscovery = null;
-      discovery.fail(error);
-      logger.flowError('NativeRecords', 'index:startup-failed', error);
-    });
+    const start = () => {
+      if (this.disposed || this.initialDiscovery !== discovery || discovery.started) return;
+      discovery.started = true;
+      void this.discoverInitialIndex(discovery).catch(error => {
+        if (this.initialDiscovery === discovery) this.initialDiscovery = null;
+        discovery.fail(error);
+        logger.flowError('NativeRecords', 'index:startup-failed', error);
+      });
+    };
+    if (options.afterLayout && !this.plugin.app.workspace.layoutReady) this.plugin.app.workspace.onLayoutReady(start);
+    else start();
     return this.setupPromise;
+  }
+
+  /** Data operations must not observe an initial inventory which has not finished. */
+  private async waitForInitialIndex(): Promise<void> {
+    if (this.disposed || (this.setupPromise && !await this.setupPromise) || this.disposed) {
+      throw new Error('TPS native-record startup was cancelled.');
+    }
   }
 
   dispose(): void {
@@ -1514,6 +1534,7 @@ export class NativeRecordService {
     if ('id' in options || 'planToken' in options || 'expectedPath' in options) {
       throw new Error('Fresh record creation cannot supply an identity or an identity plan.');
     }
+    await this.waitForInitialIndex();
     const id = this.generateCryptographicId(kind);
     // Without a secure random source, retain the existing verified create path.
     if (!id) return this.create(kind, properties, options);
@@ -1533,6 +1554,7 @@ export class NativeRecordService {
     }
     this.assertEnabled();
     this.assertValidStorageProfile();
+    await this.waitForInitialIndex();
     if (commitGuard && !commitGuard()) {
       throw new Error('Standalone task checkbox mapping changed before record creation.');
     }
@@ -1649,6 +1671,7 @@ export class NativeRecordService {
     properties: Record<string, unknown> = {},
     options: TpsNativeRecordCreateOptions = {},
   ): Promise<TpsNativeRecordHandle> {
+    await this.waitForInitialIndex();
     this.assertAssetSource(source);
     const existing = this.resolveAssetCached(source);
     if (existing) return existing;
@@ -1684,6 +1707,7 @@ export class NativeRecordService {
   }
 
   async resolveAsset(source: TFile): Promise<TpsNativeRecordHandle | null> {
+    await this.waitForInitialIndex();
     if (!(source instanceof TFile)) return null;
     const cached = this.resolveAssetCached(source);
     if (cached) return cached;
@@ -1693,6 +1717,7 @@ export class NativeRecordService {
 
   /** A selected path owns a local edit; ID discovery owns global verification. */
   async resolve(reference: NativeRecordReference): Promise<TpsNativeRecordHandle | null> {
+    await this.waitForInitialIndex();
     const directFile = reference instanceof TFile
       ? reference
       : typeof reference === 'string'
@@ -2137,6 +2162,7 @@ export class NativeRecordService {
     entries: readonly TpsNativeRecordIdentityPlanEntry[],
     snapshot: Pick<TpsNativeRecordSnapshot, 'token' | 'revision'>,
   ): Promise<TpsNativeRecordIdentityPlan | null> {
+    await this.waitForInitialIndex();
     if (
       !snapshot
       || snapshot.token !== this.identitySourceGeneration
@@ -2208,6 +2234,7 @@ export class NativeRecordService {
     entries: readonly TpsNativeRecordIdentityPlanEntry[],
     cause: FilePropertiesMutationCause = { kind: 'automation' },
   ): Promise<TpsNativeRecordIdentityApplyResult> {
+    await this.waitForInitialIndex();
     const failed = (handles: TpsNativeRecordHandle[], failedIndex: number | null, error: string) => ({
       ok: false, handles, failedIndex, error,
     });
@@ -2929,6 +2956,7 @@ export class NativeRecordService {
   }
 
   async normalizeTaskRecordIdentities(): Promise<{ inspected: number; updated: number; skipped: number }> {
+    await this.waitForInitialIndex();
     const records = [...this.recordsByPath.entries()]
       .filter(([, frontmatter]) => nativeRecordStructuralKind(frontmatter) === 'task')
       .sort(([left], [right]) => left.localeCompare(right));
@@ -3245,6 +3273,7 @@ export class NativeRecordService {
   }
 
   private async adoptNewTaskDraftInternal(file: TFile): Promise<void> {
+    await this.waitForInitialIndex();
     if (!this.isEnabled() || !this.newlyCreatedFiles.has(file)) return;
     if (file.extension.toLocaleLowerCase() !== 'md') return;
     if (this.plugin.app.vault.getFileByPath(file.path) !== file) return;
@@ -3393,7 +3422,7 @@ export class NativeRecordService {
     this.authoritativeSourceCache.clear();
     this.authoritativeSourceRevision += 1;
     this.authoritativeIdentityGeneration = -1;
-    this.clearIdentityIndex();
+    this.clearIdentityIndex(false);
     const vault = this.plugin.app.vault as typeof this.plugin.app.vault & { getMarkdownFiles?: () => TFile[] };
     const files = typeof vault.getMarkdownFiles === 'function' ? vault.getMarkdownFiles() : [];
     for (const file of files) discovery.queue.add(file.path);
@@ -3438,8 +3467,8 @@ export class NativeRecordService {
     return new Promise(resolve => globalThis.setTimeout(resolve, 0));
   }
 
-  private clearIdentityIndex(): void {
-    this.authoritativeIndexDirtyPaths.clear();
+  private clearIdentityIndex(clearDirtyPaths = true): void {
+    if (clearDirtyPaths) this.authoritativeIndexDirtyPaths.clear();
     this.idsByPath.clear();
     this.pathsById.clear();
     this.recordsByPath.clear();
@@ -3454,6 +3483,7 @@ export class NativeRecordService {
    * edits do not make every food log read the entire vault again.
    */
   private async refreshIdentityIndexFromVaultSource(): Promise<void> {
+    await this.waitForInitialIndex();
     if (this.authoritativeIdentityGeneration === this.identitySourceGeneration) return;
     if (!this.authoritativeIdentityRefresh) {
       this.authoritativeIdentityRefresh = this.refreshIdentityIndexUntilStable();

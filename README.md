@@ -1,5 +1,85 @@
 # TPS Global Context Menu
 
+## 7.3.13 — Separate interface registration from initial data readiness
+
+Onload now finishes interface, command and event registration without awaiting
+layout-owned native discovery or journal recovery. One initial job starts after
+layout readiness; its native metadata inventory retains the existing bounded
+task slices and current-source ownership. Relationship discovery also waits for
+the initial layout. Normal note navigation does not start another initial job.
+The existing API remains unavailable until the complete native inventory,
+history activation and Daily Note configuration finish. API requests during
+startup receive an explicit unavailable response; late publication retains the
+existing availability event and unchanged public API versions.
+
+Early native creation, asset lookup, resolution, identity planning and task
+normalization join the same native setup owner before inspecting incomplete
+maps, reserving identities or writing. Startup file discovery events do not
+index pre-layout cache entries or adopt existing files as new task drafts.
+Current metadata, creation, deletion, rename, path reuse and replacement are
+collected from their current owners when the initial inventory runs. Explicit
+settings, migration and cache-miss rebuild callers remain synchronous. A complete
+explicit replacement can settle the paused initial job; a failed replacement
+rejects it without retry. Unload cancels initial discovery and prevents late
+work or API republication.
+
+Initial history recovery uses its existing activation owner behind native
+readiness. Disabling and re-enabling history joins the same native setup and
+current configuration epoch. Early task mutations and final API publication
+join replacement maintenance rather than entering an old recovery pass. The
+public metadata resolution observed during a settings await also seeds the
+late Daily Note identity owner, including hosts without the private initialized
+flag. Explicit whole-cache rebuilds still revoke that identity proof until the
+next public resolution event. This is identity readiness, not an extension of
+the separate Daily Note configuration adapter-read promise.
+
+Focused actual-service/lifecycle controls pass 361 checks, including all prior
+native checks, zero native/relationship inventories before layout, early
+commands, pre-layout source events, cancellation, replacement failure and
+history toggles. The complete onload/onunload executes with bounded UI and
+dependency facades, actual Native/Parent services and selected actual history
+and Daily services; these are not whole-host UI timing tests. TypeScript passes.
+Final versioned declared tests pass 1,616 checks and the explicit supplemental
+gate passes 272, without failures, cancellations or skips. The suite's build
+and mandatory separate post-documentation build-only gate pass with deployment
+suppressed and identical artifact hashes. An exact-vault-guarded ordinary final
+build deployed only main.js/manifest.json to TEST, preserving all four tested
+artifact hashes and saved data. Targeted reload confirms loaded 7.3.13; see
+[7.3.13 release notes](release-notes/7.3.13.md).
+
+The matched installed warm-reload corpus retains 16,328 Markdown paths with an
+identical path digest, 2,733 GCM/182 Health records, one inventory per service,
+40 cached/four raw reads and zero mutations. Metadata accesses are 82,006 before
+and 82,011 after; all eight consumers' settings/data, enabled state and the
+original leaf remain unchanged. In this single hidden/unfocused pair, onload
+return changes from 1,080.8 to 439.0 ms, with the new native API still unavailable
+at return; complete API readiness is 697.2 ms and Health readiness 856.4 ms
+(before: 1,080.8/1,137.9 ms). The longest Node heartbeat gap is 305.3/212.7 ms.
+These include instrumentation and other consumers, vary between samples and
+are not a cold-process or foreground/physical speed benchmark.
+
+Both installed 13-phase Live Preview runs pass six tab switches and two
+remounts with 24 food/39 activity rows observed, without measured long tasks,
+render errors or note-mutation attempts. Each run's three UUID fixtures are
+exact-byte archived; settings/data remain unchanged. A getMarkdownFiles/getFiles
+pair in the first combined phase is attributed to Navigator 8.2.3's storage/
+search/React-memo owner, not GCM. The counter includes fixture/background work,
+so its coupling to navigation is not proven and zero navigation scans are not
+claimed. The host was hidden/unfocused; Reading, physical mobile/Windows and
+whole-process cold UI readiness remain unverified.
+
+Settings, schema, commands and minimum Obsidian 1.10.0 are unchanged. No new
+persistent index/cache, watcher, poller, repair or retry is introduced. The
+relationship seed still contains synchronous work; the first authoritative
+source verification remains separate from metadata discovery. Individual path
+inspection is not preempted. This corrects the loading barrier described by
+[Obsidian's load-time guide](https://docs.obsidian.md/plugins/guides/load-time),
+but does not establish faster whole-process cold startup, foreground input to
+paint, physical mobile/Windows or Reading-mode performance. Finances late API
+registration and Controller's private early maintenance are separately versioned
+consumer changes; this GCM-only release does not replace those owners.
+Production remains untouched.
+
 ## 7.3.12 — Bound initial native-record discovery work
 
 The initial native-record metadata inventory now releases a real task between

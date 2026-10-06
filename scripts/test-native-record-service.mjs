@@ -108,6 +108,10 @@ async function loadModule() {
       contents: `
         export * from '../src/services/native-record-service.ts';
         export { FrontmatterMutationService } from '../src/services/frontmatter-mutation-service.ts';
+        export { ParentLinkResolutionService } from '../src/services/parent-link-resolution-service.ts';
+        export { ItemHistoryService } from '../src/services/item-history-service.ts';
+        export { MemoryItemHistoryStore } from '../src/services/item-history-store.ts';
+        export { FileNamingService } from '../src/services/file-naming-service.ts';
         export { TFile, TFolder } from 'obsidian';
       `,
       resolveDir: dirname(fileURLToPath(import.meta.url)),
@@ -188,6 +192,10 @@ const {
   LEGACY_NATIVE_RECORD_PROPERTY_PROFILE,
   FrontmatterMutationService,
   NativeRecordService,
+  ParentLinkResolutionService,
+  ItemHistoryService,
+  MemoryItemHistoryStore,
+  FileNamingService,
   TFile,
   TFolder,
   TPS_NATIVE_RECORD_SCHEMA_VERSION,
@@ -4383,22 +4391,40 @@ function startupLoad(mode = 'native-records', count = 1025) {
 }
 
 function startupPublicationHarness(h, dailyConfigurationReady = Promise.resolve()) {
-  // Execute the actual straight-line onload source through its first available
-  // broadcast, plus actual onunload. UI/component dependencies are no-op
-  // facades; the native constructor/setup and its inventory are real.
+  // Preserve every prior publication/unload assertion against the complete
+  // actual lifecycle, now including the layout-owned initialization method.
+  const harn = coldStartupHarness(h, { dailyConfigurationReady });
+  return {
+    ...harn,
+    get availability() { return harn.availability.map(packet => packet.available); },
+  };
+}
+
+async function flushStartupMicrotasks() {
+  for (let turn = 0; turn < 16; turn++) await Promise.resolve();
+}
+
+function coldStartupHarness(h, {
+  initialized = true,
+  dailyConfigurationReady = Promise.resolve(),
+  settingsReady = Promise.resolve(),
+  historyStore,
+  actualDaily = false,
+} = {}) {
+  // The whole real onload is executed, not just the pre-publication prefix.
+  // UI/component implementations are bounded registration facades; native and
+  // parent discovery are actual services with an actual synthetic file host.
   const source = ts.createSourceFile('main.ts', mainSource, ts.ScriptTarget.Latest, true);
-  let owner;
-  for (const node of source.statements) if (ts.isClassDeclaration(node)
-    && node.name?.text === 'TPSGlobalContextMenuPlugin') owner = node;
+  const owner = source.statements.find(node => ts.isClassDeclaration(node)
+    && node.name?.text === 'TPSGlobalContextMenuPlugin');
   assert.ok(owner);
-  const onload = owner.members.find(member => ts.isMethodDeclaration(member) && member.name.getText(source) === 'onload');
-  const onunload = owner.members.find(member => ts.isMethodDeclaration(member) && member.name.getText(source) === 'onunload');
-  assert.ok(onload?.body && onunload);
-  const publication = onload.body.statements.find(statement => statement.getText(source) === 'this.emitGcmApiChanged(true);');
-  assert.ok(publication, 'exercise the actual first publication, not a modeled substitute');
+  const methods = owner.members.filter(member => ts.isMethodDeclaration(member)
+    && /^(?:onload|onunload|emitGcmApiChanged)$|startup|initializ/i.test(member.name.getText(source)));
   const fields = owner.members.filter(member => ts.isPropertyDeclaration(member)
-    && member.name.getText(source) === 'startupOwner').map(member => member.getText(source)).join('\n');
-  const startupMethod = mainSource.slice(onload.getStart(source), publication.end) + '\n}';
+    && /startup|initializ/i.test(member.name.getText(source)));
+  for (const name of ['onload', 'onunload', 'emitGcmApiChanged']) {
+    assert.ok(methods.some(member => member.name.getText(source) === name), `${name} must be actual source`);
+  }
   const bindings = [];
   for (const node of source.statements) {
     if (!ts.isImportDeclaration(node) || !node.importClause) continue;
@@ -4418,41 +4444,718 @@ function startupPublicationHarness(h, dailyConfigurationReady = Promise.resolve(
     },
     construct() { return noop; },
   });
-  const availability = [], publications = [];
+  const layoutCallbacks = [], cleanups = [], publications = [], availability = [];
+  const workspaceListeners = new Map();
+  const registrations = { commands: 0, editors: 0, markdown: 0, dom: 0, settings: 0, events: 0, interactions: 0 };
+  let relationshipInventories = 0;
+  h.vault.getAllLoadedFiles = () => { relationshipInventories++; return [...h.entries.values()]; };
+  Object.assign(h.plugin.app.workspace, {
+    on(name, callback) {
+      const handlers = workspaceListeners.get(name) || [];
+      handlers.push(callback);
+      workspaceListeners.set(name, handlers);
+      return {};
+    },
+    trigger(name, packet) {
+      if (name === 'tps:gcm-api-changed') availability.push(packet);
+      for (const callback of workspaceListeners.get(name) || []) callback(packet);
+    },
+    onLayoutReady(callback) {
+      if (this.layoutReady) callback();
+      else layoutCallbacks.push(callback);
+    },
+    updateOptions() {},
+    getActiveFile: () => null,
+    getLeavesOfType: () => [],
+  });
+  if (initialized === null) delete h.plugin.app.metadataCache.initialized;
+  else h.plugin.app.metadataCache.initialized = initialized;
   const dependencies = Object.fromEntries(bindings.map(name => [name, noop]));
   Object.assign(dependencies, {
     NativeRecordService: class { constructor() { return h.service; } },
-    FileNamingService: class { whenDailyNoteConfigurationReady() { return dailyConfigurationReady; } },
+    ParentLinkResolutionService,
+    FileNamingService: actualDaily ? FileNamingService : class { whenDailyNoteConfigurationReady() { return dailyConfigurationReady; } },
+    FilePropertiesService: class {
+      isCompanionFile() { return false; }
+      isPropertyTarget() { return false; }
+      handleMetadataResolved() { return Promise.resolve(); }
+      setup() { return Promise.resolve(); }
+      dispose() {}
+    },
     Platform: { isMobile: false },
+    TPS_EVENTS: { GCM_API_CHANGED: 'tps:gcm-api-changed', GCM_API_REQUEST: 'tps:gcm-api-request' },
+    registerGcmEvents() { registrations.events++; },
+    registerGcmCommands() { registrations.commands++; },
     setupPluginApi(plugin) {
       publications.push(h.service.recordsByPath.size);
       plugin.api = { nativeRecords: h.service };
     },
-    window: { clearTimeout() {}, setInterval() { return 1; } },
+    window: { clearTimeout() {}, setTimeout() { return 1; }, setInterval() { return 1; } },
+    setTimeout() { return 1; },
     document: { body: { classList: { remove() {} } } },
-    TPSGlobalContextMenuPlugin: { BUILD_STAMP: 'actual-source-startup-test' },
+    TPSGlobalContextMenuPlugin: { BUILD_STAMP: 'actual-full-onload-cold-test' },
   });
-  const code = ts.transpileModule(`export class Startup { ${fields}\n${startupMethod}\n${onunload.getText(source)} }`, {
-    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
-  }).outputText;
+  if (historyStore) dependencies.ItemHistoryService = class {
+    constructor(plugin) { return new ItemHistoryService(plugin, historyStore); }
+  };
+  const code = ts.transpileModule(`export class Startup {
+    ${fields.map(member => member.getText(source)).join('\n')}
+    ${methods.map(member => member.getText(source)).join('\n')}
+  }`, { compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS } }).outputText;
   const exports = {};
   new Function('exports', ...Object.keys(dependencies), code)(exports, ...Object.values(dependencies));
-  h.plugin.app.workspace.on = () => ({});
-  h.plugin.app.workspace.onLayoutReady = () => {};
-  h.plugin.app.workspace.updateOptions = () => {};
   const plugin = new Proxy(Object.assign(new exports.Startup(), h.plugin, {
-    async loadSettings() {},
-    usesNativeRecordArchitecture: () => true,
+    manifest: { id: 'tps-global-context-menu', dir: '.obsidian/plugins/tps-global-context-menu' },
+    loadSettings: () => settingsReady,
+    usesNativeRecordArchitecture: () => h.plugin.settings.dataArchitectureMode === 'native-records',
     shouldInstallWorkspaceOpenPatch: () => false,
     canRunBackgroundAutomation: () => false,
-    emitGcmApiChanged: available => availability.push(available),
+    register: callback => cleanups.push(callback),
+    registerEditorExtension: () => registrations.editors++,
+    registerMarkdownPostProcessor: () => registrations.markdown++,
+    registerDomEvent: () => registrations.dom++,
+    addSettingTab: () => registrations.settings++,
+    registerInteractionHandlers: () => registrations.interactions++,
   }), { get(target, key, receiver) { return key === 'api' || Reflect.has(target, key) ? Reflect.get(target, key, receiver) : noop; } });
-  return { plugin, availability, publications };
+  return {
+    plugin, publications, availability, registrations, layoutCallbacks,
+    get relationshipInventories() { return relationshipInventories; },
+    requestApi: () => h.plugin.app.workspace.trigger('tps:gcm-api-request'),
+    layout() {
+      h.plugin.app.workspace.layoutReady = true;
+      for (const callback of layoutCallbacks.splice(0)) callback();
+    },
+    unload() { plugin.onunload(); for (const cleanup of cleanups.slice().reverse()) cleanup(); },
+  };
 }
 
-async function flushStartupMicrotasks() {
-  for (let turn = 0; turn < 16; turn++) await Promise.resolve();
-}
+test('cold split: full onload finishes registrations without awaiting layout-started discovery', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  let settled = false;
+  const loaded = p.plugin.onload().then(() => { settled = true; });
+  try {
+    await flushStartupMicrotasks();
+    assert.equal(settled, true, 'Obsidian must be able to finish plugin loading before layout readiness');
+    assert.equal(p.registrations.commands, 1);
+    assert.ok(p.registrations.editors >= 3);
+    assert.equal(p.registrations.markdown, 1);
+    assert.ok(p.registrations.dom >= 4);
+    assert.equal(p.registrations.settings, 1);
+    assert.equal(p.registrations.events, 1);
+    assert.equal(p.registrations.interactions, 1);
+    assert.equal(p.plugin.api, undefined);
+  } finally { p.unload(); await tasks.drain(); await loaded; tasks.restore(); }
+});
+
+test('cold split: full onload performs zero native or relationship inventory before layout', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const loaded = p.plugin.onload();
+  try {
+    await flushStartupMicrotasks();
+    assert.deepEqual(h.counters, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
+    assert.equal(p.relationshipInventories, 0);
+    assert.equal(tasks.pending, 0, 'no discovery continuation runs before the host is ready');
+  } finally { p.unload(); await tasks.drain(); await loaded; tasks.restore(); }
+});
+
+test('cold split: native listeners capture startup events without per-file indexing before layout', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const loaded = p.plugin.onload();
+  try {
+    await flushStartupMicrotasks();
+    for (let index = 0; index < 100; index++) h.vault.emit('create', h.vault.getFileByPath(`startup-${index}.md`));
+    h.plugin.app.metadataCache.emit('changed', h.vault.getFileByPath('startup-0.md'), '', {
+      frontmatter: { tpsId: 'startup-0', tpsSchemaVersion: 1, kind: 'task', title: 'Latest before layout' },
+    });
+    h.metadata.set(h.vault.getFileByPath('startup-0.md'), {
+      tpsId: 'startup-0', tpsSchemaVersion: 1, kind: 'task', title: 'Latest before layout',
+    });
+    assert.deepEqual(h.counters, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
+    assert.equal(h.service.recordsByPath.size, 0);
+    for (let index = 0; index < 100; index++) {
+      assert.equal(h.service.newlyCreatedFiles.has(h.vault.getFileByPath(`startup-${index}.md`)), false,
+        'host discovery creates are not user task drafts');
+    }
+    p.layout();
+    await tasks.drain();
+    await flushStartupMicrotasks();
+    assert.equal(h.counters.inventories, 1);
+    assert.equal(h.service.recordsByPath.size, 1025);
+    assert.equal(h.service.recordsByPath.get('startup-0.md').title, 'Latest before layout');
+  } finally { p.unload(); await tasks.drain(); await loaded; tasks.restore(); }
+});
+
+test('cold split: the relationship listener waits for layout even with warm metadata proof', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad('native-records', 2);
+  const p = coldStartupHarness(h);
+  // Actual relationship setup isolated from the main native barrier makes this
+  // control independently fail for the eager relationship owner.
+  const service = new ParentLinkResolutionService(p.plugin);
+  p.plugin.parentLinkResolutionService = service;
+  p.plugin.filePropertiesService = { isCompanionFile: () => false, isPropertyTarget: () => false };
+  try {
+    service.setup({ afterLayout: true });
+    assert.equal(p.relationshipInventories, 0);
+    assert.equal(h.counters.metadata, 0);
+    p.layout();
+    await flushStartupMicrotasks();
+    assert.equal(p.relationshipInventories, 1);
+    assert.equal(h.counters.metadata, 2);
+  } finally { p.unload(); tasks.restore(); }
+});
+
+test('cold split: API requests remain unavailable until one complete owned post-layout inventory', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const loaded = p.plugin.onload();
+  try {
+    await flushStartupMicrotasks();
+    p.requestApi();
+    assert.equal(p.availability.at(-1)?.available, false, 'early consumers receive an explicit unavailable announcement');
+    assert.equal(p.plugin.api, undefined);
+    p.layout();
+    await flushStartupMicrotasks();
+    assert.equal(tasks.pending, 1);
+    assert.equal(p.plugin.api, undefined);
+    p.requestApi();
+    assert.equal(p.availability.at(-1)?.available, false);
+    await tasks.drain();
+    await flushStartupMicrotasks();
+    assert.deepEqual(p.publications, [1025]);
+    assert.equal(p.availability.at(-1)?.available, true);
+    assert.equal(p.relationshipInventories, 1);
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+  } finally { p.unload(); await tasks.drain(); await loaded; tasks.restore(); }
+});
+
+test('cold split: a resolved event during the settings await is not lost by late relationship setup', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad('native-records', 2);
+  let release;
+  const p = coldStartupHarness(h, { initialized: false, settingsReady: new Promise(resolve => { release = resolve; }) });
+  const loaded = p.plugin.onload();
+  try {
+    h.plugin.app.metadataCache.emit('resolved');
+    release();
+    await flushStartupMicrotasks();
+    p.layout();
+    await tasks.drain();
+    await flushStartupMicrotasks();
+    assert.equal(p.relationshipInventories, 1, 'the public global-resolution proof survives earlier startup awaits');
+    assert.equal(h.counters.inventories, 1);
+    assert.deepEqual(p.publications, [2]);
+  } finally { p.unload(); await tasks.drain(); await loaded; tasks.restore(); }
+});
+
+test('cold split: actual Daily metadata owner receives global resolution captured during loadSettings', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad('native-records', 2);
+  let release;
+  const p = coldStartupHarness(h, { initialized: null, actualDaily: true,
+    settingsReady: new Promise(resolve => { release = resolve; }),
+  });
+  const loaded = p.plugin.onload();
+  try {
+    h.plugin.app.metadataCache.emit('resolved');
+    assert.equal(p.plugin.startupMetadataResolved, true, 'actual early onload listener observes the public proof');
+    release();
+    await loaded;
+    await p.plugin.fileNamingService.whenDailyNoteConfigurationReady();
+    assert.equal(p.plugin.fileNamingService.isDailyNoteMetadataCacheReady(), true,
+      'the late actual Daily constructor must not lose an already observed global resolved event');
+    assert.deepEqual(h.counters, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
+    assert.equal(p.relationshipInventories, 0);
+    p.layout();
+    await tasks.drain();
+    await flushStartupMicrotasks();
+    assert.deepEqual(p.publications, [2]);
+  } finally { release(); p.unload(); await tasks.drain(); await loaded; tasks.restore(); }
+});
+
+test('cold split: actual Daily owner retains explicit whole-cache rebuild blocking', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad('native-records', 2);
+  let release;
+  const p = coldStartupHarness(h, { initialized: false, actualDaily: true,
+    settingsReady: new Promise(resolve => { release = resolve; }),
+  });
+  const loaded = p.plugin.onload();
+  try {
+    h.plugin.app.metadataCache.emit('resolved');
+    release();
+    await loaded;
+    await p.plugin.fileNamingService.whenDailyNoteConfigurationReady();
+    assert.equal(p.plugin.fileNamingService.isDailyNoteMetadataCacheReady(), false,
+      'a prior captured proof cannot override an explicit current whole-cache rebuild');
+    h.plugin.app.metadataCache.initialized = true;
+    h.plugin.app.metadataCache.emit('resolved');
+    await flushStartupMicrotasks();
+    assert.equal(p.plugin.fileNamingService.isDailyNoteMetadataCacheReady(), true);
+  } finally { release(); p.unload(); await tasks.drain(); await loaded; tasks.restore(); }
+});
+
+test('cold split: actual Daily readiness without a private flag still requires current public global proof', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad('native-records', 2);
+  const p = coldStartupHarness(h, { initialized: null, actualDaily: true });
+  const loaded = p.plugin.onload();
+  try {
+    await loaded;
+    await p.plugin.fileNamingService.whenDailyNoteConfigurationReady();
+    assert.equal(p.plugin.fileNamingService.isDailyNoteMetadataCacheReady(), false, 'no proof is not readiness');
+    h.plugin.app.metadataCache.emit('resolved');
+    await flushStartupMicrotasks();
+    assert.equal(p.plugin.fileNamingService.isDailyNoteMetadataCacheReady(), true);
+    h.plugin.app.metadataCache.initialized = false;
+    assert.equal(p.plugin.fileNamingService.isDailyNoteMetadataCacheReady(), false, 'current rebuild revokes prior proof');
+    delete h.plugin.app.metadataCache.initialized;
+    assert.equal(p.plugin.fileNamingService.isDailyNoteMetadataCacheReady(), false, 'removing the private flag cannot revive stale proof');
+    h.plugin.app.metadataCache.emit('resolved');
+    await flushStartupMicrotasks();
+    assert.equal(p.plugin.fileNamingService.isDailyNoteMetadataCacheReady(), true, 'new public proof owns recovery');
+    assert.deepEqual(h.counters, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
+  } finally { p.unload(); await tasks.drain(); await loaded; tasks.restore(); }
+});
+
+test('cold split: disposal before layout settles early native commands without source or reservation work', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad('native-records', 2);
+  const p = coldStartupHarness(h);
+  const setup = h.service.setup({ afterLayout: true });
+  const outcomes = Promise.allSettled([
+    h.service.createFresh('task', { title: 'Must not allocate' }),
+    h.service.create('task', { title: 'Must not reserve' }, { id: 'cancelled-creation' }),
+    h.service.resolve('startup-0.md'),
+    h.service.snapshot(),
+  ]);
+  try {
+    await flushStartupMicrotasks();
+    assert.deepEqual(h.counters, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
+    h.service.dispose();
+    assert.equal(await setup, false);
+    for (const outcome of await outcomes) {
+      assert.equal(outcome.status, 'rejected');
+      assert.match(String(outcome.reason), /startup was cancelled/u);
+    }
+    p.layout();
+    await tasks.drain();
+    assert.deepEqual(h.counters, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
+    assert.equal(h.service.inFlightCreateIds.size, 0);
+    assert.equal(h.service.recordsByPath.size, 0);
+  } finally { h.service.dispose(); await setup; await outcomes; await tasks.drain(); tasks.restore(); }
+});
+
+test('cold split: explicit synchronous configuration replacement before layout fully owns readiness', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad('native-records', 2);
+  const p = coldStartupHarness(h);
+  const setup = h.service.setup({ afterLayout: true });
+  try {
+    h.plugin.settings.nativeRecordKindPropertyKeys = { task: { key: 'transactionKind', value: 'task', parentKind: 'transaction' } };
+    for (const file of h.vault.getMarkdownFiles()) h.metadata.set(file, {
+      tpsId: file.basename, kind: 'transaction', transactionKind: 'task', title: `Mapped ${file.basename}`,
+    });
+    const inventoriesBeforeReplacement = h.counters.inventories;
+    h.service.refreshConfiguration();
+    assert.equal(h.service.recordsByPath.size, 2, 'explicit replacement remains synchronous');
+    assert.equal(await setup, true);
+    const after = { ...h.counters };
+    assert.equal(after.inventories - inventoriesBeforeReplacement, 1);
+    p.layout();
+    await tasks.drain();
+    assert.deepEqual(h.counters, after, 'the superseded layout callback cannot rescan or republish');
+    for (const file of h.vault.getMarkdownFiles()) {
+      const record = h.service.recordsByPath.get(file.path);
+      assert.equal(record.tpsId, file.basename);
+      assert.equal(record.kind, 'task', 'the index retains its normalized structural envelope');
+      assert.equal(h.metadata.get(file).transactionKind, 'task', 'authored mapping remains unchanged');
+      assert.equal(h.service.inspect(h.metadata.get(file))?.kind, 'task');
+    }
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+  } finally { h.service.dispose(); await setup; await tasks.drain(); tasks.restore(); }
+});
+
+test('cold split: failed explicit replacement before layout rejects the owned readiness without retry or publication', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad('native-records', 2);
+  const p = coldStartupHarness(h, { historyStore: new MemoryItemHistoryStore() });
+  const loaded = p.plugin.onload();
+  try {
+    await loaded;
+    h.service.indexFile = () => { throw new Error('synthetic early explicit replacement failure'); };
+    assert.throws(() => h.service.refreshConfiguration(), /synthetic early explicit replacement failure/u);
+    await assert.rejects(h.service.setup(), /synthetic early explicit replacement failure/u);
+    p.layout();
+    await tasks.drain();
+    await flushStartupMicrotasks();
+    assert.deepEqual(p.publications, []);
+    assert.equal(p.plugin.api, undefined);
+    assert.equal(h.counters.inventories, 1, 'initial layout work cannot restart the failed replacement');
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+  } finally { p.unload(); await loaded; await tasks.drain(); tasks.restore(); }
+});
+
+test('cold split: early fresh creation waits before generating or reserving an identity', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const setup = h.service.setup({ afterLayout: true });
+  let generated = 0;
+  const generate = h.service.generateCryptographicId.bind(h.service);
+  h.service.generateCryptographicId = (...args) => { generated++; return generate(...args); };
+  let result;
+  const create = h.service.createFresh('food-entry', { title: 'Early food' }).then(value => { result = value; }, error => { result = error; });
+  try {
+    await flushStartupMicrotasks();
+    assert.equal(generated, 0, 'readiness joins before ID allocation, not merely before the final write');
+    assert.equal(h.service.inFlightCreateIds.size, 0);
+    assert.equal(h.counters.writes, 0);
+    assert.equal(result, undefined);
+    p.layout();
+    await tasks.drain();
+    assert.equal(await setup, true);
+    await create;
+    assert.ok(result?.file instanceof TFile);
+    assert.equal(generated, 1);
+    assert.equal(h.counters.writes, 1);
+  } finally { h.service.dispose(); await tasks.drain(); await setup; await create; tasks.restore(); }
+});
+
+test('cold split: early asset creation waits before checking the incomplete asset map', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const image = h.addFile('image.png', 'synthetic image');
+  const asset = h.addFile('existing-asset.md', `---\ntpsId: asset-existing\ntpsSchemaVersion: 1\nkind: asset\ntitle: Existing\nsourcePath: image.png\nsourceExtension: png\n---\n`);
+  const setup = h.service.setup({ afterLayout: true });
+  let cachedLookups = 0;
+  const lookup = h.service.resolveAssetCached.bind(h.service);
+  h.service.resolveAssetCached = (...args) => { cachedLookups++; return lookup(...args); };
+  let result;
+  const create = h.service.ensureAsset(image).then(value => { result = value; }, error => { result = error; });
+  try {
+    await flushStartupMicrotasks();
+    assert.equal(cachedLookups, 0, 'an absent entry in a partial index must not authorize a second asset');
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+    assert.equal(result, undefined);
+    p.layout();
+    await tasks.drain();
+    assert.equal(await setup, true);
+    await create;
+    assert.equal(result?.file, asset);
+    assert.equal(h.counters.writes, 0);
+  } finally { h.service.dispose(); await tasks.drain(); await setup; await create; tasks.restore(); }
+});
+
+test('cold split: identity normalization cannot report success from a partial task inventory', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const setup = h.service.setup({ afterLayout: true });
+  let result;
+  const normalization = h.service.normalizeTaskRecordIdentities().then(value => { result = value; }, error => { result = error; });
+  try {
+    await flushStartupMicrotasks();
+    assert.equal(result, undefined, 'a native command joins initial discovery before snapshotting its candidates');
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+    p.layout();
+    await tasks.drain();
+    assert.equal(await setup, true);
+    await normalization;
+    assert.deepEqual(result, { inspected: 1025, updated: 0, skipped: 0 });
+  } finally { h.service.dispose(); await tasks.drain(); await setup; await normalization; tasks.restore(); }
+});
+
+test('cold split: unload prevents late layout callbacks from doing more discovery or publication', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const loaded = p.plugin.onload();
+  try {
+    await flushStartupMicrotasks();
+    p.unload();
+    const before = { ...h.counters };
+    p.layout();
+    await tasks.drain();
+    await loaded;
+    assert.deepEqual(h.counters, before);
+    assert.equal(p.relationshipInventories, 0);
+    assert.deepEqual(p.publications, []);
+    assert.equal(p.availability.at(-1)?.available, false);
+  } finally { h.service.dispose(); tasks.restore(); }
+});
+
+test('cold split: full-source facade reaches all registrations and exact inventories after layout', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const loaded = p.plugin.onload();
+  try {
+    await flushStartupMicrotasks();
+    p.layout();
+    await tasks.drain();
+    await loaded;
+    await flushStartupMicrotasks();
+    assert.deepEqual(p.publications, [1025]);
+    assert.equal(p.availability.at(-1)?.available, true);
+    assert.equal(p.registrations.commands, 1);
+    assert.ok(p.registrations.editors >= 3);
+    assert.equal(p.registrations.markdown, 1);
+    assert.ok(p.registrations.dom >= 4);
+    assert.equal(p.registrations.settings, 1);
+    assert.equal(p.registrations.events, 1);
+    assert.equal(p.registrations.interactions, 1);
+    assert.equal(h.counters.inventories, 1);
+    assert.equal(p.relationshipInventories, 1);
+    assert.equal(h.service.recordsByPath.size, 1025);
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+  } finally { p.unload(); await tasks.drain(); tasks.restore(); }
+});
+
+test('cold split: failed owned discovery settles once without publication or an automatic retry', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  let attempts = 0;
+  const index = h.service.indexFile.bind(h.service);
+  h.service.indexFile = (...args) => {
+    if (++attempts === 400) throw new Error('synthetic post-layout inventory failure');
+    return index(...args);
+  };
+  const loaded = p.plugin.onload().catch(() => undefined);
+  try {
+    await flushStartupMicrotasks();
+    p.layout();
+    await tasks.drain();
+    await loaded;
+    await assert.rejects(h.service.setup(), /synthetic post-layout inventory failure/u);
+    assert.equal(h.service.setup(), h.service.setupPromise, 'failed owner cannot silently restart');
+    assert.deepEqual(p.publications, []);
+    assert.equal(p.plugin.api, undefined);
+    assert.equal(h.counters.inventories, 1);
+    assert.ok(p.relationshipInventories <= 1, 'independent relationship discovery cannot retry on native failure');
+    assert.equal(tasks.pending, 0);
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+  } finally { p.unload(); tasks.restore(); }
+});
+
+test('cold split: API publication joins replacement history recovery rather than its superseded startup epoch', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  h.plugin.settings.enableItemHistory = true;
+  let entered, release;
+  const enteredRecovery = new Promise(resolve => { entered = resolve; });
+  class DeferredInvalidationStore extends MemoryItemHistoryStore {
+    async clearPending() {
+      entered();
+      await new Promise(resolve => { release = resolve; });
+      return super.clearPending();
+    }
+  }
+  const p = coldStartupHarness(h, { historyStore: new DeferredInvalidationStore() });
+  const loaded = p.plugin.onload();
+  try {
+    await loaded;
+    const history = p.plugin.itemHistoryService;
+    p.plugin.settings.enableItemHistory = false;
+    history.updateEnabled(false);
+    p.plugin.settings.enableItemHistory = true;
+    history.updateEnabled(true);
+    p.layout();
+    await tasks.drain();
+    await enteredRecovery;
+    await flushStartupMicrotasks();
+    assert.deepEqual(p.publications, [], 'the captured old epoch cannot publish over newer recovery');
+    assert.equal(p.plugin.api, undefined);
+    release();
+    await history.setup();
+    await flushStartupMicrotasks();
+    assert.deepEqual(p.publications, [1025]);
+    assert.equal(p.availability.at(-1)?.available, true);
+  } finally {
+    release?.(); await loaded; p.unload(); await tasks.drain(); tasks.restore();
+  }
+});
+
+test('cold split: regular task creation joins discovery before reserving its requested identity', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const setup = h.service.setup({ afterLayout: true });
+  let result;
+  const create = h.service.create('task', { title: 'Early task' }, { id: 'early-task' })
+    .then(value => { result = value; }, error => { result = error; });
+  try {
+    await flushStartupMicrotasks();
+    assert.equal(h.service.inFlightCreateIds.size, 0, 'the shared task creation entry must wait before reservation');
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+    assert.equal(result, undefined);
+    p.layout();
+    await tasks.drain();
+    assert.equal(await setup, true);
+    await create;
+    assert.equal(result?.id, 'early-task');
+    assert.equal(h.counters.writes, 1);
+  } finally { h.service.dispose(); await tasks.drain(); await setup; await create; tasks.restore(); }
+});
+
+test('cold split: selected-path resolution waits before reading or replacing the partial index', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const selected = h.addFile('selected.md', '---\ntpsId: selected-task\ntpsSchemaVersion: 1\nkind: task\ntitle: Selected\n---\n');
+  const setup = h.service.setup({ afterLayout: true });
+  let result;
+  const resolve = h.service.resolve(selected).then(value => { result = value; }, error => { result = error; });
+  try {
+    await flushStartupMicrotasks();
+    assert.equal(h.counters.reads, 0, 'the readiness check must precede selected-source resolution');
+    assert.equal(result, undefined);
+    p.layout();
+    await tasks.drain();
+    assert.equal(await setup, true);
+    await resolve;
+    assert.equal(result?.id, 'selected-task');
+    assert.equal(h.counters.reads, 1);
+    assert.equal(h.counters.writes, 0);
+  } finally { h.service.dispose(); await tasks.drain(); await setup; await resolve; tasks.restore(); }
+});
+
+test('cold split: authoritative snapshot does not start a second source pass before metadata readiness', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const setup = h.service.setup({ afterLayout: true });
+  let result;
+  const snapshot = h.service.snapshot().then(value => { result = value; }, error => { result = error; });
+  try {
+    await flushStartupMicrotasks();
+    assert.equal(h.counters.reads, 0, 'metadata discovery and authoritative source verification have separate owners');
+    assert.equal(h.counters.inventories, 0);
+    assert.equal(result, undefined);
+    p.layout();
+    await tasks.drain();
+    assert.equal(await setup, true);
+    await snapshot;
+    assert.equal(Array.isArray(result?.records), true);
+    assert.equal(h.counters.writes, 0);
+  } finally { h.service.dispose(); await tasks.drain(); await setup; await snapshot; tasks.restore(); }
+});
+
+test('cold split: pre-layout metadata/create/delete/rename/replacement sources survive the first inventory', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const loaded = p.plugin.onload();
+  try {
+    await flushStartupMicrotasks();
+    const changed = h.vault.getFileByPath('startup-0.md');
+    const changedMetadata = { ...h.metadata.get(changed), title: 'Accepted before initial inventory' };
+    h.metadata.set(changed, changedMetadata);
+    h.plugin.app.metadataCache.emit('changed', changed, '', { frontmatter: changedMetadata });
+
+    const deleted = h.vault.getFileByPath('startup-1000.md');
+    h.entries.delete(deleted.path);
+    h.vault.emit('delete', deleted);
+    h.plugin.app.metadataCache.emit('changed', deleted, '', { frontmatter: h.metadata.get(deleted) });
+
+    const renamed = h.vault.getFileByPath('startup-1001.md');
+    const oldPath = renamed.path;
+    h.entries.delete(oldPath);
+    renamed.path = 'renamed-before-layout.md';
+    renamed.refreshIdentity();
+    h.entries.set(renamed.path, renamed);
+    h.vault.emit('rename', renamed, oldPath);
+    const reusedOldPath = h.addFile(oldPath, '');
+    h.metadata.set(reusedOldPath, { tpsId: 'reused-before-layout', tpsSchemaVersion: 1, kind: 'task', title: 'Reused old path' });
+    h.vault.emit('create', reusedOldPath);
+
+    const oldOwner = h.vault.getFileByPath('startup-1002.md');
+    const replacement = h.addFile(oldOwner.path, '');
+    h.metadata.set(replacement, { tpsId: 'replacement-before-layout', tpsSchemaVersion: 1, kind: 'task', title: 'Current replacement' });
+    h.vault.emit('create', replacement);
+    h.vault.emit('delete', oldOwner);
+    h.plugin.app.metadataCache.emit('changed', oldOwner, '', { frontmatter: h.metadata.get(oldOwner) });
+
+    const created = h.addFile('created-before-layout.md', '');
+    h.metadata.set(created, { tpsId: 'created-before-layout', tpsSchemaVersion: 1, kind: 'task', title: 'Created before layout' });
+    h.vault.emit('create', created);
+    const beforeLayout = { ...h.counters };
+    const source = [...h.entries.values()].filter(file => file instanceof TFile && file.extension === 'md')
+      .map(file => ({ file, path: file.path, metadata: structuredClone(h.metadata.get(file)), body: h.contents.get(file) }));
+
+    p.layout();
+    await tasks.drain();
+    await loaded;
+    await flushStartupMicrotasks();
+    assert.equal(h.service.recordsByPath.size, source.length);
+    for (const item of source) {
+      assert.equal(h.service.recordsByPath.get(item.path)?.tpsId, item.metadata.tpsId, item.path);
+      assert.equal(h.service.recordsByPath.get(item.path)?.title, item.metadata.title, item.path);
+      assert.deepEqual(h.metadata.get(item.file), item.metadata, 'discovery must not change metadata');
+      assert.equal(h.contents.get(item.file), item.body, 'discovery must not change source');
+    }
+    assert.equal(h.service.recordsByPath.has(deleted.path), false);
+    assert.equal(h.service.pathsById.has('startup-1002'), false, 'replaced old identity cannot survive');
+    for (const file of [renamed, reusedOldPath, replacement, created]) {
+      assert.equal(h.service.newlyCreatedFiles.has(file), false, 'pre-layout discovery does not adopt task drafts');
+    }
+    assert.deepEqual(p.publications, [source.length]);
+    assert.equal(h.counters.inventories, 1);
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+    assert.deepEqual(beforeLayout, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
+  } finally { p.unload(); await tasks.drain(); await loaded; tasks.restore(); }
+});
+
+test('cold split: pre-layout conflicting identities retain duplicate ownership blocking after discovery', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = coldStartupHarness(h);
+  const loaded = p.plugin.onload();
+  try {
+    await flushStartupMicrotasks();
+    const duplicate = h.addFile('duplicate-before-layout.md', '');
+    h.metadata.set(duplicate, { tpsId: 'startup-0', tpsSchemaVersion: 1, kind: 'task', title: 'Conflicting new owner' });
+    h.vault.emit('create', duplicate);
+    const beforeLayout = { ...h.counters };
+    p.layout();
+    await tasks.drain();
+    await loaded;
+    assert.deepEqual([...h.service.pathsById.get('startup-0')].sort(), ['duplicate-before-layout.md', 'startup-0.md']);
+    assert.equal(h.service.hasUniquePathOwnership('startup-0', 'startup-0.md'), false);
+    assert.equal(h.service.hasUniquePathOwnership('startup-0', duplicate.path), false);
+    assert.equal(h.service.recordsByPath.size, 1026);
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+    assert.deepEqual(beforeLayout, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
+  } finally { p.unload(); await tasks.drain(); await loaded; tasks.restore(); }
+});
+
+test('cold split: a global resolved event before layout records proof without eager relationship discovery', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad('native-records', 2);
+  const p = coldStartupHarness(h, { initialized: false });
+  const service = new ParentLinkResolutionService(p.plugin);
+  p.plugin.parentLinkResolutionService = service;
+  p.plugin.filePropertiesService = { isCompanionFile: () => false, isPropertyTarget: () => false };
+  try {
+    service.setup({ afterLayout: true });
+    h.plugin.app.metadataCache.emit('resolved');
+    const beforeLayout = { inventories: p.relationshipInventories, metadata: h.counters.metadata };
+    p.layout();
+    await flushStartupMicrotasks();
+    assert.equal(p.relationshipInventories, 1);
+    assert.equal(h.counters.metadata, 2);
+    assert.deepEqual(beforeLayout, { inventories: 0, metadata: 0 });
+  } finally { p.unload(); tasks.restore(); }
+});
 
 test('actual onload publishes the native API only after its initial inventory completes', async () => {
   const tasks = manualStartupTasks();
@@ -4461,6 +5164,7 @@ test('actual onload publishes the native API only after its initial inventory co
   try {
     const loaded = p.plugin.onload();
     await flushStartupMicrotasks();
+    p.layout();
     assert.equal(tasks.pending, 1);
     assert.equal(p.plugin.api === undefined, true, 'no consumer receives a partly indexed NativeRecords API');
     assert.deepEqual(p.availability, []);
@@ -4470,7 +5174,7 @@ test('actual onload publishes the native API only after its initial inventory co
     assert.deepEqual(p.availability, [true]);
     assert.equal(h.counters.inventories, 1);
     assert.equal(h.counters.reads + h.counters.writes, 0);
-  } finally { p.plugin.onunload(); tasks.restore(); }
+  } finally { p.unload(); tasks.restore(); }
 });
 
 test('actual onunload during an initial yield cannot resume onload or republish the API', async () => {
@@ -4480,8 +5184,9 @@ test('actual onunload during an initial yield cannot resume onload or republish 
   try {
     const loaded = p.plugin.onload();
     await flushStartupMicrotasks();
+    p.layout();
     assert.equal(tasks.pending, 1);
-    p.plugin.onunload();
+    p.unload();
     const atUnload = { ...h.counters };
     await tasks.drain();
     await loaded;
@@ -4500,9 +5205,10 @@ test('actual onload cannot republish after unloading during the existing daily-c
   try {
     const loaded = p.plugin.onload();
     await flushStartupMicrotasks();
+    p.layout();
     await tasks.drain();
     assert.deepEqual(p.publications, []);
-    p.plugin.onunload();
+    p.unload();
     ready();
     await loaded;
     assert.equal(p.plugin.api === undefined, true);
@@ -4521,7 +5227,7 @@ test('actual onload unloaded during its first settings await never starts native
     const loaded = p.plugin.onload();
     await flushStartupMicrotasks();
     assert.deepEqual(h.counters, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
-    p.plugin.onunload();
+    p.unload();
     ready();
     await loaded;
     assert.deepEqual(h.counters, { inventories: 0, metadata: 0, reads: 0, writes: 0 });

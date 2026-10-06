@@ -29,9 +29,16 @@ export class ParentLinkResolutionService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
   /** Seed once during plugin startup, after the legacy companion catalog when used. */
-  setup(): void {
+  setup(options: { afterLayout?: boolean; metadataResolved?: () => boolean } = {}): void {
+    let layoutReady = !options.afterLayout || this.plugin.app.workspace.layoutReady === true;
+    let resolvedObserved = options.metadataResolved?.() || (this.plugin.app.metadataCache as any).initialized === true;
+    let startupFallbackPending = false;
     const initialize = (fromStartupFallback = false) => {
       if (this.disposed || this.initialBuild) return;
+      if (!layoutReady) {
+        startupFallbackPending ||= fromStartupFallback;
+        return;
+      }
       this.provisionalStartupSeed = fromStartupFallback;
       this.initialBuild = (async () => {
         if (this.plugin.settings.dataArchitectureMode !== 'native-records') {
@@ -46,6 +53,7 @@ export class ParentLinkResolutionService {
     };
     this.plugin.registerEvent(this.plugin.app.metadataCache.on('resolved', () => {
       if (this.disposed) return;
+      resolvedObserved = true;
       if (this.provisionalStartupSeed && !this.resolutionScheduled) {
         this.resolutionScheduled = true;
         void this.initialBuild?.then(() => {
@@ -62,7 +70,7 @@ export class ParentLinkResolutionService {
         initialize();
       }
     }));
-    if ((this.plugin.app.metadataCache as any).initialized === true) initialize();
+    if (resolvedObserved) initialize();
     // Hot reload may miss `resolved`, and some Obsidian versions do not expose
     // `initialized`. Seed on our own startup tick, independent of note/layout
     // navigation. A later `resolved` revisits files with pending metadata or
@@ -71,6 +79,13 @@ export class ParentLinkResolutionService {
       const timer = setTimeout(() => initialize(true), 0);
       this.plugin.register(() => clearTimeout(timer));
     }
+    if (!layoutReady) this.plugin.app.workspace.onLayoutReady(() => {
+      if (this.disposed) return;
+      layoutReady = true;
+      resolvedObserved ||= options.metadataResolved?.() || (this.plugin.app.metadataCache as any).initialized === true;
+      if (resolvedObserved) initialize();
+      else if (startupFallbackPending) initialize(true);
+    });
     this.plugin.register(() => {
       this.disposed = true;
       this.clearRelationshipIndex();

@@ -46,11 +46,12 @@ export class FileNamingService {
     private dailyNoteMetadataReadyNotificationPending = false;
     private dailyNoteMetadataGlobalResolutionObserved = false;
 
-    constructor(plugin: TPSGlobalContextMenuPlugin) {
+    constructor(plugin: TPSGlobalContextMenuPlugin, metadataResolved = false) {
         this.plugin = plugin;
-        // A hot-reloaded plugin may attach after the public `resolved` event.
-        // Obsidian's initialized flag is authoritative for that startup case.
-        this.dailyNoteMetadataGlobalResolutionObserved =
+        // The public `resolved` event may arrive during onload's settings await,
+        // before this constructor. A captured observation, or the authoritative
+        // initialized flag on warm reload, seeds the same readiness proof.
+        this.dailyNoteMetadataGlobalResolutionObserved = metadataResolved ||
             (this.plugin.app as any)?.metadataCache?.initialized === true;
         this.registerDailyNoteIndexInvalidation();
         this.dailyNoteConfigurationReady = this.loadPersistedDailyNoteConfiguration()

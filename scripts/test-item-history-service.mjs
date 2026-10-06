@@ -116,6 +116,204 @@ test('task history records redacted field changes under a stable injected identi
   assert.deepEqual(await service.stats(), { events: 1, entities: 1, pending: 0 });
 });
 
+test('cold split: initial history maintenance waits for its owned native readiness gate before store access', async () => {
+  const [{ ItemHistoryService }, { MemoryItemHistoryStore }] = await Promise.all([loadModule(), loadStoreModule()]);
+  const fixture = createPlugin();
+  const operations = [];
+  class RecordingStore extends MemoryItemHistoryStore {
+    async setup() { operations.push('setup'); return super.setup(); }
+    async listPending() { operations.push('listPending'); return super.listPending(); }
+    async putPending(record) { operations.push('putPending'); return super.putPending(record); }
+    async prune(options) { operations.push('prune'); return super.prune(options); }
+  }
+  const store = new RecordingStore();
+  const service = new ItemHistoryService(fixture.plugin, store);
+  let release;
+  const readiness = new Promise(resolve => { release = resolve; });
+  const setup = service.setup(readiness);
+  let handle;
+  const begin = service.beginTaskMutation({ action: 'task.update', cause,
+    before: { path: fixture.file.path, lineNumber: 0, rawLine: '- [ ] Early task' },
+  }).then(value => { handle = value; });
+  try {
+    for (let turn = 0; turn < 16; turn++) await Promise.resolve();
+    assert.deepEqual(operations, [], 'onload only establishes the deferred activation owner');
+    assert.equal(handle, undefined);
+    assert.equal(store.pending.size, 0);
+    release(true);
+    await setup;
+    await begin;
+    assert.ok(handle);
+    assert.deepEqual(operations, ['setup', 'listPending', 'prune', 'putPending']);
+    assert.equal(store.pending.size, 1);
+  } finally { release(true); await setup; await begin; service.dispose(); }
+});
+
+test('cold split: cancelled initial history readiness cannot open the store or create pending intent', async () => {
+  const [{ ItemHistoryService }, { MemoryItemHistoryStore }] = await Promise.all([loadModule(), loadStoreModule()]);
+  const fixture = createPlugin();
+  let opened = 0;
+  class RecordingStore extends MemoryItemHistoryStore {
+    async setup() { opened++; return super.setup(); }
+  }
+  const store = new RecordingStore();
+  const service = new ItemHistoryService(fixture.plugin, store);
+  let release;
+  const setup = service.setup(new Promise(resolve => { release = resolve; }));
+  let handle;
+  const begin = service.beginTaskMutation({ action: 'task.update', cause,
+    before: { path: fixture.file.path, lineNumber: 0, rawLine: '- [ ] Early cancelled task' },
+  }).then(value => { handle = value; });
+  try {
+    for (let turn = 0; turn < 16; turn++) await Promise.resolve();
+    service.dispose();
+    release(false);
+    await setup;
+    await begin;
+    assert.equal(opened, 0);
+    assert.equal(handle, null);
+    assert.equal(store.pending.size, 0);
+  } finally { release(false); await setup; await begin; service.dispose(); }
+});
+
+test('cold split: initial pending recovery owns activation before an early task mutation begins', async () => {
+  const [{ ItemHistoryService }, { MemoryItemHistoryStore }] = await Promise.all([loadModule(), loadStoreModule()]);
+  const fixture = createPlugin();
+  let entered, release;
+  const enteredRecovery = new Promise(resolve => { entered = resolve; });
+  class DeferredPendingStore extends MemoryItemHistoryStore {
+    async listPending() {
+      entered();
+      await new Promise(resolve => { release = resolve; });
+      return super.listPending();
+    }
+  }
+  const store = new DeferredPendingStore();
+  const service = new ItemHistoryService(fixture.plugin, store);
+  const setup = service.setup();
+  await enteredRecovery;
+  let handle;
+  const begin = service.beginTaskMutation({ action: 'task.update', cause,
+    before: { path: fixture.file.path, lineNumber: 0, rawLine: '- [ ] New current task' },
+  }).then(value => { handle = value; });
+  try {
+    for (let turn = 0; turn < 16; turn++) await Promise.resolve();
+    assert.equal(handle, undefined, 'early mutations join the same initial maintenance owner');
+    assert.equal(store.pending.size, 0, 'startup recovery must not capture a newly started live mutation');
+    release();
+    await setup;
+    await begin;
+    assert.ok(handle);
+    assert.equal(store.pending.size, 1);
+    assert.equal(store.pending.has(handle.operationId), true);
+  } finally { release(); await setup; await begin; service.dispose(); }
+});
+
+for (const outcome of ['ready', 'cancelled', 'unloaded']) {
+  test(`cold split: history disable/re-enable retains native ownership when ${outcome}`, async () => {
+    const [{ ItemHistoryService }, { MemoryItemHistoryStore }] = await Promise.all([loadModule(), loadStoreModule()]);
+    const fixture = createPlugin();
+    const operations = [];
+    class RecordingStore extends MemoryItemHistoryStore {
+      async setup() { operations.push('setup'); return super.setup(); }
+      async clearPending() { operations.push('clearPending'); return super.clearPending(); }
+      async prune(options) { operations.push('prune'); return super.prune(options); }
+      async putPending(record) { operations.push('putPending'); return super.putPending(record); }
+    }
+    let release;
+    const readiness = new Promise(resolve => { release = resolve; });
+    let nativeJoins = 0;
+    fixture.plugin.nativeRecordService = { setup: () => { nativeJoins++; return readiness; } };
+    const store = new RecordingStore();
+    const service = new ItemHistoryService(fixture.plugin, store);
+    const initial = service.setup(readiness);
+    const initialOutcome = initial.catch(error => error);
+    fixture.plugin.settings.enableItemHistory = false;
+    service.updateEnabled(false);
+    fixture.plugin.settings.enableItemHistory = true;
+    service.updateEnabled(true);
+    const replacement = service.setup();
+    const replacementOutcome = replacement.catch(error => error);
+    let result;
+    const begin = service.beginTaskMutation({ action: 'task.update', cause,
+      before: { path: fixture.file.path, lineNumber: 0, rawLine: '- [ ] Re-enabled early task' },
+    }).then(value => { result = value; }, error => { result = error; });
+    try {
+      for (let turn = 0; turn < 16; turn++) await Promise.resolve();
+      assert.deepEqual(operations, [], 're-enabling must not open or reconcile before native readiness');
+      assert.equal(result, undefined);
+      assert.equal(store.pending.size, 0);
+      assert.equal(nativeJoins, 1, 're-enable joins the existing idempotent native setup owner');
+      if (outcome === 'unloaded') service.dispose();
+      release(outcome === 'ready');
+      const [firstResult, replacementResult] = await Promise.all([initialOutcome, replacementOutcome]);
+      await begin;
+      if (outcome === 'ready') {
+        assert.equal(firstResult, undefined, 'the superseded configuration epoch performs no recovery');
+        assert.equal(replacementResult, undefined);
+        assert.ok(result && !(result instanceof Error));
+        assert.deepEqual(operations, ['setup', 'clearPending', 'prune', 'putPending']);
+        assert.deepEqual([...store.pending.keys()], [result.operationId]);
+      } else {
+        assert.deepEqual(operations, []);
+        assert.equal(store.pending.size, 0);
+        if (outcome === 'unloaded') assert.equal(result, null);
+        else {
+          assert.match(String(replacementResult), /startup was cancelled/u);
+          assert.match(String(result), /startup was cancelled/u);
+        }
+      }
+    } finally {
+      service.dispose(); release(outcome === 'ready');
+      await Promise.all([initialOutcome, replacementOutcome, begin]);
+    }
+  });
+}
+
+test('cold split: a pre-toggle task intent joins replacement recovery before entering the store', async () => {
+  const [{ ItemHistoryService }, { MemoryItemHistoryStore }] = await Promise.all([loadModule(), loadStoreModule()]);
+  const fixture = createPlugin();
+  let releaseNative, enteredRecovery, releaseRecovery;
+  const readiness = new Promise(resolve => { releaseNative = resolve; });
+  const recoveryEntered = new Promise(resolve => { enteredRecovery = resolve; });
+  fixture.plugin.nativeRecordService = { setup: () => readiness };
+  class DeferredInvalidationStore extends MemoryItemHistoryStore {
+    async clearPending() {
+      enteredRecovery();
+      await new Promise(resolve => { releaseRecovery = resolve; });
+      return super.clearPending();
+    }
+  }
+  const store = new DeferredInvalidationStore();
+  const service = new ItemHistoryService(fixture.plugin, store);
+  const initial = service.setup(readiness);
+  let handle;
+  const begin = service.beginTaskMutation({ action: 'task.update', cause,
+    before: { path: fixture.file.path, lineNumber: 0, rawLine: '- [ ] Current task crossing configuration' },
+  }).then(value => { handle = value; });
+  fixture.plugin.settings.enableItemHistory = false;
+  service.updateEnabled(false);
+  fixture.plugin.settings.enableItemHistory = true;
+  service.updateEnabled(true);
+  const replacement = service.setup();
+  try {
+    releaseNative(true);
+    await recoveryEntered;
+    await initial;
+    for (let turn = 0; turn < 16; turn++) await Promise.resolve();
+    assert.equal(handle, undefined, 'an early waiter must join the newer maintenance owner');
+    assert.equal(store.pending.size, 0, 'replacement invalidation cannot capture a newly live task intent');
+    releaseRecovery();
+    await replacement;
+    await begin;
+    assert.ok(handle);
+    assert.deepEqual([...store.pending.keys()], [handle.operationId]);
+  } finally {
+    releaseNative(true); releaseRecovery?.();
+    await Promise.all([initial, replacement, begin]); service.dispose();
+  }
+});
+
 test('confirmed live before-state prevents stale rendered fields from being attributed to the user action', async () => {
   const [{ ItemHistoryService }, { MemoryItemHistoryStore }] = await Promise.all([loadModule(), loadStoreModule()]);
   const fixture = createPlugin();

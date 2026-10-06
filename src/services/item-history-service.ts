@@ -140,8 +140,21 @@ export class ItemHistoryService {
     this.store = this.providedStore;
   }
 
-  async setup(): Promise<void> {
+  setup(activationReady?: Promise<boolean>): Promise<void> {
+    if (this.activationMaintenance) return this.activationMaintenance;
+    const maintenance = this.initializeHistory(activationReady ?? this.plugin.nativeRecordService?.setup());
+    this.activationMaintenance = maintenance;
+    void maintenance.finally(() => {
+      if (this.activationMaintenance === maintenance) this.activationMaintenance = null;
+    }).catch(() => undefined);
+    return maintenance;
+  }
+
+  private async initializeHistory(activationReady?: Promise<boolean>): Promise<void> {
     const setupEpoch = this.mutationEpoch;
+    const nativeReady = activationReady ? await activationReady : true;
+    if (this.disposed || setupEpoch !== this.mutationEpoch) return;
+    if (!nativeReady) throw new Error('TPS history startup was cancelled.');
     if (!(await this.ensureReady(true))) return;
     if (setupEpoch !== this.mutationEpoch || !this.store) return;
     const recordingEnabled = isItemHistoryEnabled(this.plugin);
@@ -164,11 +177,7 @@ export class ItemHistoryService {
 
   updateEnabled(enabled: boolean): void {
     if (enabled) {
-      const maintenance = this.setup();
-      this.activationMaintenance = maintenance;
-      void maintenance.finally(() => {
-        if (this.activationMaintenance === maintenance) this.activationMaintenance = null;
-      });
+      void this.setup().catch(error => this.warnUnavailable(error, 'activation-failed'));
       return;
     }
     this.mutationEpoch += 1;
@@ -178,15 +187,23 @@ export class ItemHistoryService {
     if (this.pruneTimer != null) globalThis.clearTimeout(this.pruneTimer);
     this.pruneTimer = null;
     this.ready = null;
+    this.activationMaintenance = null;
     const store = this.store;
     this.store = null;
     store?.dispose();
   }
 
+  async whenActivationMaintenanceReady(): Promise<void> {
+    // A settings change can replace the owner while an earlier waiter is
+    // suspended. Join the current owner before allowing a live intent or API
+    // publication to enter the newly enabled store.
+    while (this.activationMaintenance) await this.activationMaintenance;
+  }
+
   async beginTaskMutation(
     input: BeginTaskHistoryMutationInput,
   ): Promise<ItemHistoryTaskMutationHandle | null> {
-    if (this.activationMaintenance) await this.activationMaintenance;
+    await this.whenActivationMaintenanceReady();
     const cause = normalizeItemHistoryCause(input.cause);
     const before = this.snapshotTask(input.before.rawLine);
     if (this.plugin.settings.enableItemHistory === false || !cause || !before) return null;

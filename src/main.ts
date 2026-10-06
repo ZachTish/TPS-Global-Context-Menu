@@ -329,6 +329,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private static readonly NOTE_PREVIEW_SOURCE = 'tps-gcm-note-preview';
   private readonly startupTimestamp = Date.now();
   private startupOwner: symbol | null = null;
+  private startupMetadataResolved = false;
   private baseLinkPreviewArmedPath: string | null = null;
   private baseLinkPreviewArmedUntil = 0;
   settings: TPSGlobalContextMenuSettings;
@@ -483,6 +484,13 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   async onload(): Promise<void> {
     const startupOwner = Symbol();
     this.startupOwner = startupOwner;
+    this.startupMetadataResolved = (this.app.metadataCache as any).initialized === true;
+    this.registerEvent(this.app.metadataCache.on('resolved', () => {
+      if (this.startupOwner === startupOwner) this.startupMetadataResolved = true;
+    }));
+    this.registerEvent(this.app.workspace.on(TPS_EVENTS.GCM_API_REQUEST as any, () => {
+      this.emitGcmApiChanged(true);
+    }));
     this.ignoreNextContext = false;
     this.removeLegacyNotebookNavigatorRuleSettingsStyles();
     this.registerEvent(this.app.workspace.on('window-open', (_workspaceWindow, targetWindow) => {
@@ -515,7 +523,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.contextTargetService = new ContextTargetService(this);
     this.bulkEditService = new BulkEditService(this);
     this.recurrenceService = new RecurrenceService(this);
-    this.fileNamingService = new FileNamingService(this);
+    this.fileNamingService = new FileNamingService(this, this.startupMetadataResolved);
     this.noteOperationService = new NoteOperationService(this);
     this.fieldInitializationService = new FieldInitializationService(this);
     this.commandQueueService = new CommandQueueService();
@@ -549,8 +557,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.eventService = new GcmEventService(this);
     this.identityService = new TpsIdentityService(this);
     this.itemHistoryService = new ItemHistoryService(this);
-    await this.itemHistoryService.setup();
-    if (this.startupOwner !== startupOwner) return;
     this.taskApiService = new TaskApiService(this);
     this.cardContentService = new CardContentService();
     this.identityMigrationService = new IdentityMigrationService(this);
@@ -595,8 +601,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     await this.propertyMigrationService.initialize();
     if (this.startupOwner !== startupOwner) return;
     this.nativeRecordService = new NativeRecordService(this);
-    const nativeIndexReady = await this.nativeRecordService.setup();
-    if (!nativeIndexReady || this.startupOwner !== startupOwner) return;
+    const nativeIndexReady = this.nativeRecordService.setup({ afterLayout: true });
+    const historyReady = this.itemHistoryService.setup(nativeIndexReady);
     this.templateIdentityService = new TemplateIdentityService(this);
     this.sharedServices = createSharedServices(this);
     this.notebookNavigatorRuleService.setupPresentationProjection();
@@ -671,25 +677,25 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     });
 
     // Register all workspace/vault events (includes initial ensureMenus call)
-    this.parentLinkResolutionService.setup();
+    this.parentLinkResolutionService.setup({
+      afterLayout: true,
+      metadataResolved: () => this.startupMetadataResolved,
+    });
     registerGcmEvents(this);
     if (this.canRunBackgroundAutomation()) {
       this.startArchiveTagAutomation();
     }
 
-    // Expose inter-plugin API
-    await this.fileNamingService.whenDailyNoteConfigurationReady();
-    if (this.startupOwner !== startupOwner) return;
-    setupPluginApi(this);
-    this.nativeBaseNoteOpening.install();
-    this.register(() => this.nativeBaseNoteOpening.dispose());
-    this.tpsNotebookNavigatorMenuBridge.start();
-    this.registerEvent(this.app.workspace.on(TPS_EVENTS.GCM_API_REQUEST as any, () => {
-      this.emitGcmApiChanged(true);
-    }));
-    this.emitGcmApiChanged(true);
-    this.timeTrackingService.setup();
-    this.timeTrackingStatusBarService.setup();
+    // Obsidian finishes loading plugins before layout readiness. Do not await
+    // the layout-owned data job here; register every surface first and publish
+    // the unchanged API only after the owned data/configuration has settled.
+    this.app.workspace.onLayoutReady(() => {
+      if (this.startupOwner !== startupOwner) return;
+      void this.initializeStartupServices(startupOwner, nativeIndexReady, historyReady)
+        .catch((error) => {
+          if (this.startupOwner === startupOwner) logger.flowError('Lifecycle', 'startup:data-failed', error);
+        });
+    });
     if (!this.usesNativeRecordArchitecture()) {
       this.registerEvent(this.app.metadataCache.on('resolved', () => {
         this.virtualBaseEmbedService.scheduleRefresh(0);
@@ -842,6 +848,27 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       void restoreRetiredHomeTabs(this.app, () => retirementActive)
         .catch((error) => logger.flowError('RetiredHome', 'restore-failed', error));
     });
+  }
+
+  private async initializeStartupServices(
+    startupOwner: symbol,
+    nativeIndexReady: Promise<boolean>,
+    historyReady: Promise<void>,
+  ): Promise<void> {
+    if (!await nativeIndexReady || this.startupOwner !== startupOwner) return;
+    await historyReady;
+    if (this.startupOwner !== startupOwner) return;
+    await this.fileNamingService.whenDailyNoteConfigurationReady();
+    if (this.startupOwner !== startupOwner) return;
+    await this.itemHistoryService.whenActivationMaintenanceReady();
+    if (this.startupOwner !== startupOwner) return;
+    setupPluginApi(this);
+    this.nativeBaseNoteOpening.install();
+    this.register(() => this.nativeBaseNoteOpening.dispose());
+    this.tpsNotebookNavigatorMenuBridge.start();
+    this.emitGcmApiChanged(true);
+    this.timeTrackingService.setup();
+    this.timeTrackingStatusBarService.setup();
   }
 
   private registerInteractionHandlers(): void {
