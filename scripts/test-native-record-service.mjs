@@ -3901,6 +3901,71 @@ test('conflict snapshots report all duplicate and blocked owners, including cust
   await assert.rejects(()=>service.list(),/identity conflicts/);
 });
 
+test('large conflict snapshots collect ownership in linear passes without changing diagnostics', async (t) => {
+  const { service, plugin, vault, addFile } = createHarness();
+  plugin.settings.nativeRecordKindPropertyKeys = { 'food-entry': 'entryKind' };
+  const expected = [];
+  const add = (path, frontmatter, ids, kinds) => {
+    addFile(path, serializeNativeRecordDocument({ bom: '', newline: '\n', closer: '---', body: 'Unchanged body\n', frontmatter }));
+    if (ids) expected.push({ path, ids, kinds, frontmatter });
+  };
+  for (let index = 0; index < 2500; index += 1) {
+    add(`Records/${index}.md`, { tpsId: `task-${index}`, kind: 'task', title: `Task ${index}` });
+  }
+  for (let index = 0; index < 850; index += 1) {
+    const id = `duplicate-${index}`;
+    for (const suffix of ['b', 'a']) {
+      add(`Conflicts/${index}-${suffix}.md`, { tpsId: id, kind: 'calendar-event', title: suffix }, [id], ['calendar-event']);
+    }
+    const blockedId = index === 0 ? 'duplicate-0' : `blocked-${index}`;
+    add(`Blocked/${index}.md`, { tpsId: blockedId, entryKind: 'food-entry', nested: { keep: true } }, [blockedId], ['food-entry']);
+  }
+  // One blocked path can reserve several IDs, and the same ID can occur in
+  // both ownership indexes. Diagnostics retain sorted, deduplicated identities.
+  const multi = expected.find(conflict => conflict.path === 'Blocked/1.md');
+  multi.frontmatter.TPSID = 'z-extra-identity';
+  multi.ids.push('z-extra-identity');
+  const multiFile = vault.getFileByPath(multi.path);
+  await vault.process(multiFile, () => serializeNativeRecordDocument({
+    bom: '', newline: '\n', closer: '---', body: 'Unchanged body\n', frontmatter: multi.frontmatter,
+  }));
+  expected.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+  const cold = await service.snapshot(undefined, { includeConflicts: true });
+  assert.equal(cold.records.length, 2500);
+  assert.deepEqual(cold.conflicts, expected);
+
+  let indexEntryVisits = 0;
+  let profileReads = 0;
+  let sourceReads = 0;
+  const indexes = [service.pathsById, service.blockedPathsById];
+  for (const index of indexes) {
+    const entries = index[Symbol.iterator].bind(index);
+    index[Symbol.iterator] = function* () {
+      for (const entry of entries()) {
+        indexEntryVisits += 1;
+        yield entry;
+      }
+    };
+  }
+  const getProfiles = service.getInspectionProfiles.bind(service);
+  service.getInspectionProfiles = () => { profileReads += 1; return getProfiles(); };
+  const read = vault.read.bind(vault);
+  vault.read = async file => { sourceReads += 1; return read(file); };
+  const passes = 3;
+  for (let pass = 0; pass < passes; pass += 1) {
+    const snapshot = await service.snapshot(undefined, { includeConflicts: true });
+    assert.deepEqual(snapshot.conflicts, expected, 'path/ID/kind ordering and authored frontmatter remain identical');
+    assert.deepEqual(snapshot.records, cold.records);
+    snapshot.conflicts.find(conflict => conflict.path === 'Blocked/1.md').frontmatter.nested.keep = false;
+  }
+  assert.equal(sourceReads, 0, 'warm diagnostics do not reread unchanged sources');
+  assert.ok(indexEntryVisits <= passes * (2 * service.pathsById.size + service.blockedPathsById.size),
+    `ownership indexes must be traversed a bounded number of times, not once per conflict: ${indexEntryVisits} visits`);
+  assert.ok(profileReads <= passes * 2,
+    `mapping signatures must be read once for validation and once for diagnostics per snapshot: ${profileReads} reads`);
+  t.diagnostic(JSON.stringify({ conflicts: expected.length, passes, indexEntryVisits, profileReads, sourceReads }));
+});
+
 test('fresh food identities avoid 30 seconds of modeled serial reads in a cold 10,000-note vault',async()=>{
  const h=createHarness();
  for(let i=0;i<10000;i++)h.addFile(`Notes/${i}.md`,'Ordinary');

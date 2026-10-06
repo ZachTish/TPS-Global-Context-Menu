@@ -1,5 +1,31 @@
 # TPS Global Context Menu
 
+## 7.3.6 — Keep conflict-aware snapshots linear
+
+Native-record conflict diagnostics now collect IDs from the two existing
+ownership indexes once per snapshot, instead of rescanning both indexes for
+every conflicting file. The reverse lookup exists only during that call. Kind
+mapping keys are also resolved once for the diagnostic batch. Sorted paths and
+IDs, kind ordering, detached frontmatter, uniquely owned records, and all strict
+identity/mutation guards remain unchanged. There is no new persistent index,
+cache, watcher, repair, setting, note write or API change.
+
+This fixes a conflict-heavy test-vault regression exposed while validating
+Controller 3.1.4's reuse of conflict-aware discovery. A 5,050-note fixture with
+2,550 conflicts preserves identical records and diagnostics across three warm
+snapshots while ownership-index entry visits fall from 32,147,700 to 22,653;
+those snapshots make zero source reads. The before-failing operation-count
+regression also covers duplicate/blocked ownership overlap, several IDs on one
+path, custom kind keys, and detached nested frontmatter. All 138 focused
+native-record tests pass. These are synthetic operation counts, not installed
+or physical-device latency claims.
+
+This backward-compatible patch keeps minimum Obsidian 1.10.0. Full-suite,
+installed test-vault validation, final build and release hashes are tracked in
+[7.3.6 release notes](release-notes/7.3.6.md). Paired installed verification with
+Controller 3.1.4 preserves all reminder matching sets and completion/deletion
+behavior. Production installation remains the user's BRAT pull.
+
 ## 7.3.5 — Keep Calendar navigation out of idle vault scans
 
 In whole-note mode the persistent Calendar shortcut shows **Calendar**, or its

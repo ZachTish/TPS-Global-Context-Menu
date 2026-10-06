@@ -1966,20 +1966,34 @@ export class NativeRecordService {
       const file = this.plugin.app.vault.getFileByPath(path);
       if (file instanceof TFile) records.push(this.toHandle(file, frontmatter));
     }
-    const conflicts = options?.includeConflicts === true
-      ? [...conflictPaths].sort().map(path => {
-        const raw = this.authoritativeSourceCache.get(path)?.frontmatter || null;
-        const ids = new Set<string>();
+    let conflicts: TpsNativeRecordSnapshot['conflicts'];
+    if (options?.includeConflicts === true) {
+      conflicts = [];
+      if (conflictPaths.size) {
+        // Reverse ownership once for this snapshot, not once per conflict.
+        // Nothing survives the call or changes the authoritative indexes.
+        const idsByPath = new Map<string, Set<string>>();
         for (const index of [this.pathsById, this.blockedPathsById]) {
-          for (const [id, paths] of index) if (paths.has(path)) ids.add(id);
+          for (const [id, paths] of index) {
+            for (const path of paths) {
+              if (!conflictPaths.has(path)) continue;
+              const ids = idsByPath.get(path) || new Set<string>();
+              ids.add(id);
+              idsByPath.set(path, ids);
+            }
+          }
         }
         const profiles = this.getInspectionProfiles();
         const kindKeys = new Set(['kind', ...profiles.evidence.map(profile => profile.kindPropertyKey), ...Object.values(profiles.kindKeys)]);
-        const kinds = raw ? [...kindKeys].flatMap(key => readValuesCaseInsensitive(raw, key))
-          .flatMap(value => Array.isArray(value) ? value : [value])
-          .filter((value): value is string => typeof value === 'string') : [];
-        return { path, ids: [...ids].sort(), kinds: [...new Set(kinds)], frontmatter: raw ? JSON.parse(JSON.stringify(raw)) : null };
-      }) : undefined;
+        conflicts = [...conflictPaths].sort().map(path => {
+          const raw = this.authoritativeSourceCache.get(path)?.frontmatter || null;
+          const kinds = raw ? [...kindKeys].flatMap(key => readValuesCaseInsensitive(raw, key))
+            .flatMap(value => Array.isArray(value) ? value : [value])
+            .filter((value): value is string => typeof value === 'string') : [];
+          return { path, ids: [...(idsByPath.get(path) || [])].sort(), kinds: [...new Set(kinds)], frontmatter: raw ? JSON.parse(JSON.stringify(raw)) : null };
+        });
+      }
+    }
     return { token: this.identitySourceGeneration, revision: snapshotRevision, records, ...(conflicts ? { conflicts } : {}) };
   }
 
