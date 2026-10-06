@@ -1,5 +1,28 @@
 # TPS Global Context Menu
 
+## 7.3.5 — Keep Calendar navigation out of idle vault scans
+
+In whole-note mode the persistent Calendar shortcut shows **Calendar**, or its
+running elapsed timer, without an automatically polled event count. Previously
+each visible badge queried every Markdown note about every eleven seconds and
+also read historical checkbox bodies. Opening the calendar popover still queries
+current note and external events, including creates, reschedules and deletions;
+native mode no longer includes retired inline tasks. Legacy-mode counts and
+inline display remain unchanged. This removes the expensive background query
+instead of retaining a potentially stale count or adding another cache/watcher.
+
+Four synthetic badges across initial and repeated refreshes now perform zero
+calendar-count inventories, body reads or metadata inspections while still
+calling the active-timer service. That focused test mocks timer retrieval;
+enabled time tracking retains its separate existing session scan. The installed
+7.3.4 Test-vault baseline, with time tracking disabled, spent roughly 1.3–1.4 seconds
+per badge refresh across 13,812 notes. That hidden-window service timing is not
+physical-phone or foreground responsiveness evidence. Explicit popover queries
+still enumerate notes; no note schema, setting, writer, reminder policy or
+minimum Obsidian version (1.10.0) changes. Final tests, installed verification
+and hashes are in [7.3.5 release notes](release-notes/7.3.5.md). Production
+installation remains the user's BRAT pull.
+
 ## 7.3.4 — Keep whole-note deletion out of legacy body cleanup
 
 Whole-note mode no longer runs the retired inline-link body cleaner after deleting a file. That route bypassed the shared body-write boundary introduced in 5.0.0 and still inspected every Markdown body. It now checks stored parent/attachment properties and invokes the existing protected writer only for matching candidates. Historical body links stay authored, including unchecked items and links to deleted notes. Current-source atomic mutations, exclusions, ambiguity handling and deletion serialization are retained. The legacy-mode body cleaner retains its original current-body behavior. No new index, watcher, cache, setting or automatic repair is introduced.

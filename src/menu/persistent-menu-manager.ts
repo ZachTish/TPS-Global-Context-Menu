@@ -4756,7 +4756,12 @@ export class PersistentMenuManager {
     state.fetchInFlight = true;
     try {
       const [count, activeTimers] = await Promise.all([
-        this.countCalendarItemsOnDay(state.scheduledDate),
+        // A native navigation badge is a Calendar action, not a background
+        // query. Its popover reads current events when explicitly opened;
+        // elapsed timers remain live without rescanning every note on idle UI.
+        this.plugin.settings.dataArchitectureMode === 'native-records'
+          ? Promise.resolve(null)
+          : this.countCalendarItemsOnDay(state.scheduledDate),
         this.plugin.timeTrackingService.getActiveTimersForFile(state.file),
       ]);
       if (!state.labelEl.isConnected || !state.buttonEl.isConnected) {
@@ -4980,6 +4985,9 @@ export class PersistentMenuManager {
     date: Date,
     settings: Record<string, unknown>,
   ): Promise<Array<NoteTaskPopoverItem & { date: Date; inlineProperties: Map<string, string> }>> {
+    // Whole-note mode exposes note events, not the retired inline-task model.
+    // Historical checkboxes must not turn a calendar display into body scans.
+    if (this.plugin.settings.dataArchitectureMode === 'native-records') return [];
     const tasks = await this.collectTasksInFile(file);
     const scheduledKeys = this.getCalendarTaskScheduledKeys(settings);
     const results: Array<NoteTaskPopoverItem & { date: Date; inlineProperties: Map<string, string> }> = [];
