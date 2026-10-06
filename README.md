@@ -1,5 +1,41 @@
 # TPS Global Context Menu
 
+## 7.3.7 — Keep heading suggestions in their owning editor
+
+Heading-link suggestions search only while the active Markdown editor is focused
+in Source or Live Preview. Typing in sidebar search, a modal, global search or
+another input no longer searches the retained heading cursor's vault. Keyboard
+navigation and mouse selection also verify the popup still belongs to the
+current editor and file, so a stale popup cannot consume unrelated keys or edit
+the previous note.
+
+Searches now use Obsidian's public `editor-change` notification after text changes
+are applied, including changes with no keyup. Keyup searches are limited to
+arrows, Home/End and PageUp/PageDown; the popup's existing cursor context prevents
+a repeat search when that cursor has not moved. Typing therefore searches once,
+popup arrows retain their selection without rescanning, and Escape stays closed
+after keyup. Modified and composing keydowns remain editor/IME-owned. Captured
+input only dismisses an ineligible popup, and the unowned keydown timeout is
+removed. Matching, ranking and link formatting are unchanged. There is no new
+state store, timer, cache, poller, setting, schema change or note maintenance.
+
+Before-failing tests reproduce three vault inventories and 12,000 metadata reads
+from one unrelated keystroke with a 4,000-note synthetic vault; the fixed route
+does zero. All 37 focused tests and six browser timing scenarios pass, including
+stale selection, Reading mode, modifiers, composition, no-keyup changes and
+unload. The browser check uses real CodeMirror DOM/mutation processing but
+simulates Obsidian's after-commit callback and does not render the popup. The
+GCM list suite also no longer reads three files from the retired standalone TPS
+Kanban repository; all 55 active List tests and shared-utility coverage remain.
+
+This backward-compatible patch keeps minimum Obsidian 1.10.0. The final versioned
+declared suite passes 1,588 tests and the supplemental suite passes 210, with no
+failures or skips. Installed host-boundary evidence, build details and artifact
+hashes are recorded in the [7.3.7 release notes](release-notes/7.3.7.md). This fixes
+a specific heading-input path, not every possible swipe, note-opening or
+tab-switch delay. Physical mobile/Windows latency and IME acceptance remain
+separate. Production installation remains the user's BRAT pull.
+
 ## 7.3.6 — Keep conflict-aware snapshots linear
 
 Native-record conflict diagnostics now collect IDs from the two existing

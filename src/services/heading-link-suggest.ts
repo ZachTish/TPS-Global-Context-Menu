@@ -27,15 +27,20 @@ export class HeadingLinkSuggest extends Component {
   }
 
   onload(): void {
-    this.registerDomEvent(document, 'keyup', () => this.refresh());
-    this.registerDomEvent(document, 'input', () => this.refresh(), true);
+    this.registerDomEvent(document, 'keyup', (event) => this.handleKeyup(event));
+    this.registerDomEvent(document, 'input', (event) => {
+      if (!this.getFocusedEditorView(event.target)) this.close();
+    }, true);
+    this.registerEvent(this.plugin.app.workspace.on('editor-change', (editor, info) => {
+      const view = this.getFocusedEditorView();
+      if (view?.editor === editor && view.file === info.file) this.refresh();
+    }));
     this.registerDomEvent(document, 'click', (event) => {
       if (this.popoverEl?.contains(event.target as Node)) return;
       this.close();
     }, true);
     this.registerDomEvent(document, 'keydown', (event: KeyboardEvent) => {
-      if (this.handleKeydown(event)) return;
-      window.setTimeout(() => this.refresh(), 0);
+      this.handleKeydown(event);
     }, true);
   }
 
@@ -43,8 +48,18 @@ export class HeadingLinkSuggest extends Component {
     this.close();
   }
 
-  private refresh(): void {
+  private getFocusedEditorView(target?: EventTarget | null): MarkdownView | null {
     const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
+    if (!view || view.getMode() !== 'source' || !view.editor.hasFocus()) return null;
+    if (target !== undefined) {
+      const element = target instanceof Element ? target : target instanceof Node ? target.parentElement : null;
+      if (!element || !view.contentEl.contains(element) || !element.closest('.cm-content')) return null;
+    }
+    return view;
+  }
+
+  private refresh(target?: EventTarget | null): void {
+    const view = this.getFocusedEditorView(target);
     const file = view?.file;
     if (!view || !file || file.extension.toLowerCase() !== 'md') {
       this.close();
@@ -138,8 +153,29 @@ export class HeadingLinkSuggest extends Component {
     return { left: rect.left + 48, top: rect.top + 120 };
   }
 
+  private handleKeyup(event: KeyboardEvent): void {
+    const view = this.getFocusedEditorView(event.target);
+    if (!view) {
+      this.close();
+      return;
+    }
+    if (event.isComposing || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) return;
+
+    const cursor = view.editor.getCursor();
+    const context = this.context;
+    if (context?.editor === view.editor && context.file === view.file
+      && cursor.line === context.line && cursor.ch === context.endCh) return;
+    this.refresh(event.target);
+  }
+
   private handleKeydown(event: KeyboardEvent): boolean {
     if (!this.popoverEl || this.suggestions.length === 0) return false;
+    const view = this.getFocusedEditorView(event.target);
+    if (!view || this.context?.editor !== view.editor || this.context?.file !== view.file) {
+      this.close();
+      return false;
+    }
+    if (event.isComposing || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return false;
     if (event.key === 'Escape') {
       event.preventDefault();
       this.close();
@@ -176,6 +212,11 @@ export class HeadingLinkSuggest extends Component {
     const context = this.context;
     const suggestion = this.suggestions[index];
     if (!context || !suggestion) return;
+    const view = this.getFocusedEditorView();
+    if (!view || context.editor !== view.editor || context.file !== view.file) {
+      this.close();
+      return;
+    }
 
     const link = this.plugin.app.fileManager.generateMarkdownLink(
       suggestion.file,

@@ -13,9 +13,6 @@ const logLineUtilsSource = readFileSync(new URL('../src/views/log-line-utils.ts'
 const logBaseCreateSource = readFileSync(new URL('../src/views/log-base-create.ts', import.meta.url), 'utf8');
 const menuBuilderSource = readFileSync(new URL('../src/menu/menu-builder.ts', import.meta.url), 'utf8');
 const gcmStyles = readFileSync(new URL('../src/plugin-styles.ts', import.meta.url), 'utf8');
-const kanbanSource = readFileSync(new URL('../../TPS-Kanban (Dev)/src/views/KanbanView.ts', import.meta.url), 'utf8');
-const kanbanMain = readFileSync(new URL('../../TPS-Kanban (Dev)/src/main.ts', import.meta.url), 'utf8');
-const kanbanStyles = readFileSync(new URL('../../TPS-Kanban (Dev)/src/styles.css', import.meta.url), 'utf8');
 
 function sourceBlock(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
@@ -308,9 +305,6 @@ test('GCM is the sole TPS List source and runtime owner', () => {
   assert.match(gcmStyles, /\.tps-list-native-row--task/);
   assert.doesNotMatch(bridgeSource, /TPS-Kanban|KanbanView/);
   assert.doesNotMatch(viewSource, /KANBAN_VIEW_TYPE|tps-kanban-board|tps-kanban-view-controls/);
-  assert.doesNotMatch(kanbanMain, /TPS_LIST_VIEW_TYPE|createTpsListBasesView/);
-  assert.doesNotMatch(kanbanSource, /TPS_LIST_VIEW_TYPE|tps-list-native|renderTpsList|createTpsList/);
-  assert.doesNotMatch(kanbanStyles, /\.tps-list/);
 });
 
 test('TPS List host bridge exposes live GCM mappings without confusing them with List defaults', async () => {
