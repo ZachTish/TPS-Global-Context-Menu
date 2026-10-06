@@ -1,5 +1,75 @@
 # TPS Global Context Menu
 
+## 7.3.12 — Bound initial native-record discovery work
+
+The initial native-record metadata inventory now releases a real task between
+slices of at most 256 paths or 8 ms of observed work. Existing metadata/create/
+modify/delete/rename listeners are installed before the first yield. Current
+file objects and newly accepted event sources retain ownership, so an older
+queued cache value cannot restore a deleted record or replace newer metadata.
+Each file still uses the 7.3.11 operation-local inspection, including current
+nested settings, classification, aliases, ambiguity and duplicate blocking.
+The full inventory still runs once, without discovery body reads or writes.
+
+Onload awaits that owned inventory before publishing the existing native API.
+Unload cancels initial discovery and guards every straight-line startup await,
+preventing an obsolete onload continuation from publishing the API again.
+Explicit settings, migration and cache-miss rebuilds remain synchronous; a
+complete explicit rebuild can replace paused initial discovery, while a failed
+replacement rejects it without restarting. Public API versions, settings,
+stored schema and minimum Obsidian 1.10.0 remain unchanged.
+
+A selected-note rename read also owns its captured file/path until it settles.
+Newer accepted metadata, modification, another rename, replacement, deletion
+or unload invalidates the awaited result. A reused old path remains owned by
+its replacement without suppressing the legitimate new target. The transient
+read token stores no note content and is removed on settlement; there is no new
+persistent source cache, watcher, poller, automatic repair or retry.
+
+All 175 actual-service native-record checks and TypeScript pass, including 29
+new startup/lifecycle controls. The real onload/onunload prefix tests cover
+publication and cancellation with modeled UI boundaries; native discovery,
+inventory and event ownership are actual service code. Controlled task tests
+cover scheduler, one-shot MessageChannel and timer routes, both count/time
+bounds, current nested mappings, explicit replacement, source races and zero
+discovery source I/O. Independent review found no blocking data-safety issue.
+The final versioned declared suite passes 1,609 tests and the explicit
+supplemental suite passes 247, with zero failures, cancellations or skips.
+TypeScript and the suite's production-mode build pass with deployment
+suppressed. One source-shape assertion was strengthened to require the new
+unload guard between Daily Note readiness and API publication; no assertion
+or test was dropped. The required separate build-only gate passes with matching
+hashes; a normal final build deployed only changed main.js/manifest.json to
+the explicitly guarded Test vault. Targeted reload confirms loaded 7.3.12.
+A separate actual-source corpus preserves complete index state and input
+metadata through 609 operations across seven configurations.
+
+Matched installed warm-reload samples retain 2,733 GCM/182 Health records,
+one inventory for each service, 39 cached/two raw reads and zero note mutation
+attempts. Metadata accesses are 80,228 before and 80,229 after. The longest
+hidden-host Node heartbeat gap falls from 462.9 to 297.2 ms, but reload return
+increases from 661.5 to 742.4 ms and total Health readiness from 741.6 to 820 ms.
+This is bounded task cooperation, not faster total completion or foreground
+input-to-paint evidence. A small read-only diagnostic CLI query occurred during
+the after sample; the samples include other consumers and instrumentation.
+Remaining synchronous relationship lookups are outside this patch.
+
+All 13 desktop Live Preview smoke phases pass through six tab switches and
+two remounts, retaining observed 24 food/39 activity rows without measured
+long tasks, Health render errors or note-mutation attempts. Three UUID fixtures
+are exact-byte archived. Settings/data, enabled plugins and the original leaf
+remain unchanged. The host was hidden/unfocused; a foreground attempt did not
+establish visibility. Full evidence and tested artifact hashes are in
+[7.3.12 release notes](release-notes/7.3.12.md).
+
+The bound is checked between paths; one unusually expensive inspection or
+inventory call is not preempted. Onload still waits for complete discovery and
+[Obsidian loads plugins before interaction](https://docs.obsidian.md/plugins/guides/load-time), so this is not a promise of faster
+whole-process cold startup or earlier cold UI readiness. Relationship lookup,
+authoritative disk verification and other plugins' work remain separate.
+Physical mobile/Windows latency and cold-process UI readiness are unverified;
+production installation remains the user's BRAT pull.
+
 ## 7.3.11 — Inspect each indexed record once
 
 Cold native-record indexing previously classified the same note/profile several

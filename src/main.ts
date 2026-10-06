@@ -328,6 +328,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private static readonly BUILD_STAMP = '2026-07-13 base-create-owner-0.1.9';
   private static readonly NOTE_PREVIEW_SOURCE = 'tps-gcm-note-preview';
   private readonly startupTimestamp = Date.now();
+  private startupOwner: symbol | null = null;
   private baseLinkPreviewArmedPath: string | null = null;
   private baseLinkPreviewArmedUntil = 0;
   settings: TPSGlobalContextMenuSettings;
@@ -480,6 +481,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   async onload(): Promise<void> {
+    const startupOwner = Symbol();
+    this.startupOwner = startupOwner;
     this.ignoreNextContext = false;
     this.removeLegacyNotebookNavigatorRuleSettingsStyles();
     this.registerEvent(this.app.workspace.on('window-open', (_workspaceWindow, targetWindow) => {
@@ -487,6 +490,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }));
 
     await this.loadSettings();
+    if (this.startupOwner !== startupOwner) return;
     logger.setLoggingEnabled(this.settings.enableLogging);
 
     installDateContainsPolyfill();
@@ -546,6 +550,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.identityService = new TpsIdentityService(this);
     this.itemHistoryService = new ItemHistoryService(this);
     await this.itemHistoryService.setup();
+    if (this.startupOwner !== startupOwner) return;
     this.taskApiService = new TaskApiService(this);
     this.cardContentService = new CardContentService();
     this.identityMigrationService = new IdentityMigrationService(this);
@@ -588,8 +593,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.frontmatterMutationService = new FrontmatterMutationService(this);
     this.propertyMigrationService = new PropertyMigrationService(this);
     await this.propertyMigrationService.initialize();
+    if (this.startupOwner !== startupOwner) return;
     this.nativeRecordService = new NativeRecordService(this);
-    this.nativeRecordService.setup();
+    const nativeIndexReady = await this.nativeRecordService.setup();
+    if (!nativeIndexReady || this.startupOwner !== startupOwner) return;
     this.templateIdentityService = new TemplateIdentityService(this);
     this.sharedServices = createSharedServices(this);
     this.notebookNavigatorRuleService.setupPresentationProjection();
@@ -672,6 +679,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     // Expose inter-plugin API
     await this.fileNamingService.whenDailyNoteConfigurationReady();
+    if (this.startupOwner !== startupOwner) return;
     setupPluginApi(this);
     this.nativeBaseNoteOpening.install();
     this.register(() => this.nativeBaseNoteOpening.dispose());
@@ -1543,6 +1551,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   onunload(): void {
+    this.startupOwner = null;
+    this.nativeRecordService?.dispose();
     this.propertyMigrationService?.dispose();
     if (this.basesPreviewPropertiesRefreshTimer !== null) {
       window.clearTimeout(this.basesPreviewPropertiesRefreshTimer);

@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
+import ts from 'typescript';
 
 function parseYamlScalar(raw) {
   const value = String(raw ?? '').trim();
@@ -4329,8 +4330,570 @@ function assertSingleProfileEvaluation(measurement, expectedCalls, expectedCopie
   assert.equal(measurement.copies, expectedCopies);
 }
 
+function manualStartupTasks(route = 'scheduler') {
+  const original = {
+    scheduler: globalThis.scheduler,
+    MessageChannel: globalThis.MessageChannel,
+    setTimeout: globalThis.setTimeout,
+  };
+  const pending = [];
+  let closedPorts = 0;
+  const schedule = () => new Promise(resolve => pending.push(resolve));
+  globalThis.scheduler = route === 'scheduler' ? { yield: schedule } : undefined;
+  globalThis.MessageChannel = route === 'channel' ? class {
+    port1 = { onmessage: null, close() { closedPorts++; } };
+    port2 = { close() { closedPorts++; }, postMessage: () => pending.push(() => this.port1.onmessage?.()) };
+  } : undefined;
+  if (route === 'timer') globalThis.setTimeout = callback => { pending.push(callback); return 1; };
+  return {
+    get pending() { return pending.length; },
+    get closedPorts() { return closedPorts; },
+    async step() {
+      assert.ok(pending.length, 'an owned task boundary must be pending');
+      pending.shift()();
+      for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+    },
+    async drain() {
+      for (let tasks = 0; pending.length; tasks++) {
+        assert.ok(tasks < 100, 'finite startup cannot introduce a retry loop');
+        await this.step();
+      }
+    },
+    restore() { Object.assign(globalThis, original); },
+  };
+}
+
+function startupLoad(mode = 'native-records', count = 1025) {
+  const h = createHarness(mode, { deferSetup: true, layoutReady: false });
+  const counters = { inventories: 0, metadata: 0, reads: 0, writes: 0 };
+  for (let i = 0; i < count; i++) {
+    const file = h.addFile(`startup-${i}.md`, '');
+    h.metadata.set(file, { tpsId: `startup-${i}`, tpsSchemaVersion: 1, kind: 'task', title: `Task ${i}` });
+  }
+  for (const [host, method, key] of [
+    [h.vault, 'getMarkdownFiles', 'inventories'],
+    [h.plugin.app.metadataCache, 'getFileCache', 'metadata'],
+    [h.vault, 'read', 'reads'], [h.vault, 'cachedRead', 'reads'],
+    [h.vault, 'create', 'writes'], [h.vault, 'process', 'writes'], [h.vault, 'rename', 'writes'],
+  ]) {
+    const original = host[method];
+    host[method] = function (...args) { counters[key]++; return original.apply(this, args); };
+  }
+  return { ...h, counters };
+}
+
+function startupPublicationHarness(h, dailyConfigurationReady = Promise.resolve()) {
+  // Execute the actual straight-line onload source through its first available
+  // broadcast, plus actual onunload. UI/component dependencies are no-op
+  // facades; the native constructor/setup and its inventory are real.
+  const source = ts.createSourceFile('main.ts', mainSource, ts.ScriptTarget.Latest, true);
+  let owner;
+  for (const node of source.statements) if (ts.isClassDeclaration(node)
+    && node.name?.text === 'TPSGlobalContextMenuPlugin') owner = node;
+  assert.ok(owner);
+  const onload = owner.members.find(member => ts.isMethodDeclaration(member) && member.name.getText(source) === 'onload');
+  const onunload = owner.members.find(member => ts.isMethodDeclaration(member) && member.name.getText(source) === 'onunload');
+  assert.ok(onload?.body && onunload);
+  const publication = onload.body.statements.find(statement => statement.getText(source) === 'this.emitGcmApiChanged(true);');
+  assert.ok(publication, 'exercise the actual first publication, not a modeled substitute');
+  const fields = owner.members.filter(member => ts.isPropertyDeclaration(member)
+    && member.name.getText(source) === 'startupOwner').map(member => member.getText(source)).join('\n');
+  const startupMethod = mainSource.slice(onload.getStart(source), publication.end) + '\n}';
+  const bindings = [];
+  for (const node of source.statements) {
+    if (!ts.isImportDeclaration(node) || !node.importClause) continue;
+    const clause = node.importClause;
+    if (clause.name) bindings.push(clause.name.text);
+    if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) bindings.push(clause.namedBindings.name.text);
+    if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+      for (const binding of clause.namedBindings.elements) bindings.push(binding.name.text);
+    }
+  }
+  const noop = new Proxy(function () { return noop; }, {
+    get(_target, key) {
+      if (key === 'then') return undefined;
+      if (key === Symbol.toPrimitive) return () => '';
+      if (key === Symbol.iterator) return function* () {};
+      return noop;
+    },
+    construct() { return noop; },
+  });
+  const availability = [], publications = [];
+  const dependencies = Object.fromEntries(bindings.map(name => [name, noop]));
+  Object.assign(dependencies, {
+    NativeRecordService: class { constructor() { return h.service; } },
+    FileNamingService: class { whenDailyNoteConfigurationReady() { return dailyConfigurationReady; } },
+    Platform: { isMobile: false },
+    setupPluginApi(plugin) {
+      publications.push(h.service.recordsByPath.size);
+      plugin.api = { nativeRecords: h.service };
+    },
+    window: { clearTimeout() {}, setInterval() { return 1; } },
+    document: { body: { classList: { remove() {} } } },
+    TPSGlobalContextMenuPlugin: { BUILD_STAMP: 'actual-source-startup-test' },
+  });
+  const code = ts.transpileModule(`export class Startup { ${fields}\n${startupMethod}\n${onunload.getText(source)} }`, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
+  }).outputText;
+  const exports = {};
+  new Function('exports', ...Object.keys(dependencies), code)(exports, ...Object.values(dependencies));
+  h.plugin.app.workspace.on = () => ({});
+  h.plugin.app.workspace.onLayoutReady = () => {};
+  h.plugin.app.workspace.updateOptions = () => {};
+  const plugin = new Proxy(Object.assign(new exports.Startup(), h.plugin, {
+    async loadSettings() {},
+    usesNativeRecordArchitecture: () => true,
+    shouldInstallWorkspaceOpenPatch: () => false,
+    canRunBackgroundAutomation: () => false,
+    emitGcmApiChanged: available => availability.push(available),
+  }), { get(target, key, receiver) { return key === 'api' || Reflect.has(target, key) ? Reflect.get(target, key, receiver) : noop; } });
+  return { plugin, availability, publications };
+}
+
+async function flushStartupMicrotasks() {
+  for (let turn = 0; turn < 16; turn++) await Promise.resolve();
+}
+
+test('actual onload publishes the native API only after its initial inventory completes', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = startupPublicationHarness(h);
+  try {
+    const loaded = p.plugin.onload();
+    await flushStartupMicrotasks();
+    assert.equal(tasks.pending, 1);
+    assert.equal(p.plugin.api === undefined, true, 'no consumer receives a partly indexed NativeRecords API');
+    assert.deepEqual(p.availability, []);
+    await tasks.drain();
+    await loaded;
+    assert.deepEqual(p.publications, [1025]);
+    assert.deepEqual(p.availability, [true]);
+    assert.equal(h.counters.inventories, 1);
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+  } finally { p.plugin.onunload(); tasks.restore(); }
+});
+
+test('actual onunload during an initial yield cannot resume onload or republish the API', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = startupPublicationHarness(h);
+  try {
+    const loaded = p.plugin.onload();
+    await flushStartupMicrotasks();
+    assert.equal(tasks.pending, 1);
+    p.plugin.onunload();
+    const atUnload = { ...h.counters };
+    await tasks.drain();
+    await loaded;
+    assert.deepEqual(h.counters, atUnload);
+    assert.equal(p.plugin.api === undefined, true);
+    assert.deepEqual(p.publications, []);
+    assert.deepEqual(p.availability, [false]);
+  } finally { h.service.dispose?.(); tasks.restore(); }
+});
+
+test('actual onload cannot republish after unloading during the existing daily-configuration await', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  let ready;
+  const p = startupPublicationHarness(h, new Promise(resolve => { ready = resolve; }));
+  try {
+    const loaded = p.plugin.onload();
+    await flushStartupMicrotasks();
+    await tasks.drain();
+    assert.deepEqual(p.publications, []);
+    p.plugin.onunload();
+    ready();
+    await loaded;
+    assert.equal(p.plugin.api === undefined, true);
+    assert.deepEqual(p.publications, []);
+    assert.deepEqual(p.availability, [false]);
+  } finally { h.service.dispose?.(); tasks.restore(); }
+});
+
+test('actual onload unloaded during its first settings await never starts native discovery', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = startupPublicationHarness(h);
+  let ready;
+  p.plugin.loadSettings = () => new Promise(resolve => { ready = resolve; });
+  try {
+    const loaded = p.plugin.onload();
+    await flushStartupMicrotasks();
+    assert.deepEqual(h.counters, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
+    p.plugin.onunload();
+    ready();
+    await loaded;
+    assert.deepEqual(h.counters, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
+    assert.equal(tasks.pending, 0);
+    assert.equal(p.plugin.api === undefined, true);
+    assert.deepEqual(p.publications, []);
+    assert.deepEqual(p.availability, [false]);
+  } finally { h.service.dispose?.(); tasks.restore(); }
+});
+
+for (const [mode, route] of [
+  ['native-records', 'scheduler'], ['native-records', 'channel'],
+  ['native-records', 'timer'], ['legacy', 'scheduler'],
+]) test(`initial ${mode} setup yields bounded metadata work through ${route} tasks`, async () => {
+  const tasks = manualStartupTasks(route);
+  const h = startupLoad(mode);
+  try {
+    const setup = h.service.setup();
+    assert.ok(setup instanceof Promise, 'initial inventory has an explicit awaited owner');
+    assert.equal(h.service.setup(), setup, 'concurrent setup calls join the same initial owner');
+    assert.equal(tasks.pending, 1, 'a real task, not a resolved promise, separates slices');
+    assert.ok(h.counters.metadata > 0 && h.counters.metadata <= 256);
+    assert.ok(h.service.recordsByPath.size < 1025, 'startup is not published as complete before its inventory drains');
+    let previous = h.counters.metadata;
+    while (tasks.pending) {
+      await tasks.step();
+      assert.ok(h.counters.metadata - previous <= 256, 'every continuation has a file-count bound');
+      previous = h.counters.metadata;
+    }
+    assert.equal(await setup, true);
+    assert.deepEqual(h.counters, { inventories: 1, metadata: 1025, reads: 0, writes: 0 });
+    assert.equal(h.service.recordsByPath.size, 1025);
+    assert.equal(h.service.blockedIdentityEvidencePaths.size, 0);
+    for (let i = 0; i < 1025; i++) assert.equal(h.service.recordsByPath.get(`startup-${i}.md`).title, `Task ${i}`);
+    if (route === 'channel') assert.ok(tasks.closedPorts >= 2 && tasks.closedPorts % 2 === 0);
+    assert.equal(h.service.setup(), setup, 'a completed initial owner is not a second inventory');
+  } finally { h.service.dispose?.(); tasks.restore(); }
+});
+
+test('initial setup yields at its elapsed-work bound before the file-count limit', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad('native-records', 17);
+  const originalPerformance = Object.getOwnPropertyDescriptor(globalThis, 'performance');
+  let elapsed = 0;
+  Object.defineProperty(globalThis, 'performance', { configurable: true, value: { now: () => elapsed } });
+  const getFileCache = h.plugin.app.metadataCache.getFileCache;
+  h.plugin.app.metadataCache.getFileCache = file => { elapsed += 2; return getFileCache(file); };
+  try {
+    const setup = h.service.setup();
+    assert.equal(tasks.pending, 1);
+    assert.equal(h.counters.metadata, 4, 'the 8 ms branch yields after four controlled 2 ms metadata steps');
+    let previous = h.counters.metadata;
+    while (tasks.pending) {
+      await tasks.step();
+      assert.ok(h.counters.metadata - previous <= 4, 'each real continuation uses the elapsed-work bound again');
+      previous = h.counters.metadata;
+    }
+    assert.equal(await setup, true);
+    assert.deepEqual(h.counters, { inventories: 1, metadata: 17, reads: 0, writes: 0 });
+    assert.equal(h.service.recordsByPath.size, 17);
+  } finally {
+    h.service.dispose?.();
+    Object.defineProperty(globalThis, 'performance', originalPerformance);
+    tasks.restore();
+  }
+});
+
+test('initial setup listeners preserve newer sources before and after a queued file is visited', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  try {
+    const setup = h.service.setup();
+    assert.equal(tasks.pending, 1);
+    const visited = h.entries.get('startup-0.md');
+    const queued = h.entries.get('startup-1024.md');
+    for (const file of [visited, queued]) {
+      h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: {
+        tpsId: h.metadata.get(file).tpsId, tpsSchemaVersion: 1, kind: 'task', title: 'Current source', status: 'complete',
+      } });
+      assert.equal(h.service.recordsByPath.get(file.path)?.title, 'Current source', 'listeners precede the first yield');
+    }
+    await tasks.drain();
+    assert.equal(await setup, true);
+    for (const file of [visited, queued]) {
+      assert.equal(h.service.recordsByPath.get(file.path)?.title, 'Current source', 'old queued MetadataCache cannot overwrite a newer accepted event');
+      assert.equal(h.service.recordsByPath.get(file.path)?.status, 'complete');
+      assert.equal(h.service.authoritativeIndexDirtyPaths.has(file.path), true, 'metadata-only discovery cannot clear dirty source ownership');
+    }
+    assert.equal(h.counters.inventories, 1);
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+  } finally { h.service.dispose?.(); tasks.restore(); }
+});
+
+test('initial setup cannot resurrect deleted, renamed or replaced queued file objects', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  try {
+    const setup = h.service.setup();
+    assert.equal(tasks.pending, 1);
+    const deleted = h.entries.get('startup-1020.md');
+    h.entries.delete(deleted.path);
+    h.vault.emit('delete', deleted);
+    const renamed = h.entries.get('startup-1021.md');
+    await h.vault.rename(renamed, 'renamed-startup.md');
+    const obsolete = h.entries.get('startup-1022.md');
+    const replacement = h.addFile(obsolete.path, '');
+    h.metadata.set(replacement, { tpsId: 'replacement', tpsSchemaVersion: 1, kind: 'task', title: 'Replacement' });
+    h.plugin.app.metadataCache.emit('changed', replacement, '', { frontmatter: h.metadata.get(replacement) });
+    h.plugin.app.metadataCache.emit('changed', obsolete, '', { frontmatter: h.metadata.get(obsolete) });
+    h.vault.emit('delete', obsolete);
+    const created = h.addFile('created-during-startup.md', '');
+    h.metadata.set(created, { tpsId: 'created', tpsSchemaVersion: 1, kind: 'task', title: 'Created' });
+    h.vault.emit('create', created);
+    await tasks.drain();
+    assert.equal(await setup, true);
+    assert.equal(h.service.recordsByPath.has(deleted.path), false);
+    assert.equal(h.service.recordsByPath.has('startup-1021.md'), false);
+    assert.equal(h.service.recordsByPath.get(renamed.path)?.title, 'Task 1021');
+    assert.equal(h.service.recordsByPath.get(replacement.path)?.tpsId, 'replacement');
+    assert.equal(h.service.recordsByPath.get(created.path)?.title, 'Created');
+    assert.equal(h.service.pathsById.has('startup-1020'), false);
+    assert.equal(h.service.pathsById.has('startup-1022'), false);
+    assert.equal(h.counters.inventories, 1);
+    assert.equal(h.counters.reads, 0, 'a known cached rename retains the existing no-body-read route');
+  } finally { h.service.dispose?.(); tasks.restore(); }
+});
+
+for (const cache of ['cached', 'cold']) test(`a current ${cache} renamed target is indexed without removing a reused old path`, async () => {
+  const h = createHarness('native-records', { deferSetup: true });
+  let replacement;
+  h.vault.on('rename', (_file, oldPath) => {
+    if (cache === 'cold') h.metadata.delete(_file);
+    replacement = h.addFile(oldPath, '');
+    h.metadata.set(replacement, { tpsId: 'old-path-replacement', tpsSchemaVersion: 1, kind: 'task', title: 'Old path replacement' });
+    h.plugin.app.metadataCache.emit('changed', replacement, '', { frontmatter: h.metadata.get(replacement) });
+  });
+  assert.equal(await h.service.setup(), true);
+  const file = h.addFile('original-before-rename.md', serializeNativeRecordDocument({ bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
+    tpsId: 'renamed-current', tpsSchemaVersion: 1, kind: 'task', title: 'Current renamed target',
+  } }));
+  h.vault.emit('create', file);
+  assert.equal(h.service.recordsByPath.get(file.path)?.tpsId, 'renamed-current');
+  await h.vault.rename(file, 'current-renamed-target.md');
+  await flushStartupMicrotasks();
+  assert.equal(h.entries.get('original-before-rename.md'), replacement);
+  assert.equal(h.service.recordsByPath.get(replacement.path)?.tpsId, 'old-path-replacement');
+  assert.equal(h.service.recordsByPath.get(file.path)?.tpsId, 'renamed-current', 'a live old-path replacement does not suppress a legitimate current target');
+  assert.deepEqual([...h.service.pathsById.get('renamed-current')], [file.path]);
+  assert.deepEqual([...h.service.pathsById.get('old-path-replacement')], [replacement.path]);
+  h.service.dispose();
+});
+
+for (const race of ['delete', 'replacement', 'metadata', 'post-startup-metadata', 'invalid-metadata', 'removed-identity', 'modify', 'rebuild', 'dispose']) {
+  test(`a deferred startup rename read cannot replace newer ${race} ownership`, async () => {
+    const tasks = manualStartupTasks();
+    const h = startupLoad();
+    let finishRead, rename;
+    const originalRename = h.service.handleRecordRename.bind(h.service);
+    h.service.handleRecordRename = (...args) => rename = originalRename(...args);
+    try {
+      const setup = h.service.setup();
+      assert.equal(tasks.pending, 1);
+      const file = h.entries.get('startup-1024.md');
+      const originalPath = file.path;
+      const source = serializeNativeRecordDocument({ bom: '', newline: '\n', closer: '---', body: 'Original body', frontmatter: h.metadata.get(file) });
+      h.metadata.delete(file);
+      h.vault.cachedRead = () => { h.counters.reads++; return new Promise(resolve => { finishRead = resolve; }); };
+      await h.vault.rename(file, 'deferred-startup-rename.md');
+      assert.equal(typeof finishRead, 'function', 'the actual rename listener has reached its source-read await');
+      assert.equal(h.service.pendingRenameReads.has(file), true);
+      assert.equal(h.service.recordsByPath.has(originalPath), false);
+      const current = { tpsId: 'current-rename', tpsSchemaVersion: 1, kind: 'task', title: 'Current source', status: 'complete' };
+      if (race === 'delete') {
+        h.entries.delete(file.path);
+        h.vault.emit('delete', file);
+      } else if (race === 'replacement') {
+        const replacement = h.addFile(file.path, '');
+        h.plugin.app.metadataCache.emit('changed', replacement, '', { frontmatter: current });
+      } else if (race === 'metadata' || race === 'post-startup-metadata') {
+        if (race === 'post-startup-metadata') {
+          await tasks.drain();
+          assert.equal(await setup, true);
+        }
+        h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: current });
+      } else if (race === 'invalid-metadata') {
+        h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: { ...current, TPSID: 'conflicting-id' } });
+        assert.equal(h.service.blockedIdentityEvidencePaths.has(file.path), true);
+      } else if (race === 'removed-identity') {
+        h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: { title: 'No longer a native record' } });
+      } else if (race === 'modify') {
+        h.vault.emit('modify', file);
+      } else if (race === 'rebuild') {
+        h.metadata.set(file, current);
+        h.service.refreshConfiguration();
+      } else h.service.dispose();
+      const atChange = { ...h.counters };
+      finishRead(source);
+      await rename;
+      assert.equal(h.counters.metadata, atChange.metadata, 'an obsolete read does not re-inspect MetadataCache');
+      if (race === 'replacement' || race === 'metadata' || race === 'post-startup-metadata' || race === 'rebuild') {
+        assert.equal(h.service.recordsByPath.get(file.path)?.tpsId, current.tpsId);
+        assert.equal(h.service.recordsByPath.get(file.path)?.status, 'complete');
+      } else assert.equal(h.service.recordsByPath.has(file.path), false, 'an obsolete read cannot revive a deleted, blocked or disposed record');
+      if (race === 'invalid-metadata') assert.equal(h.service.blockedIdentityEvidencePaths.has(file.path), true);
+      assert.equal(h.service.pendingRenameReads.has(file), false, 'settled reads retain no ownership token');
+      await tasks.drain();
+      assert.equal(await setup, race !== 'dispose');
+      assert.equal(h.service.pathsById.has('startup-1024'), false);
+      assert.equal(h.service.authoritativeIndexDirtyPaths.has(file.path), true);
+      assert.equal(h.counters.inventories, race === 'rebuild' ? 2 : 1);
+      assert.equal(h.counters.reads, 1, 'only the already-started selected source is read');
+      assert.equal(h.counters.writes, 1, 'only the synthetic user rename writes; discovery never does');
+    } finally { h.service.dispose?.(); tasks.restore(); }
+  });
+}
+
+test('a superseded rename read cannot clear a later rename read owner', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const reads = [], renames = [];
+  const originalRename = h.service.handleRecordRename.bind(h.service);
+  h.service.handleRecordRename = (...args) => {
+    const pending = originalRename(...args);
+    renames.push(pending);
+    return pending;
+  };
+  try {
+    const setup = h.service.setup();
+    const file = h.entries.get('startup-1024.md');
+    const originalSource = serializeNativeRecordDocument({ bom: '', newline: '\n', closer: '---', body: '', frontmatter: h.metadata.get(file) });
+    h.metadata.delete(file);
+    h.vault.cachedRead = () => { h.counters.reads++; return new Promise(resolve => reads.push(resolve)); };
+    await h.vault.rename(file, 'first-deferred-rename.md');
+    await h.vault.rename(file, 'second-deferred-rename.md');
+    assert.equal(reads.length, 2);
+    reads[0](originalSource);
+    await renames[0];
+    assert.equal(h.service.recordsByPath.has(file.path), false);
+    assert.equal(h.service.pendingRenameReads.has(file), true, 'the old finally cannot clear the newer read owner');
+    reads[1](serializeNativeRecordDocument({ bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
+      tpsId: 'current-second-rename', tpsSchemaVersion: 1, kind: 'task', title: 'Second renamed current source', status: 'complete',
+    } }));
+    await renames[1];
+    assert.equal(h.service.recordsByPath.get(file.path)?.tpsId, 'current-second-rename');
+    assert.equal(h.service.recordsByPath.get(file.path)?.status, 'complete');
+    assert.equal(h.service.pendingRenameReads.has(file), false);
+    await tasks.drain();
+    assert.equal(await setup, true);
+    assert.equal(h.service.recordsByPath.has('first-deferred-rename.md'), false);
+    assert.equal(h.service.pathsById.has('startup-1024'), false);
+    assert.equal(h.counters.inventories, 1);
+    assert.equal(h.counters.reads, 2);
+    assert.equal(h.counters.writes, 2);
+  } finally { h.service.dispose?.(); tasks.restore(); }
+});
+
+test('dispose cancels initial setup and all later callbacks without claiming completion', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  try {
+    const setup = h.service.setup();
+    assert.equal(tasks.pending, 1);
+    h.service.dispose();
+    const atDispose = { ...h.counters };
+    const before = [...h.service.recordsByPath];
+    await tasks.drain();
+    assert.equal(await setup, false);
+    const first = h.entries.get('startup-0.md');
+    h.plugin.app.metadataCache.emit('changed', first, '', { frontmatter: { ...h.metadata.get(first), title: 'After unload' } });
+    h.vault.emit('create', first);
+    h.vault.emit('modify', first);
+    h.vault.emit('delete', first);
+    h.vault.emit('rename', first, 'old.md');
+    assert.deepEqual(h.counters, atDispose);
+    assert.deepEqual([...h.service.recordsByPath], before);
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+  } finally { h.service.dispose?.(); tasks.restore(); }
+});
+
+test('explicit synchronous configuration rebuild supersedes a paused initial setup', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  try {
+    const setup = h.service.setup();
+    assert.equal(tasks.pending, 1);
+    const last = h.entries.get('startup-1024.md');
+    h.metadata.set(last, { ...h.metadata.get(last), title: 'Configured current' });
+    assert.equal(h.service.refreshConfiguration(), undefined, 'the explicit rebuild contract stays synchronous');
+    assert.equal(h.service.recordsByPath.size, 1025);
+    assert.equal(h.service.recordsByPath.get(last.path)?.title, 'Configured current');
+    const afterRebuild = { ...h.counters };
+    await tasks.drain();
+    assert.equal(await setup, true, 'the complete synchronous replacement satisfies initial readiness');
+    assert.deepEqual(h.counters, afterRebuild, 'the superseded startup continuation does no more indexing');
+    assert.equal(h.counters.inventories, 2);
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+  } finally { h.service.dispose?.(); tasks.restore(); }
+});
+
+test('initial setup reads nested in-place mappings again after a task boundary', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  try {
+    h.plugin.settings.nativeRecordKindPropertyKeys = {
+      task: { primary: { kindList: { key: 'Type', value: 'Records/task' } } },
+    };
+    const first = h.entries.get('startup-0.md');
+    const last = h.entries.get('startup-1024.md');
+    const firstSource = { tpsId: 'startup-0', tpsSchemaVersion: 1, Type: ['Records/task'], title: 'First mapped' };
+    const lastSource = { tpsId: 'startup-1024', tpsSchemaVersion: 1, Type: ['Records/current'], title: 'Current mapped' };
+    const original = structuredClone([firstSource, lastSource]);
+    h.metadata.set(first, firstSource);
+    h.metadata.set(last, lastSource);
+    const setup = h.service.setup();
+    assert.equal(tasks.pending, 1);
+    assert.equal(h.service.recordsByPath.get(first.path)?.kind, 'task');
+    h.plugin.settings.nativeRecordKindPropertyKeys.task.primary.kindList.value = 'Records/current';
+    await tasks.drain();
+    assert.equal(await setup, true);
+    assert.equal(h.service.recordsByPath.get(first.path)?.title, 'First mapped', 'the accepted earlier file remains its own snapshot');
+    assert.equal(h.service.recordsByPath.get(last.path)?.kind, 'task', 'the next file checks current nested settings without requiring a save');
+    assert.equal(h.service.recordsByPath.get(last.path)?.title, 'Current mapped');
+    assert.deepEqual([firstSource, lastSource], original);
+    assert.deepEqual(h.counters, { inventories: 1, metadata: 1025, reads: 0, writes: 0 });
+  } finally { h.service.dispose?.(); tasks.restore(); }
+});
+
+test('a failed synchronous replacement rejects initial readiness and stops its old continuation', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  try {
+    const setup = h.service.setup();
+    assert.equal(tasks.pending, 1);
+    const error = new Error('Synthetic explicit replacement failure');
+    const rejected = assert.rejects(setup, error);
+    h.service.getInspectionProfiles = () => { throw error; };
+    assert.throws(() => h.service.refreshConfiguration(), error, 'explicit callers retain synchronous errors');
+    await rejected;
+    const atFailure = { ...h.counters };
+    await tasks.drain();
+    assert.deepEqual(h.counters, atFailure, 'an obsolete initial owner cannot restart after replacement failure');
+    assert.equal(h.service.initialDiscovery, null);
+    assert.equal(h.service.setup(), setup, 'failure does not silently create another startup');
+    assert.equal(tasks.pending, 0);
+    assert.equal(h.counters.inventories, 2);
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+  } finally { h.service.dispose?.(); tasks.restore(); }
+});
+
+for (const failure of ['inspection', 'scheduler']) test(`initial ${failure} failure rejects its owner and schedules no automatic retry`, async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  try {
+    const setup = h.service.setup();
+    assert.equal(tasks.pending, 1);
+    const error = new Error(`Synthetic startup ${failure} error`);
+    const rejected = assert.rejects(setup, error);
+    if (failure === 'inspection') h.service.getInspectionProfiles = () => { throw error; };
+    else globalThis.scheduler.yield = () => Promise.reject(error);
+    await tasks.step();
+    await rejected;
+    const atFailure = { ...h.counters };
+    await tasks.drain();
+    assert.deepEqual(h.counters, atFailure);
+    assert.equal(tasks.pending, 0);
+    assert.equal(h.counters.inventories, 1);
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+  } finally { h.service.dispose?.(); tasks.restore(); }
+});
+
 for (const variant of ['ordinary', 'canonical', 'mapped-26']) {
-  test(`cold setup shares one per-file inspection across 10000 ${variant} metadata notes`, () => {
+  test(`cold setup shares one per-file inspection across 10000 ${variant} metadata notes`, async () => {
     const h = createHarness('native-records', { deferSetup: true });
     h.plugin.settings.nativeRecordKindPropertyKeys = variant === 'mapped-26'
       ? Object.fromEntries(Array.from({ length: 26 }, (_, i) => [`perf-${i}`, {
@@ -4367,7 +4930,7 @@ for (const variant of ['ordinary', 'canonical', 'mapped-26']) {
       perSource.set(raw, profiles);
     };
     globalThis.__nativeRecordEnvelopeCopy = () => { counters.copies++; };
-    try { h.service.setup(); } finally {
+    try { assert.equal(await h.service.setup(), true); } finally {
       delete globalThis.__nativeRecordProfileInspection;
       delete globalThis.__nativeRecordEnvelopeCopy;
     }
@@ -4396,7 +4959,7 @@ for (const variant of ['ordinary', 'canonical', 'mapped-26']) {
   });
 }
 
-test('cold setup rechecks in-place mappings between files and each later metadata event', () => {
+test('cold setup rechecks in-place mappings between files and each later metadata event', async () => {
   const h = createHarness('native-records', { deferSetup: true });
   h.plugin.settings.nativeRecordKindPropertyKeys = { task: { tag: 'records/old' } };
   const first = h.addFile('first.md', '');
@@ -4408,7 +4971,7 @@ test('cold setup rechecks in-place mappings between files and each later metadat
     if (file === second) h.plugin.settings.nativeRecordKindPropertyKeys.task.tag = 'records/new';
     return readCache(file);
   };
-  h.service.setup();
+  assert.equal(await h.service.setup(), true);
   assert.equal(h.service.recordsByPath.get(first.path)?.kind, 'task');
   assert.equal(h.service.recordsByPath.get(second.path)?.kind, 'task');
   h.plugin.settings.nativeRecordKindPropertyKeys.task.tag = 'records/final';

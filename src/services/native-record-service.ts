@@ -1140,7 +1140,16 @@ export function isNativeRecordEnvelope(value: unknown): value is TpsNativeRecord
  */
 export class NativeRecordService {
   readonly version = 6;
-  private setupComplete = false;
+  private setupPromise: Promise<boolean> | null = null;
+  private initialDiscovery: {
+    queue: Set<string>;
+    sourceFiles: Set<TFile>;
+    complete: (ready: boolean) => void;
+    fail: (error: unknown) => void;
+  } | null = null;
+  private disposed = false;
+  // Tokens own awaited rename reads only; no source data is retained here.
+  private readonly pendingRenameReads = new WeakMap<TFile, symbol>();
   private readonly newlyCreatedFiles = new WeakSet<TFile>();
   private readonly draftAdoptions = new WeakMap<TFile, Promise<void>>();
   private readonly idsByPath = new Map<string, string>();
@@ -1179,16 +1188,25 @@ export class NativeRecordService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
   refreshConfiguration(): void {
+    if (this.disposed) return;
     this.rebuildIndex();
     this.identitySourceGeneration += 1;
     this.authoritativeIdentityGeneration = -1;
   }
 
-  setup(): void {
-    if (this.setupComplete) return;
-    this.setupComplete = true;
-    this.rebuildIndex();
+  setup(): Promise<boolean> {
+    if (this.disposed) return Promise.resolve(false);
+    if (this.setupPromise) return this.setupPromise;
+    let complete!: (ready: boolean) => void;
+    let fail!: (error: unknown) => void;
+    this.setupPromise = new Promise<boolean>((resolve, reject) => { complete = resolve; fail = reject; });
+    // Direct test/service callers need not await an empty startup. An owning
+    // onload still receives the original rejection rather than a retry.
+    void this.setupPromise.catch(() => undefined);
+    const discovery = { queue: new Set<string>(), sourceFiles: new Set<TFile>(), complete, fail };
+    this.initialDiscovery = discovery;
     this.plugin.registerEvent(this.plugin.app.metadataCache.on('changed', (file, _data, cache) => {
+      if (this.disposed || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
       // A delayed cache event can still contain the pre-write identity after a
       // source-preserving internal mutation. Keep the exact authoritative
       // index while its generation is current; external Vault events invalidate
@@ -1198,7 +1216,8 @@ export class NativeRecordService {
       }
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('create', (file) => {
-      if (!(file instanceof TFile)) return;
+      if (this.disposed || !(file instanceof TFile)
+        || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
       this.invalidateAuthoritativeSources([file.path]);
       if (!this.isInternalIdentityWrite(file.path)) this.identitySourceGeneration += 1;
       this.indexFile(file);
@@ -1208,18 +1227,30 @@ export class NativeRecordService {
       this.newlyCreatedFiles.add(file);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('modify', (file) => {
+      if (this.disposed || !(file instanceof TFile)
+        || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
+      this.pendingRenameReads.delete(file);
       if (file instanceof TFile) this.invalidateAuthoritativeSources([file.path]);
       if (file instanceof TFile && !this.isInternalIdentityWrite(file.path)) {
         this.identitySourceGeneration += 1;
       }
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('delete', (file) => {
-      if (!(file instanceof TFile)) return;
+      if (this.disposed || !(file instanceof TFile)) return;
+      const current = this.plugin.app.vault.getAbstractFileByPath(file.path);
+      if (current instanceof TFile && current !== file) return;
+      this.pendingRenameReads.delete(file);
+      this.initialDiscovery?.queue.delete(file.path);
       this.invalidateAuthoritativeSources([file.path]);
       if (!this.isInternalIdentityWrite(file.path)) this.identitySourceGeneration += 1;
       this.removePath(file.path);
     }));
     this.plugin.registerEvent(this.plugin.app.vault.on('rename', (file, oldPath) => {
+      if (this.disposed || !(file instanceof TFile)
+        || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
+      this.pendingRenameReads.delete(file);
+      this.initialDiscovery?.queue.delete(oldPath);
+      this.initialDiscovery?.sourceFiles.add(file);
       this.invalidateAuthoritativeSources([oldPath, file.path]);
       if (
         file instanceof TFile
@@ -1228,6 +1259,21 @@ export class NativeRecordService {
       ) this.identitySourceGeneration += 1;
       void this.handleRecordRename(file, oldPath);
     }));
+    // The existing incremental owners must be installed before this scan can
+    // release its first task. Only initial discovery is cooperative.
+    void this.discoverInitialIndex(discovery).catch(error => {
+      if (this.initialDiscovery === discovery) this.initialDiscovery = null;
+      discovery.fail(error);
+      logger.flowError('NativeRecords', 'index:startup-failed', error);
+    });
+    return this.setupPromise;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+    const discovery = this.initialDiscovery;
+    this.initialDiscovery = null;
+    discovery?.complete(false);
   }
 
   isEnabled(): boolean {
@@ -3309,23 +3355,87 @@ export class NativeRecordService {
   }
 
   private rebuildIndex(): void {
+    if (this.disposed) return;
+    // Existing explicit rebuild callers stay synchronous. A completed full
+    // replacement, not its invocation, satisfies any paused initial owner.
+    const discovery = this.initialDiscovery;
+    this.initialDiscovery = null;
+    try {
+      const started = performance.now();
+      this.authoritativeSourceCache.clear();
+      this.authoritativeSourceRevision += 1;
+      this.authoritativeIdentityGeneration = -1;
+      const vault = this.plugin.app.vault as typeof this.plugin.app.vault & {
+        getMarkdownFiles?: () => TFile[];
+      };
+      if (typeof vault.getMarkdownFiles !== 'function') {
+        discovery?.complete(!this.disposed);
+        return;
+      }
+      const markdownFiles = vault.getMarkdownFiles();
+      this.clearIdentityIndex();
+      for (const file of markdownFiles) this.indexFile(file);
+      logger.flow('NativeRecords', 'index:rebuilt', {
+        files: markdownFiles.length,
+        records: this.recordsByPath.size,
+        blocked: this.blockedIdentityEvidencePaths.size,
+        durationMs: Math.round(performance.now() - started),
+      });
+      discovery?.complete(!this.disposed);
+    } catch (error) {
+      discovery?.fail(error);
+      throw error;
+    }
+  }
+
+  private async discoverInitialIndex(discovery: NonNullable<NativeRecordService['initialDiscovery']>): Promise<void> {
     const started = performance.now();
     this.authoritativeSourceCache.clear();
     this.authoritativeSourceRevision += 1;
     this.authoritativeIdentityGeneration = -1;
-    const vault = this.plugin.app.vault as typeof this.plugin.app.vault & {
-      getMarkdownFiles?: () => TFile[];
-    };
-    if (typeof vault.getMarkdownFiles !== 'function') return;
-    const markdownFiles = vault.getMarkdownFiles();
     this.clearIdentityIndex();
-    for (const file of markdownFiles) this.indexFile(file);
+    const vault = this.plugin.app.vault as typeof this.plugin.app.vault & { getMarkdownFiles?: () => TFile[] };
+    const files = typeof vault.getMarkdownFiles === 'function' ? vault.getMarkdownFiles() : [];
+    for (const file of files) discovery.queue.add(file.path);
+    let sliceStart = performance.now(), sliceFiles = 0;
+    for (const path of discovery.queue) {
+      if (this.disposed || this.initialDiscovery !== discovery) return;
+      discovery.queue.delete(path);
+      const file = vault.getAbstractFileByPath(path);
+      if (file instanceof TFile && !discovery.sourceFiles.has(file)) this.indexFile(file, undefined, discovery);
+      if ((++sliceFiles >= 256 || performance.now() - sliceStart >= 8) && discovery.queue.size) {
+        await this.yieldInitialDiscovery();
+        sliceStart = performance.now();
+        sliceFiles = 0;
+      }
+    }
+    if (this.disposed || this.initialDiscovery !== discovery) return;
+    this.initialDiscovery = null;
     logger.flow('NativeRecords', 'index:rebuilt', {
-      files: markdownFiles.length,
+      files: files.length,
       records: this.recordsByPath.size,
       blocked: this.blockedIdentityEvidencePaths.size,
       durationMs: Math.round(performance.now() - started),
     });
+    discovery.complete(true);
+  }
+
+  private yieldInitialDiscovery(): Promise<void> {
+    const scheduler = (globalThis as unknown as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
+    if (typeof scheduler?.yield === 'function') return scheduler.yield();
+    // One-shot ports permit input between slices without relying on inactive
+    // Electron timer scheduling. They do not prevent whole-process suspension.
+    if (typeof globalThis.MessageChannel === 'function') return new Promise(resolve => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.onmessage = null;
+        channel.port1.close();
+        channel.port2.close();
+        resolve();
+      };
+      channel.port2.postMessage(null);
+    });
+    return new Promise(resolve => globalThis.setTimeout(resolve, 0));
   }
 
   private clearIdentityIndex(): void {
@@ -3500,7 +3610,14 @@ export class NativeRecordService {
     return false;
   }
 
-  private indexFile(file: TFile, frontmatter?: Record<string, unknown> | null): void {
+  private indexFile(
+    file: TFile,
+    frontmatter?: Record<string, unknown> | null,
+    discovery?: NativeRecordService['initialDiscovery'],
+  ): void {
+    if (this.disposed) return;
+    this.pendingRenameReads.delete(file);
+    if (this.initialDiscovery && discovery !== this.initialDiscovery) this.initialDiscovery.sourceFiles.add(file);
     this.removePath(file.path);
     const resolved = frontmatter ?? this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
     let inspection: TpsNativeRecordInspection | null = null;
@@ -3608,21 +3725,39 @@ export class NativeRecordService {
   }
 
   private async handleRecordRename(file: unknown, oldPath: string): Promise<void> {
-    const prior = this.recordsByPath.get(oldPath);
-    this.removePath(oldPath);
-    if (!(file instanceof TFile)) return;
+    if (this.disposed || !(file instanceof TFile)
+      || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
+    this.pendingRenameReads.delete(file);
+    const targetPath = file.path;
+    const oldOwner = this.plugin.app.vault.getAbstractFileByPath(oldPath);
+    const oldPathReused = oldOwner instanceof TFile && oldOwner !== file;
+    const prior = oldPathReused ? undefined : this.recordsByPath.get(oldPath);
+    if (!oldPathReused) this.removePath(oldPath);
 
     const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
     let envelope = this.inspect(cached)?.frontmatter
       || (isNativeRecordEnvelope(prior) ? prior : null);
+    if (this.disposed || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
     if (!envelope) {
+      const readOwner = Symbol();
+      this.pendingRenameReads.set(file, readOwner);
+      const ownsRead = () => !this.disposed && file.path === targetPath
+        && this.plugin.app.vault.getAbstractFileByPath(targetPath) === file
+        && this.pendingRenameReads.get(file) === readOwner;
       try {
-        const parsed = parseNativeRecordDocument(await this.plugin.app.vault.cachedRead(file));
-        const inspection = parsed ? this.inspect(parsed.frontmatter) : null;
-        if (inspection) envelope = inspection.frontmatter;
-      } catch {
-        // A rename can race MetadataCache. If the authoritative read also fails,
-        // leave the file untouched and let the next metadata event index it.
+        try {
+          const source = await this.plugin.app.vault.cachedRead(file);
+          if (!ownsRead()) return;
+          const parsed = parseNativeRecordDocument(source);
+          const inspection = parsed ? this.inspect(parsed.frontmatter) : null;
+          if (inspection) envelope = inspection.frontmatter;
+        } catch {
+          // A rename can race MetadataCache. If the authoritative read also fails,
+          // leave the file untouched and let the next metadata event index it.
+        }
+        if (!ownsRead()) return;
+      } finally {
+        if (this.pendingRenameReads.get(file) === readOwner) this.pendingRenameReads.delete(file);
       }
     }
     if (!envelope) {

@@ -1298,7 +1298,7 @@ test('Daily Note classification consumers use the hardened shared path', () => {
   assert.match(fileNamingSource, /parseDailyNoteFileDate\(this\.plugin\.app, this\.plugin\.settings, file\) !== null/u);
   assert.match(fileNamingSource, /registerEvent\.call\(this\.plugin, ref\)/u);
   assert.doesNotMatch(dailyNoteScheduleSource, /vault\?\.on\?\./u);
-  assert.match(mainSource, /await this\.fileNamingService\.whenDailyNoteConfigurationReady\(\);\s*setupPluginApi\(this\)/u);
+  assert.match(mainSource, /await this\.fileNamingService\.whenDailyNoteConfigurationReady\(\);\s*if \(this\.startupOwner !== startupOwner\) return;\s*setupPluginApi\(this\)/u);
   assert.match(bulkEditSource, /return this\.plugin\.fileNamingService\.isDailyNoteFile\(file\)/u);
   assert.match(noteOperationSource, /reconcileExistingDailyNoteForIsoDate\([\s\S]{0,180}expectedPath === null \? undefined : \{ expectedPath \}/u);
   assert.match(noteOperationSource, /resolution\.status === 'blocked'[\s\S]*return null/u);
