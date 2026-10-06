@@ -1212,6 +1212,12 @@ export class NativeRecordService {
         this.invalidateAuthoritativeSources([file.path]);
         return;
       }
+      // While source verification owns the index, late provisional metadata
+      // must not overwrite a path which that pass has already committed.
+      if (this.authoritativeIdentityRefresh) {
+        this.authoritativeIndexDirtyPaths.add(file.path);
+        return;
+      }
       // A delayed cache event can still contain the pre-write identity after a
       // source-preserving internal mutation. Keep the exact authoritative
       // index while its generation is current; external Vault events invalidate
@@ -3494,6 +3500,7 @@ export class NativeRecordService {
     } finally {
       if (this.authoritativeIdentityRefresh === refresh) this.authoritativeIdentityRefresh = null;
     }
+    if (this.disposed) throw new Error('TPS native-record startup was cancelled.');
     if (this.authoritativeIdentityGeneration !== this.identitySourceGeneration) {
       await this.refreshIdentityIndexFromVaultSource();
     }
@@ -3515,91 +3522,143 @@ export class NativeRecordService {
     let reads = 0;
     let passes = 0;
     try {
-      while (this.authoritativeIdentityGeneration !== this.identitySourceGeneration) {
+      refresh: while (this.authoritativeIdentityGeneration !== this.identitySourceGeneration) {
         passes += 1;
         const generation = this.identitySourceGeneration;
         const sourceRevision = this.authoritativeSourceRevision;
+        const isCurrent = (): boolean => {
+          if (this.disposed) throw new Error('TPS native-record startup was cancelled.');
+          return generation === this.identitySourceGeneration && sourceRevision === this.authoritativeSourceRevision;
+        };
+        // All eight readers share one elapsed-work slice and one pending task.
+        // Cheap cache hits incur no count-only/clamped task-yield penalty.
+        let sliceStarted = performance.now();
+        let pendingTask: Promise<void> | null = null;
+        const checkpoint = (): Promise<void> | null => {
+          if (!isCurrent()) return null;
+          if (pendingTask) return pendingTask;
+          if (performance.now() - sliceStarted < 8) return null;
+          const task = this.yieldInitialDiscovery().then(() => { sliceStarted = performance.now(); });
+          pendingTask = task.finally(() => { if (pendingTask === owned) pendingTask = null; });
+          const owned = pendingTask;
+          return owned;
+        };
+        if (!isCurrent()) continue;
         if (typeof vault.getMarkdownFiles !== 'function') {
           this.authoritativeIdentityGeneration = generation;
           return;
         }
-        const files = vault.getMarkdownFiles();
-        const paths = new Set(files.map(file => file.path));
+        const files = vault.getMarkdownFiles().map(file => ({ file, path: file.path }));
+        const paths = new Set<string>();
+        for (const { path } of files) {
+          const task = checkpoint();
+          if (task) await task;
+          if (!isCurrent()) continue refresh;
+          paths.add(path);
+        }
         for (const path of this.authoritativeSourceCache.keys()) {
+          const task = checkpoint();
+          if (task) await task;
+          if (!isCurrent()) continue refresh;
           if (!paths.has(path)) {
             this.authoritativeSourceCache.delete(path);
             this.authoritativeIndexDirtyPaths.add(path);
           }
         }
-        const snapshot: Array<[TFile, Record<string, unknown> | null]> = [];
-        const readFile = async (file: TFile): Promise<void> => {
-          const path = file.path;
+        const snapshot: Array<{ file: TFile; path: string; frontmatter: Record<string, unknown> | null }> = [];
+        let interrupted = false;
+        let failure: unknown = null;
+        const ownsFile = (file: TFile, path: string): boolean => {
+          if (file.path === path && vault.getAbstractFileByPath(path) === file) return true;
+          interrupted = true;
+          this.authoritativeIndexDirtyPaths.add(path);
+          if (this.authoritativeSourceCache.get(path)?.file === file) this.authoritativeSourceCache.delete(path);
+          return false;
+        };
+        const readFile = async ({ file, path }: { file: TFile; path: string }): Promise<void> => {
+          if (failure || !isCurrent() || !ownsFile(file, path)) return;
           const mtime = file.stat?.mtime;
           const size = file.stat?.size;
           const cached = this.authoritativeSourceCache.get(path);
           if (cached?.file === file && cached.mtime === mtime && cached.size === size) {
-            snapshot.push([file, cached.frontmatter]);
+            snapshot.push({ file, path, frontmatter: cached.frontmatter });
             return;
           }
           this.authoritativeIndexDirtyPaths.add(path);
-          const readRevision = this.authoritativeSourceRevision;
+          let source: string;
           try {
             reads += 1;
-            const source = await this.readVaultSource(file);
-            const parsed = parseNativeRecordDocument(source);
-            // Any write during this read makes its result uncertain. Keep the
-            // other verified envelopes and retry against the current file list.
-            if (readRevision !== this.authoritativeSourceRevision || file.path !== path) return;
-            if (!parsed && this.malformedSourceHasNativeIdentityEvidence(source)) {
-              throw new Error(`Malformed native-record identity evidence: ${file.path}`);
-            }
-            const frontmatter = parsed?.frontmatter || null;
-            this.authoritativeSourceCache.set(path, { file, mtime, size, frontmatter });
-            snapshot.push([file, frontmatter]);
+            source = await this.readVaultSource(file);
           } catch (error) {
-            if (readRevision !== this.authoritativeSourceRevision || file.path !== path) return;
+            if (!isCurrent() || !ownsFile(file, path)) return;
             this.authoritativeSourceCache.delete(path);
-            if (error instanceof Error && error.message.startsWith('Malformed native-record identity evidence:')) throw error;
             throw new Error(`Unable to authoritatively read native-record candidate: ${file.path}`);
           }
+          // Scheduler/cancellation failures are not Vault read failures. Keep
+          // these checkpoints outside the storage-error conversion above.
+          if (failure || !isCurrent() || !ownsFile(file, path)) return;
+          const beforeParse = checkpoint();
+          if (beforeParse) await beforeParse;
+          if (failure || !isCurrent() || !ownsFile(file, path)) return;
+          const parsed = parseNativeRecordDocument(source);
+          const afterParse = checkpoint();
+          if (afterParse) await afterParse;
+          if (failure || !isCurrent() || !ownsFile(file, path)) return;
+          if (!parsed && this.malformedSourceHasNativeIdentityEvidence(source)) {
+            throw new Error(`Malformed native-record identity evidence: ${file.path}`);
+          }
+          const frontmatter = parsed?.frontmatter || null;
+          this.authoritativeSourceCache.set(path, { file, mtime, size, frontmatter });
+          snapshot.push({ file, path, frontmatter });
         };
         // Bound I/O concurrency: cold identity verification must read all source
         // files, but need not serialize thousands of independent Vault reads.
         // Drain every in-flight read on failure before another refresh can start.
         let cursor = 0;
-        let failure: unknown = null;
         await Promise.all(Array.from({ length: Math.min(8, files.length) }, async () => {
           while (cursor < files.length && !failure) {
-            const file = files[cursor++];
             try {
-              await readFile(file);
+              const task = checkpoint();
+              if (task) await task;
+              if (!isCurrent() || interrupted || failure || cursor >= files.length) return;
+              await readFile(files[cursor++]);
             } catch (error) {
               failure = failure || error;
             }
           }
         }));
         if (failure) throw failure;
-        if (generation !== this.identitySourceGeneration || sourceRevision !== this.authoritativeSourceRevision) continue;
+        if (!isCurrent() || interrupted) continue;
         // Metadata events may have touched the provisional index during reads.
         // Reconcile those paths plus changed sources; keep verified identities
         // for every unchanged file, including duplicate and blocked ownership.
         for (const path of this.authoritativeIndexDirtyPaths) {
+          const task = checkpoint();
+          if (task) await task;
+          if (!isCurrent()) continue refresh;
           if (!paths.has(path)) this.removePath(path);
         }
-        for (const [file, frontmatter] of snapshot) {
-          if (!this.authoritativeIndexDirtyPaths.has(file.path)) continue;
+        for (const { file, path, frontmatter } of snapshot) {
+          const task = checkpoint();
+          if (task) await task;
+          if (!isCurrent() || !ownsFile(file, path)) continue refresh;
+          if (!this.authoritativeIndexDirtyPaths.has(path)) continue;
           if (!frontmatter) {
-            this.removePath(file.path);
+            this.removePath(path);
             continue;
           }
           this.indexFile(file, frontmatter);
-          if (!this.idsByPath.has(file.path) && !this.blockedIdentityEvidencePaths.has(file.path)) {
+          if (!isCurrent() || !ownsFile(file, path)) continue refresh;
+          if (!this.idsByPath.has(path) && !this.blockedIdentityEvidencePaths.has(path)) {
             // Remember verified non-records without repeatedly classifying their
             // properties. A source or configuration change invalidates this marker.
-            const cached = this.authoritativeSourceCache.get(file.path);
+            const cached = this.authoritativeSourceCache.get(path);
             if (cached) cached.frontmatter = null;
           }
         }
+        const finalTask = checkpoint();
+        if (finalTask) await finalTask;
+        if (!isCurrent() || interrupted) continue;
         this.authoritativeIndexDirtyPaths.clear();
         this.authoritativeIdentityGeneration = generation;
       }

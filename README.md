@@ -1,5 +1,66 @@
 # TPS Global Context Menu
 
+## 7.3.14 — Cooperate during authoritative source verification
+
+The existing authoritative native-record refresh now releases a real task when
+its shared elapsed-work budget reaches 8 ms. Retained-cache pruning, acquisition,
+parsing and index commits share one pending continuation across the existing
+eight read workers. Cheap cache-hit walks below the budget are not forced to
+yield merely because they visit many paths. No extra source scan, persistent
+cache/index, watcher, poller, automatic repair or retry is introduced.
+
+Every resumed slice checks the existing source generation/revision, disposal
+and captured path/file owner before accepting bytes or updating the index.
+Interrupted passes retain dirty work and cannot publish authoritative readiness.
+Started reads drain before an error releases the single-flight owner; scheduler
+errors stay intact, and late read completions do not schedule another task after
+failure. While that source owner is active, metadata-only events cannot replace
+its verified records with provisional cache values. Existing provisional
+metadata handling resumes after an unsuccessful owner is released.
+
+All 200 previous native checks remain covered; 31 new actual-service controls
+exercise task budgets, shared workers, failure drainage, cancellation, source
+replacement, duplicate blocking and metadata-only races. Final versioned
+7.3.14 gates pass 231 native, 303 supplemental and 1,616 declared checks, plus
+standalone TypeScript and a separate production-mode build-only gate, with
+deployment suppressed and byte-identical suite-build artifacts. An exact-TEST
+ordinary build deploys only main.js/manifest.json; targeted reload confirms
+7.3.14, preserving 2,733 GCM/182 Health records, all eight consumers' saved data,
+settings, enabled state and the original leaf. Installed acceptance passes; see
+[7.3.14 release notes](release-notes/7.3.14.md).
+
+A serialized synthetic actual-service real-heartbeat pair, without injected
+CPU cost, preserves source inputs and operation counts. At 10,000 notes/2,000
+native records, the longest heartbeat gap changes from 176.6 to 9.3 ms; at
+10,000 native records it changes from 350.1 to 16.2 ms. Total verification takes
+175.3/182.3 and 348.8/366.6 ms respectively: this is cooperation, not less total
+work or a total-speedup claim. A cheap warm edit still reads and indexes one
+file, retains 9,999 cache hits and uses zero helper tasks.
+
+The same finite installed-constructor probe retains complete synthetic source
+inputs and parser/index operation counts. At 1,000/10,000 files, longest
+heartbeat gaps change from 94.6/953.2 to 9.1/9.4 ms, with 11/77 real-task
+continuations instead of zero. Total verification is 94.6/95.6 and
+953.1/637.8 ms in these single samples, not a total-CPU speed benchmark. The
+installed 10,000-file warm edit takes 12 ms and legitimately yields once when
+its elapsed budget is reached; it still reads/indexes one source. This is
+distinct from the cheaper synthetic warm replay above.
+
+All 13 installed Live Preview phases pass six tab switches and two remounts,
+observing up to 24 food/39 activity rows without measured long tasks, phase/
+render errors or note-mutation attempts. Three UUID fixtures are exact-byte
+archived and all settings/data remain stable. One required Navigator Markdown
+inventory occurs in the first busy combined phase, with no getFiles inventory;
+zero navigation scans are not claimed. All windows were hidden/unfocused.
+
+The budget does not preempt an individual expensive operation, the Vault's
+inventory call or separate public snapshot materialization. Current-source
+safety retains the accepted Vault event contract; queued file replacement is
+covered, not detection of eventless changes to already committed paths. Public
+API versions, commands, settings, note schema and minimum Obsidian 1.10.0 remain
+unchanged. Foreground/physical mobile or Windows, Reading-mode and whole-process
+cold-start performance remain unverified. Production remains untouched.
+
 ## 7.3.13 — Separate interface registration from initial data readiness
 
 Onload now finishes interface, command and event registration without awaiting

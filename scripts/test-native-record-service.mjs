@@ -135,6 +135,9 @@ async function loadModule() {
           const copyMarker = 'const frontmatter = { ...raw } as TpsNativeRecordEnvelope;';
           assert.equal(contents.includes(copyMarker), true, 'envelope counter must target the real copy');
           contents = contents.replace(copyMarker, `globalThis.__nativeRecordEnvelopeCopy?.(raw, profile);\n  ${copyMarker}`);
+          const parseMarker = 'export function parseNativeRecordDocument(content: string): ParsedNativeRecordDocument | null {';
+          assert.equal(contents.includes(parseMarker), true, 'authoritative parse counter must target the real parser');
+          contents = contents.replace(parseMarker, `${parseMarker}\n  globalThis.__nativeRecordAuthoritativeParse?.();`);
           return { contents, loader: 'ts', resolveDir: dirname(args.path) };
         });
         builder.onResolve({ filter: /property-migration-modal$/ }, () => ({ path: 'modal', namespace: 'migration-modal-test' }));
@@ -4346,7 +4349,7 @@ function manualStartupTasks(route = 'scheduler') {
   };
   const pending = [];
   let closedPorts = 0;
-  const schedule = () => new Promise(resolve => pending.push(resolve));
+  const schedule = () => new Promise((resolve, reject) => { resolve.reject = reject; pending.push(resolve); });
   globalThis.scheduler = route === 'scheduler' ? { yield: schedule } : undefined;
   globalThis.MessageChannel = route === 'channel' ? class {
     port1 = { onmessage: null, close() { closedPorts++; } };
@@ -4359,6 +4362,12 @@ function manualStartupTasks(route = 'scheduler') {
     async step() {
       assert.ok(pending.length, 'an owned task boundary must be pending');
       pending.shift()();
+      for (let turn = 0; turn < 8; turn++) await Promise.resolve();
+    },
+    async fail(error) {
+      const continuation = pending.shift();
+      assert.equal(typeof continuation?.reject, 'function', 'a scheduler task must be owned before rejection');
+      continuation.reject(error);
       for (let turn = 0; turn < 8; turn++) await Promise.resolve();
     },
     async drain() {
@@ -5001,7 +5010,7 @@ test('cold split: regular task creation joins discovery before reserving its req
     p.layout();
     await tasks.drain();
     assert.equal(await setup, true);
-    await create;
+    await finishAuthoritativeOperation({ tasks }, observeAuthoritativeOperation(create));
     assert.equal(result?.id, 'early-task');
     assert.equal(h.counters.writes, 1);
   } finally { h.service.dispose(); await tasks.drain(); await setup; await create; tasks.restore(); }
@@ -5044,7 +5053,7 @@ test('cold split: authoritative snapshot does not start a second source pass bef
     p.layout();
     await tasks.drain();
     assert.equal(await setup, true);
-    await snapshot;
+    await finishAuthoritativeOperation({ tasks }, observeAuthoritativeOperation(snapshot));
     assert.equal(Array.isArray(result?.records), true);
     assert.equal(h.counters.writes, 0);
   } finally { h.service.dispose(); await tasks.drain(); await setup; await snapshot; tasks.restore(); }
@@ -6159,3 +6168,469 @@ for (const operation of ['canReidentify', 'reidentify', 'canApplyIdentityPlan'])
     assert.equal(h.contents.get(other), source);
   });
 }
+
+async function authoritativeWorkload(count = 32) {
+  const h = createHarness('native-records', { deferSetup: true });
+  h.files = Array.from({ length: count }, (_, i) => h.addFile(`Authority/record-${i}.md`,
+    `---\ntpsId: authority-${i}\nkind: task\ntitle: Record ${i}\nlabel: Label ${i}\n---\nPreserve body ${i}\n`));
+  assert.equal(await h.service.setup(), true);
+  return h;
+}
+
+function editAuthoritativeSource(h, file = h.files[0], title = 'Current source') {
+  const next = h.contents.get(file).replace(/^title:.*$/mu, `title: ${title}`);
+  h.contents.set(file, next);
+  file.stat.mtime += 1;
+  file.stat.size = next.length;
+  h.vault.emit('modify', file);
+  return next;
+}
+
+function authoritativeCpuBudget(h, phase, cost = 2) {
+  // Deterministically model CPU spent in the actual private pass. Cheap visits
+  // advance no clock: they must not incur a count-only/clamped task penalty.
+  const performanceDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'performance');
+  const parseObserver = globalThis.__nativeRecordAuthoritativeParse;
+  let elapsed = 0;
+  const counts = { inventories: 0, reads: 0, writes: 0, prune: 0, acquire: 0, parse: 0, index: 0 };
+  Object.defineProperty(globalThis, 'performance', { configurable: true, value: { now: () => elapsed } });
+  const restorations = [];
+  const wrap = (host, method, key, measuredPhase) => {
+    const original = host[method];
+    host[method] = function (...args) {
+      counts[key]++;
+      const result = original.apply(this, args);
+      if (phase === measuredPhase) elapsed += cost;
+      return result;
+    };
+    restorations.push(() => { host[method] = original; });
+  };
+  wrap(h.vault, 'getMarkdownFiles', 'inventories');
+  wrap(h.vault, 'read', 'reads');
+  for (const method of ['process', 'create', 'rename', 'createFolder']) wrap(h.vault, method, 'writes');
+  wrap(h.service.authoritativeSourceCache, 'get', 'acquire', 'acquire');
+  wrap(h.service, 'indexFile', 'index', 'commit');
+  const cache = h.service.authoritativeSourceCache;
+  const keys = cache.keys;
+  cache.keys = function* () {
+    for (const path of keys.call(this)) {
+      counts.prune++;
+      if (phase === 'prune') elapsed += cost;
+      yield path;
+    }
+  };
+  restorations.push(() => { cache.keys = keys; });
+  globalThis.__nativeRecordAuthoritativeParse = () => {
+    counts.parse++;
+    if (phase === 'parse') elapsed += cost;
+  };
+  const tasks = manualStartupTasks();
+  const taskObservations = [];
+  const schedule = globalThis.scheduler.yield;
+  globalThis.scheduler.yield = () => { taskObservations.push({ elapsed, ...counts }); return schedule(); };
+  let taskTurns = 0;
+  const step = tasks.step.bind(tasks);
+  tasks.step = async () => { taskTurns++; await step(); };
+  return {
+    counts, tasks, taskObservations,
+    get taskTurns() { return taskTurns; },
+    restore() {
+      tasks.restore();
+      for (const restore of restorations.reverse()) restore();
+      globalThis.__nativeRecordAuthoritativeParse = parseObserver;
+      Object.defineProperty(globalThis, 'performance', performanceDescriptor);
+    },
+  };
+}
+
+function observeAuthoritativeOperation(operation) {
+  const observed = { settled: false, result: undefined, error: undefined };
+  observed.promise = operation.then(result => {
+    observed.settled = true; observed.result = result;
+  }, error => {
+    observed.settled = true; observed.error = error;
+  });
+  return observed;
+}
+
+async function reachAuthoritativeTask(work, operation) {
+  for (let turn = 0; !work.tasks.pending && !operation.settled && turn < 1000; turn++) await flushStartupMicrotasks();
+  assert.equal(operation.settled, false, 'expensive authoritative work must not finish in one uninterrupted task');
+  assert.equal(work.tasks.pending, 1, 'eight read workers must share one task-yield owner, not eight independent yields');
+}
+
+async function finishAuthoritativeOperation(work, operation) {
+  for (let turn = 0; !operation.settled && turn < 4000; turn++) {
+    if (work.tasks.pending) await work.tasks.step();
+    else await flushStartupMicrotasks();
+  }
+  assert.equal(operation.settled, true, 'finite source work and cancellation must settle without a retry/poller');
+  await operation.promise;
+  if (operation.error) throw operation.error;
+  return operation.result;
+}
+
+async function readyAuthoritativePhase(phase) {
+  const h = await authoritativeWorkload();
+  if (phase === 'prune' || phase === 'acquire') {
+    await h.service.refreshIdentityIndexFromVaultSource();
+    editAuthoritativeSource(h);
+  }
+  return h;
+}
+
+test('authoritative refresh task observer detects the existing actual service task helper', async () => {
+  const h = await authoritativeWorkload(1);
+  const work = authoritativeCpuBudget(h, 'none');
+  const operation = observeAuthoritativeOperation(h.service.yieldInitialDiscovery());
+  try {
+    assert.equal(operation.settled, false);
+    assert.equal(work.tasks.pending, 1);
+    await finishAuthoritativeOperation(work, operation);
+    assert.equal(work.taskTurns, 1, 'a microtask-only continuation cannot satisfy this observer');
+    assert.equal(work.counts.inventories + work.counts.reads + work.counts.writes, 0);
+  } finally { h.service.dispose(); work.restore(); }
+});
+
+test('authoritative refresh late creation task is driven after the cold setup drain has already returned', async () => {
+  const h = startupLoad('native-records', 17);
+  const work = authoritativeCpuBudget(h, 'parse');
+  const p = coldStartupHarness(h);
+  const setup = h.service.setup({ afterLayout: true });
+  const create = observeAuthoritativeOperation(h.service.create('task', { title: 'Early task' }, { id: 'late-task' }));
+  try {
+    await flushStartupMicrotasks();
+    assert.equal(h.service.inFlightCreateIds.size, 0);
+    assert.equal(h.counters.reads + h.counters.writes, 0);
+    assert.equal(create.settled, false);
+    p.layout();
+    await work.tasks.drain();
+    assert.equal(await setup, true);
+    await flushStartupMicrotasks();
+    assert.equal(create.settled, false, 'setup completion alone cannot settle the later source-verification owner');
+    assert.equal(work.tasks.pending, 1, 'a source task is queued after the one-time startup drain returned');
+    assert.equal(h.counters.writes, 0);
+    const created = await finishAuthoritativeOperation(work, create);
+    assert.equal(created.id, 'late-task');
+    assert.equal(h.counters.writes, 1);
+    assert.equal(h.service.inFlightCreateIds.size, 0);
+    assert.equal(work.counts.reads, 17);
+    assert.ok(work.taskTurns > 0);
+  } finally { h.service.dispose(); await work.tasks.drain(); work.restore(); }
+});
+
+for (const phase of ['prune', 'acquire', 'parse', 'commit']) {
+  test(`authoritative refresh yields costly ${phase} work before publishing or clearing dirty sources`, async () => {
+    const h = await readyAuthoritativePhase(phase);
+    const work = authoritativeCpuBudget(h, phase);
+    const inputs = h.files.map(file => h.contents.get(file));
+    const operation = observeAuthoritativeOperation(h.service.refreshIdentityIndexFromVaultSource());
+    try {
+      await reachAuthoritativeTask(work, operation);
+      assert.ok(work.counts[phase === 'commit' ? 'index' : phase] > 0);
+      assert.ok(work.counts[phase === 'commit' ? 'index' : phase] < h.files.length, 'the CPU-bound stage is incomplete at its first task boundary');
+      const firstSliceLimit = phase === 'prune' ? 5 : phase === 'commit' ? 4 : 8;
+      assert.ok(work.counts[phase === 'commit' ? 'index' : phase] <= firstSliceLimit,
+        'the shared 8 ms budget allows one atomic iterator step or the bounded in-flight reader group, not an almost-complete scan');
+      assert.notEqual(h.service.authoritativeIdentityGeneration, h.service.identitySourceGeneration);
+      assert.ok(h.service.authoritativeIndexDirtyPaths.size > 0);
+      const joined = observeAuthoritativeOperation(h.service.snapshot());
+      await flushStartupMicrotasks();
+      assert.equal(joined.settled, false, 'public consumers cannot materialize a partially committed identity index');
+      await finishAuthoritativeOperation(work, operation);
+      const snapshot = await finishAuthoritativeOperation(work, joined);
+      assert.equal(snapshot.records.length, 32);
+      assert.equal(work.counts.inventories, 1, 'concurrent callers join the existing single flight');
+      assert.equal(work.counts.reads, phase === 'prune' || phase === 'acquire' ? 1 : 32);
+      assert.equal(work.counts.index, phase === 'prune' || phase === 'acquire' ? 1 : 32);
+      assert.equal(work.counts.writes, 0);
+      assert.equal(h.service.authoritativeIndexDirtyPaths.size, 0);
+      assert.equal(h.service.authoritativeIdentityGeneration, h.service.identitySourceGeneration);
+      assert.deepEqual(h.files.map(file => h.contents.get(file)), inputs);
+      let previousClock = 0;
+      for (const boundary of work.taskObservations) {
+        assert.ok(boundary.elapsed - previousClock <= 16, 'every continued CPU slice obeys the shared budget plus bounded reader/atomic allowance');
+        previousClock = boundary.elapsed;
+      }
+    } finally { h.service.dispose(); work.restore(); }
+  });
+}
+
+test('authoritative refresh keeps cheap 10000-cache-hit warm edits on the no-task path with one read and index', async () => {
+  const h = await authoritativeWorkload(10000);
+  await h.service.refreshIdentityIndexFromVaultSource();
+  const current = editAuthoritativeSource(h);
+  const work = authoritativeCpuBudget(h, 'none');
+  const operation = observeAuthoritativeOperation(h.service.refreshIdentityIndexFromVaultSource());
+  try {
+    await finishAuthoritativeOperation(work, operation);
+    assert.equal(work.tasks.pending, 0);
+    assert.equal(work.taskTurns, 0, 'cheap cache hits must not receive a count-only task-yield penalty');
+    assert.equal(work.counts.inventories, 1);
+    assert.equal(work.counts.reads, 1);
+    assert.equal(work.counts.parse, 1);
+    assert.equal(work.counts.index, 1);
+    assert.equal(work.counts.prune, 9999);
+    assert.ok(work.counts.acquire >= 10000, 'unchanged files still use the existing source cache');
+    assert.equal(h.service.recordsByPath.get(h.files[0].path).title, 'Current source');
+    assert.equal(h.contents.get(h.files[0]), current);
+    assert.equal(work.counts.writes, 0);
+    const before = { ...work.counts };
+    await h.service.refreshIdentityIndexFromVaultSource();
+    assert.deepEqual(work.counts, before, 'already authoritative unchanged requests do no additional work');
+  } finally { h.service.dispose(); work.restore(); }
+});
+
+for (const phase of ['prune', 'acquire', 'commit']) {
+  for (const invalidation of ['generation', 'revision-only', 'configuration']) {
+    test(`authoritative refresh rechecks ${invalidation} after a held ${phase} task`, async () => {
+      const h = await readyAuthoritativePhase(phase);
+      const work = authoritativeCpuBudget(h, phase);
+      const operation = observeAuthoritativeOperation(h.service.snapshot());
+      try {
+        await reachAuthoritativeTask(work, operation);
+        const generation = h.service.identitySourceGeneration;
+        if (invalidation === 'configuration') {
+          h.plugin.settings.nativeRecordTitlePropertyKey = 'label';
+          h.service.refreshConfiguration();
+        } else {
+          const file = h.files[0];
+          const current = h.contents.get(file).replace(/^title:.*$/mu, 'title: Edited during task');
+          h.contents.set(file, current); file.stat.mtime++; file.stat.size = current.length;
+          if (invalidation === 'generation') {
+            h.vault.emit('modify', file);
+            h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: {
+              tpsId: 'poisoned-cache-id', kind: 'task', title: 'Stale metadata',
+            } });
+          } else h.service.invalidateAuthoritativeSources([file.path]);
+        }
+        if (invalidation === 'revision-only') assert.equal(h.service.identitySourceGeneration, generation, 'internal source revisions do not require a new public generation');
+        const snapshot = await finishAuthoritativeOperation(work, operation);
+        assert.equal(snapshot.records.length, 32);
+        assert.equal(h.service.recordsByPath.get(h.files[0].path).title,
+          invalidation === 'configuration' ? 'Label 0' : 'Edited during task');
+        assert.equal(h.service.pathsById.has('poisoned-cache-id'), false);
+        assert.equal(h.service.authoritativeIndexDirtyPaths.size, 0);
+        assert.equal(h.service.authoritativeIdentityGeneration, h.service.identitySourceGeneration);
+        assert.equal(work.counts.writes, 0);
+      } finally { h.service.dispose(); work.restore(); }
+    });
+  }
+}
+
+for (const change of ['delete', 'rename', 'replacement', 'unannounced-replacement']) {
+  test(`authoritative refresh cannot restore an obsolete TFile after ${change} during commit`, async () => {
+    const h = await authoritativeWorkload();
+    const work = authoritativeCpuBudget(h, 'commit');
+    const operation = observeAuthoritativeOperation(h.service.snapshot());
+    try {
+      await reachAuthoritativeTask(work, operation);
+      const obsolete = h.files[31];
+      const oldPath = obsolete.path;
+      if (change === 'delete') { h.entries.delete(oldPath); h.vault.emit('delete', obsolete); }
+      else if (change === 'rename') await h.vault.rename(obsolete, 'Authority/Renamed.md');
+      else {
+        const replacement = h.addFile(oldPath, h.contents.get(obsolete).replace('authority-31', 'replacement-id'));
+        if (change === 'replacement') h.vault.emit('create', replacement);
+      }
+      const snapshot = await finishAuthoritativeOperation(work, operation);
+      assert.equal(snapshot.records.length, change === 'delete' ? 31 : 32);
+      if (change === 'rename') {
+        assert.equal(h.service.recordsByPath.has(oldPath), false);
+        assert.equal(snapshot.records.find(record => record.id === 'authority-31')?.path, 'Authority/Renamed.md');
+      } else if (change === 'delete') assert.equal(h.service.pathsById.has('authority-31'), false);
+      else {
+        assert.equal(h.service.recordsByPath.get(oldPath)?.tpsId, 'replacement-id');
+        assert.equal(h.service.pathsById.has('authority-31'), false);
+      }
+      assert.equal(h.service.authoritativeIndexDirtyPaths.size, 0);
+      assert.equal(h.service.authoritativeIdentityGeneration, h.service.identitySourceGeneration);
+      assert.equal(work.counts.writes, change === 'rename' ? 1 : 0);
+    } finally { h.service.dispose(); work.restore(); }
+  });
+}
+
+for (const phase of ['prune', 'acquire', 'parse', 'commit']) {
+  test(`authoritative refresh disposal at ${phase} task cancels all waiters without publication or restart`, async () => {
+    const h = await readyAuthoritativePhase(phase);
+    const work = authoritativeCpuBudget(h, phase);
+    const operation = observeAuthoritativeOperation(h.service.snapshot());
+    try {
+      await reachAuthoritativeTask(work, operation);
+      const joined = observeAuthoritativeOperation(h.service.snapshot());
+      await flushStartupMicrotasks();
+      const inventories = work.counts.inventories;
+      const indexed = work.counts.index;
+      h.service.dispose();
+      await assert.rejects(() => finishAuthoritativeOperation(work, operation), /cancelled/u);
+      await assert.rejects(() => finishAuthoritativeOperation(work, joined), /cancelled/u);
+      assert.equal(work.counts.inventories, inventories, 'cancelled scans cannot recursively restart');
+      assert.equal(work.counts.index, indexed, 'late task continuations cannot accept more source records');
+      assert.notEqual(h.service.authoritativeIdentityGeneration, h.service.identitySourceGeneration);
+      assert.ok(h.service.authoritativeIndexDirtyPaths.size > 0);
+      assert.equal(h.service.authoritativeIdentityRefresh, null);
+      assert.equal(work.counts.writes, 0);
+    } finally { h.service.dispose(); work.restore(); }
+  });
+}
+
+test('authoritative refresh drains already-started reads on disposal but never parses, indexes or publishes them', async () => {
+  const h = await authoritativeWorkload();
+  const work = authoritativeCpuBudget(h, 'none');
+  const originalRead = h.vault.read;
+  const pending = [];
+  h.vault.read = file => new Promise(resolve => pending.push(async () => resolve(await originalRead(file))));
+  const operation = observeAuthoritativeOperation(h.service.snapshot());
+  try {
+    for (let turn = 0; pending.length < 8 && !operation.settled && turn < 100; turn++) await flushStartupMicrotasks();
+    assert.equal(pending.length, 8);
+    h.service.dispose();
+    await flushStartupMicrotasks();
+    assert.equal(operation.settled, false, 'owned in-flight Vault reads are drained before releasing the single flight');
+    await Promise.all(pending.splice(0).map(release => release()));
+    await assert.rejects(() => finishAuthoritativeOperation(work, operation), /cancelled/u);
+    assert.equal(work.counts.reads, 8);
+    assert.equal(work.counts.parse, 0, 'disposed read callbacks must not spend CPU parsing old bytes');
+    assert.equal(work.counts.index, 0);
+    assert.equal(work.counts.inventories, 1);
+    assert.equal(h.service.authoritativeIdentityGeneration, -1);
+    assert.ok(h.service.authoritativeIndexDirtyPaths.size > 0);
+    assert.equal(h.service.authoritativeIdentityRefresh, null);
+    assert.equal(work.counts.writes, 0);
+  } finally { h.service.dispose(); work.restore(); }
+});
+
+test('authoritative refresh preserves duplicate blocking when a second owner appears during a held commit', async () => {
+  const h = await authoritativeWorkload();
+  const work = authoritativeCpuBudget(h, 'commit');
+  const operation = observeAuthoritativeOperation(h.service.snapshot(undefined, { includeConflicts: true }));
+  try {
+    await reachAuthoritativeTask(work, operation);
+    const duplicate = h.addFile('Authority/Duplicate.md', h.contents.get(h.files[0]));
+    h.vault.emit('create', duplicate);
+    const snapshot = await finishAuthoritativeOperation(work, operation);
+    assert.equal(snapshot.records.length, 31);
+    assert.equal(snapshot.conflicts.some(conflict => conflict.ids.includes('authority-0')), true);
+    assert.equal(h.service.pathsById.get('authority-0').size, 2);
+    await assert.rejects(() => h.service.create('task', { title: 'Duplicate' }, { id: 'authority-0' }), /already exists/u);
+    assert.equal(work.counts.writes, 0);
+  } finally { h.service.dispose(); work.restore(); }
+});
+
+test('authoritative refresh task rejection releases one failed owner without clearing dirty sources or retrying', async () => {
+  const h = await authoritativeWorkload();
+  const work = authoritativeCpuBudget(h, 'commit');
+  const schedulerFailure = Error('Authoritative task unavailable');
+  let yields = 0;
+  globalThis.scheduler = { yield: () => { yields++; return Promise.reject(schedulerFailure); } };
+  const left = observeAuthoritativeOperation(h.service.snapshot());
+  const right = observeAuthoritativeOperation(h.service.snapshot());
+  try {
+    await assert.rejects(() => finishAuthoritativeOperation(work, left), error => error === schedulerFailure);
+    await assert.rejects(() => finishAuthoritativeOperation(work, right), error => error === schedulerFailure);
+    assert.equal(yields, 1);
+    assert.equal(work.counts.inventories, 1);
+    assert.equal(h.service.authoritativeIdentityRefresh, null);
+    assert.equal(h.service.authoritativeIdentityGeneration, -1);
+    assert.ok(h.service.authoritativeIndexDirtyPaths.size > 0);
+    assert.equal(work.counts.writes, 0);
+  } finally { h.service.dispose(); work.restore(); }
+});
+
+for (const position of ['committed', 'queued']) {
+  test(`authoritative refresh ignores metadata-only poison for a ${position} path while its source owner is held`, async () => {
+    const h = await authoritativeWorkload();
+    const work = authoritativeCpuBudget(h, 'commit');
+    const operation = observeAuthoritativeOperation(h.service.snapshot());
+    try {
+      await reachAuthoritativeTask(work, operation);
+      assert.equal(h.plugin.api, undefined, 'source ownership is independent of public API publication');
+      const file = h.files[position === 'committed' ? 0 : 31];
+      assert.ok(work.counts.index >= 1 && work.counts.index < 32);
+      const source = h.contents.get(file);
+      const stat = { ...file.stat };
+      const generation = h.service.identitySourceGeneration;
+      const revision = h.service.authoritativeSourceRevision;
+      h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: {
+        tpsId: 'metadata-poison', kind: 'task', title: 'Unverified metadata',
+      } });
+      assert.equal(h.service.pathsById.has('metadata-poison'), false, 'an active source owner must not accept provisional projection bytes');
+      assert.equal(h.service.identitySourceGeneration, generation);
+      assert.equal(h.service.authoritativeSourceRevision, revision, 'projection-only events must not invalidate verified source bytes');
+      assert.equal(h.contents.get(file), source);
+      assert.deepEqual(file.stat, stat);
+      const snapshot = await finishAuthoritativeOperation(work, operation);
+      assert.equal(snapshot.records.length, 32);
+      assert.equal(h.service.recordsByPath.get(file.path).tpsId, position === 'committed' ? 'authority-0' : 'authority-31');
+      assert.equal(h.service.recordsByPath.get(file.path).title, position === 'committed' ? 'Record 0' : 'Record 31');
+      assert.equal(work.counts.reads, 32, 'stale metadata must not reread verified source');
+      assert.equal(work.counts.writes, 0);
+      h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: { tpsId: 'post-owner-poison', kind: 'task', title: 'Stale' } });
+      assert.equal(h.service.pathsById.has('post-owner-poison'), false, 'the existing authoritative-generation guard remains after successful release');
+    } finally { h.service.dispose(); work.restore(); }
+  });
+}
+
+test('authoritative refresh failed-owner release restores ordinary metadata projection and later source reconciliation', async () => {
+  const h = await authoritativeWorkload();
+  const work = authoritativeCpuBudget(h, 'commit');
+  const operation = observeAuthoritativeOperation(h.service.snapshot());
+  const failure = Error('Held task failed');
+  try {
+    await reachAuthoritativeTask(work, operation);
+    const file = h.files[0];
+    const poison = { tpsId: 'metadata-after-failure', kind: 'task', title: 'Projection' };
+    h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: poison });
+    assert.equal(h.service.pathsById.has(poison.tpsId), false);
+    await work.tasks.fail(failure);
+    await assert.rejects(() => finishAuthoritativeOperation(work, operation), error => error === failure);
+    assert.equal(h.service.authoritativeIdentityRefresh, null);
+    assert.equal(h.service.authoritativeIdentityGeneration, -1);
+    h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: poison });
+    assert.equal(h.service.recordsByPath.get(file.path).tpsId, poison.tpsId, 'without an active owner, existing unready projection semantics remain');
+    const reads = work.counts.reads;
+    const recovered = observeAuthoritativeOperation(h.service.snapshot());
+    assert.equal((await finishAuthoritativeOperation(work, recovered)).records.length, 32);
+    assert.equal(work.counts.reads, reads, 'later recovery uses the retained verified source cache');
+    assert.equal(h.service.recordsByPath.get(file.path).tpsId, 'authority-0');
+    assert.equal(h.service.pathsById.has(poison.tpsId), false);
+    assert.equal(work.counts.writes, 0);
+  } finally { h.service.dispose(); work.restore(); }
+});
+
+test('authoritative refresh rejected parse task drains the other started reads and preserves its original error', async () => {
+  const h = await authoritativeWorkload();
+  const work = authoritativeCpuBudget(h, 'parse');
+  const read = h.vault.read;
+  const pending = [];
+  let started = 0;
+  h.vault.read = file => { started++; return new Promise(resolve => pending.push(async () => resolve(await read(file)))); };
+  const left = observeAuthoritativeOperation(h.service.snapshot());
+  const right = observeAuthoritativeOperation(h.service.snapshot());
+  const failure = Error('Parse task unavailable');
+  try {
+    for (let turn = 0; pending.length < 8 && !left.settled && turn < 100; turn++) await flushStartupMicrotasks();
+    assert.equal(pending.length, 8);
+    await Promise.all(pending.splice(0, 4).map(release => release()));
+    await reachAuthoritativeTask(work, left);
+    assert.equal(work.counts.parse, 4);
+    await work.tasks.fail(failure);
+    await flushStartupMicrotasks();
+    assert.equal(left.settled || right.settled, false, 'task failure must still drain owned Vault reads');
+    assert.equal(started, 8, 'no later reads may start after a scheduler failure');
+    await Promise.all(pending.splice(0).map(release => release()));
+    await flushStartupMicrotasks();
+    assert.equal(work.taskObservations.length, 1, 'late read completion must not schedule another task for an already failed owner');
+    assert.equal(work.tasks.pending, 0);
+    await assert.rejects(() => finishAuthoritativeOperation(work, left), error => error === failure);
+    await assert.rejects(() => finishAuthoritativeOperation(work, right), error => error === failure);
+    assert.equal(started, 8);
+    assert.equal(work.counts.parse, 4);
+    assert.equal(work.counts.index, 0);
+    assert.equal(work.counts.inventories, 1);
+    assert.equal(h.service.authoritativeIdentityGeneration, -1);
+    assert.equal(h.service.authoritativeIdentityRefresh, null);
+    assert.ok(h.service.authoritativeIndexDirtyPaths.size > 0);
+    assert.equal(work.counts.writes, 0);
+  } finally { h.service.dispose(); work.restore(); }
+});
