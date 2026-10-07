@@ -1,5 +1,99 @@
 # TPS Global Context Menu
 
+## 7.3.16 — Cooperate during initial relationship indexing
+
+The initial parent/child relationship inventory now cooperates with host tasks at
+its existing 8 ms elapsed-work budget. It retains one metadata-only inventory and
+one ready-menu refresh. The inventory's own atomic cost is included, and folder
+entries cannot bypass checkpoints. The existing scheduler yield, MessageChannel
+and timer fallbacks release actual tasks; cheap work below the budget does not
+schedule mandatory tasks. This is startup work, not a navigation scan or writer.
+
+Accepted create/edit/delete/file/folder rename events are reconciled against live
+files before readiness. A superseding settings change and unload revoke the old
+build's publication authority. Provisional metadata resolution, legacy catalog
+prerequisites, explicit rebuilds, errors and concurrent settings waiters retain
+their owning behavior. No poller, watcher, repair, extra inventory, persisted
+metadata snapshot or note mutation is added. Explicit/settings rebuilds remain
+synchronous; this release addresses initial indexing and resolved catch-up.
+
+Validation on 2026-10-07 reproduces both remaining candidate budget defects before
+correction: an atomic inventory charged 12 ms allowed another 8 ms of metadata
+before yielding (20 ms); 20 folder entries charged 8 ms each delayed the first
+checkpoint until 160 ms. After correction those tests yield at 12 and 8 ms
+respectively. These are controlled logical costs, not machine timing claims.
+
+The normal `npm test` pretest includes the relationship regression script. Its
+10,000-Markdown-note controls exercise real Node MessageChannel and setTimeout
+fallbacks with a host-timer sentinel during indexing, exactly one inventory,
+10,000 initial cache reads, all 9,900 relationships unchanged, and zero body reads
+or writes. Repeated real persistent-menu lookups and actual file-open/tab callback
+bodies request no second relationship inventory. Other UI consumers are facades
+in those callback tests, and optional configured open automation is disabled;
+they are not installed end-to-end UI acceptance. Lifecycle controls include
+in-flight edits, deletes, creates, renames, settings changes and unloading.
+The scheduler branch uses a controlled substitute in tests. The installed Mac
+host has no native `scheduler.yield()`; its MessageChannel path is verified.
+Native browser scheduler execution remains untested.
+
+Reproduce the component comparison with
+`node scripts/benchmark-parent-startup.mjs 4cf8cc5b49f8f69c76c5b528d93c208070913352`.
+It compiles the published source and candidate before timing, uses the actual
+FileProperties classifier, preserves real clocks/task fallbacks, alternates
+three paired samples and records a 1 ms heartbeat. Both retain one inventory,
+10,000 initial metadata accesses, zero raw/body reads and writes, and identical
+complete relationship-graph SHA-256
+`646128ac60488edf047673532ff74219032639e07e471d18bdc0326032c4db32`.
+Longest heartbeat gaps are 119.60/93.77/80.79 ms before versus
+57.66/18.43/16.48 ms after; medians are 93.77 versus 18.43 ms.
+Median total completion is 92.44 versus 94.58 ms. This measures component
+cooperation, not total CPU reduction, installed vault speed or input-to-paint.
+The budget cannot preempt an individual operation, atomic inventory, garbage
+collection or host scheduling delay.
+
+The candidate's 65 focused checks passed on inspection. Final versioned validation
+passes 70 relationship checks, 1,673 declared checks and 303 explicit supplemental
+checks, with no failures, cancellations or skips. The normal test command includes
+the relationship controls. Three whole-onload assertions now recognize both the
+Native and Parent continuation owners in their shared task queue; Native-only
+exact-one and API/publication/unload protections remain. The focused Native suite
+passes 231 checks. No additional runtime correction was needed.
+
+Foreground installed 7.3.15/7.3.16 warm GCM-only reloads use the same 17,089 Markdown
+paths and 57,014 loaded files, with all eight consumers enabled. Both preserve
+records, relationships, notes, settings, saved data, enabled state and the original
+leaf. Both have one loaded-file and two Markdown inventories, 47 cached reads,
+zero raw reads and zero note writes. Application-wide metadata calls are
+51,670/51,681. Reload return is 447.5/384.3 ms; API readiness is 699.3/695.3 ms;
+Health readiness is 863.4/851.9 ms; longest heartbeat gap is 130.4/122.8 ms.
+These single warm-host samples demonstrate preserved integration, not a large
+whole-reload speedup, cold process startup or physical input-to-paint improvement.
+
+The foreground installed-constructor 10,000-Markdown fixture retains one inventory,
+10,000 metadata calls, all 1,428 relationships and zero I/O/writes. Before/after
+completion is 29.6/33.8 ms; longest heartbeat gap is 29.6/8.5 ms, with zero/four
+actual yields and ticks during work. This distinct synthetic fixture exercises the
+installed Parent/FileProperties constructors, not actual vault metadata costs.
+Live indexes, runtime instances, settings, data and original leaf are unchanged.
+
+Installed Live Preview navigation passes two first displays, ten tab switches and
+six repeated opens of existing linked notes: zero inventories, Parent rebuilds,
+note writes or frontmatter writes. It observes 34 raw/30 cached reads across the
+flow (28 raw reads during the first two displays and six during repeated opens).
+Tab switches perform no reads. Relationships, content, settings, saved data and
+enabled state remain unchanged; temporary tabs are detached and the original leaf
+restored. No test notes or settings are changed.
+
+The separate final build deploys the matching 7.3.16 artifacts only to the test
+vault; targeted GCM reload verifies the loaded version. Minimum Obsidian remains
+1.10.0; settings/API/storage contracts are unchanged. This backward-compatible
+patch is tested in the test vault and ready for the user's BRAT pull. Production
+is untouched and the app is not restarted. Physical iPhone/Windows, process cold
+startup, native browser scheduler execution and input-to-paint remain unverified.
+The remaining 122.8 ms whole-reload heartbeat gap is not resolved by this patch.
+See [7.3.16 release notes](release-notes/7.3.16.md) and
+[the detailed validation record](release-notes/parent-startup-candidate-20261007.md).
+
 ## 7.3.15 — Read relationship metadata once per operation
 
 Relationship reindexing now shares one lazy metadata acquisition between the

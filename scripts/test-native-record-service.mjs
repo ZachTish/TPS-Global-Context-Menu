@@ -4409,6 +4409,15 @@ function startupPublicationHarness(h, dailyConfigurationReady = Promise.resolve(
   };
 }
 
+function assertColdStartupContinuationOwners(h, p, tasks) {
+  assert.ok(h.service.initialDiscovery?.queue.size, 'Native discovery still owns unfinished work');
+  // Whole onload uses both actual owners. Parent contributes an independent
+  // continuation when its elapsed 8 ms budget is reached, including under load.
+  const parent = p.plugin.parentLinkResolutionService;
+  assert.equal(tasks.pending, 1 + Number(!parent.indexReady),
+    'one Native continuation plus the independently suspended Parent owner');
+}
+
 async function flushStartupMicrotasks() {
   for (let turn = 0; turn < 16; turn++) await Promise.resolve();
 }
@@ -4632,12 +4641,13 @@ test('cold split: API requests remain unavailable until one complete owned post-
     assert.equal(p.plugin.api, undefined);
     p.layout();
     await flushStartupMicrotasks();
-    assert.equal(tasks.pending, 1);
+    assertColdStartupContinuationOwners(h, p, tasks);
     assert.equal(p.plugin.api, undefined);
     p.requestApi();
     assert.equal(p.availability.at(-1)?.available, false);
     await tasks.drain();
     await flushStartupMicrotasks();
+    assert.equal(h.counters.inventories, 1, 'Native retains its single initial inventory');
     assert.deepEqual(p.publications, [1025]);
     assert.equal(p.availability.at(-1)?.available, true);
     assert.equal(p.relationshipInventories, 1);
@@ -5174,7 +5184,7 @@ test('actual onload publishes the native API only after its initial inventory co
     const loaded = p.plugin.onload();
     await flushStartupMicrotasks();
     p.layout();
-    assert.equal(tasks.pending, 1);
+    assertColdStartupContinuationOwners(h, p, tasks);
     assert.equal(p.plugin.api === undefined, true, 'no consumer receives a partly indexed NativeRecords API');
     assert.deepEqual(p.availability, []);
     await tasks.drain();
@@ -5194,7 +5204,7 @@ test('actual onunload during an initial yield cannot resume onload or republish 
     const loaded = p.plugin.onload();
     await flushStartupMicrotasks();
     p.layout();
-    assert.equal(tasks.pending, 1);
+    assertColdStartupContinuationOwners(h, p, tasks);
     p.unload();
     const atUnload = { ...h.counters };
     await tasks.drain();

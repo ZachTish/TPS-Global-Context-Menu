@@ -9,6 +9,17 @@ import {
   type ParentChildIgnoreSettings,
 } from './parent-child-ignore-service';
 
+type RelationshipIndexBuild = {
+  kind: 'initial' | 'settings' | 'resolved';
+  epoch: number;
+  signature: string;
+  pending: Set<TFile>;
+  promise: Promise<void>;
+  resolve: () => void;
+  reject: (error: unknown) => void;
+  legacyPrerequisite: Promise<void> | null;
+};
+
 export class ParentLinkResolutionService {
   private childrenByParentPath = new Map<string, Set<TFile>>();
   private parentPathsByChild = new Map<TFile, Set<string>>();
@@ -20,6 +31,10 @@ export class ParentLinkResolutionService {
   private disposed = false;
   private indexSettingsSignature = '';
   private initialBuild: Promise<void> | null = null;
+  private indexBuild: RelationshipIndexBuild | null = null;
+  private buildEpoch = 0;
+  private lastAttemptSignature = '';
+  private metadataResolvedObserved = false;
   private provisionalStartupSeed = false;
   private resolutionScheduled = false;
   private pendingResolutionChildren = new Set<TFile>();
@@ -32,6 +47,7 @@ export class ParentLinkResolutionService {
   setup(options: { afterLayout?: boolean; metadataResolved?: () => boolean } = {}): void {
     let layoutReady = !options.afterLayout || this.plugin.app.workspace.layoutReady === true;
     let resolvedObserved = options.metadataResolved?.() || (this.plugin.app.metadataCache as any).initialized === true;
+    this.metadataResolvedObserved ||= resolvedObserved;
     let startupFallbackPending = false;
     const initialize = (fromStartupFallback = false) => {
       if (this.disposed || this.initialBuild) return;
@@ -39,33 +55,30 @@ export class ParentLinkResolutionService {
         startupFallbackPending ||= fromStartupFallback;
         return;
       }
-      this.provisionalStartupSeed = fromStartupFallback;
-      this.initialBuild = (async () => {
-        if (this.plugin.settings.dataArchitectureMode !== 'native-records') {
-          await this.plugin.filePropertiesService.handleMetadataResolved();
-        }
-        if (this.disposed) return;
-        this.rebuildRelationshipIndex(fromStartupFallback ? 'startup-fallback' : 'resolved');
-        this.refreshMenusAfterIndexReady('parent-relationship-index-ready');
-      })().catch((error) => {
+      this.provisionalStartupSeed = fromStartupFallback && !this.metadataResolvedObserved;
+      const owner = this.startIndexBuild('initial');
+      // Install the one-shot join before catalog work can announce changes.
+      this.initialBuild = owner.promise.catch((error) => {
         if (!this.disposed) logger.error('[TPS GCM] Could not build parent relationship index', { error });
       });
+      void this.buildInitialIndex(owner, fromStartupFallback ? 'startup-fallback' : 'resolved');
     };
     this.plugin.registerEvent(this.plugin.app.metadataCache.on('resolved', () => {
       if (this.disposed) return;
       resolvedObserved = true;
+      this.metadataResolvedObserved = true;
       if (this.provisionalStartupSeed && !this.resolutionScheduled) {
         this.resolutionScheduled = true;
-        void this.initialBuild?.then(() => {
-          if (this.disposed || !this.indexReady) return;
-          const pending = Array.from(this.pendingResolutionChildren);
-          this.provisionalStartupSeed = false;
+        this.provisionalStartupSeed = false;
+        if (this.indexBuild) {
+          for (const child of this.pendingResolutionChildren) this.indexBuild.pending.add(child);
           this.pendingResolutionChildren.clear();
-          for (const child of pending) this.reindexChild(child);
-          if (pending.length) this.refreshMenusAfterIndexReady('parent-relationship-index-resolved');
-        }).catch((error) => {
-          if (!this.disposed) logger.error('[TPS GCM] Could not refresh the resolved parent relationship index', { error });
-        });
+        } else if (this.indexReady) {
+          const owner = this.startIndexBuild('resolved');
+          for (const child of this.pendingResolutionChildren) owner.pending.add(child);
+          this.pendingResolutionChildren.clear();
+          void this.finishResolvedIndex(owner);
+        }
       } else {
         initialize();
       }
@@ -83,32 +96,41 @@ export class ParentLinkResolutionService {
       if (this.disposed) return;
       layoutReady = true;
       resolvedObserved ||= options.metadataResolved?.() || (this.plugin.app.metadataCache as any).initialized === true;
+      this.metadataResolvedObserved ||= resolvedObserved;
       if (resolvedObserved) initialize();
       else if (startupFallbackPending) initialize(true);
     });
     this.plugin.register(() => {
       this.disposed = true;
+      this.cancelIndexBuild();
       this.clearRelationshipIndex();
     });
   }
 
   /** A single metadata-only inventory, owned by startup or a relationship setting change. */
   rebuildRelationshipIndex(source: 'resolved' | 'startup-fallback' | 'settings' = 'settings'): void {
+    this.cancelIndexBuild();
+    this.provisionalStartupSeed = false;
+    this.resolutionScheduled = false;
+    this.lastAttemptSignature = this.relationshipSettingsSignature();
+    this.scanRelationshipIndex(source);
+  }
+
+  private scanRelationshipIndex(source: 'resolved' | 'startup-fallback' | 'settings', owner?: RelationshipIndexBuild): void {
     const startedAt = performance.now();
     this.clearRelationshipIndex();
     const candidates = this.plugin.app.vault.getAllLoadedFiles();
-    this.seedingIndex = true;
     this.seedDirectCacheLookups = 0;
-    try {
-      for (const item of candidates) {
-        if (!(item instanceof TFile)) continue;
-        this.reindexChild(item);
-      }
-    } finally {
-      this.seedingIndex = false;
+    for (const item of candidates) {
+      if (owner && !this.ownsIndexBuild(owner)) return;
+      if (!(item instanceof TFile)) continue;
+      this.reindexSeedChild(item);
     }
-    this.indexSettingsSignature = this.relationshipSettingsSignature();
-    this.indexReady = true;
+    if (owner && !this.ownsIndexBuild(owner)) return;
+    if (!owner) {
+      this.indexSettingsSignature = this.relationshipSettingsSignature();
+      this.indexReady = true;
+    }
     logger.perf('parent-relationship-index:seed', {
       source,
       candidates: candidates.length,
@@ -120,19 +142,184 @@ export class ParentLinkResolutionService {
   }
 
   async onRelationshipSettingsChanged(): Promise<void> {
-    if (this.initialBuild) await this.initialBuild;
     if (this.disposed) return;
-    if (!this.indexReady || this.indexSettingsSignature === this.relationshipSettingsSignature()) return;
-    if (this.plugin.settings.dataArchitectureMode !== 'native-records'
-      && this.indexSettingsSignature.endsWith('\u0000native-records')) {
-      this.clearRelationshipIndex();
-      // The settings UI recommends a reload, but the current session must not
-      // retain an empty child index while the new architecture is selected.
-      await this.plugin.filePropertiesService.setup();
-      if (this.disposed) return;
+    const signature = this.relationshipSettingsSignature();
+    const previousOwner = this.indexBuild;
+    if (previousOwner?.signature === signature) {
+      if (previousOwner.kind === 'initial') await this.initialBuild;
+      else await previousOwner.promise;
+      return;
     }
-    this.rebuildRelationshipIndex('settings');
-    this.refreshMenusAfterIndexReady('parent-relationship-index-settings');
+    // A save is not startup proof or a retry of a failed identical attempt.
+    if ((!this.initialBuild && !this.indexReady)
+      || this.lastAttemptSignature === signature || this.indexSettingsSignature === signature) return;
+    const previousSignature = previousOwner?.signature || this.indexSettingsSignature || this.lastAttemptSignature;
+    const useLegacy = this.plugin.settings.dataArchitectureMode !== 'native-records';
+    const prerequisite = useLegacy ? previousOwner?.legacyPrerequisite || null : null;
+    const needsLegacySetup = useLegacy && !prerequisite && previousSignature.endsWith('\u0000native-records');
+    const owner = this.startIndexBuild('settings');
+    owner.legacyPrerequisite = prerequisite;
+    this.clearRelationshipIndex();
+    this.provisionalStartupSeed = !this.metadataResolvedObserved;
+    this.resolutionScheduled = false;
+    void this.buildSettingsIndex(owner, needsLegacySetup);
+    await owner.promise;
+  }
+
+  private startIndexBuild(kind: RelationshipIndexBuild['kind']): RelationshipIndexBuild {
+    this.cancelIndexBuild();
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const promise = new Promise<void>((done, fail) => { resolve = done; reject = fail; });
+    const owner: RelationshipIndexBuild = {
+      kind, epoch: this.buildEpoch, signature: this.relationshipSettingsSignature(),
+      pending: new Set(), promise, resolve, reject, legacyPrerequisite: null,
+    };
+    // Catch-up has no external waiter; settings waiters still receive rejection.
+    void promise.catch(() => {});
+    this.indexBuild = owner;
+    this.lastAttemptSignature = owner.signature;
+    return owner;
+  }
+
+  private cancelIndexBuild(): void {
+    this.buildEpoch++;
+    const previous = this.indexBuild;
+    this.indexBuild = null;
+    previous?.resolve();
+  }
+
+  private ownsIndexBuild(owner: RelationshipIndexBuild): boolean {
+    return !this.disposed && this.indexBuild === owner && this.buildEpoch === owner.epoch
+      && owner.signature === this.relationshipSettingsSignature();
+  }
+
+  private finishIndexBuild(owner: RelationshipIndexBuild, failure?: { error: unknown }): void {
+    if (!this.ownsIndexBuild(owner)) return;
+    this.indexBuild = null;
+    if (failure) {
+      if (owner.kind !== 'resolved') this.indexReady = false;
+      owner.reject(failure.error);
+    }
+    else owner.resolve();
+  }
+
+  private reindexSeedChild(child: TFile): void {
+    this.seedingIndex = true;
+    try { this.reindexChild(child); }
+    finally { this.seedingIndex = false; }
+  }
+
+  private async buildInitialIndex(owner: RelationshipIndexBuild, source: 'resolved' | 'startup-fallback'): Promise<void> {
+    const startedAt = performance.now();
+    try {
+      if (this.plugin.settings.dataArchitectureMode !== 'native-records') {
+        owner.legacyPrerequisite = this.plugin.filePropertiesService.handleMetadataResolved();
+        await owner.legacyPrerequisite;
+      }
+      if (!this.ownsIndexBuild(owner)) return;
+      let sliceStarted = performance.now();
+      this.clearRelationshipIndex();
+      const candidates = this.plugin.app.vault.getAllLoadedFiles();
+      this.seedDirectCacheLookups = 0;
+      const checkpoint = async () => {
+        if (performance.now() - sliceStarted < 8) return;
+        await this.yieldIndexBuild();
+        sliceStarted = performance.now();
+      };
+      // Inventory is atomic, but its cost belongs to the same work budget.
+      if (performance.now() - sliceStarted >= 8) await checkpoint();
+      for (const item of candidates) {
+        if (!this.ownsIndexBuild(owner)) return;
+        if (item instanceof TFile) {
+          owner.pending.delete(item);
+          this.reindexSeedChild(item);
+        }
+        // Await only an elapsed checkpoint; cheap paths incur no host tasks.
+        // Folder-only stretches must still give the host a task boundary.
+        if (performance.now() - sliceStarted >= 8) await checkpoint();
+      }
+      while (this.ownsIndexBuild(owner) && owner.pending.size) {
+        const child = owner.pending.values().next().value as TFile;
+        owner.pending.delete(child);
+        this.reindexSeedChild(child);
+        if (performance.now() - sliceStarted >= 8) await checkpoint();
+      }
+      if (!this.ownsIndexBuild(owner)) return;
+      this.indexSettingsSignature = owner.signature;
+      this.indexReady = true;
+      logger.perf('parent-relationship-index:seed', {
+        source, candidates: candidates.length, files: this.knownFilePaths.size,
+        directMetadataCacheLookups: this.seedDirectCacheLookups,
+        pendingResolution: this.pendingResolutionChildren.size,
+        durationMs: Math.round(performance.now() - startedAt),
+      });
+      this.refreshMenusAfterIndexReady('parent-relationship-index-ready');
+      this.finishIndexBuild(owner);
+    } catch (error) { this.finishIndexBuild(owner, { error }); }
+    finally { this.settleSupersededConfiguration(owner); }
+  }
+
+  private async buildSettingsIndex(owner: RelationshipIndexBuild, needsLegacySetup: boolean): Promise<void> {
+    try {
+      if (needsLegacySetup) owner.legacyPrerequisite = this.plugin.filePropertiesService.setup();
+      if (owner.legacyPrerequisite) await owner.legacyPrerequisite;
+      if (!this.ownsIndexBuild(owner)) return;
+      // Do not call the external rebuild: it would settle this owner before a
+      // failed synchronous scan could reject every same-signature settings join.
+      this.scanRelationshipIndex('settings', owner);
+      while (this.ownsIndexBuild(owner) && owner.pending.size) {
+        const child = owner.pending.values().next().value as TFile;
+        owner.pending.delete(child);
+        this.reindexSeedChild(child);
+      }
+      if (!this.ownsIndexBuild(owner)) return;
+      this.indexSettingsSignature = owner.signature;
+      this.indexReady = true;
+      this.refreshMenusAfterIndexReady('parent-relationship-index-settings');
+      this.finishIndexBuild(owner);
+    } catch (error) { this.finishIndexBuild(owner, { error }); }
+    finally { this.settleSupersededConfiguration(owner); }
+  }
+
+  private async finishResolvedIndex(owner: RelationshipIndexBuild): Promise<void> {
+    let sliceStarted = performance.now();
+    const hadPending = owner.pending.size > 0;
+    try {
+      while (this.ownsIndexBuild(owner) && owner.pending.size) {
+        const child = owner.pending.values().next().value as TFile;
+        owner.pending.delete(child);
+        this.reindexChild(child);
+        if (performance.now() - sliceStarted >= 8) {
+          await this.yieldIndexBuild();
+          sliceStarted = performance.now();
+        }
+      }
+      if (!this.ownsIndexBuild(owner)) return;
+      if (hadPending) this.refreshMenusAfterIndexReady('parent-relationship-index-resolved');
+      this.finishIndexBuild(owner);
+    } catch (error) {
+      if (this.ownsIndexBuild(owner)) logger.error('[TPS GCM] Could not refresh the resolved parent relationship index', { error });
+      this.finishIndexBuild(owner, { error });
+    } finally { this.settleSupersededConfiguration(owner); }
+  }
+
+  private settleSupersededConfiguration(owner: RelationshipIndexBuild): void {
+    if (this.indexBuild === owner && !this.ownsIndexBuild(owner)) this.cancelIndexBuild();
+  }
+
+  private yieldIndexBuild(): Promise<void> {
+    const scheduler = (globalThis as unknown as { scheduler?: { yield?: () => Promise<void> } }).scheduler;
+    if (typeof scheduler?.yield === 'function') return scheduler.yield();
+    if (typeof globalThis.MessageChannel === 'function') return new Promise(resolve => {
+      const channel = new MessageChannel();
+      channel.port1.onmessage = () => {
+        channel.port1.onmessage = null;
+        channel.port1.close(); channel.port2.close(); resolve();
+      };
+      channel.port2.postMessage(null);
+    });
+    return new Promise(resolve => globalThis.setTimeout(resolve, 0));
   }
 
   /** Current stored children are filtered against current ignore rules at query time. */
@@ -154,16 +341,25 @@ export class ParentLinkResolutionService {
 
   /** Return both old and current parent paths for the owning event to refresh. */
   onMetadataChanged(file: TFile): string[] {
-    if (!this.indexReady || !(file instanceof TFile)) return [];
+    if (!(file instanceof TFile)) return [];
+    if (this.indexBuild && !this.indexReady) { this.indexBuild.pending.add(file); return []; }
+    if (!this.indexReady) return [];
     return Array.from(this.reindexChild(file));
   }
 
   onFileCreated(file: TFile): string[] {
-    if (!this.indexReady || !(file instanceof TFile)) return [];
+    if (!(file instanceof TFile)) return [];
+    if (this.indexBuild && !this.indexReady) {
+      this.indexBuild.pending.add(file);
+      this.collectRelatedChildren(file.path, this.indexBuild.pending);
+      return [];
+    }
+    if (!this.indexReady) return [];
     return this.refreshRelatedChildren(file, file.path);
   }
 
   onFileDeleted(item: TFile | TFolder): string[] {
+    if (this.queueIndexBuildLifecycle(item, item.path)) return [];
     if (!this.indexReady) return [];
     const removed = item instanceof TFile
       ? (this.knownFilePaths.has(item) ? [item] : [])
@@ -187,6 +383,7 @@ export class ParentLinkResolutionService {
   }
 
   onFileRenamed(item: TFile | TFolder, oldPath: string): string[] {
+    if (this.queueIndexBuildLifecycle(item, oldPath)) return [];
     if (!this.indexReady) return [];
     const renamed = item instanceof TFile
       ? [[item, oldPath] as const]
@@ -204,6 +401,26 @@ export class ParentLinkResolutionService {
       for (const path of this.reindexChild(child)) parentPaths.add(path);
     }
     return Array.from(parentPaths);
+  }
+
+  private queueIndexBuildLifecycle(item: TFile | TFolder, oldPath: string): boolean {
+    const owner = this.indexBuild;
+    if (!owner || this.indexReady) return false;
+    if (item instanceof TFile) {
+      owner.pending.add(item);
+      this.collectRelatedChildren(this.knownFilePaths.get(item) || oldPath, owner.pending);
+      this.collectRelatedChildren(oldPath, owner.pending);
+      this.collectRelatedChildren(item.path, owner.pending);
+    } else {
+      // An unvisited target has no known old path. Reconsider the already-read
+      // relationship bearers, not the whole inventory or frontmatter snapshots.
+      for (const child of this.targetNamesByChild.keys()) owner.pending.add(child);
+      for (const [file, path] of this.knownFilePaths) {
+        if (path === oldPath || path.startsWith(`${oldPath}/`)
+          || path === item.path || path.startsWith(`${item.path}/`)) owner.pending.add(file);
+      }
+    }
+    return true;
   }
 
   private refreshRelatedChildren(file: TFile, path: string): string[] {
