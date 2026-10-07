@@ -7270,46 +7270,6 @@ export const PLUGIN_STYLES = `
         color: var(--text-normal);
       }
 
-      .tps-gcm-heading-link-suggest {
-        position: fixed;
-        z-index: 100001;
-        width: min(420px, calc(100vw - 24px));
-        max-height: 280px;
-        overflow-y: auto;
-        border: 1px solid var(--background-modifier-border);
-        border-radius: 6px;
-        background: var(--background-primary);
-        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.32);
-        padding: 4px;
-      }
-
-      .tps-gcm-heading-link-suggest-item {
-        border-radius: 4px;
-        padding: 7px 8px;
-        cursor: pointer;
-      }
-
-      .tps-gcm-heading-link-suggest-item.is-selected,
-      .tps-gcm-heading-link-suggest-item:hover {
-        background: var(--background-modifier-hover);
-      }
-
-      .tps-gcm-heading-link-suggest-title {
-        color: var(--text-normal);
-        font-size: 13px;
-        font-weight: 650;
-        line-height: 18px;
-      }
-
-      .tps-gcm-heading-link-suggest-detail {
-        color: var(--text-muted);
-        font-size: 11px;
-        line-height: 15px;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-
       .tps-gcm-task-editor-card {
         position: fixed;
         z-index: 100002;

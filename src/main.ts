@@ -48,7 +48,6 @@ import { OverlayRenderingService } from './services/overlay-rendering-service';
 import { HideCompletedCheckboxesService } from './services/hide-completed-checkboxes-service';
 import { InlinePropertyDecorationService } from './services/inline-property-decoration-service';
 import { InlinePropertySuggest } from './services/inline-property-suggest';
-import { HeadingLinkSuggest } from './services/heading-link-suggest';
 import { TaskStatusCheckboxReconcileService } from './services/task-status-checkbox-reconcile-service';
 import { TaskLineContextMenuService } from './services/task-line-context-menu-service';
 import { DailyInboxLineService } from './services/daily-inbox-line-service';
@@ -634,7 +633,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       }, 900));
     }
     if (!this.usesNativeRecordArchitecture()) this.registerEditorSuggest(new InlinePropertySuggest(this));
-    this.addChild(new HeadingLinkSuggest(this));
     this.app.workspace.updateOptions();
 
     this.menuController = new MenuController(this);

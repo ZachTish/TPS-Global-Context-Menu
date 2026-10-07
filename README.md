@@ -1,5 +1,43 @@
 # TPS Global Context Menu
 
+## 7.3.17 — Remove heading link suggestions
+
+GCM no longer suggests existing notes while typing ordinary Markdown headings.
+The suggestion component, editor and keyboard listeners, vault-wide search,
+custom popover and its styles are removed. Obsidian's native `[[` link completion,
+heading folding, title editing, hover preview and body selection keep their
+existing owners. This does not add a setting, replacement service, watcher,
+cache or repair path. Saved configuration, note content and public APIs are
+unchanged. The minimum Obsidian version remains 1.10.0.
+
+Regression coverage requires the component, runtime registration and CSS to be
+absent, while preserving independent heading and editing features. The new
+retirement checks reproduced three failures before removal and pass all five
+afterward. Consumer checks pass 3/3; the full declared `npm test` passes 1,641
+checks with no failures, cancellations or skips. A separate final `npm run build`
+deploys only to the test vault. Hot Reload loads the new code; a targeted GCM
+reload after refreshing manifests verifies loaded version 7.3.17 and API readiness.
+
+Installed foreground Live Preview typing, with all eight active TPS consumers
+enabled, records 40 editor changes in each comparison. Before: 40 heading searches,
+40 Markdown inventories and 1,384,080 heading-owned metadata calls. The first search
+takes 79.9 ms; the median is 63.8 ms (range 60.8–79.9 ms). After: zero heading
+searches, zero inventories and zero heading-owned metadata calls. Application-wide
+metadata calls fall from 1,384,575 to 287 for these samples. A repeated 20-character
+burst also performs zero inventories and searches. These operation counts and
+instrumented component timings are separate evidence; they are not input-to-paint,
+physical iPhone, process-cold-startup or production timing claims. Ordinary core
+saving and unrelated display work remain: 2/1 raw reads, 14/7 cached reads and
+2/1 modifications in the before/after samples, with no frontmatter attempts.
+
+Native `[[` completion visibly offers the synthetic note and Enter inserts its
+link. The synthetic source marker and frontmatter remain intact, the fixture is
+moved directly to `_archive`, temporary wrappers are removed, the original leaf
+is restored, and saved data/enabled state retain their original hashes. No outbound
+automation is enabled. See [7.3.17 release notes](release-notes/7.3.17.md) for
+artifact hashes and limits. This patch is tested in the test vault and ready for
+the user's BRAT pull; production plugin installation has not been performed.
+
 ## 7.3.16 — Cooperate during initial relationship indexing
 
 The initial parent/child relationship inventory now cooperates with host tasks at
