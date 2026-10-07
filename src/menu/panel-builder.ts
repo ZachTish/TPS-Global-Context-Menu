@@ -1391,7 +1391,6 @@ export class PanelBuilder {
     } else {
       logger.flow('PropertySelector', 'refresh:await-metadata-cache', { files: files.length, changedKeys });
     }
-    void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(files, changedKeys);
   }
 
   private populateStackedPropertyValue(target: HTMLElement, entries: any[], prop: any, frontmatter: Record<string, any>): void {

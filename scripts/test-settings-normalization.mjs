@@ -1021,15 +1021,14 @@ test('settings use shallow routed pages with responsive, accessible selectors', 
     assert.match(displaySource, new RegExp(`this\\.activeWorkflowPage === '${workflow}'`));
   }
   assert.match(displaySource, /this\.activeRulesFieldsPage === 'custom-fields'[\s\S]*showCustomPropertiesInInlineUi[\s\S]*this\.renderProperties\(propertiesConfigContainer\)/);
-  assert.match(displaySource, /this\.activeRulesFieldsPage === 'view-mode'[\s\S]*enableViewModeSwitching[\s\S]*viewModeRules/);
+  assert.doesNotMatch(displaySource, /viewModeRules|Enable automatic view mode switching|id: 'view-mode'/);
+  assert.match(displaySource, /this\.activeSettingsPage === 'menus-surfaces'[\s\S]*Show manual view mode controls[\s\S]*enableInlineManualViewMode/);
 
   assert.match(stylesSource, /\.tps-gcm-settings-hub\s*\{[\s\S]*position: sticky;[\s\S]*grid-template-columns:/);
   assert.match(stylesSource, /\.tps-gcm-settings-route-button\[aria-pressed='true'\]/);
   assert.match(stylesSource, /\.tps-gcm-settings-route-button\s*\{[\s\S]*\n  height: auto;/);
   assert.match(stylesSource, /@media \(max-width: 700px\)[\s\S]*\.tps-gcm-settings-hub[\s\S]*display: flex/);
   assert.match(stylesSource, /@media \(max-width: 700px\)[\s\S]*\.tps-gcm-settings-subnav/);
-  assert.match(stylesSource, /\.tps-gcm-viewmode-condition-row\s*\{[\s\S]*grid-template-columns:/);
-  assert.match(stylesSource, /@media \(max-width: 700px\)[\s\S]*\.tps-gcm-viewmode-condition-row[\s\S]*grid-template-columns: minmax\(0, 1fr\)/);
   assert.doesNotMatch(stylesSource, /(?:^|\n)\.tps-settings-(?:hub|subnav|route|page|editor|callout)/);
 });
 

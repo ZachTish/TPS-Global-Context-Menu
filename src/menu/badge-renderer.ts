@@ -106,7 +106,7 @@ export class BadgeRenderer {
       : null;
   }
 
-  private async afterWholeNotePropertyEdit(files: TFile[], changedKeys: string[]): Promise<void> {
+  private async afterWholeNotePropertyEdit(files: TFile[]): Promise<void> {
     if (files.length === 0) return;
     await Promise.all(files.map((file) =>
       this.plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
@@ -118,7 +118,6 @@ export class BadgeRenderer {
     for (const file of files) {
       this.plugin.persistentMenuManager?.refreshMenusForFile(file, true);
     }
-    this.plugin.viewModeManager?.handlePotentialFrontmatterChange(files, changedKeys);
   }
 
   createSummaryHeader(file: TFile, leaf?: WorkspaceLeaf): HTMLElement {
@@ -215,7 +214,7 @@ export class BadgeRenderer {
               await this.plugin.bulkEditService.updateFrontmatter(files, { [prop.key]: choice.value });
               badge.textContent = choice.label;
             }
-            await this.afterWholeNotePropertyEdit(files, [prop.key]);
+            await this.afterWholeNotePropertyEdit(files);
           });
           },
         );
@@ -246,7 +245,7 @@ export class BadgeRenderer {
                 .setChecked(allWithoutKey)
                 .onClick(async () => {
                   await this.plugin.bulkEditService.removeFrontmatterKey(files, prop.key);
-                  await this.afterWholeNotePropertyEdit(files, [prop.key]);
+                  await this.afterWholeNotePropertyEdit(files);
                   (e.target as HTMLElement).remove();
                 });
             });
@@ -255,7 +254,7 @@ export class BadgeRenderer {
                 .setChecked(allEmpty)
                 .onClick(async () => {
                   await this.plugin.bulkEditService.updateFrontmatter(files, { [prop.key]: '' });
-                  await this.afterWholeNotePropertyEdit(files, [prop.key]);
+                  await this.afterWholeNotePropertyEdit(files);
                   (e.target as HTMLElement).remove();
                 });
             });
@@ -266,7 +265,7 @@ export class BadgeRenderer {
                   .setChecked(this.getValueCaseInsensitive(fm, prop.key) === opt)
                   .onClick(async () => {
                     await this.plugin.bulkEditService.updateFrontmatter(files, { [prop.key]: opt });
-                    await this.afterWholeNotePropertyEdit(files, [prop.key]);
+                    await this.afterWholeNotePropertyEdit(files);
                     (e.target as HTMLElement).textContent = opt;
                     (e.target as HTMLElement).className = `tps-gcm-badge tps-gcm-badge-${prop.key} tps-gcm-badge-${opt}`;
                   });
@@ -299,7 +298,7 @@ export class BadgeRenderer {
                 choice.kind === 'entity',
               );
             }
-            await this.afterWholeNotePropertyEdit(files, [prop.key]);
+            await this.afterWholeNotePropertyEdit(files);
           });
         };
 
@@ -326,12 +325,12 @@ export class BadgeRenderer {
               if (isTextList || isLinkList || isEntityList) {
                 const files = this.filesFromEntries(entries);
                 await this.plugin.bulkEditService.removeListValues(files, item, prop.key);
-                await this.afterWholeNotePropertyEdit(files, [prop.key]);
+                await this.afterWholeNotePropertyEdit(files);
                 this.plugin.bulkEditService.showNotice('removed', `${prop.label || prop.key} ${cleanItem}`, '', entries.length);
               } else {
                 const files = this.filesFromEntries(entries);
                 await this.plugin.bulkEditService.removeTag(files, cleanItem, prop.key);
-                await this.afterWholeNotePropertyEdit(files, [prop.key, 'tags']);
+                await this.afterWholeNotePropertyEdit(files);
                 this.plugin.bulkEditService.showNotice('removed', `Tag #${cleanItem}`, '', entries.length);
               }
               badge.remove();

@@ -28,6 +28,7 @@ import { ChecklistHandler } from '../handlers/checklist-handler';
 import { ParentLinkHandler } from '../handlers/parent-link-handler';
 import { buildParentFrontmatterLinkValue, buildParentLinkValue, linkValueMatchesFile, extractLinkTarget, resolveLinkValueToFile } from '../handlers/parent-link-format';
 import { reconcileExistingDailyNoteForIsoDate } from '../utils/daily-note-task-schedule';
+import { parseNativeRecordDocument } from '../utils/native-record-document';
 import {
     canAutomaticallyMutateTemplateFile,
     canAutomaticallyMutateTemplateFrontmatter,
@@ -57,7 +58,9 @@ export class BulkEditService {
     private readonly recurrenceLastGeneratedKey = 'recurrenceLastGenerated';
     private readonly dailyRecurrenceRule = 'FREQ=DAILY';
     private recurrenceCreationInProgress: Set<string> = new Set();
-    private checkMissingRecurrencesRunning = false;
+    private recurrenceRecoveryPromise: Promise<void> | null = null;
+    private recurrenceRecoveryFullPending = false;
+    private recurrenceRecoveryPendingPaths = new Set<string>();
     private frontmatterWriteChains: Map<string, Promise<void>> = new Map();
     private deletedLinkCleanupChain: Promise<void> = Promise.resolve();
     private deletedLinkCleanupPending = 0;
@@ -1201,10 +1204,6 @@ export class BulkEditService {
             }
         }
 
-        const keys = Object.keys(updates);
-        if (count > 0 && keys.length > 0) {
-            void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(files, keys);
-        }
         logger.flow('BulkEdit', 'frontmatter:update-done', {
             files: files.length,
             changed: count,
@@ -2317,13 +2316,61 @@ export class BulkEditService {
         });
     }
 
-    async checkMissingRecurrences(): Promise<void> {
-        if (this.checkMissingRecurrencesRunning) return;
+    async checkMissingRecurrences(paths?: readonly string[]): Promise<void> {
         if (!this.plugin.settings.enableRecurrence) return;
+        if (paths !== undefined && paths.length === 0) return;
 
-        this.checkMissingRecurrencesRunning = true;
+        if (paths === undefined) {
+            this.recurrenceRecoveryFullPending = true;
+            this.recurrenceRecoveryPendingPaths.clear();
+        } else if (!this.recurrenceRecoveryFullPending) {
+            for (const path of paths) {
+                const normalized = normalizePath(path.trim());
+                if (normalized) this.recurrenceRecoveryPendingPaths.add(normalized);
+            }
+        }
+
+        if (!this.recurrenceRecoveryPromise) {
+            // Defer dispatch to coalesce callers in this turn. Later arrivals
+            // remain pending until the same worker drains them; a full request
+            // supersedes only work that has not started yet.
+            this.recurrenceRecoveryPromise = Promise.resolve().then(() => this.drainRecurrenceRecovery());
+        }
+        await this.recurrenceRecoveryPromise;
+    }
+
+    private async drainRecurrenceRecovery(): Promise<void> {
+        let failed = false;
+        let firstError: unknown;
         try {
-            const files = this.plugin.app.vault.getMarkdownFiles()
+            while (this.recurrenceRecoveryFullPending || this.recurrenceRecoveryPendingPaths.size) {
+                const paths = this.recurrenceRecoveryFullPending ? undefined : [...this.recurrenceRecoveryPendingPaths];
+                this.recurrenceRecoveryFullPending = false;
+                this.recurrenceRecoveryPendingPaths.clear();
+                if (!this.plugin.settings.enableRecurrence) continue;
+                try {
+                    await this.runMissingRecurrenceCheck(paths);
+                } catch (error) {
+                    // Do not automatically retry this pass. Drain independent
+                    // later requests once (a full request can revisit its files)
+                    // and reject every joined caller with the original failure.
+                    if (!failed) firstError = error;
+                    failed = true;
+                }
+            }
+            if (failed) throw firstError;
+        } finally {
+            // Clear synchronously at the drain boundary so a new arrival cannot
+            // join an already-finished promise and leave its scope unprocessed.
+            this.recurrenceRecoveryPromise = null;
+        }
+    }
+
+    private async runMissingRecurrenceCheck(paths?: readonly string[]): Promise<void> {
+            const files = (paths === undefined
+                ? this.plugin.app.vault.getMarkdownFiles()
+                : paths.map(path => this.plugin.app.vault.getAbstractFileByPath(path))
+                    .filter((file): file is TFile => file instanceof TFile && file.extension === 'md'))
                 .filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file));
             let createdCount = 0;
 
@@ -2338,11 +2385,11 @@ export class BulkEditService {
 
             for (const file of files) {
                 const cache = this.plugin.app.metadataCache.getFileCache(file);
-                const fm = cache?.frontmatter;
+                let fm = cache?.frontmatter;
 
                 if (!fm) continue;
 
-                const recurrenceInfo = this.resolveRecurrenceInfo(file, fm);
+                let recurrenceInfo = this.resolveRecurrenceInfo(file, fm);
                 if (!recurrenceInfo.rule) continue;
 
                 // Classify template identity from current bytes for the narrow
@@ -2353,6 +2400,18 @@ export class BulkEditService {
                 try {
                     const source = await this.plugin.app.vault.read(file);
                     templateProtectionState = inspectTemplateProtectionSource(source, this.plugin.settings);
+                    const current = parseNativeRecordDocument(source);
+                    if (!current) {
+                        logger.warn('[TPS GCM] Skipping recurrence recovery because current frontmatter could not be parsed', { file: file.path });
+                        continue;
+                    }
+                    // Metadata is only a cheap candidate preflight. The already
+                    // read source owns completion, recurrence configuration and
+                    // the generated-successor marker, including metadata lag
+                    // between a full pass and a queued scoped request.
+                    fm = current.frontmatter;
+                    recurrenceInfo = this.resolveRecurrenceInfo(file, fm);
+                    if (!recurrenceInfo.rule) continue;
                 } catch (error) {
                     logger.warn('[TPS GCM] Skipping startup recurrence check because current source could not be read', {
                         file: file.path,
@@ -2486,9 +2545,6 @@ export class BulkEditService {
                 }
                 logger.log(`[TPS GCM] Relinked ${needsRelink.length} recurrence instance(s) to series templates.`);
             }
-        } finally {
-            this.checkMissingRecurrencesRunning = false;
-        }
     }
 
     async clearRecurrenceRule(file: TFile): Promise<void> {
@@ -2561,7 +2617,6 @@ export class BulkEditService {
         }, 200);
 
         this.notifyFilesChanged(updatedFiles);
-        void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(updatedFiles, ['tags']);
     }
 
     private getInheritableParentTags(parentFile: TFile): string[] {
@@ -2662,7 +2717,6 @@ export class BulkEditService {
             affected.push(parentFile);
             setTimeout(() => affected.forEach((file) => this.plugin.persistentMenuManager?.refreshMenusForFile(file)), 200);
             this.notifyFilesChanged(affected);
-            void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(affected, [parentKey, 'tags']);
         }
         return count;
     }
@@ -2679,7 +2733,6 @@ export class BulkEditService {
             const parentKey = this.parentLinkHandler.normalizeParentKey();
             setTimeout(() => touched.forEach((file) => this.plugin.persistentMenuManager?.refreshMenusForFile(file)), 200);
             this.notifyFilesChanged(touched);
-            void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(touched, [parentKey]);
         }
         return result.addedParents + result.removedParents;
     }
@@ -2696,7 +2749,6 @@ export class BulkEditService {
         }
         setTimeout(() => this.plugin.persistentMenuManager?.refreshMenusForFile(parentFile), 200);
         this.notifyFilesChanged([parentFile]);
-        void this.plugin.viewModeManager?.handlePotentialFrontmatterChange([parentFile], [parentKey]);
         return true;
     }
 
@@ -2826,7 +2878,6 @@ export class BulkEditService {
         if (added > 0) {
             setTimeout(() => this.plugin.persistentMenuManager?.refreshMenusForFile(currentFile), 350);
             this.notifyFilesChanged([currentFile]);
-            void this.plugin.viewModeManager?.handlePotentialFrontmatterChange([currentFile], []);
         }
 
         return added;
@@ -2887,7 +2938,6 @@ export class BulkEditService {
         }
         if (updatedFiles.length > 0) {
             this.notifyFilesChanged(updatedFiles);
-            void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(updatedFiles, [key]);
         }
         return count;
     }
@@ -2904,7 +2954,6 @@ export class BulkEditService {
         const parentKey = this.parentLinkHandler.normalizeParentKey();
         setTimeout(() => changedFiles.forEach((file) => this.plugin.persistentMenuManager?.refreshMenusForFile(file)), 200);
         this.notifyFilesChanged(changedFiles);
-        void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(changedFiles, [parentKey]);
     }
 
     async unlinkFromAllParents(childFile: TFile): Promise<number> {
@@ -2917,7 +2966,6 @@ export class BulkEditService {
         for (const parent of parents) {
             await this.unlinkFromParent(childFile, parent);
         }
-        void this.plugin.viewModeManager?.handlePotentialFrontmatterChange([childFile], [parentKey]);
         return parents.length;
     }
 

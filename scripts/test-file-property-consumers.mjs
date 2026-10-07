@@ -187,7 +187,7 @@ test('managed companions stay out of note, task, recurrence, and picker workflow
 
   assert.match(taskCheckbox, /synchronizeChecklistPropertyForAllMarkdownFiles[\s\S]{0,500}isCompanionFile/u);
   assert.match(taskCheckbox, /updateChecklistPropertyForFile[\s\S]{0,250}isCompanionFile/u);
-  assert.match(bulkEdit, /checkMissingRecurrences[\s\S]{0,400}getMarkdownFiles\(\)[\s\S]{0,200}isCompanionFile/u);
+  assert.match(bulkEdit, /runMissingRecurrenceCheck\(paths\?: readonly string\[\]\)[\s\S]{0,180}getMarkdownFiles\(\)[\s\S]{0,350}isCompanionFile/u);
   assert.match(bulkEdit, /createNextRecurrenceInstance[\s\S]{0,250}isCompanionFile/u);
   assert.match(bulkEdit, /applyTemplateToOpenInstances[\s\S]{0,250}isCompanionFile/u);
   assert.match(bulkEdit, /runDeletedLinkCleanup[\s\S]{0,800}getRelationshipCandidates\(\{ includeIgnored: true \}\)[\s\S]{0,200}isCompanionFile/u);

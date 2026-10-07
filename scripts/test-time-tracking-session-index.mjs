@@ -24,32 +24,34 @@ new Function('require','module','exports',build.outputFiles[0].text)(createRequi
 const {TimeTrackingService,TFile}=module.exports;
 const record = id => ({id,targetId:'target',sourcePath:'Target.md',targetType:'note',start:'2026-09-22T12:00:00Z'});
 const document = fm => `---\n${stringify(fm)}---\n`;
-function harness() {
-  const files=[],bodies=new Map(),metadata=new Map(),events=new Map(),layoutCallbacks=[];let reads=0;let readHook=null;
-  const on=(event,fn)=>{const list=events.get(event)||[];list.push(fn);events.set(event,list);return {};};
+function harness({enabled=true}={}) {
+  const files=[],bodies=new Map(),metadata=new Map(),events=new Map(),layoutCallbacks=[],intervals=new Map(),timeouts=new Map();let handle=0;let reads=0;let readHook=null;
+  const on=(event,fn)=>{const list=events.get(event)||[];list.push(fn);events.set(event,list);return {event,fn};};
+  const offref=ref=>events.set(ref.event,(events.get(ref.event)||[]).filter(fn=>fn!==ref.fn));
+  const timerWindow={setInterval:fn=>{intervals.set(++handle,fn);return handle;},clearInterval:id=>intervals.delete(id),setTimeout:fn=>{timeouts.set(++handle,fn);return handle;},clearTimeout:id=>timeouts.delete(id)};
   const emit=(event,...args)=>{for(const fn of events.get(event)||[])fn(...args);};
-  const plugin={settings:{},registerEvent(){},registerInterval(){},getArchiveFolderPath:()=> '_archive',
+  const plugin={settings:{enableTimeTracking:enabled},registerEvent(){},registerInterval(){},getArchiveFolderPath:()=> '_archive',
     filePropertiesService:{isCompanionFile:f=>f.path.endsWith('.companion.md')},
-    app:{workspace:{onLayoutReady(fn){layoutCallbacks.push(fn);}},metadataCache:{on:(event,fn)=>on('metadata:'+event,fn),getFileCache:f=>metadata.get(f)},
-      vault:{on,getMarkdownFiles:()=>[...files],async cachedRead(f){reads++;if(readHook)return readHook(f);return bodies.get(f);}}},
+    app:{workspace:{onLayoutReady(fn){layoutCallbacks.push(fn);}},metadataCache:{on:(event,fn)=>on('metadata:'+event,fn),offref,getFileCache:f=>metadata.get(f)},
+      vault:{on,offref,getMarkdownFiles:()=>[...files],async cachedRead(f){reads++;if(readHook)return readHook(f);return bodies.get(f);}}},
     frontmatterMutationService:{async process(f,mutate){const fm=parse(bodies.get(f).split('---')[1]);mutate(fm);bodies.set(f,document(fm));}},
   };
   const service=new TimeTrackingService(plugin);
-  const previous=globalThis.window;globalThis.window={setInterval:()=>0};service.setup();globalThis.window=previous;
+  const previous=globalThis.window;globalThis.window=timerWindow;service.setup();globalThis.window=previous;
   const add=(path,fm={},raw)=>{const f=new TFile(path);files.push(f);bodies.set(f,raw??document(fm));emit('create',f);return f;};
   const write=(f,fm,event='modify')=>{bodies.set(f,document(fm));emit(event,f);};
   const runStartup=async beforeTimers=>{
-    const timers=[],previous=globalThis.window;
+    const previous=globalThis.window;
     try {
-      globalThis.window={setTimeout:fn=>{timers.push(fn);return 0;}};
+      globalThis.window=timerWindow;
       for(const fn of layoutCallbacks)fn();
     } finally {globalThis.window=previous;}
     beforeTimers?.();
-    for(const fn of timers)fn();
+    const timers=[...timeouts.values()];timeouts.clear();for(const fn of timers)fn();
     if(service.sessionScan)await service.sessionScan;
     await new Promise(resolve=>setImmediate(resolve));
   };
-  return {service,plugin,files,bodies,metadata,add,write,emit,runStartup,reads:()=>reads,setReadHook:fn=>{readHook=fn;}};
+  return {service,plugin,files,bodies,metadata,add,write,emit,runStartup,intervals,timeouts,events,timerWindow,activate(value){plugin.settings.enableTimeTracking=value;const previous=globalThis.window;try{globalThis.window=timerWindow;service.setup();}finally{globalThis.window=previous;}},reads:()=>reads,setReadHook:fn=>{readHook=fn;}};
 }
 
 test('native mode refuses task-line timers and task metadata writes', async () => {
@@ -70,7 +72,7 @@ test('native mode refuses task-line timers and task metadata writes', async () =
 
 test('disabled startup leaves the timer source index unread, including disable before scheduled work',async()=>{
  for(const initiallyEnabled of [false,true]){
-  const h=harness();h.plugin.settings.enableTimeTracking=initiallyEnabled;
+  const h=harness({enabled:initiallyEnabled});
   for(let i=0;i<1000;i++)h.add(`Ordinary ${i}.md`);
   let scans=0;const original=h.plugin.app.vault.getMarkdownFiles;
   h.plugin.app.vault.getMarkdownFiles=()=>{scans++;return original();};
@@ -82,11 +84,12 @@ test('disabled startup leaves the timer source index unread, including disable b
 });
 
 test('enabled startup prepares the timer index once through the existing synchronization owner',async()=>{
- const h=harness();h.plugin.settings.enableTimeTracking=false;
+ const h=harness({enabled:false});
  for(let i=0;i<1000;i++)h.add(`Ordinary ${i}.md`);
  let refreshes=0;const refresh=h.service.refreshActiveTimerCache.bind(h.service);
  h.service.refreshActiveTimerCache=(...args)=>{refreshes++;return refresh(...args);};
- await h.runStartup(()=>{h.plugin.settings.enableTimeTracking=true;});
+ h.activate(true);
+ await h.runStartup();
  assert.equal(h.reads(),1000,'enabling before the delayed callback still discovers stored sessions');
  assert.equal(refreshes,1,'startup synchronization already refreshes timer counts');
  assert.equal(h.service.sessionSources.size,1000);
@@ -164,4 +167,87 @@ test('a rejected shared scan is released so subsequent callers can recover',asyn
  h.plugin.app.vault.getMarkdownFiles=()=>{throw Error('unavailable');};
  const results=await Promise.allSettled([h.service.scanStoredSessions(),h.service.scanStoredSessions()]);assert.ok(results.every(r=>r.status==='rejected'));
  h.plugin.app.vault.getMarkdownFiles=original;assert.equal((await h.service.scanStoredSessions())[0].record.id,'one');
+});
+
+test('disabled activation owns no timers, listeners, inventory, body read or UI publication during bursts', async()=>{
+ const h=harness({enabled:false});
+ let inventories=0, publications=0;
+ h.plugin.app.vault.getMarkdownFiles=()=>{inventories++;return h.files;};
+ h.plugin.eventService={emitFilesUpdated(){publications++;}};
+ const revision=h.service.sessionSourceRevision;
+ for(let i=0;i<1000;i++){
+  const f=h.add(`Disabled ${i}.md`);
+  for(const event of ['modify','rename','delete','metadata:changed'])h.emit(event,f);
+ }
+ await h.runStartup();
+ await h.service.syncRunningScheduledMetadata();
+ assert.deepEqual(await h.service.getRuntimeStatus(),{active:null,paused:null});
+ assert.equal(h.events.size,0);
+ assert.equal(h.intervals.size,0);
+ assert.equal(h.timeouts.size,0);
+ assert.equal(h.service.sessionSourceRevision,revision,'disabled events do not invalidate an unused source index');
+ assert.deepEqual({inventories,reads:h.reads(),publications},{inventories:0,reads:0,publications:0});
+});
+
+test('enabling, disabling and enabling again owns one listener set and cancels previous layout/timer callbacks',async()=>{
+ const h=harness({enabled:false});
+ const target=h.add('Target.md',{tpsId:'target',title:'Target'});
+ h.add('Session.md',{timeTracking:[record('first')]});
+ h.plugin.app.vault.getAbstractFileByPath=path=>h.files.find(f=>f.path===path)??null;
+ h.plugin.eventService={emitFilesUpdated(){}};
+ h.activate(true);h.activate(true);
+ assert.equal([...h.events.values()].reduce((n,refs)=>n+refs.length,0),5);
+ assert.equal(h.intervals.size,1);
+ const staleInterval=[...h.intervals.values()][0];
+ await h.runStartup();
+ assert.equal(h.service.getActiveTimerCountForFileSync(target),1);
+ assert.equal(h.reads(),2);
+ h.activate(false);
+ assert.equal([...h.events.values()].flat().length,0);
+ assert.equal(h.intervals.size,0);
+ assert.equal(h.timeouts.size,0);
+ assert.equal(h.service.sessionSources.size,0);
+ assert.equal(h.service.activeTimerCountsByPath.size,0);
+ const stoppedRevision=h.service.sessionSourceRevision;
+ for(let i=0;i<100;i++)h.emit('metadata:changed',target);
+ staleInterval();await h.runStartup();
+ assert.equal(h.reads(),2);
+ assert.equal(h.service.sessionSourceRevision,stoppedRevision);
+ h.activate(true);
+ assert.equal([...h.events.values()].flat().length,5);
+ assert.equal(h.intervals.size,1);
+ await h.runStartup();
+ assert.equal(h.reads(),4,'reactivation discovers changes made while listeners were stopped');
+ assert.equal(h.service.getActiveTimerCountForFileSync(target),1);
+ h.service.detach();h.service.detach();
+ assert.equal(h.intervals.size,0);
+ assert.equal([...h.events.values()].flat().length,0);
+});
+
+test('disable during an awaited source read drains that read and stops all remaining inventory processing',async()=>{
+ const h=harness();for(let i=0;i<1000;i++)h.add(`File ${i}.md`,{timeTracking:[record(`${i}`)]});
+ let release;const wait=new Promise(resolve=>{release=resolve;});
+ h.setReadHook(async f=>{await wait;return h.bodies.get(f);});
+ const scan=h.service.scanStoredSessions();
+ assert.equal(h.reads(),1);
+ h.activate(false);release();
+ assert.deepEqual(await scan,[]);
+ assert.equal(h.reads(),1);
+ assert.equal(h.service.sessionSources.size,0);
+ assert.equal(h.service.activeTimerCountsByPath.size,0);
+});
+
+test('late work from a stopped activation cannot publish over a newly enabled scan',async()=>{
+ const h=harness();const f=h.add('Session.md',{timeTracking:[record('old')]});
+ let release;const wait=new Promise(resolve=>{release=resolve;});
+ h.setReadHook(async file=>{const old=h.bodies.get(file);await wait;return old;});
+ const oldScan=h.service.scanStoredSessions();
+ h.activate(false);
+ h.write(f,{timeTracking:[record('new')]});f.stat.mtime++;
+ h.setReadHook(null);h.activate(true);
+ assert.equal((await h.service.scanStoredSessions())[0].record.id,'new');
+ release();assert.deepEqual(await oldScan,[]);
+ assert.equal((await h.service.scanStoredSessions())[0].record.id,'new');
+ assert.equal(h.reads(),2,'the stale read cannot invalidate or replace the new activation cache');
+ h.service.detach();
 });

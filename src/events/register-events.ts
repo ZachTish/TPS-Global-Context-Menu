@@ -165,12 +165,6 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             throttledEnsureMenus();
             refreshActiveInlineTitle();
             throttledEnsureLinkedSubitemCheckboxes();
-            const activePath = plugin.app.workspace.getActiveFile()?.path || null;
-            for (const path of Array.from((plugin as any).viewModeSuppressedPaths as Set<string>)) {
-                if (path !== activePath) {
-                    (plugin as any).viewModeSuppressedPaths.delete(path);
-                }
-            }
         }),
     );
 

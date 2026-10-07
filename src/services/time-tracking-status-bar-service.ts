@@ -10,6 +10,7 @@ type StatusBarTimerState =
 
 export class TimeTrackingStatusBarService {
   private itemEl: HTMLElement | null = null;
+  private cleanups: Array<() => void> = [];
   private updateInFlight = false;
   private refreshPending = false;
   private lastRenderKey = '';
@@ -18,8 +19,12 @@ export class TimeTrackingStatusBarService {
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
-  setup(): void {
-    if (this.itemEl) return;
+  setup(): boolean {
+    if (this.plugin.settings.enableTimeTracking === false) {
+      this.detach();
+      return false;
+    }
+    if (this.itemEl) return false;
     this.itemEl = this.isMobile
       ? document.createElement('div')
       : this.plugin.addStatusBarItem();
@@ -29,30 +34,43 @@ export class TimeTrackingStatusBarService {
     }
     this.itemEl.style.display = 'none';
 
-    this.plugin.registerInterval(window.setInterval(() => {
-      void this.update(false, false);
-    }, 1000));
-    this.plugin.registerInterval(window.setInterval(() => {
-      void this.update(true, true);
-    }, 30000));
+    const itemEl = this.itemEl;
+    const timerWindow = window;
+    const elapsedInterval = timerWindow.setInterval(() => {
+      if (this.itemEl === itemEl) void this.update(false, false);
+    }, 1000);
+    const statusInterval = timerWindow.setInterval(() => {
+      if (this.itemEl === itemEl) void this.update(true, true);
+    }, 30000);
+    this.cleanups.push(() => {
+      timerWindow.clearInterval(elapsedInterval);
+      timerWindow.clearInterval(statusInterval);
+    });
 
     this.plugin.app.workspace.onLayoutReady(() => {
+      if (this.itemEl !== itemEl || this.plugin.settings.enableTimeTracking === false) return;
       this.reposition();
       void this.update(true, true);
     });
     if (this.isMobile) {
-      this.plugin.registerEvent(this.plugin.app.workspace.on('active-leaf-change', () => {
-        this.reposition();
-      }));
-      this.plugin.registerEvent(this.plugin.app.workspace.on('layout-change', () => {
-        this.reposition();
-      }));
-      this.plugin.registerDomEvent(window, 'resize', () => this.reposition());
+      const workspace = this.plugin.app.workspace;
+      const refs = [
+        workspace.on('active-leaf-change', () => this.reposition()),
+        workspace.on('layout-change', () => this.reposition()),
+      ];
+      const onResize = () => this.reposition();
+      timerWindow.addEventListener('resize', onResize);
+      this.cleanups.push(() => {
+        for (const ref of refs) workspace.offref(ref);
+        timerWindow.removeEventListener('resize', onResize);
+      });
     }
     this.refresh();
+    return true;
   }
 
   detach(): void {
+    for (const cleanup of this.cleanups.splice(0)) cleanup();
     this.itemEl?.remove();
     this.itemEl = null;
     this.refreshPending = false;

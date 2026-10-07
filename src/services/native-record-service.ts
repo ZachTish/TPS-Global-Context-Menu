@@ -1,3 +1,5 @@
+import { parseNativeRecordDocument, type ParsedNativeRecordDocument } from '../utils/native-record-document';
+export { parseNativeRecordDocument } from '../utils/native-record-document';
 import { kindClassification, kindDiscriminator, kindReadClassifications, kindWriterEnabled, matchesKindClassification, classificationTags, hasClassificationTag } from '../utils/kind-classification';
 import { PropertyMigrationModal } from '../modals/property-migration-modal';
 import { readManagedNoteField, writeManagedNoteField } from '../utils/managed-note-fields';
@@ -5,7 +7,6 @@ import {
   TFile,
   TFolder,
   normalizePath,
-  parseYaml,
   stringifyYaml,
 } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
@@ -195,13 +196,6 @@ export interface TpsNativeRecordSnapshot {
   conflicts?: Array<{ path: string; ids: string[]; kinds: string[]; frontmatter: Record<string, unknown> | null }>;
 }
 
-interface ParsedNativeRecordDocument {
-  bom: string;
-  newline: string;
-  closer: '---' | '...';
-  body: string;
-  frontmatter: Record<string, unknown>;
-}
 
 const RECORD_FOLDER_BY_KIND: Record<string, string> = {
   task: 'tasks',
@@ -1065,37 +1059,6 @@ export function taskLineNeedsNativeRecord(rawLine: string): boolean {
   ));
 }
 
-export function parseNativeRecordDocument(content: string): ParsedNativeRecordDocument | null {
-  const source = String(content || '');
-  const bom = source.startsWith('\uFEFF') ? '\uFEFF' : '';
-  const withoutBom = bom ? source.slice(1) : source;
-  const newline = withoutBom.match(/\r\n|\n|\r/u)?.[0] || '\n';
-  const lines = withoutBom.split(/\r\n|\n|\r/u);
-  if (!/^---[\t ]*$/u.test(String(lines[0] || ''))) return null;
-  let closerIndex = -1;
-  let closer: '---' | '...' = '---';
-  for (let index = 1; index < lines.length; index += 1) {
-    const markerMatch = String(lines[index] || '').match(/^(---|\.\.\.)[\t ]*$/u);
-    if (!markerMatch) continue;
-    closerIndex = index;
-    closer = markerMatch[1] as '---' | '...';
-    break;
-  }
-  if (closerIndex < 0) return null;
-  try {
-    const parsed = parseYaml(lines.slice(1, closerIndex).join(newline));
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    return {
-      bom,
-      newline,
-      closer,
-      body: lines.slice(closerIndex + 1).join(newline),
-      frontmatter: parsed as Record<string, unknown>,
-    };
-  } catch {
-    return null;
-  }
-}
 
 function openingFrontmatterSource(content: string): string | null {
   const source = String(content || '').replace(/^\uFEFF/u, '');

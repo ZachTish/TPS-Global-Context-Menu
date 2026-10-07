@@ -28,7 +28,7 @@ test('GCM API lifecycle publishes exact available and unavailable contract versi
     'requests are handled before startup awaits so a partial API stays explicitly unavailable');
   assert.match(main, /private async initializeStartupServices[\s\S]{0,1200}setupPluginApi\(this\);[\s\S]{0,300}emitGcmApiChanged\(true\)/u,
     'owned completion publishes the same available contract after initialization');
-  assert.match(main, /this\.emitGcmApiChanged\(true\);\s*this\.timeTrackingService\.setup\(\)/u, 'initial provider readiness remains published');
+  assert.match(main, /this\.emitGcmApiChanged\(true\);\s*this\.syncTimeTrackingActivation\(\)/u, 'initial provider readiness remains published');
   assert.match(main, /await this\.persistSettingsSnapshot\(\);\s*await this\.parentLinkResolutionService\?\.onRelationshipSettingsChanged\(\);\s*this\.emitGcmApiChanged\(true\)/u, 'saved configuration changes refresh relationships before notifying API consumers');
   assert.match(main, /delete \(this as any\)\.api;[\s\S]{0,300}emitGcmApiChanged\(false\)/u);
 });

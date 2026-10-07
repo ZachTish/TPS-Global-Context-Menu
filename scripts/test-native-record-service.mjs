@@ -135,9 +135,13 @@ async function loadModule() {
           const copyMarker = 'const frontmatter = { ...raw } as TpsNativeRecordEnvelope;';
           assert.equal(contents.includes(copyMarker), true, 'envelope counter must target the real copy');
           contents = contents.replace(copyMarker, `globalThis.__nativeRecordEnvelopeCopy?.(raw, profile);\n  ${copyMarker}`);
-          const parseMarker = 'export function parseNativeRecordDocument(content: string): ParsedNativeRecordDocument | null {';
-          assert.equal(contents.includes(parseMarker), true, 'authoritative parse counter must target the real parser');
-          contents = contents.replace(parseMarker, `${parseMarker}\n  globalThis.__nativeRecordAuthoritativeParse?.();`);
+          return { contents, loader: 'ts', resolveDir: dirname(args.path) };
+        });
+        builder.onLoad({ filter: /native-record-document\.ts$/ }, (args) => {
+          let contents = readFileSync(args.path, 'utf8');
+          const marker = 'export function parseNativeRecordDocument(content: string): ParsedNativeRecordDocument | null {';
+          assert.equal(contents.includes(marker), true, 'authoritative parse counter must target the same extracted parser');
+          contents = contents.replace(marker, `${marker}\n  globalThis.__nativeRecordAuthoritativeParse?.();`);
           return { contents, loader: 'ts', resolveDir: dirname(args.path) };
         });
         builder.onResolve({ filter: /property-migration-modal$/ }, () => ({ path: 'modal', namespace: 'migration-modal-test' }));

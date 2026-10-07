@@ -114,6 +114,8 @@ const RUNNING_SCHEDULE_SYNC_INTERVAL_MS = 60_000;
 export class TimeTrackingService {
   private activeTimerCountsByPath = new Map<string, number>();
   private sessionIndexReady = false;
+  private activationOwner: symbol | null = null;
+  private cleanups: Array<() => void> = [];
   private sessionSourceRevision = 0;
   private sessionScan: Promise<StoredSession[]> | null = null;
   private readonly sessionSources = new Map<TFile, {
@@ -124,19 +126,48 @@ export class TimeTrackingService {
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
   setup(): void {
+    if (!this.isEnabled()) {
+      this.detach();
+      return;
+    }
     if (this.sessionIndexReady) return;
-    this.plugin.registerEvent(this.plugin.app.vault.on('create', file => this.invalidateSessionSource(file)));
-    this.plugin.registerEvent(this.plugin.app.vault.on('modify', file => this.invalidateSessionSource(file)));
-    this.plugin.registerEvent(this.plugin.app.vault.on('delete', file => this.invalidateSessionSource(file)));
-    this.plugin.registerEvent(this.plugin.app.vault.on('rename', file => this.invalidateSessionSource(file)));
-    this.plugin.registerEvent(this.plugin.app.metadataCache.on('changed', file => this.invalidateSessionSource(file)));
-    this.sessionIndexReady = true;
-    this.plugin.registerInterval(window.setInterval(() => {
-      void this.syncRunningScheduledMetadata();
-    }, RUNNING_SCHEDULE_SYNC_INTERVAL_MS));
-    this.plugin.app.workspace.onLayoutReady(() => {
-      window.setTimeout(() => void this.syncRunningScheduledMetadata(), 2000);
+    const owner = this.activationOwner = Symbol('time-tracking');
+    const { vault, metadataCache, workspace } = this.plugin.app;
+    const vaultRefs = [
+      vault.on('create', file => this.invalidateSessionSource(file)),
+      vault.on('modify', file => this.invalidateSessionSource(file)),
+      vault.on('delete', file => this.invalidateSessionSource(file)),
+      vault.on('rename', file => this.invalidateSessionSource(file)),
+    ];
+    const metadataRef = metadataCache.on('changed', file => this.invalidateSessionSource(file));
+    this.cleanups.push(() => {
+      for (const ref of vaultRefs) vault.offref(ref);
+      metadataCache.offref(metadataRef);
     });
+    this.sessionIndexReady = true;
+    const timerWindow = window;
+    const syncInterval = timerWindow.setInterval(() => {
+      if (this.activationOwner === owner) void this.syncRunningScheduledMetadata();
+    }, RUNNING_SCHEDULE_SYNC_INTERVAL_MS);
+    this.cleanups.push(() => timerWindow.clearInterval(syncInterval));
+    workspace.onLayoutReady(() => {
+      if (this.activationOwner !== owner || !this.isEnabled()) return;
+      const startupTimeout = timerWindow.setTimeout(() => {
+        if (this.activationOwner === owner) void this.syncRunningScheduledMetadata();
+      }, 2000);
+      this.cleanups.push(() => timerWindow.clearTimeout(startupTimeout));
+    });
+  }
+
+  detach(): void {
+    this.activationOwner = null;
+    this.sessionIndexReady = false;
+    this.sessionSourceRevision += 1;
+    for (const cleanup of this.cleanups.splice(0)) cleanup();
+    this.sessionSources.clear();
+    this.activeTimerCountsByPath.clear();
+    // A stopped scan keeps its own promise until it drains; reactivation owns a new scan.
+    this.sessionScan = null;
   }
 
   isEnabled(): boolean {
@@ -821,8 +852,11 @@ export class TimeTrackingService {
 
   async syncRunningScheduledMetadata(): Promise<void> {
     if (!this.isEnabled()) return;
+    const owner = this.activationOwner;
     const active = (await this.scanStoredSessions()).filter((session) => !session.record.end);
+    if (!this.isEnabled() || this.activationOwner !== owner) return;
     await this.refreshActiveTimerCache(active);
+    if (!this.isEnabled() || this.activationOwner !== owner) return;
     if (this.plugin.settings.dataArchitectureMode === 'native-records') return;
     const syncedFiles = new Set<string>();
     for (const stored of active) {
@@ -1397,6 +1431,7 @@ export class TimeTrackingService {
   }
 
   private async scanStoredSessions(): Promise<StoredSession[]> {
+    if (!this.isEnabled()) return [];
     const scan = this.sessionScan ?? (this.sessionScan = this.scanStoredSessionsUntilStable());
     try {
       // Consumers sort arrays and edit records; never expose the shared scan result.
@@ -1414,7 +1449,8 @@ export class TimeTrackingService {
   private async scanStoredSessionsUntilStable(): Promise<StoredSession[]> {
     const started = performance.now();
     let passes = 0;
-    while (true) {
+    const owner = this.activationOwner;
+    while (this.isEnabled() && this.activationOwner === owner) {
       passes += 1;
       const revision = this.sessionSourceRevision;
       const configuration = this.sessionScanConfiguration();
@@ -1428,6 +1464,7 @@ export class TimeTrackingService {
       for (const file of files) {
         if (this.shouldIgnoreTimeTrackingPath(file.path)) continue;
         const frontmatter = await this.readFrontmatterForTimeTrackingScan(file);
+        if (!this.isEnabled() || this.activationOwner !== owner) return [];
         const existingKey = frontmatter ? findKeyCaseInsensitive(frontmatter, key) : null;
         if (frontmatter && existingKey) {
           // Companion classification can inspect metadata; only session-bearing
@@ -1445,9 +1482,11 @@ export class TimeTrackingService {
       });
       return output;
     }
+    return [];
   }
 
   private async readFrontmatterForTimeTrackingScan(file: TFile): Promise<Record<string, unknown> | undefined> {
+    const owner = this.activationOwner;
     const key = this.getPropertyKey();
     const { path } = file;
     const mtime = file.stat?.mtime;
@@ -1467,6 +1506,7 @@ export class TimeTrackingService {
       // Do not turn a transient read failure into a persistent negative result.
       return cached;
     }
+    if (!this.isEnabled() || this.activationOwner !== owner) return undefined;
     let frontmatter: Record<string, unknown> | undefined;
     const normalized = raw.replace(/^\uFEFF/u, '').replace(/\r\n/g, '\n');
     const opening = /^---[ \t]*\n/u.exec(normalized);
@@ -1526,18 +1566,22 @@ export class TimeTrackingService {
   }
 
   private async refreshActiveTimerCache(activeSessions?: StoredSession[]): Promise<void> {
+    const owner = this.activationOwner;
     const active = activeSessions ?? (await this.scanStoredSessions()).filter((session) => !session.record.end);
     const next = new Map<string, number>();
     for (const session of active) {
-      if (await this.shouldIgnoreStoredSession(session)) continue;
-      if (session.record.targetType !== 'note') continue;
+      if (!this.isEnabled() || this.activationOwner !== owner) return;
+      const ignored = await this.shouldIgnoreStoredSession(session);
+      if (!this.isEnabled() || this.activationOwner !== owner) return;
+      if (ignored || session.record.targetType !== 'note') continue;
       const target = await this.resolveTargetForRecord(session.record, session);
+      if (!this.isEnabled() || this.activationOwner !== owner) return;
       const path = String(target?.file.path || session.record.sourcePath || '').trim();
       if (path) {
         next.set(path, (next.get(path) ?? 0) + 1);
       }
     }
-    this.activeTimerCountsByPath = next;
+    if (this.isEnabled() && this.activationOwner === owner) this.activeTimerCountsByPath = next;
   }
 
   private shouldIgnoreTimeTrackingPath(path: string | null | undefined): boolean {

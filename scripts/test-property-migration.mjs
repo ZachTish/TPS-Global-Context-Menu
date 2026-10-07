@@ -37,8 +37,8 @@ test('missing close delimiter and multiline owned values are reported',()=>{
  assert.throws(()=>migrate(fm('status: |\n  todo'),{...value,from:'todo\n'}));
 });
 test('references follow key renames without rewriting arbitrary labels or filter substrings',()=>{
- const settings={properties:[{id:'status',key:'status',label:'status',scopeProperties:[{key:'status',value:'todo'}]}],viewModeRules:[{conditions:[{type:'frontmatter',key:'status',value:'todo'}]}],parentChildIgnoreFrontmatterKey:'status',notebookNavigatorRules:{rules:[{conditions:[{source:'frontmatter',field:'status',operator:'is',value:'todo'},{source:'body',field:'status',operator:'contains',value:'status'}]}]}};
- references(settings,key); assert.equal(settings.properties[0].key,'taskStatus');assert.equal(settings.properties[0].label,'status');assert.equal(settings.properties[0].scopeProperties[0].key,'taskStatus');assert.equal(settings.viewModeRules[0].conditions[0].key,'taskStatus');assert.equal(settings.notebookNavigatorRules.rules[0].conditions[0].field,'taskStatus');assert.equal(settings.notebookNavigatorRules.rules[0].conditions[1].field,'status');
+ const settings={properties:[{id:'status',key:'status',label:'status',scopeProperties:[{key:'status',value:'todo'}]}],parentChildIgnoreFrontmatterKey:'status',notebookNavigatorRules:{rules:[{conditions:[{source:'frontmatter',field:'status',operator:'is',value:'todo'},{source:'body',field:'status',operator:'contains',value:'status'}]}]}};
+ references(settings,key); assert.equal(settings.properties[0].key,'taskStatus');assert.equal(settings.properties[0].label,'status');assert.equal(settings.properties[0].scopeProperties[0].key,'taskStatus');assert.equal(settings.notebookNavigatorRules.rules[0].conditions[0].field,'taskStatus');assert.equal(settings.notebookNavigatorRules.rules[0].conditions[1].field,'status');
 });
 test('status value rename keeps options, classifications, checkbox targets and exact rules aligned',()=>{
  const settings={properties:[{id:'status',key:'status',options:['todo','done'],hideWhenProperties:[{key:'status',operator:'contains',value:'todo'}]}],activeStatusValues:['todo'],linkedSubitemCheckboxMappings:[{statuses:['todo'],toggleTargetStatus:'todo'}],parentChildIgnoreFrontmatterKey:'status',parentChildIgnoreFrontmatterValue:'todo'};
@@ -452,7 +452,7 @@ test('concurrent note edit is preserved and recovery survives a restart',async()
 });
 test('all owning key controls use explicit migration actions and options are drafts',()=>{
  const source=readFileSync('src/settings-tab.ts','utf8');
- for(const key of ['dateCreatedFrontmatterKey','dateModifiedFrontmatterKey','viewModeFrontmatterKey','timeTrackingPropertyKey','parentLinkFrontmatterKey']) assert.match(source,new RegExp(`renderMigratingKeySetting\\([^\\n]+ '${key}'\\)`));
+ for(const key of ['dateCreatedFrontmatterKey','dateModifiedFrontmatterKey','timeTrackingPropertyKey','parentLinkFrontmatterKey']) assert.match(source,new RegExp(`renderMigratingKeySetting\\([^\\n]+ '${key}'\\)`));
  assert.doesNotMatch(source, /renderMigratingKeySetting\([^\n]+ 'taskVisibilityStateFrontmatterKey'\)/u);
  assert.match(source,/Rename stored value/);assert.match(source,/draftOptions = value/);assert.match(source,/configureManagedNoteField\(settings, field, next\)/);assert.match(source,/this\.migrateProperty\(\{ kind: 'key', from: prop.key/);
 });

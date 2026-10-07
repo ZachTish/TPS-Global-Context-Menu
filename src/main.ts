@@ -22,7 +22,6 @@ import { BulkEditService } from './services/bulk-edit-service';
 import { RecurrenceService } from './services/recurrence-service';
 import { FileNamingService } from './services/file-naming-service';
 import { AutoFrontmatterExclusionService } from './services/file-exclusion-service';
-import { ViewModeManager } from './handlers/view-mode-manager';
 import { DailyNoteNavManager } from './handlers/daily-note-nav-manager';
 import { TaskCheckboxHandler } from './handlers/task-checkbox-handler';
 import { ContextTargetService } from './services/context-target-service';
@@ -337,7 +336,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   bulkEditService: BulkEditService;
   recurrenceService: RecurrenceService;
   fileNamingService: FileNamingService;
-  viewModeManager: ViewModeManager;
   dailyNoteNavManager: DailyNoteNavManager;
   contextTargetService: ContextTargetService;
   noteOperationService: NoteOperationService;
@@ -396,7 +394,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private restoreCanvasOpenGuard: (() => void) | null = null;
   private basesPreviewPropertiesObserver: MutationObserver | null = null;
   private basesPreviewPropertiesRefreshTimer: number | null = null;
-  private viewModeSuppressedPaths: Set<string> = new Set();
   private externalActionRegistrations: Map<string, GcmExternalActionRegistration> = new Map();
   noteOpeningService = new NoteOpeningService(this);
   nativeBaseNoteOpening = new NativeBaseNoteOpening(this);
@@ -638,8 +635,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.menuController = new MenuController(this);
     this.tpsNotebookNavigatorMenuBridge = new TpsNotebookNavigatorMenuBridge(this);
     this.persistentMenuManager = new PersistentMenuManager(this);
-    this.viewModeManager = new ViewModeManager(this);
-    this.addChild(this.viewModeManager);
     this.dailyNoteNavManager = new DailyNoteNavManager(this);
     this.addChild(this.dailyNoteNavManager);
 
@@ -865,8 +860,14 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.register(() => this.nativeBaseNoteOpening.dispose());
     this.tpsNotebookNavigatorMenuBridge.start();
     this.emitGcmApiChanged(true);
-    this.timeTrackingService.setup();
-    this.timeTrackingStatusBarService.setup();
+    this.syncTimeTrackingActivation();
+  }
+
+  private syncTimeTrackingActivation(): void {
+    // Timer consumers start only after the owning startup services publish the API.
+    if (!(this as any).api) return;
+    this.timeTrackingService?.setup();
+    if (!this.timeTrackingStatusBarService?.setup()) this.timeTrackingStatusBarService?.refresh();
   }
 
   private registerInteractionHandlers(): void {
@@ -1603,6 +1604,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.persistentMenuManager?.detach();
     this.recurrenceService?.cleanup();
     this.timeTrackingStatusBarService?.detach();
+    this.timeTrackingService?.detach();
     this.taskLineDragService?.dispose();
     this.taskCheckboxHandler?.dispose();
     this.taskLineContextMenuService?.dispose();
@@ -1664,6 +1666,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }
     const loadedSettingsRecord = (loaded ?? {}) as SettingsRecord;
     const hadRetiredHomeSettings = RETIRED_HOME_SETTING_KEYS.some((key) => Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key));
+    const hadAutomaticViewModeSettings = ['enableViewModeSwitching', 'viewModeFrontmatterKey', 'viewModeIgnoredFolders', 'viewModeRules']
+      .some((key) => Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key));
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
     Object.assign(this.settings, await migrateNoteOpeningSettings(this.app, loaded ?? {}));
     const needsNoteOpeningMigration = loaded?.notePostCreateBehavior !== this.settings.notePostCreateBehavior
@@ -1964,6 +1968,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       needsNoteOpeningMigration ||
       needsArchitectureMigration ||
       hadRetiredHomeSettings ||
+      hadAutomaticViewModeSettings ||
       needsCheckboxMappingMigration ||
       needsNativeRecordIdentityMigration ||
       needsCreateTaskDefaultParentMigration ||
@@ -2189,6 +2194,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   private stripLegacySettingsFields(record: Record<string, unknown>): void {
     delete record.enableShiftClickCancel;
+    delete record.enableViewModeSwitching;
+    delete record.viewModeFrontmatterKey;
+    delete record.viewModeIgnoredFolders;
+    delete record.viewModeRules;
     delete record.archiveFolder;
     delete record.rules;
     delete record.smartSort;
@@ -2421,7 +2430,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       this.taskCheckboxHandler?.cancelChecklistPropertyUpdates();
     }
     this.workspaceRibbonService?.refresh();
-    this.timeTrackingStatusBarService?.refresh();
+    this.syncTimeTrackingActivation();
     this.hideCompletedCheckboxesService?.applyBodyClass();
     this.hideCompletedCheckboxesService?.refreshAllEditors();
     if (this.canRunBackgroundAutomation()) {
@@ -2877,17 +2886,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   buildSpecialPanel(file: TFile | TFile[], options: BuildPanelOptions = {}): HTMLElement | null {
     const files = Array.isArray(file) ? file : [file];
     return this.menuController.buildSpecialPanel(files, options);
-  }
-
-  suppressViewModeSwitchForPathUntilFocusChange(path: string): void {
-    if (!path) return;
-    this.viewModeSuppressedPaths.add(path);
-  }
-
-  shouldSkipViewModeSwitch(): boolean {
-    const activePath = this.app.workspace.getActiveFile()?.path;
-    if (!activePath) return false;
-    return this.viewModeSuppressedPaths.has(activePath);
   }
 
   shouldIgnoreAutoFrontmatterWrite(file: TFile): boolean {

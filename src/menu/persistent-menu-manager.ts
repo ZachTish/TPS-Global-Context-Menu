@@ -4544,7 +4544,6 @@ export class PersistentMenuManager {
     await this.plugin.frontmatterMutationService.deleteKeys([file], [key]);
     this.scheduleNativePropertyVisibilityForFile(file);
     this.refreshMenusForFile(file, true);
-    void this.plugin.viewModeManager?.handlePotentialFrontmatterChange([file], [key]);
     new Notice(`Removed ${String(property?.label || key)} from ${file.basename}.`);
   }
 

@@ -8,7 +8,6 @@ export interface SettingsPatch { key: string; before: unknown; after: unknown }
 export const MIGRATABLE_KEY_SETTINGS = {
   dateCreatedFrontmatterKey: 'datecreated',
   dateModifiedFrontmatterKey: 'datemodified',
-  viewModeFrontmatterKey: 'viewmode',
   timeTrackingPropertyKey: 'timeTracking',
   taskVisibilityStateFrontmatterKey: 'gcmTaskVisibility',
   parentLinkFrontmatterKey: 'parent',
@@ -211,10 +210,6 @@ export function updateMigrationReferences(settings: any, change: PropertyMigrati
         else if (['is', '!is'].includes(rule.operator)) rule.value = renameValue(rule.value);
       }
     }
-  }
-  for (const rule of settings.viewModeRules || []) {
-    condition(rule);
-    rule.conditions?.filter((item: any) => item.type === 'frontmatter').forEach(condition);
   }
   for (const [keyField, valueField] of [['parentChildIgnoreFrontmatterKey', 'parentChildIgnoreFrontmatterValue'], ['templateIdentificationPropertyKey', 'templateIdentificationPropertyValue']]) {
     if (change.kind === 'value' && fold(settings[keyField] || '') === fold(key)

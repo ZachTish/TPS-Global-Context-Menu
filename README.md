@@ -1,5 +1,117 @@
 # TPS Global Context Menu
 
+## 8.0.0 — Keep editor mode manual and disabled timers inactive
+
+GCM no longer automatically changes Reading, Live Preview, or Source mode.
+The automatic rules destination, per-note mode key, ignored-folder settings,
+`force-view-mode-check` command, active-leaf/metadata enforcement, mutation
+callbacks, temporary manual-override suppression and stale-mobile mount replay
+are removed. Existing note properties are left intact. The existing settings load/save path discards exactly
+`enableViewModeSwitching`, `viewModeFrontmatterKey`, `viewModeIgnoredFolders` and
+`viewModeRules`; runtime `data.json` is therefore expected to lose those keys.
+Other settings, including the manual-controls and time-tracking preferences,
+remain intact. This is a major
+version because a configured behavior, settings and a command are removed.
+
+Obsidian's own editor controls and GCM's explicit Reading/Live/Source actions
+remain. The existing `enableInlineManualViewMode` preference is unchanged; its
+control now lives directly in **Menus & surfaces**. **Rules & fields** keeps only
+Navigator rules and Custom fields. The shared condition engine continues to
+serve custom-field and ignore rules. Source-mode rendering still fails closed
+when host state and the mounted editor disagree; GCM does not replay editor
+state to fix the host. The existing read-only display mode observer remains.
+
+Time tracking keeps its existing feature switch, configuration, notes and APIs.
+Disabled time tracking now owns zero interval timers, workspace/vault/metadata
+listeners, resize listeners, startup jobs, timer source scans or dock elements.
+Enabling starts one listener/timer set after GCM startup readiness; disabling or
+unloading removes that set, cancels delayed startup work, releases its transient
+source cache and rejects late results from the stopped activation. Re-enabling
+reads current stored sessions, including changes made while disabled. Enabled
+time tracking retains its status refresh and scheduling intervals, session
+storage and explicit start/pause/resume/stop actions. No replacement poller,
+repair, retry or persisted state is introduced. Mobile mounts and reparents the
+same in-flow dock only while enabled.
+
+The existing recurrence recovery worker now accepts an optional list of changed
+paths through `sharedServices.recurrence.checkMissingRecurrences(paths)`.
+Controller can submit only successfully applied calendar note paths. An empty
+scope or disabled recurrence does no work; ordinary non-recurring scoped notes
+perform no body reads, writes or vault inventory. Calls without arguments keep
+the existing full startup/manual recovery. A scoped calendar sync consequently
+stops incidentally catching up unrelated completed notes; their existing startup
+recovery and explicit completion actions remain responsible for that work.
+
+Concurrent scopes join the same owning worker. Pending paths are deduplicated;
+a full pending request supersedes pending scoped paths, while requests arriving
+during an active pass are drained rather than dropped. On a failure, independent
+already-pending requests are drained once and joined callers receive the first
+error. This is request ownership, not a retry or new scheduler framework.
+Existing creation responses whose `handled` value is false retain their existing
+failure behavior.
+
+Metadata selects cheap recurrence candidates. The source already read for their
+existing protection inspection owns current completion, rule and durable
+successor markers, so a queued pass with stale metadata cannot generate a second
+undated tracker successor. The existing atomic creation guards remain. The
+unchanged document parser is moved into a pure utility and re-exported from
+`native-record-service` for compatibility; this extraction adds no source read.
+Fourteen scoped/actual-creation regressions cover current-source authority,
+tracker/date recurrence, overlapping full/scoped work, exclusions and failures.
+
+The initial focused gate passes 174 tests, including the actual time-tracking
+source service, mobile/desktop status component, settings/migration consumers,
+and actual registered GCM callback bodies. Disabled bursts of 1,000 synthetic
+files perform zero inventories, reads, listeners or timer registrations. The
+mode callback control runs 100 metadata changes, note opens and tab switches
+with zero editor-state mutations, inventories, source reads or note mutations;
+ordinary display callbacks still execute. Enabled startup restores a real stored
+session's note count; disable/read and disable/re-enable races cannot republish
+stale results. Manual core-mode choices each make one explicit view-state call.
+
+These are deterministic operation-count tests with host/UI facades, not installed
+vault speed or physical iPhone timing measurements. The full versioned `npm test`
+passes 1,680 checks and the separate supplemental `npm run prepretest` passes 290
+checks, both with no failures, cancellations or skips. TypeScript and the mandatory
+separate production-mode preflight build pass with `TPS_NO_DEPLOY=1`. Candidate
+artifacts were then deployed only to Obsidian Plugin Test Vault and the affected
+plugin reloaded; loaded version 8.0.0 and API readiness were verified.
+
+Installed foreground QA (2026-10-07), with all eight active TPS consumers enabled,
+opens the synthetic fixture through the core API in requested Live Preview
+(`mode: source`, `source: false`). The native control shows **Current view:
+editing**, and the fixture body is preserved. First and repeated open pairs
+perform zero automatic-mode decisions, mutations, stale checks or replays. The
+baseline pair performed one decision, one mutation and one stale check. Each
+pair still performs two raw reads owned by core/other consumers; those reads were
+not removed. Both candidate pairs perform zero vault inventories or note writes.
+Obsidian's native Reading → Editing controls work in both directions.
+
+The installed disabled timer control exercises `getActiveTimers()` and
+`getRuntimeStatus()` in 100 repetitions with zero inventories, reads or writes. Its
+activation, scan and dock owners are absent; listener cleanup arrays, source and
+count maps are empty, and no timer dock element exists. Rules & fields visibly
+contains only Navigator rules and Custom fields. Menus & surfaces exposes **Show
+manual view mode controls** with the existing Reading/Live Preview/Source actions.
+
+The installed recurrence control exercises the published GCM worker and
+Controller 3.1.7 dispatch with synthetic vault/metadata/frontmatter/journal and
+daily-exclusion boundaries. Unchanged sync dispatches no recovery and performs
+zero inventories, reads or writes. Changed ordinary notes dispatch once, inspect
+two metadata records and perform no inventories, reads or writes. Full startup
+still inventories 1,000 synthetic notes once. Overlapping full/scoped checks with
+stale metadata create exactly one successor for both daily and undated tracker
+rules. The control makes zero real note mutations or network calls. This is
+installed logic validation with synthetic boundaries, not a real import or
+input-to-paint timing claim.
+
+Saved-state comparison confirms GCM settings equal their baseline after deleting
+exactly the four retired mode keys, all of which are absent. All other consumer
+data hashes and the enabled community-plugin list remain unchanged; no note's
+view-mode property was edited. The final normal production build passed with byte-identical artifacts and
+reported the test runtime unchanged. Public publication is the remaining handoff step. Physical iPhone timing and production performance
+are not established by this QA. Minimum Obsidian stays 1.10.0. Production is untouched.
+
 ## 7.3.17 — Remove heading link suggestions
 
 GCM no longer suggests existing notes while typing ordinary Markdown headings.
@@ -1062,7 +1174,7 @@ The settings hub opens on **Rules & fields**. Other destinations are **Menus & s
 
 - **Custom fields** defines keys, labels, types, value sources, and visibility. Search by name/key or filter by type; only one property editor stays expanded. Search and disclosure state are transient.
 - TPS Notebook Navigator 6.1.0+ imports defined keys through `api.propertyCatalog` version 1. Existing Navigator ordering and visibility win; removing a GCM definition does not delete note data or Navigator configuration.
-- Use **Atomic note** for a full note as the record, and **Atomic line** for an inline record. GCM owns the shared identity, configured field mappings, status choices, and checkbox mappings consumed by other TPS plugins.
+- Whole notes are the supported record model. GCM owns shared identity, configured field mappings and status choices consumed by other TPS plugins; inline records are retired.
 - Navigator presentation rules provide virtual sorting/icon/color values. User-authored icon, color, sort, and hidden properties are preserved during recurrence cleanup.
 - Linked menus, recurrence, timers, and Daily Note workflows use their configured fields. Source mode shows source rather than replacing the note with a rendered TPS surface.
 

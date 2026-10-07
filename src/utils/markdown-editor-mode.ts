@@ -44,15 +44,3 @@ export function isStrictSourceModeSnapshot(input: {
   if (input.sourceState === false) return false;
   return isStrictSourceEditorRoot(input.sourceRoot);
 }
-
-export function shouldRepairStaleLivePreviewSnapshot(input: {
-  reportedMode?: unknown;
-  stateMode?: unknown;
-  sourceState?: unknown;
-  sourceRoot?: MarkdownEditorRootLike | null;
-}): boolean {
-  if (input.reportedMode === 'preview' || input.stateMode === 'preview') return false;
-  return input.sourceState === false
-    && (input.reportedMode === 'source' || input.stateMode === 'source')
-    && isStrictSourceEditorRoot(input.sourceRoot);
-}

@@ -360,7 +360,7 @@ export class MenuController {
             if (actualKey) delete entry.frontmatter[actualKey];
           });
           if (onUpdate) onUpdate('');
-          await this.afterWholeNotePropertyEdit(files, [statusKey, 'completedDate']);
+          await this.afterWholeNotePropertyEdit(files);
         });
     });
     menu.addItem(item => {
@@ -373,7 +373,7 @@ export class MenuController {
             entry.frontmatter[statusKey] = '';
           });
           if (onUpdate) onUpdate('');
-          await this.afterWholeNotePropertyEdit(files, [statusKey, 'completedDate']);
+          await this.afterWholeNotePropertyEdit(files);
         });
     });
     menu.addSeparator();
@@ -389,7 +389,7 @@ export class MenuController {
             });
             if (onUpdate) onUpdate(status);
             await this.plugin.bulkEditService.setStatus(files, status);
-            await this.afterWholeNotePropertyEdit(files, [statusKey, 'completedDate']);
+            await this.afterWholeNotePropertyEdit(files);
           });
       });
     });
@@ -418,7 +418,7 @@ export class MenuController {
             delete entry.frontmatter.priority;
           });
           if (onUpdate) onUpdate('');
-          await this.afterWholeNotePropertyEdit(files, ['priority']);
+          await this.afterWholeNotePropertyEdit(files);
         });
     });
     menu.addItem(item => {
@@ -431,7 +431,7 @@ export class MenuController {
             entry.frontmatter.priority = '';
           });
           if (onUpdate) onUpdate('');
-          await this.afterWholeNotePropertyEdit(files, ['priority']);
+          await this.afterWholeNotePropertyEdit(files);
         });
     });
     menu.addSeparator();
@@ -447,7 +447,7 @@ export class MenuController {
             });
             if (onUpdate) onUpdate(prio);
             await this.plugin.bulkEditService.setPriority(files, prio);
-            await this.afterWholeNotePropertyEdit(files, ['priority']);
+            await this.afterWholeNotePropertyEdit(files);
           });
       });
     });
@@ -574,7 +574,7 @@ export class MenuController {
         const normalized = parseTagInput(tag);
         const display = normalized.length ? normalized.map((value) => `#${value}`).join(' ') : `#${tag}`;
         this.plugin.bulkEditService.showNotice('added', `Tag ${display}`, '', count);
-        await this.afterWholeNotePropertyEdit(files, [key, 'tags']);
+        await this.afterWholeNotePropertyEdit(files);
       }
     }).open();
   }
@@ -587,7 +587,7 @@ export class MenuController {
         const files = this.filesFromEntries(entries);
         if (choice.kind === 'clear') {
           const count = await this.plugin.bulkEditService.removeFrontmatterKey(files, key);
-          if (count > 0) await this.afterWholeNotePropertyEdit(files, [key]);
+          if (count > 0) await this.afterWholeNotePropertyEdit(files);
           return;
         }
         const count = await this.plugin.bulkEditService.addListValues(
@@ -598,7 +598,7 @@ export class MenuController {
         );
         if (count > 0) {
           this.plugin.bulkEditService.showNotice('added', `${label} ${choice.label}`, '', count);
-          await this.afterWholeNotePropertyEdit(files, [key]);
+          await this.afterWholeNotePropertyEdit(files);
         }
       });
       return;
@@ -614,7 +614,7 @@ export class MenuController {
         const count = await this.plugin.bulkEditService.addListValues(files, link, key);
         if (count > 0) {
           this.plugin.bulkEditService.showNotice('added', `${label} ${link}`, '', count);
-          await this.afterWholeNotePropertyEdit(files, [key]);
+          await this.afterWholeNotePropertyEdit(files);
         }
       }, {
         extensions: Array.from(new Set(
@@ -636,7 +636,7 @@ export class MenuController {
         const values = parseStringListInput(value);
         const display = values.length ? values.join(', ') : value;
         this.plugin.bulkEditService.showNotice('added', `${label} ${display}`, '', count);
-        await this.afterWholeNotePropertyEdit(files, [key]);
+        await this.afterWholeNotePropertyEdit(files);
       }
     }, {
       title: `Add ${label}`,
@@ -682,7 +682,7 @@ export class MenuController {
             else delete entry.frontmatter.allDay;
           }
         });
-        await this.afterWholeNotePropertyEdit(files, [key, 'timeEstimate', 'allDay']);
+        await this.afterWholeNotePropertyEdit(files);
       }
     ).open();
   }
@@ -704,7 +704,7 @@ export class MenuController {
         const snoozeDate = window.moment().add(minutes, 'minutes').format('YYYY-MM-DDTHH:mm:ss');
         await this.plugin.bulkEditService.updateFrontmatter(files, { [resolvedKey]: snoozeDate });
         new Notice(`Snoozed for ${minutes} minutes`);
-        await this.afterWholeNotePropertyEdit(files, [resolvedKey]);
+        await this.afterWholeNotePropertyEdit(files);
       }
     ).open();
   }
@@ -859,12 +859,11 @@ export class MenuController {
     }
   }
 
-  private async afterWholeNotePropertyEdit(files: TFile[], changedKeys: string[]): Promise<void> {
+  private async afterWholeNotePropertyEdit(files: TFile[]): Promise<void> {
     await Promise.all(files.map((file) => this.applyNotebookNavigatorRulesToFile(file)));
     for (const file of files) {
       this.plugin.persistentMenuManager?.refreshMenusForFile(file, true);
     }
-    void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(files, changedKeys);
   }
 
   get app() {

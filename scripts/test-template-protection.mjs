@@ -5,8 +5,10 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import ts from 'typescript';
+import { parse } from 'yaml';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
+globalThis.__TpsTemplateProtectionParseYaml = parse;
 
 async function importUtility() {
   const result = await build({
@@ -63,12 +65,14 @@ async function importBulkEditService() {
                 Notice: Dummy,
                 TFile,
                 WorkspaceLeaf: Dummy,
+                parseYaml: source => globalThis.__TpsTemplateProtectionParseYaml(source),
                 normalizePath(value) { return String(value || '').replace(/\\\\/g, '/'); },
               },
               { get(target, key) { return key in target ? target[key] : Dummy; } },
             );
           `,
           loader: 'js',
+          resolveDir: repoRoot,
         }));
       },
     }],

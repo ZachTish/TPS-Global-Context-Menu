@@ -211,7 +211,7 @@ function createHarness(statusResults, options = {}) {
   viewContent.addClass('view-content');
   leafContainer.appendChild(viewContent);
   const plugin = {
-    settings: { enableTimeTracking: true },
+    settings: { enableTimeTracking: options.enabled !== false },
     addStatusBarItem() {
       statusBarCalls += 1;
       const item = new FakeElement(`status-${statusItems.length + 1}`);
@@ -231,6 +231,7 @@ function createHarness(statusResults, options = {}) {
           workspaceHandlers.set(name, callback);
           return { name, callback };
         },
+        offref(ref) { if(workspaceHandlers.get(ref.name)===ref.callback) workspaceHandlers.delete(ref.name); },
       },
     },
     timeTrackingService: {
@@ -286,9 +287,15 @@ function createHarness(statusResults, options = {}) {
     },
     querySelector: () => null,
   };
+  const activeIntervals = new Map();
+  const domHandlers = new Map();
   globalThis.window = {
+    clearInterval(id) { activeIntervals.delete(id); },
+    addEventListener(name,callback) { domHandlers.set(name,callback); },
+    removeEventListener(name,callback) { if(domHandlers.get(name)===callback) domHandlers.delete(name); },
     setInterval(callback) {
       intervalCallbacks.push(callback);
+      activeIntervals.set(intervalCallbacks.length,callback);
       return intervalCallbacks.length;
     },
   };
@@ -296,6 +303,8 @@ function createHarness(statusResults, options = {}) {
   return {
     plugin,
     intervalCallbacks,
+    activeIntervals,
+    domHandlers,
     statusItems,
     createdElements,
     leafContainer,
@@ -527,4 +536,33 @@ test('mobile timer clears both the safe area and navigation header without a fix
   const start = pluginStylesSource.indexOf('body.is-mobile .tps-gcm-time-tracker-mobile-dock');
   const css = pluginStylesSource.slice(start, pluginStylesSource.indexOf('/* Mobile gesture passthrough', start));
   assert.match(css, /margin-top: max\(0px, calc\(var\(--safe-area-inset-top, env\(safe-area-inset-top, 0px\)\) \+ var\(--view-header-height, 44px\) \+ 4px - var\(--tps-gcm-timer-flow-top, 0px\)\)\)/);
+});
+
+test('disabled desktop/mobile status bars register no timer, workspace listener, DOM listener or element',async()=>{
+ for(const Service of [TimeTrackingStatusBarService,MobileTimeTrackingStatusBarService]){
+  const h=createHarness([],{enabled:false});const service=new Service(h.plugin);
+  assert.equal(service.setup(),false);service.refresh();
+  for(let i=0;i<100;i++){h.workspaceHandlers.get('active-leaf-change')?.();h.workspaceHandlers.get('layout-change')?.();h.domHandlers.get('resize')?.();}
+  await settle();
+  assert.equal(h.statusReadCount,0);assert.equal(h.statusBarCalls,0);assert.equal(h.createdElements.length,0);
+  assert.equal(h.activeIntervals.size,0);assert.equal(h.workspaceHandlers.size,0);assert.equal(h.domHandlers.size,0);
+ }
+});
+
+test('mobile disable removes owned timers and listeners; reenable restores one working dock',async()=>{
+ const h=createHarness([activeStatus('Before'),pausedStatus('After')]);
+ const service=new MobileTimeTrackingStatusBarService(h.plugin);
+ assert.equal(service.setup(),true);await settle();
+ assert.equal(service.setup(),false,'an unchanged activation is idempotent');
+ assert.equal(h.activeIntervals.size,2);assert.equal(h.workspaceHandlers.size,2);assert.equal(h.domHandlers.size,1);
+ const oldCallbacks=[...h.activeIntervals.values()],oldDock=h.createdElements[0],oldLayout=h.plugin.layoutReadyCallback;
+ h.plugin.settings.enableTimeTracking=false;service.setup();
+ assert.equal(oldDock.removed,true);assert.equal(h.activeIntervals.size,0);assert.equal(h.workspaceHandlers.size,0);assert.equal(h.domHandlers.size,0);
+ for(let i=0;i<100;i++)for(const callback of oldCallbacks)callback();
+ oldLayout();service.refresh();await settle();assert.equal(h.statusReadCount,1);
+ h.plugin.settings.enableTimeTracking=true;service.setup();await settle();
+ assert.equal(h.activeIntervals.size,2);assert.equal(h.workspaceHandlers.size,2);assert.equal(h.domHandlers.size,1);
+ assert.match(h.createdElements[1].visibleText,/After/);assert.equal(h.createdElements[1].parentElement,h.leafContainer);
+ oldLayout();for(const callback of oldCallbacks)callback();await settle();assert.equal(h.statusReadCount,2,'revoked callbacks do not read or reposition the replacement');
+ service.detach();assert.equal(h.activeIntervals.size,0);assert.equal(h.workspaceHandlers.size,0);assert.equal(h.domHandlers.size,0);
 });

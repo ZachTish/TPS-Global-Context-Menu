@@ -6,7 +6,7 @@ import { PropertyMigrationModal } from './modals/property-migration-modal';
 import { MANAGED_NOTE_FIELDS, managedNoteFieldKey, configureManagedNoteField } from './utils/managed-note-fields';
 import { App, Notice, PluginSettingTab, Setting, TextComponent, TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
-import type { AppearanceSettingKey, CustomProperty, ViewModeConditionOperator, ViewModeConditionType, ViewModeRule, ViewModeRuleCondition } from './types';
+import type { AppearanceSettingKey, CustomProperty } from './types';
 import { BucketSectionRenderer } from './notebook-navigator-settings/bucket-section';
 import { HideSectionRenderer } from './notebook-navigator-settings/hide-section';
 import { RulesSectionRenderer } from './notebook-navigator-settings/rules-section';
@@ -70,7 +70,7 @@ function formatAcceptedKindConstraint(value: unknown): string {
 }
 
 type SettingsPageId = 'rules-fields' | 'menus-surfaces' | 'workflows' | 'appearance' | 'advanced';
-type RulesFieldsPageId = 'frontmatter' | 'custom-fields' | 'view-mode';
+type RulesFieldsPageId = 'frontmatter' | 'custom-fields';
 type FrontmatterEditorId = 'sort' | 'tags' | 'icon-color';
 type WorkflowPageId = 'daily-notes' | 'tasks' | 'child-notes' | 'recurrence' | 'time-tracking';
 
@@ -252,7 +252,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           id: 'rules-fields',
           label: 'Rules & fields',
           summary: `${ruleCount} rules · ${(settings.properties || []).length} fields`,
-          description: 'Navigator presentation, semantic tags, custom fields, and view-mode rules.',
+          description: 'Navigator presentation, semantic tags, custom fields.',
         },
         {
           id: 'menus-surfaces',
@@ -301,11 +301,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           id: 'custom-fields',
           label: 'Custom fields',
           summary: `${(this.plugin.settings.properties || []).length} configured`,
-        },
-        {
-          id: 'view-mode',
-          label: 'View mode',
-          summary: `${(this.plugin.settings.viewModeRules || []).length} rules`,
         },
       ],
       this.activeRulesFieldsPage,
@@ -781,7 +776,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     this.renderSettingsHub(containerEl);
 
     const activePage = this.activeSettingsPage === 'rules-fields'
-      ? this.createSettingsPage(containerEl, 'rules-fields', 'Rules & fields', 'Configure virtual Navigator presentation, semantic tag automation, reusable custom fields, and view-mode rules.')
+      ? this.createSettingsPage(containerEl, 'rules-fields', 'Rules & fields', 'Configure virtual Navigator presentation, semantic tag automation, reusable custom fields.')
       : this.activeSettingsPage === 'menus-surfaces'
         ? this.createSettingsPage(containerEl, 'menus-surfaces', 'Menus & surfaces', 'Choose where GCM appears and how note links and inline controls behave.')
         : this.activeSettingsPage === 'workflows'
@@ -798,6 +793,15 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     }
 
     if (this.activeSettingsPage === 'menus-surfaces') {
+      new Setting(activePage)
+        .setName('Show manual view mode controls')
+        .setDesc('Show Reading, Live Preview, and Source actions in the note menu. Obsidian keeps its own editor controls.')
+        .addToggle(toggle => toggle
+          .setValue(this.plugin.settings.enableInlineManualViewMode)
+          .onChange(async value => {
+            this.plugin.settings.enableInlineManualViewMode = value;
+            await this.plugin.saveSettings();
+          }));
       activePage.createEl('h3', { text: 'Note opening' });
       new Setting(activePage)
         .setName('After creating a note')
@@ -1633,371 +1637,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
           this.display();
         }));
-    }
-
-    // --- View Mode Settings ---
-    if (this.activeSettingsPage === 'rules-fields' && this.activeRulesFieldsPage === 'view-mode') {
-      const viewMode = activePage.createDiv({ cls: 'tps-gcm-settings-editor-page' });
-      viewMode.dataset.tpsSettingsRoute = 'view-mode';
-      const viewModeConfigContainer = viewMode.createDiv();
-      const viewRulesPopout: HTMLElement = viewModeConfigContainer;
-
-      new Setting(viewModeConfigContainer)
-        .setName('Enable automatic view mode switching')
-        .setDesc('Automatically switch between Source, Live Preview, and Reading modes based on the rules below.')
-        .addToggle((toggle) =>
-          toggle
-            .setValue(this.plugin.settings.enableViewModeSwitching)
-            .onChange(async (value) => {
-              this.plugin.settings.enableViewModeSwitching = value;
-              await this.plugin.saveSettings();
-            })
-        );
-
-      new Setting(viewModeConfigContainer)
-        .setName('Show inline manual view mode controls')
-        .setDesc('Show Reading, Live, and Source buttons in the inline menu panel.')
-        .addToggle((toggle) =>
-          toggle
-            .setValue(this.plugin.settings.enableInlineManualViewMode)
-            .onChange(async (value) => {
-              this.plugin.settings.enableInlineManualViewMode = value;
-              await this.plugin.saveSettings();
-            })
-        );
-
-      this.renderMigratingKeySetting(viewModeConfigContainer, 'Frontmatter key', 'Frontmatter property used to determine view mode.', 'viewModeFrontmatterKey');
-
-      new Setting(viewModeConfigContainer)
-        .setName('Ignored folders')
-        .setDesc('One path per line. Files in these folders will generally keep their current view mode.')
-        .addTextArea((text) => {
-          text
-            .setPlaceholder('Bases\nAtlas/Views')
-            .setValue(this.plugin.settings.viewModeIgnoredFolders || '')
-            .onChange(async (value) => {
-              this.plugin.settings.viewModeIgnoredFolders = value;
-              await this.plugin.saveSettings();
-            });
-          text.inputEl.rows = 3;
-          text.inputEl.cols = 30;
-        });
-
-      viewModeConfigContainer.createEl('h4', { text: 'View mode rules' });
-      viewModeConfigContainer.createEl('p', {
-        text: 'Define AND/OR conditions using frontmatter, path, schedule, or Daily Note date.',
-        cls: 'setting-item-description',
-      });
-
-    const ensureViewModeRules = (): ViewModeRule[] => {
-      if (!Array.isArray(this.plugin.settings.viewModeRules)) {
-        this.plugin.settings.viewModeRules = [];
-      }
-      return this.plugin.settings.viewModeRules as ViewModeRule[];
-    };
-
-    const createCondition = (type: ViewModeConditionType): ViewModeRuleCondition => {
-      if (type === 'path') return { type: 'path', operator: 'contains', value: '' };
-      if (type === 'scheduled') return { type: 'scheduled', key: 'scheduled', operator: 'past' };
-      if (type === 'daily-note') return { type: 'daily-note', operator: 'not-today' };
-      return { type: 'frontmatter', key: 'status', operator: 'equals', value: '' };
-    };
-
-    const normalizeConditionType = (type: unknown): ViewModeConditionType => {
-      const normalized = String(type || '').trim().toLowerCase();
-      if (normalized === 'path') return 'path';
-      if (normalized === 'scheduled') return 'scheduled';
-      if (normalized === 'daily-note') return 'daily-note';
-      return 'frontmatter';
-    };
-
-    const normalizeConditionOperator = (type: ViewModeConditionType, operator: unknown): ViewModeConditionOperator => {
-      const value = String(operator || '').trim().toLowerCase();
-      if (type === 'path') {
-        if (value === 'equals' || value === 'starts-with' || value === 'ends-with' || value === 'not-contains' || value === 'exists' || value === 'missing') {
-          return value as ViewModeConditionOperator;
-        }
-        return 'contains';
-      }
-      if (type === 'frontmatter') {
-        if (value === 'contains' || value === 'not-equals' || value === 'not-contains' || value === 'exists' || value === 'missing' || value === 'is-empty') {
-          return value as ViewModeConditionOperator;
-        }
-        return 'equals';
-      }
-      if (value === 'future' || value === 'today' || value === 'not-today' || value === 'exists' || value === 'missing') {
-        return value as ViewModeConditionOperator;
-      }
-      return 'past';
-    };
-
-    const operatorNeedsValue = (type: ViewModeConditionType, operator: ViewModeConditionOperator): boolean => {
-      if (type === 'daily-note' || type === 'scheduled') return false;
-      return operator !== 'exists' && operator !== 'missing' && operator !== 'is-empty';
-    };
-
-    const ensureRuleShape = (rule: ViewModeRule): { normalizedRule: ViewModeRule; changed: boolean } => {
-      let changed = false;
-      const normalizedRule: ViewModeRule = rule;
-
-      if (normalizedRule.match !== 'all' && normalizedRule.match !== 'any') {
-        normalizedRule.match = 'all';
-        changed = true;
-      }
-      if (!normalizedRule.mode) {
-        normalizedRule.mode = 'reading';
-        changed = true;
-      }
-
-      if (!Array.isArray(normalizedRule.conditions) || normalizedRule.conditions.length === 0) {
-        const legacyKey = String((normalizedRule as any).key || '').trim();
-        const legacyValue = String((normalizedRule as any).value || '').trim();
-        if (legacyKey && legacyValue) {
-          normalizedRule.conditions = [{ type: 'frontmatter', key: legacyKey, operator: 'equals', value: legacyValue }];
-        } else {
-          normalizedRule.conditions = [createCondition('frontmatter')];
-        }
-        changed = true;
-      }
-
-      normalizedRule.conditions = (normalizedRule.conditions || []).map((condition) => {
-        const type = normalizeConditionType(condition?.type);
-        const operator = normalizeConditionOperator(type, condition?.operator);
-        const normalizedCondition: ViewModeRuleCondition = {
-          ...condition,
-          type,
-          operator,
-        };
-        if (type === 'frontmatter' && !String(normalizedCondition.key || '').trim()) {
-          normalizedCondition.key = 'status';
-          changed = true;
-        }
-        if (type === 'scheduled' && !String(normalizedCondition.key || '').trim()) {
-          normalizedCondition.key = 'scheduled';
-          changed = true;
-        }
-        if (operatorNeedsValue(type, operator)) {
-          if (normalizedCondition.value == null) {
-            normalizedCondition.value = '';
-            changed = true;
-          }
-        } else if (normalizedCondition.value) {
-          normalizedCondition.value = '';
-          changed = true;
-        }
-        return normalizedCondition;
-      });
-
-      return { normalizedRule, changed };
-    };
-
-    const getOperatorOptions = (type: ViewModeConditionType): Array<{ value: ViewModeConditionOperator; label: string }> => {
-      if (type === 'path') {
-        return [
-          { value: 'contains', label: 'contains' },
-          { value: 'equals', label: 'equals' },
-          { value: 'starts-with', label: 'starts with' },
-          { value: 'ends-with', label: 'ends with' },
-          { value: 'not-contains', label: 'does not contain' },
-          { value: 'exists', label: 'exists' },
-          { value: 'missing', label: 'missing' },
-        ];
-      }
-      if (type === 'frontmatter') {
-        return [
-          { value: 'equals', label: 'equals' },
-          { value: 'contains', label: 'contains' },
-          { value: 'not-equals', label: 'does not equal' },
-          { value: 'not-contains', label: 'does not contain' },
-          { value: 'exists', label: 'exists' },
-          { value: 'missing', label: 'missing' },
-        ];
-      }
-      return [
-        { value: 'past', label: 'is in the past' },
-        { value: 'future', label: 'is in the future' },
-        { value: 'today', label: 'is today' },
-        { value: 'not-today', label: 'is not today' },
-        { value: 'exists', label: 'exists' },
-        { value: 'missing', label: 'missing' },
-      ];
-    };
-
-      new Setting(viewRulesPopout)
-        .setName('Rules')
-        .setDesc('Add and combine conditions per rule.')
-        .addButton(btn => btn
-          .setButtonText('Add Rule')
-          .setCta()
-          .onClick(async () => {
-            const rules = ensureViewModeRules();
-            rules.push({
-              mode: 'reading',
-              match: 'all',
-              conditions: [createCondition('frontmatter')],
-            });
-            await this.plugin.saveSettings();
-            this.display();
-          }))
-        .addButton(btn => btn
-          .setButtonText('Add Daily Rule')
-          .onClick(async () => {
-            const rules = ensureViewModeRules();
-            rules.push({
-              mode: 'reading',
-              match: 'all',
-              conditions: [{ type: 'daily-note', operator: 'not-today' }],
-            });
-            await this.plugin.saveSettings();
-            this.display();
-          }))
-        .addButton(btn => btn
-          .setButtonText('Add Path/Past OR')
-          .onClick(async () => {
-            const rules = ensureViewModeRules();
-            rules.push({
-              mode: 'reading',
-              match: 'any',
-              conditions: [
-                { type: 'path', operator: 'contains', value: '' },
-                { type: 'scheduled', key: 'scheduled', operator: 'past' },
-              ],
-            });
-            await this.plugin.saveSettings();
-            this.display();
-          }));
-
-      const rules = ensureViewModeRules();
-      let migratedRules = false;
-      rules.forEach((rule, index) => {
-        const normalized = ensureRuleShape(rule);
-        if (normalized.changed) migratedRules = true;
-        const currentRule = normalized.normalizedRule;
-
-        const card = viewRulesPopout.createDiv({ cls: 'tps-gcm-viewmode-rule' });
-        card.style.border = '1px solid var(--background-modifier-border)';
-        card.style.borderRadius = '8px';
-        card.style.padding = '10px';
-        card.style.marginBottom = '10px';
-
-        new Setting(card)
-          .setName(`Rule ${index + 1}`)
-          .setDesc('Conditions must match before applying mode.')
-          .addDropdown(drop => drop
-            .addOption('all', 'Match all (AND)')
-            .addOption('any', 'Match any (OR)')
-            .setValue(currentRule.match || 'all')
-            .onChange(async v => {
-              currentRule.match = v === 'any' ? 'any' : 'all';
-              await this.plugin.saveSettings();
-            }))
-          .addDropdown(drop => drop
-            .addOption('reading', 'Reading')
-            .addOption('source', 'Source')
-            .addOption('live', 'Live')
-            .setValue(currentRule.mode)
-            .onChange(async v => {
-              currentRule.mode = v;
-              await this.plugin.saveSettings();
-            }))
-          .addButton(btn => btn
-            .setButtonText('Add Condition')
-            .onClick(async () => {
-              currentRule.conditions = currentRule.conditions || [];
-              currentRule.conditions.push(createCondition('frontmatter'));
-              await this.plugin.saveSettings();
-              this.display();
-            }))
-          .addExtraButton(btn => btn
-            .setIcon('trash')
-            .setTooltip('Delete rule')
-            .onClick(async () => {
-              rules.splice(index, 1);
-              await this.plugin.saveSettings();
-              this.display();
-            }));
-
-        const conditions = currentRule.conditions || [];
-        conditions.forEach((condition, conditionIndex) => {
-          const type = normalizeConditionType(condition.type);
-          const operator = normalizeConditionOperator(type, condition.operator);
-          const conditionRow = card.createDiv({ cls: 'tps-gcm-viewmode-condition-row' });
-
-          const typeSetting = new Setting(conditionRow).setClass('tps-gcm-no-border');
-          typeSetting.addDropdown(drop => drop
-            .addOption('frontmatter', 'Frontmatter')
-            .addOption('path', 'Path')
-            .addOption('scheduled', 'Scheduled')
-            .addOption('daily-note', 'Daily Note')
-            .setValue(type)
-            .onChange(async v => {
-              const nextType = normalizeConditionType(v);
-              const nextCondition = createCondition(nextType);
-              currentRule.conditions![conditionIndex] = nextCondition;
-              await this.plugin.saveSettings();
-              this.display();
-            }));
-
-          const keySetting = new Setting(conditionRow).setClass('tps-gcm-no-border');
-          if (type === 'frontmatter' || type === 'scheduled') {
-            keySetting.addText(text => text
-              .setPlaceholder(type === 'frontmatter' ? 'key' : 'scheduled')
-              .setValue(String(condition.key || (type === 'scheduled' ? 'scheduled' : '')))
-              .onChange(async value => {
-                condition.key = type === 'scheduled' ? (value.trim() || 'scheduled') : value.trim();
-                await this.plugin.saveSettings();
-              }));
-          } else {
-            keySetting.setName('');
-          }
-
-          const operatorSetting = new Setting(conditionRow).setClass('tps-gcm-no-border');
-          operatorSetting.addDropdown(drop => {
-            getOperatorOptions(type).forEach(option => drop.addOption(option.value, option.label));
-            drop
-              .setValue(operator)
-              .onChange(async value => {
-                condition.operator = normalizeConditionOperator(type, value);
-                if (!operatorNeedsValue(type, condition.operator)) {
-                  condition.value = '';
-                }
-                await this.plugin.saveSettings();
-                this.display();
-              });
-          });
-
-          const valueSetting = new Setting(conditionRow).setClass('tps-gcm-no-border');
-          if (operatorNeedsValue(type, operator)) {
-            valueSetting.addText(text => text
-              .setPlaceholder(type === 'path' ? 'text to match in path' : 'value')
-              .setValue(String(condition.value || ''))
-              .onChange(async value => {
-                condition.value = value;
-                await this.plugin.saveSettings();
-              }));
-          } else {
-            valueSetting.setName('');
-          }
-
-          new Setting(conditionRow)
-            .setClass('tps-gcm-no-border')
-            .addExtraButton(btn => btn
-              .setIcon('x')
-              .setTooltip('Remove condition')
-              .onClick(async () => {
-                currentRule.conditions!.splice(conditionIndex, 1);
-                if (!currentRule.conditions!.length) {
-                  currentRule.conditions = [createCondition('frontmatter')];
-                }
-                await this.plugin.saveSettings();
-                this.display();
-              }));
-        });
-      });
-
-      if (migratedRules) {
-        void this.plugin.saveSettings();
-      }
     }
 
     // --- Automation Features (Consolidated) ---

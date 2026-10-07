@@ -54,6 +54,7 @@ async function loadRegisterEvents() {
                   globalThis.__GcmEventBatchingTestTFile = TFile;
                   globalThis.__GcmEventBatchingTestTFolder = TFolder;
                   export class MarkdownView {}
+                  globalThis.__GcmEventMarkdownView = MarkdownView;
                   export class WorkspaceLeaf {}
                   export const Platform = { isMobile: false };
                   globalThis.__GcmEventPlatform = Platform;
@@ -253,7 +254,6 @@ function createHarness({
       enableAutoInsertBlankLineOnOpen: false,
       enableLinkedSubitemCheckboxes,
     },
-    viewModeSuppressedPaths: new Set(),
     registerEvent() {},
     register(cleanup) {
       cleanups.push(cleanup);
@@ -1049,4 +1049,29 @@ test('mobile opening retains enabled child display but skips both refreshes when
   } finally {
     globalThis.__GcmEventPlatform.isMobile = false;
   }
+});
+
+test('retired automatic mode rules cannot mutate a view during metadata, opening or active-leaf bursts',async()=>{
+ const h=createHarness({dataArchitectureMode:'native-records',enableLinkedSubitemCheckboxes:false});
+ const f=h.addFile('Inbox/Manual mode.md',{viewmode:'reading',scheduled:'2026-09-22',title:'Keep title'},'Keep source body');
+ const snapshot=JSON.stringify(f.frontmatter),body=f.body,state={file:f.path,mode:'source',source:true};
+ let viewMutations=0,inventories=0,titleRefreshes=0;
+ const view=Object.assign(new globalThis.__GcmEventMarkdownView(),{file:f,getViewType:()=> 'markdown',getState:()=>({...state}),getMode:()=> 'source',setState:async()=>{viewMutations++;}});
+ h.plugin.app.workspace.activeLeaf={view,getViewState:()=>({type:'markdown',state:{...state}}),setViewState:async()=>{viewMutations++;}};
+ h.plugin.app.workspace.getActiveFile=()=>f;
+ h.plugin.app.workspace.getActiveViewOfType=()=>view;
+ h.plugin.noteTitleRenderService.refreshInlineTitle=()=>{titleRefreshes++;};
+ h.plugin.app.vault.getMarkdownFiles=()=>{inventories++;return[f];};
+ h.plugin.settings.enableViewModeSwitching=true;
+ h.plugin.settings.viewModeRules=[{mode:'reading',conditions:[{type:'path',operator:'contains',value:'Inbox'}]}];
+ for(let i=0;i<100;i++){
+  h.emit('workspace','active-leaf-change',h.plugin.app.workspace.activeLeaf);
+  h.emit('workspace','file-open',f);
+  h.metadataChanged(f);
+ }
+ await new Promise(resolve=>setTimeout(resolve,40));
+ assert.equal(viewMutations,0);assert.equal(inventories,0);assert.equal(h.rawBodyReads(),0);
+ assert.equal(h.mutations.length,0);assert.equal(JSON.stringify(f.frontmatter),snapshot);assert.equal(f.body,body);
+ assert.ok(titleRefreshes>0,'the ordinary display callbacks still execute');
+ h.cleanup();
 });

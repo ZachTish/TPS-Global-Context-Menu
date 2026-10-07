@@ -160,7 +160,6 @@ export class PropertyRowService {
       files: files.length,
       changedKeys,
     });
-    void this.plugin.viewModeManager?.handlePotentialFrontmatterChange(files, changedKeys);
   }
 
   private promptForCustomPropertyValue(

@@ -118,7 +118,7 @@ export function createSharedServices(plugin: TPSGlobalContextMenuPlugin) {
         deleteValueCaseInsensitive(frontmatterRecord, key);
       }
     },
-    checkMissingRecurrences: () => plugin.bulkEditService.checkMissingRecurrences(),
+    checkMissingRecurrences: (paths?: readonly string[]) => plugin.bulkEditService.checkMissingRecurrences(paths),
   };
 
   const identity = Object.assign(plugin.identityService, {

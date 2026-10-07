@@ -590,12 +590,8 @@ export interface TPSGlobalContextMenuSettings {
   ignoredBacklinksFrontmatterKeys: string[];
   ignoredSubitemTags: string[];
 
-  // View Mode Settings
-  enableViewModeSwitching: boolean;
+  // Manual editor mode actions
   enableInlineManualViewMode: boolean;
-  viewModeFrontmatterKey: string;
-  viewModeIgnoredFolders: string;
-  viewModeRules: ViewModeRule[];
 
   enableChecklistCompletionProperty: boolean;
   checklistCompletionPropertyKey: string;

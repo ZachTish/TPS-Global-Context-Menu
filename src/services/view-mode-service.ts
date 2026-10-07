@@ -1,6 +1,4 @@
-import { WorkspaceLeaf } from "obsidian";
 import {
-  TPSGlobalContextMenuSettings,
   ViewModeConditionOperator,
   ViewModeConditionType,
   ViewModeRule,
@@ -8,17 +6,8 @@ import {
   ViewModeRuleMatch,
 } from "../types";
 
-export type NormalizedViewMode = "reading" | "preview" | "source" | "live";
-
+/** Shared condition evaluation for custom-property and ignore rules. */
 export class ViewModeService {
-  normalizeMode(value: unknown): NormalizedViewMode | null {
-    const normalized = String(value ?? "").trim().toLowerCase();
-    if (normalized === "reading" || normalized === "preview" || normalized === "source" || normalized === "live") {
-      return normalized;
-    }
-    return null;
-  }
-
   shouldIgnorePath(path: string, ignoredFoldersRaw: string | undefined): boolean {
     if (!ignoredFoldersRaw) return false;
     const ignored = ignoredFoldersRaw
@@ -26,43 +15,6 @@ export class ViewModeService {
       .map((p) => p.trim())
       .filter(Boolean);
     return ignored.some((prefix) => path.startsWith(prefix));
-  }
-
-  resolveTargetMode(
-    frontmatter: Record<string, unknown> | undefined,
-    settings: TPSGlobalContextMenuSettings,
-    derivedContext: Record<string, unknown> = {}
-  ): { mode: NormalizedViewMode | null; source: "explicit" | "rule" | "none"; invalidExplicit?: string } {
-    const data: Record<string, unknown> = {
-      ...(frontmatter || {}),
-      ...derivedContext,
-    };
-    if (!frontmatter && Object.keys(derivedContext).length === 0) return { mode: null, source: "none" };
-    let invalidExplicit: string | undefined;
-
-    if (settings.viewModeFrontmatterKey) {
-      const explicitRaw = data[settings.viewModeFrontmatterKey];
-      const explicitMode = this.normalizeMode(explicitRaw);
-      const explicitValue = String(explicitRaw ?? "").trim();
-      if (explicitMode) {
-        return { mode: explicitMode, source: "explicit" };
-      }
-      if (explicitValue) {
-        invalidExplicit = explicitValue;
-      }
-    }
-
-    for (const rule of settings.viewModeRules || []) {
-      const ruleMode = this.normalizeMode(rule.mode);
-      if (!ruleMode) continue;
-
-      const conditions = this.getRuleConditions(rule);
-      const matchType = this.normalizeMatch(rule.match);
-      if (!this.evaluateConditions(matchType, conditions, data)) continue;
-      return { mode: ruleMode, source: "rule", invalidExplicit };
-    }
-
-    return { mode: null, source: "none", invalidExplicit };
   }
 
   public evaluateConditions(matchType: ViewModeRuleMatch | undefined, conditions: ViewModeRuleCondition[] | undefined, data: Record<string, unknown>): boolean {
@@ -288,41 +240,4 @@ export class ViewModeService {
     return Number.isNaN(nativeDate.getTime()) ? null : nativeDate;
   }
 
-  matchesMode(state: ReturnType<WorkspaceLeaf["getViewState"]>, targetMode: NormalizedViewMode): boolean {
-    if (targetMode === "reading" || targetMode === "preview") {
-      return state.state.mode === "preview";
-    }
-    if (targetMode === "source") {
-      return state.state.mode === "source" && state.state.source === true;
-    }
-    return state.state.mode === "source" && state.state.source === false;
-  }
-
-  applyModeToState(
-    state: ReturnType<WorkspaceLeaf["getViewState"]>,
-    targetMode: NormalizedViewMode
-  ): { state: ReturnType<WorkspaceLeaf["getViewState"]>; needsUpdate: boolean } {
-    let needsUpdate = false;
-    if (targetMode === "reading" || targetMode === "preview") {
-      if (state.state.mode !== "preview") {
-        state.state.mode = "preview";
-        needsUpdate = true;
-      }
-      return { state, needsUpdate };
-    }
-    if (targetMode === "source") {
-      if (state.state.mode !== "source" || state.state.source !== true) {
-        state.state.mode = "source";
-        state.state.source = true;
-        needsUpdate = true;
-      }
-      return { state, needsUpdate };
-    }
-    if (state.state.mode !== "source" || state.state.source !== false) {
-      state.state.mode = "source";
-      state.state.source = false;
-      needsUpdate = true;
-    }
-    return { state, needsUpdate };
-  }
 }

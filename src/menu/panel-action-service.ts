@@ -87,7 +87,6 @@ export class PanelActionService {
     }
 
     await view.setState(state, { history: true });
-    this.plugin.suppressViewModeSwitchForPathUntilFocusChange(file.path);
   }
 
   async promptRenameFile(file: TFile): Promise<void> {
