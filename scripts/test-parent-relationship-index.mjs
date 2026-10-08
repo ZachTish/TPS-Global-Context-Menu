@@ -1743,7 +1743,7 @@ function actualParentStartupHost(h) {
   const owner = tree.statements.find(node => ts.isClassDeclaration(node) && node.name?.text === 'TPSGlobalContextMenuPlugin');
   assert.ok(owner);
   const methods = owner.members.filter(member => ts.isMethodDeclaration(member)
-    && /^(?:onload|onunload|emitGcmApiChanged)$|startup|initializ/i.test(member.name.getText(tree)));
+    && /^(?:onload|onunload|emitGcmApiChanged|registerNoteTitleDocument)$|startup|initializ/i.test(member.name.getText(tree)));
   const fields = owner.members.filter(member => ts.isPropertyDeclaration(member) && /startup|initializ/i.test(member.name.getText(tree)));
   for (const name of ['onload', 'onunload', 'emitGcmApiChanged']) {
     assert.ok(methods.some(member => member.name.getText(tree) === name));
@@ -1783,6 +1783,7 @@ function actualParentStartupHost(h) {
     trigger(event, packet) { for (const callback of workspaceHandlers.get(event) || []) callback(packet); },
     onLayoutReady(callback) { if (this.layoutReady) callback(); else layouts.push(callback); },
     updateOptions() {},
+    iterateAllLeaves() {},
   });
   // Pending native discovery makes accidental Parent-to-Native joins visible.
   const nativeReady = deferredParentPrerequisite();
@@ -1855,7 +1856,7 @@ test('initial cooperation actual full onload: surfaces and accepted callbacks ar
     assert.ok(startup.registrations.editors >= 3);
     assert.equal(startup.registrations.markdown, 1);
     assert.equal(startup.registrations.settings, 1);
-    assert.ok(startup.registrations.dom >= 4);
+    assert.ok(startup.registrations.dom >= 3, 'native title focus/press/click retain UI registration without retired delete writers');
     assert.equal(h.counters.scans, 0, 'actual onload cannot seed before layout');
     startup.layout();
     await tasks.pump();

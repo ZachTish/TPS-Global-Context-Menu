@@ -491,6 +491,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.removeLegacyNotebookNavigatorRuleSettingsStyles();
     this.registerEvent(this.app.workspace.on('window-open', (_workspaceWindow, targetWindow) => {
       removeLegacyNotebookNavigatorRuleSettingsStyle(targetWindow.document);
+      if (this.noteTitleRenderService) this.registerNoteTitleDocument(targetWindow.document);
     }));
 
     await this.loadSettings();
@@ -613,18 +614,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       if (!this.usesNativeRecordArchitecture()) this.inlinePropertyDecorationService.processRenderedInlineProperties(el);
       this.noteTitleRenderService.processRenderedNoteLinks(el, ctx.sourcePath);
     });
-    this.registerDomEvent(document, 'pointerdown', (event: PointerEvent) => {
-      this.noteTitleRenderService.handleInlineTitleActivation(event);
-    }, { capture: true });
-    this.registerDomEvent(document, 'click', (event: MouseEvent) => {
-      this.noteTitleRenderService.handleInlineTitleActivation(event);
-    }, { capture: true });
-    this.registerDomEvent(document, 'keydown', (event: KeyboardEvent) => {
-      this.noteTitleRenderService.handleInlineTitleKeydown(event);
-    }, { capture: true });
-    this.registerDomEvent(document, 'keyup', (event: KeyboardEvent) => {
-      this.noteTitleRenderService.handleInlineTitleKeyup(event);
-    }, { capture: true });
+    const titleDocuments = new Set<Document>([document]);
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      titleDocuments.add(leaf.getContainer().doc);
+    });
+    for (const titleDocument of titleDocuments) this.registerNoteTitleDocument(titleDocument);
     if (Platform.isMobile) {
       this.registerInterval(window.setInterval(() => {
         this.noteTitleRenderService.refreshInlineTitles();
@@ -2869,6 +2863,18 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       this.styleEl.remove();
       this.styleEl = null;
     }
+  }
+
+  private registerNoteTitleDocument(targetDocument: Document): void {
+    this.registerDomEvent(targetDocument, 'focus', (event: FocusEvent) => {
+      this.noteTitleRenderService.prepareNativeInlineTitleFocus(event);
+    }, { capture: true });
+    this.registerDomEvent(targetDocument, 'pointerdown', (event: PointerEvent) => {
+      this.noteTitleRenderService.handleInlineTitleActivation(event);
+    }, { capture: true });
+    this.registerDomEvent(targetDocument, 'click', (event: MouseEvent) => {
+      this.noteTitleRenderService.handleInlineTitleActivation(event);
+    }, { capture: true });
   }
 
   private removeLegacyNotebookNavigatorRuleSettingsStyles(): void {

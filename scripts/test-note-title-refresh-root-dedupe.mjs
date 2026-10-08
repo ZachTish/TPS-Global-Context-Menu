@@ -38,6 +38,8 @@ class FakeElement {
     this.computedStyle = { display: 'block', visibility: 'visible' };
   }
 
+  instanceOf(type) { return this instanceof type; }
+
   append(child) {
     child.parentElement = this;
     this.children.push(child);
@@ -581,14 +583,31 @@ if (process.env.TPS_NOTE_TITLE_BENCHMARK === '1') {
 }
 
 
-function makeRenameHarness({ changed = true, autoRename = true, failure = false } = {}) {
+function makeRenameHarness({ autoRename = true, failure = false, unsupported = false } = {}) {
   const file = new TestTFile('Inbox/Before.md');
-  const state = { title: 'Before', renames: 0, events: 0, refreshes: 0 };
+  const activeFile = new TestTFile('Inbox/Unrelated active.md');
+  const state = { title: 'Before', renames: 0, events: 0, refreshes: 0, prompts: [], metadata: 0, reads: 0, inventories: 0, writes: 0 };
   const plugin = {
     settings: { enableAutoRename: autoRename },
     app: {
-      vault: { getFileByPath: path => path === file.path ? file : null },
-      metadataCache: { getFileCache: () => ({ frontmatter: { title: state.title } }) },
+      vault: {
+        getFileByPath: path => path === file.path ? file : null,
+        read() { state.reads++; throw new Error('Prompt must not read source'); },
+        cachedRead() { state.reads++; throw new Error('Prompt must not read cached source'); },
+        getFiles() { state.inventories++; return [file, activeFile]; },
+        getMarkdownFiles() { state.inventories++; return [file, activeFile]; },
+      },
+      metadataCache: { getFileCache: () => { state.metadata++; return { frontmatter: { title: state.title } }; } },
+      workspace: { getActiveFile: () => activeFile },
+      fileManager: unsupported ? {} : {
+        // Core's prompt is a void handoff. Dismissal does not produce a rename
+        // event, and GCM must not fabricate completion from its return value.
+        promptForFileRename(target) {
+          assert.equal(this, plugin.app.fileManager);
+          state.prompts.push(target);
+          if (failure) throw new Error('Core prompt unavailable');
+        },
+      },
     },
     fileNamingService: {
       async updateFilenameIfNeeded(target, options) {
@@ -597,21 +616,13 @@ function makeRenameHarness({ changed = true, autoRename = true, failure = false 
       },
     },
     bulkEditService: {
-      async updateFrontmatter(files, updates) {
-        if (failure) throw new Error('Write failed');
-        if (!changed) return 0;
-        state.title = updates.title;
-        // The shared writer owns the filename update and its completion event.
-        if (autoRename) await plugin.fileNamingService.updateFilenameIfNeeded(files[0], { titleOverride: updates.title });
-        plugin.eventService.emitFilesUpdated([files[0].path]);
-        return 1;
-      },
+      async updateFrontmatter() { state.writes++; throw new Error('Prompt must not write properties'); },
     },
     eventService: { emitFilesUpdated() { state.events++; } },
     overlayRenderingService: { scheduleFileRefresh() { state.refreshes++; } },
   };
   globalThis.__tpsTitleNotice = null;
-  return { file, state, service: new serviceModule.NoteTitleRenderService(plugin) };
+  return { file, activeFile, plugin, state, service: new serviceModule.NoteTitleRenderService(plugin) };
 }
 
 function watchRenderedTitleWork(t, service, file) {
@@ -663,58 +674,149 @@ test('rendering mismatched or stale titles never schedules filename mutations', 
   assert.equal(file.path, 'Inbox/Already renamed.md');
 });
 
-test('rendering after an explicit title save does not replay the writer-owned rename', async t => {
+test('rendering after a native rename handoff never performs a second filename mutation', async t => {
   const { file, state, service } = makeRenameHarness();
   const work = watchRenderedTitleWork(t, service, file);
   await service.promptRenameTitle(file);
-  await globalThis.__tpsTitleSubmit('After');
-  assert.equal(state.renames, 1, 'the explicit frontmatter writer still owns the filename update');
+  assert.deepEqual(state.prompts, [file]);
+  // Simulate only the completed core filename edit; the committed-rename
+  // propagation owner is tested separately, not faked by the prompt callback.
+  file.path = 'Inbox/After.md'; file.basename = 'After';
   for (let index = 0; index < 25; index++) work.render();
   const scheduled = work.callbacks.length;
   work.drain();
-  assert.deepEqual({ scheduled, renames: state.renames }, { scheduled: 0, renames: 1 });
+  assert.deepEqual({ scheduled, renames: state.renames }, { scheduled: 0, renames: 0 });
   assert.equal(file.path, 'Inbox/After.md');
 });
 
-test('a cancelled or rejected title write cannot rename the file or announce success', async () => {
-  const { file, state, service } = makeRenameHarness({ changed: false });
+test('native prompt dismissal leaves properties, filename and consumers unchanged', async () => {
+  const { file, state, service } = makeRenameHarness();
   await service.promptRenameTitle(file);
-  await globalThis.__tpsTitleSubmit('After');
+  assert.deepEqual(state.prompts, [file]);
   assert.equal(file.path, 'Inbox/Before.md');
   assert.equal(state.title, 'Before');
   assert.equal(state.renames, 0);
   assert.equal(state.events, 0);
   assert.equal(state.refreshes, 0);
+  assert.equal(state.writes, 0);
+  assert.equal(state.reads, 0);
+  assert.equal(state.inventories, 0);
+  assert.equal(state.metadata, 0);
 });
 
-test('a successful title edit uses the shared writer once for the filename', async () => {
-  const { file, state, service } = makeRenameHarness();
+test('native prompt receives the exact inactive file with no eager reads, mutations or refreshes', async t => {
+  const { file, activeFile, state, service } = makeRenameHarness();
+  let timers = 0;
+  t.mock.method(globalThis, 'setTimeout', () => { timers++; return 1; });
   await service.promptRenameTitle(file);
-  await globalThis.__tpsTitleSubmit('  After   rename  ');
-  assert.equal(state.title, 'After rename');
-  assert.equal(file.path, 'Inbox/After rename.md');
-  assert.equal(state.renames, 1);
-  assert.equal(state.events, 1);
-  assert.equal(state.refreshes, 1);
+  assert.notEqual(file, activeFile);
+  assert.deepEqual(state, { title: 'Before', renames: 0, events: 0, refreshes: 0, prompts: [file], metadata: 0, reads: 0, inventories: 0, writes: 0 });
+  assert.equal(timers, 0);
 });
 
-test('title editing with auto-rename disabled preserves the filename', async () => {
+test('explicit native filename editing remains available with auto-rename disabled', async () => {
   const { file, state, service } = makeRenameHarness({ autoRename: false });
   await service.promptRenameTitle(file);
-  await globalThis.__tpsTitleSubmit('After');
-  assert.equal(state.title, 'After');
+  assert.deepEqual(state.prompts, [file]);
+  assert.equal(state.title, 'Before');
   assert.equal(file.path, 'Inbox/Before.md');
   assert.equal(state.renames, 0);
 });
 
-test('an exception during title editing leaves the filename alone and reports failure', async () => {
+test('a synchronous native prompt failure leaves source alone and reports a notice', async () => {
   const { file, state, service } = makeRenameHarness({ failure: true });
   await service.promptRenameTitle(file);
-  await globalThis.__tpsTitleSubmit('After');
+  assert.deepEqual(state.prompts, [file]);
   assert.equal(file.path, 'Inbox/Before.md');
   assert.equal(state.title, 'Before');
   assert.equal(state.renames, 0);
-  assert.equal(globalThis.__tpsTitleNotice, 'Title rename failed.');
+  assert.equal(globalThis.__tpsTitleNotice, 'Could not open Obsidian file renaming.');
+  assert.equal(state.writes + state.reads + state.inventories + state.events + state.refreshes, 0);
+});
+
+test('unsupported native rename does not fall back to a custom prompt or property writer', async () => {
+  const { file, state, service } = makeRenameHarness({ unsupported: true });
+  await service.promptRenameTitle(file);
+  assert.deepEqual(state.prompts, []);
+  assert.equal(file.path, 'Inbox/Before.md');
+  assert.equal(state.title, 'Before');
+  assert.equal(state.writes + state.reads + state.inventories + state.metadata + state.events + state.refreshes, 0);
+  assert.equal(globalThis.__tpsTitleNotice, 'Obsidian file renaming is unavailable in this version.');
+});
+
+test('paired pointer activation opens once, and a keyboard click is not time-throttled', async t => {
+  const previousMouse = globalThis.MouseEvent, previousPointer = globalThis.PointerEvent;
+  class TestMouseEvent {
+    constructor(type, target, button = 0) { this.type = type; this.target = target; this.button = button; this.prevented = 0; this.stopped = 0; this.immediate = 0; }
+    preventDefault() { this.prevented++; }
+    stopPropagation() { this.stopped++; }
+    stopImmediatePropagation() { this.immediate++; }
+  }
+  class TestPointerEvent extends TestMouseEvent {}
+  globalThis.MouseEvent = TestMouseEvent; globalThis.PointerEvent = TestPointerEvent;
+  t.after(() => { globalThis.MouseEvent = previousMouse; globalThis.PointerEvent = previousPointer; });
+  const { file, state, service } = makeRenameHarness();
+  const title = new FakeElement('inactive title', ['inline-title']);
+  service.isMarkdownInlineTitle = element => element === title;
+  service.resolveFileForInlineTitle = element => element === title ? file : null;
+  const pointer = new TestPointerEvent('pointerdown', title);
+  assert.equal(service.handleInlineTitleActivation(pointer), true);
+  assert.deepEqual(state.prompts, [], 'pointerdown consumes core inline edit without opening a second prompt');
+  const click = new TestMouseEvent('click', title);
+  assert.equal(service.handleInlineTitleActivation(click), true);
+  await Promise.resolve();
+  assert.deepEqual(state.prompts, [file]);
+  const keyboardClick = new TestMouseEvent('click', title);
+  keyboardClick.detail = 0;
+  assert.equal(service.handleInlineTitleActivation(keyboardClick), true);
+  await Promise.resolve();
+  assert.deepEqual(state.prompts, [file, file], 'a separate click remains available immediately after dismissal');
+  for (const event of [pointer, click, keyboardClick]) assert.deepEqual([event.prevented, event.stopped, event.immediate], [1, 1, 1]);
+  const rightClick = new TestMouseEvent('click', title, 2);
+  assert.equal(service.handleInlineTitleActivation(rightClick), false);
+  const icon = title.append(new FakeElement('title icon', ['tps-gcm-note-title-icon']));
+  assert.equal(service.handleInlineTitleActivation(new TestMouseEvent('click', icon)), false);
+  service.isMarkdownInlineTitle = () => false;
+  assert.equal(service.handleInlineTitleActivation(new TestMouseEvent('click', title)), false);
+  assert.equal(state.prompts.length, 2);
+  assert.equal(state.writes + state.reads + state.inventories + state.metadata + state.events + state.refreshes, 0);
+});
+
+test('native keyboard focus receives the filename before core editing without source work or icon replacement', t => {
+  const { file, state, service } = makeRenameHarness();
+  const title = new FakeElement('inactive title', ['inline-title', 'tps-gcm-inline-title-frontmatter']);
+  const icon = title.append(new FakeElement('title icon', ['tps-gcm-note-title-icon']));
+  const projected = title.append(new FakeElement('projected text'));
+  projected.textContent = 'Frontmatter display: different';
+  title.dataset.tpsGcmRenderedTitle = projected.textContent;
+  title.dataset.tpsGcmOriginalInlineTitle = 'Older filename';
+  Object.defineProperty(title, 'childNodes', { get: () => title.children });
+  Object.defineProperty(title, 'textContent', { get: () => title.children.map(child => child.textContent).join('') });
+  title.appendChild = title.append.bind(title);
+  const previousDocument = globalThis.document;
+  globalThis.document = { createTextNode(value) { const node = new FakeElement('core filename text'); node.textContent = value; return node; } };
+  t.after(() => { globalThis.document = previousDocument; });
+  service.isMarkdownInlineTitle = element => element === title;
+  service.resolveFileForInlineTitle = element => element === title ? file : null;
+  const event = { target: title, preventDefault() { assert.fail('focus remains owned by core'); }, stopPropagation() { assert.fail('focus must reach core'); } };
+  service.prepareNativeInlineTitleFocus(event);
+  // This is the value core's target-focus handler sees after document capture.
+  assert.equal(title.textContent, file.basename);
+  assert.equal(title.children[0], icon);
+  assert.equal(icon.parentElement, title);
+  assert.equal(projected.isConnected, false);
+  assert.equal(title.classes.has('tps-gcm-inline-title-frontmatter'), false);
+  assert.equal(title.dataset.tpsGcmRenderedTitle, undefined);
+  assert.equal(title.dataset.tpsGcmOriginalInlineTitle, undefined);
+  assert.equal(title.title, file.path);
+  assert.equal(state.writes + state.reads + state.inventories + state.metadata + state.events + state.refreshes, 0);
+  assert.deepEqual(state.prompts, []);
+  const children = [...title.children];
+  service.prepareNativeInlineTitleFocus({ target: icon });
+  assert.deepEqual(title.children, children, 'icon focus is not inline editing');
+  service.isMarkdownInlineTitle = () => false;
+  service.prepareNativeInlineTitleFocus(event);
+  assert.deepEqual(title.children, children, 'non-Markdown focus is ignored');
 });
 
 
@@ -1110,4 +1212,22 @@ test('metadata and postprocessor owners still update hidden rendered links indep
   h.service.handleMetadataChanged(target);
   assert.equal(pane.link.textContent, 'After');
   assert.equal(h.events.some(event => /^(rect|style):/u.test(event)), false);
+});
+
+
+test('native display reads the configured canonical title without source I/O', () => {
+  const file = new TestTFile('Inbox/Filename.md');
+  let lookups = 0;
+  const service = new serviceModule.NoteTitleRenderService({ app: {
+    metadataCache: { getFileCache(target) {
+      assert.equal(target, file);
+      return { frontmatter: { name: 'Configured record title', title: 'Unrelated literal title' } };
+    } },
+  }, nativeRecordService: { inspect(frontmatter) {
+    lookups++;
+    return { frontmatter: { title: frontmatter.name } };
+  } } });
+  assert.equal(service.getDisplayTitle(file), 'Configured record title');
+  for (let index = 0; index < 100; index++) assert.equal(service.getDisplayTitle(file), 'Configured record title');
+  assert.equal(lookups, 1, 'the existing display cache retains the configured title');
 });

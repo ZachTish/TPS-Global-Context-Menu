@@ -647,7 +647,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
     new Setting(advanced)
       .setName('Auto-sync title from filename')
-      .setDesc('Keep ordinary note titles aligned to filenames on create/open/rename. Daily Notes keep their template or user title and retain the canonical Daily Notes filename.')
+      .setDesc('Keep titles aligned when ordinary notes are initialized or filenames change. Committed renames also update TPS-managed note titles on mobile and in the User role. Daily Notes keep their template or user title and retain the canonical Daily Notes filename.')
       .addToggle(t => t.setValue(this.plugin.settings.autoSyncTitleFromFilename).onChange(async v => { this.plugin.settings.autoSyncTitleFromFilename = v; await this.plugin.saveSettings(); }));
     new Setting(advanced)
       .setName('Sync folderPath frontmatter')

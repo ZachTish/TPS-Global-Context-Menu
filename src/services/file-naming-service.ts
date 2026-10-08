@@ -4,6 +4,7 @@ import * as logger from "../logger";
 import { extractDatePrefix, extractDateSuffix, stripDatePrefix, stripDateSuffix, FULL_DATE_REGEX } from '../utils/date-suffix-utils';
 import {
     clearDailyNoteConfigurationOverride,
+    hasExplicitDailyNoteIdentity,
     hasPendingDailyNoteCandidatePathRefresh,
     invalidateDailyNoteCandidateIndex,
     markDailyNoteCandidateMetadataReady,
@@ -16,6 +17,7 @@ import {
     canAutomaticallyMutateTemplateFile,
     canAutomaticallyMutateTemplateFrontmatter,
 } from '../utils/template-protection';
+import { parseNativeRecordDocument } from '../utils/native-record-document';
 
 export type DailyNoteConfigurationSnapshot = {
     folder: string;
@@ -907,7 +909,10 @@ export class FileNamingService {
             return;
         }
         if (options.renamedFromPath?.split('/').pop() === file.name) return;
-        await this.syncTitleFromFilenameWithOptions(file, options);
+        const renamedTargetPath = options.renamedFromPath ? file.path : undefined;
+        if (options.renamedFromPath && (this.plugin.nativeRecordService?.isInternalIdentityWrite?.(options.renamedFromPath)
+            || this.plugin.nativeRecordService?.isInternalIdentityWrite?.(file.path))) return;
+        await this.syncTitleFromFilenameWithOptions(file, options, renamedTargetPath);
     }
 
     async repairTemplateDerivedTitlesAcrossVault(): Promise<{ scanned: number; updated: number; skipped: number; failed: number }> {
@@ -974,9 +979,20 @@ export class FileNamingService {
     private async syncTitleFromFilenameWithOptions(
         file: TFile,
         options: { onlyIfTemplateDerived?: boolean; onlyIfMissing?: boolean; onlyIfHasFrontmatter?: boolean; force?: boolean; bypassCreationGrace?: boolean; renamedFromPath?: string },
+        renamedTargetPath?: string,
     ): Promise<"updated" | "skipped"> {
         await this.dailyNoteConfigurationReady;
         if (!options.force && !this.plugin.settings.autoSyncTitleFromFilename) return "skipped";
+        if (renamedTargetPath && (file.path !== renamedTargetPath
+            || this.plugin.app.vault.getFileByPath(renamedTargetPath) !== file)) return "skipped";
+        if (options.renamedFromPath && this.plugin.nativeRecordService?.isRecordFile(file)) {
+            try {
+                return await this.syncNativeRecordTitleFromFilename(file, options, renamedTargetPath || file.path);
+            } catch (error) {
+                logger.error('[TPS GCM] Error syncing native record title from committed filename:', error);
+                return "skipped";
+            }
+        }
         if (!this.shouldProcess(file, options)) return "skipped";
         const liveFile = this.getLiveFile(file);
         if (!liveFile || !this.shouldProcess(liveFile, options)) return "skipped";
@@ -1057,7 +1073,7 @@ export class FileNamingService {
 
             if (nextTitle && nextTitle !== currentTitle) {
                 const targetFile = this.getLiveFile(liveFile);
-                if (!targetFile) return "skipped";
+                if (!targetFile || (options.renamedFromPath && targetFile !== file)) return "skipped";
                 if (!(await this.plugin.bulkEditService.canMutateFrontmatterSafely(targetFile))) {
                     logger.warn(`[TPS GCM] Skipping title sync due to malformed frontmatter: ${targetFile.path}`);
                     return "skipped";
@@ -1065,12 +1081,13 @@ export class FileNamingService {
                 let changed = false;
                 await this.plugin.bulkEditService.runSerializedFrontmatterWrite(targetFile, async () => {
                     const currentFile = this.getLiveFile(targetFile);
-                    if (!currentFile) return;
+                    if (!currentFile || (options.renamedFromPath && currentFile !== file)) return;
                     if (!(await this.canAutomaticallyMutateTemplateSource(currentFile))) return;
                     if (await this.hasWorkflowOwnedFilenameEvidence(currentFile)) return;
                     changed = await this.plugin.frontmatterMutationService.processOwnedKeysPreservingSource(currentFile, ['title', 'alias', 'aliases'], (frontmatter) => {
                         if (!this.canAutomaticallyMutateTemplateFrontmatter(frontmatter)) return;
                         if (currentFile.path !== lockKey || currentFile.basename.trim() !== rawBasename) return;
+                        if (options.renamedFromPath && this.plugin.app.vault.getFileByPath(lockKey) !== file) return;
                         if (this.plugin.nativeRecordService?.hasRecordIdentityEvidenceInFrontmatter(frontmatter)
                             || this.isProcessRunFrontmatter(frontmatter)) return;
                         const existingTitleKeys = Object.keys(frontmatter).filter(
@@ -1113,6 +1130,57 @@ export class FileNamingService {
             this.processingFiles.delete(lockKey);
         }
         return "skipped";
+    }
+
+    private async syncNativeRecordTitleFromFilename(
+        file: TFile,
+        options: { bypassCreationGrace?: boolean; renamedFromPath?: string },
+        targetPath: string,
+    ): Promise<"updated" | "skipped"> {
+        if (!this.shouldProcess(file, { ...options, allowCommittedRenameTitle: true })) return "skipped";
+        const nativeRecords = this.plugin.nativeRecordService;
+        let frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
+        let inspection = nativeRecords.inspect(frontmatter);
+        if (!inspection) {
+            const parsed = parseNativeRecordDocument(await this.plugin.app.vault.cachedRead(file));
+            frontmatter = parsed?.frontmatter;
+            inspection = nativeRecords.inspect(frontmatter);
+        }
+        if (!inspection || !frontmatter || !this.canAutomaticallyMutateTemplateFrontmatter(frontmatter)
+            || hasExplicitDailyNoteIdentity(frontmatter, this.plugin.settings)
+            || this.isProcessRunFrontmatter(frontmatter) || this.isProcessRunFrontmatter(inspection.frontmatter)
+            || await this.isDailyNoteFile(file)
+            || await this.plugin.bulkEditService.shouldSkipNoteLevelRecurrence(file, String(inspection.frontmatter.scheduled || ''))) return "skipped";
+        const rawBasename = file.basename.trim();
+        const previousTitle = String(inspection.frontmatter.title || '').trim();
+        if (!rawBasename || !this.plugin.settings.autoSyncTitleFromFilename
+            || file.path !== targetPath || this.plugin.app.vault.getFileByPath(targetPath) !== file
+            || this.buildExpectedBasename(previousTitle, inspection.frontmatter.scheduled) === rawBasename) return "skipped";
+        const scheduled = inspection.frontmatter.scheduled;
+        const scheduledDate = scheduled ? window.moment(scheduled) : null;
+        const nextTitle = (scheduledDate?.isValid?.()
+            ? this.stripKnownDateMarker(rawBasename, scheduledDate)
+            : stripDatePrefix(stripDateSuffix(rawBasename))).replace(/\s+/g, ' ').trim();
+        if (!nextTitle || nextTitle === previousTitle) return "skipped";
+
+        this.processingFiles.add(targetPath);
+        try {
+            const result = await nativeRecords.updateFromSource({ path: targetPath, id: inspection.id }, ['title'], (current) => {
+                if (!this.plugin.settings.autoSyncTitleFromFilename || file.path !== targetPath
+                    || file.basename.trim() !== rawBasename || this.plugin.app.vault.getFileByPath(targetPath) !== file
+                    || !this.shouldProcess(file, { ...options, allowCommittedRenameTitle: true, bypassProcessingLock: true })
+                    || hasExplicitDailyNoteIdentity(current, this.plugin.settings)
+                    || this.isProcessRunFrontmatter(current)
+                    || JSON.stringify(current.kind) !== JSON.stringify(inspection.frontmatter.kind)
+                    || String(current.title || '').trim() !== previousTitle
+                    || JSON.stringify(current.scheduled) !== JSON.stringify(scheduled)
+                    || this.buildExpectedBasename(previousTitle, current.scheduled) === rawBasename) return null;
+                return { title: nextTitle };
+            }, { kind: 'automation', surface: 'file-title-sync' });
+            return result ? "updated" : "skipped";
+        } finally {
+            this.processingFiles.delete(targetPath);
+        }
     }
 
     /**
@@ -1225,7 +1293,7 @@ export class FileNamingService {
     /**
      * Check if a file should be processed for auto-naming
      */
-    shouldProcess(file: TFile, options: { bypassCreationGrace?: boolean; bypassProcessingLock?: boolean; allowCalendarEventFilename?: boolean } = {}): boolean {
+    shouldProcess(file: TFile, options: { bypassCreationGrace?: boolean; bypassProcessingLock?: boolean; allowCalendarEventFilename?: boolean; allowCommittedRenameTitle?: boolean } = {}): boolean {
         if (this.plugin.propertyMigrationService?.active) return false;
         // Only process markdown files
         if (file.extension !== 'md') return false;
@@ -1235,6 +1303,7 @@ export class FileNamingService {
         // Native-record filenames are owned by their creating workflow (or by
         // the user). Keep generic note auto-naming out of that contract.
         if (this.plugin.nativeRecordService?.isRecordFile(file)
+            && !options.allowCommittedRenameTitle
             && !(options.allowCalendarEventFilename && this.isCalendarEventFile(file))) return false;
 
         // Metadata cache is only a fast rejection. Every automatic mutation

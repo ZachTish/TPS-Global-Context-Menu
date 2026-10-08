@@ -62,6 +62,7 @@ function fixture(initial = '---\nkind: note\n---\nInitial body\n', basename = 'Q
   const stats = { cachedReads: 0, rawReads: 0, queues: 0, processes: 0, modifies: 0, renamed: 0, events: 0, indexed: 0 };
   let atQueue = null;
   let atProcess = null;
+  let liveReplacement = null;
   const frontmatter = () => parse(content.replace(/^\uFEFF/u, '').match(/^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/u)?.[1] || '') || {};
   const rename = (basename) => { file.basename = basename; file.name = `${basename}.md`; file.path = `Inbox/${file.name}`; };
   const plugin = {
@@ -88,8 +89,8 @@ function fixture(initial = '---\nkind: note\n---\nInitial body\n', basename = 'Q
         configDir: '.obsidian',
         adapter: { async read() { throw Error('No Daily Notes configuration in fixture'); } },
         getFiles: () => [file], getMarkdownFiles: () => [file],
-        getAbstractFileByPath: path => path === file.path ? file : null,
-        getFileByPath: path => path === file.path ? file : null,
+        getAbstractFileByPath: path => path === file.path ? (liveReplacement || file) : null,
+        getFileByPath: path => path === file.path ? (liveReplacement || file) : null,
         cachedRead: async () => { stats.cachedReads++; return content; },
         read: async () => { stats.rawReads++; return content; },
         modify: async (_file, next) => { stats.modifies++; content = next; },
@@ -116,6 +117,7 @@ function fixture(initial = '---\nkind: note\n---\nInitial body\n', basename = 'Q
     setSource: next => { content = next; },
     beforeWrite: callback => { atQueue = callback; },
     beforeProcess: callback => { atProcess = callback; },
+    replaceLiveFile: () => { liveReplacement = { ...file }; },
     async sync(options = {}) {
       await service.whenDailyNoteConfigurationReady();
       await service.syncTitleFromFilename(file, { force: true, onlyIfMissing: true, onlyIfHasFrontmatter: true, bypassCreationGrace: true, ...options });
@@ -374,12 +376,23 @@ test('a newer filename supersedes an earlier rename queued for title synchroniza
   assert.equal(f.stats.modifies, 1);
 });
 
-test('native records skip filename-to-title work before source reads', async () => {
+test('native records retain their workflow-owned title during generic creation initialization', async () => {
   const f = fixture('---\ntitle: Native title\ntpsId: stable-id\nkind: task\n---\nKeep body\n', 'New name');
   f.plugin.nativeRecordService.isRecordFile = () => true;
-  await syncRename(f);
+  await f.sync();
   assert.equal(f.frontmatter().title, 'Native title');
   assert.equal(f.stats.rawReads, 0);
   assert.equal(f.stats.cachedReads, 0);
   assert.equal(f.stats.queues, 0);
 });
+
+for (const boundary of ['beforeWrite', 'beforeProcess']) {
+  test(`ordinary committed rename cannot update a replacement file at ${boundary}`, async () => {
+    const f = fixture('---\ntitle: Previous name\n---\nKeep body\n', 'New name');
+    const before = f.source();
+    f[boundary](() => f.replaceLiveFile());
+    await syncRename(f);
+    assert.equal(f.source(), before);
+    assert.equal(f.stats.modifies, 0);
+  });
+}

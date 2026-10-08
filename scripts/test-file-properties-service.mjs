@@ -931,7 +931,7 @@ test('vault deletion wiring delegates companion invalidation to the service', ()
     source,
     /handleCompanionMetadataChanged\(file\)[\s\S]{0,700}getSourceFileForCompanion\(file\)[\s\S]{0,500}scheduleApply\(logicalSource,[\s\S]{0,180}reason: 'metadata-change'/u,
   );
-  assert.match(source, /oldPath\.toLocaleLowerCase\(\)\.endsWith\('\.md'\)[\s\S]{0,260}handlePendingMarkdownTargetRename/u);
+  assert.match(source, /oldPath\.toLocaleLowerCase\(\)\.endsWith\('\.md'\)[\s\S]{0,850}handlePendingMarkdownTargetRename/u);
   assert.match(source, /vault\.on\('delete',[\s\S]{0,1800}invalidatePendingMarkdownTarget\(file\)/u);
 });
 

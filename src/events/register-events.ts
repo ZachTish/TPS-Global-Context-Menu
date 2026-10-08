@@ -594,6 +594,10 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 && file.extension?.toLocaleLowerCase() === 'md'
                 && oldPath.toLocaleLowerCase().endsWith('.md')) {
                 const capturedNewPath = file.path;
+                // Capture the existing writer's ownership before its awaited
+                // rename finishes and releases the internal-write guard.
+                const workflowOwnedRename = plugin.nativeRecordService?.isInternalIdentityWrite?.(oldPath)
+                    || plugin.nativeRecordService?.isInternalIdentityWrite?.(capturedNewPath);
                 if (useLegacyFileProperties) {
                     void plugin.filePropertiesService.handlePendingMarkdownTargetRename(file, oldPath, capturedNewPath)
                         .catch((error) => {
@@ -613,7 +617,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
                 // Companion bookkeeping must not swallow ordinary filename edits.
                 // The committed rename owns title synchronization; no navigation
                 // settlement timer or unrelated maintenance is needed here.
-                if (plugin.canRunBackgroundAutomation() && plugin.settings.autoSyncTitleFromFilename) {
+                if (!workflowOwnedRename && plugin.settings.autoSyncTitleFromFilename) {
                     void plugin.fileNamingService.syncTitleFromFilename(file, {
                         bypassCreationGrace: true,
                         renamedFromPath: oldPath,

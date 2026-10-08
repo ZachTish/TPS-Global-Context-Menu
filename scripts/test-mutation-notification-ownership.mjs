@@ -115,7 +115,7 @@ function fixture(t, { title = 'Before', autoRename = true, extension = 'md' } = 
     manifest: { id: 'tps-global-context-menu' },
     settings: { autoSyncTitleFromFilename: true, enableAutoRename: autoRename, enableActivityLog: false, frontmatterAutoWriteExclusions: '', folderExclusions: '', dailyNoteDateFormat: 'YYYY-MM-DD', properties: [] },
     registerEvent() {}, shouldIgnoreAutoFrontmatterWrite: () => false,
-    nativeRecordService: { isRecordFile: () => false, hasRecordIdentityEvidence: async () => false, hasRecordIdentityEvidenceInFrontmatter: () => false },
+    nativeRecordService: { isRecordFile: () => false, isInternalIdentityWrite: () => false, hasRecordIdentityEvidence: async () => false, hasRecordIdentityEvidenceInFrontmatter: () => false },
     eventService: {
       emitFilesUpdated(paths, cause) { events.push({ paths: [...paths], cause }); order.push('files-updated'); },
       emitExplicitAction(paths, cause) { explicit.push({ paths: [...paths], cause }); order.push('explicit-action'); },
@@ -153,14 +153,14 @@ function fixture(t, { title = 'Before', autoRename = true, extension = 'md' } = 
   plugin.noteTitleRenderService = new NoteTitleRenderService(plugin);
   return {
     file, files, sources, add, plugin, stats, events, explicit, order, timers, delayedRefreshes, localRefreshes, notices,
-    async prompt(value) { await plugin.noteTitleRenderService.promptRenameTitle(file); await globalThis.mutationTitleSubmit(value); },
+    async editTitle(value) { return plugin.bulkEditService.updateFrontmatter([file], { title: value }); },
     flush() { while (timers.length) timers.shift()(); },
   };
 }
 
-test('real title prompt composes writer, filename and bulk ownership into one final-path notification', async t => {
+test('explicit title property edit composes writer, filename and bulk ownership into one final-path notification', async t => {
   const f = fixture(t);
-  await f.prompt('After');
+  await f.editTitle('After');
   assert.equal(f.stats.modifies, 1);
   assert.equal(f.stats.renames, 1);
   assert.equal(f.stats.namingChecks, 1);
@@ -169,10 +169,48 @@ test('real title prompt composes writer, filename and bulk ownership into one fi
   assert.deepEqual(f.explicit, [{ paths: ['Inbox/After.md'], cause: { sourcePluginId: 'tps-global-context-menu', source: 'frontmatter' } }]);
   assert.deepEqual(f.order, ['write', 'index', 'rename', 'files-updated', 'explicit-action']);
   assert.ok(f.sources.get(f.file).endsWith('Keep body marker\n'));
-  assert.deepEqual(f.localRefreshes, [{ path: 'Inbox/After.md', reason: 'title-rename', options: { force: true, delayMs: 0 } }]);
+  assert.deepEqual(f.localRefreshes, [], 'the property writer owns notifications without a second prompt refresh');
   f.flush();
   assert.deepEqual(f.delayedRefreshes, [], 'Markdown refresh is owned by existing event consumers');
 });
+
+for (const extension of ['md', 'pdf']) {
+  test(`native filename prompt delegates the selected ${extension} file without entering a mutation owner`, async t => {
+    const f = fixture(t, { extension, autoRename: false });
+    const active = f.add('Unrelated active');
+    f.plugin.app.workspace.getActiveFile = () => active;
+    const calls = [];
+    const manager = f.plugin.app.fileManager;
+    manager.promptForFileRename = function (target) {
+      assert.equal(this, manager);
+      calls.push(target);
+      // Core returns void on opening. Cancel is represented by no committed
+      // rename event, not by a fabricated completion callback or promise.
+    };
+    const inspected = [];
+    for (const [owner, methods] of [
+      [f.plugin.app.vault, ['read', 'cachedRead', 'getFiles', 'getMarkdownFiles', 'process', 'modify']],
+      [f.plugin.app.metadataCache, ['getFileCache']],
+      [f.plugin.bulkEditService, ['updateFrontmatter']],
+      [f.plugin.fileNamingService, ['updateFilenameIfNeeded']],
+    ]) {
+      for (const name of methods) inspected.push(t.mock.method(owner, name));
+    }
+    const before = f.sources.get(f.file);
+    await f.plugin.noteTitleRenderService.promptRenameTitle(f.file);
+    assert.deepEqual(calls, [f.file]);
+    assert.notEqual(calls[0], active);
+    assert.ok(inspected.every(mock => mock.mock.callCount() === 0));
+    assert.equal(f.sources.get(f.file), before);
+    assert.deepEqual(f.stats, { modifies: 0, renames: 0, namingChecks: 0, indexed: 0 });
+    assert.deepEqual(f.events, []);
+    assert.deepEqual(f.explicit, []);
+    assert.deepEqual(f.localRefreshes, []);
+    assert.deepEqual(f.delayedRefreshes, []);
+    assert.deepEqual(f.timers, []);
+    assert.deepEqual(f.notices, []);
+  });
+}
 
 test('shared bulk title route completes once with auto rename disabled', async t => {
   const f = fixture(t, { autoRename: false });
@@ -235,12 +273,12 @@ test('explicit caller surface survives the shared mutation owner', async t => {
   assert.deepEqual(f.explicit, [{ paths: ['Inbox/After.md'], cause: { sourcePluginId: 'test-caller', source: 'test-property' } }]);
 });
 
-test('unchanged and rejected title saves have no events, filename checks or prompt refreshes', async t => {
+test('unchanged and rejected title property saves have no events, filename checks or prompt refreshes', async t => {
   const f = fixture(t);
-  await f.prompt('Before');
+  await f.editTitle('Before');
   assert.equal(f.stats.modifies, 0);
   f.plugin.app.vault.modify = async () => { throw Error('Expected write rejection'); };
-  await f.prompt('After');
+  assert.equal(await f.editTitle('After'), 0);
   assert.equal(f.stats.namingChecks, 0);
   assert.deepEqual(f.events, []);
   assert.deepEqual(f.explicit, []);
@@ -289,7 +327,7 @@ for (const title of ['After', 'Question: why?']) {
         bypassCreationGrace: true, renamedFromPath: previousPath,
       }));
     };
-    await f.prompt(title);
+    await f.editTitle(title);
     await Promise.all(renameWork);
     assert.equal(parse(f.sources.get(f.file).split('---')[1]).title, title);
     assert.equal(f.stats.modifies, 1);
@@ -326,7 +364,7 @@ test('committed-rename display restores the authored title while incoming links 
     await linksGate;
   };
   let saved = false;
-  const save = f.prompt('Question: why?').then(() => { saved = true; });
+  const save = f.editTitle('Question: why?').then(() => { saved = true; });
   await committedGate;
   assert.equal(saved, false, 'link rewriting must still be pending');
   assert.equal(view.title, 'Question: why?');
@@ -802,11 +840,11 @@ test('the source editor remains the property owner when the active matching leaf
 });
 
 
-test('the real title prompt reports a native-save failure instead of silently closing', async t => {
+test('the explicit title property writer reports a native-save failure instead of silently succeeding', async t => {
   const f = openBufferFixture(t);
   const before = f.saved();
   f.view.save = async () => { throw Error('Synthetic save failure'); };
-  await f.prompt('After');
+  assert.equal(await f.editTitle('After'), 0);
   assert.deepEqual(f.notices, ['Could not finish updating properties for 1 note.']);
   assert.equal(f.saved(), before); assert.match(f.editor.getValue(), /title: After/);
   assert.equal(f.stats.modifies, 0); assert.equal(f.stats.renames, 0);
@@ -829,7 +867,7 @@ for (const afterRename of [false, true]) {
     const f = fixture(t);
     const rename = f.plugin.app.fileManager.renameFile;
     f.plugin.app.fileManager.renameFile = async (...args) => { if (afterRename) await rename(...args); throw Error('Synthetic rename failure'); };
-    await f.prompt('After');
+    assert.equal(await f.editTitle('After'), 0);
     assert.deepEqual(f.notices, ['Could not finish updating properties for 1 note.']);
     assert.equal(f.stats.modifies, 1); assert.match(f.sources.get(f.file), /title: After/);
     assert.equal(f.file.path, afterRename ? 'Inbox/After.md' : 'Inbox/Before.md');
@@ -852,7 +890,7 @@ for (const message of ['Synthetic rename failure', 'ENOENT: no such file or dire
 
 test('unchanged property requests and write-guard refusals are not presented as save errors', async t => {
   const f = openBufferFixture(t);
-  await f.prompt('Before');
+  assert.equal(await f.editTitle('Before'), 0);
   assert.equal(await f.plugin.bulkEditService.updateFrontmatter([f.file], {title: 'After'}, {writeGuard: () => false}), 0);
   assert.deepEqual(f.notices, []); assert.equal(f.counts.nativeSaves, 0);
 });

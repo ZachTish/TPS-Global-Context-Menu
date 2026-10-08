@@ -1,5 +1,75 @@
 # TPS Global Context Menu
 
+## 8.1.1 — Use Obsidian file renaming
+
+Clicking a note's inline title, its GCM menu title row, or the existing
+`rename-active-note-title` command opens Obsidian's native file rename dialog
+for that exact file. Core owns the input, validation, cancellation, file rename
+and link updates. The former custom Title modal, duplicate-prompt time gate and
+Backspace/Delete frontmatter writer are removed. There is no title write or
+render refresh merely for opening or canceling the dialog. The legacy command
+ID remains compatible; it now renames the file rather than editing a property.
+
+The display can still use frontmatter title. Pointer presses prevent core from
+editing that projected text; one click opens the core dialog. Keyboard focus
+restores the filename before core's inline editor receives focus: core otherwise
+commits projected text on blur even without typing. This is a synchronous
+presentation change with no source inspection or mutation. Keyboard filename
+editing remains Obsidian's own input. Title icons keep their existing behavior. The same three component-owned DOM
+handlers cover the main document and existing/new detached windows, using
+Obsidian's cross-window node check and each title's own focused document.
+There is no additional vault listener or source work on window focus.
+
+The existing committed file-rename owner propagates filename changes when
+**Auto-sync title from filename** (`autoSyncTitleFromFilename`) is enabled,
+including mobile and the User role. Folder-only moves, generic startup,
+creation and navigation do not gain a title writer. Native records use their
+existing selected-source atomic title action and configured storage profile;
+identity/conflict, exclusions, template, Daily Note and superseded-edit guards
+remain. Internal record/import filename maintenance is recognized by its
+existing ownership guard and does not become another title edit. Explicit
+property edits keep their existing property writer and optional auto-rename
+setting; a resulting sanitized/date-formatted filename is not a second edit.
+
+Vault rename events have no actor, so unmarked third-party or externally synced
+filename changes follow the same existing title-sync setting. Imported calendar
+titles still belong to their provider; a later external sync can restore its
+title and filename. This release adds no provider-title override, repair loop,
+new watcher, scheduler, persistent state, settings key or migration.
+
+The exact-target core prompt is present in inspected Obsidian 1.14.4 but is not
+in the public TypeScript declarations. It is feature-detected; an unsupported
+version reports a notice without an active-file or custom-editor fallback.
+Minimum supported Obsidian remains 1.10.0. Physical iPhone validation remains
+pending; native core controls are used on both platforms.
+
+Final versioned validation passed **1,706 declared-suite checks**, **322
+supplemental checks**, TypeScript and the separate ordinary production-mode
+build, which deployed only to Obsidian Plugin Test Vault. The targeted reload
+verified GCM **8.1.1** and Navigator **8.2.6** with all eight active TPS consumers
+enabled and the background automation role disabled. Installed foreground
+inline-title and Navigator context-menu saves each opened one core **Note
+title** dialog, committed one filename rename and one native-record title
+update, with no custom title action. Titles and note bodies remained correct.
+Title cancellation and detached-window cancellation each made zero source
+reads, writes or inventories. Core keyboard title focus restored the filename;
+blurring without typing changed neither filename nor source. A newly created
+ordinary `Untitled.md` also renamed and propagated its title correctly; creation
+used the vault API and the subsequent native dialog used actual keyboard input.
+
+Combined-consumer title-save counts were four raw reads, nine cached reads and
+four inventories; Navigator save used four raw, eight cached and two inventories.
+These counts include existing downstream consumers. The source-owner native
+propagation test uses one authoritative read and one atomic process, with zero
+inventories or additional renames; 100 unchanged propagations do no I/O or
+writes. The owning title UI performs no source work while prompting or focusing.
+No latency, production or physical-mobile claim follows from this QA. Temporary
+instrumentation was removed, the original note/dashboard restored and the two
+owned fixtures archived byte-identically. All runtime settings remained
+byte-identical except Navigator's existing release acknowledgement. The patch
+release and artifact hashes are in [8.1.1 release notes](release-notes/8.1.1.md);
+the public numeric release is the BRAT handoff, not a production installation.
+
 ## 8.1.0 — Bounded startup recovery and read-only indexed evidence
 
 Startup no longer initializes or waits for the retired item-history store when

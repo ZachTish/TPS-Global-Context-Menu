@@ -1,13 +1,11 @@
 import { MarkdownView, Notice, TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
-import { TextInputModal } from '../modals/text-input-modal';
 import { isLeafVisible, isStrictSourceMode } from './leaf-resolver';
 import * as logger from '../logger';
 import { getPlainDisplayTitle } from '../utils/display-title';
 
 export class NoteTitleRenderService {
   private readonly linkTitleCache = new Map<string, string>();
-  private lastInlineTitlePromptAt = 0;
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
@@ -16,7 +14,8 @@ export class NoteTitleRenderService {
     if (cached) return cached;
     const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
     const titleKey = Object.keys(frontmatter || {}).find((key) => key.trim().toLowerCase() === 'title');
-    const rawTitle = titleKey ? frontmatter?.[titleKey] : undefined;
+    const nativeTitle = this.plugin.nativeRecordService?.inspect(frontmatter)?.frontmatter.title;
+    const rawTitle = nativeTitle ?? (titleKey ? frontmatter?.[titleKey] : undefined);
     const display = getPlainDisplayTitle(rawTitle, file.basename);
     this.linkTitleCache.set(file.path, display);
     return display;
@@ -119,9 +118,9 @@ export class NoteTitleRenderService {
   }
 
   handleInlineTitleActivation(event: MouseEvent | PointerEvent): boolean {
-    if (event instanceof MouseEvent && event.button !== 0) return false;
-    if (event instanceof PointerEvent && event.button !== 0) return false;
-    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (event.button !== 0) return false;
+    const node = event.target as Node | null;
+    const target = node?.instanceOf(HTMLElement) ? node : null;
     if (target?.closest('.tps-gcm-note-title-icon')) return false;
     const titleEl = target?.closest<HTMLElement>('.inline-title');
     if (!titleEl) return false;
@@ -132,90 +131,43 @@ export class NoteTitleRenderService {
     event.preventDefault();
     event.stopPropagation();
     event.stopImmediatePropagation();
-    const now = Date.now();
-    if (now - this.lastInlineTitlePromptAt < 600) return true;
-    this.lastInlineTitlePromptAt = now;
-    void this.promptRenameTitle(file);
+    // Prevent native inline editing of the rendered frontmatter title on press.
+    // The following click (including keyboard-generated clicks) opens one core
+    // file rename dialog. No delay, duplicate prompt or title writer is needed.
+    if (event.type === 'click') void this.promptRenameTitle(file);
     return true;
   }
 
-  handleInlineTitleKeydown(event: KeyboardEvent): boolean {
-    if (event.key !== 'Backspace' && event.key !== 'Delete') return false;
-    const titleEl = this.resolveInlineTitleFromKeyboardEvent(event);
-    if (!titleEl) return false;
-    if (!this.isMarkdownInlineTitle(titleEl)) return false;
-    if (!titleEl.hasClass('tps-gcm-inline-title-frontmatter')) return false;
+  prepareNativeInlineTitleFocus(event: FocusEvent): void {
+    const node = event.target as Node | null;
+    const target = node?.instanceOf(HTMLElement) ? node : null;
+    if (target?.closest('.tps-gcm-note-title-icon')) return;
+    const titleEl = target?.closest<HTMLElement>('.inline-title');
+    if (!titleEl || !this.isMarkdownInlineTitle(titleEl)) return;
     const file = this.resolveFileForInlineTitle(titleEl);
-    if (!(file instanceof TFile)) return false;
-    const visibleTitle = String(titleEl.textContent || '').replace(/\s+/g, ' ').trim();
-    if (!this.isGeneratedUntitledTitle(file, visibleTitle)) return false;
-
-    event.preventDefault();
-    event.stopPropagation();
-    event.stopImmediatePropagation();
-    void this.clearGeneratedTitle(file);
-    return true;
-  }
-
-  handleInlineTitleKeyup(event: KeyboardEvent): boolean {
-    if (event.key !== 'Backspace' && event.key !== 'Delete') return false;
-    const file = this.plugin.app.workspace.getActiveFile();
-    if (!(file instanceof TFile)) return false;
-    const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
-    if (!view || view.file?.path !== file.path) return false;
-    const titleEl = this.resolveInlineTitleElement(view);
-    if (!titleEl || !this.isMarkdownInlineTitle(titleEl)) return false;
-    const visibleTitle = String(titleEl.textContent || '').replace(/\s+/g, ' ').trim();
-    if (visibleTitle) return false;
-    const frontmatterTitle = this.getFrontmatterTitle(file);
-    if (!this.isGeneratedUntitledTitle(file, frontmatterTitle)) return false;
-    void this.clearGeneratedTitle(file);
-    return true;
+    // Core commits an inline title on blur even without an input event. Feed
+    // its existing keyboard editor the filename, never projected display text.
+    if (file instanceof TFile) this.restoreFilenameInlineTitle(titleEl, file);
   }
 
   async promptRenameTitle(file: TFile): Promise<void> {
-    if (!(file instanceof TFile) || file.extension !== 'md') {
-      new Notice('Only markdown note titles can be renamed.');
+    if (!(file instanceof TFile)) return;
+    const fileManager = this.plugin.app.fileManager as typeof this.plugin.app.fileManager & {
+      promptForFileRename?: (file: TFile) => void | Promise<void>;
+    };
+    if (typeof fileManager.promptForFileRename !== 'function') {
+      new Notice('Obsidian file renaming is unavailable in this version.');
       return;
     }
-
-    const currentTitle = this.getDisplayTitle(file);
-    logger.flow('NoteTitle', 'rename:prompt', {
-      path: file.path,
-      displayTitle: currentTitle,
-      autoRename: this.plugin.settings.enableAutoRename === true,
-    });
-    new TextInputModal(this.plugin.app, 'Title', currentTitle, async (value) => {
-      const nextTitle = String(value ?? '').replace(/\s+/g, ' ').trim();
-      if (!nextTitle) {
-        new Notice('Title cannot be empty.');
-        return;
-      }
-
-      try {
-        const liveFile = this.plugin.app.vault.getFileByPath(file.path);
-        if (!(liveFile instanceof TFile)) return;
-        // The frontmatter writer also owns title-driven filename updates.
-        // A cancelled, rejected or unchanged write must not rename independently.
-        const changed = await this.plugin.bulkEditService.updateFrontmatter([liveFile], { title: nextTitle });
-        if (!changed) {
-          logger.flow('NoteTitle', 'rename:not-applied', { path: liveFile.path });
-          return;
-        }
-        this.clearTitleCache(liveFile.path);
-        this.plugin.overlayRenderingService.scheduleFileRefresh(liveFile, 'title-rename', { force: true, delayMs: 0 });
-        logger.flow('NoteTitle', 'rename:done', {
-          sourcePath: file.path,
-          resultingPath: liveFile.path,
-          displayTitle: nextTitle,
-          autoRename: this.plugin.settings.enableAutoRename === true,
-        });
-      } catch (error) {
-        logger.flowError('NoteTitle', 'rename:failed', error, { path: file.path });
-        logger.error('[TPS GCM] Failed renaming note title:', error);
-        new Notice('Title rename failed.');
-      }
-    }, { selectOnOpen: true }).open();
+    logger.flow('NoteTitle', 'rename:prompt', { path: file.path, route: 'obsidian-file-rename' });
+    try {
+      // Core owns the input, validation, cancellation, path commit and link
+      // updates. Its promise opens the dialog; it does not signal a rename.
+      await fileManager.promptForFileRename(file);
+    } catch (error) {
+      logger.flowError('NoteTitle', 'rename:prompt-failed', error, { path: file.path });
+      new Notice('Could not open Obsidian file renaming.');
+    }
   }
 
   private replaceLinkTextWithTitle(link: HTMLElement, sourcePath: string): void {
@@ -284,7 +236,7 @@ export class NoteTitleRenderService {
     if (!(file instanceof TFile)) return;
     const titleEl = this.resolveInlineTitleElement(view);
     if (!titleEl) return;
-    if (document.activeElement instanceof HTMLElement && titleEl.contains(document.activeElement)) return;
+    if (titleEl.contains((titleEl.ownerDocument || document).activeElement)) return;
     if (isStrictSourceMode(view)) {
       this.restoreFilenameInlineTitle(titleEl, file);
       return;
@@ -341,7 +293,7 @@ export class NoteTitleRenderService {
     const leafContent = titleEl.closest<HTMLElement>('.workspace-leaf-content[data-type="markdown"]');
     const leaf = this.plugin.app.workspace.getLeavesOfType('markdown').find((candidate) =>
       !!leafContent
-      && (candidate.view as MarkdownView | undefined)?.contentEl instanceof HTMLElement
+      && !!(candidate.view as MarkdownView | undefined)?.contentEl
       && leafContent.contains((candidate.view as MarkdownView).contentEl),
     );
     const file = (leaf?.view as MarkdownView | undefined)?.file ?? null;
@@ -352,52 +304,4 @@ export class NoteTitleRenderService {
     return !!titleEl.closest('.workspace-leaf-content[data-type="markdown"]');
   }
 
-  private resolveInlineTitleFromKeyboardEvent(event: KeyboardEvent): HTMLElement | null {
-    const target = event.target instanceof HTMLElement ? event.target : null;
-    const direct = target?.closest<HTMLElement>('.inline-title');
-    if (direct) return direct;
-    const active = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const activeTitle = active?.closest<HTMLElement>('.inline-title');
-    if (activeTitle) return activeTitle;
-    const selection = document.getSelection();
-    const anchor = selection?.anchorNode;
-    const focus = selection?.focusNode;
-    for (const node of [anchor, focus]) {
-      const element = node instanceof HTMLElement ? node : node?.parentElement ?? null;
-      const selectedTitle = element?.closest<HTMLElement>('.inline-title');
-      if (selectedTitle) return selectedTitle;
-    }
-    return null;
-  }
-
-  private isGeneratedUntitledTitle(file: TFile, title: string): boolean {
-    const basename = String(file.basename || '').replace(/\s+/g, ' ').trim();
-    return /^Untitled(?: \d+)?$/i.test(basename) && title === basename;
-  }
-
-  private getFrontmatterTitle(file: TFile): string {
-    const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
-    const titleKey = Object.keys(frontmatter || {}).find((key) => key.trim().toLowerCase() === 'title');
-    const rawTitle = titleKey ? frontmatter?.[titleKey] : undefined;
-    return typeof rawTitle === 'string' ? rawTitle.replace(/\s+/g, ' ').trim() : '';
-  }
-
-  private async clearGeneratedTitle(file: TFile): Promise<void> {
-    try {
-      const liveFile = this.plugin.app.vault.getFileByPath(file.path);
-      if (!(liveFile instanceof TFile)) return;
-      await this.plugin.frontmatterMutationService.process(liveFile, (frontmatter) => {
-        for (const key of Object.keys(frontmatter)) {
-          if (key.trim().toLowerCase() === 'title') {
-            delete frontmatter[key];
-          }
-        }
-      });
-      this.clearTitleCache(liveFile.path);
-      this.plugin.eventService.emitFilesUpdated([liveFile.path]);
-      this.plugin.overlayRenderingService.scheduleFileRefresh(liveFile, 'generated-title-clear', { force: true, delayMs: 0 });
-    } catch (error) {
-      logger.error('[TPS GCM] Failed clearing generated note title:', error);
-    }
-  }
 }

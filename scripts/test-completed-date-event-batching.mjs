@@ -702,17 +702,29 @@ test('ordinary Markdown rename reaches title synchronization immediately alongsi
   h.cleanup();
 });
 
-for (const disabled of ['setting', 'automation']) {
-  test(`Markdown rename avoids the title writer when ${disabled} is disabled`, () => {
+for (const disabled of ['setting', 'workflow']) {
+  test(`Markdown rename avoids the title writer when ${disabled} owns the guard`, () => {
     const h = createHarness();
     h.plugin.settings.autoSyncTitleFromFilename = disabled !== 'setting';
-    h.plugin.canRunBackgroundAutomation = () => disabled !== 'automation';
+    h.plugin.nativeRecordService = { isInternalIdentityWrite: () => disabled === 'workflow' };
     h.plugin.fileNamingService.syncTitleFromFilename = async () => { throw Error('Unexpected title writer'); };
     const f = h.addFile('Inbox/Untitled.md');
     h.renameFile(f, f.path, 'Inbox/Named.md');
     h.cleanup();
   });
 }
+
+test('committed filename title propagation runs without background automation authority', () => {
+  const h = createHarness();
+  const calls = [];
+  h.plugin.settings.autoSyncTitleFromFilename = true;
+  h.plugin.canRunBackgroundAutomation = () => false;
+  h.plugin.fileNamingService.syncTitleFromFilename = async (...args) => calls.push(args);
+  const f = h.addFile('Inbox/Untitled.md', { title: 'Untitled' });
+  h.renameFile(f, f.path, 'Inbox/Named.md');
+  assert.deepEqual(calls, [[f, { bypassCreationGrace: true, renamedFromPath: 'Inbox/Untitled.md' }]]);
+  h.cleanup();
+});
 
 for (const background of [false, true]) {
   test(`a committed Markdown filename change refreshes its title before link settlement (background=${background})`, async () => {

@@ -33,12 +33,12 @@ test('frontmatter title rendering restores filename in strict source mode', () =
 test('inline title activation intercepts markdown title clicks without waiting for rendered-title refresh', () => {
   const activationSource = noteTitleSource.slice(
     noteTitleSource.indexOf('handleInlineTitleActivation'),
-    noteTitleSource.indexOf('handleInlineTitleKeydown'),
+    noteTitleSource.indexOf('async promptRenameTitle'),
   );
 
   assert.doesNotMatch(activationSource, /tps-gcm-inline-title-frontmatter/);
-  assert.match(activationSource, /event instanceof MouseEvent && event\.button !== 0/);
-  assert.match(activationSource, /event instanceof PointerEvent && event\.button !== 0/);
+  assert.match(activationSource, /event\.button !== 0/);
+  assert.match(activationSource, /node\?\.instanceOf\(HTMLElement\)/);
   assert.match(noteTitleSource, /event\.preventDefault\(\);/);
   assert.match(noteTitleSource, /void this\.promptRenameTitle\(file\);/);
 });
@@ -52,22 +52,17 @@ test('note menus show one plain clickable title row across native and panel surf
   assert.match(panelActionSource, /setTitle\(`Title: \$\{getPlainDisplayTitle/);
   assert.doesNotMatch(panelActionSource, /setTitle\('Rename Title'\)/);
   assert.match(noteTitleSource, /'NoteTitle', 'rename:prompt'/);
-  assert.match(noteTitleSource, /'NoteTitle', 'rename:done'/);
+  assert.match(noteTitleSource, /fileManager\.promptForFileRename\(file\)/);
+  assert.doesNotMatch(noteTitleSource, /TextInputModal|bulkEditService\.updateFrontmatter|'rename:done'/);
 });
 
 test('focused inline title is not rewritten during active native title editing', () => {
-  assert.match(noteTitleSource, /document\.activeElement instanceof HTMLElement && titleEl\.contains\(document\.activeElement\)/);
-  assert.match(noteTitleSource, /if \(document\.activeElement instanceof HTMLElement && titleEl\.contains\(document\.activeElement\)\) return;/);
+  assert.match(noteTitleSource, /if \(titleEl\.contains\(\(titleEl\.ownerDocument \|\| document\)\.activeElement\)\) return;/);
 });
 
-test('generated Untitled frontmatter title can be cleared with Backspace', () => {
-  assert.match(noteTitleSource, /handleInlineTitleKeydown\(event: KeyboardEvent\)/);
-  assert.match(noteTitleSource, /handleInlineTitleKeyup\(event: KeyboardEvent\)/);
-  assert.match(noteTitleSource, /event\.key !== 'Backspace' && event\.key !== 'Delete'/);
-  assert.match(noteTitleSource, /document\.getSelection\(\)/);
-  assert.match(noteTitleSource, /if \(visibleTitle\) return false;/);
-  assert.match(noteTitleSource, /isGeneratedUntitledTitle\(file, visibleTitle\)/);
-  assert.match(noteTitleSource, /delete frontmatter\[key\]/);
+test('inline title activation opens one native prompt on click and has no delete writer', () => {
+  assert.match(noteTitleSource, /if \(event\.type === 'click'\) void this\.promptRenameTitle\(file\)/);
+  assert.doesNotMatch(noteTitleSource, /lastInlineTitlePromptAt|handleInlineTitleKeydown|handleInlineTitleKeyup|clearGeneratedTitle/);
 });
 
 test('title icons are not rendered in strict source mode', () => {

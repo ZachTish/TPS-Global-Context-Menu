@@ -4037,7 +4037,8 @@ export class NativeRecordService {
     return String(id || '').trim().toLocaleLowerCase();
   }
 
-  private isInternalIdentityWrite(path: string): boolean {
+  /** Read-only ownership check for the existing synchronous committed-rename handler. */
+  isInternalIdentityWrite(path: string): boolean {
     return (this.internalIdentityWritesByPath.get(normalizePath(path)) || 0) > 0;
   }
 
