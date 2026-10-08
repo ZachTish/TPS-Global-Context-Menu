@@ -190,7 +190,9 @@ export function registerGcmCommands(plugin: TPSGlobalContextMenuPlugin): void {
         id: 'time-tracking-start-active-target',
         name: 'Time tracking: Start work session for current task or note',
         callback: async () => {
-            const target = await plugin.timeTrackingService.resolveActiveTarget();
+            const target = plugin.usesNativeRecordArchitecture()
+                ? { file: plugin.app.workspace.getActiveFile() ?? undefined, type: 'note' as const }
+                : await plugin.timeTrackingService.resolveActiveTarget();
             await plugin.timeTrackingService.startTimer(target ?? undefined);
         },
     });

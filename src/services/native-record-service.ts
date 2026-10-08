@@ -27,6 +27,7 @@ import { joinContent, splitContent } from '../utils/task-block-move';
 import { parseTaskLine, readInlineFieldValue } from '../utils/task-line-metadata';
 import {
   canAutomaticallyMutatePathWithExclusions,
+  canAutomaticallyMutateTemplateFrontmatter,
   canAutomaticallyMutateTemplateFile,
   canAutomaticallyMutateTemplateSource,
 } from '../utils/template-protection';
@@ -194,6 +195,13 @@ export interface TpsNativeRecordSnapshot {
   records: TpsNativeRecordHandle[];
   /** Present only when explicitly requested; these notes are never writable through this snapshot. */
   conflicts?: Array<{ path: string; ids: string[]; kinds: string[]; frontmatter: Record<string, unknown> | null }>;
+}
+
+/** Read-only metadata projection. It carries no source-authority or mutation token. */
+export interface TpsNativeRecordIndexedSnapshot {
+  ready: boolean;
+  records: TpsNativeRecordHandle[];
+  conflicts?: TpsNativeRecordSnapshot['conflicts'];
 }
 
 
@@ -1104,6 +1112,7 @@ export function isNativeRecordEnvelope(value: unknown): value is TpsNativeRecord
 export class NativeRecordService {
   readonly version = 6;
   private setupPromise: Promise<boolean> | null = null;
+  private initialDiscoveryReady = false;
   private initialDiscovery: {
     started: boolean;
     queue: Set<string>;
@@ -1112,6 +1121,9 @@ export class NativeRecordService {
     fail: (error: unknown) => void;
   } | null = null;
   private disposed = false;
+  private indexedMetadataReady = false;
+  // Display readiness is distinct from authoritative source verification.
+  private readonly pendingIndexedMetadataPaths = new Set<string>();
   // Tokens own awaited rename reads only; no source data is retained here.
   private readonly pendingRenameReads = new WeakMap<TFile, symbol>();
   private readonly newlyCreatedFiles = new WeakSet<TFile>();
@@ -1163,12 +1175,21 @@ export class NativeRecordService {
     if (this.setupPromise) return this.setupPromise;
     let complete!: (ready: boolean) => void;
     let fail!: (error: unknown) => void;
-    this.setupPromise = new Promise<boolean>((resolve, reject) => { complete = resolve; fail = reject; });
+    this.setupPromise = new Promise<boolean>((resolve, reject) => {
+      complete = ready => { this.initialDiscoveryReady = ready; resolve(ready); };
+      fail = error => { this.initialDiscoveryReady = false; reject(error); };
+    });
     // Direct test/service callers need not await an empty startup. An owning
     // onload still receives the original rejection rather than a retry.
     void this.setupPromise.catch(() => undefined);
     const discovery = { started: false, queue: new Set<string>(), sourceFiles: new Set<TFile>(), complete, fail };
     this.initialDiscovery = discovery;
+    this.indexedMetadataReady = (this.plugin.app.metadataCache as unknown as { initialized?: boolean }).initialized === true;
+    this.plugin.registerEvent(this.plugin.app.metadataCache.on('resolved', () => {
+      if (this.disposed || (!this.initialDiscovery && !this.initialDiscoveryReady)) return;
+      this.indexedMetadataReady = true;
+      this.reconcileIndexedMetadataPaths();
+    }));
     this.plugin.registerEvent(this.plugin.app.metadataCache.on('changed', (file, _data, cache) => {
       if (this.disposed || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
       if (this.initialDiscovery && !this.initialDiscovery.started) {
@@ -1193,6 +1214,10 @@ export class NativeRecordService {
       if (this.disposed || !(file instanceof TFile)
         || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
       this.invalidateAuthoritativeSources([file.path]);
+      if (file.extension === 'md') {
+        this.pendingIndexedMetadataPaths.add(file.path);
+        this.indexedMetadataReady = false;
+      }
       if (!this.isInternalIdentityWrite(file.path)) this.identitySourceGeneration += 1;
       if (this.initialDiscovery && !this.initialDiscovery.started) return;
       this.indexFile(file);
@@ -1205,6 +1230,10 @@ export class NativeRecordService {
       if (this.disposed || !(file instanceof TFile)
         || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
       this.pendingRenameReads.delete(file);
+      if (file.extension === 'md') {
+        this.pendingIndexedMetadataPaths.add(file.path);
+        this.indexedMetadataReady = false;
+      }
       if (file instanceof TFile) this.invalidateAuthoritativeSources([file.path]);
       if (file instanceof TFile && !this.isInternalIdentityWrite(file.path)) {
         this.identitySourceGeneration += 1;
@@ -1216,6 +1245,7 @@ export class NativeRecordService {
       if (current instanceof TFile && current !== file) return;
       this.pendingRenameReads.delete(file);
       this.initialDiscovery?.queue.delete(file.path);
+      this.pendingIndexedMetadataPaths.delete(file.path);
       this.invalidateAuthoritativeSources([file.path]);
       if (!this.isInternalIdentityWrite(file.path)) this.identitySourceGeneration += 1;
       this.removePath(file.path);
@@ -1225,6 +1255,11 @@ export class NativeRecordService {
         || this.plugin.app.vault.getAbstractFileByPath(file.path) !== file) return;
       this.pendingRenameReads.delete(file);
       this.initialDiscovery?.queue.delete(oldPath);
+      this.pendingIndexedMetadataPaths.delete(oldPath);
+      if (file.extension === 'md' || oldPath.toLocaleLowerCase().endsWith('.md')) {
+        this.pendingIndexedMetadataPaths.add(file.path);
+        this.indexedMetadataReady = false;
+      }
       this.invalidateAuthoritativeSources([oldPath, file.path]);
       if (
         file instanceof TFile
@@ -1242,6 +1277,7 @@ export class NativeRecordService {
       discovery.started = true;
       void this.discoverInitialIndex(discovery).catch(error => {
         if (this.initialDiscovery === discovery) this.initialDiscovery = null;
+        this.indexedMetadataReady = false;
         discovery.fail(error);
         logger.flowError('NativeRecords', 'index:startup-failed', error);
       });
@@ -1263,6 +1299,7 @@ export class NativeRecordService {
     const discovery = this.initialDiscovery;
     this.initialDiscovery = null;
     discovery?.complete(false);
+    this.pendingIndexedMetadataPaths.clear();
   }
 
   isEnabled(): boolean {
@@ -1585,6 +1622,7 @@ export class NativeRecordService {
         body,
         frontmatter: persistedFrontmatter,
       });
+      if (commitGuard && !commitGuard()) throw new Error('Standalone task checkbox mapping changed before record creation.');
       const file = await this.withInternalIdentityWrite([path], () => (
         this.plugin.app.vault.create(path, content)
       ), internalPlanKey);
@@ -1604,6 +1642,7 @@ export class NativeRecordService {
     fileName: string,
     cause?: FilePropertiesMutationCause,
     internalPlanKey?: symbol,
+    commitGuard?: () => boolean,
   ): Promise<TpsNativeRecordHandle | null> {
     if (this.plugin.propertyMigrationService?.active || (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock)) return null;
     this.assertEnabled();
@@ -1620,6 +1659,7 @@ export class NativeRecordService {
     record = confirmed;
     if (!this.hasUniquePathOwnership(record.id, oldPath)) return null;
     if (this.plugin.app.vault.getFileByPath(oldPath) !== record.file) return null;
+    if (commitGuard && !commitGuard()) return null;
     await this.withInternalIdentityWrite([oldPath, nextPath], () => (
       this.plugin.app.fileManager.renameFile(record.file, nextPath)
     ), internalPlanKey);
@@ -1782,19 +1822,54 @@ export class NativeRecordService {
     updates: Record<string, unknown>,
     cause: FilePropertiesMutationCause = { kind: 'user' },
     internalPlanKey?: symbol,
+    commitGuard?: () => boolean,
+  ): Promise<TpsNativeRecordHandle | null> {
+    if (!this.isUpdatePayloadShapeSafe(updates)) return null;
+    return this.updateUsingCurrentSource(reference, Object.keys(updates), () => updates, cause, internalPlanKey, false, commitGuard);
+  }
+
+  /** Computes declared business fields inside the existing source authority owner. */
+  async updateFromSource(
+    reference: NativeRecordReference,
+    propertyKeys: readonly string[],
+    compute: (current: Readonly<Record<string, unknown>>) => Record<string, unknown> | null,
+    cause: FilePropertiesMutationCause = { kind: 'user' },
+  ): Promise<TpsNativeRecordHandle | null> {
+    if (!Array.isArray(propertyKeys) || !propertyKeys.length || typeof compute !== 'function'
+      || compute.constructor?.name === 'AsyncFunction'
+      || propertyKeys.some(key => typeof key !== 'string' || !key.trim())
+      || new Set(propertyKeys.map(key => key.trim().toLocaleLowerCase())).size !== propertyKeys.length) return null;
+    return this.updateUsingCurrentSource(reference, propertyKeys, compute, cause, undefined, true);
+  }
+
+  private async updateUsingCurrentSource(
+    reference: NativeRecordReference,
+    propertyKeys: readonly string[],
+    compute: (current: Readonly<Record<string, unknown>>) => Record<string, unknown> | null,
+    cause: FilePropertiesMutationCause,
+    internalPlanKey?: symbol,
+    computed = false,
+    commitGuard?: () => boolean,
   ): Promise<TpsNativeRecordHandle | null> {
     if (this.plugin.propertyMigrationService?.active || (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock)) return null;
     this.assertValidStorageProfile();
-    if (!this.isUpdatePayloadShapeSafe(updates)) return null;
     const record = await (internalPlanKey ? this.resolveIdentity(reference) : this.resolve(reference));
     if (!record) return null;
+    const configuration = this.getInspectionProfiles();
+    const sourceGeneration = this.identitySourceGeneration;
     const writeProfile = this.getStorageProfile(record.kind);
     const readableProfiles = this.getIdentityEvidenceProfiles();
+    const declaredKeys = new Set(propertyKeys.map(key => key.trim().toLocaleLowerCase()));
+    const protectedKeys = new Set([...CANONICAL_ENVELOPE_KEYS, 'tags',
+      ...storageKeys(writeProfile), ...readableProfiles.flatMap(storageKeys)].map(key => key.toLocaleLowerCase()));
+    protectedKeys.delete('title'); // The existing canonical title action maps to the configured title key.
+    if (computed && [...declaredKeys].some(key => protectedKeys.has(key))) return null;
+    if (computed && cause.kind === 'automation' && !canAutomaticallyMutatePathWithExclusions(record.file, this.plugin.settings)) return null;
     const ownedKeys = this.uniquePropertyKeys([
       ...storageKeys(writeProfile),
       ...readableProfiles.flatMap(storageKeys),
       'tags',
-      ...Object.keys(updates || {}),
+      ...propertyKeys,
     ]);
     let nextEnvelope: TpsNativeRecordEnvelope | null = null;
     let persistedFrontmatter: Record<string, unknown> | null = null;
@@ -1804,7 +1879,12 @@ export class NativeRecordService {
         record.file,
         ownedKeys,
         (frontmatter) => {
+        if (commitGuard && !commitGuard()) return;
         if (record.file.path !== record.path || this.plugin.app.vault.getFileByPath(record.path) !== record.file) return;
+        if (computed && (this.disposed || !this.isEnabled() || this.plugin.propertyMigrationService?.active
+          || this.identitySourceGeneration !== sourceGeneration || this.getInspectionProfiles() !== configuration
+          || (cause.kind === 'automation' && (!canAutomaticallyMutatePathWithExclusions(record.file, this.plugin.settings)
+            || !canAutomaticallyMutateTemplateFrontmatter(frontmatter, this.plugin.settings))))) return;
         // MetadataCache can lag a preceding source-preserving mutation (for
         // example, reidentify followed immediately by cleanup). Reindex the
         // authoritative Vault.process frontmatter before checking ownership.
@@ -1814,6 +1894,26 @@ export class NativeRecordService {
         if (!matchSet || !inspection || inspection.id !== record.id || inspection.kind !== record.kind) return;
         if (!this.hasUniquePathOwnership(inspection.id, record.path)) return;
         const canonical = { ...inspection.frontmatter };
+        const updates = compute(computed ? JSON.parse(JSON.stringify(canonical)) : canonical);
+        if (computed) {
+          if (!updates || typeof (updates as unknown as { then?: unknown }).then === 'function'
+            || (Object.getPrototypeOf(updates) !== Object.prototype && Object.getPrototypeOf(updates) !== null)
+            || !this.isUpdatePayloadShapeSafe(updates)
+            || Object.keys(updates).some(key => !declaredKeys.has(key.trim().toLocaleLowerCase()))) return;
+          const hasChange = Object.entries(updates).some(([key, value]) => {
+            const currentKey = findKeyCaseInsensitive(canonical, key);
+            if (key.trim().toLocaleLowerCase() === 'title') return value != null
+              && String(value).replace(/\s+/gu, ' ').trim() !== String(currentKey ? canonical[currentKey] : '');
+            return value == null ? currentKey != null
+              : currentKey == null || JSON.stringify(canonical[currentKey]) !== JSON.stringify(value);
+          });
+          if (!hasChange) {
+            mutationAccepted = true;
+            persistedFrontmatter = frontmatter;
+            nextEnvelope = inspection.frontmatter;
+            return;
+          }
+        }
         const keysToSynchronize: string[] = [
           writeProfile.identityPropertyKey,
           writeProfile.schemaPropertyKey,
@@ -1929,6 +2029,8 @@ export class NativeRecordService {
           writeProfile,
         );
         if (!persistedMatch) return;
+        if (computed && (!this.isEnabled() || this.identitySourceGeneration !== sourceGeneration
+          || this.getInspectionProfiles() !== configuration)) return;
         for (const ownedKey of synchronizedKeys) {
           const candidateKey = findKeyCaseInsensitive(candidateFrontmatter, ownedKey);
           if (!candidateKey) {
@@ -1946,7 +2048,8 @@ export class NativeRecordService {
         })
     ), internalPlanKey);
     if (!mutationAccepted) return null;
-    if (!changed || !nextEnvelope || !persistedFrontmatter) return this.resolve(record.file);
+    if (!changed || !nextEnvelope || !persistedFrontmatter) return computed && nextEnvelope
+      ? this.toHandle(record.file, nextEnvelope) : this.resolve(record.file);
     this.indexFile(record.file, persistedFrontmatter);
     this.plugin.entityIndexService?.upsertFile(record.file, nextEnvelope);
     this.notify([record.file.path], cause, 'native-record-update');
@@ -1979,6 +2082,23 @@ export class NativeRecordService {
     return (await this.snapshot(kind)).records;
   }
 
+  /** Metadata-only display projection; never authorizes an identity or mutation. */
+  indexedSnapshot(kind?: TpsNativeRecordKind, options?: { includeConflicts?: boolean }): TpsNativeRecordIndexedSnapshot {
+    if ((this.plugin.app.metadataCache as unknown as { initialized?: boolean }).initialized === false) {
+      this.indexedMetadataReady = false;
+    }
+    if (this.disposed || !this.initialDiscoveryReady || this.initialDiscovery || !this.indexedMetadataReady
+      || this.pendingIndexedMetadataPaths.size || this.authoritativeIdentityRefresh || this.activeNativeWrites
+      || !this.isEnabled() || validateNativeRecordStorageProfile(this.getStorageProfile()).length > 0
+      || (kind != null && !isValidNativeRecordKind(kind))) return { ready: false, records: [] };
+    return { ready: true, ...this.projectIndexedRecords(kind, options, path => {
+      const source = this.authoritativeSourceCache.get(path);
+      if (source) return source.frontmatter;
+      const file = this.plugin.app.vault.getFileByPath(path);
+      return file instanceof TFile ? this.plugin.app.metadataCache.getFileCache(file)?.frontmatter || null : null;
+    }) };
+  }
+
   /**
    * Returns the authoritative record list with a short-lived generation token.
    * A caller can bind a later identity-plan preflight to this exact discovery
@@ -1998,6 +2118,15 @@ export class NativeRecordService {
       await this.refreshIdentityIndexFromVaultSource();
       if (snapshotRevision === this.nativeMutationRevision) break;
     }
+    return { token: this.identitySourceGeneration, revision: snapshotRevision,
+      ...this.projectIndexedRecords(kind, options, path => this.authoritativeSourceCache.get(path)?.frontmatter || null) };
+  }
+
+  private projectIndexedRecords(
+    kind: TpsNativeRecordKind | undefined,
+    options: { includeConflicts?: boolean } | undefined,
+    readConflictFrontmatter: (path: string) => Record<string, unknown> | null,
+  ): Pick<TpsNativeRecordSnapshot, 'records' | 'conflicts'> {
     const conflictPaths = new Set(this.blockedIdentityEvidencePaths);
     for (const [id, paths] of this.pathsById) {
       if (paths.size !== 1 || this.blockedPathsById.has(id)) {
@@ -2008,10 +2137,10 @@ export class NativeRecordService {
       throw new Error('TPS native-record identity conflicts must be resolved before records can be listed.');
     }
     const records: TpsNativeRecordHandle[] = [];
-    for (const [path, frontmatter] of [...this.recordsByPath.entries()].sort(([left], [right]) => (
+    const entries = [...this.recordsByPath.entries()];
+    for (const [path, frontmatter] of (kind ? entries.filter(([, value]) => nativeRecordStructuralKind(value) === kind) : entries).sort(([left], [right]) => (
       left.localeCompare(right)
     ))) {
-      if (kind && nativeRecordStructuralKind(frontmatter) !== kind) continue;
       if (!this.hasUniquePathOwnership(frontmatter.tpsId, path)) continue;
       const file = this.plugin.app.vault.getFileByPath(path);
       if (file instanceof TFile) records.push(this.toHandle(file, frontmatter));
@@ -2036,7 +2165,7 @@ export class NativeRecordService {
         const profiles = this.getInspectionProfiles();
         const kindKeys = new Set(['kind', ...profiles.evidence.map(profile => profile.kindPropertyKey), ...Object.values(profiles.kindKeys)]);
         conflicts = [...conflictPaths].sort().map(path => {
-          const raw = this.authoritativeSourceCache.get(path)?.frontmatter || null;
+          const raw = readConflictFrontmatter(path);
           const kinds = raw ? [...kindKeys].flatMap(key => readValuesCaseInsensitive(raw, key))
             .flatMap(value => Array.isArray(value) ? value : [value])
             .filter((value): value is string => typeof value === 'string') : [];
@@ -2044,7 +2173,23 @@ export class NativeRecordService {
         });
       }
     }
-    return { token: this.identitySourceGeneration, revision: snapshotRevision, records, ...(conflicts ? { conflicts } : {}) };
+    return { records, ...(conflicts ? { conflicts } : {}) };
+  }
+
+  private reconcileIndexedMetadataPaths(): void {
+    if (this.disposed || !this.indexedMetadataReady || this.initialDiscovery || this.authoritativeIdentityRefresh) return;
+    const profiles = this.getInspectionProfiles();
+    for (const path of this.pendingIndexedMetadataPaths) {
+      const file = this.plugin.app.vault.getFileByPath(path);
+      // Do not replace source-verified identities with a delayed metadata event.
+      if (this.authoritativeIdentityGeneration !== this.identitySourceGeneration) {
+        if (file instanceof TFile) this.indexFile(file, undefined, undefined, profiles);
+        else this.removePath(path);
+      }
+      this.pendingIndexedMetadataPaths.delete(path);
+    }
+    // Intentionally retain authoritative dirty paths, source envelopes and
+    // source generation: resolved metadata is display readiness, not authority.
   }
 
   /**
@@ -2202,11 +2347,17 @@ export class NativeRecordService {
     plannedBatch: TpsNativeRecordIdentityPlan,
     entries: readonly TpsNativeRecordIdentityPlanEntry[],
     cause: FilePropertiesMutationCause = { kind: 'automation' },
+    options: { isCurrent?: () => boolean } = {},
   ): Promise<TpsNativeRecordIdentityApplyResult> {
     await this.waitForInitialIndex();
     const failed = (handles: TpsNativeRecordHandle[], failedIndex: number | null, error: string) => ({
       ok: false, handles, failedIndex, error,
     });
+    const assertCurrent = () => {
+      if (this.disposed || options.isCurrent?.() === false) throw new Error('native-identity-apply-interrupted');
+      return true;
+    };
+    if (options.isCurrent?.() === false) return failed([], null, 'native-identity-apply-interrupted');
     if (this.nativePlanMutationLock) return failed([], null, 'native-mutation-locked');
     if (
       !plannedBatch
@@ -2215,6 +2366,7 @@ export class NativeRecordService {
       || plannedBatch.revision !== this.nativeMutationRevision
     ) return failed([], null, 'stale-plan');
     await this.waitForNativeWriteDrain();
+    if (options.isCurrent?.() === false) return failed([], null, 'native-identity-apply-interrupted');
     if (
       this.nativePlanMutationLock
       || plannedBatch.token !== this.identitySourceGeneration
@@ -2225,6 +2377,7 @@ export class NativeRecordService {
     const handles: TpsNativeRecordHandle[] = [];
     let currentIndex: number | null = null;
     try {
+      assertCurrent();
       const confirmed = await this.planIdentityChanges(entries, plannedBatch);
       if (
         !confirmed
@@ -2249,6 +2402,7 @@ export class NativeRecordService {
       ) return failed([], null, 'plan-revalidation-failed');
       for (let index = 0; index < entries.length; index += 1) {
         currentIndex = index;
+        assertCurrent();
         const entry = entries[index];
         const expectedPath = confirmed.entries[index]?.expectedPath || undefined;
         if (entry.operation === 'create') {
@@ -2259,20 +2413,22 @@ export class NativeRecordService {
             planToken: plannedBatch.token,
             cause,
             body: entry.body,
-          }, undefined, key));
+          }, assertCurrent, key));
           continue;
         }
         let handle = await this.reidentify(entry.reference, entry.nextId, cause, {
           fileName: entry.fileName,
           expectedPath,
           planToken: plannedBatch.token,
-        }, key);
+        }, key, assertCurrent);
         if (!handle) return failed(handles, index, 'reidentify-failed');
-        for (const updates of entry.updates) {
-          handle = await this.update(handle.file, updates, cause, key);
-          if (!handle) return failed(handles, index, 'update-failed');
-        }
         handles.push(handle);
+        for (const updates of entry.updates) {
+          assertCurrent();
+          handle = await this.update(handle.file, updates, cause, key, assertCurrent);
+          if (!handle) return failed(handles, index, 'update-failed');
+          handles[handles.length - 1] = handle;
+        }
       }
       return { ok: true, handles, failedIndex: null };
     } catch (error) {
@@ -2615,6 +2771,7 @@ export class NativeRecordService {
     cause: FilePropertiesMutationCause = { kind: 'automation' },
     options: TpsNativeRecordReidentifyOptions = {},
     internalPlanKey?: symbol,
+    commitGuard?: () => boolean,
   ): Promise<TpsNativeRecordHandle | null> {
     if (this.plugin.propertyMigrationService?.active || (this.nativePlanMutationLock && internalPlanKey !== this.nativePlanMutationLock)) return null;
     this.assertEnabled();
@@ -2652,7 +2809,7 @@ export class NativeRecordService {
     }
     if (record.id === nextId) {
       if (plannedPath === record.path) return record;
-      return this.rename(record.file, options.fileName!, cause, internalPlanKey);
+      return this.rename(record.file, options.fileName!, cause, internalPlanKey, commitGuard);
     }
 
     const writeProfile = this.getStorageProfile(record.kind);
@@ -2703,6 +2860,7 @@ export class NativeRecordService {
           record.file,
           ownedKeys,
           (frontmatter) => {
+          if (commitGuard && !commitGuard()) return;
           // MetadataCache may lag the authoritative Vault.process content. Index
           // that exact content before repeating both sides of the ownership CAS.
           this.indexFile(record.file, frontmatter);
@@ -3372,7 +3530,9 @@ export class NativeRecordService {
       }
       const markdownFiles = vault.getMarkdownFiles();
       this.clearIdentityIndex();
-      for (const file of markdownFiles) this.indexFile(file);
+      const profiles = this.getInspectionProfiles();
+      for (const file of markdownFiles) this.indexFile(file, undefined, undefined, profiles);
+      this.reconcileIndexedMetadataPaths();
       logger.flow('NativeRecords', 'index:rebuilt', {
         files: markdownFiles.length,
         records: this.recordsByPath.size,
@@ -3396,19 +3556,22 @@ export class NativeRecordService {
     const files = typeof vault.getMarkdownFiles === 'function' ? vault.getMarkdownFiles() : [];
     for (const file of files) discovery.queue.add(file.path);
     let sliceStart = performance.now(), sliceFiles = 0;
+    let profiles = this.getInspectionProfiles();
     for (const path of discovery.queue) {
       if (this.disposed || this.initialDiscovery !== discovery) return;
       discovery.queue.delete(path);
       const file = vault.getAbstractFileByPath(path);
-      if (file instanceof TFile && !discovery.sourceFiles.has(file)) this.indexFile(file, undefined, discovery);
+      if (file instanceof TFile && !discovery.sourceFiles.has(file)) this.indexFile(file, undefined, discovery, profiles);
       if ((++sliceFiles >= 256 || performance.now() - sliceStart >= 8) && discovery.queue.size) {
         await this.yieldInitialDiscovery();
         sliceStart = performance.now();
         sliceFiles = 0;
+        profiles = this.getInspectionProfiles();
       }
     }
     if (this.disposed || this.initialDiscovery !== discovery) return;
     this.initialDiscovery = null;
+    this.reconcileIndexedMetadataPaths();
     logger.flow('NativeRecords', 'index:rebuilt', {
       files: files.length,
       records: this.recordsByPath.size,
@@ -3601,16 +3764,17 @@ export class NativeRecordService {
           if (!isCurrent()) continue refresh;
           if (!paths.has(path)) this.removePath(path);
         }
+        let profiles = this.getInspectionProfiles();
         for (const { file, path, frontmatter } of snapshot) {
           const task = checkpoint();
-          if (task) await task;
+          if (task) { await task; profiles = this.getInspectionProfiles(); }
           if (!isCurrent() || !ownsFile(file, path)) continue refresh;
           if (!this.authoritativeIndexDirtyPaths.has(path)) continue;
           if (!frontmatter) {
             this.removePath(path);
             continue;
           }
-          this.indexFile(file, frontmatter);
+          this.indexFile(file, frontmatter, undefined, profiles);
           if (!isCurrent() || !ownsFile(file, path)) continue refresh;
           if (!this.idsByPath.has(path) && !this.blockedIdentityEvidencePaths.has(path)) {
             // Remember verified non-records without repeatedly classifying their
@@ -3624,6 +3788,8 @@ export class NativeRecordService {
         if (!isCurrent() || interrupted) continue;
         this.authoritativeIndexDirtyPaths.clear();
         this.authoritativeIdentityGeneration = generation;
+        this.pendingIndexedMetadataPaths.clear();
+        this.indexedMetadataReady = true;
       }
     } finally {
       logger.perf('native-records:identity-refresh', {
@@ -3666,6 +3832,7 @@ export class NativeRecordService {
     file: TFile,
     frontmatter?: Record<string, unknown> | null,
     discovery?: NativeRecordService['initialDiscovery'],
+    preparedProfiles?: NonNullable<NativeRecordService['inspectionProfiles']>,
   ): void {
     if (this.disposed) return;
     this.pendingRenameReads.delete(file);
@@ -3674,7 +3841,7 @@ export class NativeRecordService {
     const resolved = frontmatter ?? this.plugin.app.metadataCache.getFileCache(file)?.frontmatter;
     let inspection: TpsNativeRecordInspection | null = null;
     if (resolved) {
-      const profiles = this.getInspectionProfiles();
+      const profiles = preparedProfiles || this.getInspectionProfiles();
       // One synchronous file index owns evidence and the final classification.
       // The next file/event still checks current settings and current metadata.
       const inspectProfile = createProfileInspector(resolved);

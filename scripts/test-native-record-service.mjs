@@ -225,6 +225,242 @@ const filePropertiesSource = readFileSync(new URL('../src/services/file-properti
 const fileNamingSource = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
 const apiSource = readFileSync(new URL('../src/plugin-api.ts', import.meta.url), 'utf8');
 
+test('indexed snapshots are synchronous display projections with zero inventory or body reads', async () => {
+  const h = createHarness('native-records', { deferSetup: true });
+  const task = h.addFile('Task.md', '---\ntpsId: one\nkind: task\ntitle: One\n---\nBody');
+  assert.deepEqual(h.service.indexedSnapshot(), { ready: false, records: [] });
+  await h.service.setup();
+  assert.equal(h.service.indexedSnapshot().ready, false, 'initial discovery alone is not metadata completion');
+  h.plugin.app.metadataCache.emit('resolved');
+  const counts = { inventory: 0, reads: 0, writes: 0 };
+  for (const [method, key] of [['getMarkdownFiles', 'inventory'], ['read', 'reads'], ['cachedRead', 'reads'], ['process', 'writes']]) {
+    const original = h.vault[method];
+    h.vault[method] = (...args) => { counts[key]++; return original(...args); };
+  }
+  for (let i = 0; i < 100; i++) {
+    const result = h.service.indexedSnapshot('task', { includeConflicts: true });
+    assert.equal(result.ready, true); assert.equal(result.records[0].file, task);
+    assert.equal(result.records[0].id, 'one'); assert.deepEqual(result.conflicts, []);
+    assert.equal('token' in result, false); assert.equal('revision' in result, false);
+  }
+  assert.deepEqual(counts, { inventory: 0, reads: 0, writes: 0 });
+  h.service.dispose(); assert.equal(h.service.indexedSnapshot().ready, false);
+});
+
+test('metadata resolution restores display readiness without weakening later source authority or ID reservation', async () => {
+  const h = createHarness('native-records', { deferSetup: true });
+  const file = h.addFile('Task.md', '---\ntpsId: old\nkind: task\ntitle: Old\n---\nBody');
+  await h.service.setup(); h.plugin.app.metadataCache.emit('resolved');
+  await h.service.snapshot();
+  const next = '---\ntpsId: new\nkind: task\ntitle: New\n---\nBody';
+  h.contents.set(file, next); h.vault.emit('modify', file);
+  const generation = h.service.identitySourceGeneration;
+  assert.equal(h.service.indexedSnapshot().ready, false);
+  h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: h.metadata.get(file) });
+  assert.equal(h.service.indexedSnapshot().ready, false, 'a per-file stale changed event is not completion');
+  h.metadata.set(file, parseNativeRecordDocument(next).frontmatter);
+  h.plugin.app.metadataCache.emit('resolved');
+  assert.equal(h.service.indexedSnapshot().records[0].id, 'new');
+  assert.equal(h.service.identitySourceGeneration, generation);
+  assert.equal(h.service.authoritativeSourceCache.has(file.path), false);
+  assert.equal(h.service.authoritativeIndexDirtyPaths.has(file.path), true);
+  let reads = 0; const read = h.vault.read;
+  h.vault.read = async (...args) => { reads++; return read(...args); };
+  assert.equal(await h.service.canCreateIdentity('new'), false, 'resolved metadata cannot authorize a conflicting new ID');
+  assert.equal(reads, 1, 'the invalidated current source is still verified at reservation');
+  assert.equal((await h.service.snapshot()).records[0].id, 'new');
+  assert.equal(reads, 1, 'current source reuse remains intact');
+});
+
+test('indexed kind filtering still reports conflicts in other kinds', async () => {
+  const h = createHarness('native-records', { deferSetup: true });
+  h.addFile('Task1.md', '---\ntpsId: duplicate\nkind: task\ntitle: One\n---\n');
+  h.addFile('Task2.md', '---\ntpsId: duplicate\nkind: task\ntitle: Two\n---\n');
+  h.addFile('Calendar.md', '---\ntpsId: event\nkind: calendar-event\ntitle: Event\n---\n');
+  await h.service.setup(); h.plugin.app.metadataCache.emit('resolved');
+  const projected = h.service.indexedSnapshot('calendar-event', { includeConflicts: true });
+  assert.equal(projected.ready, true); assert.equal(projected.records.length, 1);
+  assert.deepEqual(projected.conflicts.map(conflict => conflict.path), ['Task1.md', 'Task2.md']);
+  assert.throws(() => h.service.indexedSnapshot('calendar-event'), /identity conflicts/u);
+});
+
+test('disabled retired history performs no store startup, pruning or publication wait', async () => {
+  const tasks = manualStartupTasks(); const h = startupLoad('native-records', 2);
+  h.plugin.settings.enableItemHistory = false;
+  let storeCalls = 0;
+  class UnavailableRetiredStore extends MemoryItemHistoryStore {
+    async setup() { storeCalls++; throw new Error('retired store must not open'); }
+    async clearPending() { storeCalls++; }
+    async prune() { storeCalls++; }
+  }
+  const p = coldStartupHarness(h, { historyStore: new UnavailableRetiredStore() });
+  const loaded = p.plugin.onload();
+  try {
+    await loaded; p.layout(); await tasks.drain(); await flushStartupMicrotasks();
+    assert.deepEqual(p.publications, [2]); assert.equal(storeCalls, 0);
+    assert.equal(p.plugin.itemHistoryService.activationMaintenance, null);
+  } finally { p.unload(); await tasks.drain(); tasks.restore(); }
+});
+
+test('computed native fields use atomic current source, preserve authored bytes, and update title in the same action', async () => {
+  const h = createHarness('native-records', { identityMode: 'property', schemaPropertyKey: '', modifiedPropertyKey: 'updated' });
+  const created = await h.service.create('nutrition-log', { title: 'Food', quantity: 1, calories: 100 }, { id: 'food' });
+  const source = h.contents.get(created.file).replace('quantity: 1', 'quantity: 3').replace('calories: 100', '# authored comment\ncalories: 100') + 'Authored body\n';
+  const process = h.vault.process;
+  h.vault.process = async (file, processor) => {
+    h.contents.set(file, source);
+    return process(file, processor);
+  };
+  let observedQuantity;
+  const result = await h.service.updateFromSource(created.id, ['calories', 'title'], current => {
+    observedQuantity = current.quantity;
+    return { calories: Number(current.quantity) * 100, title: 'Updated food' };
+  });
+  assert.equal(observedQuantity, 3); assert.equal(result.frontmatter.calories, 300);
+  const next = h.contents.get(created.file);
+  assert.match(next, /quantity: 3/u); assert.match(next, /# authored comment\ncalories: 300/u);
+  assert.match(next, /title: Updated food/u); assert.equal(parseNativeRecordDocument(next).body, 'Authored body\n');
+  assert.equal(result.id, 'food'); assert.equal(result.kind, 'nutrition-log');
+});
+
+test('computed no-ops and rejected callbacks preserve source and modified timestamps', async () => {
+  const h = createHarness('native-records', { identityMode: 'property', schemaPropertyKey: '', modifiedPropertyKey: 'updated' });
+  const created = await h.service.create('nutrition-log', { title: 'Food', calories: 100 }, { id: 'food' });
+  const before = h.contents.get(created.file); let events = h.events.length;
+  assert.equal((await h.service.updateFromSource(created.id, ['calories'], current => ({ calories: current.calories }))).id, 'food');
+  assert.equal(h.contents.get(created.file), before); assert.equal(h.events.length, events);
+  for (const [keys, compute] of [
+    [['calories'], () => null], [['calories'], () => ({ protein: 10 })],
+    [['tpsId'], () => ({ tpsId: 'other' })], [['kind'], () => ({ kind: 'task' })],
+    [['modifiedDate'], () => ({ modifiedDate: 'later' })], [['tags'], () => ({ tags: ['changed'] })],
+    [['calories'], async () => ({ calories: 300 })], [['calories'], () => Promise.resolve({ calories: 300 })],
+  ]) {
+    assert.equal(await h.service.updateFromSource(created.id, keys, compute), null);
+    assert.equal(h.contents.get(created.file), before); assert.equal(h.events.length, events);
+  }
+});
+
+test('computed fields reject stale mappings, concurrent identity arrivals, and current-source exclusions', async () => {
+  for (const change of ['mapping', 'identity', 'excluded-tag', 'excluded-path', 'excluded-template', 'unsafe-tag']) {
+    const h = createHarness();
+    const record = await h.service.create('nutrition-log', { title: 'Food', calories: 100 }, { id: 'food' });
+    const before = h.contents.get(record.file); const process = h.vault.process; let computations = 0;
+    h.vault.process = async (file, processor) => {
+      if (change === 'mapping') h.plugin.settings.nativeRecordTitlePropertyKey = 'newTitle';
+      if (change === 'identity') {
+        const duplicate = h.addFile('Duplicate.md', before); h.vault.emit('create', duplicate);
+      }
+      if (change === 'excluded-tag') {
+        h.plugin.settings.frontmatterAutoWriteExclusions = 'tag:protected';
+        h.contents.set(file, before.replace('\n---\n', '\ntags:\n  - protected\n---\n'));
+      }
+      if (change === 'excluded-path') h.plugin.settings.frontmatterAutoWriteExclusions = file.path;
+      if (change === 'excluded-template') {
+        h.plugin.settings.frontmatterAutoWriteExclusions = 'tag:custom-blueprint';
+        h.plugin.settings.templateIdentificationTag = 'custom-blueprint';
+        h.contents.set(file, before.replace('\n---\n', '\ntags:\n  - custom-blueprint\n---\n'));
+      }
+      if (change === 'unsafe-tag') {
+        h.plugin.settings.frontmatterAutoWriteExclusions = 'tag:custom-blueprint';
+        h.contents.set(file, before.replace('\n---\n', '\ntags: 42\n---\n'));
+      }
+      return process(file, processor);
+    };
+    assert.equal(await h.service.updateFromSource(record.id, ['calories'], () => {
+      computations++; return { calories: 300 };
+    }, { kind: 'automation' }), null);
+    assert.equal(computations, 0, change);
+    assert.equal(parseNativeRecordDocument(h.contents.get(record.file)).frontmatter.calories, 100, change);
+  }
+});
+
+test('computed automation rejects configured path exclusion before entering the serialized writer', async () => {
+  const h = createHarness(); const record = await h.service.create('nutrition-log', { title: 'Food', calories: 100 }, { id: 'food' });
+  await h.service.snapshot(); h.plugin.settings.frontmatterAutoWriteExclusions = record.path;
+  let writes = 0, computations = 0; const process = h.vault.process;
+  h.vault.process = (...args) => { writes++; return process(...args); };
+  assert.equal(await h.service.updateFromSource(record.id, ['calories'], () => { computations++; return { calories: 200 }; }, { kind: 'automation' }), null);
+  assert.equal(writes, 0); assert.equal(computations, 0);
+  assert.equal(parseNativeRecordDocument(h.contents.get(record.file)).frontmatter.calories, 100);
+});
+
+test('twenty computed nutrition writes retain one existing authority index instead of rescanning the vault', async () => {
+  const h = createHarness(); const records = [];
+  for (let i = 0; i < 20; i++) records.push(await h.service.create('nutrition-log', { title: `Food ${i}`, calories: 100 }, { id: `food-${i}` }));
+  await h.service.snapshot(); let inventories = 0, reads = 0, cachedReads = 0, processes = 0;
+  const inventory = h.vault.getMarkdownFiles, read = h.vault.read, cachedRead = h.vault.cachedRead, process = h.vault.process;
+  h.vault.getMarkdownFiles = () => { inventories++; return inventory(); };
+  h.vault.read = (...args) => { reads++; return read(...args); };
+  h.vault.cachedRead = (...args) => { cachedReads++; return cachedRead(...args); };
+  h.vault.process = (...args) => { processes++; return process(...args); };
+  for (const record of records) {
+    const updated = await h.service.updateFromSource(record.id, ['calories'], current => ({ calories: Number(current.calories) + 10 }));
+    assert.equal(updated.frontmatter.calories, 110);
+  }
+  assert.deepEqual({ inventories, reads, cachedReads, processes }, { inventories: 0, reads: 0, cachedReads: 0, processes: 20 },
+    'warm ID handles use the existing identity index; each writer computes against its selected atomic current source');
+});
+
+test('computed selected-path edits read only their selected source and preserve custom kind and business property names', async () => {
+  const h = createHarness('native-records', { kindPropertyKey: 'recordType', titlePropertyKey: 'name' });
+  const records = [];
+  for (let i = 0; i < 20; i++) records.push(await h.service.create('nutrition-log', { title: `Food ${i}`, energy: 100 }, { id: `food-${i}` }));
+  await h.service.snapshot(); let inventories = 0, reads = 0, cachedReads = 0, processes = 0;
+  const inventory = h.vault.getMarkdownFiles, read = h.vault.read, cachedRead = h.vault.cachedRead, process = h.vault.process;
+  h.vault.getMarkdownFiles = () => { inventories++; return inventory(); };
+  h.vault.read = (...args) => { reads++; return read(...args); };
+  h.vault.cachedRead = (...args) => { cachedReads++; return cachedRead(...args); };
+  h.vault.process = (...args) => { processes++; return process(...args); };
+  for (const record of records) {
+    const updated = await h.service.updateFromSource(record.path, ['energy', 'title'], current => {
+      assert.equal(current.kind, 'nutrition-log'); return { energy: Number(current.energy) + 10, title: `${current.title} edited` };
+    });
+    assert.equal(updated.frontmatter.energy, 110); assert.equal(updated.kind, 'nutrition-log');
+    const current = parseNativeRecordDocument(h.contents.get(record.file)).frontmatter;
+    assert.equal(current.recordType, 'nutrition-log'); assert.equal(current.name, `${record.frontmatter.title} edited`); assert.equal(current.title, undefined);
+  }
+  assert.deepEqual({ inventories, reads, cachedReads, processes }, { inventories: 0, reads: 20, cachedReads: 0, processes: 20 },
+    'selected paths require selected fresh reads only; no global authority scan is repeated');
+});
+
+test('identity batch interruption retains the committed prefix and never starts the next creation', async () => {
+  const h = createHarness(); let current = true;
+  const entries = [0, 1].map(i => ({ operation: 'create', nextId: `new-${i}`, kind: 'task', properties: { title: `New ${i}` } }));
+  const plan = await h.service.planIdentityChanges(entries, await h.service.snapshot());
+  const create = h.vault.create; let creates = 0;
+  h.vault.create = async (...args) => { creates++; const file = await create(...args); current = false; return file; };
+  const applied = await h.service.applyIdentityChanges(plan, entries, { kind: 'automation' }, { isCurrent: () => current });
+  assert.equal(applied.ok, false); assert.equal(applied.failedIndex, 1);
+  assert.equal(applied.error, 'native-identity-apply-interrupted'); assert.equal(creates, 1);
+  assert.deepEqual(applied.handles.map(handle => handle.id), ['new-0']);
+  assert.ok(h.vault.getFileByPath('_records/tasks/new-0.md'));
+  assert.equal(h.vault.getFileByPath('_records/tasks/new-1.md'), null);
+});
+
+test('identity batch checks the caller owner at the queued source-write boundary', async () => {
+  const h = createHarness(); const record = await h.service.create('task', { title: 'Original' }, { id: 'old' });
+  const before = h.contents.get(record.file); let current = true;
+  const entries = [{ operation: 'reidentify', nextId: 'new', reference: record.id, updates: [{ title: 'Changed' }] }];
+  const plan = await h.service.planIdentityChanges(entries, await h.service.snapshot());
+  const process = h.vault.process;
+  h.vault.process = (file, processor) => { current = false; return process(file, processor); };
+  const applied = await h.service.applyIdentityChanges(plan, entries, { kind: 'automation' }, { isCurrent: () => current });
+  assert.equal(applied.ok, false); assert.equal(applied.error, 'native-identity-apply-interrupted');
+  assert.deepEqual(applied.handles, []); assert.equal(h.contents.get(record.file), before);
+});
+
+test('interruption after reidentification reports its committed handle and skips later business updates', async () => {
+  const h = createHarness(); const record = await h.service.create('task', { title: 'Original' }, { id: 'old' });
+  let current = true; const entries = [{ operation: 'reidentify', nextId: 'new', reference: record.id, updates: [{ title: 'Changed' }] }];
+  const plan = await h.service.planIdentityChanges(entries, await h.service.snapshot());
+  const process = h.vault.process;
+  h.vault.process = async (...args) => { const value = await process(...args); current = false; return value; };
+  const applied = await h.service.applyIdentityChanges(plan, entries, { kind: 'automation' }, { isCurrent: () => current });
+  assert.equal(applied.ok, false); assert.equal(applied.error, 'native-identity-apply-interrupted');
+  assert.equal(applied.handles[0].id, 'new'); assert.equal(applied.handles[0].frontmatter.title, 'Original');
+  assert.equal(parseNativeRecordDocument(h.contents.get(record.file)).frontmatter.tpsId, 'new');
+});
+
 function createHarness(mode = 'native-records', options = {}) {
   const entries = new Map();
   const contents = new WeakMap();
@@ -3595,7 +3831,7 @@ test('native profile is mandatory and legacy active paths remain gated', () => {
 });
 
 test('public GCM API exposes versioned generic and task record contracts', () => {
-  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true, freshIdentityCreates: true, selectedFileAuthority: true \}\)/u);
+  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true, freshIdentityCreates: true, selectedFileAuthority: true, indexedSnapshot: true, updateFromSource: true, identityApplyCancellation: true \}\)/u);
   assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
   assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 6;/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);
@@ -5618,6 +5854,8 @@ for (const failure of ['inspection', 'scheduler']) test(`initial ${failure} fail
     assert.equal(tasks.pending, 0);
     assert.equal(h.counters.inventories, 1);
     assert.equal(h.counters.reads + h.counters.writes, 0);
+    h.plugin.app.metadataCache.emit('resolved');
+    assert.deepEqual(h.service.indexedSnapshot(), { ready: false, records: [] }, 'later metadata cannot publish a partially failed discovery');
   } finally { h.service.dispose?.(); tasks.restore(); }
 });
 
@@ -5640,6 +5878,9 @@ for (const variant of ['ordinary', 'canonical', 'mapped-26']) {
     }
     const before = structuredClone(sources);
     const counters = { inventories: 0, metadata: 0, reads: 0, writes: 0, profileAccesses: 0, configurations: 0, evaluations: 0, copies: 0 };
+    let slices = 1;
+    const yieldSlice = h.service.yieldInitialDiscovery.bind(h.service);
+    h.service.yieldInitialDiscovery = async () => { slices++; await yieldSlice(); };
     const perSource = new Map();
     for (const [host, name, key] of [
       [h.vault, 'getMarkdownFiles', 'inventories'],
@@ -5668,7 +5909,8 @@ for (const variant of ['ordinary', 'canonical', 'mapped-26']) {
     assert.equal(counters.reads, 0, 'cold metadata indexing is not authoritative body verification');
     assert.equal(counters.writes, 0);
     assert.equal(counters.configurations, 1, 'the existing configuration cache stays generation-scoped');
-    assert.equal(counters.profileAccesses, sources.length, 'one current settings signature per file, not per validation pass');
+    assert.equal(counters.profileAccesses, slices, 'one current settings signature per synchronous slice');
+    assert.ok(slices < sources.length, 'slice preparation avoids per-file configuration serialization');
     assert.equal(counters.evaluations, sources.length * (variant === 'mapped-26' ? 27 : 3));
     assert.equal([...perSource.values()].every(profiles => [...profiles.values()].every(count => count === 1)), true,
       'every exact prepared profile, including a no-match, is evaluated once per file');
@@ -5688,17 +5930,18 @@ for (const variant of ['ordinary', 'canonical', 'mapped-26']) {
   });
 }
 
-test('cold setup rechecks in-place mappings between files and each later metadata event', async () => {
+test('cold setup rechecks in-place mappings between yielded slices and each later metadata event', async () => {
   const h = createHarness('native-records', { deferSetup: true });
   h.plugin.settings.nativeRecordKindPropertyKeys = { task: { tag: 'records/old' } };
   const first = h.addFile('first.md', '');
+  for (let i = 0; i < 255; i++) h.addFile(`between-${i}.md`, '');
   const second = h.addFile('second.md', '');
   h.metadata.set(first, { tpsId: 'first', title: 'First', tags: ['records/old'], status: 'open' });
   h.metadata.set(second, { tpsId: 'second', title: 'Second', tags: ['records/new'], status: 'open' });
-  const readCache = h.plugin.app.metadataCache.getFileCache;
-  h.plugin.app.metadataCache.getFileCache = file => {
-    if (file === second) h.plugin.settings.nativeRecordKindPropertyKeys.task.tag = 'records/new';
-    return readCache(file);
+  const yieldSlice = h.service.yieldInitialDiscovery.bind(h.service);
+  h.service.yieldInitialDiscovery = async () => {
+    h.plugin.settings.nativeRecordKindPropertyKeys.task.tag = 'records/new';
+    await yieldSlice();
   };
   assert.equal(await h.service.setup(), true);
   assert.equal(h.service.recordsByPath.get(first.path)?.kind, 'task');

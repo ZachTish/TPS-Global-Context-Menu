@@ -15,6 +15,7 @@ class SessionTracker {
     private plugin: TPSGlobalContextMenuPlugin;
     private cacheFilePath: string;
     private saveDebounceTimer: number | null = null;
+    private generation = 0;
 
     constructor(plugin: TPSGlobalContextMenuPlugin, durationMinutes: number = 5) {
         this.plugin = plugin;
@@ -23,14 +24,17 @@ class SessionTracker {
     }
 
     async load(): Promise<void> {
+        const generation = this.generation;
         try {
             const exists = await this.plugin.app.vault.adapter.exists(this.cacheFilePath);
+            if (generation !== this.generation) return;
             if (!exists) {
                 logger.log('[SessionTracker] No cache file found, starting fresh');
                 return;
             }
 
             const content = await this.plugin.app.vault.adapter.read(this.cacheFilePath);
+            if (generation !== this.generation) return;
             const data = JSON.parse(content);
 
             if (data.version === 1 && data.sessions) {
@@ -57,7 +61,10 @@ class SessionTracker {
             window.clearTimeout(this.saveDebounceTimer);
         }
 
+        const generation = this.generation;
         this.saveDebounceTimer = window.setTimeout(async () => {
+            this.saveDebounceTimer = null;
+            if (generation !== this.generation) return;
             try {
                 // Clean up expired entries before saving (only editedFiles to disk)
                 const now = Date.now();
@@ -79,13 +86,16 @@ class SessionTracker {
                 const nextContent = JSON.stringify(data, null, 2);
                 let currentContent = '';
                 try {
-                    if (await this.plugin.app.vault.adapter.exists(this.cacheFilePath)) {
+                    const exists = await this.plugin.app.vault.adapter.exists(this.cacheFilePath);
+                    if (generation !== this.generation) return;
+                    if (exists) {
                         currentContent = await this.plugin.app.vault.adapter.read(this.cacheFilePath);
                     }
                 } catch {
                     currentContent = '';
                 }
 
+                if (generation !== this.generation) return;
                 if (currentContent !== nextContent) {
                     await this.plugin.app.vault.adapter.write(this.cacheFilePath, nextContent);
                 }
@@ -93,8 +103,6 @@ class SessionTracker {
                 logger.log(`[SessionTracker] Saved ${Object.keys(sessions).length} sessions to cache`);
             } catch (error) {
                 logger.warn('[SessionTracker] Failed to save session cache:', error);
-            } finally {
-                this.saveDebounceTimer = null;
             }
         }, 1000); // 1 second debounce
     }
@@ -159,9 +167,11 @@ class SessionTracker {
     }
 
     clear(): void {
+        this.generation += 1;
+        if (this.saveDebounceTimer !== null) window.clearTimeout(this.saveDebounceTimer);
+        this.saveDebounceTimer = null;
         this.focusedFiles.clear();
         this.editedFiles.clear();
-        void this.save();
     }
 }
 
@@ -287,10 +297,16 @@ export class RecurrenceService {
                 // Small delay so Obsidian finishes flushing the file to disk.
                 // If the user navigates back to the template before the timeout fires
                 // (e.g. quick tab switch), cancel the prompt — they're still editing.
-                window.setTimeout(() => {
+                const timerKey = `leave:${prevPath}`;
+                const priorTimer = this.pendingModifyTimers.get(timerKey);
+                if (priorTimer !== undefined) window.clearTimeout(priorTimer);
+                const timer = window.setTimeout(() => {
+                    if (this.pendingModifyTimers.get(timerKey) !== timer) return;
+                    this.pendingModifyTimers.delete(timerKey);
                     if (this.lastActiveFilePath === templateFile.path) return;
                     void this.handleTemplateLeave(templateFile);
                 }, 600);
+                this.pendingModifyTimers.set(timerKey, timer);
             })
         );
     }

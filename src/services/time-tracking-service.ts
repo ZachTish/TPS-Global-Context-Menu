@@ -1,6 +1,6 @@
 import { MarkdownView, Notice, TFile, normalizePath, parseYaml } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
-import { deleteValueCaseInsensitive, findKeyCaseInsensitive, setValueCaseInsensitive } from '../core';
+import { deleteValueCaseInsensitive, findKeyCaseInsensitive, setValueCaseInsensitive, yieldToEventLoop } from '../core';
 import {
   getTaskDisplayTitle,
   parseTaskLine,
@@ -114,6 +114,9 @@ const RUNNING_SCHEDULE_SYNC_INTERVAL_MS = 60_000;
 export class TimeTrackingService {
   private activeTimerCountsByPath = new Map<string, number>();
   private sessionIndexReady = false;
+  private sessionMetadataReady = false;
+  private sessionInventoryReady = false;
+  private sessionMetadataCompletion: Promise<boolean> | null = null;
   private activationOwner: symbol | null = null;
   private cleanups: Array<() => void> = [];
   private sessionSourceRevision = 0;
@@ -121,6 +124,7 @@ export class TimeTrackingService {
   private readonly sessionSources = new Map<TFile, {
     path: string; mtime: number; size: number; key: string;
     frontmatter: Record<string, unknown> | undefined;
+    sourceChanged?: boolean;
   }>();
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
@@ -133,27 +137,52 @@ export class TimeTrackingService {
     if (this.sessionIndexReady) return;
     const owner = this.activationOwner = Symbol('time-tracking');
     const { vault, metadataCache, workspace } = this.plugin.app;
+    this.sessionMetadataReady = (metadataCache as unknown as { initialized?: boolean }).initialized === true;
+    let completeMetadata: (ready: boolean) => void = () => {};
+    this.sessionMetadataCompletion = this.sessionMetadataReady ? null
+      : new Promise(resolve => { completeMetadata = resolve; });
     const vaultRefs = [
       vault.on('create', file => this.invalidateSessionSource(file)),
       vault.on('modify', file => this.invalidateSessionSource(file)),
-      vault.on('delete', file => this.invalidateSessionSource(file)),
+      vault.on('delete', file => {
+        if (!(file instanceof TFile) || file.extension !== 'md') return;
+        this.sessionSourceRevision += 1; this.sessionSources.delete(file);
+      }),
       vault.on('rename', file => this.invalidateSessionSource(file)),
     ];
-    const metadataRef = metadataCache.on('changed', file => this.invalidateSessionSource(file));
+    const metadataRef = metadataCache.on('changed', file => {
+      if (!(file instanceof TFile)) return;
+      const verified = this.sessionSources.get(file);
+      // Source events already invalidate same-stat changes. Late or unrelated
+      // metadata cannot invalidate a source result which is still current.
+      if (verified?.path === file.path && verified.mtime === file.stat?.mtime && verified.size === file.stat?.size
+        && (verified.key === this.getPropertyKey() || (verified.key === '' && !verified.sourceChanged))) return;
+      this.invalidateSessionSource(file);
+    });
+    const resolvedRef = metadataCache.on('resolved', () => {
+      this.sessionMetadataReady = true;
+      completeMetadata(true);
+    });
     this.cleanups.push(() => {
       for (const ref of vaultRefs) vault.offref(ref);
       metadataCache.offref(metadataRef);
+      metadataCache.offref(resolvedRef);
+      completeMetadata(false);
     });
     this.sessionIndexReady = true;
     const timerWindow = window;
     const syncInterval = timerWindow.setInterval(() => {
-      if (this.activationOwner === owner) void this.syncRunningScheduledMetadata();
+      if (this.activationOwner === owner) void this.syncRunningScheduledMetadata().catch(error => {
+        logger.warn('[TimeTracking] Current session source is unavailable; existing timer display is retained.', { error });
+      });
     }, RUNNING_SCHEDULE_SYNC_INTERVAL_MS);
     this.cleanups.push(() => timerWindow.clearInterval(syncInterval));
     workspace.onLayoutReady(() => {
       if (this.activationOwner !== owner || !this.isEnabled()) return;
       const startupTimeout = timerWindow.setTimeout(() => {
-        if (this.activationOwner === owner) void this.syncRunningScheduledMetadata();
+        if (this.activationOwner === owner) void this.syncRunningScheduledMetadata().catch(error => {
+          logger.warn('[TimeTracking] Current session source is unavailable; existing timer display is retained.', { error });
+        });
       }, 2000);
       this.cleanups.push(() => timerWindow.clearTimeout(startupTimeout));
     });
@@ -162,6 +191,9 @@ export class TimeTrackingService {
   detach(): void {
     this.activationOwner = null;
     this.sessionIndexReady = false;
+    this.sessionMetadataReady = false;
+    this.sessionInventoryReady = false;
+    this.sessionMetadataCompletion = null;
     this.sessionSourceRevision += 1;
     for (const cleanup of this.cleanups.splice(0)) cleanup();
     this.sessionSources.clear();
@@ -192,13 +224,20 @@ export class TimeTrackingService {
     options: TimeTrackingStartOptions = {},
   ): Promise<TimeTrackingSession | null> {
     if (!this.ensureEnabled()) return null;
+    const owner = this.activationOwner;
 
+    // Retired task-line actions still refuse before any source discovery.
+    if (input?.type === 'task' && this.plugin.settings.dataArchitectureMode === 'native-records') {
+      await this.resolveAndEnsureTarget(input);
+      return null;
+    }
+    // Resolve current stored sessions before preparing a target identity or
+    // writing a new timer. An unknown source cannot authorize a new session.
+    const currentActive = await this.getActiveSession();
+    if (!this.isEnabled() || this.activationOwner !== owner) return null;
+    const active = this.plugin.settings.timeTrackingSingleActiveSession === false ? null : currentActive;
     const target = await this.resolveAndEnsureTarget(input);
-    if (!target) return null;
-
-    const active = this.plugin.settings.timeTrackingSingleActiveSession === false
-      ? null
-      : await this.getActiveSession();
+    if (!target || !this.isEnabled() || this.activationOwner !== owner) return null;
     if (active) {
       const shouldStartAdditional = confirm(
         `A timer is already running for "${active.title}". Start another running timer?`,
@@ -513,9 +552,16 @@ export class TimeTrackingService {
     endInput: Date | string | number,
   ): Promise<TimeTrackingSession | null> {
     if (!this.ensureEnabled()) return null;
+    const owner = this.activationOwner;
+    if (input?.type === 'task' && this.plugin.settings.dataArchitectureMode === 'native-records') {
+      await this.resolveAndEnsureTarget(input);
+      return null;
+    }
+    await this.scanStoredSessions();
+    if (!this.isEnabled() || this.activationOwner !== owner) return null;
 
     const target = await this.resolveAndEnsureTarget(input);
-    if (!target) {
+    if (!target || !this.isEnabled() || this.activationOwner !== owner) {
       logger.warn('[TimeTracking] Manual session skipped because target could not be resolved.', {
         filePath: input?.filePath || input?.file?.path || null,
         type: input?.type || null,
@@ -819,6 +865,9 @@ export class TimeTrackingService {
   }
 
   async resolveActiveTarget(): Promise<ResolvedTimeTrackingTarget | null> {
+    const owner = this.activationOwner;
+    await this.scanStoredSessions();
+    if (!this.isEnabled() || this.activationOwner !== owner) return null;
     const view = this.plugin.app.workspace.getActiveViewOfType(MarkdownView);
     const file = view?.file ?? this.plugin.app.workspace.getActiveFile();
     if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return null;
@@ -1426,12 +1475,22 @@ export class TimeTrackingService {
   }
 
   private invalidateSessionSource(file: unknown): void {
+    if (!(file instanceof TFile) || file.extension !== 'md') return;
     this.sessionSourceRevision += 1;
-    if (file instanceof TFile) this.sessionSources.delete(file);
+    const prior = this.sessionSources.get(file);
+    // Keep the existing file map as discovery ownership. An empty key marks
+    // this exact source unknown without throwing away unrelated negatives.
+    this.sessionSources.set(file, { path: file.path, mtime: file.stat?.mtime,
+      size: file.stat?.size, key: '', frontmatter: prior?.frontmatter,
+      sourceChanged: this.sessionInventoryReady || prior?.sourceChanged === true
+        || this.plugin.app.workspace.layoutReady === true });
   }
 
   private async scanStoredSessions(): Promise<StoredSession[]> {
     if (!this.isEnabled()) return [];
+    // Public commands can run before the layout-owned activation publishes its
+    // consumers. That is not permission to fall through to legacy full reads.
+    if (!this.sessionIndexReady && this.plugin.nativeRecordService) throw new Error('time-tracking-startup-not-ready');
     const scan = this.sessionScan ?? (this.sessionScan = this.scanStoredSessionsUntilStable());
     try {
       // Consumers sort arrays and edit records; never expose the shared scan result.
@@ -1450,19 +1509,32 @@ export class TimeTrackingService {
     const started = performance.now();
     let passes = 0;
     const owner = this.activationOwner;
+    if (!this.sessionInventoryReady) {
+      if (this.sessionMetadataCompletion && !await this.sessionMetadataCompletion) return [];
+      if (!this.isEnabled() || this.activationOwner !== owner) return [];
+      for (const file of this.plugin.app.vault.getMarkdownFiles()) {
+        if (!this.sessionSources.has(file)) this.sessionSources.set(file, {
+          path: file.path, mtime: file.stat?.mtime, size: file.stat?.size, key: '', frontmatter: undefined,
+        });
+      }
+      this.sessionInventoryReady = true;
+    }
     while (this.isEnabled() && this.activationOwner === owner) {
       passes += 1;
       const revision = this.sessionSourceRevision;
       const configuration = this.sessionScanConfiguration();
       const key = this.getPropertyKey();
+      let sliceStarted = performance.now();
       const output: StoredSession[] = [];
-      const files = this.plugin.app.vault.getMarkdownFiles();
-      const liveFiles = new Set(files);
-      for (const file of this.sessionSources.keys()) {
-        if (!liveFiles.has(file)) this.sessionSources.delete(file);
-      }
-      for (const file of files) {
+      for (const [file, verified] of this.sessionSources) {
+        if (performance.now() - sliceStarted >= 8) {
+          await yieldToEventLoop();
+          if (!this.isEnabled() || this.activationOwner !== owner) return [];
+          sliceStarted = performance.now();
+        }
         if (this.shouldIgnoreTimeTrackingPath(file.path)) continue;
+        if (verified.path === file.path && verified.key === key && verified.mtime === file.stat?.mtime
+          && verified.size === file.stat?.size && !verified.frontmatter) continue;
         const frontmatter = await this.readFrontmatterForTimeTrackingScan(file);
         if (!this.isEnabled() || this.activationOwner !== owner) return [];
         const existingKey = frontmatter ? findKeyCaseInsensitive(frontmatter, key) : null;
@@ -1477,7 +1549,7 @@ export class TimeTrackingService {
       }
       if (revision !== this.sessionSourceRevision || configuration !== this.sessionScanConfiguration()) continue;
       logger.perf('time-tracking:session-scan', {
-        files: files.length, sessions: output.length, cachedFiles: this.sessionSources.size,
+        files: this.sessionSources.size, sessions: output.length, cachedFiles: this.sessionSources.size,
         passes, durationMs: Math.round(performance.now() - started),
       });
       return output;
@@ -1498,13 +1570,22 @@ export class TimeTrackingService {
     const cached = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
     // Before event listeners are installed, retain the uncached legacy path.
     if (!this.sessionIndexReady && cached && findKeyCaseInsensitive(cached, key)) return cached;
-    const revision = this.sessionSourceRevision;
+    // Complete core metadata can reject known non-candidates. Missing metadata,
+    // any changed source, and silently changed stats remain
+    // unknown and still take the existing source-inspection path.
+    if (this.sessionIndexReady && this.sessionMetadataReady && !verified?.sourceChanged && (!verified || verified.key === '')
+      && cached && typeof cached === 'object' && !Array.isArray(cached)
+      && !findKeyCaseInsensitive(cached, key)) {
+      this.sessionSources.set(file, { path, mtime, size, key, frontmatter: undefined });
+      return undefined;
+    }
     let raw: string;
     try {
       raw = await this.plugin.app.vault.cachedRead(file);
     } catch {
-      // Do not turn a transient read failure into a persistent negative result.
-      return cached;
+      // Leave this source unknown. Reject the owning scan before it can replace
+      // known timer counts or authorize a mutation using stale metadata.
+      throw new Error('time-tracking-source-unavailable');
     }
     if (!this.isEnabled() || this.activationOwner !== owner) return undefined;
     let frontmatter: Record<string, unknown> | undefined;
@@ -1512,19 +1593,22 @@ export class TimeTrackingService {
     const opening = /^---[ \t]*\n/u.exec(normalized);
     if (opening) {
       const closing = /^(?:---|\.\.\.)[ \t]*$/mu.exec(normalized.slice(opening[0].length));
-      if (!closing) return cached;
+      if (!closing) throw new Error('time-tracking-source-invalid');
       try {
         const parsed = parseYaml(normalized.slice(opening[0].length, opening[0].length + closing.index));
+        if (parsed != null && (typeof parsed !== 'object' || Array.isArray(parsed))) {
+          throw new Error('time-tracking-source-invalid');
+        }
         if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           const existingKey = findKeyCaseInsensitive(parsed, key);
           // Retain only normalized session data, never note bodies or unrelated properties.
           if (existingKey) frontmatter = { [key]: this.normalizeRecordList(parsed[existingKey]) };
         }
       } catch {
-        return cached;
+        throw new Error('time-tracking-source-invalid');
       }
     }
-    if (this.sessionIndexReady && revision === this.sessionSourceRevision && key === this.getPropertyKey()
+    if (this.sessionIndexReady && this.sessionSources.get(file) === verified && key === this.getPropertyKey()
       && file.path === path && file.stat?.mtime === mtime && file.stat?.size === size) {
       this.sessionSources.set(file, { path, mtime, size, key, frontmatter });
     }

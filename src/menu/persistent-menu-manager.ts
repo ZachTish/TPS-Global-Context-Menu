@@ -580,6 +580,19 @@ export class PersistentMenuManager {
     return false;
   }
 
+  /** File refreshes only serve existing menus or a relevant linked context. */
+  hasRefreshConsumerForFile(file: TFile): boolean {
+    if (this.hasMountedMenuForFile(file)) return true;
+    const resolvedLinks = this.plugin.app.metadataCache.resolvedLinks || {};
+    const primary = resolvePrimaryMarkdownView(this.plugin.app);
+    if (!primary || !(primary.file instanceof TFile)) return false;
+    if (!this.linkedContextPanels.has(primary) && !this.linkedContextRenders.has(primary)
+      && !this.linkedContextHostObservers.has(primary)) return false;
+    return isLinkedContextSourceChangeRelevant(file.path, primary.file.path,
+      this.linkedContextPanels.get(primary)?.sourcePaths || new Set<string>(),
+      Number(resolvedLinks[file.path]?.[primary.file.path] || 0));
+  }
+
   /**
    * Ensure menus exist only for the active markdown view.
    * Rendering fixed menus for every markdown leaf causes off-screen overlays.

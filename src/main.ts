@@ -598,7 +598,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (this.startupOwner !== startupOwner) return;
     this.nativeRecordService = new NativeRecordService(this);
     const nativeIndexReady = this.nativeRecordService.setup({ afterLayout: true });
-    const historyReady = this.itemHistoryService.setup(nativeIndexReady);
+    const historyReady = this.settings.enableItemHistory === false
+      ? Promise.resolve() : this.itemHistoryService.setup(nativeIndexReady);
     this.templateIdentityService = new TemplateIdentityService(this);
     this.sharedServices = createSharedServices(this);
     this.notebookNavigatorRuleService.setupPresentationProjection();
@@ -700,15 +701,22 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         this.virtualBaseEmbedService.scheduleRefresh(80);
       }));
       this.app.workspace.onLayoutReady(() => {
+        if (this.startupOwner !== startupOwner) return;
         this.virtualBaseEmbedService.scheduleRefresh(0);
-        window.setTimeout(() => this.virtualBaseEmbedService.scheduleRefresh(0), 350);
-        window.setTimeout(() => this.virtualBaseEmbedService.scheduleRefresh(0), 1200);
+        for (const delay of [350, 1200]) {
+          const timer = window.setTimeout(() => {
+            if (this.startupOwner === startupOwner) this.virtualBaseEmbedService.scheduleRefresh(0);
+          }, delay);
+          this.register(() => window.clearTimeout(timer));
+        }
       });
     }
     this.app.workspace.onLayoutReady(() => {
+      if (this.startupOwner !== startupOwner) return;
       if (!this.canRunBackgroundAutomation()) return;
       if (!this.notebookNavigatorRuleService.shouldApplyOnStartup()) return;
-      window.setTimeout(() => {
+      const timer = window.setTimeout(() => {
+        if (this.startupOwner !== startupOwner) return;
         if (!this.canRunBackgroundAutomation()) return;
         void this.notebookNavigatorRuleService.applyRulesToAllFiles({
           reason: 'gcm-startup-auto',
@@ -716,9 +724,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
           bypassCreationGrace: true,
         });
       }, 1000);
+      this.register(() => window.clearTimeout(timer));
     });
     // Check for missing recurrences on startup; build workspace ribbon buttons
     this.app.workspace.onLayoutReady(async () => {
+      if (this.startupOwner !== startupOwner) return;
       this.workspaceRibbonService.setup();
       // Wait for metadataCache to finish initial indexing before scanning for
       // missing recurrences. 'resolved' fires once indexing completes; the
@@ -726,6 +736,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       // register (already-resolved vaults).
       let startupCheckDone = false;
       const runStartupCheck = async () => {
+        if (this.startupOwner !== startupOwner) return;
         if (!this.canRunBackgroundAutomation()) return;
         if (startupCheckDone) return;
         startupCheckDone = true;
@@ -735,7 +746,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       this.registerEvent(
         this.app.metadataCache.on('resolved', () => void runStartupCheck())
       );
-      setTimeout(() => void runStartupCheck(), 6000);
+      const startupCheckTimer = window.setTimeout(() => void runStartupCheck(), 6000);
+      this.register(() => window.clearTimeout(startupCheckTimer));
     });
 
     // Capture right-click targets early so file-menu/files-menu can expand accurately.
@@ -853,7 +865,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (this.startupOwner !== startupOwner) return;
     await this.fileNamingService.whenDailyNoteConfigurationReady();
     if (this.startupOwner !== startupOwner) return;
-    await this.itemHistoryService.whenActivationMaintenanceReady();
+    if (this.settings.enableItemHistory !== false) await this.itemHistoryService.whenActivationMaintenanceReady();
     if (this.startupOwner !== startupOwner) return;
     setupPluginApi(this);
     this.nativeBaseNoteOpening.install();

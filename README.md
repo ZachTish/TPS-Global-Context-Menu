@@ -1,5 +1,139 @@
 # TPS Global Context Menu
 
+## 8.1.0 — Bounded startup recovery and read-only indexed evidence
+
+Startup no longer initializes or waits for the retired item-history store when
+`enableItemHistory` is false. Its historical explicit APIs remain; no stored
+history, note property or setting is deleted. Startup embed, Navigator-rule and
+recurrence callbacks now belong to their current plugin activation and are
+canceled or ignored after unload. Recurrence cleanup releases its in-memory
+tracker and pending timers without persisting an empty tracker. A save already
+entered at the adapter boundary may drain; an obsolete continuation cannot
+start a later read or write.
+
+Enabled time tracking waits for core metadata readiness before its one initial
+Markdown inventory. Complete metadata rejects ordinary non-candidates without
+reading their bodies. Candidate notes and missing or unresolved source evidence
+still use the existing source inspection owner. Thereafter create/modify/rename/
+delete listeners update the existing per-file session map; repeated inspection
+walks that map in cooperative slices, but performs source reads only for changed
+or unknown paths. Settled metadata proof remains valid for unrelated files when
+one source changes. Non-Markdown events and unchanged metadata bursts do not
+repeat the inventory or body reads. The map retains only normalized timer records, never note bodies.
+
+A transient `sourceChanged` marker inside that existing map distinguishes a
+changed source from an uninspected bootstrap candidate. A delayed or resolved
+metadata negative cannot authorize skipping a changed source. Failed reads or
+malformed frontmatter reject the owning inspection, retain known timer display
+counts and prevent new timer identity preparation/writes from incomplete
+recovery, including multiple-active and manual-session actions. Stop, pause,
+edit and delete use that same recovery boundary. The native Start command passes
+read-only active-note input to its sole preparation owner. The exposed target
+resolver keeps its return contract and waits for recovery before preparing an
+identity. Direct enabled calls before activation or after unload fail closed
+rather than enter legacy full-source discovery. A later explicit or existing
+periodic inspection may inspect the source again; no automatic retry loop or fallback mutation is added. Disabled time
+tracking still owns no source scans, listeners, timers or dock.
+
+The additive native-record methods preserve API **version 6** and advertise their
+individual capabilities. This minor release adds no new property or settings
+migration. An upgrade from 7.3.12 or another pre-8.0 version also includes 8.0
+removal of automatic editor-mode enforcement and its four retired settings keys;
+manual Obsidian/GCM mode controls remain. Existing `snapshot()` and identity/mutation APIs keep
+current-source verification, conflict protection and their authority token.
+
+- `indexedSnapshot(kind?, { includeConflicts? })` is synchronous and metadata-only.
+  It returns `{ ready, records, conflicts? }`, with no authority token or refresh.
+  It reports `ready: false` during initial or failed discovery, incomplete core
+  metadata, pending source metadata, active source verification/writes and after
+  unload. Consumers must retain their prior display/projection while it is not
+  ready. A selected kind narrows record allocation; requested conflicts retain
+  all identity evidence. It never permits creating, changing or reserving an ID.
+- Metadata resolution releases display-only pending paths. It does **not** clear
+  authoritative dirty paths, source envelopes or source generations. The small
+  transient pending-metadata set is necessary because source-authority
+  invalidation and display readiness have different owners; it is neither a
+  persistent cache nor a new watcher/poller. Initial classification prepares the
+  existing mapping configuration once per cooperative slice, while later events
+  still inspect current configuration and frontmatter.
+- `updateFromSource(reference, propertyKeys, compute, cause)` accepts a synchronous
+  function of detached current canonical frontmatter, returning declared plain
+  updates or `null`. It reuses the existing source-preserving atomic update
+  writer, source/configuration/identity/conflict checks and automation exclusions.
+  Canonical `title` can be updated with business fields in one action. Identity,
+  schema, classification, created/modified envelope keys and undeclared keys are
+  rejected, as are async/Promise callbacks. Null and unchanged results preserve
+  source bytes and timestamps. This is an explicit edit API, not an index writer.
+- `applyIdentityChanges(plan, entries, cause, { isCurrent? })` checks the optional
+  activation predicate before the next entry and at existing atomic mutation
+  boundaries. Interrupted calls return the committed handle prefix with a failed
+  result; already committed work is retained. No rollback, retry or second queue
+  is introduced. The existing three-argument call remains compatible.
+
+Menu refresh requests reject files with neither a mounted menu nor a relevant
+linked-context consumer before scheduling. Existing mounted menus, linked
+source dependencies, explicit cold refresh and non-menu render surfaces retain
+their owners. Late overlay requests do nothing after unload. This changes no
+settings navigation, persisted schema, note contents or default controls.
+
+Focused actual-service tests pass **362/362**; the full declared `npm test`
+passes **1,697/1,697**, and supplemental `npm run prepretest` passes **303/303**.
+All have zero failures, cancellations or skips. The full and supplemental gates
+were repeated against version 8.1.0. TypeScript and the versioned build-only gates
+pass with `TPS_NO_DEPLOY=1` and report `target=none`. The ordinary stable build
+then deployed only to the test vault; GCM was reloaded as 8.1.0, and source/runtime
+artifacts match exactly. GCM data and recurrence-session bytes are unchanged.
+
+The bounded tests use synthetic Vault, metadata, atomic writer and scheduler
+boundaries, counting work separately from timings. A 4,049-note cold recovery
+waits for complete core metadata with zero inventory/body reads while pending,
+then performs one inventory and reads eight timer candidates. An edit during
+that bootstrap adds only its selected source read (nine total); repeated queries
+and three unchanged full metadata bursts add no reads or inventory. Missing,
+malformed and changed-but-stale metadata remain unknown until source inspection
+succeeds. One thousand ordinary notes retain zero non-candidate body reads through
+asset and folder events. Disabled features, failures and stop/re-enable races remain covered.
+
+One hundred indexed display queries perform zero inventories, reads or writes
+and expose no mutation token. Twenty warm ID-reference computed edits perform
+zero inventories/raw/cached reads and twenty existing atomic process calls.
+Twenty selected-path edits instead perform twenty selected fresh reads, with no
+global scan. Automation path exclusions reject before the serialized writer;
+late configured tag/template exclusions, unsafe evidence, configuration changes
+and concurrent identity arrivals reject at current source. Hidden menu-only
+bursts schedule no rendering; mounted requests still coalesce and refresh.
+
+Installed foreground QA on 2026-10-08 invokes the actual public native API one
+hundred times with `indexedSnapshot()`: readiness is true, 1,447 records are
+returned, and inventories, raw/cached reads, writes and authority-refresh calls
+remain zero. A separate installed actual-class timer control uses a synthetic
+4,049-note memory Vault boundary: one candidate restores through one inventory
+and one cached read; one hundred warm queries add no I/O. Same-stat source edits,
+stale metadata resolution, rename, deletion, malformed source and unload are
+verified. The final affected-path total is five cached reads, zero writes, with
+zero owned listeners after detach. This is installed logic with a bounded facade,
+not enabling time tracking or creating real timer notes in the test vault.
+
+The combined TPS candidate was also measured in five foreground warm startup
+runs per comparison, with a 30-second capture window, all eight active consumers
+enabled, outbound automation off and actual time tracking disabled. Median body
+readiness changed from 10.868 to 8.514 seconds, GCM API readiness from 14.886 to
+9.187 seconds, and Health readiness from 15.123 to 9.471 seconds. These combined
+suite observations include core layout and other consumers; they do not isolate
+GCM's contribution or measure first input responsiveness. Total startup reads
+increased: raw reads from 36 to 44 and cached reads from 34 to 73–74; repeated
+inventories remain three. Only the targeted component counts above establish
+removed work. This is not a claim of fewer total startup reads, process-cold,
+production or physical-iPhone performance.
+
+The session map still walks existing entries; an authoritative first native
+snapshot/identity reservation still verifies the vault, and later authoritative
+checks retain their existing invalidated-source safeguards. Combined installed
+Health/GCM nutrition action QA passed seven phases, preserving source and
+settings; the final separate build retained the verified artifact bytes. See [8.1.0 release notes](release-notes/8.1.0.md)
+for tested artifact hashes and handoff status. Minimum Obsidian remains 1.10.0;
+production is untouched.
+
 ## 8.0.0 — Keep editor mode manual and disabled timers inactive
 
 GCM no longer automatically changes Reading, Live Preview, or Source mode.
@@ -109,7 +243,8 @@ Saved-state comparison confirms GCM settings equal their baseline after deleting
 exactly the four retired mode keys, all of which are absent. All other consumer
 data hashes and the enabled community-plugin list remain unchanged; no note's
 view-mode property was edited. The final normal production build passed with byte-identical artifacts and
-reported the test runtime unchanged. Public publication is the remaining handoff step. Physical iPhone timing and production performance
+reported the test runtime unchanged. Version 8.0.0 was subsequently published as
+a public BRAT-compatible release. Physical iPhone timing and production performance
 are not established by this QA. Minimum Obsidian stays 1.10.0. Production is untouched.
 
 ## 7.3.17 — Remove heading link suggestions
@@ -633,7 +768,7 @@ fixed.
 This backward-compatible patch keeps minimum Obsidian 1.10.0. The final versioned
 declared suite passes 1,597 tests and the sequential supplemental suite passes
 214, with no failures or skips. The separate final build deployed to the Test
-vault and a targeted reload confirmed 7.3.9. Exact loaded-method comparisons in
+vault and a TEST renderer reload confirmed 7.3.9. Exact loaded-method comparisons in
 isolated mobile fixtures reproduce 120,000 style reads becoming zero and five
 leaked touch/pointer callbacks becoming zero, with unchanged clearance results.
 These are modeled host tests, not physical mobile measurements. Installed
@@ -1441,3 +1576,9 @@ Rules & fields → Custom fields shows a compact Record tags selector and tag ed
 Validation: focused tag round trips and creation/update tests, full declared tests, a separate final build, test-vault deployment and targeted reload are required. Final results and artifact hashes are recorded in release notes.
 
 Installed test-vault validation on 2026-09-26: 1,242 declared-suite tests and 171 supplemental tests passed; TypeScript and final build/deployment passed. A targeted reload loaded 3.6.0. A synthetic food record was created and updated with only the configured type tag, preserving its identity and unrelated tag. The Record tags selector and displayed full path were checked in the test-vault settings UI. Temporary settings were restored without saving, data.json stayed byte-identical during the probe, and the fixture was moved directly from Inbox to _archive. No production artifacts or notes were changed.
+
+<!-- Startup implementation verification: 2026-10-08 -->
+
+Installed foreground interaction QA also clicked Navigator New note in a unique Inbox scope, opened the created item through normal Navigator selection, typed with the native keyboard and saved. Exactly one note was created; the visible body and saved source contained the typed marker. The trace counted 16 raw reads, 31 cached reads, one inventory, two process attempts and one modify across setup/creation/navigation/input inspection. The original leaf/query were restored and the owned fixture was archived byte-identically. This is a correctness check, not first-input latency or a controlled navigation benchmark.
+
+Final post-documentation verification: the separate ordinary production build passed, reported `target=test` with unchanged runtime bytes, and retained the already-loaded and QA-verified numeric version. Public release artifacts must match the SHA-256 receipt above. Production installation, full quit/reopen and vault-close/reopen comparisons, single-versus-two-window production profiling, first-use input latency and physical mobile acceptance remain rollout verification gates.

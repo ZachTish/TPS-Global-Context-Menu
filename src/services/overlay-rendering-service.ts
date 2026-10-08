@@ -44,12 +44,14 @@ export class OverlayRenderingService extends Component {
   private flushTimer: number | null = null;
   private flushInProgress = false;
   private nextDelayMs = 0;
+  private disposed = false;
 
   constructor(private plugin: TPSGlobalContextMenuPlugin) {
     super();
   }
 
   onunload(): void {
+    this.disposed = true;
     if (this.flushTimer !== null) {
       window.clearTimeout(this.flushTimer);
       this.flushTimer = null;
@@ -58,6 +60,7 @@ export class OverlayRenderingService extends Component {
   }
 
   invalidate(request: OverlayInvalidationRequest): void {
+    if (this.disposed) return;
     const surfaces = new Set<OverlayRenderSurface>(request.surfaces || ['menus']);
     const files = this.collectFiles(request);
 
@@ -82,6 +85,7 @@ export class OverlayRenderingService extends Component {
 
     if (surfaces.has('menus') && files.length > 0) {
       for (const file of files) {
+        if (this.plugin.persistentMenuManager?.hasRefreshConsumerForFile?.(file) === false) continue;
         const existing = this.pendingFiles.get(file.path);
         this.pendingFiles.set(file.path, {
           file,
@@ -92,6 +96,7 @@ export class OverlayRenderingService extends Component {
       }
     }
 
+    if (!this.hasPendingWork()) return;
     logger.perf?.('overlay-rendering:invalidate', {
       reason: request.reason,
       surfaces: Array.from(surfaces),
@@ -182,6 +187,7 @@ export class OverlayRenderingService extends Component {
   }
 
   private flush(): void {
+    if (this.disposed) return;
     if (this.flushInProgress) {
       this.scheduleFlush(50);
       return;

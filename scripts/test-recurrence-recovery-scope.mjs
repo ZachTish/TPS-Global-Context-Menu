@@ -8,7 +8,7 @@ import { parse, stringify } from 'yaml';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const result = await build({
-  stdin: { contents: "export { BulkEditService } from './src/services/bulk-edit-service.ts'; export { TFile } from 'obsidian';", resolveDir: root, loader: 'ts' },
+  stdin: { contents: "export { BulkEditService } from './src/services/bulk-edit-service.ts'; export { RecurrenceService } from './src/services/recurrence-service.ts'; export { TFile } from 'obsidian';", resolveDir: root, loader: 'ts' },
   bundle: true, write: false, platform: 'node', format: 'cjs', logLevel: 'silent',
   plugins: [{ name: 'recurrence-recovery-obsidian', setup(builder) {
     builder.onResolve({ filter: /^obsidian$/u }, () => ({ path: 'obsidian', namespace: 'recurrence-recovery' }));
@@ -22,7 +22,50 @@ const result = await build({
 });
 const module = { exports: {} };
 new Function('module', 'exports', 'require', result.outputFiles[0].text)(module, module.exports, createRequire(import.meta.url));
-const { BulkEditService, TFile } = module.exports;
+const { BulkEditService, RecurrenceService, TFile } = module.exports;
+
+test('recurrence setup/unload never writes an empty session cache and cancels owned prompt/save timers', async () => {
+  const timers = new Map(), callbacks = [], handlers = new Map(); let next = 0;
+  const previousWindow = globalThis.window;
+  globalThis.window = { setTimeout(fn) { timers.set(++next, fn); callbacks.push(fn); return next; }, clearTimeout(id) { timers.delete(id); } };
+  let adapterCalls = 0, prompts = 0;
+  const file = new TFile('Inbox/Template.md');
+  const plugin = { settings: {}, manifest: { dir: '.obsidian/plugins/tps-global-context-menu' }, registerEvent() {}, app: {
+    workspace: { on(name, fn) { handlers.set(name, fn); return {}; } },
+    metadataCache: { getFileCache() { return { frontmatter: {} }; } },
+    vault: { on() { return {}; }, getAbstractFileByPath: () => file,
+      adapter: { exists: async () => { adapterCalls++; return false; }, read: async () => { adapterCalls++; return ''; }, write: async () => { adapterCalls++; } } },
+  } };
+  const service = new RecurrenceService(plugin);
+  service.handleTemplateLeave = async () => { prompts++; };
+  try {
+    service.setup(); assert.equal(timers.size, 0); assert.equal(adapterCalls, 0);
+    service.markFileAsModified(file.path);
+    service.dirtyTemplates.add(file.path); service.lastActiveFilePath = file.path;
+    handlers.get('active-leaf-change')({ view: { file: new TFile('Other.md') } });
+    assert.equal(timers.size, 2);
+    service.cleanup(); assert.equal(timers.size, 0);
+    for (const callback of callbacks) await callback();
+    assert.equal(adapterCalls, 0); assert.equal(prompts, 0);
+  } finally { service.cleanup(); globalThis.window = previousWindow; }
+});
+
+test('unload during session-cache comparison cannot write afterward; active saves still persist', async () => {
+  let callback; const previousWindow = globalThis.window;
+  globalThis.window = { setTimeout(fn) { callback = fn; return 1; }, clearTimeout() {} };
+  const waiting = deferred(); let writes = 0, reads = 0;
+  const plugin = { settings: {}, manifest: { dir: '.obsidian/plugins/tps-global-context-menu' }, app: { vault: { adapter: {
+    exists: async () => true,
+    read: async () => { reads++; await waiting.promise; return '{}'; },
+    write: async () => { writes++; },
+  } } } };
+  const service = new RecurrenceService(plugin);
+  try {
+    service.markFileAsModified('Inbox/One.md'); const saving = callback(); await flush();
+    assert.equal(reads, 1); service.cleanup(); waiting.resolve(); await saving; assert.equal(writes, 0);
+    service.markFileAsModified('Inbox/Two.md'); await callback(); assert.equal(writes, 1);
+  } finally { service.cleanup(); globalThis.window = previousWindow; }
+});
 
 function deferred() { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; }
 async function flush() { for (let n = 0; n < 20; n++) await Promise.resolve(); }

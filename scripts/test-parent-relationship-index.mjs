@@ -92,6 +92,29 @@ async function loadPersistentLookupHarness() {
 
 const persistentHarnessPromise = loadPersistentLookupHarness();
 
+test('unmounted metadata bursts schedule no overlay timer or render; mounted consumers still refresh', async () => {
+  const { OverlayRenderingService, TFile } = await modulePromise;
+  let scheduled = 0, rendered = 0;
+  const timers = new Map();
+  const previousWindow = globalThis.window;
+  globalThis.window = { setTimeout(fn) { timers.set(++scheduled, fn); return scheduled; }, clearTimeout(id) { timers.delete(id); } };
+  const visible = new TFile('Visible.md');
+  const plugin = { persistentMenuManager: {
+    hasRefreshConsumerForFile: file => file === visible,
+    refreshMenusForFile: () => { rendered++; },
+  } };
+  const overlay = new OverlayRenderingService(plugin);
+  try {
+    for (let i = 0; i < 4000; i++) overlay.scheduleFileRefresh(new TFile(`Hidden-${i}.md`), 'metadata');
+    assert.equal(scheduled, 0); assert.equal(overlay.pendingFiles.size, 0); assert.equal(rendered, 0);
+    for (let i = 0; i < 100; i++) overlay.scheduleFileRefresh(visible, 'metadata', { force: true });
+    assert.equal(scheduled, 1); assert.equal(overlay.pendingFiles.size, 1);
+    overlay.flushNow(); assert.equal(rendered, 1);
+    overlay.onunload(); overlay.scheduleFileRefresh(visible, 'late');
+    assert.equal(scheduled, 1); assert.equal(overlay.pendingFiles.size, 0);
+  } finally { overlay.onunload(); globalThis.window = previousWindow; }
+});
+
 async function makeHarness({ mode = 'native-records', initialized = false } = {}) {
   const { ParentLinkResolutionService, TFile, TFolder } = await modulePromise;
   const files = new Map();

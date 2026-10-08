@@ -736,7 +736,7 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
     };
     const nativeRecordsApi = {
         version: plugin.nativeRecordService.version,
-        capabilities: Object.freeze({ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true, freshIdentityCreates: true, selectedFileAuthority: true }),
+        capabilities: Object.freeze({ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true, freshIdentityCreates: true, selectedFileAuthority: true, indexedSnapshot: true, updateFromSource: true, identityApplyCancellation: true }),
         getMode: () => plugin.nativeRecordService.getMode(),
         isEnabled: () => plugin.nativeRecordService.isEnabled(),
         getRootPath: () => plugin.nativeRecordService.getRootPath(),
@@ -774,11 +774,19 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             plugin.nativeRecordService.list(kind),
         snapshot: (kind?: Parameters<typeof plugin.nativeRecordService.snapshot>[0], options?: Parameters<typeof plugin.nativeRecordService.snapshot>[1]) =>
             plugin.nativeRecordService.snapshot(kind, options),
+        indexedSnapshot: (kind?: Parameters<typeof plugin.nativeRecordService.indexedSnapshot>[0], options?: Parameters<typeof plugin.nativeRecordService.indexedSnapshot>[1]) =>
+            plugin.nativeRecordService.indexedSnapshot(kind, options),
         update: (
             reference: Parameters<typeof plugin.nativeRecordService.update>[0],
             updates: Parameters<typeof plugin.nativeRecordService.update>[1],
             cause?: Parameters<typeof plugin.nativeRecordService.update>[2],
         ) => plugin.nativeRecordService.update(reference, updates, publicMutationCause(cause)),
+        updateFromSource: (
+            reference: Parameters<typeof plugin.nativeRecordService.updateFromSource>[0],
+            propertyKeys: Parameters<typeof plugin.nativeRecordService.updateFromSource>[1],
+            compute: Parameters<typeof plugin.nativeRecordService.updateFromSource>[2],
+            cause?: Parameters<typeof plugin.nativeRecordService.updateFromSource>[3],
+        ) => plugin.nativeRecordService.updateFromSource(reference, propertyKeys, compute, publicMutationCause(cause)),
         canCreateIdentity: (
             nextId: Parameters<typeof plugin.nativeRecordService.canCreateIdentity>[0],
         ) => plugin.nativeRecordService.canCreateIdentity(nextId),
@@ -794,7 +802,8 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             plannedBatch: Parameters<typeof plugin.nativeRecordService.applyIdentityChanges>[0],
             entries: Parameters<typeof plugin.nativeRecordService.applyIdentityChanges>[1],
             cause?: Parameters<typeof plugin.nativeRecordService.applyIdentityChanges>[2],
-        ) => plugin.nativeRecordService.applyIdentityChanges(plannedBatch, entries, publicMutationCause(cause)),
+            options?: Parameters<typeof plugin.nativeRecordService.applyIdentityChanges>[3],
+        ) => plugin.nativeRecordService.applyIdentityChanges(plannedBatch, entries, publicMutationCause(cause), options),
         canReidentify: (
             reference: Parameters<typeof plugin.nativeRecordService.canReidentify>[0],
             nextId: Parameters<typeof plugin.nativeRecordService.canReidentify>[1],
