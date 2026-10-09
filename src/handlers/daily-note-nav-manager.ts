@@ -22,6 +22,9 @@ export class DailyNoteNavManager extends Component {
     private _currentIsoDate: string | null = null;
     private _currentKind: DailyNavTarget["kind"] | null = null;
     private _currentDayCount: number | null = null;
+    private _currentTodayIso: string | null = null;
+    private _todayRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+    private _unloaded = false;
 
     constructor(plugin: TPSGlobalContextMenuPlugin) {
         super();
@@ -29,6 +32,15 @@ export class DailyNoteNavManager extends Component {
     }
 
     onload() {
+        this._unloaded = false;
+        const resume = () => {
+            this.clearTodayRefresh();
+            this._scheduleRefresh();
+        };
+        this.registerDomEvent(window, "focus", resume);
+        this.registerDomEvent(document, "visibilitychange", () => {
+            if (!document.hidden) resume();
+        });
         this.registerEvent(
             this.plugin.app.workspace.on("active-leaf-change", () => this._scheduleRefresh())
         );
@@ -39,6 +51,7 @@ export class DailyNoteNavManager extends Component {
             this.plugin.app.workspace.on("layout-change", () => this._scheduleRefresh())
         );
         this.plugin.app.workspace.onLayoutReady(() => {
+            if (this._unloaded) return;
             for (const delay of [100, 500, 1200]) {
                 const timer = setTimeout(() => {
                     this._layoutRetryTimers = this._layoutRetryTimers.filter((candidate) => candidate !== timer);
@@ -53,6 +66,7 @@ export class DailyNoteNavManager extends Component {
 
     /** Debounce rapid back-to-back events (active-leaf-change + file-open fire together). */
     private _scheduleRefresh() {
+        if (this._unloaded) return;
         if (this.plugin.overlayRenderingService) {
             this.plugin.overlayRenderingService.scheduleDailyNavRefresh("daily-note-nav-event", 30);
             return;
@@ -69,6 +83,7 @@ export class DailyNoteNavManager extends Component {
     }
 
     onunload() {
+        this._unloaded = true;
         if (this._refreshTimer !== null) {
             clearTimeout(this._refreshTimer);
             this._refreshTimer = null;
@@ -79,6 +94,7 @@ export class DailyNoteNavManager extends Component {
     }
 
     refresh() {
+        if (this._unloaded) return;
         if (!this.plugin.settings.enableDailyNoteNav) {
             this.detachNav();
             return;
@@ -96,14 +112,17 @@ export class DailyNoteNavManager extends Component {
         }
 
         const dayCount = normalizeDailyNavDayCount(this.plugin.settings.dailyNavDayCount);
+        const todayIso = (window as any).moment().format("YYYY-MM-DD");
 
         if (
             this.currentNav?.isConnected &&
             this._currentLeaf === target.leaf &&
             this._currentIsoDate === target.isoDate &&
             this._currentKind === target.kind &&
-            this._currentDayCount === dayCount
+            this._currentDayCount === dayCount &&
+            this._currentTodayIso === todayIso
         ) {
+            if (target.kind === "daily-note" && this._todayRefreshTimer === null) this.scheduleTodayRefresh();
             return;
         }
 
@@ -112,6 +131,7 @@ export class DailyNoteNavManager extends Component {
         this._currentIsoDate = target.isoDate;
         this._currentKind = target.kind;
         this._currentDayCount = dayCount;
+        this._currentTodayIso = todayIso;
         if (target.kind === "daily-note") {
             this.injectNav(target.leaf, target.isoDate);
         } else {
@@ -120,6 +140,7 @@ export class DailyNoteNavManager extends Component {
     }
 
     private detachNav(): void {
+        this.clearTodayRefresh();
         this._navAbortController?.abort();
         this._navAbortController = null;
         if (this.currentNav) {
@@ -139,6 +160,26 @@ export class DailyNoteNavManager extends Component {
         this._currentIsoDate = null;
         this._currentKind = null;
         this._currentDayCount = null;
+        this._currentTodayIso = null;
+    }
+
+    private clearTodayRefresh(): void {
+        if (this._todayRefreshTimer !== null) clearTimeout(this._todayRefreshTimer);
+        this._todayRefreshTimer = null;
+    }
+
+    private scheduleTodayRefresh(): void {
+        this.clearTodayRefresh();
+        if (this._unloaded || !this.currentNav?.isConnected) return;
+        const now = (window as any).moment();
+        const delay = now.clone().startOf("day").add(1, "day").valueOf() - now.valueOf();
+        // One local-midnight boundary while a strip is mounted; no polling or source work.
+        const timer = setTimeout(() => {
+            if (this._todayRefreshTimer !== timer) return;
+            this._todayRefreshTimer = null;
+            if (!this._unloaded) this.refresh();
+        }, Math.max(1, delay));
+        this._todayRefreshTimer = timer;
     }
 
     private getTargetLeaf(): DailyNavTarget | null {
@@ -217,6 +258,8 @@ export class DailyNoteNavManager extends Component {
         // Create the nav element
         const nav = document.createElement("div");
         nav.className = "tps-daily-note-nav";
+        nav.setAttribute("role", "navigation");
+        nav.setAttribute("aria-label", "Daily notes");
         this.hardenNavControl(nav);
         if (mobilePlacement) {
             nav.addClass("tps-daily-note-nav--mobile-bottom");
@@ -245,10 +288,9 @@ export class DailyNoteNavManager extends Component {
         const activeDate = m(isoDateStr, "YYYY-MM-DD");
         const todayIso = m().format("YYYY-MM-DD");
         const isTodayActive = isoDateStr === todayIso;
-        const dayOffsets = getDailyNavDayOffsets(
-            this.plugin.settings.dailyNavDayCount,
-            activeDate.isoWeekday()
-        );
+        const dayCount = normalizeDailyNavDayCount(this.plugin.settings.dailyNavDayCount);
+        nav.dataset.dayCount = dayCount === 0 ? "auto" : String(dayCount);
+        const dayOffsets = getDailyNavDayOffsets(this.plugin.settings.dailyNavDayCount);
 
         const timeline = nav.createDiv({ cls: "tps-daily-nav-timeline" });
         this.hardenNavControl(timeline);
@@ -261,8 +303,12 @@ export class DailyNoteNavManager extends Component {
             });
             dayBtn.type = "button";
             dayBtn.toggleClass("is-active", dayIso === isoDateStr);
+            dayBtn.toggleClass("is-today", dayIso === todayIso);
+            dayBtn.dataset.offset = String(offset);
+            dayBtn.dataset.date = dayIso;
             dayBtn.setAttribute("aria-label", `Open ${day.format("dddd, MMMM D, YYYY")}`);
-            dayBtn.setAttribute("aria-current", dayIso === isoDateStr ? "date" : "false");
+            dayBtn.setAttribute("aria-current", dayIso === todayIso ? "date" : "false");
+            dayBtn.setAttribute("aria-pressed", String(dayIso === isoDateStr));
             this.hardenNavControl(dayBtn);
             this.attachTapNavigation(dayBtn, (event) => {
                 this.suppressNavEvent(event);
@@ -276,6 +322,7 @@ export class DailyNoteNavManager extends Component {
         // Left Arrow (Prev)
         const prevBtn = controls.createEl("button", { cls: "tps-daily-nav-btn" });
         prevBtn.type = "button";
+        prevBtn.setAttribute("aria-label", "Open previous daily note");
         setIcon(prevBtn, "chevron-left");
         this.hardenNavControl(prevBtn);
         this.attachTapNavigation(prevBtn, (e) => {
@@ -290,6 +337,7 @@ export class DailyNoteNavManager extends Component {
                 text: "Today"
             });
             todayBtn.type = "button";
+            todayBtn.setAttribute("aria-label", "Open today's daily note");
             todayBtn.toggleClass("is-active", isTodayActive);
             todayBtn.setAttribute("aria-current", isTodayActive ? "date" : "false");
             this.hardenNavControl(todayBtn);
@@ -302,12 +350,14 @@ export class DailyNoteNavManager extends Component {
         // Right Arrow (Next)
         const nextBtn = controls.createEl("button", { cls: "tps-daily-nav-btn" });
         nextBtn.type = "button";
+        nextBtn.setAttribute("aria-label", "Open next daily note");
         setIcon(nextBtn, "chevron-right");
         this.hardenNavControl(nextBtn);
         this.attachTapNavigation(nextBtn, (e) => {
             this.suppressNavEvent(e);
             this.goToDate(isoDateStr, 1, leaf);
         });
+        this.scheduleTodayRefresh();
     }
 
     private injectScheduledDailyNoteButton(leaf: WorkspaceLeaf, isoDateStr: string): void {

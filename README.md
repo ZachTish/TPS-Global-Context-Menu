@@ -1,5 +1,69 @@
 # TPS Global Context Menu
 
+## 8.2.0 — Current-day accent and responsive daily navigation
+
+Daily Note Navigation uses Obsidian's `--interactive-accent` and
+`--text-on-accent` appearance colors for **Today** and the visible date that is
+actually today. Opening a different daily note keeps that date centered above
+Today with neutral bold text; it does not move the accent highlight to the
+opened date. When today is outside the visible range, Today remains the accent
+action. Dates use the local clock. A single component-owned timeout refreshes
+at the next local midnight, including daylight-saving transitions; focus and
+visibility resume use the existing coalesced overlay refresh queue. Detach,
+disable and unload cancel the timeout, and stale queued callbacks do nothing.
+
+**Appearance → Daily Note Navigation → Visible day buttons** is now a native
+selector with **Automatic (up to five)** and the existing fixed counts 1–7.
+Automatic is the default for unset settings and stores `0` in the existing
+`dailyNavDayCount` key. Saved fixed values remain fixed until changed. Every
+range is relative to the opened date, including seven days, which previously
+showed an ISO week. Odd counts center that date exactly; even fixed counts keep
+the existing left-biased range. There are no new keys or migrations.
+
+Automatic creates five equal-width date buttons once; scoped CSS container
+queries reduce them to three below 26em or one below 16em of available strip
+width. Thresholds follow the existing daily navigation text scale. Resizing
+needs no JavaScript observer, source read or rerender. On mobile the date strip
+is visible above Today, remains attached to its note's leaf shell and keeps
+36px-tall controls. The fallback beneath a title shares the same centered axis;
+blank space around floating buttons lets clicks reach the note underneath.
+Daily-note identification, create/open routing, templates,
+the optional Today setting and native note contents retain their owners.
+
+The settings destination map, default rules/fields route and disclosure depth
+are unchanged. Only the existing visible-day control changes from a slider to
+a selector; its save uses the same settings writer and daily-navigation refresh.
+Minimum Obsidian remains 1.10.0. Physical iPhone verification remains pending.
+
+Focused tests cover fixed/automatic counts, opened-date centering, current-day
+highlighting, out-of-range today, midnight/DST/resume, mobile placement and
+teardown, scoped accent/container CSS, and 100 unchanged refreshes with no note
+reads, writes, inventory or DOM/timer churn. Create/open routing retains its
+existing focused suite. Installed Obsidian 1.14.4 QA used the actual GCM owner,
+DOM and styles with temporary leaf/date/opening facades, and all eight active
+TPS consumers enabled. Foreground screenshots confirmed Thursday centered
+above Today while Friday retained the appearance accent, and the mobile date
+strip remained above the controls. Native date/previous/Today clicks selected
+the expected dates through the test-only opening facade; they did not create
+notes. Geometry checks covered automatic five/three/one layouts at 100%, 150%
+and 200% text scales and fixed 1/3/5/7, with no overflow and centering error
+below 0.004px. Changing the local accent CSS variable updated both accent
+buttons without a rerender. Before and after the change, 100 unchanged owner
+refreshes each used zero raw/cached note reads, inventories or write attempts;
+100 width changes also retained the same DOM and midnight timer. These are
+presentation counts, not startup or production timing claims. Temporary
+instrumentation and settings were restored without a persisted settings change.
+The actual Appearance selector retained a saved three-day choice and accepted
+Automatic then three days with one existing save/refresh per selection in an
+isolated draft. Its eight choices and accessible label were verified. Final
+versioned gates passed 1,719 declared-suite checks and 322 supplemental checks,
+with zero failures or skips, TypeScript and the separate production-mode build
+deploying only to the test vault. Reload uses the manifest-ID owner; no outbound
+automation was enabled and no real note or production setting was changed.
+Final test-vault validation and artifact hashes are
+recorded in [8.2.0 release notes](release-notes/8.2.0.md); this minor feature is
+handed off through BRAT and is not a direct production installation.
+
 ## 8.1.1 — Use Obsidian file renaming
 
 Clicking a note's inline title, its GCM menu title row, or the existing

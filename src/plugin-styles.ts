@@ -1358,6 +1358,9 @@ export const PLUGIN_STYLES = `
         align-items: center;
         gap: calc(8px * var(--tps-gcm-daily-nav-scale));
         max-width: 100%;
+        width: min(560px, calc(100% - 24px));
+        font-size: calc(12px * var(--tps-gcm-daily-nav-scale));
+        container: tps-daily-nav / inline-size;
         background: transparent;
         border: none;
         border-radius: 0;
@@ -1457,7 +1460,7 @@ export const PLUGIN_STYLES = `
       .tps-daily-note-nav--under-title {
         position: relative;
         display: flex;
-        align-items: flex-start;
+        align-items: center;
         width: 100%;
         margin: 0 0 22px;
         opacity: 1;
@@ -1471,6 +1474,15 @@ export const PLUGIN_STYLES = `
         pointer-events: auto;
       }
 
+      /* The query container is wider than its buttons; blank floating space stays editable. */
+      body:not(.is-mobile):not(.is-phone) .tps-daily-note-nav--floating {
+        pointer-events: none;
+      }
+
+      body:not(.is-mobile):not(.is-phone) .tps-daily-note-nav--floating button {
+        pointer-events: auto;
+      }
+
       .tps-daily-note-nav--mobile-bottom {
         position: absolute;
         display: flex;
@@ -1480,7 +1492,7 @@ export const PLUGIN_STYLES = `
         width: auto;
         max-width: 100%;
         margin: 0;
-        flex-direction: column-reverse;
+        flex-direction: column;
         gap: 8px;
         align-items: stretch;
         opacity: 1;
@@ -1595,6 +1607,23 @@ export const PLUGIN_STYLES = `
         display: none;
       }
 
+      .tps-daily-note-nav[data-day-count="auto"] .tps-daily-nav-timeline {
+        overflow: visible;
+        gap: 0.5em;
+      }
+
+      @container tps-daily-nav (width < 26em) {
+        .tps-daily-note-nav[data-day-count="auto"] .tps-daily-nav-day:is([data-offset="-2"], [data-offset="2"]) {
+          display: none;
+        }
+      }
+
+      @container tps-daily-nav (width < 16em) {
+        .tps-daily-note-nav[data-day-count="auto"] .tps-daily-nav-day:is([data-offset="-1"], [data-offset="1"]) {
+          display: none;
+        }
+      }
+
       .tps-daily-nav-controls {
         gap: calc(8px * var(--tps-gcm-daily-nav-scale));
         width: 100%;
@@ -1623,8 +1652,12 @@ export const PLUGIN_STYLES = `
       }
 
       .tps-daily-nav-day.is-active {
+        font-weight: 600;
+      }
+
+      .tps-daily-nav-day.is-today {
         color: var(--text-on-accent);
-        background: var(--color-purple, var(--interactive-accent)) !important;
+        background: var(--interactive-accent) !important;
         font-weight: 700;
       }
 
@@ -1655,20 +1688,18 @@ export const PLUGIN_STYLES = `
         font-weight: 600;
         text-transform: uppercase;
         letter-spacing: 0;
-        color: var(--text-muted);
-        background: transparent !important;
+        color: var(--text-on-accent);
+        background: var(--interactive-accent) !important;
         box-shadow: none !important;
         cursor: pointer;
         padding: calc(1px * var(--tps-gcm-daily-nav-scale)) calc(8px * var(--tps-gcm-daily-nav-scale));
         border-radius: calc(4px * var(--tps-gcm-daily-nav-scale));
       }
       .tps-daily-nav-today:hover {
-        background-color: var(--background-modifier-hover);
+        background-color: var(--interactive-accent-hover) !important;
       }
 
       .tps-daily-nav-today.is-active {
-        color: var(--text-on-accent);
-        background: var(--color-purple, var(--interactive-accent)) !important;
         font-weight: 700;
       }
 
@@ -1683,7 +1714,7 @@ export const PLUGIN_STYLES = `
         width: auto;
         max-width: 100%;
         margin: 0;
-        flex-direction: column-reverse;
+        flex-direction: column;
         gap: 8px;
         align-items: stretch;
         z-index: 100001;
@@ -1700,14 +1731,23 @@ export const PLUGIN_STYLES = `
       .tps-daily-note-nav--mobile-bottom .tps-daily-nav-timeline,
       .is-mobile .tps-daily-note-nav--mobile-bottom .tps-daily-nav-timeline,
       .is-phone .tps-daily-note-nav--mobile-bottom .tps-daily-nav-timeline {
-        display: none;
+        display: flex;
+        width: fit-content;
+        margin: 0 auto;
+        padding: 4px 0;
+        border-radius: 8px;
+        background: color-mix(in srgb, var(--background-primary) 82%, transparent);
+        border: 1px solid var(--background-modifier-border);
+        backdrop-filter: blur(18px);
+        -webkit-backdrop-filter: blur(18px);
+        pointer-events: auto;
       }
 
       .tps-daily-note-nav--mobile-bottom .tps-daily-nav-controls,
       .is-mobile .tps-daily-note-nav--mobile-bottom .tps-daily-nav-controls,
       .is-phone .tps-daily-note-nav--mobile-bottom .tps-daily-nav-controls {
         display: grid;
-        grid-template-columns: 30px minmax(72px, auto) 30px;
+        grid-template-columns: 36px minmax(72px, auto) 36px;
         justify-content: center;
         gap: 6px;
         width: fit-content;
@@ -1730,21 +1770,21 @@ export const PLUGIN_STYLES = `
       .is-phone .tps-daily-note-nav--mobile-bottom .tps-daily-nav-day {
         flex: 0 0 auto;
         min-width: 40px;
-        height: 24px;
-        min-height: 0;
+        height: 36px;
+        min-height: 36px;
         padding: 0 7px;
         border-radius: 7px;
         font-size: 12px;
-        line-height: 24px;
+        line-height: 36px;
       }
 
       .tps-daily-note-nav--mobile-bottom .tps-daily-nav-btn,
       .is-mobile .tps-daily-note-nav--mobile-bottom .tps-daily-nav-btn,
       .is-phone .tps-daily-note-nav--mobile-bottom .tps-daily-nav-btn {
-        width: 30px;
-        height: 28px;
+        width: 36px;
+        height: 36px;
         min-width: 0;
-        min-height: 0;
+        min-height: 36px;
         padding: 0;
         border-radius: 7px;
       }
@@ -1752,12 +1792,24 @@ export const PLUGIN_STYLES = `
       .tps-daily-note-nav--mobile-bottom .tps-daily-nav-today,
       .is-mobile .tps-daily-note-nav--mobile-bottom .tps-daily-nav-today,
       .is-phone .tps-daily-note-nav--mobile-bottom .tps-daily-nav-today {
-        height: 28px;
-        min-height: 0;
+        height: 36px;
+        min-height: 36px;
         padding: 0 10px;
         border-radius: 7px;
         font-size: 12px;
-        line-height: 28px;
+        line-height: 36px;
+      }
+
+      /* Keep automatic cells equal and scaled after the mobile button defaults. */
+      .tps-daily-note-nav[data-day-count="auto"] .tps-daily-nav-day {
+        box-sizing: border-box;
+        flex: 0 0 4.6667em;
+        width: 4.6667em;
+        min-width: 0;
+        padding-inline: 0.3333em;
+        font-size: 1em;
+        overflow: hidden;
+        text-overflow: ellipsis;
       }
 
       .tps-global-context-menu {

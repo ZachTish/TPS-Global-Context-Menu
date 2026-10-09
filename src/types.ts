@@ -627,6 +627,7 @@ export interface TPSGlobalContextMenuSettings {
 
   // Daily Note Navigation
   enableDailyNoteNav: boolean;
+  /** Zero selects a responsive five/three/one-day strip; one through seven are fixed counts. */
   dailyNavDayCount: number;
   enableTopParentNav: boolean;
   topParentNavPlacement: 'top' | 'bottom';

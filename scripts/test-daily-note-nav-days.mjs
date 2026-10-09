@@ -16,14 +16,16 @@ async function importDailyNavDays() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
-test('Daily Note navigator day count defaults to seven and clamps persisted values to one through seven', async () => {
+test('Daily Note navigator defaults to Automatic and preserves configured one-through-seven counts', async () => {
   const { normalizeDailyNavDayCount } = await importDailyNavDays();
 
-  assert.equal(normalizeDailyNavDayCount(undefined), 7);
-  assert.equal(normalizeDailyNavDayCount(null), 7);
-  assert.equal(normalizeDailyNavDayCount(''), 7);
-  assert.equal(normalizeDailyNavDayCount('not-a-number'), 7);
-  assert.equal(normalizeDailyNavDayCount(0), 1);
+  assert.equal(normalizeDailyNavDayCount(undefined), 0);
+  assert.equal(normalizeDailyNavDayCount(null), 0);
+  assert.equal(normalizeDailyNavDayCount(''), 0);
+  assert.equal(normalizeDailyNavDayCount('not-a-number'), 0);
+  assert.equal(normalizeDailyNavDayCount(0), 0);
+  assert.equal(normalizeDailyNavDayCount('0'), 0);
+  for (let count = 1; count <= 7; count++) assert.equal(normalizeDailyNavDayCount(count), count);
   assert.equal(normalizeDailyNavDayCount('3'), 3);
   assert.equal(normalizeDailyNavDayCount(4.9), 4);
   assert.equal(normalizeDailyNavDayCount(12), 7);
@@ -40,12 +42,14 @@ test('short Daily Note navigator ranges stay contiguous and active-day centered 
   assert.deepEqual(getDailyNavDayOffsets(6, 4), [-3, -2, -1, 0, 1, 2]);
 });
 
-test('the seven-day Daily Note navigator preserves the ISO Monday-Sunday week', async () => {
+test('Automatic renders five centered days and seven days remain centered across week boundaries', async () => {
   const { getDailyNavDayOffsets } = await importDailyNavDays();
 
-  assert.deepEqual(getDailyNavDayOffsets(7, 1), [0, 1, 2, 3, 4, 5, 6]);
-  assert.deepEqual(getDailyNavDayOffsets(7, 3), [-2, -1, 0, 1, 2, 3, 4]);
-  assert.deepEqual(getDailyNavDayOffsets(7, 7), [-6, -5, -4, -3, -2, -1, 0]);
+  assert.deepEqual(getDailyNavDayOffsets(0, 1), [-2, -1, 0, 1, 2]);
+  assert.deepEqual(getDailyNavDayOffsets(undefined, 7), [-2, -1, 0, 1, 2]);
+  assert.deepEqual(getDailyNavDayOffsets(7, 1), [-3, -2, -1, 0, 1, 2, 3]);
+  assert.deepEqual(getDailyNavDayOffsets(7, 3), [-3, -2, -1, 0, 1, 2, 3]);
+  assert.deepEqual(getDailyNavDayOffsets(7, 7), [-3, -2, -1, 0, 1, 2, 3]);
 });
 
 test('Daily Note navigator rendering and settings use the normalized persisted day count', () => {
@@ -58,5 +62,6 @@ test('Daily Note navigator rendering and settings use the normalized persisted d
   assert.match(managerSource, /this\._currentDayCount === dayCount/);
   assert.match(mainSource, /this\.settings\.dailyNavDayCount = normalizeDailyNavDayCount\(this\.settings\.dailyNavDayCount\)/);
   assert.match(settingsSource, /\.setName\('Visible day buttons'\)/);
-  assert.match(settingsSource, /\.setLimits\(1, 7, 1\)/);
+  assert.match(settingsSource, /Automatic/);
+  assert.match(settingsSource, /\.addDropdown\(/);
 });

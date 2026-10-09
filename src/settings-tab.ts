@@ -1119,18 +1119,19 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
     new Setting(appearance)
       .setName('Visible day buttons')
-      .setDesc('Choose how many contiguous days the Daily Note navigator shows. Seven keeps the existing Monday-Sunday week; shorter ranges stay centered on the active day.')
-      .addSlider((slider) =>
-        slider
-          .setLimits(1, 7, 1)
-          .setDynamicTooltip()
-          .setValue(normalizeDailyNavDayCount(this.plugin.settings.dailyNavDayCount))
+      .setDesc('Automatic shows five centered days when they fit, three on narrower panes, or just the opened date in very tight spaces. Fixed counts keep your chosen number.')
+      .addDropdown((dropdown) => {
+        dropdown.selectEl.setAttribute('aria-label', 'Visible day buttons');
+        dropdown.addOption('0', 'Automatic (up to five)');
+        for (let count = 1; count <= 7; count++) dropdown.addOption(String(count), `${count} ${count === 1 ? 'day' : 'days'}`);
+        dropdown
+          .setValue(String(normalizeDailyNavDayCount(this.plugin.settings.dailyNavDayCount)))
           .onChange(async (value) => {
             this.plugin.settings.dailyNavDayCount = normalizeDailyNavDayCount(value);
             await this.plugin.saveSettings();
             this.plugin.dailyNoteNavManager?.refresh();
-          }),
-      );
+          });
+      });
 
     const dailyNavOpacitySetting = new Setting(appearance)
       .setName('Nav resting opacity')

@@ -1,6 +1,7 @@
 import { DEFAULT_NOTEBOOK_NAVIGATOR_RULE_SETTINGS, TPSGlobalContextMenuSettings } from './types';
 import { MIGRATED_TASK_STATUS } from './constants/task-migration';
 import { DEFAULT_LINKED_SUBITEM_MAPPINGS } from './utils/linked-subitem-mapping';
+import { DEFAULT_DAILY_NAV_DAY_COUNT } from './utils/daily-note-nav-days';
 
 export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   dataArchitectureMode: 'native-records',
@@ -135,7 +136,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   workspaceRibbonButtons: false,
   workspaceRibbonIcons: {},
   enableDailyNoteNav: true,
-  dailyNavDayCount: 7,
+  dailyNavDayCount: DEFAULT_DAILY_NAV_DAY_COUNT,
   enableTopParentNav: true,
   topParentNavPlacement: 'top',
   showCalendarNavButton: true,
