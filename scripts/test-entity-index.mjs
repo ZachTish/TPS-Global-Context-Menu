@@ -1062,7 +1062,7 @@ test('line materialization keeps legacy identity keys distinct and prefers nativ
   } = await lineProviderPromise;
   const provider = new LineEntitySourceProvider(() => 'tps-fixed-block');
   let content = [
-    '- Target [kind:: Project] [tpsId:: old-id]',
+    '- Target [kind:: Project] [id:: old-id]',
     '- Other [kind:: Project] [subitemId:: other-id]',
   ].join('\n');
   const [provisional] = provider.scanFile(
@@ -1072,7 +1072,7 @@ test('line materialization keeps legacy identity keys distinct and prefers nativ
   );
 
   content = [
-    '- Target changed [kind:: Project] [tpsId:: new-id]',
+    '- Target changed [kind:: Project] [id:: new-id]',
     '- Other [kind:: Project] [subitemId:: old-id]',
   ].join('\n');
   await assert.rejects(
@@ -1093,13 +1093,13 @@ test('line materialization keeps legacy identity keys distinct and prefers nativ
   assert.equal(
     content.includes('^tps-fixed-block'),
     false,
-    'a tpsId can never retarget to an unrelated subitemId',
+    'a id can never retarget to an unrelated subitemId',
   );
 
   const readyProvider = new LineEntitySourceProvider(() => 'unused');
   const originalReady = [
-    '- Ready target [kind:: Project] [tpsId:: ready-old] ^ready-native',
-    '- Other [kind:: Project] [tpsId:: other-id]',
+    '- Ready target [kind:: Project] [id:: ready-old] ^ready-native',
+    '- Other [kind:: Project] [id:: other-id]',
   ].join('\n');
   const [ready] = readyProvider.scanFile(
     'Entities/Ready-Identity.md',
@@ -1107,8 +1107,8 @@ test('line materialization keeps legacy identity keys distinct and prefers nativ
     [{ name: 'kind', propertyKeys: ['kind'] }],
   );
   let changedReady = [
-    '- Ready target changed [kind:: Context] [tpsId:: ready-new] ^ready-native',
-    '- Other [kind:: Project] [tpsId:: ready-old]',
+    '- Ready target changed [kind:: Context] [id:: ready-new] ^ready-native',
+    '- Other [kind:: Project] [id:: ready-old]',
   ].join('\n');
   const resolved = await readyProvider.materialize(
     { path: 'Entities/Ready-Identity.md' },
@@ -1134,8 +1134,8 @@ test('provisional lines never retarget through legacy identity lookalikes in cod
   const cases = [
     {
       label: 'closed inline code',
-      lookalike: '`example [tpsId:: spoof-code]`',
-      replacementIdentity: '[tpsId:: spoof-code]',
+      lookalike: '`example [id:: spoof-code]`',
+      replacementIdentity: '[id:: spoof-code]',
     },
     {
       label: 'protected TPS metadata',
@@ -2187,7 +2187,7 @@ test('selecting a provisional line materializes one native block link and reinde
 
 test('ready line selection revalidates whole-file uniqueness and current Kind state', async () => {
   const { EntityIndexService, TFile } = await servicePromise;
-  const original = '- Project entity [kind:: Project] [tpsId:: entity-1] ^entity-ready';
+  const original = '- Project entity [kind:: Project] [id:: entity-1] ^entity-ready';
   const fixture = createServiceHost(TFile, [{
     path: 'Entities/Ready.md',
     basename: 'Ready',
@@ -2208,7 +2208,7 @@ test('ready line selection revalidates whole-file uniqueness and current Kind st
     'a duplicate added outside the indexed entity set rejects the stale ready choice',
   );
 
-  const changedKind = '- Project entity [kind:: Context] [tpsId:: entity-1] ^entity-ready';
+  const changedKind = '- Project entity [kind:: Context] [id:: entity-1] ^entity-ready';
   fixture.contentByFile.set(fixture.files[0], changedKind);
   const refreshed = await service.materializeReference(ready);
   assert.deepEqual(refreshed?.dimensions.kind, ['Context', 'bullet']);

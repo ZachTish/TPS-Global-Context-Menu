@@ -91,7 +91,7 @@ test('task history records redacted field changes under a stable injected identi
   assert.doesNotMatch(JSON.stringify([...store.pending.values()]), /Ship release/u, 'pending intent must not contain raw task text');
 
   const after = service.ensureTaskIdentity(handle, '- [ ] Ship release [status:: working]');
-  assert.match(after, /\[tpsId:: item_/u);
+  assert.match(after, /\[id:: item_/u);
   fixture.setContent(after);
   await service.commitTaskMutation(handle, {
     after: { path: fixture.file.path, lineNumber: 0, rawLine: after },
@@ -319,9 +319,9 @@ test('confirmed live before-state prevents stale rendered fields from being attr
   const fixture = createPlugin();
   const store = new MemoryItemHistoryStore();
   const service = new ItemHistoryService(fixture.plugin, store);
-  const rendered = '- [ ] Task [priority:: low] [tpsId:: item_live_before]';
-  const liveBefore = '- [ ] Task [priority:: high] [tpsId:: item_live_before]';
-  const after = '- [ ] Task [priority:: high] [status:: working] [tpsId:: item_live_before]';
+  const rendered = '- [ ] Task [priority:: low] [id:: item_live_before]';
+  const liveBefore = '- [ ] Task [priority:: high] [id:: item_live_before]';
+  const after = '- [ ] Task [priority:: high] [status:: working] [id:: item_live_before]';
   const handle = await service.beginTaskMutation({
     action: 'task.update',
     cause,
@@ -349,7 +349,7 @@ test('confirmed history revisions reject conflicting identities and non-task aft
   const fixture = createPlugin();
   const store = new MemoryItemHistoryStore();
   const service = new ItemHistoryService(fixture.plugin, store);
-  const before = '- [ ] Task [tpsId:: item_confirmed]';
+  const before = '- [ ] Task [id:: item_confirmed]';
 
   const conflicting = await service.beginTaskMutation({
     action: 'task.update',
@@ -372,7 +372,7 @@ test('confirmed history revisions reject conflicting identities and non-task aft
   });
   await service.commitTaskMutation(converted, {
     confirmedBefore: { path: fixture.file.path, lineNumber: 0, rawLine: before },
-    after: { path: fixture.file.path, lineNumber: 0, rawLine: 'Plain bullet [tpsId:: item_confirmed]' },
+    after: { path: fixture.file.path, lineNumber: 0, rawLine: 'Plain bullet [id:: item_confirmed]' },
   });
 
   assert.deepEqual(await service.query('item_confirmed'), []);
@@ -393,8 +393,8 @@ test('renamed configured status, priority, and tags keys remain canonical allowl
   };
   const store = new MemoryItemHistoryStore();
   const service = new ItemHistoryService(fixture.plugin, store);
-  const before = '- [ ] Task [phase:: queued] [importance:: low] [topics:: #alpha, #beta] [secret-custom:: private] [tpsId:: item_aliases]';
-  const after = '- [ ] Task [phase:: working] [topics:: #beta, #gamma] [secret-custom:: changed-private] [tpsId:: item_aliases]';
+  const before = '- [ ] Task [phase:: queued] [importance:: low] [topics:: #alpha, #beta] [secret-custom:: private] [id:: item_aliases]';
+  const after = '- [ ] Task [phase:: working] [topics:: #beta, #gamma] [secret-custom:: changed-private] [id:: item_aliases]';
   const handle = await service.beginTaskMutation({
     action: 'task.update',
     cause,
@@ -420,7 +420,7 @@ test('move history preserves entity identity and records source disposition and 
   const fixture = createPlugin();
   const store = new MemoryItemHistoryStore();
   const service = new ItemHistoryService(fixture.plugin, store);
-  const before = '- [ ] Move me [tpsId:: item_existing]';
+  const before = '- [ ] Move me [id:: item_existing]';
   const handle = await service.beginTaskMutation({
     action: 'task.move',
     cause: { ...cause, surface: 'task-drag' },
@@ -474,13 +474,13 @@ test('task renames are recorded without persisting either title', async () => {
   const fixture = createPlugin();
   const store = new MemoryItemHistoryStore();
   const service = new ItemHistoryService(fixture.plugin, store);
-  const before = '- [ ] Confidential old title [tpsId:: item_rename]';
+  const before = '- [ ] Confidential old title [id:: item_rename]';
   const handle = await service.beginTaskMutation({
     action: 'task.update',
     cause,
     before: { path: fixture.file.path, lineNumber: 0, rawLine: before },
   });
-  const after = '- [ ] Confidential new title [tpsId:: item_rename]';
+  const after = '- [ ] Confidential new title [id:: item_rename]';
   await service.commitTaskMutation(handle, {
     after: { path: fixture.file.path, lineNumber: 0, rawLine: after },
   });
@@ -537,7 +537,7 @@ test('pending intents and committed events serialize only allowlisted redacted t
 
   const after = [
     '- [x] Another title that must stay transient',
-    `[tpsId:: ${handle.entityId}]`,
+    `[id:: ${handle.entityId}]`,
     '[status:: working]',
     '[priority:: www.secret.example]',
     '[externalId:: other-external-secret]',
@@ -573,13 +573,13 @@ test('identity races are rejected so callers can abort the pending intent withou
   assert.ok(handle);
 
   assert.throws(
-    () => service.ensureTaskIdentity(handle, '- [ ] Replaced task [tpsId:: different-item]'),
+    () => service.ensureTaskIdentity(handle, '- [ ] Replaced task [id:: different-item]'),
     /identity changed before the mutation/u,
   );
   assert.throws(
     () => service.ensureTaskIdentity(
       handle,
-      `- [ ] Conflicting task [tpsId:: ${handle.entityId}] [subitemId:: different-subitem]`,
+      `- [ ] Conflicting task [id:: ${handle.entityId}] [subitemId:: different-subitem]`,
     ),
     /identity changed before the mutation/u,
   );
@@ -587,7 +587,7 @@ test('identity races are rejected so callers can abort the pending intent withou
     handle,
     `- [ ] Matching subitem [subitemId:: ${handle.entityId}]`,
   );
-  assert.match(adopted, new RegExp(`\\[tpsId:: ${handle.entityId}\\]`, 'u'));
+  assert.match(adopted, new RegExp(`\\[id:: ${handle.entityId}\\]`, 'u'));
 
   await service.abortTaskMutation(handle);
 
@@ -598,7 +598,7 @@ test('identity races are rejected so callers can abort the pending intent withou
     before: {
       path: fixture.file.path,
       lineNumber: 0,
-      rawLine: `- [ ] Sensitive identity [tpsId:: ${sensitiveIdentity}]`,
+      rawLine: `- [ ] Sensitive identity [id:: ${sensitiveIdentity}]`,
     },
   });
   assert.ok(sensitiveHandle);
@@ -607,7 +607,7 @@ test('identity races are rejected so callers can abort the pending intent withou
   assert.throws(
     () => service.ensureTaskIdentity(
       sensitiveHandle,
-      `- [ ] Sensitive identity [tpsId:: ${sensitiveIdentity}]`,
+      `- [ ] Sensitive identity [id:: ${sensitiveIdentity}]`,
     ),
     /identity changed before the mutation/u,
   );
@@ -1047,7 +1047,7 @@ test('startup reconciliation commits strong create evidence, aborts unchanged wo
   assert.doesNotMatch(JSON.stringify(generatedUpdateEvent), /Private updated title/u);
 
   const collidingCreateFixture = createPlugin();
-  const collidingCreateLine = '- [ ] Existing private title [tpsId:: item_existing_create]';
+  const collidingCreateLine = '- [ ] Existing private title [id:: item_existing_create]';
   collidingCreateFixture.setContent(collidingCreateLine);
   const collidingCreateStore = new MemoryItemHistoryStore();
   const firstCollidingCreateService = new ItemHistoryService(
@@ -1075,7 +1075,7 @@ test('startup reconciliation commits strong create evidence, aborts unchanged wo
   );
 
   const abortedFixture = createPlugin();
-  const unchangedLine = '- [ ] Unchanged private title [tpsId:: item_unchanged] [status:: open]';
+  const unchangedLine = '- [ ] Unchanged private title [id:: item_unchanged] [status:: open]';
   abortedFixture.setContent(unchangedLine);
   const abortedStore = new MemoryItemHistoryStore();
   const firstAbortedService = new ItemHistoryService(abortedFixture.plugin, abortedStore);
@@ -1089,7 +1089,7 @@ test('startup reconciliation commits strong create evidence, aborts unchanged wo
   assert.deepEqual(await recoveredAbortedService.stats(), { events: 0, entities: 0, pending: 0 });
 
   const uncertainFixture = createPlugin();
-  const uncertainBefore = '- [ ] Uncertain private title [tpsId:: item_uncertain] [priority:: high]';
+  const uncertainBefore = '- [ ] Uncertain private title [id:: item_uncertain] [priority:: high]';
   uncertainFixture.setContent(uncertainBefore);
   const uncertainStore = new MemoryItemHistoryStore();
   const firstUncertainService = new ItemHistoryService(uncertainFixture.plugin, uncertainStore);
@@ -1098,7 +1098,7 @@ test('startup reconciliation commits strong create evidence, aborts unchanged wo
     cause,
     before: { path: uncertainFixture.file.path, lineNumber: 0, rawLine: uncertainBefore },
   });
-  uncertainFixture.setContent('- [ ] Uncertain private title [tpsId:: item_uncertain] [priority:: low]');
+  uncertainFixture.setContent('- [ ] Uncertain private title [id:: item_uncertain] [priority:: low]');
   const recoveredUncertainService = new ItemHistoryService(uncertainFixture.plugin, uncertainStore);
   await recoveredUncertainService.setup();
   assert.deepEqual(await recoveredUncertainService.stats(), { events: 0, entities: 0, pending: 1 });
@@ -1142,7 +1142,7 @@ test('startup reconciliation keeps missing-source moves and conflicting dual ide
   const targetFile = { path: targetPath };
   const files = new Map([[sourcePath, sourceFile], [targetPath, targetFile]]);
   const contents = new Map([
-    [sourcePath, '- [ ] Private moved title [tpsId:: item_missing_source]'],
+    [sourcePath, '- [ ] Private moved title [id:: item_missing_source]'],
     [targetPath, ''],
   ]);
   moveFixture.plugin.app.vault.getFileByPath = (path) => files.get(path) ?? null;
@@ -1213,7 +1213,7 @@ test('startup reconciliation keeps missing-source moves and conflicting dual ide
   );
 
   const identityFixture = createPlugin();
-  const identityBefore = '- [ ] Private identity title [tpsId:: item_expected] [status:: open]';
+  const identityBefore = '- [ ] Private identity title [id:: item_expected] [status:: open]';
   identityFixture.setContent(identityBefore);
   const identityStore = new MemoryItemHistoryStore();
   const firstIdentityService = new ItemHistoryService(identityFixture.plugin, identityStore);
@@ -1227,7 +1227,7 @@ test('startup reconciliation keeps missing-source moves and conflicting dual ide
     },
   });
   identityFixture.setContent(
-    '- [ ] Private identity title [tpsId:: item_expected] [subitemId:: item_conflict] [status:: done]',
+    '- [ ] Private identity title [id:: item_expected] [subitemId:: item_conflict] [status:: done]',
   );
 
   const recoveredIdentityService = new ItemHistoryService(identityFixture.plugin, identityStore);

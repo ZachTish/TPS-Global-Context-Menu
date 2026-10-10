@@ -70,7 +70,7 @@ function fixture(initial = '---\nkind: note\n---\nInitial body\n', basename = 'Q
     settings: { autoSyncTitleFromFilename: true, enableAutoRename: true, enableActivityLog: false, frontmatterAutoWriteExclusions: '', folderExclusions: '', dailyNoteDateFormat: 'YYYY-MM-DD', properties: [] },
     registerEvent() {},
     shouldIgnoreAutoFrontmatterWrite: () => false,
-    nativeRecordService: { isRecordFile: () => false, hasRecordIdentityEvidence: async () => false, hasRecordIdentityEvidenceInFrontmatter: fm => Object.hasOwn(fm, 'tpsId') },
+    nativeRecordService: { isRecordFile: () => false, hasRecordIdentityEvidence: async () => false, hasRecordIdentityEvidenceInFrontmatter: fm => Object.hasOwn(fm, 'id') },
     bulkEditService: {
       shouldSkipNoteLevelRecurrence: async () => false,
       canMutateFrontmatterSafely: async () => true,
@@ -269,7 +269,7 @@ test('ambiguous title case variants are left unchanged by explicit filename sync
 });
 
 
-for (const marker of ['tpsId: native-record', 'kind: workout-session', 'tags: [template]']) {
+for (const marker of ['id: native-record', 'kind: workout-session', 'tags: [template]']) {
   test(`new source ownership/exclusion at the atomic boundary blocks title initialization: ${marker}`, async () => {
     const f = fixture();
     f.plugin.settings.frontmatterAutoWriteExclusions = 'tag:template';
@@ -354,7 +354,7 @@ test('disabling title synchronization while a rename waits prevents the write', 
   assert.equal(f.stats.modifies, 0);
 });
 
-for (const marker of ['tpsId: native-record', 'kind: workout-session', 'tags: [template]']) {
+for (const marker of ['id: native-record', 'kind: workout-session', 'tags: [template]']) {
   test(`explicit rename retains new atomic ownership/exclusion: ${marker}`, async () => {
     const f = fixture('---\ntitle: Previous name\n---\nKeep body\n', 'New name');
     f.plugin.settings.frontmatterAutoWriteExclusions = 'tag:template';
@@ -377,7 +377,7 @@ test('a newer filename supersedes an earlier rename queued for title synchroniza
 });
 
 test('native records retain their workflow-owned title during generic creation initialization', async () => {
-  const f = fixture('---\ntitle: Native title\ntpsId: stable-id\nkind: task\n---\nKeep body\n', 'New name');
+  const f = fixture('---\ntitle: Native title\nid: stable-id\nkind: task\n---\nKeep body\n', 'New name');
   f.plugin.nativeRecordService.isRecordFile = () => true;
   await f.sync();
   assert.equal(f.frontmatter().title, 'Native title');

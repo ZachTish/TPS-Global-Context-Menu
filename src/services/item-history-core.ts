@@ -103,7 +103,7 @@ const SAFE_TASK_FIELD_KEYS = new Map<string, string>([
   ['tag', 'tags'],
   ['tags', 'tags'],
 ]);
-const TASK_IDENTITY_FIELD_KEYS = new Set(['tpsid', 'subitemid']);
+const TASK_IDENTITY_FIELD_KEYS = new Set(['id', 'subitemid']);
 const SAFE_TASK_IDENTITY_RE = /^[A-Za-z0-9_-]{1,160}$/u;
 const SAFE_CAUSE_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9._/-]*$/u;
 const SAFE_CAUSE_COMMAND_TOKEN_RE = /^[A-Za-z0-9][A-Za-z0-9._/:-]*$/u;
@@ -125,8 +125,8 @@ export function normalizeItemHistoryCause(cause: ItemHistoryUserCause | null | u
 }
 
 export function getTaskHistoryIdentity(line: string): string {
-  const tpsId = normalizeTaskHistoryIdentity(readInlineFieldValue(line, 'tpsId'));
-  if (tpsId) return tpsId;
+  const id = normalizeTaskHistoryIdentity(readInlineFieldValue(line, 'id'));
+  if (id) return id;
   return normalizeTaskHistoryIdentity(readInlineFieldValue(line, 'subitemId'));
 }
 
@@ -141,9 +141,9 @@ export function ensureTaskHistoryIdentity(line: string, entityId: string): strin
     throw new Error('Task history identity changed before the mutation was written.');
   }
 
-  const tpsId = readInlineFieldValue(line, 'tpsId').trim();
-  if (tpsId) return line;
-  return setInlineFieldValueOnTaskLine(line, 'tpsId', expected);
+  const id = readInlineFieldValue(line, 'id').trim();
+  if (id) return line;
+  return setInlineFieldValueOnTaskLine(line, 'id', expected);
 }
 
 export function snapshotTaskForHistory(

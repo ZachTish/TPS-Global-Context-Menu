@@ -98,7 +98,7 @@ test('enabled startup prepares the timer index once through the existing synchro
 
 test('enabled startup still restores active note timer counts without modifying the target',async()=>{
  const h=harness();h.plugin.settings.enableTimeTracking=true;
- const target=h.add('Target.md',{tpsId:'target',title:'Target'});
+ const target=h.add('Target.md',{id:'target',title:'Target'});
  h.add('Session.md',{timeTracking:[record('active')]});
  h.plugin.app.vault.getAbstractFileByPath=path=>h.files.find(file=>file.path===path)??null;
  const updates=[];h.plugin.eventService={emitFilesUpdated:paths=>updates.push(...paths)};
@@ -160,7 +160,7 @@ test('unknown read failures and malformed source reject without publishing stale
 });
 test('failed unknown recovery preserves known timer counts and blocks target preparation before starting a timer',async()=>{
  for(const failure of ['read','malformed']){
-  const h=harness();const target=h.add('Target.md',{tpsId:'target',title:'Target'});
+  const h=harness();const target=h.add('Target.md',{id:'target',title:'Target'});
   const session=h.add('Session.md',{timeTracking:[record('known')]});
   h.plugin.app.vault.getAbstractFileByPath=path=>h.files.find(f=>f.path===path)??null;
   await h.service.refreshActiveTimerCache();assert.equal(h.service.getActiveTimerCountForFileSync(target),1);
@@ -169,7 +169,7 @@ test('failed unknown recovery preserves known timer counts and blocks target pre
   else h.bodies.set(session,'---\ntimeTracking: [\n---\n');
   h.metadata.set(session,{frontmatter:{}});h.emit('metadata:resolved');
   let targetPreparations=0,writes=0;
-  h.service.resolveAndEnsureTarget=async()=>{targetPreparations++;return {file:target,type:'note',tpsId:'target',title:'Target'};};
+  h.service.resolveAndEnsureTarget=async()=>{targetPreparations++;return {file:target,type:'note',id:'target',title:'Target'};};
   h.service.writeNewSession=async()=>{writes++;};
   await assert.rejects(h.service.syncRunningScheduledMetadata(),/time-tracking-source-(?:unavailable|invalid)/u);
   assert.equal(h.service.getActiveTimerCountForFileSync(target),1,'failed recovery never publishes zero known timers');
@@ -220,7 +220,7 @@ test('disabled activation owns no timers, listeners, inventory, body read or UI 
 
 test('enabling, disabling and enabling again owns one listener set and cancels previous layout/timer callbacks',async()=>{
  const h=harness({enabled:false});
- const target=h.add('Target.md',{tpsId:'target',title:'Target'});
+ const target=h.add('Target.md',{id:'target',title:'Target'});
  h.add('Session.md',{timeTracking:[record('first')]});
  h.plugin.app.vault.getAbstractFileByPath=path=>h.files.find(f=>f.path===path)??null;
  h.plugin.eventService={emitFilesUpdated(){}};
@@ -349,7 +349,7 @@ test('missing metadata remains source-inspected after resolved and configured ke
 
 test('disabling while a start waits for core metadata cancels target preparation and all timer writes',async()=>{
  const h=harness({initialized:false});const target=h.add('Target.md');let preparations=0,writes=0;
- h.service.resolveAndEnsureTarget=async()=>{preparations++;return {file:target,type:'note',tpsId:'target',title:'Target'};};
+ h.service.resolveAndEnsureTarget=async()=>{preparations++;return {file:target,type:'note',id:'target',title:'Target'};};
  h.service.writeNewSession=async()=>{writes++;};
  const pending=h.service.startTimer({file:target,type:'note'});await new Promise(resolve=>setImmediate(resolve));
  h.activate(false);assert.equal(await pending,null);assert.equal(preparations,0);assert.equal(writes,0);assert.equal(h.reads(),0);
@@ -366,12 +366,12 @@ test('unknown recovery blocks timer mutations with both single-active modes, inc
   ['edit',h=>h.service.updateSessionTimes('known','2026-09-22T12:00:00Z')],['delete',h=>h.service.deleteSession('known')],
  ];
  for(const failure of ['read','malformed'])for(const [name,action] of actions){
-  const h=harness();const target=h.add('Target.md',{tpsId:'target',title:'Target'});const session=h.add('Session.md',{timeTracking:[record('known')]});
+  const h=harness();const target=h.add('Target.md',{id:'target',title:'Target'});const session=h.add('Session.md',{timeTracking:[record('known')]});
   await h.service.scanStoredSessions();h.service.activeTimerCountsByPath.set(target.path,1);
   h.write(session,{});h.metadata.set(session,{frontmatter:{}});h.emit('metadata:resolved');
   if(failure==='read')h.setReadHook(async()=>{throw Error('unavailable');});else h.bodies.set(session,'---\ntimeTracking: [\n---\n');
   const before=h.bodies.get(session);let preparations=0,writes=0,inventories=0;
-  h.service.resolveAndEnsureTarget=async()=>{preparations++;return {file:target,type:'note',tpsId:'target',title:'Target'};};
+  h.service.resolveAndEnsureTarget=async()=>{preparations++;return {file:target,type:'note',id:'target',title:'Target'};};
   for(const method of ['writeNewSession','replaceStoredSession','removeStoredSession'])h.service[method]=async()=>{writes++;};
   const inventory=h.plugin.app.vault.getMarkdownFiles;h.plugin.app.vault.getMarkdownFiles=()=>{inventories++;return inventory();};
   await assert.rejects(action(h),/time-tracking-source-(?:unavailable|invalid)/u,`${failure}:${name}`);

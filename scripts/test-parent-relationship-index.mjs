@@ -1041,7 +1041,7 @@ test('actual FileProperties: native asset Markdown owns its properties while a n
   const h = await makeActualParentPropertiesHarness();
   const parent = h.add('Parent.md');
   const assetProperties = {
-    tpsId: 'asset-1', kind: 'asset', title: 'Native asset', sourcePath: 'File.pdf',
+    id: 'asset-1', kind: 'asset', title: 'Native asset', sourcePath: 'File.pdf',
     sourceExtension: 'pdf', parent: '[[Parent]]', custom: { value: 5 },
   };
   const asset = h.add('_records/assets/asset-1.md', assetProperties);

@@ -40,7 +40,7 @@ const PROTECTED_TASK_EDITOR_PROPERTY_KEYS = new Set([
   'parent',
   'parentof',
   'folderpath',
-  'tpsid',
+  'id',
   'subitemid',
   'tpsinlineprops',
   'tps-inline-props',

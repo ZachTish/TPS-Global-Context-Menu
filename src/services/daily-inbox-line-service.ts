@@ -442,7 +442,7 @@ export class DailyInboxLineService {
       .filter((index) => index >= 0);
     if (exactMatches.length === 1) return exactMatches[0];
 
-    for (const key of ['tpsId', 'subitemId']) {
+    for (const key of ['id', 'subitemId']) {
       const identity = readInlineFieldValue(context.rawLine, key);
       if (!identity) continue;
       const matches = lines

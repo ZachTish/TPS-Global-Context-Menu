@@ -9,7 +9,7 @@ export interface KindMappingWithAliases { primary: KindClassification; aliases: 
 export type KindMappings = Record<string, string | KindClassification | KindMappingWithAliases>;
 const keyPattern = /^[a-zA-Z_][a-zA-Z0-9_-]*$/u;
 const pathPattern = /^[\p{L}\p{M}\p{N}_-]+(?:\/[\p{L}\p{M}\p{N}_-]+)+$/u;
-const reservedRecordKeys = new Set(['tags', 'tpsid', 'tpsschemaversion', 'title', 'createddate', 'modifieddate']);
+const reservedRecordKeys = new Set(['tags', 'id', 'tpsschemaversion', 'title', 'createddate', 'modifieddate']);
 
 export function normalizeClassificationTag(value: string): string {
   const tag = value.trim().replace(/^#/, '');
@@ -54,7 +54,7 @@ export function normalizeKindClassification(raw: KindClassification, kind = 'rec
     }
     return { scalar: { key, value: value.trim() } };
   }
-  if (!keyPattern.test(raw.key) || ['kind', 'tpsid', 'title', 'tags'].includes(raw.key.toLowerCase())
+  if (!keyPattern.test(raw.key) || ['kind', 'id', 'title', 'tags'].includes(raw.key.toLowerCase())
     || !keyPattern.test(raw.parentKind) || !/^[a-zA-Z][a-zA-Z0-9-]*$/u.test(raw.value)) {
     throw new Error(`Invalid classification for ${kind}.`);
   }

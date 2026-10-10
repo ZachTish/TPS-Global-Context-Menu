@@ -25,8 +25,8 @@ function parseYamlForNativeRecordTest(source) {
   const text = String(source || '').trim();
   if (!text) return {};
   if (text.includes('!tps-test-invalid-yaml!')) throw new Error('synthetic invalid YAML');
-  if (/^\?\s+tpsId\s*$/mu.test(text)) throw new Error('synthetic explicit-key YAML rejection');
-  if (/^-\s+tpsId\s*:/mu.test(text)) return [];
+  if (/^\?\s+id\s*$/mu.test(text)) throw new Error('synthetic explicit-key YAML rejection');
+  if (/^-\s+id\s*:/mu.test(text)) return [];
   if (text.startsWith('{')) return JSON.parse(text);
   const result = {};
   let listKey = null;
@@ -217,6 +217,7 @@ const {
   resolveWritableNativeRecordStorageConfiguration,
   serializeNativeRecordDocument,
   taskLineNeedsNativeRecord,
+  validateNativeRecordStorageProfile,
 } = await loadModule();
 
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
@@ -229,7 +230,7 @@ const apiSource = readFileSync(new URL('../src/plugin-api.ts', import.meta.url),
 
 test('indexed snapshots are synchronous display projections with zero inventory or body reads', async () => {
   const h = createHarness('native-records', { deferSetup: true });
-  const task = h.addFile('Task.md', '---\ntpsId: one\nkind: task\ntitle: One\n---\nBody');
+  const task = h.addFile('Task.md', '---\nid: one\nkind: task\ntitle: One\n---\nBody');
   assert.deepEqual(h.service.indexedSnapshot(), { ready: false, records: [] });
   await h.service.setup();
   assert.equal(h.service.indexedSnapshot().ready, false, 'initial discovery alone is not metadata completion');
@@ -251,10 +252,10 @@ test('indexed snapshots are synchronous display projections with zero inventory 
 
 test('metadata resolution restores display readiness without weakening later source authority or ID reservation', async () => {
   const h = createHarness('native-records', { deferSetup: true });
-  const file = h.addFile('Task.md', '---\ntpsId: old\nkind: task\ntitle: Old\n---\nBody');
+  const file = h.addFile('Task.md', '---\nid: old\nkind: task\ntitle: Old\n---\nBody');
   await h.service.setup(); h.plugin.app.metadataCache.emit('resolved');
   await h.service.snapshot();
-  const next = '---\ntpsId: new\nkind: task\ntitle: New\n---\nBody';
+  const next = '---\nid: new\nkind: task\ntitle: New\n---\nBody';
   h.contents.set(file, next); h.vault.emit('modify', file);
   const generation = h.service.identitySourceGeneration;
   assert.equal(h.service.indexedSnapshot().ready, false);
@@ -276,9 +277,9 @@ test('metadata resolution restores display readiness without weakening later sou
 
 test('indexed kind filtering still reports conflicts in other kinds', async () => {
   const h = createHarness('native-records', { deferSetup: true });
-  h.addFile('Task1.md', '---\ntpsId: duplicate\nkind: task\ntitle: One\n---\n');
-  h.addFile('Task2.md', '---\ntpsId: duplicate\nkind: task\ntitle: Two\n---\n');
-  h.addFile('Calendar.md', '---\ntpsId: event\nkind: calendar-event\ntitle: Event\n---\n');
+  h.addFile('Task1.md', '---\nid: duplicate\nkind: task\ntitle: One\n---\n');
+  h.addFile('Task2.md', '---\nid: duplicate\nkind: task\ntitle: Two\n---\n');
+  h.addFile('Calendar.md', '---\nid: event\nkind: calendar-event\ntitle: Event\n---\n');
   await h.service.setup(); h.plugin.app.metadataCache.emit('resolved');
   const projected = h.service.indexedSnapshot('calendar-event', { includeConflicts: true });
   assert.equal(projected.ready, true); assert.equal(projected.records.length, 1);
@@ -333,7 +334,7 @@ test('computed no-ops and rejected callbacks preserve source and modified timest
   assert.equal(h.contents.get(created.file), before); assert.equal(h.events.length, events);
   for (const [keys, compute] of [
     [['calories'], () => null], [['calories'], () => ({ protein: 10 })],
-    [['tpsId'], () => ({ tpsId: 'other' })], [['kind'], () => ({ kind: 'task' })],
+    [['id'], () => ({ id: 'other' })], [['kind'], () => ({ kind: 'task' })],
     [['modifiedDate'], () => ({ modifiedDate: 'later' })], [['tags'], () => ({ tags: ['changed'] })],
     [['calories'], async () => ({ calories: 300 })], [['calories'], () => Promise.resolve({ calories: 300 })],
   ]) {
@@ -460,7 +461,7 @@ test('interruption after reidentification reports its committed handle and skips
   const applied = await h.service.applyIdentityChanges(plan, entries, { kind: 'automation' }, { isCurrent: () => current });
   assert.equal(applied.ok, false); assert.equal(applied.error, 'native-identity-apply-interrupted');
   assert.equal(applied.handles[0].id, 'new'); assert.equal(applied.handles[0].frontmatter.title, 'Original');
-  assert.equal(parseNativeRecordDocument(h.contents.get(record.file)).frontmatter.tpsId, 'new');
+  assert.equal(parseNativeRecordDocument(h.contents.get(record.file)).frontmatter.id, 'new');
 });
 
 function createHarness(mode = 'native-records', options = {}) {
@@ -692,7 +693,7 @@ for (const condition of ['title', 'filename', 'replacement', 'identity', 'daily'
     const process = h.vault.process;
     h.vault.process = async (file, mutate) => {
       if (condition === 'title') expected = before.replace('title: Before', 'title: Newer title');
-      if (condition === 'identity') expected = before.replace(`tpsId: race-${condition}`, 'tpsId: new-identity');
+      if (condition === 'identity') expected = before.replace(`id: race-${condition}`, 'id: new-identity');
       if (condition === 'daily') expected = before.replace('kind: task', 'kind: dailynote');
       if (condition === 'process') expected = before.replace('\n---\n', '\nrunType: active\n---\n');
       if (condition === 'tag') {
@@ -734,7 +735,7 @@ for (const field of ['id', 'kind', 'title']) {
     const oldPath = record.file.path;
     await h.vault.rename(record.file, 'Inbox/After.md');
     const before = h.contents.get(record.file);
-    const expected = field === 'id' ? before.replace('tpsId: source-before-read', 'tpsId: new-owner')
+    const expected = field === 'id' ? before.replace('id: source-before-read', 'id: new-owner')
       : field === 'kind' ? before.replace('kind: task', 'kind: food-entry')
         : before.replace('title: Before', 'title: Current title');
     const update = h.service.updateFromSource.bind(h.service);
@@ -794,7 +795,7 @@ test('native record envelope and path helpers are deterministic', () => {
   assert.equal(isValidNativeRecordKind(true), false);
   assert.equal(isValidNativeRecordKind(null), false);
   const envelope = {
-    tpsId: 'task-1',
+    id: 'task-1',
     tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
     kind: 'task',
     title: 'One',
@@ -852,11 +853,11 @@ test('calendar template authority requires the exact canonical ID grammar', asyn
     await assert.rejects(service.create(kind, { title: 'Wrong route' }, { id: calendarId() }), /calendar-event structural route/u);
   }
   for (const id of ['calendar:v1:scope:digest', calendarId().slice(0, -1), `${calendarId()}x`]) {
-    assert.equal(service.inspect({ tpsId: id, title: 'No public kind' }), null);
+    assert.equal(service.inspect({ id: id, title: 'No public kind' }), null);
     await assert.rejects(service.create('calendar-event', { title: 'Invalid', kind: 'Team meeting' }, { id }), /collides with system storage/u);
     await assert.rejects(service.create('calendar-event', { title: 'Invalid' }, { id, body: 'Body' }), /canonical calendar record ID/u);
   }
-  await assert.rejects(service.create('calendar-event', { title: 'Copied ID', tpsId: 'template-id' }, { id: calendarId() }), /collides with system storage/u);
+  await assert.rejects(service.create('calendar-event', { title: 'Copied ID', id: 'template-id' }, { id: calendarId() }), /collides with system storage/u);
   await assert.rejects(service.create('calendar-event', { title: 'Invalid body' }, { id: calendarId(), body: null }), /canonical calendar record ID/u);
   await assert.rejects(service.create('calendar-event', { title: 'Invalid kind', kind: [42] }, { id: calendarId() }), /kind must be text or a list of text/u);
   await assert.rejects(service.create('task', { title: 'Unchanged task contract' }, { id: 'task-body', body: 'Body' }), /canonical calendar record ID/u);
@@ -963,7 +964,7 @@ test('canonical calendar IDs retain global duplicate protection regardless of pu
   const first = await service.create('calendar-event', { title: 'First' }, { id: calendarId() });
   const duplicate = addFile('Inbox/duplicate.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
-      tpsId: calendarId().toUpperCase(), kind: 'task', title: 'Conflicting note',
+      id: calendarId().toUpperCase(), kind: 'task', title: 'Conflicting note',
     },
   }));
   vault.emit('create', duplicate);
@@ -977,10 +978,10 @@ test('canonical calendar IDs retain global duplicate protection regardless of pu
 });
 
 test('frontmatter fences must be column-zero and indented scalar markers survive consolidation', async () => {
-  assert.equal(parseNativeRecordDocument('  ---\ntpsId: task-nope\n---\n'), null);
+  assert.equal(parseNativeRecordDocument('  ---\nid: task-nope\n---\n'), null);
   const source = [
     '\uFEFF---',
-    'tpsId: task-indented-fence',
+    'id: task-indented-fence',
     'tpsSchemaVersion: 1',
     'kind: task',
     'title: Indented fence task',
@@ -1014,7 +1015,7 @@ test('flat-root layout creates every native record directly in the configured de
   assert.equal(food.path, 'food-root.md');
 });
 
-test('canonical writes persist only tpsId, kind, and title while API projections retain virtual schema and file timestamps', async () => {
+test('canonical writes persist only id, kind, and title while API projections retain virtual schema and file timestamps', async () => {
   const { service, contents } = createHarness();
   const created = await service.create('task', {
     title: 'Canonical task',
@@ -1024,14 +1025,14 @@ test('canonical writes persist only tpsId, kind, and title while API projections
 
   assert.deepEqual(
     Object.keys(raw).filter((key) => [
-      'tpsId',
+      'id',
       'tpsSchemaVersion',
       'kind',
       'title',
       'createdDate',
       'modifiedDate',
     ].includes(key)).sort(),
-    ['kind', 'title', 'tpsId'],
+    ['id', 'kind', 'title'],
   );
   const inspection = service.inspect(raw);
   assert.equal(inspection?.schemaVersion, 1);
@@ -1050,7 +1051,7 @@ test('the built-in six-field property profile remains readable and consolidates 
   const { service, contents, addFile } = createHarness();
   const legacy = addFile('Imported/Legacy event.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Legacy body\n', frontmatter: {
-      tpsId: 'calendar-legacy-property',
+      id: 'calendar-legacy-property',
       tpsSchemaVersion: 1,
       kind: 'calendar-event',
       title: 'Legacy event',
@@ -1067,7 +1068,7 @@ test('the built-in six-field property profile remains readable and consolidates 
   const raw = parseNativeRecordDocument(contents.get(legacy)).frontmatter;
   assert.deepEqual(raw, {
     status: 'scheduled',
-    tpsId: 'calendar-legacy-property',
+    id: 'calendar-legacy-property',
     kind: 'calendar-event',
     title: 'Legacy event',
   });
@@ -1077,7 +1078,7 @@ test('the built-in six-field property profile remains readable and consolidates 
   assert.equal(projected?.modifiedDate, '');
 });
 
-test('TPS definition kinds share the global tpsId namespace without relocating existing notes', async () => {
+test('TPS definition kinds share the global id namespace without relocating existing notes', async () => {
   const { service, vault, entries, contents, addFile } = createHarness();
   const folderByKind = new Map([
     ['food', 'foods'],
@@ -1094,7 +1095,7 @@ test('TPS definition kinds share the global tpsId namespace without relocating e
 
   const existing = addFile('Definitions/Foods/Apple.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Definition body\n', frontmatter: {
-      tpsId: 'food-existing-global',
+      id: 'food-existing-global',
       kind: 'food',
       title: 'Apple',
       servingSize: 1,
@@ -1138,9 +1139,9 @@ test('configured legacy tag storage remains read-only while new records use only
     calories: 420,
   }, { id: 'food:one' });
   const parsed = parseNativeRecordDocument(contents.get(created.file));
-  assert.equal(service.version, 6);
+  assert.equal(service.version, 7);
   assert.deepEqual(service.getStorageProfile(), DEFAULT_NATIVE_RECORD_STORAGE_PROFILE);
-  assert.equal(parsed.frontmatter.tpsId, 'food:one');
+  assert.equal(parsed.frontmatter.id, 'food:one');
   assert.equal(parsed.frontmatter.kind, 'food-entry');
   assert.equal(parsed.frontmatter.title, 'Tagged lunch');
   assert.equal(Object.hasOwn(parsed.frontmatter, 'tpsSchemaVersion'), false);
@@ -1293,7 +1294,7 @@ test('the canonical writer never consumes tags while valid prior mappings remain
   for (const systemKey of systemKeys) {
     const configured = {
       identityMode: 'property',
-      identityPropertyKey: 'tpsId',
+      identityPropertyKey: 'id',
       schemaPropertyKey: 'tpsSchemaVersion',
       identityTagPrefix: 'tps/record',
       kindPropertyKey: 'kind',
@@ -1337,7 +1338,7 @@ test('even a fully collided legacy configuration writes safe properties without 
   }, { id: 'food-safe' });
   const raw = parseNativeRecordDocument(contents.get(created.file)).frontmatter;
   assert.deepEqual(raw.tags, ['food', 'lunch']);
-  assert.equal(raw.tpsId, 'food-safe');
+  assert.equal(raw.id, 'food-safe');
   assert.equal(Object.hasOwn(raw, 'tpsSchemaVersion'), false);
   assert.equal(raw.kind, 'food-entry');
   assert.equal(raw.title, 'Safe lunch');
@@ -1376,7 +1377,7 @@ test('only exact matched aliases own cleanup keys across create, update, and con
   }, { id: 'task-property-only-create' });
   const cleanedCreateRaw = parseNativeRecordDocument(contents.get(cleanedCreate.file)).frontmatter;
   assert.deepEqual(cleanedCreateRaw.tags, ['todo']);
-  assert.equal(cleanedCreateRaw.tpsId, 'task-property-only-create');
+  assert.equal(cleanedCreateRaw.id, 'task-property-only-create');
   assert.deepEqual(cleanedCreate.frontmatter.tags, ['todo']);
   const cleanedCreateIndex = [...indexed].reverse().find(([file]) => file === cleanedCreate.file)?.[1];
   assert.deepEqual(cleanedCreateIndex?.tags, ['todo']);
@@ -1422,7 +1423,7 @@ test('only exact matched aliases own cleanup keys across create, update, and con
   const currentRaw = parseNativeRecordDocument(contents.get(current.file)).frontmatter;
   assert.equal(currentRaw.name, 'User-owned display name');
   const legacyRaw = parseNativeRecordDocument(contents.get(legacy)).frontmatter;
-  assert.equal(legacyRaw.tpsId, 'task-matched-legacy');
+  assert.equal(legacyRaw.id, 'task-matched-legacy');
   assert.equal(legacyRaw.kind, 'task');
   assert.equal(legacyRaw.title, 'Matched legacy title');
   assert.equal(legacyRaw.producerField, 'preserve me');
@@ -1449,7 +1450,7 @@ test('a valid current writer preserves dormant partial alias fields and owns tim
   });
   const dormant = addFile('_records/tasks/task-dormant-current.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Dormant body', frontmatter: {
-      tpsId: 'task-dormant-current',
+      id: 'task-dormant-current',
       tpsSchemaVersion: 1,
       kind: 'task',
       title: 'Current identity wins',
@@ -1465,7 +1466,7 @@ test('a valid current writer preserves dormant partial alias fields and owns tim
 
   const partiallyMigrated = addFile('_records/tasks/task-partial-timestamps.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Timestamp body', frontmatter: {
-      tpsId: 'task-partial-timestamps',
+      id: 'task-partial-timestamps',
       tpsSchemaVersion: 1,
       kind: 'task',
       title: 'Current timestamp title',
@@ -1485,7 +1486,7 @@ test('a valid current writer preserves dormant partial alias fields and owns tim
 
   const partialUpdate = addFile('_records/tasks/task-partial-timestamps-update.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Timestamp update body', frontmatter: {
-      tpsId: 'task-partial-timestamps-update', tpsSchemaVersion: 1, kind: 'task', title: 'Timestamp update',
+      id: 'task-partial-timestamps-update', tpsSchemaVersion: 1, kind: 'task', title: 'Timestamp update',
       createdDate: '', modifiedDate: '',
       externalId: 'task-partial-timestamps-update', externalSchema: 1,
       externalKind: 'task', externalTitle: 'Legacy timestamp update',
@@ -1501,7 +1502,7 @@ test('a valid current writer preserves dormant partial alias fields and owns tim
 
   const authoritative = addFile('_records/tasks/task-authoritative-timestamps.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
-      tpsId: 'task-authoritative-timestamps',
+      id: 'task-authoritative-timestamps',
       tpsSchemaVersion: 1,
       kind: 'task',
       title: 'Authoritative timestamps',
@@ -1547,7 +1548,7 @@ test('missing current timestamps fail closed when agreeing identity aliases disa
   });
   const conflicted = addFile('_records/tasks/task-timestamp-conflict.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Timestamp conflict body', frontmatter: {
-      tpsId: 'task-timestamp-conflict', tpsSchemaVersion: 1, kind: 'task', title: 'Timestamp conflict',
+      id: 'task-timestamp-conflict', tpsSchemaVersion: 1, kind: 'task', title: 'Timestamp conflict',
       createdDate: '', modifiedDate: '',
       firstId: 'task-timestamp-conflict', firstSchema: 1, firstKind: 'task', firstTitle: 'First alias',
       firstCreated: '2026-08-25T00:00:00.000Z',
@@ -1662,7 +1663,7 @@ test('legacy property identity in tags is recovered only without a valid current
   const updated = await service.update(legacyForUpdate, { status: 'done' });
   assert.equal(updated?.id, 'task-tags-update');
   const updatedRaw = parseNativeRecordDocument(contents.get(legacyForUpdate)).frontmatter;
-  assert.equal(updatedRaw.tpsId, 'task-tags-update');
+  assert.equal(updatedRaw.id, 'task-tags-update');
   assert.equal(updatedRaw.status, 'done');
   assert.equal(updatedRaw.producerField, 'update producer');
   for (const key of ['tags', 'legacySchema', 'legacyKind', 'legacyTitle']) {
@@ -1676,7 +1677,7 @@ test('legacy property identity in tags is recovered only without a valid current
   const result = await service.migrateStorageProfile();
   assert.equal(result.failed, 1);
   const migratedRaw = parseNativeRecordDocument(contents.get(legacyForMigration)).frontmatter;
-  assert.equal(migratedRaw.tpsId, 'task-tags-migration');
+  assert.equal(migratedRaw.id, 'task-tags-migration');
   assert.equal(migratedRaw.producerField, 'migration producer');
   for (const key of ['tags', 'legacySchema', 'legacyKind', 'legacyTitle']) {
     assert.equal(Object.hasOwn(migratedRaw, key), false, key);
@@ -1748,7 +1749,7 @@ test('legacy tag prefixes dedupe and reconcile case-insensitively end to end', a
   const result = await service.migrateStorageProfile();
   assert.equal(result.failed, 0);
   const raw = parseNativeRecordDocument(contents.get(legacy)).frontmatter;
-  assert.equal(raw.tpsId, 'task-prefix-legacy');
+  assert.equal(raw.id, 'task-prefix-legacy');
   assert.deepEqual(raw.tags, ['todo']);
 });
 
@@ -1833,7 +1834,7 @@ test('property records reconcile every recognized reserved tag independently of 
 test('conflicting property and legacy-tag identities fail closed', () => {
   const { service } = createHarness();
   assert.equal(service.inspect({
-    tpsId: 'task-property',
+    id: 'task-property',
     tpsSchemaVersion: 1,
     kind: 'task',
     title: 'Conflicted task',
@@ -1854,19 +1855,19 @@ test('legacy hex tag IDs keep canonical UTF-8 compatibility and property identit
 
   const literalHex = addFile('_records/tasks/literal-hex-id.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
-      tpsId: 'hex-3a', tpsSchemaVersion: 1, kind: 'task', title: 'Literal hex ID',
+      id: 'hex-3a', tpsSchemaVersion: 1, kind: 'task', title: 'Literal hex ID',
       tags: ['todo', 'tps/record/v1/task/hex-3a'],
     },
   }));
   const decodedHex = addFile('_records/tasks/decoded-hex-id.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
-      tpsId: ':', tpsSchemaVersion: 1, kind: 'task', title: 'Decoded hex ID',
+      id: ':', tpsSchemaVersion: 1, kind: 'task', title: 'Decoded hex ID',
       tags: ['todo', 'tps/record/v1/task/hex-3a'],
     },
   }));
   const literalLetters = addFile('_records/tasks/literal-hex-letters.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
-      tpsId: 'hex-4142', tpsSchemaVersion: 1, kind: 'task', title: 'Literal hex letters',
+      id: 'hex-4142', tpsSchemaVersion: 1, kind: 'task', title: 'Literal hex letters',
       tags: ['todo', 'tps/record/v1/task/hex-4142'],
     },
   }));
@@ -1876,14 +1877,14 @@ test('legacy hex tag IDs keep canonical UTF-8 compatibility and property identit
 
   const result = await service.migrateStorageProfile();
   assert.equal(result.failed, 0);
-  assert.equal(parseNativeRecordDocument(contents.get(legacyUnsafe)).frontmatter.tpsId, 'food:one');
+  assert.equal(parseNativeRecordDocument(contents.get(legacyUnsafe)).frontmatter.id, 'food:one');
   for (const [file, expectedId] of [
     [literalHex, 'hex-3a'],
     [decodedHex, ':'],
     [literalLetters, 'hex-4142'],
   ]) {
     const raw = parseNativeRecordDocument(contents.get(file)).frontmatter;
-    assert.equal(raw.tpsId, expectedId);
+    assert.equal(raw.id, expectedId);
     assert.deepEqual(raw.tags, ['todo']);
   }
 
@@ -1904,7 +1905,7 @@ test('legacy hex tag IDs keep canonical UTF-8 compatibility and property identit
 test('readable storage fields and tag evidence are case-insensitive without losing timestamps', () => {
   const { service } = createHarness();
   const mixedCase = {
-    TPSID: 'task-case-a',
+    ID: 'task-case-a',
     TPSSchemaVersion: 1,
     Kind: 'task',
     Title: 'Mixed-case task',
@@ -1931,7 +1932,7 @@ test('partial or invalid property identity cannot be masked by a valid legacy ta
   const { service, contents, events, indexed, addFile } = createHarness();
   const partial = addFile('_records/tasks/task-partial-property.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Partial body', frontmatter: {
-      tpsId: 'task-property-a',
+      id: 'task-property-a',
       kind: 'task',
       title: 'Partial property marker',
       tags: ['todo', 'tps/record/v1/task/task-tag-b'],
@@ -1939,7 +1940,7 @@ test('partial or invalid property identity cannot be masked by a valid legacy ta
   }));
   const invalidSchema = addFile('_records/tasks/task-invalid-schema.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Schema body', frontmatter: {
-      tpsId: 'task-property-c',
+      id: 'task-property-c',
       tpsSchemaVersion: 2,
       kind: 'task',
       title: 'Invalid schema marker',
@@ -1980,11 +1981,11 @@ test('tag-profile identity property names remain dormant while valid property al
   })?.id, 'task-dormant');
 
   const { service: propertyService } = createHarness('native-records', {
-    identityPropertyKey: 'tpsId',
+    identityPropertyKey: 'id',
     schemaPropertyKey: 'customSchema',
   });
   assert.equal(inspectMigration(propertyService, {
-    tpsId: 'task-shared-marker',
+    id: 'task-shared-marker',
     customSchema: 1,
     kind: 'task',
     title: 'Shared marker',
@@ -1995,8 +1996,8 @@ test('case-variant duplicate storage keys block inspect, update, and consolidati
   const { service, contents, events, indexed, addFile } = createHarness();
   const duplicate = addFile('_records/tasks/task-case-duplicate.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Duplicate body', frontmatter: {
-      tpsId: 'task-case-duplicate',
-      TPSID: 'task-shadow',
+      id: 'task-case-duplicate',
+      ID: 'task-shadow',
       tpsSchemaVersion: 1,
       kind: 'task',
       title: 'Case duplicate',
@@ -2057,7 +2058,7 @@ test('valid property identity cannot mask malformed or multiple reserved legacy 
   });
   const malformed = addFile('_records/tasks/task-malformed.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
-      tpsId: 'task-malformed',
+      id: 'task-malformed',
       tpsSchemaVersion: 1,
       kind: 'task',
       title: 'Malformed evidence',
@@ -2066,7 +2067,7 @@ test('valid property identity cannot mask malformed or multiple reserved legacy 
   }));
   const multiple = addFile('_records/tasks/task-multiple.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
-      tpsId: 'task-multiple',
+      id: 'task-multiple',
       tpsSchemaVersion: 1,
       kind: 'task',
       title: 'Multiple evidence',
@@ -2092,12 +2093,12 @@ test('blocked identity evidence reserves recoverable IDs and poisons global owne
   const { service, vault, contents, events, addFile } = createHarness();
   const valid = addFile('_records/tasks/task-union-valid.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Valid body', frontmatter: {
-      tpsId: 'task-union-owner', tpsSchemaVersion: 1, kind: 'task', title: 'Valid union owner',
+      id: 'task-union-owner', tpsSchemaVersion: 1, kind: 'task', title: 'Valid union owner',
     },
   }));
   const blocked = addFile('_records/tasks/task-union-blocked.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Blocked body', frontmatter: {
-      tpsId: 'task-union-owner', tpsSchemaVersion: 1, kind: 'task', title: 'Blocked union owner',
+      id: 'task-union-owner', tpsSchemaVersion: 1, kind: 'task', title: 'Blocked union owner',
       tags: ['todo', 'tps/record/v1/calendar-event/task-union-owner'],
     },
   }));
@@ -2167,7 +2168,7 @@ test('conflicting full property readers block every recoverable ID instead of di
   });
   const conflicted = addFile('_records/tasks/conflicting-property-readers.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Conflict body', frontmatter: {
-      tpsId: 'task-current-conflict', tpsSchemaVersion: 1, kind: 'task', title: 'Current conflict',
+      id: 'task-current-conflict', tpsSchemaVersion: 1, kind: 'task', title: 'Current conflict',
       legacyId: 'calendar-legacy-conflict', legacySchema: 1,
       legacyKind: 'calendar-event', legacyTitle: 'Legacy conflict',
     },
@@ -2228,7 +2229,7 @@ test('explicit create refuses an ID already owned by multiple paths instead of c
   ]) {
     addFile(path, serializeNativeRecordDocument({
       bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
-        tpsId: 'task-duplicate-create',
+        id: 'task-duplicate-create',
         tpsSchemaVersion: 1,
         kind: 'task',
         title,
@@ -2273,12 +2274,12 @@ test('rename refuses a direct path when its stable ID has multiple known owners'
   const { service, contents, entries, events, addFile } = createHarness();
   const first = addFile('_records/tasks/rename-duplicate-one.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'First rename body', frontmatter: {
-      tpsId: 'task-rename-duplicate', tpsSchemaVersion: 1, kind: 'task', title: 'Rename one',
+      id: 'task-rename-duplicate', tpsSchemaVersion: 1, kind: 'task', title: 'Rename one',
     },
   }));
   const second = addFile('_records/tasks/rename-duplicate-two.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Second rename body', frontmatter: {
-      tpsId: 'task-rename-duplicate', tpsSchemaVersion: 1, kind: 'task', title: 'Rename two',
+      id: 'task-rename-duplicate', tpsSchemaVersion: 1, kind: 'task', title: 'Rename two',
     },
   }));
   service.indexFile(first);
@@ -2328,7 +2329,7 @@ test('storage migration removes legacy identities and retires aliases for late S
   assert.deepEqual(result, { inspected: 1, updated: 1, skipped: 0, failed: 0 });
   const migrated = parseNativeRecordDocument(contents.get(created));
   const raw = migrated.frontmatter;
-  assert.equal(raw.tpsId, 'calendar-event-1');
+  assert.equal(raw.id, 'calendar-event-1');
   assert.equal(Object.hasOwn(raw, 'tpsSchemaVersion'), false);
   assert.equal(raw.kind, 'calendar-event');
   assert.equal(raw.title, 'Migration event');
@@ -2366,7 +2367,7 @@ test('updating a current record removes agreeing identity tags without reseriali
   const original = [
     '\uFEFF---\r\n',
     'title: "Legacy source task"\r\n',
-    'tpsId: task-source-preserved\r\n',
+    'id: task-source-preserved\r\n',
     '# producer-owned bytes remain in this exact location\r\n',
     'producerField: "Keep: exact spelling"\r\n',
     'scheduled: 2026-09-01T14:30:00Z\r\n',
@@ -2395,13 +2396,13 @@ test('updating a current record removes agreeing identity tags without reseriali
   const stripOwnedSource = (source) => source
     .replace(/^title:[^\r\n]*(?:\r?\n)/gmu, '')
     .replace(/^tags:(?:\r?\n)(?:[ \t]+-[^\r\n]*(?:\r?\n))*/gmu, '')
-    .replace(/^(?:tpsId|tpsSchemaVersion|createdDate|modifiedDate|status):[^\r\n]*(?:\r?\n)/gmu, '');
+    .replace(/^(?:id|tpsSchemaVersion|createdDate|modifiedDate|status):[^\r\n]*(?:\r?\n)/gmu, '');
 
   assert.equal(updated?.id, 'task-source-preserved');
   assert.equal(updated?.frontmatter.title, 'Updated source task');
   assert.deepEqual(updated?.frontmatter.tags, ['todo', 'important']);
   assert.equal(stripOwnedSource(output), stripOwnedSource(original));
-  assert.match(output, /^tpsId: task-source-preserved\r$/mu);
+  assert.match(output, /^id: task-source-preserved\r$/mu);
   assert.doesNotMatch(output, /^tpsSchemaVersion:/mu);
   assert.match(output, /^title: Updated source task\r$/mu);
   assert.match(output, /^status: done\r$/mu);
@@ -2411,7 +2412,7 @@ test('updating a current record removes agreeing identity tags without reseriali
   assert.ok(output.endsWith('Body with --- and title: text stays byte-for-byte.\r\n'));
   assert.equal(helperCalls.length, 1);
   assert.ok(helperCalls[0].ownedKeys.includes('tags'));
-  assert.ok(helperCalls[0].ownedKeys.includes('tpsId'));
+  assert.ok(helperCalls[0].ownedKeys.includes('id'));
   assert.ok(helperCalls[0].ownedKeys.includes('status'));
   assert.deepEqual(helperCalls[0].options, { emitEvents: false, updateEntityIndex: false });
   assert.equal(indexed.length, 1, 'only NativeRecordService owns the final index update');
@@ -2423,7 +2424,7 @@ test('reidentify atomically replaces property identity while preserving path, so
   const { service, contents, events, indexed, addFile } = createHarness();
   const original = [
     '\uFEFF---\r\n',
-    'tpsId: calendar-old\r\n',
+    'id: calendar-old\r\n',
     'tpsSchemaVersion: 1\r\n',
     'kind: calendar-event\r\n',
     'title: "Provider: planning"\r\n',
@@ -2450,7 +2451,7 @@ test('reidentify atomically replaces property identity while preserving path, so
   assert.equal(result?.path, file.path);
   assert.equal(await service.resolve('calendar-old'), null);
   assert.equal((await service.resolve('calendar:v1:source:occurrence'))?.path, file.path);
-  assert.match(output, /^tpsId: "?calendar:v1:source:occurrence"?\r$/mu);
+  assert.match(output, /^id: "?calendar:v1:source:occurrence"?\r$/mu);
   assert.match(output, /^scheduled: 2026-10-02T14:00:00.000Z\r$/mu);
   assert.match(output, /^providerPayload: "Keep: exact"\r$/mu);
   assert.match(output, /^# producer-owned placement and spelling must survive\r$/mu);
@@ -2497,7 +2498,7 @@ test('reidentify adopts recognized tag identity and retains ordinary tags and bo
   const parsed = parseNativeRecordDocument(contents.get(file));
 
   assert.equal(result?.id, 'calendar:v1:source:tagged');
-  assert.equal(parsed.frontmatter.tpsId, 'calendar:v1:source:tagged');
+  assert.equal(parsed.frontmatter.id, 'calendar:v1:source:tagged');
   assert.equal(Object.hasOwn(parsed.frontmatter, 'tpsSchemaVersion'), false);
   assert.equal(parsed.frontmatter.kind, 'calendar-event');
   assert.equal(parsed.frontmatter.title, 'Legacy tagged event');
@@ -2512,7 +2513,7 @@ test('a reidentified record can be cleaned up immediately while MetadataCache st
   const { service, plugin, contents, addFile } = createHarness();
   const file = addFile('_records/calendar-events/stale-cache-event.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Body stays.\n', frontmatter: {
-      tpsId: 'calendar-stale-old',
+      id: 'calendar-stale-old',
       tpsSchemaVersion: 1,
       kind: 'calendar-event',
       title: 'Stale cache event',
@@ -2543,7 +2544,7 @@ test('a reidentified record can be cleaned up immediately while MetadataCache st
   const parsed = parseNativeRecordDocument(contents.get(file));
 
   assert.equal(cleaned?.id, 'calendar:v1:source:stale');
-  assert.equal(parsed.frontmatter.tpsId, 'calendar:v1:source:stale');
+  assert.equal(parsed.frontmatter.id, 'calendar:v1:source:stale');
   assert.equal(Object.hasOwn(parsed.frontmatter, 'legacyOccurrenceKey'), false);
   assert.equal(parsed.frontmatter.status, 'scheduled');
   assert.equal(parsed.body, 'Body stays.\n');
@@ -2553,7 +2554,7 @@ test('reidentify fails closed for duplicate sources and occupied or blocked dest
   const { service, contents, events, indexed, addFile } = createHarness();
   const addRecord = (path, id, title) => addFile(path, serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: `${title} body\n`, frontmatter: {
-      tpsId: id,
+      id: id,
       tpsSchemaVersion: 1,
       kind: 'calendar-event',
       title,
@@ -2565,7 +2566,7 @@ test('reidentify fails closed for duplicate sources and occupied or blocked dest
   const duplicateTwo = addRecord('_records/calendar-events/duplicate-two.md', 'CALENDAR-DUPLICATE', 'Duplicate two');
   const blocked = addFile('_records/calendar-events/blocked.md', serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: 'Blocked body\n', frontmatter: {
-      tpsId: 'calendar-blocked',
+      id: 'calendar-blocked',
       tpsSchemaVersion: 9,
       kind: 'calendar-event',
       title: 'Blocked evidence',
@@ -2620,7 +2621,7 @@ test('reidentify fails closed for duplicate sources and occupied or blocked dest
 test('resolve refreshes stale identity state from Vault bytes and rejects every duplicate reference form', async () => {
   const sourceFor = (id) => serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: `${id} body\n`, frontmatter: {
-      tpsId: id,
+      id: id,
       kind: 'calendar-event',
       title: id,
     },
@@ -2659,7 +2660,7 @@ test('resolve refreshes stale identity state from Vault bytes and rejects every 
 test('reidentify preflight matches source-writer eligibility and sees uncached on-disk destinations', async () => {
   const addRecordSource = (id, newline = '\n', body = 'Body\n') => serializeNativeRecordDocument({
     bom: '', newline, closer: '---', body, frontmatter: {
-      tpsId: id,
+      id: id,
       tpsSchemaVersion: 1,
       kind: 'calendar-event',
       title: id,
@@ -2789,7 +2790,7 @@ test('reidentify preflight matches source-writer eligibility and sees uncached o
     addFile('_records/calendar-events/malformed-identity.md', [
       '---',
       '{broken',
-      'tpsId: calendar-malformed',
+      'id: calendar-malformed',
       'tpsSchemaVersion: 1',
       'kind: calendar-event',
       '---',
@@ -2811,10 +2812,10 @@ test('reidentify preflight matches source-writer eligibility and sees uncached o
   }
 
   for (const [name, malformedFrontmatter] of [
-    ['flow', '{tpsId: calendar-flow-malformed, tpsSchemaVersion: 1, kind: calendar-event,'],
-    ['indented', '  tpsId: calendar-indented-malformed\n  tpsSchemaVersion: 1\n!tps-test-invalid-yaml!'],
-    ['root-sequence', '- tpsId: calendar-root-sequence-malformed\n  tpsSchemaVersion: 1'],
-    ['explicit-key', '? tpsId\n: calendar-explicit-key-malformed'],
+    ['flow', '{id: calendar-flow-malformed, tpsSchemaVersion: 1, kind: calendar-event,'],
+    ['indented', '  id: calendar-indented-malformed\n  tpsSchemaVersion: 1\n!tps-test-invalid-yaml!'],
+    ['root-sequence', '- id: calendar-root-sequence-malformed\n  tpsSchemaVersion: 1'],
+    ['explicit-key', '? id\n: calendar-explicit-key-malformed'],
   ]) {
     const { service, vault, contents, addFile } = createHarness();
     const malformed = addFile(`_records/calendar-events/${name}-malformed.md`, [
@@ -2863,7 +2864,7 @@ test('reidentify preflight matches source-writer eligibility and sees uncached o
     const staleSource = addRecordSource('calendar-duplicate-business-key');
     const duplicateBusinessKeySource = serializeNativeRecordDocument({
       bom: '', newline: '\n', closer: '---', body: 'Body stays.\n', frontmatter: {
-        tpsId: 'calendar-duplicate-business-key',
+        id: 'calendar-duplicate-business-key',
         tpsSchemaVersion: 1,
         kind: 'calendar-event',
         title: 'Duplicate business key',
@@ -2905,14 +2906,14 @@ test('reidentify preflight matches source-writer eligibility and sees uncached o
     );
     const flow = addFile('_records/calendar-events/flow-plan-later.md', [
       '---',
-      '{"tpsId":"calendar-flow-plan-later","tpsSchemaVersion":1,"kind":"calendar-event","title":"Flow event","calendarId":"calendar-one"}',
+      '{"id":"calendar-flow-plan-later","tpsSchemaVersion":1,"kind":"calendar-event","title":"Flow event","calendarId":"calendar-one"}',
       '---',
       'Flow body stays.',
       '',
     ].join('\n'));
     const before = new Map([clean, flow].map((file) => [file, contents.get(file)]));
     const flowOwnedKeys = [
-      'tpsId',
+      'id',
       'tpsSchemaVersion',
       'kind',
       'title',
@@ -2979,7 +2980,7 @@ test('reidentify preflight matches source-writer eligibility and sees uncached o
 test('identity plans preflight exact create and ordered update payloads before any writes', async () => {
   const sourceFor = (id, tags = ['hca']) => serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: `${id} body\n`, frontmatter: {
-      tpsId: id,
+      id: id,
       tpsSchemaVersion: 1,
       kind: 'calendar-event',
       title: id,
@@ -3081,7 +3082,7 @@ test('identity plans preflight exact create and ordered update payloads before a
 test('identity plans bind create kind and reidentify source path plus current ID', async () => {
   const sourceFor = (id) => serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: `${id} body\n`, frontmatter: {
-      tpsId: id,
+      id: id,
       kind: 'calendar-event',
       title: id,
     },
@@ -3162,7 +3163,7 @@ test('identity plans bind create kind and reidentify source path plus current ID
 test('identity plans apply a no-rename reidentify at its source path and fail closed on invalid path contracts', async () => {
   const sourceFor = (id, body) => serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body, frontmatter: {
-      tpsId: id,
+      id: id,
       tpsSchemaVersion: 1,
       kind: 'calendar-event',
       title: id,
@@ -3207,7 +3208,7 @@ test('identity plans apply a no-rename reidentify at its source path and fail cl
     '_records/calendar-events/Renamed record.md',
   ]);
   const stationaryPersisted = parseNativeRecordDocument(contents.get(stationary));
-  assert.equal(stationaryPersisted?.frontmatter.tpsId, 'calendar-no-rename-next');
+  assert.equal(stationaryPersisted?.frontmatter.id, 'calendar-no-rename-next');
   assert.equal(stationaryPersisted?.frontmatter.status, 'complete');
   assert.equal(stationaryPersisted?.frontmatter.completedDate, '2026-08-31 13:04:28');
   assert.equal(stationaryPersisted?.body, 'No-rename body must survive byte-for-byte.\n');
@@ -3241,7 +3242,7 @@ test('identity plans apply a no-rename reidentify at its source path and fail cl
 test('identity plans bind collision-resolved rename paths and reject changed path configuration before mutation', async () => {
   const sourceFor = (id) => serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: `${id} body\n`, frontmatter: {
-      tpsId: id,
+      id: id,
       tpsSchemaVersion: 1,
       kind: 'calendar-event',
       title: id,
@@ -3439,7 +3440,7 @@ test('identity plans bind collision-resolved rename paths and reject changed pat
   releaseMigration();
   await storageMigration;
   assert.equal((await migrationApply).ok, false);
-  assert.equal(parseNativeRecordDocument(migrating.contents.get(migrationFirst)).frontmatter.tpsId, 'calendar-migration-first');
+  assert.equal(parseNativeRecordDocument(migrating.contents.get(migrationFirst)).frontmatter.id, 'calendar-migration-first');
   assert.equal(await migrating.service.resolve('calendar-migration-first-next'), null);
 
   const externalRace = createHarness();
@@ -3471,7 +3472,7 @@ test('identity plans bind collision-resolved rename paths and reject changed pat
 test('internal identity writes keep one authoritative scan across a planned batch', async () => {
   const sourceFor = (id) => serializeNativeRecordDocument({
     bom: '', newline: '\n', closer: '---', body: `${id} body\n`, frontmatter: {
-      tpsId: id,
+      id: id,
       tpsSchemaVersion: 1,
       kind: 'calendar-event',
       title: id,
@@ -3510,8 +3511,8 @@ test('reidentify revalidates the old ID inside the write transaction', async () 
     if (!injected) {
       injected = true;
       await vault.process(record.file, (source) => source.replace(
-        /^tpsId: calendar-before-cas$/mu,
-        'tpsId: calendar-changed-elsewhere',
+        /^id: calendar-before-cas$/mu,
+        'id: calendar-changed-elsewhere',
       ));
     }
     return sourcePreservingWriter(...args);
@@ -3520,7 +3521,7 @@ test('reidentify revalidates the old ID inside the write transaction', async () 
   const indexCount = indexed.length;
 
   assert.equal(await service.reidentify('calendar-before-cas', 'calendar-after-cas'), null);
-  assert.match(contents.get(record.file), /^tpsId: calendar-changed-elsewhere$/mu);
+  assert.match(contents.get(record.file), /^id: calendar-changed-elsewhere$/mu);
   assert.doesNotMatch(contents.get(record.file), /calendar-after-cas/u);
   assert.equal(events.length, eventCount);
   assert.equal(indexed.length, indexCount);
@@ -3572,7 +3573,7 @@ test('native record create, update, archive, and asset paths preserve typed valu
   assert.deepEqual(created.frontmatter.tags, ['food', 'lunch']);
 
   const beforeInvalidUpdate = contents.get(created.file);
-  assert.equal(await service.update(created.file, { calories: 700, tpsId: 'forbidden', kind: 'asset' }), null);
+  assert.equal(await service.update(created.file, { calories: 700, id: 'forbidden', kind: 'asset' }), null);
   assert.equal(contents.get(created.file), beforeInvalidUpdate);
   const updated = await service.update(created.file, { calories: 700 });
   assert.equal(updated?.id, 'food-1');
@@ -3580,7 +3581,7 @@ test('native record create, update, archive, and asset paths preserve typed valu
   assert.equal(updated?.frontmatter.calories, 700);
   const archived = await service.archive(created.id);
   assert.equal(archived?.frontmatter.archived, true);
-  assert.match(String(contents.get(created.file)), /^tpsId: food-1$/mu);
+  assert.match(String(contents.get(created.file)), /^id: food-1$/mu);
 
   const assetSource = addFile('Documents/spec.pdf', '%PDF-test');
   const asset = await service.createAsset(assetSource, { title: 'Spec' }, { id: 'asset-1' });
@@ -3646,8 +3647,8 @@ test('a new empty task draft created by core Bases is adopted into the canonical
   assert.equal(parsed?.frontmatter.status, 'todo');
   assert.equal(parsed?.frontmatter.name, 'Draft producer name');
   assert.equal(Object.hasOwn(parsed?.frontmatter || {}, 'tpsSchemaVersion'), false);
-  assert.match(String(parsed?.frontmatter.tpsId), /^task-/u);
-  assert.equal((await service.resolve(String(parsed?.frontmatter.tpsId)))?.path, draft.path);
+  assert.match(String(parsed?.frontmatter.id), /^task-/u);
+  assert.equal((await service.resolve(String(parsed?.frontmatter.id)))?.path, draft.path);
   assert.ok(events.some((event) => event.type === 'explicit'
     && event.details?.source === 'native-base-new-task'));
 });
@@ -3657,7 +3658,7 @@ test('native draft adoption never absorbs existing, non-task, enveloped, or body
   const cases = [
     ['Body task.md', { kind: 'task', title: '' }, 'human notes'],
     ['Project.md', { kind: 'project', title: '' }, ''],
-    ['Partial.md', { kind: 'task', title: '', tpsId: 'manual-id' }, ''],
+    ['Partial.md', { kind: 'task', title: '', id: 'manual-id' }, ''],
     ['Schema.md', { kind: 'task', title: '', tpsSchemaVersion: 1 }, ''],
   ];
   for (const [path, frontmatter, body] of cases) {
@@ -3700,7 +3701,7 @@ test('native draft adoption honors explicit Global path and tag exclusions', asy
 
     assert.equal(draft.path, fixture.path);
     const parsed = parseNativeRecordDocument(contents.get(draft));
-    assert.equal(Object.hasOwn(parsed?.frontmatter || {}, 'tpsId'), false);
+    assert.equal(Object.hasOwn(parsed?.frontmatter || {}, 'id'), false);
     assert.deepEqual(parsed?.frontmatter.tags, fixture.tags);
   }
 });
@@ -3729,7 +3730,7 @@ test('native record rename remains indexed before MetadataCache is ready', async
     closer: '---',
     body: '',
     frontmatter: {
-      tpsId: 'calendar-event-cold',
+      id: 'calendar-event-cold',
       tpsSchemaVersion: 1,
       kind: 'calendar-event',
       title: 'Cold cache event',
@@ -3853,7 +3854,7 @@ test('native filename protection survives a cold cache and malformed frontmatter
   const { service, plugin, contents, metadata, addFile } = createHarness('native-records', { root: '/', layout: 'flat-root' });
   const validSource = [
     '---',
-    'tpsId: workout-cold-cache',
+    'id: workout-cold-cache',
     'tpsSchemaVersion: 1',
     'kind: workout-session',
     'title: Workout 2026-08-31 07.04',
@@ -3878,7 +3879,7 @@ test('native filename protection survives a cold cache and malformed frontmatter
 
   const malformedSource = [
     '---',
-    'tpsId: workout-malformed',
+    'id: workout-malformed',
     'tpsSchemaVersion: 1',
     'kind: workout-session',
     'title: Workout 2026-08-31 07.04',
@@ -3907,7 +3908,7 @@ test('native filename protection survives a cold cache and malformed frontmatter
     'the synchronous mutation-boundary classifier recognizes a valid record',
   );
   assert.equal(
-    service.hasRecordIdentityEvidenceInFrontmatter({ tpsId: '' }),
+    service.hasRecordIdentityEvidenceInFrontmatter({ id: '' }),
     true,
     'the mutation-boundary classifier fails closed for an incomplete identity property',
   );
@@ -4012,7 +4013,7 @@ test('native profile is mandatory and legacy active paths remain gated', () => {
 test('public GCM API exposes versioned generic and task record contracts', () => {
   assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true, freshIdentityCreates: true, selectedFileAuthority: true, indexedSnapshot: true, updateFromSource: true, identityApplyCancellation: true \}\)/u);
   assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
-  assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 6;/u);
+  assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 7;/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);
   assert.match(apiSource, /const taskRecordsApi = \{[\s\S]{0,200}version: 2,\s*supportsPromotion: false[\s\S]{0,500}promote:[\s\S]{0,900}resolve:/u);
   assert.match(apiSource, /nativeRecords: nativeRecordsApi,[\s\S]{0,100}taskRecords: taskRecordsApi/u);
@@ -4020,14 +4021,14 @@ test('public GCM API exposes versioned generic and task record contracts', () =>
 
 test('current-only record readers reject old kinds while identity evidence still prevents duplicate IDs', async () => {
  const {service,addFile}=createHarness('native-records',{kindPropertyKey:'entityKind'});
- const old=addFile('_records/tasks/old-key.md',serializeNativeRecordDocument({bom:'',newline:'\n',closer:'---',body:'',frontmatter:{tpsId:'task-old-key',kind:'task',title:'Old'}}));
+ const old=addFile('_records/tasks/old-key.md',serializeNativeRecordDocument({bom:'',newline:'\n',closer:'---',body:'',frontmatter:{id:'task-old-key',kind:'task',title:'Old'}}));
  assert.equal(service.getStorageProfile().kindPropertyKey,'entityKind');
- assert.equal(service.inspect({tpsId:'task-old-key',kind:'task',title:'Old'}),null);
+ assert.equal(service.inspect({id:'task-old-key',kind:'task',title:'Old'}),null);
  assert.equal(await service.resolve(old),null);
  await assert.rejects(service.create('task',{title:'Duplicate'},{id:'task-old-key'}));
  const created=await service.create('task',{title:'New'},{id:'task-new-key'});
  assert.equal(created.kind,'task');
- assert.equal(service.inspect({tpsId:'task-new-key',entityKind:'task',title:'New'})?.kind,'task');
+ assert.equal(service.inspect({id:'task-new-key',entityKind:'task',title:'New'})?.kind,'task');
 });
 
 
@@ -4036,8 +4037,8 @@ test('Health records use an independent current key for creation, updates, resol
  plugin.settings.nativeRecordKindPropertyKeys={'food-entry':'entryKind','activity-entry':'entryKind','workout-session':'entryKind'};
  const entry=await service.create('food-entry',{title:'Lunch',calories:100},{id:'food-entry-key-test'});
  assert.match(contents.get(entry.file),/entryKind: food-entry/);assert.doesNotMatch(contents.get(entry.file),/^kind:/m);
- assert.equal(service.inspect({tpsId:entry.id,title:'Lunch',kind:'food-entry'}),null);
- assert.equal(service.inspect({tpsId:entry.id,title:'Lunch',entryKind:'food-entry'})?.kind,'food-entry');
+ assert.equal(service.inspect({id:entry.id,title:'Lunch',kind:'food-entry'}),null);
+ assert.equal(service.inspect({id:entry.id,title:'Lunch',entryKind:'food-entry'})?.kind,'food-entry');
  const updated=await service.update(entry.path,{calories:150});assert.equal(updated.frontmatter.calories,150);
  assert.match(contents.get(entry.file),/entryKind: food-entry/);assert.doesNotMatch(contents.get(entry.file),/^kind:/m);
  const renamed=await service.reidentify(entry.path,'food-entry-new-key-test');assert.equal(renamed.id,'food-entry-new-key-test');
@@ -4130,7 +4131,7 @@ test('a cached non-record is reconsidered after source and storage configuration
   const {service,plugin,vault,contents,addFile}=createHarness();
   const ordinary=addFile('Inbox/later-record.md','---\ntitle: Ordinary\n---\nBody');
   await service.snapshot();
-  contents.set(ordinary,'---\ntitle: Later\ntpsId: later-food\nkind: food-entry\ntpsSchemaVersion: 1\n---\nBody');
+  contents.set(ordinary,'---\ntitle: Later\nid: later-food\nkind: food-entry\ntpsSchemaVersion: 1\n---\nBody');
   vault.emit('modify',ordinary);
   assert.equal((await service.resolve('later-food'))?.path,ordinary.path);
   const original=vault.read;let reads=0;
@@ -4142,11 +4143,11 @@ test('a cached non-record is reconsidered after source and storage configuration
 
 test('incremental source reconciliation retains unchanged records and repairs provisional metadata', async()=>{
   const {service,plugin,vault,contents,addFile}=createHarness();
-  const files=Array.from({length:1000},(_,i)=>addFile(`Inbox/record-${i}.md`,`---\ntpsId: food-${i}\nkind: food-entry\ntitle: Food ${i}\n---\nBody`));
+  const files=Array.from({length:1000},(_,i)=>addFile(`Inbox/record-${i}.md`,`---\nid: food-${i}\nkind: food-entry\ntitle: Food ${i}\n---\nBody`));
   const ordinary=addFile('Inbox/ordinary.md','Ordinary');
   assert.equal((await service.snapshot()).records.length,1000);
   contents.set(ordinary,'Edited ordinary');vault.emit('modify',ordinary);
-  plugin.app.metadataCache.emit('changed',files[500],'',{frontmatter:{tpsId:'poison',kind:'food-entry',title:'Stale'}});
+  plugin.app.metadataCache.emit('changed',files[500],'',{frontmatter:{id:'poison',kind:'food-entry',title:'Stale'}});
   const original=service.indexFile.bind(service);let classifications=0;
   service.indexFile=(...args)=>{classifications++;return original(...args);};
   await service.create('food-entry',{title:'New food'},{id:'food-new'});
@@ -4166,7 +4167,7 @@ test('cold vault discovery indexes existing records without reading or adopting 
   vault.cachedRead = async file => { reads++; return read(file); };
   const discovered = [];
   for (let i = 0; i < 1000; i++) {
-    const fm = i % 2 ? { kind: 'task', title: `Existing ${i}`, tpsId: `existing-${i}` } : { kind: 'task', title: `Existing ${i}` };
+    const fm = i % 2 ? { kind: 'task', title: `Existing ${i}`, id: `existing-${i}` } : { kind: 'task', title: `Existing ${i}` };
     const text = serializeNativeRecordDocument({ bom: '', newline: '\n', closer: '---', body: '', frontmatter: fm });
     const file = await vault.create(`Existing ${i}.md`, text);
     discovered.push({ file, text });
@@ -4196,25 +4197,25 @@ test('record inspection prepares mappings once and keeps returned profiles and n
   const prepare = service.getStorageConfiguration;
   service.getStorageConfiguration = function () { preparations++; return prepare.call(this); };
   service.inspectionProfiles = null;
-  const fm = { tpsId: 'prepared', kind: 'task', title: 'Before' };
+  const fm = { id: 'prepared', kind: 'task', title: 'Before' };
   for (let i = 0; i < 1000; i++) assert.equal(service.inspect(fm)?.id, 'prepared');
   const file = addFile('Prepared.md', fm);
   for (let i = 0; i < 1000; i++) service.indexFile(file, fm);
-  assert.equal(service.recordsByPath.get(file.path)?.tpsId, 'prepared');
+  assert.equal(service.recordsByPath.get(file.path)?.id, 'prepared');
   assert.equal(preparations, 1);
   const first = service.inspect(fm);
   first.profile.identityPropertyKey = 'poisoned';
   first.frontmatter.title = 'Caller-owned copy';
   fm.title = 'After';
   assert.equal(service.inspect(fm)?.frontmatter.title, 'After');
-  assert.equal(service.inspect(fm)?.profile.identityPropertyKey, 'tpsId');
-  fm.tpsId = '';
+  assert.equal(service.inspect(fm)?.profile.identityPropertyKey, 'id');
+  fm.id = '';
   assert.equal(service.inspect(fm), null, 'conflicting evidence is still evaluated on every call');
 });
 
 test('prepared inspection tracks nested key changes, aliases and migration mode without requiring a settings save', () => {
   const { service, plugin } = createHarness();
-  const fm = { tpsId: 'mapped', kind: 'task', title: 'Mapped' };
+  const fm = { id: 'mapped', kind: 'task', title: 'Mapped' };
   assert.equal(service.inspect(fm)?.id, 'mapped');
   plugin.settings.nativeRecordKindPropertyKeys = { task: 'taskKind' };
   assert.equal(service.inspect(fm), null);
@@ -4282,7 +4283,7 @@ test('a failed parallel scan drains pending reads and never commits a record', a
 
 test('ordinary index updates do not walk unrelated blocked identities', async()=>{
   const {service,addFile}=createHarness();
-  const blocked=Array.from({length:250},(_,i)=>addFile(`Inbox/blocked-${i}.md`,`---\ntpsId: blocked-${i}\nkind: food-entry\n---\n`));
+  const blocked=Array.from({length:250},(_,i)=>addFile(`Inbox/blocked-${i}.md`,`---\nid: blocked-${i}\nkind: food-entry\n---\n`));
   const ordinary=addFile('Inbox/ordinary.md','---\ntitle: Ordinary\n---\n');
   await service.refreshIdentityIndexFromVaultSource();
   let deletes=0;
@@ -4301,8 +4302,8 @@ test('ordinary index updates do not walk unrelated blocked identities', async()=
 test('opt-in conflict snapshot isolates invalid unrelated records without releasing their identities', async () => {
   const {service,addFile,contents}=createHarness();
   const doc=fm=>serializeNativeRecordDocument({bom:'',newline:'\n',closer:'---',body:'Keep this body\n',frontmatter:fm});
-  const invalid=addFile('broken-item.md',doc({tpsId:'item-broken',entityKind:'food',nested:{keep:true}}));
-  addFile('event.md',doc({tpsId:'calendar-owned',kind:'calendar-event',title:'Event'}));
+  const invalid=addFile('broken-item.md',doc({id:'item-broken',entityKind:'food',nested:{keep:true}}));
+  addFile('event.md',doc({id:'calendar-owned',kind:'calendar-event',title:'Event'}));
   await assert.rejects(()=>service.snapshot(),/identity conflicts/);
   const before=contents.get(invalid);
   const snapshot=await service.snapshot(undefined,{includeConflicts:true});
@@ -4320,10 +4321,10 @@ test('opt-in conflict snapshot isolates invalid unrelated records without releas
 test('conflict snapshots report all duplicate and blocked owners, including custom kind evidence', async () => {
   const {service,addFile}=createHarness();
   const doc=fm=>serializeNativeRecordDocument({bom:'',newline:'\n',closer:'---',body:'',frontmatter:fm});
-  addFile('a.md',doc({tpsId:'shared',kind:'calendar-event',title:'A'}));
-  addFile('b.md',doc({tpsId:'SHARED',kind:'calendar-event',title:'B'}));
-  addFile('c.md',doc({tpsId:'other',kind:'calendar-event',title:'Valid'}));
-  addFile('d.md',doc({tpsId:'OTHER',kind:'calendar-event'}));
+  addFile('a.md',doc({id:'shared',kind:'calendar-event',title:'A'}));
+  addFile('b.md',doc({id:'SHARED',kind:'calendar-event',title:'B'}));
+  addFile('c.md',doc({id:'other',kind:'calendar-event',title:'Valid'}));
+  addFile('d.md',doc({id:'OTHER',kind:'calendar-event'}));
   const s=await service.snapshot(undefined,{includeConflicts:true});
   assert.equal(s.records.length,0);
   assert.equal(s.conflicts.length,4);
@@ -4341,20 +4342,20 @@ test('large conflict snapshots collect ownership in linear passes without changi
     if (ids) expected.push({ path, ids, kinds, frontmatter });
   };
   for (let index = 0; index < 2500; index += 1) {
-    add(`Records/${index}.md`, { tpsId: `task-${index}`, kind: 'task', title: `Task ${index}` });
+    add(`Records/${index}.md`, { id: `task-${index}`, kind: 'task', title: `Task ${index}` });
   }
   for (let index = 0; index < 850; index += 1) {
     const id = `duplicate-${index}`;
     for (const suffix of ['b', 'a']) {
-      add(`Conflicts/${index}-${suffix}.md`, { tpsId: id, kind: 'calendar-event', title: suffix }, [id], ['calendar-event']);
+      add(`Conflicts/${index}-${suffix}.md`, { id: id, kind: 'calendar-event', title: suffix }, [id], ['calendar-event']);
     }
     const blockedId = index === 0 ? 'duplicate-0' : `blocked-${index}`;
-    add(`Blocked/${index}.md`, { tpsId: blockedId, entryKind: 'food-entry', nested: { keep: true } }, [blockedId], ['food-entry']);
+    add(`Blocked/${index}.md`, { id: blockedId, entryKind: 'food-entry', nested: { keep: true } }, [blockedId], ['food-entry']);
   }
   // One blocked path can reserve several IDs, and the same ID can occur in
   // both ownership indexes. Diagnostics retain sorted, deduplicated identities.
   const multi = expected.find(conflict => conflict.path === 'Blocked/1.md');
-  multi.frontmatter.TPSID = 'z-extra-identity';
+  multi.frontmatter.ID = 'z-extra-identity';
   multi.ids.push('z-extra-identity');
   const multiFile = vault.getFileByPath(multi.path);
   await vault.process(multiFile, () => serializeNativeRecordDocument({
@@ -4407,7 +4408,7 @@ test('fresh food identities avoid 30 seconds of modeled serial reads in a cold 1
  const fresh=await h.service.createFresh('food-entry',{title:'New food',calories:100});
  assert.match(fresh.id,/^food-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
  assert.equal(reads,0);assert.equal(fresh.frontmatter.calories,100);
- assert.equal(parseNativeRecordDocument(h.contents.get(fresh.file)).frontmatter.tpsId,fresh.id);
+ assert.equal(parseNativeRecordDocument(h.contents.get(fresh.file)).frontmatter.id,fresh.id);
  assert.equal(h.service.authoritativeIdentityGeneration,-1,'fresh creation does not falsely certify the global index');
 });
 
@@ -4415,14 +4416,14 @@ test('fresh creation cannot accept caller IDs, plan tokens, or protected identit
  const {service,vault}=createHarness();
  for(const options of [{id:'reused'},{planToken:1},{expectedPath:'existing.md'}])
   await assert.rejects(service.createFresh('food-entry',{title:'Invalid'},options),/cannot supply an identity/);
- for(const key of ['tpsId','TPSID','kind'])
+ for(const key of ['id','ID','kind'])
   await assert.rejects(service.createFresh('food-entry',{title:'Invalid',[key]:'reused'}),/collides with system storage/);
  assert.equal(vault.getMarkdownFiles().length,0);
 });
 
 test('fresh creation retains known conflict checks and in-flight ID reservations',async()=>{
  const h=createHarness();
- const existing=h.addFile('Existing.md','---\ntpsId: forced-id\nkind: food-entry\ntitle: Owner\n---\n');
+ const existing=h.addFile('Existing.md','---\nid: forced-id\nkind: food-entry\ntitle: Owner\n---\n');
  h.service.indexFile(existing);
  h.service.generateCryptographicId=()=> 'forced-id';
  await assert.rejects(h.service.createFresh('food-entry',{title:'Duplicate'}),/already exists/);
@@ -4466,7 +4467,7 @@ test('secure-random unavailability retains authoritative source verification',as
 
 test('explicit identities still detect nonstandard whitespace YAML hidden by core metadata',async()=>{
  const h=createHarness();
- h.addFile('Whitespace.md','--- \t\ntpsId: hidden-owner\nkind: food-entry\ntitle: Owner\n--- \t\n');
+ h.addFile('Whitespace.md','--- \t\nid: hidden-owner\nkind: food-entry\ntitle: Owner\n--- \t\n');
  h.plugin.app.metadataCache.getFileCache=()=>({sections:[{type:'paragraph'}]});
  await assert.rejects(h.service.create('food-entry',{title:'Duplicate'},{id:'hidden-owner'}),/already exists/);
  assert.match(apiSource,/freshIdentityCreates: true/);
@@ -4498,15 +4499,15 @@ test('configured kind list creates native records and reads explicit legacy tag/
  const source=contents.get(created.file);
  assert.match(source,/kind:\s*\n\s*- transaction\/macros/u);
  assert.doesNotMatch(source,/kind\/food\/transaction/u);
- assert.equal(service.inspect({tpsId:'kind-list-food',title:'Lunch',kind:['transaction/macros','user/custom']})?.kind,'food-entry');
- assert.equal(service.inspect({tpsId:'legacy-food',title:'Old lunch',tags:['kind/food/transaction']})?.kind,'food-entry');
- assert.equal(service.inspect({tpsId:'legacy-scalar',title:'Old lunch',kind:'food-entry'})?.kind,'food-entry');
+ assert.equal(service.inspect({id:'kind-list-food',title:'Lunch',kind:['transaction/macros','user/custom']})?.kind,'food-entry');
+ assert.equal(service.inspect({id:'legacy-food',title:'Old lunch',tags:['kind/food/transaction']})?.kind,'food-entry');
+ assert.equal(service.inspect({id:'legacy-scalar',title:'Old lunch',kind:'food-entry'})?.kind,'food-entry');
  const updated=await service.update(created.path,{calories:180});
  assert.equal(updated.kind,'food-entry');
  assert.match(contents.get(created.file),/kind:\s*\n\s*- transaction\/macros/u);
  const legacy=addFile('_records/food-entries/legacy-kind.md',serializeNativeRecordDocument({
   bom:'',newline:'\n',closer:'---',body:'Authored body',frontmatter:{
-   tpsId:'legacy-kind',tpsSchemaVersion:1,kind:'food-entry',title:'Old lunch',calories:100,
+   id:'legacy-kind',tpsSchemaVersion:1,kind:'food-entry',title:'Old lunch',calories:100,
   },
  }));
  vault.emit('modify',legacy);
@@ -4515,7 +4516,7 @@ test('configured kind list creates native records and reads explicit legacy tag/
  assert.match(contents.get(legacy),/Authored body$/u);
  const conflicting=addFile('_records/food-entries/conflicting-kind.md',serializeNativeRecordDocument({
   bom:'',newline:'\n',closer:'---',body:'Unchanged body',frontmatter:{
-   tpsId:'conflicting-kind',tpsSchemaVersion:1,kind:'unrelated',title:'Other lunch',tags:['kind/food/transaction'],calories:100,
+   id:'conflicting-kind',tpsSchemaVersion:1,kind:'unrelated',title:'Other lunch',tags:['kind/food/transaction'],calories:100,
   },
  }));
  vault.emit('modify',conflicting);
@@ -4538,13 +4539,13 @@ test('configured shared kind-list identity keeps native record subtypes distinct
    discriminator:{key:'recordType',value:'investment'},
   },
  };
- const ordinary={tpsId:'ordinary-one',title:'Coffee',category:['transaction/money'],recordType:'ordinary'};
- const investment={tpsId:'investment-one',title:'Shares',category:['transaction/money'],recordType:'investment'};
+ const ordinary={id:'ordinary-one',title:'Coffee',category:['transaction/money'],recordType:'ordinary'};
+ const investment={id:'investment-one',title:'Shares',category:['transaction/money'],recordType:'investment'};
  assert.equal(service.inspect(ordinary)?.kind,'finance-transaction');
  assert.equal(service.inspect(investment)?.kind,'investment-transaction');
  assert.equal(service.inspect({...ordinary,recordType:'other'}),null);
- assert.equal(service.inspect({tpsId:'unknown',title:'Unknown',category:['transaction/money']}),null);
- assert.equal(service.inspect({tpsId:'old',title:'Old',tags:['legacy/investment']})?.kind,'investment-transaction');
+ assert.equal(service.inspect({id:'unknown',title:'Unknown',category:['transaction/money']}),null);
+ assert.equal(service.inspect({id:'old',title:'Old',tags:['legacy/investment']})?.kind,'investment-transaction');
  const created=await service.create('investment-transaction',{title:'New shares'},{id:'investment-new'});
  const persisted=parseNativeRecordDocument(contents.get(created.file)).frontmatter;
  assert.deepEqual(persisted.category,['transaction/money']);
@@ -4575,17 +4576,17 @@ test('cold index resolves migrated scalar records through configured list and su
  };
  const finance=addFile('Inbox/migrated-finance.md',serializeNativeRecordDocument({
   bom:'',newline:'\n',closer:'---',body:'Finance body',frontmatter:{
-   tpsId:'wallet:migrated-one',title:'Coffee',kind:['transaction/financial'],type:'transaction',amount:5,
+   id:'wallet:migrated-one',title:'Coffee',kind:['transaction/financial'],type:'transaction',amount:5,
   },
  }));
  const activity=addFile('Inbox/migrated-activity.md',serializeNativeRecordDocument({
   bom:'',newline:'\n',closer:'---',body:'Activity body',frontmatter:{
-   tpsId:'activity:migrated-one',title:'Walk',kind:['transaction/activity'],distance:2,
+   id:'activity:migrated-one',title:'Walk',kind:['transaction/activity'],distance:2,
   },
  }));
  service.refreshConfiguration();
- assert.equal(service.inspect({tpsId:'wallet:migrated-one',title:'Coffee',kind:['transaction/financial'],type:'transaction'})?.kind,'finance-transaction');
- assert.equal(service.inspect({tpsId:'activity:migrated-one',title:'Walk',kind:['transaction/activity']})?.kind,'activity-entry');
+ assert.equal(service.inspect({id:'wallet:migrated-one',title:'Coffee',kind:['transaction/financial'],type:'transaction'})?.kind,'finance-transaction');
+ assert.equal(service.inspect({id:'activity:migrated-one',title:'Walk',kind:['transaction/activity']})?.kind,'activity-entry');
  assert.equal((await service.resolve('wallet:migrated-one'))?.file,finance);
  assert.equal((await service.resolve('activity:migrated-one'))?.file,activity);
  assert.equal((await service.resolve(finance))?.kind,'finance-transaction');
@@ -4638,7 +4639,7 @@ test('disabled kind writer rejects native creation while older matching notes re
  plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{
   primary:{tag:'kind/food/transaction'},aliases:[{scalar:{key:'kind',value:'food-entry'}}],writeDisabled:true,
  }};
- assert.equal(service.inspect({tpsId:'older-food',title:'Lunch',tags:['kind/food/transaction']})?.kind,'food-entry');
+ assert.equal(service.inspect({id:'older-food',title:'Lunch',tags:['kind/food/transaction']})?.kind,'food-entry');
  await assert.rejects(service.create('food-entry',{title:'New lunch'}),/disabled until a writer is configured/u);
  assert.equal([...entries.values()].filter(entry=>entry instanceof TFile).length,0);
 });
@@ -4648,9 +4649,9 @@ test('configured subtype values decode to canonical record kinds and reject conf
  plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{key:'transactionKind',value:'food',parentKind:'transaction'}};
  const entry=await service.create('food-entry',{title:'Snack'});
  assert.match(contents.get(entry.file),/^transactionKind: food$/m);
- assert.equal(service.inspect({tpsId:entry.id,title:'Snack',kind:'transaction',transactionKind:'food'})?.kind,'food-entry');
- assert.equal(service.inspect({tpsId:entry.id,title:'Snack',kind:'entity',transactionKind:'food'}),null);
- assert.equal(service.inspect({tpsId:entry.id,title:'Snack',kind:'food-entry'}),null);
+ assert.equal(service.inspect({id:entry.id,title:'Snack',kind:'transaction',transactionKind:'food'})?.kind,'food-entry');
+ assert.equal(service.inspect({id:entry.id,title:'Snack',kind:'entity',transactionKind:'food'}),null);
+ assert.equal(service.inspect({id:entry.id,title:'Snack',kind:'food-entry'}),null);
 });
 
 test('calendar template classification survives creation and update with Health classifications configured',async()=>{
@@ -4708,8 +4709,8 @@ test('complete configured tags replace kind properties through record creation, 
  const created=await service.create('food-entry',{title:'Lunch',tags:['favorite']},{id:'tag-food'});
  assert.match(contents.get(created.file),/kind\/food\/transaction/);
  assert.doesNotMatch(contents.get(created.file),/^kind:/m);
- assert.equal(service.inspect({tpsId:'tag-food',title:'Lunch',tags:['kind/food/transaction']})?.kind,'food-entry');
- assert.equal(service.inspect({tpsId:'tag-food',title:'Lunch',kind:'food-entry'}),null);
+ assert.equal(service.inspect({id:'tag-food',title:'Lunch',tags:['kind/food/transaction']})?.kind,'food-entry');
+ assert.equal(service.inspect({id:'tag-food',title:'Lunch',kind:'food-entry'}),null);
  const updated=await service.update(created.path,{calories:180});assert.equal(updated.kind,'food-entry');
  assert.match(contents.get(created.file),/favorite/);assert.doesNotMatch(contents.get(created.file),/^kind:/m);
  const renamed=await service.reidentify(created.path,'tag-food-new');assert.equal(renamed.kind,'food-entry');
@@ -4719,12 +4720,12 @@ test('complete configured tags replace kind properties through record creation, 
 test('tags have arbitrary paths, exact matching and ambiguous identities are rejected', async () => {
  const {service,plugin}=createHarness();
  plugin.settings.nativeRecordKindPropertyKeys={'food-entry':{tag:'food'},exercise:{tag:'Food/Library/custom/entry'}};
- assert.equal(service.inspect({tpsId:'a',title:'A',tags:['FOOD']})?.kind,'food-entry');
- assert.equal(service.inspect({tpsId:'a',title:'A',tags:['food/other']}),null);
- assert.equal(service.inspect({tpsId:'a',title:'A',tags:['food','Food/Library/custom/entry']}),null);
+ assert.equal(service.inspect({id:'a',title:'A',tags:['FOOD']})?.kind,'food-entry');
+ assert.equal(service.inspect({id:'a',title:'A',tags:['food/other']}),null);
+ assert.equal(service.inspect({id:'a',title:'A',tags:['food','Food/Library/custom/entry']}),null);
  plugin.settings.nativeRecordKindPropertyKeys['food-entry'].tag='logs/nutrition';
- assert.equal(service.inspect({tpsId:'a',title:'A',tags:['FOOD']}),null);
- assert.equal(service.inspect({tpsId:'a',title:'A',tags:['logs/nutrition']})?.kind,'food-entry');
+ assert.equal(service.inspect({id:'a',title:'A',tags:['FOOD']}),null);
+ assert.equal(service.inspect({id:'a',title:'A',tags:['logs/nutrition']})?.kind,'food-entry');
 });
 
 test('canonical calendar identity remains independent of public template tags',async()=>{
@@ -4804,7 +4805,7 @@ function startupLoad(mode = 'native-records', count = 1025) {
   const counters = { inventories: 0, metadata: 0, reads: 0, writes: 0 };
   for (let i = 0; i < count; i++) {
     const file = h.addFile(`startup-${i}.md`, '');
-    h.metadata.set(file, { tpsId: `startup-${i}`, tpsSchemaVersion: 1, kind: 'task', title: `Task ${i}` });
+    h.metadata.set(file, { id: `startup-${i}`, tpsSchemaVersion: 1, kind: 'task', title: `Task ${i}` });
   }
   for (const [host, method, key] of [
     [h.vault, 'getMarkdownFiles', 'inventories'],
@@ -5009,10 +5010,10 @@ test('cold split: native listeners capture startup events without per-file index
     await flushStartupMicrotasks();
     for (let index = 0; index < 100; index++) h.vault.emit('create', h.vault.getFileByPath(`startup-${index}.md`));
     h.plugin.app.metadataCache.emit('changed', h.vault.getFileByPath('startup-0.md'), '', {
-      frontmatter: { tpsId: 'startup-0', tpsSchemaVersion: 1, kind: 'task', title: 'Latest before layout' },
+      frontmatter: { id: 'startup-0', tpsSchemaVersion: 1, kind: 'task', title: 'Latest before layout' },
     });
     h.metadata.set(h.vault.getFileByPath('startup-0.md'), {
-      tpsId: 'startup-0', tpsSchemaVersion: 1, kind: 'task', title: 'Latest before layout',
+      id: 'startup-0', tpsSchemaVersion: 1, kind: 'task', title: 'Latest before layout',
     });
     assert.deepEqual(h.counters, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
     assert.equal(h.service.recordsByPath.size, 0);
@@ -5200,7 +5201,7 @@ test('cold split: explicit synchronous configuration replacement before layout f
   try {
     h.plugin.settings.nativeRecordKindPropertyKeys = { task: { key: 'transactionKind', value: 'task', parentKind: 'transaction' } };
     for (const file of h.vault.getMarkdownFiles()) h.metadata.set(file, {
-      tpsId: file.basename, kind: 'transaction', transactionKind: 'task', title: `Mapped ${file.basename}`,
+      id: file.basename, kind: 'transaction', transactionKind: 'task', title: `Mapped ${file.basename}`,
     });
     const inventoriesBeforeReplacement = h.counters.inventories;
     h.service.refreshConfiguration();
@@ -5213,7 +5214,7 @@ test('cold split: explicit synchronous configuration replacement before layout f
     assert.deepEqual(h.counters, after, 'the superseded layout callback cannot rescan or republish');
     for (const file of h.vault.getMarkdownFiles()) {
       const record = h.service.recordsByPath.get(file.path);
-      assert.equal(record.tpsId, file.basename);
+      assert.equal(record.id, file.basename);
       assert.equal(record.kind, 'task', 'the index retains its normalized structural envelope');
       assert.equal(h.metadata.get(file).transactionKind, 'task', 'authored mapping remains unchanged');
       assert.equal(h.service.inspect(h.metadata.get(file))?.kind, 'task');
@@ -5273,7 +5274,7 @@ test('cold split: early asset creation waits before checking the incomplete asse
   const h = startupLoad();
   const p = coldStartupHarness(h);
   const image = h.addFile('image.png', 'synthetic image');
-  const asset = h.addFile('existing-asset.md', `---\ntpsId: asset-existing\ntpsSchemaVersion: 1\nkind: asset\ntitle: Existing\nsourcePath: image.png\nsourceExtension: png\n---\n`);
+  const asset = h.addFile('existing-asset.md', `---\nid: asset-existing\ntpsSchemaVersion: 1\nkind: asset\ntitle: Existing\nsourcePath: image.png\nsourceExtension: png\n---\n`);
   const setup = h.service.setup({ afterLayout: true });
   let cachedLookups = 0;
   const lookup = h.service.resolveAssetCached.bind(h.service);
@@ -5450,7 +5451,7 @@ test('cold split: selected-path resolution waits before reading or replacing the
   const tasks = manualStartupTasks();
   const h = startupLoad();
   const p = coldStartupHarness(h);
-  const selected = h.addFile('selected.md', '---\ntpsId: selected-task\ntpsSchemaVersion: 1\nkind: task\ntitle: Selected\n---\n');
+  const selected = h.addFile('selected.md', '---\nid: selected-task\ntpsSchemaVersion: 1\nkind: task\ntitle: Selected\n---\n');
   const setup = h.service.setup({ afterLayout: true });
   let result;
   const resolve = h.service.resolve(selected).then(value => { result = value; }, error => { result = error; });
@@ -5514,18 +5515,18 @@ test('cold split: pre-layout metadata/create/delete/rename/replacement sources s
     h.entries.set(renamed.path, renamed);
     h.vault.emit('rename', renamed, oldPath);
     const reusedOldPath = h.addFile(oldPath, '');
-    h.metadata.set(reusedOldPath, { tpsId: 'reused-before-layout', tpsSchemaVersion: 1, kind: 'task', title: 'Reused old path' });
+    h.metadata.set(reusedOldPath, { id: 'reused-before-layout', tpsSchemaVersion: 1, kind: 'task', title: 'Reused old path' });
     h.vault.emit('create', reusedOldPath);
 
     const oldOwner = h.vault.getFileByPath('startup-1002.md');
     const replacement = h.addFile(oldOwner.path, '');
-    h.metadata.set(replacement, { tpsId: 'replacement-before-layout', tpsSchemaVersion: 1, kind: 'task', title: 'Current replacement' });
+    h.metadata.set(replacement, { id: 'replacement-before-layout', tpsSchemaVersion: 1, kind: 'task', title: 'Current replacement' });
     h.vault.emit('create', replacement);
     h.vault.emit('delete', oldOwner);
     h.plugin.app.metadataCache.emit('changed', oldOwner, '', { frontmatter: h.metadata.get(oldOwner) });
 
     const created = h.addFile('created-before-layout.md', '');
-    h.metadata.set(created, { tpsId: 'created-before-layout', tpsSchemaVersion: 1, kind: 'task', title: 'Created before layout' });
+    h.metadata.set(created, { id: 'created-before-layout', tpsSchemaVersion: 1, kind: 'task', title: 'Created before layout' });
     h.vault.emit('create', created);
     const beforeLayout = { ...h.counters };
     const source = [...h.entries.values()].filter(file => file instanceof TFile && file.extension === 'md')
@@ -5537,7 +5538,7 @@ test('cold split: pre-layout metadata/create/delete/rename/replacement sources s
     await flushStartupMicrotasks();
     assert.equal(h.service.recordsByPath.size, source.length);
     for (const item of source) {
-      assert.equal(h.service.recordsByPath.get(item.path)?.tpsId, item.metadata.tpsId, item.path);
+      assert.equal(h.service.recordsByPath.get(item.path)?.id, item.metadata.id, item.path);
       assert.equal(h.service.recordsByPath.get(item.path)?.title, item.metadata.title, item.path);
       assert.deepEqual(h.metadata.get(item.file), item.metadata, 'discovery must not change metadata');
       assert.equal(h.contents.get(item.file), item.body, 'discovery must not change source');
@@ -5562,7 +5563,7 @@ test('cold split: pre-layout conflicting identities retain duplicate ownership b
   try {
     await flushStartupMicrotasks();
     const duplicate = h.addFile('duplicate-before-layout.md', '');
-    h.metadata.set(duplicate, { tpsId: 'startup-0', tpsSchemaVersion: 1, kind: 'task', title: 'Conflicting new owner' });
+    h.metadata.set(duplicate, { id: 'startup-0', tpsSchemaVersion: 1, kind: 'task', title: 'Conflicting new owner' });
     h.vault.emit('create', duplicate);
     const beforeLayout = { ...h.counters };
     p.layout();
@@ -5744,7 +5745,7 @@ test('initial setup listeners preserve newer sources before and after a queued f
     const queued = h.entries.get('startup-1024.md');
     for (const file of [visited, queued]) {
       h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: {
-        tpsId: h.metadata.get(file).tpsId, tpsSchemaVersion: 1, kind: 'task', title: 'Current source', status: 'complete',
+        id: h.metadata.get(file).id, tpsSchemaVersion: 1, kind: 'task', title: 'Current source', status: 'complete',
       } });
       assert.equal(h.service.recordsByPath.get(file.path)?.title, 'Current source', 'listeners precede the first yield');
     }
@@ -5773,19 +5774,19 @@ test('initial setup cannot resurrect deleted, renamed or replaced queued file ob
     await h.vault.rename(renamed, 'renamed-startup.md');
     const obsolete = h.entries.get('startup-1022.md');
     const replacement = h.addFile(obsolete.path, '');
-    h.metadata.set(replacement, { tpsId: 'replacement', tpsSchemaVersion: 1, kind: 'task', title: 'Replacement' });
+    h.metadata.set(replacement, { id: 'replacement', tpsSchemaVersion: 1, kind: 'task', title: 'Replacement' });
     h.plugin.app.metadataCache.emit('changed', replacement, '', { frontmatter: h.metadata.get(replacement) });
     h.plugin.app.metadataCache.emit('changed', obsolete, '', { frontmatter: h.metadata.get(obsolete) });
     h.vault.emit('delete', obsolete);
     const created = h.addFile('created-during-startup.md', '');
-    h.metadata.set(created, { tpsId: 'created', tpsSchemaVersion: 1, kind: 'task', title: 'Created' });
+    h.metadata.set(created, { id: 'created', tpsSchemaVersion: 1, kind: 'task', title: 'Created' });
     h.vault.emit('create', created);
     await tasks.drain();
     assert.equal(await setup, true);
     assert.equal(h.service.recordsByPath.has(deleted.path), false);
     assert.equal(h.service.recordsByPath.has('startup-1021.md'), false);
     assert.equal(h.service.recordsByPath.get(renamed.path)?.title, 'Task 1021');
-    assert.equal(h.service.recordsByPath.get(replacement.path)?.tpsId, 'replacement');
+    assert.equal(h.service.recordsByPath.get(replacement.path)?.id, 'replacement');
     assert.equal(h.service.recordsByPath.get(created.path)?.title, 'Created');
     assert.equal(h.service.pathsById.has('startup-1020'), false);
     assert.equal(h.service.pathsById.has('startup-1022'), false);
@@ -5800,20 +5801,20 @@ for (const cache of ['cached', 'cold']) test(`a current ${cache} renamed target 
   h.vault.on('rename', (_file, oldPath) => {
     if (cache === 'cold') h.metadata.delete(_file);
     replacement = h.addFile(oldPath, '');
-    h.metadata.set(replacement, { tpsId: 'old-path-replacement', tpsSchemaVersion: 1, kind: 'task', title: 'Old path replacement' });
+    h.metadata.set(replacement, { id: 'old-path-replacement', tpsSchemaVersion: 1, kind: 'task', title: 'Old path replacement' });
     h.plugin.app.metadataCache.emit('changed', replacement, '', { frontmatter: h.metadata.get(replacement) });
   });
   assert.equal(await h.service.setup(), true);
   const file = h.addFile('original-before-rename.md', serializeNativeRecordDocument({ bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
-    tpsId: 'renamed-current', tpsSchemaVersion: 1, kind: 'task', title: 'Current renamed target',
+    id: 'renamed-current', tpsSchemaVersion: 1, kind: 'task', title: 'Current renamed target',
   } }));
   h.vault.emit('create', file);
-  assert.equal(h.service.recordsByPath.get(file.path)?.tpsId, 'renamed-current');
+  assert.equal(h.service.recordsByPath.get(file.path)?.id, 'renamed-current');
   await h.vault.rename(file, 'current-renamed-target.md');
   await flushStartupMicrotasks();
   assert.equal(h.entries.get('original-before-rename.md'), replacement);
-  assert.equal(h.service.recordsByPath.get(replacement.path)?.tpsId, 'old-path-replacement');
-  assert.equal(h.service.recordsByPath.get(file.path)?.tpsId, 'renamed-current', 'a live old-path replacement does not suppress a legitimate current target');
+  assert.equal(h.service.recordsByPath.get(replacement.path)?.id, 'old-path-replacement');
+  assert.equal(h.service.recordsByPath.get(file.path)?.id, 'renamed-current', 'a live old-path replacement does not suppress a legitimate current target');
   assert.deepEqual([...h.service.pathsById.get('renamed-current')], [file.path]);
   assert.deepEqual([...h.service.pathsById.get('old-path-replacement')], [replacement.path]);
   h.service.dispose();
@@ -5838,7 +5839,7 @@ for (const race of ['delete', 'replacement', 'metadata', 'post-startup-metadata'
       assert.equal(typeof finishRead, 'function', 'the actual rename listener has reached its source-read await');
       assert.equal(h.service.pendingRenameReads.has(file), true);
       assert.equal(h.service.recordsByPath.has(originalPath), false);
-      const current = { tpsId: 'current-rename', tpsSchemaVersion: 1, kind: 'task', title: 'Current source', status: 'complete' };
+      const current = { id: 'current-rename', tpsSchemaVersion: 1, kind: 'task', title: 'Current source', status: 'complete' };
       if (race === 'delete') {
         h.entries.delete(file.path);
         h.vault.emit('delete', file);
@@ -5852,7 +5853,7 @@ for (const race of ['delete', 'replacement', 'metadata', 'post-startup-metadata'
         }
         h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: current });
       } else if (race === 'invalid-metadata') {
-        h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: { ...current, TPSID: 'conflicting-id' } });
+        h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: { ...current, ID: 'conflicting-id' } });
         assert.equal(h.service.blockedIdentityEvidencePaths.has(file.path), true);
       } else if (race === 'removed-identity') {
         h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: { title: 'No longer a native record' } });
@@ -5867,7 +5868,7 @@ for (const race of ['delete', 'replacement', 'metadata', 'post-startup-metadata'
       await rename;
       assert.equal(h.counters.metadata, atChange.metadata, 'an obsolete read does not re-inspect MetadataCache');
       if (race === 'replacement' || race === 'metadata' || race === 'post-startup-metadata' || race === 'rebuild') {
-        assert.equal(h.service.recordsByPath.get(file.path)?.tpsId, current.tpsId);
+        assert.equal(h.service.recordsByPath.get(file.path)?.id, current.id);
         assert.equal(h.service.recordsByPath.get(file.path)?.status, 'complete');
       } else assert.equal(h.service.recordsByPath.has(file.path), false, 'an obsolete read cannot revive a deleted, blocked or disposed record');
       if (race === 'invalid-metadata') assert.equal(h.service.blockedIdentityEvidencePaths.has(file.path), true);
@@ -5907,10 +5908,10 @@ test('a superseded rename read cannot clear a later rename read owner', async ()
     assert.equal(h.service.recordsByPath.has(file.path), false);
     assert.equal(h.service.pendingRenameReads.has(file), true, 'the old finally cannot clear the newer read owner');
     reads[1](serializeNativeRecordDocument({ bom: '', newline: '\n', closer: '---', body: '', frontmatter: {
-      tpsId: 'current-second-rename', tpsSchemaVersion: 1, kind: 'task', title: 'Second renamed current source', status: 'complete',
+      id: 'current-second-rename', tpsSchemaVersion: 1, kind: 'task', title: 'Second renamed current source', status: 'complete',
     } }));
     await renames[1];
-    assert.equal(h.service.recordsByPath.get(file.path)?.tpsId, 'current-second-rename');
+    assert.equal(h.service.recordsByPath.get(file.path)?.id, 'current-second-rename');
     assert.equal(h.service.recordsByPath.get(file.path)?.status, 'complete');
     assert.equal(h.service.pendingRenameReads.has(file), false);
     await tasks.drain();
@@ -5975,8 +5976,8 @@ test('initial setup reads nested in-place mappings again after a task boundary',
     };
     const first = h.entries.get('startup-0.md');
     const last = h.entries.get('startup-1024.md');
-    const firstSource = { tpsId: 'startup-0', tpsSchemaVersion: 1, Type: ['Records/task'], title: 'First mapped' };
-    const lastSource = { tpsId: 'startup-1024', tpsSchemaVersion: 1, Type: ['Records/current'], title: 'Current mapped' };
+    const firstSource = { id: 'startup-0', tpsSchemaVersion: 1, Type: ['Records/task'], title: 'First mapped' };
+    const lastSource = { id: 'startup-1024', tpsSchemaVersion: 1, Type: ['Records/current'], title: 'Current mapped' };
     const original = structuredClone([firstSource, lastSource]);
     h.metadata.set(first, firstSource);
     h.metadata.set(last, lastSource);
@@ -6051,8 +6052,8 @@ for (const variant of ['ordinary', 'canonical', 'mapped-26']) {
     for (let i = 0; i < 10000; i++) {
       const file = h.addFile(`cold-${i}.md`, '');
       const raw = variant === 'ordinary' ? { title: `Ordinary ${i}`, tags: ['notes'] }
-        : variant === 'canonical' ? { tpsId: `cold-${i}`, kind: 'task', title: `Task ${i}` }
-        : { tpsId: `cold-${i}`, kind: 'entity', entityKind: 'type-0', title: `Entity ${i}` };
+        : variant === 'canonical' ? { id: `cold-${i}`, kind: 'task', title: `Task ${i}` }
+        : { id: `cold-${i}`, kind: 'entity', entityKind: 'type-0', title: `Entity ${i}` };
       h.metadata.set(file, raw);
       sources.push(raw);
     }
@@ -6101,7 +6102,7 @@ for (const variant of ['ordinary', 'canonical', 'mapped-26']) {
       const indexed = h.service.recordsByPath.get(`cold-${i}.md`);
       if (variant === 'ordinary') assert.equal(indexed, undefined);
       else {
-        assert.equal(indexed.tpsId, sources[i].tpsId);
+        assert.equal(indexed.id, sources[i].id);
         assert.equal(indexed.title, sources[i].title);
         assert.equal(indexed.kind, variant === 'canonical' ? 'task' : 'perf-0');
       }
@@ -6116,8 +6117,8 @@ test('cold setup rechecks in-place mappings between yielded slices and each late
   const first = h.addFile('first.md', '');
   for (let i = 0; i < 255; i++) h.addFile(`between-${i}.md`, '');
   const second = h.addFile('second.md', '');
-  h.metadata.set(first, { tpsId: 'first', title: 'First', tags: ['records/old'], status: 'open' });
-  h.metadata.set(second, { tpsId: 'second', title: 'Second', tags: ['records/new'], status: 'open' });
+  h.metadata.set(first, { id: 'first', title: 'First', tags: ['records/old'], status: 'open' });
+  h.metadata.set(second, { id: 'second', title: 'Second', tags: ['records/new'], status: 'open' });
   const yieldSlice = h.service.yieldInitialDiscovery.bind(h.service);
   h.service.yieldInitialDiscovery = async () => {
     h.plugin.settings.nativeRecordKindPropertyKeys.task.tag = 'records/new';
@@ -6127,7 +6128,7 @@ test('cold setup rechecks in-place mappings between yielded slices and each late
   assert.equal(h.service.recordsByPath.get(first.path)?.kind, 'task');
   assert.equal(h.service.recordsByPath.get(second.path)?.kind, 'task');
   h.plugin.settings.nativeRecordKindPropertyKeys.task.tag = 'records/final';
-  const completed = { tpsId: 'first', title: 'Changed', tags: ['records/final'], status: 'complete' };
+  const completed = { id: 'first', title: 'Changed', tags: ['records/final'], status: 'complete' };
   h.plugin.app.metadataCache.emit('changed', first, '', { frontmatter: completed });
   assert.equal(h.service.recordsByPath.get(first.path)?.title, 'Changed');
   assert.equal(h.service.recordsByPath.get(first.path)?.status, 'complete');
@@ -6159,7 +6160,7 @@ for (const mapped of [false, true]) {
       }]));
     }
     const notes = Array.from({ length: 10000 }, (_, index) => ({
-      tpsId: `title-inspection-${index}`,
+      id: `title-inspection-${index}`,
       title: `Note ${String(10000 - index).padStart(5, '0')}`,
       ...(mapped ? { Type: ['Records/task'] } : { kind: 'task' }),
     }));
@@ -6177,7 +6178,7 @@ for (const mapped of [false, true]) {
         copies = 0;
         const titles = notes.map(note => {
           const inspection = service.inspect(note);
-          assert.equal(inspection?.id, note.tpsId);
+          assert.equal(inspection?.id, note.id);
           assert.equal(inspection?.kind, 'task');
           assert.equal(inspection?.frontmatter.title, note.title);
           return inspection.frontmatter.title;
@@ -6209,7 +6210,7 @@ test('prepared profile references preserve normalized aliases, key order and det
   plugin.settings.nativeRecordKindPropertyKeys = { task: { kindList: { key: 'Type', value: 'Records/task' } } };
   service.readingMigrationSources = true;
   const readable = service.getReadableStorageProfiles();
-  const mapped = readable.filter(profile => profile.classification?.recordKind === 'task');
+  const mapped = readable.filter(profile => profile.classification?.recordKind === 'task' && profile.identityPropertyKey === 'id');
   assert.equal(mapped.length, 1, 'a reordered normalized alias must not duplicate its current classification');
   assert.deepEqual(mapped[0].classification, { kindList: { key: 'Type', value: 'Records/task' }, recordKind: 'task' });
   const legacy = readable.find(profile => profile.identityPropertyKey === 'recordId');
@@ -6221,7 +6222,7 @@ test('prepared profile references preserve normalized aliases, key order and det
   mapped[0].classification.kindList.value = 'Poisoned/mapping';
   legacy.titlePropertyKey = 'poisoned';
   assert.equal(service.inspect(raw)?.frontmatter.title, 'Legacy title');
-  const current = { tpsId: 'current-task', title: 'Current title', Type: ['Records/task'] };
+  const current = { id: 'current-task', title: 'Current title', Type: ['Records/task'] };
   const inspection = service.inspect(current);
   assert.equal(inspection?.kind, 'task');
   inspection.profile.classification.kindList.value = 'Poisoned/result';
@@ -6240,7 +6241,7 @@ test('prepared profile references recheck live title, status, list shape, confli
     },
     food: { kindList: { key: 'Type', value: 'Records/food' } },
   };
-  const raw = { tpsId: 'live-task', title: 'Before', status: 'open', Type: ['Records/task'] };
+  const raw = { id: 'live-task', title: 'Before', status: 'open', Type: ['Records/task'] };
   const first = service.inspect(raw);
   raw.title = 'After';
   raw.status = 'complete';
@@ -6265,9 +6266,9 @@ test('prepared profile references recheck live title, status, list shape, confli
   raw.Type.push('Records/food');
   assert.equal(service.inspect(raw), null, 'conflicting classifications remain invalid');
   raw.Type = ['Records/action'];
-  raw.TPSID = 'conflicting-id';
+  raw.ID = 'conflicting-id';
   assert.equal(service.inspect(raw), null, 'case-duplicate identity remains invalid');
-  delete raw.TPSID;
+  delete raw.ID;
   raw.TYPE = ['Records/action'];
   assert.throws(() => service.inspect(raw), /Ambiguous frontmatter property/);
   delete raw.TYPE;
@@ -6278,7 +6279,7 @@ test('profile inspection reuse covers native kinds and arbitrary nested tag mapp
   const kinds = ['task', 'food-entry', 'activity-entry', 'workout-session', 'workout-exercise', 'calendar-event', 'nutrition-log'];
   const { service, plugin } = createHarness();
   for (const kind of kinds) {
-    const measurement = countedRecordInspection(service, { tpsId: `fixture-${kind}`, kind, title: 'Fixture' });
+    const measurement = countedRecordInspection(service, { id: `fixture-${kind}`, kind, title: 'Fixture' });
     assert.equal(measurement.result?.kind, kind);
     // Readable profiles retain their prepared evidence/current identity instead
     // of requiring a second classification and envelope for normalized clones.
@@ -6289,12 +6290,12 @@ test('profile inspection reuse covers native kinds and arbitrary nested tag mapp
   assert.equal(ordinary.result, null);
   assertSingleProfileEvaluation(ordinary, 10, 0);
   for (const kind of kinds) {
-    const measurement = countedRecordInspection(service, { tpsId: `fixture-${kind}`, title: 'Fixture', tags: [`custom/${kind}`] });
+    const measurement = countedRecordInspection(service, { id: `fixture-${kind}`, title: 'Fixture', tags: [`custom/${kind}`] });
     assert.equal(measurement.result?.kind, kind);
     assertSingleProfileEvaluation(measurement, 8, 1);
   }
   const calendar = countedRecordInspection(service, {
-    tpsId: 'calendar:v1:abcdefghijklmnop:abcdefghijklmnopqrstuvwxyz2', title: 'Calendar', tags: ['unrelated'],
+    id: 'calendar:v1:abcdefghijklmnop:abcdefghijklmnopqrstuvwxyz2', title: 'Calendar', tags: ['unrelated'],
   });
   assert.equal(calendar.result?.kind, 'calendar-event');
   assertSingleProfileEvaluation(calendar, 10, 1);
@@ -6302,12 +6303,12 @@ test('profile inspection reuse covers native kinds and arbitrary nested tag mapp
 
 test('profile inspection reuse preserves current custom keys, pair mappings and legacy migration readers', () => {
   const current = createHarness('native-records', { kindPropertyKey: 'recordType', titlePropertyKey: 'name' });
-  const mapped = countedRecordInspection(current.service, { tpsId: 'current-food', recordType: 'food-entry', name: 'Food' });
+  const mapped = countedRecordInspection(current.service, { id: 'current-food', recordType: 'food-entry', name: 'Food' });
   assert.equal(mapped.result?.kind, 'food-entry');
   assertSingleProfileEvaluation(mapped, 3, 1);
   const pair = createHarness();
   pair.plugin.settings.nativeRecordKindPropertyKeys = { 'food-entry': { key: 'entryType', parentKind: 'transaction', value: 'food' } };
-  const paired = countedRecordInspection(pair.service, { tpsId: 'food', title: 'Food', kind: 'transaction', entryType: 'food' });
+  const paired = countedRecordInspection(pair.service, { id: 'food', title: 'Food', kind: 'transaction', entryType: 'food' });
   assert.equal(paired.result?.kind, 'food-entry');
   assertSingleProfileEvaluation(paired, 2, 2);
   const legacy = createHarness('native-records', {
@@ -6330,7 +6331,7 @@ test('profile inspection reuse keeps equivalent distinct profiles separate and r
   const equivalent = { ...profiles.write };
   profiles.evidence.push(equivalent, equivalent);
   profiles.readable.push(equivalent, equivalent);
-  const measurement = countedRecordInspection(service, { tpsId: 'duplicate-profiles', kind: 'task', title: 'Task' });
+  const measurement = countedRecordInspection(service, { id: 'duplicate-profiles', kind: 'task', title: 'Task' });
   assert.equal(measurement.result?.id, 'duplicate-profiles');
   assert.equal(measurement.calls.get(equivalent), 1);
   assert.equal(measurement.calls.get(profiles.write), 1);
@@ -6340,7 +6341,7 @@ test('profile inspection reuse keeps equivalent distinct profiles separate and r
 test('profile inspection reuse does not survive input edits, mapping edits or returned-value mutation', () => {
   const { service, plugin } = createHarness();
   plugin.settings.nativeRecordKindPropertyKeys = { 'food-entry': { tag: 'logs/food' } };
-  const raw = { tpsId: 'food-one', title: 'Before', tags: ['logs/food'] };
+  const raw = { id: 'food-one', title: 'Before', tags: ['logs/food'] };
   const before = structuredClone(raw);
   const first = countedRecordInspection(service, raw);
   assert.equal(first.result?.kind, 'food-entry');
@@ -6348,18 +6349,18 @@ test('profile inspection reuse does not survive input edits, mapping edits or re
   first.result.frontmatter.title = 'Caller copy';
   first.result.profile.classification.tag = 'poisoned';
   raw.title = 'Edited';
-  raw.tpsId = 'food-two';
+  raw.id = 'food-two';
   const second = countedRecordInspection(service, raw);
   assert.equal(second.result?.id, 'food-two');
   assert.equal(second.result?.frontmatter.title, 'Edited');
   assert.equal(second.result?.profile.classification.tag, 'logs/food');
   assert.notEqual(first.result.frontmatter, second.result.frontmatter);
-  const other = countedRecordInspection(service, { ...raw, tpsId: 'other-food', title: 'Other source' });
+  const other = countedRecordInspection(service, { ...raw, id: 'other-food', title: 'Other source' });
   assert.equal(other.result?.id, 'other-food');
   assert.equal(other.result?.frontmatter.title, 'Other source');
-  delete raw.tpsId;
+  delete raw.id;
   assert.equal(countedRecordInspection(service, raw).result, null);
-  raw.tpsId = 'food-two';
+  raw.id = 'food-two';
   assert.equal(countedRecordInspection(service, raw).result?.id, 'food-two');
   plugin.settings.nativeRecordKindPropertyKeys['food-entry'].tag = 'logs/nutrition';
   assert.equal(countedRecordInspection(service, raw).result, null);
@@ -6370,10 +6371,10 @@ test('profile inspection reuse does not survive input edits, mapping edits or re
 test('profile inspection reuse preserves conflicting evidence and timestamp fallback isolation', () => {
   const { service, plugin } = createHarness();
   plugin.settings.nativeRecordKindPropertyKeys = { 'food-entry': { tag: 'food' }, exercise: { tag: 'exercise' } };
-  assert.equal(countedRecordInspection(service, { tpsId: 'conflict', title: 'Both', tags: ['food', 'exercise'] }).result, null);
-  assert.equal(countedRecordInspection(service, { tpsId: 'a', TPSID: 'b', title: 'Case conflict', tags: ['food'] }).result, null);
+  assert.equal(countedRecordInspection(service, { id: 'conflict', title: 'Both', tags: ['food', 'exercise'] }).result, null);
+  assert.equal(countedRecordInspection(service, { id: 'a', ID: 'b', title: 'Case conflict', tags: ['food'] }).result, null);
   plugin.settings.nativeRecordKindPropertyKeys = {};
-  const raw = { tpsId: 'fallback', tpsSchemaVersion: 1, title: 'Fallback', kind: 'task', createdDate: '2026-09-01', modifiedDate: '2026-09-02' };
+  const raw = { id: 'fallback', tpsSchemaVersion: 1, title: 'Fallback', kind: 'task', createdDate: '2026-09-01', modifiedDate: '2026-09-02' };
   const original = structuredClone(raw);
   service.readingMigrationSources = true;
   assert.equal(countedRecordInspection(service, raw).result?.frontmatter.createdDate, '2026-09-01');
@@ -6432,7 +6433,7 @@ test('task preparation preserves a concurrent body edit or newly applied exclusi
     };
     await service.prepareCreatedNote(file);
     const expected = contents.get(file);
-    assert.equal(expected.includes('tpsId'), false);
+    assert.equal(expected.includes('id'), false);
     assert.equal(file.path, 'Inbox/Draft.md');
     assert.equal(renames, 0);
     plugin.app.metadataCache.emit('changed', file);
@@ -6477,7 +6478,7 @@ for (const shape of ['file', 'path', 'path+id']) {
   test(`selected-file ${shape} edits inspect only their source, including a 100-read burst`, async () => {
     const h = createHarness();
     for (let i = 0; i < 1000; i++) h.addFile(`Inbox/ordinary-${i}.md`, 'Unrelated body\n');
-    const file = h.addFile('Inbox/Selected.md', '---\ntpsId: selected-id\nkind: food-entry\ntitle: Selected\n---\nKeep this body\n');
+    const file = h.addFile('Inbox/Selected.md', '---\nid: selected-id\nkind: food-entry\ntitle: Selected\n---\nKeep this body\n');
     const reference = shape === 'file' ? file : shape === 'path' ? file.path : { path: file.path, id: 'selected-id' };
     let scans = 0, reads = 0, writes = 0;
     const enumerate = h.vault.getMarkdownFiles, read = h.vault.read, process = h.vault.process;
@@ -6496,7 +6497,7 @@ for (const shape of ['file', 'path', 'path+id']) {
 
 test('selected-file authority does not conceal unseen duplicates from later global operations', async () => {
   const h = createHarness();
-  const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+  const source = '---\nid: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
   const file = h.addFile('Inbox/Selected.md', source);
   const duplicate = h.addFile('Inbox/Uncached duplicate.md', source);
   h.metadata.delete(duplicate);
@@ -6510,7 +6511,7 @@ test('selected-file authority does not conceal unseen duplicates from later glob
 
 test('selected-file references never redirect a missing path or detached TFile to another owner', async () => {
   const h = createHarness();
-  const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+  const source = '---\nid: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
   const file = h.addFile('Inbox/Selected.md', source);
   const replacement = h.addFile(file.path, source);
   for (const reference of [file, {path: 'Inbox/Missing.md', id: 'selected-owner'}, {path: replacement.path, id: 'stale-owner'}]) {
@@ -6523,7 +6524,7 @@ test('selected-file references never redirect a missing path or detached TFile t
 test('selected-file updates preserve concurrent body edits and reject changed identity at the atomic boundary', async () => {
   for (const changeIdentity of [false, true]) {
     const h = createHarness();
-    const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+    const source = '---\nid: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
     const file = h.addFile('Inbox/Selected.md', source);
     const process = h.vault.process;
     h.vault.process = async (...args) => {
@@ -6540,7 +6541,7 @@ test('selected-file updates preserve concurrent body edits and reject changed id
 test('selected-file rename remains local and rechecks identity after folder preparation', async () => {
   for (const changeIdentity of [false, true]) {
     const h = createHarness();
-    const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+    const source = '---\nid: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
     const file = h.addFile('Inbox/Selected.md', source);
     let scans = 0;
     const enumerate = h.vault.getMarkdownFiles;
@@ -6560,7 +6561,7 @@ test('selected-file rename remains local and rechecks identity after folder prep
 test('selected-file read rejects replacement, movement and configuration changes without rescanning', async () => {
   for (const race of ['replacement', 'move', 'mapping']) {
     const h = createHarness();
-    const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+    const source = '---\nid: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
     const file = h.addFile('Inbox/Selected.md', source);
     h.vault.getMarkdownFiles = () => { throw Error('No global scan'); };
     h.vault.read = async () => {
@@ -6575,7 +6576,7 @@ test('selected-file read rejects replacement, movement and configuration changes
 
 test('selected-file edits reject a moved target at the atomic boundary', async () => {
   const h = createHarness();
-  const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+  const source = '---\nid: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
   const file = h.addFile('Inbox/Selected.md', source);
   const process = h.vault.process;
   h.vault.process = async (...args) => {
@@ -6589,7 +6590,7 @@ test('selected-file edits reject a moved target at the atomic boundary', async (
 for (const operation of ['canReidentify', 'reidentify', 'canApplyIdentityPlan']) {
   test(`selected-file ${operation} still verifies unknown duplicate identities`, async () => {
     const h = createHarness();
-    const source = '---\ntpsId: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
+    const source = '---\nid: selected-owner\nkind: food-entry\ntitle: Selected\n---\nBody\n';
     const file = h.addFile('Inbox/Selected.md', source);
     const other = h.addFile('Inbox/Unknown.md', source);
     h.metadata.delete(other);
@@ -6609,7 +6610,7 @@ for (const operation of ['canReidentify', 'reidentify', 'canApplyIdentityPlan'])
 async function authoritativeWorkload(count = 32) {
   const h = createHarness('native-records', { deferSetup: true });
   h.files = Array.from({ length: count }, (_, i) => h.addFile(`Authority/record-${i}.md`,
-    `---\ntpsId: authority-${i}\nkind: task\ntitle: Record ${i}\nlabel: Label ${i}\n---\nPreserve body ${i}\n`));
+    `---\nid: authority-${i}\nkind: task\ntitle: Record ${i}\nlabel: Label ${i}\n---\nPreserve body ${i}\n`));
   assert.equal(await h.service.setup(), true);
   return h;
 }
@@ -6837,7 +6838,7 @@ for (const phase of ['prune', 'acquire', 'commit']) {
           if (invalidation === 'generation') {
             h.vault.emit('modify', file);
             h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: {
-              tpsId: 'poisoned-cache-id', kind: 'task', title: 'Stale metadata',
+              id: 'poisoned-cache-id', kind: 'task', title: 'Stale metadata',
             } });
           } else h.service.invalidateAuthoritativeSources([file.path]);
         }
@@ -6877,7 +6878,7 @@ for (const change of ['delete', 'rename', 'replacement', 'unannounced-replacemen
         assert.equal(snapshot.records.find(record => record.id === 'authority-31')?.path, 'Authority/Renamed.md');
       } else if (change === 'delete') assert.equal(h.service.pathsById.has('authority-31'), false);
       else {
-        assert.equal(h.service.recordsByPath.get(oldPath)?.tpsId, 'replacement-id');
+        assert.equal(h.service.recordsByPath.get(oldPath)?.id, 'replacement-id');
         assert.equal(h.service.pathsById.has('authority-31'), false);
       }
       assert.equal(h.service.authoritativeIndexDirtyPaths.size, 0);
@@ -6989,7 +6990,7 @@ for (const position of ['committed', 'queued']) {
       const generation = h.service.identitySourceGeneration;
       const revision = h.service.authoritativeSourceRevision;
       h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: {
-        tpsId: 'metadata-poison', kind: 'task', title: 'Unverified metadata',
+        id: 'metadata-poison', kind: 'task', title: 'Unverified metadata',
       } });
       assert.equal(h.service.pathsById.has('metadata-poison'), false, 'an active source owner must not accept provisional projection bytes');
       assert.equal(h.service.identitySourceGeneration, generation);
@@ -6998,11 +6999,11 @@ for (const position of ['committed', 'queued']) {
       assert.deepEqual(file.stat, stat);
       const snapshot = await finishAuthoritativeOperation(work, operation);
       assert.equal(snapshot.records.length, 32);
-      assert.equal(h.service.recordsByPath.get(file.path).tpsId, position === 'committed' ? 'authority-0' : 'authority-31');
+      assert.equal(h.service.recordsByPath.get(file.path).id, position === 'committed' ? 'authority-0' : 'authority-31');
       assert.equal(h.service.recordsByPath.get(file.path).title, position === 'committed' ? 'Record 0' : 'Record 31');
       assert.equal(work.counts.reads, 32, 'stale metadata must not reread verified source');
       assert.equal(work.counts.writes, 0);
-      h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: { tpsId: 'post-owner-poison', kind: 'task', title: 'Stale' } });
+      h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: { id: 'post-owner-poison', kind: 'task', title: 'Stale' } });
       assert.equal(h.service.pathsById.has('post-owner-poison'), false, 'the existing authoritative-generation guard remains after successful release');
     } finally { h.service.dispose(); work.restore(); }
   });
@@ -7016,21 +7017,21 @@ test('authoritative refresh failed-owner release restores ordinary metadata proj
   try {
     await reachAuthoritativeTask(work, operation);
     const file = h.files[0];
-    const poison = { tpsId: 'metadata-after-failure', kind: 'task', title: 'Projection' };
+    const poison = { id: 'metadata-after-failure', kind: 'task', title: 'Projection' };
     h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: poison });
-    assert.equal(h.service.pathsById.has(poison.tpsId), false);
+    assert.equal(h.service.pathsById.has(poison.id), false);
     await work.tasks.fail(failure);
     await assert.rejects(() => finishAuthoritativeOperation(work, operation), error => error === failure);
     assert.equal(h.service.authoritativeIdentityRefresh, null);
     assert.equal(h.service.authoritativeIdentityGeneration, -1);
     h.plugin.app.metadataCache.emit('changed', file, '', { frontmatter: poison });
-    assert.equal(h.service.recordsByPath.get(file.path).tpsId, poison.tpsId, 'without an active owner, existing unready projection semantics remain');
+    assert.equal(h.service.recordsByPath.get(file.path).id, poison.id, 'without an active owner, existing unready projection semantics remain');
     const reads = work.counts.reads;
     const recovered = observeAuthoritativeOperation(h.service.snapshot());
     assert.equal((await finishAuthoritativeOperation(work, recovered)).records.length, 32);
     assert.equal(work.counts.reads, reads, 'later recovery uses the retained verified source cache');
-    assert.equal(h.service.recordsByPath.get(file.path).tpsId, 'authority-0');
-    assert.equal(h.service.pathsById.has(poison.tpsId), false);
+    assert.equal(h.service.recordsByPath.get(file.path).id, 'authority-0');
+    assert.equal(h.service.pathsById.has(poison.id), false);
     assert.equal(work.counts.writes, 0);
   } finally { h.service.dispose(); work.restore(); }
 });
@@ -7070,4 +7071,69 @@ test('authoritative refresh rejected parse task drains the other started reads a
     assert.ok(h.service.authoritativeIndexDirtyPaths.size > 0);
     assert.equal(work.counts.writes, 0);
   } finally { h.service.dispose(); work.restore(); }
+});
+
+
+test('default identity storage is id and custom physical keys keep the canonical API projection across mutations', async () => {
+  assert.equal(DEFAULT_NATIVE_RECORD_STORAGE_PROFILE.identityPropertyKey, 'id');
+  for (const identityPropertyKey of ['recordIdentity', 'tpsId']) {
+    const h = createHarness('native-records', { identityPropertyKey });
+    const created = await h.service.create('task', { title: 'Mapped identity', status: 'todo' }, { id: 'stable-record' });
+    assert.equal(h.service.version, 7);
+    assert.equal(created.frontmatter.id, 'stable-record');
+    assert.equal(created.frontmatter[identityPropertyKey], 'stable-record');
+    let raw = parseNativeRecordDocument(h.contents.get(created.file)).frontmatter;
+    assert.equal(raw[identityPropertyKey], 'stable-record');
+    assert.equal(Object.hasOwn(raw, 'id'), false);
+    assert.equal(h.service.getStorageProfile().identityPropertyKey, identityPropertyKey);
+    assert.equal(h.service.inspect(raw)?.id, 'stable-record');
+    assert.equal((await h.service.update(created.file, { status: 'working' })).frontmatter.id, 'stable-record');
+    const changed = await h.service.reidentify(created.file, 'stable-reidentified');
+    raw = parseNativeRecordDocument(h.contents.get(changed.file)).frontmatter;
+    assert.equal(raw[identityPropertyKey], 'stable-reidentified');
+    assert.equal(Object.hasOwn(raw, 'id'), false);
+    assert.equal(changed.frontmatter.id, 'stable-reidentified');
+    assert.equal(raw.status, 'working');
+  }
+});
+
+test('historical schema-free identities participate only in explicit consolidation and preserve stable values', async () => {
+  const h = createHarness();
+  h.plugin.settings.nativeRecordKindPropertyKeys = { 'food-entry': { tag: 'kind/food/transaction' } };
+  const raw = { tpsId: 'legacy-stable-id', tags: ['kind/food/transaction', 'personal'], title: 'Legacy meal' };
+  const source = serializeNativeRecordDocument({ bom: '', newline: '\n', closer: '---', body: 'Authored body\n', frontmatter: raw });
+  const file = h.addFile('Inbox/Legacy identity.md', source);
+  assert.equal(h.service.inspect(raw), null);
+  assert.equal(h.service.hasRecordIdentityEvidenceInFrontmatter(raw), true);
+  assert.equal(h.contents.get(file), source);
+  const result = await h.service.migrateStorageProfile();
+  assert.equal(result.updated, 1);
+  assert.equal(result.failed, 0);
+  const migrated = parseNativeRecordDocument(h.contents.get(file)).frontmatter;
+  assert.equal(migrated.id, 'legacy-stable-id');
+  assert.equal(Object.hasOwn(migrated, 'tpsId'), false);
+  assert.deepEqual(migrated.tags, ['kind/food/transaction', 'personal']);
+  assert.equal(h.service.inspect(migrated)?.kind, 'food-entry');
+  assert.ok(h.contents.get(file).endsWith('Authored body\n'));
+});
+
+test('configured identity rejects a conflicting authored canonical id before mutation', async () => {
+  const h = createHarness('native-records', { identityPropertyKey: 'recordIdentity' });
+  const raw = { recordIdentity: 'owned', id: 'occupied', kind: 'task', title: 'Conflict' };
+  assert.equal(h.service.inspect(raw), null);
+  const source = serializeNativeRecordDocument({ bom: '', newline: '\n', closer: '---', body: 'Keep body\n', frontmatter: raw });
+  const file = h.addFile('Inbox/Occupied identity.md', source);
+  assert.equal(await h.service.update(file, { status: 'working' }), null);
+  assert.equal(h.contents.get(file), source);
+});
+
+test('configured physical identity cannot overwrite canonical API envelope projections', async () => {
+  for (const identityPropertyKey of ['kind', 'title', 'tpsSchemaVersion', 'createdDate', 'modifiedDate']) {
+    const profile = { ...DEFAULT_NATIVE_RECORD_STORAGE_PROFILE, identityPropertyKey };
+    assert.ok(validateNativeRecordStorageProfile(profile).some(error => error.includes('canonical API envelope field')));
+    const h = createHarness('native-records', { identityPropertyKey });
+    const before = [...h.entries];
+    await assert.rejects(h.service.create('task', { title: 'Keep identity' }, { id: 'stable' }), /canonical API envelope field/u);
+    assert.deepEqual([...h.entries], before);
+  }
 });

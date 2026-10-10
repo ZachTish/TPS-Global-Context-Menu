@@ -3089,7 +3089,7 @@ export class TaskLineContextMenuService {
       'recurrence',
       'recurrenceRule',
       'recurrenceTaskId',
-      'tpsId',
+      'id',
       'subitemId',
     ]) {
       next = setInlineFieldValueOnTaskLine(next, key, null);

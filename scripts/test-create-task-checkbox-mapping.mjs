@@ -260,7 +260,7 @@ test('manual create derives ordered options and rebuilds the line from the selec
       },
       ensureTaskIdentity(_handle, line) {
         historyEvents.push({ type: 'ensure' });
-        return `${line} [tpsId:: create-history-id]`;
+        return `${line} [id:: create-history-id]`;
       },
       async commitTaskMutation(_handle, input) {
         historyEvents.push({ type: 'commit', input });
@@ -300,7 +300,7 @@ test('manual create derives ordered options and rebuilds the line from the selec
   assert.equal(processCalls, 1);
   assert.equal(dailyNoteCalls, 1);
   assert.match(content, /- \[o\] Mapped task/);
-  assert.match(content, /\[tpsId:: create-history-id\]/u);
+  assert.match(content, /\[id:: create-history-id\]/u);
   assert.doesNotMatch(content, /untrusted prebuilt line|\[x\]/);
   assert.deepEqual(historyEvents.map((event) => event.type), [
     'begin',
@@ -316,7 +316,7 @@ test('manual create derives ordered options and rebuilds the line from the selec
   });
   assert.equal(historyEvents[4].input.after.path, file.path);
   assert.equal(historyEvents[4].input.after.lineNumber, 1);
-  assert.match(historyEvents[4].input.after.rawLine, /\[tpsId:: create-history-id\]/u);
+  assert.match(historyEvents[4].input.after.rawLine, /\[id:: create-history-id\]/u);
 });
 
 test('native standalone Create task writes only one task record and never resolves or mutates a Daily Note', async () => {

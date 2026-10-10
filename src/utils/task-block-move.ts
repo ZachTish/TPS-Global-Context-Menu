@@ -48,7 +48,7 @@ export function findCurrentTaskLineIndex(lines: string[], preferredIndex: number
   }
 
   let ambiguousIdentity = false;
-  for (const key of ['tpsId', 'subitemId']) {
+  for (const key of ['id', 'subitemId']) {
     const identity = readInlineFieldValue(sourceRawLine, key);
     if (!identity) continue;
     const identityMatches = findTaskLineIndexes(
@@ -237,7 +237,7 @@ function findTaskLineIndexes(lines: string[], predicate: (line: string, index: n
 function stripMovedTaskIdentity(line: string): string {
   let next = stripTaskInlinePropsMetadata(line);
   if (!parseTaskLine(next)) return next;
-  next = setInlineFieldValueOnTaskLine(next, 'tpsId', null);
+  next = setInlineFieldValueOnTaskLine(next, 'id', null);
   next = setInlineFieldValueOnTaskLine(next, 'subitemId', null);
   return next;
 }

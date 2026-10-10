@@ -80,7 +80,7 @@ export class PropertyMigrationService {
             ? migrateNoteClassification(before, change, this.plugin.settings.nativeRecordKindPropertyKeys)
             : change.kind === 'discriminator'
               ? migrateNoteDiscriminator(before, change, this.plugin.settings.nativeRecordKindPropertyKeys)
-              : migrateNoteProperties(before, change);
+              : migrateNoteProperties(before, change, this.plugin.settings.nativeRecordIdentityPropertyKey || 'id');
           if (after !== before) notes.push({ path: file.path, before, after });
         } catch (error) { blocked.push(`${file.path}: ${error instanceof Error ? error.message : String(error)}`); }
         completed++;

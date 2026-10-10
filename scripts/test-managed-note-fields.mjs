@@ -17,7 +17,7 @@ for (const field of fields) test(`${field}: only the configured name is read and
 });
 test('identity collisions are rejected while unrelated old names remain untouched', () => {
  const settings = {};
- for (const bad of ['tpsId','title','tags','sourcePath','__proto__','bad\nkey','']) assert.throws(() => configure(settings,'externalId',bad));
+ for (const bad of ['id','title','tags','sourcePath','__proto__','bad\nkey','']) assert.throws(() => configure(settings,'externalId',bad));
  configure(settings,'externalId','mirrorKey');
  const fm={externalId:'unrelated',mirrorKey:'current'};
  assert.equal(read(settings,'externalId',fm),'current');

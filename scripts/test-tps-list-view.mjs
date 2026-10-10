@@ -1722,10 +1722,10 @@ test('TPS List and TPS Table row menus expose built-in tag actions', async () =>
   assert.equal(addLogLineTag('#alpha', 'QA/Base'), '#alpha, #qa/base');
   assert.equal(removeLogLineTag('#alpha, #qa/base', '#alpha'), '#qa/base');
   assert.equal(removeLogLineTag('#alpha', 'alpha'), null);
-  const tableLine = '- [ ] Table row #existing <!-- [tpsId:: row-tags] --> ^row-tags';
+  const tableLine = '- [ ] Table row #existing <!-- [id:: row-tags] --> ^row-tags';
   const taggedTableLine = addLogLineSemanticTags(tableLine, 'tags', 'One, two, #ONE');
   assert.match(taggedTableLine, /\[tags:: #existing, #one, #two\]/u);
-  assert.match(taggedTableLine, /\[tpsId:: row-tags\]/u);
+  assert.match(taggedTableLine, /\[id:: row-tags\]/u);
   assert.match(taggedTableLine, /\^row-tags$/u);
 });
 

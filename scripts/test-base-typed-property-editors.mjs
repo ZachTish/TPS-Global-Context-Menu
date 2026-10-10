@@ -421,13 +421,13 @@ test('empty Accepted-Kind TPS Table cells stay property-owned and open the entit
 
 test('TPS Table selector mutations preserve line identity and sibling fields', async () => {
   const logLines = await importBundled('../src/views/log-line-utils.ts');
-  let line = '- [ ] Ship selector fix [tpsId:: selector-row] <!-- [contexts:: [[Contexts/Home]]] --> ^selector-row';
+  let line = '- [ ] Ship selector fix [id:: selector-row] <!-- [contexts:: [[Contexts/Home]]] --> ^selector-row';
 
   line = logLines.setLogInlineFieldValue(line, 'priority', 'high');
 
   assert.match(line, /^- \[ \] Ship selector fix/u);
   assert.equal(logLines.readInlineFields(line).priority, 'high');
-  assert.equal(logLines.readInlineFields(line).tpsid, 'selector-row');
+  assert.equal(logLines.readInlineFields(line).id, 'selector-row');
   assert.equal(logLines.readInlineFields(line).contexts, '[[Contexts/Home]]');
   assert.match(line, /\^selector-row$/u);
 });
@@ -698,7 +698,7 @@ test('TPS List heading cells keep populated and empty writable properties editab
 test('typed task mutations preserve sibling hidden fields through a full entity, tag, and schedule sequence', async () => {
   const metadata = await importBundled('../src/utils/task-line-metadata.ts');
   const logLines = await importBundled('../src/views/log-line-utils.ts');
-  let line = '- [ ] QA Typed [tpsId:: qa-typed] <!-- [priority:: high] -->';
+  let line = '- [ ] QA Typed [id:: qa-typed] <!-- [priority:: high] -->';
 
   line = logLines.setLogInlineFieldValue(
     line,
@@ -716,7 +716,7 @@ test('typed task mutations preserve sibling hidden fields through a full entity,
   line = logLines.setLogInlineFieldValue(line, 'allDay', null);
 
   assert.equal(metadata.getTaskDisplayTitle(line), 'QA Typed');
-  assert.equal(metadata.readInlineFieldValue(line, 'tpsId'), 'qa-typed');
+  assert.equal(metadata.readInlineFieldValue(line, 'id'), 'qa-typed');
   assert.equal(metadata.readInlineFieldValue(line, 'priority'), 'high');
   assert.equal(
     metadata.readInlineFieldValue(line, 'projects'),
@@ -734,7 +734,7 @@ test('TPS List preserves hidden multi-link fields through its parse-to-render pr
     '../src/tps-list/task-inline-property-fields.ts',
   );
   const fields = collectTpsListInlineFields(
-    '- [ ] QA row [tpsId:: qa-row] <!-- [projects:: [[Projects/Alpha]], [[Entities/Registry#^project-line|Project line]]] [contexts:: [[Contexts/Home]]] [tags:: #home #work] [scheduled:: 2026-08-15 09:30:00] [timeEstimate:: 45] --> ^qa-row',
+    '- [ ] QA row [id:: qa-row] <!-- [projects:: [[Projects/Alpha]], [[Entities/Registry#^project-line|Project line]]] [contexts:: [[Contexts/Home]]] [tags:: #home #work] [scheduled:: 2026-08-15 09:30:00] [timeEstimate:: 45] --> ^qa-row',
   );
   const byKey = new Map(fields.map((field) => [field.key.toLocaleLowerCase(), field.value]));
 
@@ -746,7 +746,7 @@ test('TPS List preserves hidden multi-link fields through its parse-to-render pr
   assert.equal(byKey.get('tags'), '#home #work');
   assert.equal(byKey.get('scheduled'), '2026-08-15 09:30:00');
   assert.equal(byKey.get('timeestimate'), '45');
-  assert.equal(byKey.get('tpsid'), 'qa-row');
+  assert.equal(byKey.get('id'), 'qa-row');
 });
 
 test('tag lists accept whitespace or comma storage without dropping existing tags', async () => {
@@ -795,11 +795,11 @@ test('TPS List keeps visible and hidden tags together without duplicate display 
 test('TPS Table semantic tag toggle removes raw hashtags and persists add/remove through its row mutation path', async () => {
   const metadata = await importBundled('../src/utils/task-line-metadata.ts');
   const logLines = await importBundled('../src/views/log-line-utils.ts');
-  const originalLine = '- [ ] QA Table tags #home <!-- [tags:: #work] [tpsId:: qa-table-tags] --> ^qa-table-tags';
+  const originalLine = '- [ ] QA Table tags #home <!-- [tags:: #work] [id:: qa-table-tags] --> ^qa-table-tags';
   const entry = {
     lineNumber: 0,
     line: originalLine,
-    fields: { tpsid: 'qa-table-tags', tags: '#work' },
+    fields: { id: 'qa-table-tags', tags: '#work' },
   };
   const removed = logLines.mutateLogLineContent(
     `${originalLine}\n`,
@@ -811,7 +811,7 @@ test('TPS Table semantic tag toggle removes raw hashtags and persists add/remove
   const removedLine = removed.content.trimEnd();
   assert.deepEqual(metadata.readTaskLineTags(removedLine), ['work']);
   assert.doesNotMatch(removedLine, /(?:^|[ \t])#home(?:$|[ \t])/u);
-  assert.equal(metadata.readInlineFieldValue(removedLine, 'tpsId'), 'qa-table-tags');
+  assert.equal(metadata.readInlineFieldValue(removedLine, 'id'), 'qa-table-tags');
   assert.match(removedLine, /\^qa-table-tags$/u);
 
   const restored = logLines.mutateLogLineContent(
@@ -819,19 +819,19 @@ test('TPS Table semantic tag toggle removes raw hashtags and persists add/remove
     entry,
     (line) => logLines.toggleLogLineSemanticTag(line, 'tags', 'home', false),
   );
-  assert.equal(restored.outcome, 'changed', 'stable tpsId resolves the row after its first mutation');
+  assert.equal(restored.outcome, 'changed', 'stable id resolves the row after its first mutation');
   assert.deepEqual(metadata.readTaskLineTags(restored.content.trimEnd()), ['work', 'home']);
-  assert.equal(metadata.readInlineFieldValue(restored.content, 'tpsId'), 'qa-table-tags');
+  assert.equal(metadata.readInlineFieldValue(restored.content, 'id'), 'qa-table-tags');
 });
 
 test('TPS Table comma-tag creation is atomic, deduped, and preserves protected metadata', async () => {
   const metadata = await importBundled('../src/utils/task-line-metadata.ts');
   const logLines = await importBundled('../src/views/log-line-utils.ts');
-  const original = '- [ ] QA Table multi-tags #existing <!-- [tpsId:: qa-table-multi] --> ^qa-table-multi';
+  const original = '- [ ] QA Table multi-tags #existing <!-- [id:: qa-table-multi] --> ^qa-table-multi';
   const updated = logLines.addLogLineSemanticTags(original, 'tags', 'One, two, #ONE');
 
   assert.deepEqual(metadata.readTaskLineTags(updated), ['existing', 'one', 'two']);
-  assert.equal(metadata.readInlineFieldValue(updated, 'tpsId'), 'qa-table-multi');
+  assert.equal(metadata.readInlineFieldValue(updated, 'id'), 'qa-table-multi');
   assert.match(updated, /\^qa-table-multi$/u);
   assert.equal(logLines.addLogLineSemanticTags(updated, 'tags', 'TWO, one'), updated);
 });
@@ -840,7 +840,7 @@ test('TPS List semantic tag toggle preserves nested layout while removing raw an
   const metadata = await importBundled('../src/utils/task-line-metadata.ts');
   const logLines = await importBundled('../src/views/log-line-utils.ts');
   const lineItems = await importBundled('../src/utils/line-item-deletion.ts');
-  const originalLine = '    - [ ] QA  List tags #home <!-- [tags:: #work] [tpsId:: qa-list-tags] --> ^qa-list-tags';
+  const originalLine = '    - [ ] QA  List tags #home <!-- [tags:: #work] [id:: qa-list-tags] --> ^qa-list-tags';
   let content = `Parent\n${originalLine}\n`;
 
   const mutateLikeTpsList = (expectedLine, tag, selected) => {
@@ -860,17 +860,17 @@ test('TPS List semantic tag toggle preserves nested layout while removing raw an
   const removedHome = mutateLikeTpsList(originalLine, 'home', true);
   assert.match(removedHome, /^ {4}- \[ \] QA  List tags/u);
   assert.deepEqual(metadata.readTaskLineTags(removedHome), ['work']);
-  assert.equal(metadata.readInlineFieldValue(removedHome, 'tpsId'), 'qa-list-tags');
+  assert.equal(metadata.readInlineFieldValue(removedHome, 'id'), 'qa-list-tags');
   assert.match(removedHome, /\^qa-list-tags$/u);
 
   const removedWork = mutateLikeTpsList(removedHome, 'work', true);
   assert.deepEqual(metadata.readTaskLineTags(removedWork), []);
   assert.equal(metadata.readInlineFieldValue(removedWork, 'tags'), '');
-  assert.equal(metadata.readInlineFieldValue(removedWork, 'tpsId'), 'qa-list-tags');
+  assert.equal(metadata.readInlineFieldValue(removedWork, 'id'), 'qa-list-tags');
 
   const restoredHome = mutateLikeTpsList(removedWork, 'home', false);
   assert.deepEqual(metadata.readTaskLineTags(restoredHome), ['home']);
-  assert.equal(metadata.readInlineFieldValue(restoredHome, 'tpsId'), 'qa-list-tags');
+  assert.equal(metadata.readInlineFieldValue(restoredHome, 'id'), 'qa-list-tags');
 });
 
 test('semantic tag canonicalization merges singular and plural carriers without touching protected metadata', async () => {
@@ -910,13 +910,13 @@ test('typed row mutation preserves CRLF, final newline, and an absolute-final bl
     '---',
     'kind: task-source',
     '---',
-    '- [ ] QA row [tpsId:: qa-row] ^qa-row',
+    '- [ ] QA row [id:: qa-row] ^qa-row',
     '',
   ].join('\r\n');
   const entry = {
     lineNumber: 3,
-    line: '- [ ] QA row [tpsId:: qa-row] ^qa-row',
-    fields: { tpsid: 'qa-row' },
+    line: '- [ ] QA row [id:: qa-row] ^qa-row',
+    fields: { id: 'qa-row' },
   };
   const result = logLines.mutateLogLineContent(
     content,
@@ -974,7 +974,7 @@ test('typed fields and tags ignore closed code and protected lookalikes while pr
   );
   const code = '`[projects:: [[Code/False]]] #code [tags:: #code-field]`';
   const protectedCarrier = '%% tps-inline-props:{"memo":"keep  [projects:: [[Protected/False]]] #protected [tags:: #protected-field]  exactly"} %%';
-  const original = `- [ ] Semantic ${code} ${protectedCarrier} #visible <!-- [projects:: [[Projects/Real]]] [tags:: #hidden] [tpsId:: semantic-row] --> ^semantic-row`;
+  const original = `- [ ] Semantic ${code} ${protectedCarrier} #visible <!-- [projects:: [[Projects/Real]]] [tags:: #hidden] [id:: semantic-row] --> ^semantic-row`;
 
   assert.equal(
     metadata.readInlineFieldValue(original, 'projects'),
@@ -986,12 +986,12 @@ test('typed fields and tags ignore closed code and protected lookalikes while pr
   const listFields = collectTpsListInlineFields(original);
   assert.deepEqual(
     listFields
-      .filter(({ key }) => /^(?:projects|tags?|tpsId)$/iu.test(key))
+      .filter(({ key }) => /^(?:projects|tags?|id)$/iu.test(key))
       .map(({ key, value }) => [key.toLocaleLowerCase(), value]),
     [
       ['projects', '[[Projects/Real]]'],
       ['tags', '#hidden'],
-      ['tpsid', 'semantic-row'],
+      ['id', 'semantic-row'],
       ['tag', '#visible'],
     ],
     'TPS List exposes only semantic fields while retaining visible tags',
@@ -1011,7 +1011,7 @@ test('typed fields and tags ignore closed code and protected lookalikes while pr
     replaced.includes(protectedCarrier),
     'protected TPS metadata remains byte-identical after a typed write',
   );
-  assert.equal(metadata.readInlineFieldValue(replaced, 'tpsId'), 'semantic-row');
+  assert.equal(metadata.readInlineFieldValue(replaced, 'id'), 'semantic-row');
   assert.deepEqual(metadata.readTaskLineTags(replaced), ['visible', 'hidden']);
 
   const removed = logLines.setLogInlineFieldValue(replaced, 'projects', null);
@@ -1022,7 +1022,7 @@ test('typed fields and tags ignore closed code and protected lookalikes while pr
     'protected TPS metadata remains byte-identical after field removal',
   );
   assert.deepEqual(metadata.readTaskLineTags(removed), ['visible', 'hidden']);
-  assert.match(removed, /<!-- \[tags:: #hidden\] \[tpsId:: semantic-row\] -->/u);
+  assert.match(removed, /<!-- \[tags:: #hidden\] \[id:: semantic-row\] -->/u);
   assert.match(removed, /\^semantic-row$/u);
 
   const withoutVisible = metadata.removeInlineTagFromTaskLine(removed, 'visible');

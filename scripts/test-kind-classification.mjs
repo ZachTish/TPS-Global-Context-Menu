@@ -61,7 +61,7 @@ test('kind-list paths and property keys come from mappings, not built-in taxonom
  assert.equal(decodeKind(mapped,{myKinds:['alpha/beta/gamma']}).kind,'arbitrary');
  for(const invalid of ['', 'alpha', 'alpha//beta', 'alpha/beta space'])
   assert.throws(()=>encodeKind({arbitrary:{kindList:{key:'myKinds',value:invalid}}},{kind:'arbitrary'}),/Invalid kind list/u);
- for(const reserved of ['tpsId','tpsSchemaVersion','title','createdDate','modifiedDate','tags']) {
+ for(const reserved of ['id','tpsSchemaVersion','title','createdDate','modifiedDate','tags']) {
   assert.throws(()=>encodeKind({arbitrary:{kindList:{key:reserved,value:'alpha/beta'}}},{kind:'arbitrary'}),/Invalid kind list/u);
   assert.throws(()=>decodeKind({arbitrary:{scalar:{key:reserved,value:'alpha'}}},{[reserved]:'alpha'}),/Invalid scalar/u);
  }

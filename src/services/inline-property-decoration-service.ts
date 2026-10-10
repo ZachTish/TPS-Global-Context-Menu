@@ -46,7 +46,7 @@ const DEFAULT_INLINE_DENY_KEYS = new Set([
   'parent',
   'parentof',
   'folderpath',
-  'tpsid',
+  'id',
   'subitemid',
   'tpsinlineprops',
   'tps-inline-props',
@@ -836,7 +836,8 @@ export class InlinePropertyDecorationService {
       const to = lineFrom + field.end;
       const normalizedKey = propertyKey.toLowerCase();
       const isReservedMetadata = DEFAULT_INLINE_DENY_KEYS.has(normalizedKey)
-        && (normalizedKey.startsWith('tps') || normalizedKey === 'subitemid');
+        && (normalizedKey.startsWith('tps') || normalizedKey === 'id' || normalizedKey === 'subitemid')
+        || normalizedKey === String(this.plugin.settings.nativeRecordIdentityPropertyKey || 'id').trim().toLowerCase();
       if (!isReservedMetadata && this.selectionIntersects(view, from, to)) continue;
       const isVisible =
         !isReservedMetadata &&
@@ -890,7 +891,8 @@ export class InlinePropertyDecorationService {
       const normalizedKey = key.toLowerCase();
       const isHealthFoodLogField = this.isRenderedHealthFoodLogField(field);
       const isHealthWorkoutSetField = this.isRenderedHealthWorkoutSetField(field);
-      const isReservedMetadata = DEFAULT_INLINE_DENY_KEYS.has(normalizedKey);
+      const isReservedMetadata = DEFAULT_INLINE_DENY_KEYS.has(normalizedKey)
+        || normalizedKey === String(this.plugin.settings.nativeRecordIdentityPropertyKey || 'id').trim().toLowerCase();
       const isVisible =
         !isReservedMetadata &&
         visibleKeys.has(normalizedKey) &&
@@ -1036,7 +1038,8 @@ export class InlinePropertyDecorationService {
       const wrapper = document.createElement('span');
       const normalizedKey = item.key.toLowerCase();
       const isHealthWorkoutSetLine = this.isHealthWorkoutSetInlineLine(combined);
-      const isReservedMetadata = DEFAULT_INLINE_DENY_KEYS.has(normalizedKey);
+      const isReservedMetadata = DEFAULT_INLINE_DENY_KEYS.has(normalizedKey)
+        || normalizedKey === String(this.plugin.settings.nativeRecordIdentityPropertyKey || 'id').trim().toLowerCase();
       const isVisible =
         !isReservedMetadata &&
         visibleKeys.has(normalizedKey) &&
@@ -1227,6 +1230,7 @@ export class InlinePropertyDecorationService {
     if (!property || property.disabled || property.hidden || property.allowInlineSet === false) return '';
     const key = String(property.key || '').trim();
     if (!key) return '';
+    if (key.toLowerCase() === String(this.plugin.settings.nativeRecordIdentityPropertyKey || 'id').trim().toLowerCase()) return '';
     if (DEFAULT_INLINE_DENY_KEYS.has(key.toLowerCase())) return '';
     if (property.allowInlineSet === undefined && DEFAULT_INLINE_DENY_KEYS.has(key.toLowerCase())) return '';
     return key;

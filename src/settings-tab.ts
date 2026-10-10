@@ -2011,15 +2011,16 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           }));
 
       diagnostics.createEl('h4', { text: 'Atomic note properties' });
+      this.renderMigratingKeySetting(diagnostics, 'Record identity key', 'Property storing the stable record ID. New settings default to id. Apply previews existing notes and recognized references before changing the key; stored IDs stay the same.', 'nativeRecordIdentityPropertyKey');
       this.renderMigratingKeySetting(diagnostics, 'Record kind key', 'Property identifying the record type. Used by all TPS atomic records.', 'nativeRecordKindPropertyKey');
 
       new Setting(diagnostics)
         .setName('Canonical record envelope')
-        .setDesc('Records use tpsId, the configured kind key, and title. Only the current mapping is read. Review older identities below to migrate them.');
+        .setDesc('Records use the configured identity and kind keys, plus title. The shared API exposes the identity as id. Only the current mapping is read. Review older identities below to migrate them.');
 
       new Setting(diagnostics)
         .setName('Consolidate atomic note storage')
-        .setDesc('Rewrite recognized legacy identities to tpsId, kind, and title. User properties, ordinary tags, bodies, stable IDs, paths, and filenames are preserved. Historical names are used only for this confirmed migration; ambiguous identities are blocked.')
+        .setDesc('Rewrite recognized legacy identities to id, kind, and title. User properties, ordinary tags, bodies, stable IDs, paths, and filenames are preserved. Historical names are used only for this confirmed migration; ambiguous identities are blocked.')
         .addButton((button) => button
           .setButtonText('Consolidate records')
           .onClick(async () => {

@@ -4,7 +4,7 @@ import { findKeyCaseInsensitive } from '../core';
 
 export interface LegacyCalendarIdentityMigrationItem {
   path: string;
-  tpsIdAction: 'keep' | 'create';
+  idAction: 'keep' | 'create';
   externalId: string;
   legacyFields: string[];
 }
@@ -35,7 +35,7 @@ export class IdentityMigrationService {
 
       candidates.push({
         path: file.path,
-        tpsIdAction: this.plugin.identityService.getInternalId(frontmatter) ? 'keep' : 'create',
+        idAction: this.plugin.identityService.getInternalId(frontmatter) ? 'keep' : 'create',
         externalId: legacy.externalId,
         legacyFields: this.getPresentLegacyFields(frontmatter),
       });

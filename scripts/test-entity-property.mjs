@@ -112,7 +112,7 @@ test('canonical entity aliases cannot terminate hidden inline-property carriers'
     'sanitizing the alias must not change the canonical link target',
   );
 
-  let taskLine = '- [ ] Ship safely [tpsId:: qa-comment-delimiter] <!-- [priority:: high] -->';
+  let taskLine = '- [ ] Ship safely [id:: qa-comment-delimiter] <!-- [priority:: high] -->';
   taskLine = logLineUtils.setLogInlineFieldValue(taskLine, 'projects', wikilink);
   taskLine = logLineUtils.setLogInlineFieldValue(taskLine, 'contexts', '[[Contexts/Home]]');
 
@@ -129,7 +129,7 @@ test('canonical entity aliases cannot terminate hidden inline-property carriers'
   const carrierBody = taskLine.match(/<!--([\s\S]*?)-->/u)?.[1] || '';
   assert.doesNotMatch(carrierBody, /<!--|-->/u);
   assert.deepEqual(logLineUtils.readInlineFields(taskLine), {
-    tpsid: 'qa-comment-delimiter',
+    id: 'qa-comment-delimiter',
     priority: 'high',
     projects: wikilink,
     contexts: '[[Contexts/Home]]',
@@ -188,7 +188,7 @@ test('unsafe entity targets are omitted before a hidden carrier can be mutated',
     'unsafe note paths and declared targets never reach the picker',
   );
 
-  let taskLine = '- [ ] Ship safely [tpsId:: qa-target-delimiter] <!-- [priority:: high] -->';
+  let taskLine = '- [ ] Ship safely [id:: qa-target-delimiter] <!-- [priority:: high] -->';
   for (const choice of choices) {
     taskLine = logLineUtils.setLogInlineFieldValue(taskLine, 'projects', choice.wikilink);
   }

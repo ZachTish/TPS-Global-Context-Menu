@@ -260,7 +260,7 @@ test("kind scopes use the configured property key with case-insensitive frontmat
     RecordKinds: ["transaction/macros"], recordkinds: ["transaction/financial"],
   } }], {}, "any").map(property => property.id), ["kind"],
   "ambiguous authored keys must not select a scoped property or break the panel");
-  const authored = { kind: ["task/todo"], tpsId: "task-1" };
+  const authored = { kind: ["task/todo"], id: "task-1" };
   const entry = createCustomPropertyEntry({ path: "Inbox/Test.md" }, authored, "task");
   assert.equal(entry.frontmatter, authored, "stacked and context controls must read the authored list, not the inspector envelope");
   assert.deepEqual(entry.frontmatter.kind, ["task/todo"]);

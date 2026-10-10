@@ -98,7 +98,7 @@ test('task timers re-resolve the current task before reading or attaching a stab
   assert.match(timeTrackingSource, /findCurrentTaskLineIndex\([\s\S]{0,240}preferredLineNumber[\s\S]{0,240}sourceRawLine[\s\S]{0,240}sourceTitle/);
   assert.match(
     timeTrackingSource,
-    /private async ensureTaskLineTpsId\([\s\S]{0,1800}vault\.process\([\s\S]{0,900}findCurrentTaskLineIndex\(lines, preferredLineNumber, rawLine, title\)/,
+    /private async ensureTaskLineId\([\s\S]{0,1800}vault\.process\([\s\S]{0,900}findCurrentTaskLineIndex\(lines, preferredLineNumber, rawLine, title\)/,
   );
   assert.match(timeTrackingSource, /lineNumber: ensured\.lineNumber/);
   assert.match(timeTrackingSource, /rawLine: target\.rawLine/);
@@ -121,19 +121,19 @@ test('recurrence clones use the captured mapped status while dropping stale work
     buildTaskRecurrenceTemplateLine,
     isCompletedTaskMarker,
   } = await importTaskRecurrenceUtility();
-  const source = '- [x] Recurring task [workflow:: complete] [recurrence:: FREQ=DAILY] [recurrenceTaskId:: rec-1] [tpsId:: task-1] [subitemId:: sub-1] [completedDate:: 2026-07-14 09:00:00] %% tps-inline-props:{"associatedNotePath":"Tasks/Recurring task.md","externalId":"reminder-1","stableId":"stable-1"} %%';
+  const source = '- [x] Recurring task [workflow:: complete] [recurrence:: FREQ=DAILY] [recurrenceTaskId:: rec-1] [id:: task-1] [subitemId:: sub-1] [completedDate:: 2026-07-14 09:00:00] %% tps-inline-props:{"associatedNotePath":"Tasks/Recurring task.md","externalId":"reminder-1","stableId":"stable-1"} %%';
 
   const template = buildTaskRecurrenceTemplateLine(source, '[o]', 'workflow');
   assert.match(template, /^- \[o\] Recurring task/);
   assert.match(template, /\[recurrence:: FREQ=DAILY\]/);
   assert.match(template, /\[recurrenceTaskId:: rec-1\]/);
-  assert.doesNotMatch(template, /workflow|tpsId|subitemId|completedDate|tps-inline-props|associatedNotePath|externalId|stableId/i);
+  assert.doesNotMatch(template, /workflow|\[id::|subitemId|completedDate|tps-inline-props|associatedNotePath|externalId|stableId/i);
 
   const next = buildNextTaskRecurrenceLine(template, '2026-07-15 09:00:00', '[o]', 'workflow');
   assert.match(next, /^- \[o\] Recurring task/);
   assert.match(next, /\[recurrenceTaskId:: rec-1\]/);
   assert.match(next, /\[scheduled:: 2026-07-15 09:00:00\]/);
-  assert.doesNotMatch(next, /tpsId|subitemId|completedDate|tps-inline-props|associatedNotePath|externalId|stableId/i);
+  assert.doesNotMatch(next, /\[id::|subitemId|completedDate|tps-inline-props|associatedNotePath|externalId|stableId/i);
   assert.throws(
     () => buildTaskRecurrenceTemplateLine(source, '[too-long]', 'workflow'),
     /requires a valid mapped checkbox state/u,
@@ -469,7 +469,7 @@ test('timer task creation resolves mapping before any Daily Note creation or mar
   assert.ok(created);
   assert.equal(dailyNoteCreates, 0);
   assert.equal(processCalls, 1);
-  assert.match(sourceContent, /- \[o\] Mapped timer \[tpsId:: task_/u);
+  assert.match(sourceContent, /- \[o\] Mapped timer \[id:: task_/u);
 });
 
 test('timer task creation performs zero markdown writes when Todo mapping changes at the process boundary', async () => {
@@ -532,15 +532,15 @@ async function createTimeTrackingNotesHarness() {
     [dailyFile.path, dailyFile],
   ]);
   const bodies = new Map([
-    [sourceFile.path, '---\ntitle: Alpha\ntpsId: project-alpha\n---\n\n# Alpha\n- [ ] Ship release [tpsId:: task-one]\n'],
-    [scheduledFile.path, '---\ntitle: Beta\ntpsId: project-beta\nscheduled: 2026-09-01 09:00:00\ntimeEstimate: 75\nend: 2026-09-01 10:15:00\n---\n\n# Beta\n'],
+    [sourceFile.path, '---\ntitle: Alpha\nid: project-alpha\n---\n\n# Alpha\n- [ ] Ship release [id:: task-one]\n'],
+    [scheduledFile.path, '---\ntitle: Beta\nid: project-beta\nscheduled: 2026-09-01 09:00:00\ntimeEstimate: 75\nend: 2026-09-01 10:15:00\n---\n\n# Beta\n'],
     [dailyFile.path, '---\ntitle: Today\nscheduled: 2026-08-03 00:00:00\n---\n\n# Existing\n'],
   ]);
   const frontmatter = new Map([
-    [sourceFile.path, { title: 'Alpha', tpsId: 'project-alpha' }],
+    [sourceFile.path, { title: 'Alpha', id: 'project-alpha' }],
     [scheduledFile.path, {
       title: 'Beta',
-      tpsId: 'project-beta',
+      id: 'project-beta',
       scheduled: '2026-09-01 09:00:00',
       timeEstimate: 75,
       end: '2026-09-01 10:15:00',
@@ -666,7 +666,7 @@ test('ordinary note sessions create Daily Note notes without scheduling the note
   assert.equal(stored[0].notesHeading, 'Time Tracking');
   assert.match(stored[0].notesBlockId, /^tps-time-tt[_-]/u);
 
-  const rawTask = '- [ ] Ship release [tpsId:: task-one]';
+  const rawTask = '- [ ] Ship release [id:: task-one]';
   const taskLineNumber = bodies.get(sourceFile.path).split(/\r?\n/u).indexOf(rawTask);
   const taskSession = await service.startTimer({
     file: sourceFile,
@@ -690,7 +690,7 @@ test('external task timers can reuse their target without creating notes and sto
   const { bodies, dailyFile, frontmatter, service, sourceFile } = await createTimeTrackingNotesHarness();
   const dailyBefore = bodies.get(dailyFile.path);
   const lines = bodies.get(sourceFile.path).split(/\r?\n/u);
-  const rawTask = '- [ ] Ship release [tpsId:: task-one]';
+  const rawTask = '- [ ] Ship release [id:: task-one]';
   const lineNumber = lines.indexOf(rawTask);
   const external = await service.startTimer({
     file: sourceFile,
@@ -812,15 +812,32 @@ test('timer duplicate resolves todo before vault.process and clears stale status
 
 test('note timer preserves source identity when metadata is missing or stale', async () => {
   const { TimeTrackingService, TFile } = await importMappedTaskCreationServices();
-  for (const source of [{tpsId:'workout-original'}, {TPSID:'workout-case'}, {subitemId:'legacy-original'}, {}]) {
+  for (const source of [{id:'workout-original'}, {ID:'workout-case'}, {subitemId:'legacy-original'}, {}]) {
     const expected = Object.values(source)[0];
-    const plugin = {app:{metadataCache:{getFileCache:()=>null}},frontmatterMutationService:{async process(_file, mutate){mutate(source);}}};
+    const plugin = {settings:{},app:{metadataCache:{getFileCache:()=>null}},frontmatterMutationService:{async process(_file, mutate){mutate(source);}}};
     const service = new TimeTrackingService(plugin);
-    const first = await service.ensureNoteTpsId(new TFile('Inbox/Identity QA.md'));
-    const second = await service.ensureNoteTpsId(new TFile('Inbox/Identity QA.md'));
+    const first = await service.ensureNoteId(new TFile('Inbox/Identity QA.md'));
+    const second = await service.ensureNoteId(new TFile('Inbox/Identity QA.md'));
     assert.equal(first, expected || second);
     assert.equal(second, first);
     assert.ok(first);
-    assert.equal(Object.entries(source).find(([key])=>key.toLowerCase()==='tpsid')[1],first);
+    assert.equal(Object.entries(source).find(([key])=>key.toLowerCase()==='id')[1],first);
+  }
+});
+
+
+test('note timers preserve the configured physical identity and never create a second canonical field', async () => {
+  const { TimeTrackingService, TFile } = await importMappedTaskCreationServices();
+  for (const key of ['recordIdentity', 'tpsId']) {
+    const source = { [key]: 'existing-target-id', title: 'Keep title' };
+    const plugin = { settings: { nativeRecordIdentityPropertyKey: key }, app: { metadataCache: { getFileCache: () => null } }, frontmatterMutationService: { async process(_file, mutate) { mutate(source); } } };
+    const service = new TimeTrackingService(plugin);
+    assert.equal(await service.ensureNoteId(new TFile('Inbox/Configured identity QA.md')), 'existing-target-id');
+    assert.deepEqual(source, { [key]: 'existing-target-id', title: 'Keep title' });
+    delete source[key];
+    const allocated = await service.ensureNoteId(new TFile('Inbox/Configured identity QA.md'));
+    assert.ok(allocated);
+    assert.equal(source[key], allocated);
+    assert.equal(Object.hasOwn(source, 'id'), false);
   }
 });

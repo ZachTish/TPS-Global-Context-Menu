@@ -125,7 +125,7 @@ test('title and full-body edits normalize leading links and retain their local a
     setTaskTitle,
   } = await metadataPromise;
   const hidden = '%% tps-inline-props:{"externalId":"reminders:abc","remindersSyncedTitle":"Birthday Dinner"} %%';
-  const legacy = `- [ ] [[Events/Birthday Dinner#2026-07-13|Birthday Dinner]] [parents:: [[2026-07-13]]] [scheduled:: 2026-07-13 17:45:00] [tpsId:: item_abc] ${hidden}`;
+  const legacy = `- [ ] [[Events/Birthday Dinner#2026-07-13|Birthday Dinner]] [parents:: [[2026-07-13]]] [scheduled:: 2026-07-13 17:45:00] [id:: item_abc] ${hidden}`;
 
   const renamed = setTaskTitle(legacy, 'Birthday Dinner renamed');
   assert.equal(getTaskSourceTitle(renamed), 'Birthday Dinner renamed');
@@ -133,7 +133,7 @@ test('title and full-body edits normalize leading links and retain their local a
   assert.equal(readTaskAssociatedNotePath(renamed), 'Events/Birthday Dinner');
   assert.equal(readInlineFieldValue(renamed, 'parents'), '[[2026-07-13]]');
   assert.equal(readInlineFieldValue(renamed, 'scheduled'), '2026-07-13 17:45:00');
-  assert.equal(readInlineFieldValue(renamed, 'tpsId'), 'item_abc');
+  assert.equal(readInlineFieldValue(renamed, 'id'), 'item_abc');
   assert.match(renamed, /"externalId":"reminders:abc"/u);
   assert.equal((renamed.match(/tps-inline-props:/gu) || []).length, 1);
   assert.doesNotMatch(getTaskSourceTitle(renamed), /\[\[|\]\]/u);
@@ -149,7 +149,7 @@ test('title and full-body edits normalize leading links and retain their local a
     '[[2026-07-13]]',
     'full-body edits retain the current source property instead of accepting hidden inline-field input',
   );
-  assert.equal(readInlineFieldValue(edited, 'tpsId'), 'item_abc');
+  assert.equal(readInlineFieldValue(edited, 'id'), 'item_abc');
   assert.match(edited, /"externalId":"reminders:abc"/u);
   assert.equal((edited.match(/tps-inline-props:/gu) || []).length, 1);
 
@@ -213,7 +213,7 @@ test('hidden GCM properties merge without loss and remain hidden through line ed
 test('task relocation uses exact and stable identities and refuses ambiguous fallback matches', async () => {
   const { findCurrentTaskLineIndex } = await taskBlockPromise;
 
-  const exact = '- [ ] Exact task [tpsId:: exact_1]';
+  const exact = '- [ ] Exact task [id:: exact_1]';
   assert.equal(findCurrentTaskLineIndex(['before', exact], 1, exact, 'Exact task'), 1);
   assert.equal(findCurrentTaskLineIndex([exact, 'before'], 1, exact, 'Exact task'), 0);
 
@@ -243,9 +243,9 @@ test('task relocation uses exact and stable identities and refuses ambiguous fal
     -1,
   );
 
-  const staleById = '- [ ] Original title [tpsId:: stable_1]';
+  const staleById = '- [ ] Original title [id:: stable_1]';
   assert.equal(
-    findCurrentTaskLineIndex(['- [ ] Renamed elsewhere [tpsId:: stable_1]'], 4, staleById, 'Original title'),
+    findCurrentTaskLineIndex(['- [ ] Renamed elsewhere [id:: stable_1]'], 4, staleById, 'Original title'),
     0,
   );
   const staleBySubitem = '- [ ] Original child [subitemId:: child_1]';
@@ -272,10 +272,10 @@ test('task relocation uses exact and stable identities and refuses ambiguous fal
     -1,
     'a duplicate exact revision stays ambiguous even at the preferred coordinate',
   );
-  const duplicateIdentity = '- [ ] Original [tpsId:: duplicate_1]';
+  const duplicateIdentity = '- [ ] Original [id:: duplicate_1]';
   assert.equal(
     findCurrentTaskLineIndex(
-      ['- [ ] Only this title [tpsId:: duplicate_1]', '- [ ] Another title [tpsId:: duplicate_1]'],
+      ['- [ ] Only this title [id:: duplicate_1]', '- [ ] Another title [id:: duplicate_1]'],
       8,
       duplicateIdentity,
       'Only this title',
@@ -310,8 +310,8 @@ test('daily-note migrated source blocks shed clone identities while destination 
   const { readInlineFieldValue } = await metadataPromise;
   const { buildDailyNoteScratchpadMovedTaskBlock, insertTaskBlockAfterFrontmatter } = await taskBlockPromise;
   const sourceBlock = [
-    '- [ ] Root task [scheduled:: 2026-07-14] [tpsId:: root_1] [subitemId:: root_sub] %% tps-inline-props:{"externalId":"event-root","associatedNotePath":"Notes/Root.md"} %%',
-    '  - [ ] Child task [tpsId:: child_1] %% tps-inline-props:{"externalId":"event-child"} %%',
+    '- [ ] Root task [scheduled:: 2026-07-14] [id:: root_1] [subitemId:: root_sub] %% tps-inline-props:{"externalId":"event-root","associatedNotePath":"Notes/Root.md"} %%',
+    '  - [ ] Child task [id:: child_1] %% tps-inline-props:{"externalId":"event-child"} %%',
     '    Supporting detail %% tps-inline-props:{"associatedNotePath":"Notes/Detail.md"} %%',
   ];
   const original = [...sourceBlock];
@@ -321,11 +321,11 @@ test('daily-note migrated source blocks shed clone identities while destination 
   assert.match(scratchpad[0], /^- \[>\] Root task/u);
   assert.equal(readInlineFieldValue(scratchpad[0], 'scheduled'), '2026-07-14');
   assert.equal(readInlineFieldValue(scratchpad[0], 'migratedTo'), '[[Projects/Target]]');
-  assert.doesNotMatch(scratchpad.join('\n'), /tpsId|subitemId|tps-inline-props|externalId|associatedNotePath/u);
+  assert.doesNotMatch(scratchpad.join('\n'), /id|subitemId|tps-inline-props|externalId|associatedNotePath/u);
   assert.match(scratchpad[1], /^  - \[ \] Child task/u);
   assert.equal(scratchpad[2].trim(), 'Supporting detail');
 
   const destination = insertTaskBlockAfterFrontmatter('', sourceBlock).content;
-  assert.match(destination, /\[tpsId:: root_1\]/u);
+  assert.match(destination, /\[id:: root_1\]/u);
   assert.match(destination, /"associatedNotePath":"Notes\/Root.md"/u);
 });

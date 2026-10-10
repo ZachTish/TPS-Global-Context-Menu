@@ -56,7 +56,7 @@ import { AiAssistedTaskService } from './services/ai-assisted-task-service';
 import { TaskRecurrenceService } from './services/task-recurrence-service';
 import { TaskApiService } from './services/task-api-service';
 import { GcmEventService } from './services/gcm-event-service';
-import { TpsIdentityService } from './services/tps-identity-service';
+import { IdentityService } from './services/tps-identity-service';
 import { CardContentService } from './services/card-content-service';
 import { IdentityMigrationService } from './services/identity-migration-service';
 import { FilePropertiesService } from './services/file-properties-service';
@@ -65,6 +65,7 @@ import {
   normalizeNativeRecordLayout,
   normalizeNativeRecordRoot,
   normalizeNativeRecordStorageProfile,
+  resolveLoadedNativeRecordIdentityPropertyKey,
   resolveWritableNativeRecordStorageConfiguration,
 } from './services/native-record-service';
 import { TemplateIdentityService } from './services/template-identity-service';
@@ -369,7 +370,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   taskApiService: TaskApiService;
   itemHistoryService: ItemHistoryService;
   eventService: GcmEventService;
-  identityService: TpsIdentityService;
+  identityService: IdentityService;
   cardContentService: CardContentService;
   identityMigrationService: IdentityMigrationService;
   filePropertiesService: FilePropertiesService;
@@ -552,7 +553,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.aiAssistedTaskService = new AiAssistedTaskService(this);
     this.taskRecurrenceService = new TaskRecurrenceService(this);
     this.eventService = new GcmEventService(this);
-    this.identityService = new TpsIdentityService(this);
+    this.identityService = new IdentityService(this);
     this.itemHistoryService = new ItemHistoryService(this);
     this.taskApiService = new TaskApiService(this);
     this.cardContentService = new CardContentService();
@@ -1687,7 +1688,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.nativeRecordLayout = normalizeNativeRecordLayout(loaded?.nativeRecordLayout);
     const configuredNativeRecordStorageProfile = normalizeNativeRecordStorageProfile({
       identityMode: loaded?.nativeRecordIdentityMode,
-      identityPropertyKey: loaded?.nativeRecordIdentityPropertyKey,
+      identityPropertyKey: resolveLoadedNativeRecordIdentityPropertyKey(loaded),
       schemaPropertyKey: loaded?.nativeRecordSchemaPropertyKey,
       identityTagPrefix: loaded?.nativeRecordIdentityTagPrefix,
       kindPropertyKey: loaded?.nativeRecordKindPropertyKey,
@@ -1721,7 +1722,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     );
     const needsNativeRecordIdentityMigration = nativeRecordStorageConfiguration.requiresSettingsMigration
       || hasRawNativeRecordStorageRepair
-      || hasRawNativeRecordStorageAliasRepair;
+      || hasRawNativeRecordStorageAliasRepair
+      || !Object.prototype.hasOwnProperty.call(loadedSettingsRecord, 'nativeRecordIdentityPropertyKey');
     this.settings.nativeRecordIdentityMode = nativeRecordStorageProfile.identityMode;
     this.settings.nativeRecordIdentityPropertyKey = nativeRecordStorageProfile.identityPropertyKey;
     this.settings.nativeRecordSchemaPropertyKey = nativeRecordStorageProfile.schemaPropertyKey;
@@ -1770,6 +1772,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         nativeRecordModifiedPropertyKey: originalStorageValue('nativeRecordModifiedPropertyKey', configuredNativeRecordStorageProfile.modifiedPropertyKey),
         nativeRecordStorageAliases: originalStorageValue('nativeRecordStorageAliases', []),
       });
+      // Persist this existing key even when the old sparse payload omitted it.
+      // That keeps first installs on id and upgrades on their previous key.
+      if (!Object.prototype.hasOwnProperty.call(loadedSettingsRecord, 'nativeRecordIdentityPropertyKey')) {
+        delete preNormalizationSettings.nativeRecordIdentityPropertyKey;
+      }
     }
     this.stripLegacySettingsFields(this.settings as unknown as Record<string, unknown>);
     const normalizedProperties = this.normalizeCustomProperties(this.settings.properties);

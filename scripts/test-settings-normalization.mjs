@@ -43,7 +43,7 @@ async function importModule(relativePath) {
 async function importNativeRecordStorageModule() {
   const build = await esbuild.build({
     stdin: {
-      contents: "export { resolveWritableNativeRecordStorageConfiguration } from '../src/services/native-record-service.ts';",
+      contents: "export { resolveLoadedNativeRecordIdentityPropertyKey, resolveWritableNativeRecordStorageConfiguration } from '../src/services/native-record-service.ts';",
       resolveDir: fileURLToPath(new URL('.', import.meta.url)),
       sourcefile: 'native-record-storage-settings-harness.ts',
       loader: 'ts',
@@ -619,7 +619,7 @@ test('legacy tag identity settings resolve to a property writer and retain the e
   assert.equal(resolved.requiresSettingsMigration, true);
   assert.equal(resolved.configuredProfile.identityMode, 'tag');
   assert.equal(resolved.writeProfile.identityMode, 'property');
-  assert.equal(resolved.writeProfile.identityPropertyKey, 'tpsId');
+  assert.equal(resolved.writeProfile.identityPropertyKey, 'id');
   assert.equal(resolved.writeProfile.schemaPropertyKey, '');
   assert.equal(resolved.writeProfile.kindPropertyKey, 'kind');
   assert.equal(resolved.writeProfile.titlePropertyKey, 'title');
@@ -633,7 +633,7 @@ test('tag identity retirement uses serialized settings persistence without rewri
   const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
   const legacyTagProfile = {
     identityMode: 'tag',
-    identityPropertyKey: 'tpsId',
+    identityPropertyKey: 'id',
     schemaPropertyKey: 'tpsSchemaVersion',
     identityTagPrefix: 'custom/record',
     kindPropertyKey: 'kind',
@@ -690,7 +690,7 @@ test('sanitized native record aliases replace the raw persisted alias array', as
   const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
   const legacyTagProfile = {
     identityMode: 'tag',
-    identityPropertyKey: 'tpsId',
+    identityPropertyKey: 'id',
     schemaPropertyKey: 'tpsSchemaVersion',
     identityTagPrefix: 'custom/record',
     kindPropertyKey: 'kind',
@@ -725,19 +725,20 @@ test('sanitized native record aliases replace the raw persisted alias array', as
   assert.equal(disk.unrelatedSetting, 'preserve');
 });
 
-test('native record settings expose one confirmed kind-key mapping and explicit legacy migration', () => {
+test('native record settings expose confirmed identity and kind-key mappings and explicit legacy migration', () => {
   const nativeSettingsStart = settingsTabSource.indexOf("diagnostics.createEl('h4', { text: 'Atomic note properties' })");
   const nativeSettingsEnd = settingsTabSource.indexOf("diagnostics.createEl('h4', { text: 'Template identity' })", nativeSettingsStart);
   const nativeSettingsSource = settingsTabSource.slice(nativeSettingsStart, nativeSettingsEnd);
 
   assert.ok(nativeSettingsStart >= 0 && nativeSettingsEnd > nativeSettingsStart);
   assert.match(nativeSettingsSource, /setName\('Canonical record envelope'\)/);
-  assert.match(nativeSettingsSource, /Records use tpsId, the configured kind key/);
+  assert.match(nativeSettingsSource, /Records use the configured identity and kind keys/);
   assert.match(nativeSettingsSource, /Only the current mapping is read/);
   assert.doesNotMatch(nativeSettingsSource, /setName\('Store record identity as'\)/);
   assert.doesNotMatch(nativeSettingsSource, /addOption\('tag', 'Tag'\)/);
   assert.doesNotMatch(nativeSettingsSource, /setName\('Identity tag prefix'\)/);
-  assert.doesNotMatch(nativeSettingsSource, /nativeRecordIdentityPropertyKey|nativeRecordSchemaPropertyKey/);
+  assert.match(nativeSettingsSource, /renderMigratingKeySetting\(diagnostics, 'Record identity key'[\s\S]*?'nativeRecordIdentityPropertyKey'/);
+  assert.doesNotMatch(nativeSettingsSource, /nativeRecordSchemaPropertyKey/);
   assert.match(nativeSettingsSource, /renderMigratingKeySetting\(diagnostics, 'Record kind key'/);
   assert.doesNotMatch(nativeSettingsSource, /nativeRecordCreatedPropertyKey|nativeRecordModifiedPropertyKey/);
   assert.match(nativeSettingsSource, /Historical names are used only for this confirmed migration/);
@@ -1130,4 +1131,38 @@ test('Atomic note is the only rendered architecture', () => {
   assert.match(settingsTabSource, /TPS records use Atomic notes/);
   assert.doesNotMatch(settingsTabSource, /addOption\('legacy', 'Atomic line'\)/);
   assert.match(mainSource, /this\.settings\.dataArchitectureMode = 'native-records'/);
+});
+
+
+test('schema-free physical identity keys survive normalization and do not schedule a settings migration', async () => {
+  const { resolveWritableNativeRecordStorageConfiguration } = await importNativeRecordStorageModule();
+  for (const identityPropertyKey of ['id', 'tpsId', 'recordIdentity']) {
+    const resolved = resolveWritableNativeRecordStorageConfiguration({ identityMode: 'property', identityPropertyKey, schemaPropertyKey: '', kindPropertyKey: 'kind', titlePropertyKey: 'title' });
+    assert.equal(resolved.writeProfile.identityPropertyKey, identityPropertyKey);
+    assert.equal(resolved.requiresSettingsMigration, false);
+    assert.deepEqual(resolved.readAliases, []);
+  }
+  assert.equal(resolveWritableNativeRecordStorageConfiguration().writeProfile.identityPropertyKey, 'id');
+});
+
+
+test('sparse old settings retain the old physical identity while first installs persist the new default', async () => {
+  const { resolveLoadedNativeRecordIdentityPropertyKey, resolveWritableNativeRecordStorageConfiguration } = await importNativeRecordStorageModule();
+  const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
+  for (const [loaded, expected] of [[null, 'id'], [{}, 'tpsId'], [{ enableTimeTracking: true }, 'tpsId'], [{ nativeRecordIdentityPropertyKey: 'customRecordId' }, 'customRecordId'], [{ nativeRecordIdentityPropertyKey: 'id' }, 'id']]) {
+    const identityPropertyKey = resolveLoadedNativeRecordIdentityPropertyKey(loaded);
+    assert.equal(identityPropertyKey, expected);
+    assert.equal(resolveWritableNativeRecordStorageConfiguration({ identityPropertyKey }).writeProfile.identityPropertyKey, expected);
+    let disk = structuredClone(loaded || {});
+    const coordinator = new SettingsPersistenceCoordinator(async () => disk, async next => { disk = next; });
+    coordinator.setBaseline(loaded || {});
+    await coordinator.request({ ...loaded, nativeRecordIdentityPropertyKey: identityPropertyKey });
+    assert.equal(disk.nativeRecordIdentityPropertyKey, expected);
+    assert.equal(resolveLoadedNativeRecordIdentityPropertyKey(disk), expected);
+  }
+  const start = mainSource.indexOf('async loadSettings(): Promise<void>');
+  const load = mainSource.slice(start, mainSource.indexOf('private normalizeCustomProperties(', start));
+  assert.match(load, /identityPropertyKey: resolveLoadedNativeRecordIdentityPropertyKey\(loaded\)/u);
+  assert.match(load, /delete preNormalizationSettings\.nativeRecordIdentityPropertyKey/u);
+  assert.doesNotMatch(load, /vault\.(?:read|process|modify)|migrateStorageProfile/u);
 });

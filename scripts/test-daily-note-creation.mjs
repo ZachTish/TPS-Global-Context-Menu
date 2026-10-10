@@ -3415,7 +3415,7 @@ test('generic title synchronization checks workflow ownership only at a real mut
         isRecordFile: () => false,
         async hasRecordIdentityEvidence(_file, authoritativeSource) {
           identityChecks += 1;
-          return /(?:^|\n)tpsId\s*:/u.test(String(authoritativeSource || ''));
+          return /(?:^|\n)id\s*:/u.test(String(authoritativeSource || ''));
         },
       },
       bulkEditService: {
@@ -3482,7 +3482,7 @@ test('generic title synchronization checks workflow ownership only at a real mut
     assert.equal(renamed, 0);
     source = [
       '---',
-      'tpsId: workout-became-native',
+      'id: workout-became-native',
       'tpsSchemaVersion: 1',
       'kind: workout-session',
       'title: New path',
@@ -3568,12 +3568,12 @@ test('timestamp sync rejects native identity evidence acquired at the source-pre
     const cases = [
       {
         label: 'valid native record',
-        boundaryFrontmatter: { tpsId: 'task-valid-race', kind: 'task', title: 'Timestamp race' },
+        boundaryFrontmatter: { id: 'task-valid-race', kind: 'task', title: 'Timestamp race' },
         expectedWrites: 0,
       },
       {
         label: 'incomplete native identity',
-        boundaryFrontmatter: { tpsId: '', title: 'Timestamp race' },
+        boundaryFrontmatter: { id: '', title: 'Timestamp race' },
         expectedWrites: 0,
       },
       {
@@ -3613,7 +3613,7 @@ test('timestamp sync rejects native identity evidence acquired at the source-pre
         nativeRecordService: {
           hasRecordIdentityEvidenceInFrontmatter(frontmatter) {
             return Object.keys(frontmatter || {}).some((key) => (
-              ['tpsid', 'tpsschemaversion'].includes(key.toLowerCase())
+              ['id', 'tpsschemaversion'].includes(key.toLowerCase())
             ));
           },
         },
@@ -3684,9 +3684,9 @@ test('calendar records follow their title without allowing reverse title writes 
   try {
     const {FileNamingService}=await loadFileNamingService();
     const file={__isTestTFile:true,path:'Inbox/calendar-event-id.md',name:'calendar-event-id.md',basename:'calendar-event-id',extension:'md',parent:{path:'Inbox'},stat:{ctime:0,mtime:0}};
-    let fields={tpsId:'calendar-event-id',kind:'calendar-event',title:'Planning'},source='',collision=false,renames=0,writes=0;
+    let fields={id:'calendar-event-id',kind:'calendar-event',title:'Planning'},source='',collision=false,renames=0,writes=0;
     const refresh=()=>source='---\n'+Object.entries(fields).map(([k,v])=>`${k}: ${v}`).join('\n')+'\n---\nBody stays here';refresh();
-    const inspect=fm=>fm?.tpsId&&fm?.kind?{id:fm.tpsId,kind:fm.kind}:null;
+    const inspect=fm=>fm?.id&&fm?.kind?{id:fm.id,kind:fm.kind}:null;
     const plugin={settings:{enableAutoRename:true,autoSyncTitleFromFilename:true,folderExclusions:'',frontmatterAutoWriteExclusions:'',dailyNoteDateFormat:'YYYY-MM-DD'},registerEvent(){},shouldIgnoreAutoFrontmatterWrite:()=>false,
       nativeRecordService:{isRecordFile:()=>!!inspect(fields),inspect,hasRecordIdentityEvidence:async()=>true},
       bulkEditService:{shouldSkipNoteLevelRecurrence:async()=>false,canMutateFrontmatterSafely:async()=>true,runSerializedFrontmatterWrite:async(f,action)=>action()},

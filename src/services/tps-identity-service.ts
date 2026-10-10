@@ -17,8 +17,8 @@ export type CalendarIdentityInput = {
   sourceUrl?: string | null;
 };
 
-export class TpsIdentityService {
-  readonly internalIdKey = 'tpsId';
+export class IdentityService {
+  get internalIdKey(): string { return String(this.plugin.settings.nativeRecordIdentityPropertyKey || 'id').trim() || 'id'; }
   get externalIdKey(): string { return managedNoteFieldKey(this.plugin.settings, 'externalId'); }
 
   getNoteField(frontmatter: Record<string, unknown> | null | undefined, field: ManagedNoteField): unknown {

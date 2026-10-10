@@ -301,7 +301,7 @@ test('a status-only general property edit preserves zoned schedule instants and 
 
 function stripNativeUpdateLines(source) {
   return source
-    .replace(/^(?:title|createdDate|modifiedDate|tpsId|tpsSchemaVersion):[^\r\n]*(?:\r?\n)/gmu, '')
+    .replace(/^(?:title|createdDate|modifiedDate|id|tpsSchemaVersion):[^\r\n]*(?:\r?\n)/gmu, '')
     .replace(/^  - tps\/record\/v1\/calendar-event\/calendar-3rv0kr(?:\r?\n)/gmu, '');
 }
 
@@ -591,11 +591,11 @@ test('Notebook Navigator semantic automation rechecks ambiguous native identity 
   const cases = [
     {
       label: 'valid identity acquired after preflight',
-      identityLines: ['tpsId: task-raced-valid\n', 'kind: task\n'],
+      identityLines: ['id: task-raced-valid\n', 'kind: task\n'],
     },
     {
       label: 'incomplete identity acquired after preflight',
-      identityLines: ['tpsId:\n'],
+      identityLines: ['id:\n'],
     },
     {
       label: 'malformed schema evidence acquired after preflight',
@@ -656,7 +656,7 @@ test('Notebook Navigator semantic automation rechecks ambiguous native identity 
 test('legacy architecture still protects a proven native record from Notebook Navigator automation', async () => {
   const source = [
     '\uFEFF---\r\n',
-    'tpsId: legacy-mode-protected\r\n',
+    'id: legacy-mode-protected\r\n',
     'tpsSchemaVersion: 1\r\n',
     'kind: task\r\n',
     'title: Legacy Mode Protected\r\n',
@@ -678,7 +678,7 @@ test('legacy architecture still protects a proven native record from Notebook Na
     nativeRecordStorageAliases: [],
   });
   Object.assign(fixture.plugin.settings.notebookNavigatorRules, {
-    frontmatterIconField: 'TPSID',
+    frontmatterIconField: 'ID',
     frontmatterColorField: 'TaGs',
     hideRules: [{
       id: 'hide-legacy-mode-record',
@@ -722,7 +722,7 @@ test('proven native records reject Notebook Navigator destinations owned by curr
       fileName: 'Canonical Protected.md',
       source: [
         '\uFEFF---\r\n',
-        'tpsId: canonical-protected\r\n',
+        'id: canonical-protected\r\n',
         'tpsSchemaVersion: 1\r\n',
         'kind: task\r\n',
         'title: Canonical Protected\r\n',
@@ -733,7 +733,7 @@ test('proven native records reject Notebook Navigator destinations owned by curr
         '---\r\n',
       ].join(''),
       settings: { nativeRecordIdentityMode: 'property', nativeRecordStorageAliases: [] },
-      iconField: 'TPSID',
+      iconField: 'ID',
       colorField: 'TaGs',
       sortField: 'TiTlE',
     },
@@ -850,7 +850,7 @@ test('proven native records reject Notebook Navigator destinations owned by curr
 });
 
 test('nativeRecords.update cleans agreeing identity evidence through owned fields and preserves producer source', async () => {
-  const fixture = makeFixture(pocRecord.replace('---\r\n', '---\r\ntpsId: calendar-3rv0kr\r\n'));
+  const fixture = makeFixture(pocRecord.replace('---\r\n', '---\r\nid: calendar-3rv0kr\r\n'));
   const service = new NativeRecordService(fixture.plugin);
   const nextTitle = '[[Calendar Events/2026-09-01/Calendar event--calendar-3rv0kr|Daily Standup: Platform sync]]';
 
@@ -866,7 +866,7 @@ test('nativeRecords.update cleans agreeing identity evidence through owned field
   assert.equal(updated?.frontmatter.title, nextTitle);
   assert.equal(stripNativeUpdateLines(output), stripNativeUpdateLines(pocRecord));
   assert.doesNotMatch(output, /^  - tps\/record\/v1\/calendar-event\/calendar-3rv0kr\r$/mu);
-  assert.match(output, /^tpsId: calendar-3rv0kr\r$/mu);
+  assert.match(output, /^id: calendar-3rv0kr\r$/mu);
   assert.doesNotMatch(output, /^tpsSchemaVersion:/mu);
   assert.match(output, /^  - calendar-event\r$/mu);
   assert.match(output, /^  - work\r$/mu);

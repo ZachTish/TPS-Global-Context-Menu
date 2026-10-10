@@ -11,6 +11,7 @@ export const MIGRATABLE_KEY_SETTINGS = {
   timeTrackingPropertyKey: 'timeTracking',
   taskVisibilityStateFrontmatterKey: 'gcmTaskVisibility',
   parentLinkFrontmatterKey: 'parent',
+  nativeRecordIdentityPropertyKey: 'id',
   nativeRecordKindPropertyKey: 'kind',
   nativeRecordTitlePropertyKey: 'title',
 } as const;
@@ -25,7 +26,12 @@ export function validateMigration(change: PropertyMigration): void {
 
 export function validateMigrationSettings(settings: any, change: PropertyMigration): void {
   if (change.kind !== 'key' || fold(change.from) === fold(change.to)) return;
-  if (['tpsid', 'tags', 'aliases'].includes(fold(change.to)) || fold(change.from) === 'tpsid') throw new Error('This property is reserved and cannot be used for this mapping.');
+  const identityChange = fold(settings.nativeRecordIdentityPropertyKey || 'id') === fold(change.from);
+  if (['tags', 'aliases'].includes(fold(change.to))
+    || (identityChange && ['kind', 'title', 'tpsschemaversion', 'createddate', 'modifieddate'].includes(fold(change.to)))
+    || (!identityChange && (['id', 'tpsid'].includes(fold(change.to)) || ['id', 'tpsid'].includes(fold(change.from))))) {
+    throw new Error('This property is reserved and cannot be used for this mapping.');
+  }
   if (change.recordKinds) {
     if (['title', 'tpsschemaversion', 'createddate', 'modifieddate'].includes(fold(change.to))) throw new Error('This property is reserved.');
     return;
@@ -41,12 +47,12 @@ export function validateMigrationSettings(settings: any, change: PropertyMigrati
 }
 
 /** Patch source ranges, never serialize the document or alter the Markdown body. */
-export function migrateNoteProperties(source: string, change: PropertyMigration): string {
+export function migrateNoteProperties(source: string, change: PropertyMigration, identityPropertyKey = 'id'): string {
   validateMigration(change);
   if (change.kind === 'key' && change.previousKeys?.length) {
     let next = source;
     for (const from of [...new Set([change.from, ...change.previousKeys])]) {
-      if (from !== change.to) next = migrateNoteProperties(next, { kind: 'key', from, to: change.to });
+      if (from !== change.to) next = migrateNoteProperties(next, { kind: 'key', from, to: change.to }, identityPropertyKey);
     }
     return next;
   }
@@ -60,13 +66,13 @@ export function migrateNoteProperties(source: string, change: PropertyMigration)
   const map = isMap(doc.contents) ? doc.contents : null;
   const matches = map?.items.filter(pair => isScalar(pair.key) && fold(String(pair.key.value)) === wanted) || [];
   if (change.kind === 'key' && change.recordKinds && doc.errors.length && !/[\\&*!]|<</.test(yaml)
-    && (!yaml.toLowerCase().includes('tpsid') || !change.recordKinds.some(kind => yaml.includes(kind)))) return source;
+    && (!yaml.toLowerCase().includes(fold(identityPropertyKey)) || !change.recordKinds.some(kind => yaml.includes(kind)))) return source;
   if (change.kind === 'key' && change.recordKinds && !doc.errors.length) {
-    const id = map?.items.find(pair => isScalar(pair.key) && fold(String(pair.key.value)) === 'tpsid')?.value;
+    const id = map?.items.find(pair => isScalar(pair.key) && fold(String(pair.key.value)) === fold(identityPropertyKey))?.value;
     if (map?.items.some(pair => isScalar(pair.key) && pair.key.value === '<<')) {
       let possibleKind = false, possibleId = false;
       visit(doc, { Pair(_key, pair) {
-        if (isScalar(pair.key) && fold(String(pair.key.value)) === 'tpsid') possibleId = true;
+        if (isScalar(pair.key) && fold(String(pair.key.value)) === fold(identityPropertyKey)) possibleId = true;
         if (isScalar(pair.value) && change.recordKinds!.includes(String(pair.value.value))) possibleKind = true;
       } });
       if (possibleId && possibleKind) throw new Error('YAML merge keys require manual migration.');
@@ -178,6 +184,11 @@ export function updateMigrationReferences(settings: any, change: PropertyMigrati
     property.hideWhenProperties?.forEach(condition);
   }
   if (change.kind === 'key') {
+    for (const profile of settings.nativeRecordStorageAliases || []) {
+      for (const field of ['identityPropertyKey', 'schemaPropertyKey', 'kindPropertyKey', 'titlePropertyKey', 'createdPropertyKey', 'modifiedPropertyKey']) {
+        profile[field] = renameKey(profile[field]);
+      }
+    }
     for (const field of MANAGED_NOTE_FIELDS) {
       if (fold(managedNoteFieldKey(settings, field)) === fold(key)) configureManagedNoteField(settings, field, change.to);
     }

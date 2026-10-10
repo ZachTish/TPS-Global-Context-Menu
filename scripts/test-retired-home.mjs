@@ -112,11 +112,11 @@ test('settings retirement removes only known legacy keys and keeps concurrent un
 });
 
 test('independent line editor preserves line endings and refuses concurrent source changes', () => {
-  const source = 'before\r\n- [ ] task [tpsId:: identity]\r\nafter';
+  const source = 'before\r\n- [ ] task [id:: identity]\r\nafter';
   const range = line.resolveLineRange(source, 1);
   const snapshot = line.createLineRangeSnapshot(source, range.from, range.to);
-  assert.equal(snapshot.value, '- [ ] task [tpsId:: identity]');
-  assert.equal(line.replaceLineRangeIfUnchanged(source, snapshot, [snapshot.value], '- [x] task [tpsId:: identity]'), 'before\r\n- [x] task [tpsId:: identity]\r\nafter');
+  assert.equal(snapshot.value, '- [ ] task [id:: identity]');
+  assert.equal(line.replaceLineRangeIfUnchanged(source, snapshot, [snapshot.value], '- [x] task [id:: identity]'), 'before\r\n- [x] task [id:: identity]\r\nafter');
   assert.equal(line.replaceLineRangeIfUnchanged(source + ' changed', snapshot, [snapshot.value], 'edit'), null);
   assert.equal(line.resolveLineRange(source, -1), null);
   assert.equal(line.resolveLineRange(source, 100), null);

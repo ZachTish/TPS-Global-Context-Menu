@@ -36,7 +36,7 @@ export const TPS_NATIVE_RECORD_SCHEMA_VERSION = 1;
 export const DEFAULT_NATIVE_RECORD_ROOT = '_records';
 export const DEFAULT_NATIVE_RECORD_STORAGE_PROFILE: TpsNativeRecordStorageProfile = {
   identityMode: 'property',
-  identityPropertyKey: 'tpsId',
+  identityPropertyKey: 'id',
   schemaPropertyKey: '',
   identityTagPrefix: 'tps/record',
   kindPropertyKey: 'kind',
@@ -46,13 +46,22 @@ export const DEFAULT_NATIVE_RECORD_STORAGE_PROFILE: TpsNativeRecordStorageProfil
 };
 export const LEGACY_NATIVE_RECORD_PROPERTY_PROFILE: TpsNativeRecordStorageProfile = {
   identityMode: 'property',
-  identityPropertyKey: 'tpsId',
+  identityPropertyKey: 'id',
   schemaPropertyKey: 'tpsSchemaVersion',
   identityTagPrefix: 'tps/record',
   kindPropertyKey: 'kind',
   titlePropertyKey: 'title',
   createdPropertyKey: 'createdDate',
   modifiedPropertyKey: 'modifiedDate',
+};
+const HISTORICAL_NAMED_ID_PROPERTY_PROFILE: TpsNativeRecordStorageProfile = {
+  ...LEGACY_NATIVE_RECORD_PROPERTY_PROFILE,
+  identityPropertyKey: 'tpsId',
+};
+/** Historical schema-free identities are evidence and explicit migration inputs only. */
+export const LEGACY_SCHEMA_FREE_NATIVE_RECORD_PROPERTY_PROFILE: TpsNativeRecordStorageProfile = {
+  ...DEFAULT_NATIVE_RECORD_STORAGE_PROFILE,
+  identityPropertyKey: HISTORICAL_NAMED_ID_PROPERTY_PROFILE.identityPropertyKey,
 };
 export const DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE: TpsNativeRecordStorageProfile = {
   ...LEGACY_NATIVE_RECORD_PROPERTY_PROFILE,
@@ -84,7 +93,7 @@ export type TpsNativeRecordKind =
   | (string & {});
 
 export interface TpsNativeRecordEnvelope extends Record<string, unknown> {
-  tpsId: string;
+  id: string;
   tpsSchemaVersion: number;
   /** Canonical calendar records keep this optional, user-owned business value. */
   kind?: unknown;
@@ -136,7 +145,7 @@ export interface TpsTaskPromotionResult {
   error?: string;
 }
 
-type NativeRecordReference = string | TFile | { path?: string; id?: string; tpsId?: string };
+type NativeRecordReference = string | TFile | { path?: string; id?: string };
 
 export type TpsNativeRecordIdentityPlanEntry =
   | {
@@ -233,7 +242,7 @@ export function isCanonicalCalendarRecordId(value: unknown): value is string {
 }
 
 function nativeRecordStructuralKind(envelope: Record<string, unknown>): TpsNativeRecordKind | null {
-  if (isCanonicalCalendarRecordId(envelope.tpsId)) return 'calendar-event';
+  if (isCanonicalCalendarRecordId(envelope.id)) return 'calendar-event';
   return isValidNativeRecordKind(envelope.kind) ? envelope.kind : null;
 }
 
@@ -246,7 +255,7 @@ function nativeRecordFolder(kind: TpsNativeRecordKind): string {
 }
 
 const CANONICAL_ENVELOPE_KEYS = new Set([
-  'tpsid',
+  'id',
   'tpsschemaversion',
   'kind',
   'title',
@@ -258,6 +267,15 @@ function normalizePropertyKey(value: unknown, fallback: string, allowEmpty = fal
   if (value === undefined || value === null) return fallback;
   const normalized = String(value ?? '').trim();
   return normalized || (allowEmpty ? '' : fallback);
+}
+
+/** Sparse existing settings omitted the former default; null is a first install. */
+export function resolveLoadedNativeRecordIdentityPropertyKey(
+  loaded: { nativeRecordIdentityPropertyKey?: string } | null | undefined,
+): string {
+  return normalizePropertyKey(loaded?.nativeRecordIdentityPropertyKey, loaded
+    ? HISTORICAL_NAMED_ID_PROPERTY_PROFILE.identityPropertyKey
+    : DEFAULT_NATIVE_RECORD_STORAGE_PROFILE.identityPropertyKey);
 }
 
 function normalizeIdentityTagPrefix(value: unknown): string {
@@ -315,6 +333,14 @@ export function normalizeNativeRecordStorageProfile(
 function validateReadableNativeRecordStorageProfile(profileValue: TpsNativeRecordStorageProfile): string[] {
   const profile = normalizeNativeRecordStorageProfile(profileValue);
   const errors: string[] = [];
+  if (!profile.identityPropertyKey.trim() || /[\r\n\x00-\x1f]/u.test(profile.identityPropertyKey)
+    || ['__proto__', 'constructor', 'prototype'].includes(profile.identityPropertyKey.toLocaleLowerCase())) {
+    errors.push('Choose a valid record identity property name.');
+  }
+  if (profile.identityMode === 'property' && profile.identityPropertyKey.toLocaleLowerCase() !== 'id'
+    && CANONICAL_ENVELOPE_KEYS.has(profile.identityPropertyKey.toLocaleLowerCase())) {
+    errors.push('The record identity property cannot reuse another canonical API envelope field.');
+  }
   if (!profile.titlePropertyKey) errors.push('Title property is required.');
   if (profile.identityMode === 'property' && !profile.kindPropertyKey && !profile.classification) {
     errors.push('Kind property is required when record identity uses properties.');
@@ -322,9 +348,9 @@ function validateReadableNativeRecordStorageProfile(profileValue: TpsNativeRecor
   if (
     profile.identityMode === 'property'
     && !profile.schemaPropertyKey
-    && profileKey({ ...profile, classification: undefined, kindPropertyKey: 'kind', titlePropertyKey: 'title' }) !== profileKey(DEFAULT_NATIVE_RECORD_STORAGE_PROFILE)
+    && profileKey({ ...profile, identityPropertyKey: DEFAULT_NATIVE_RECORD_STORAGE_PROFILE.identityPropertyKey, classification: undefined, kindPropertyKey: 'kind', titlePropertyKey: 'title' }) !== profileKey(DEFAULT_NATIVE_RECORD_STORAGE_PROFILE)
   ) {
-    errors.push('Schema-free native record storage is reserved for the exact canonical tpsId, kind, and title envelope.');
+    errors.push('Schema-free native record storage requires the configured identity, kind, and title envelope.');
   }
   const keyedFields = [
     ...(profile.identityMode === 'property' ? [profile.identityPropertyKey, profile.schemaPropertyKey] : []),
@@ -351,8 +377,8 @@ export function validateNativeRecordStorageProfile(profileValue: TpsNativeRecord
   const profile = normalizeNativeRecordStorageProfile(profileValue);
   const errors = validateReadableNativeRecordStorageProfile(profile);
   const canonical = DEFAULT_NATIVE_RECORD_STORAGE_PROFILE;
-  if (profileKey({ ...profile, classification: undefined, kindPropertyKey: 'kind', titlePropertyKey: 'title' }) !== profileKey(canonical)) {
-    errors.push('Writable native records must use the canonical tpsId, kind, and title envelope.');
+  if (profileKey({ ...profile, identityPropertyKey: canonical.identityPropertyKey, classification: undefined, kindPropertyKey: 'kind', titlePropertyKey: 'title' }) !== profileKey(canonical)) {
+    errors.push('Writable native records must use the configured identity, kind, and title envelope.');
   }
   const writableKeys = [
     profile.identityPropertyKey,
@@ -404,7 +430,7 @@ export function resolveWritableNativeRecordStorageConfiguration(
   const configuredProfile = normalizeNativeRecordStorageProfile(profileValue);
   const retiredTagIdentity = configuredProfile.identityMode === 'tag';
   const writeProfile = normalizeNativeRecordStorageProfile(
-    { ...DEFAULT_NATIVE_RECORD_STORAGE_PROFILE, ...(configuredProfile.identityMode === 'property' && !configuredProfile.schemaPropertyKey ? { kindPropertyKey: configuredProfile.kindPropertyKey, titlePropertyKey: configuredProfile.titlePropertyKey } : {}) },
+    { ...DEFAULT_NATIVE_RECORD_STORAGE_PROFILE, ...(configuredProfile.identityMode === 'property' && !configuredProfile.schemaPropertyKey ? { identityPropertyKey: configuredProfile.identityPropertyKey, kindPropertyKey: configuredProfile.kindPropertyKey, titlePropertyKey: configuredProfile.titlePropertyKey } : {}) },
   );
   const writeKey = profileKey(writeProfile);
   const requiresSettingsMigration = profileKey(configuredProfile) !== writeKey;
@@ -524,7 +550,13 @@ function createProfileInspector(raw: Record<string, unknown>): NativeRecordProfi
   // One synchronous source inspection owns these results, including no-matches.
   // Never carry them into another source/candidate check or mutation boundary.
   const inspections = new Map<TpsNativeRecordStorageProfile, TpsNativeRecordInspection | null>();
+  const historicalIdentityPresent = findKeyCaseInsensitive(raw, HISTORICAL_NAMED_ID_PROPERTY_PROFILE.identityPropertyKey) !== null;
   return (profile) => {
+    // Historical names only participate when that source actually carries one.
+    // Keep unchanged modern inspections at their existing operation count.
+    if (profile.identityMode === 'property'
+      && profile.identityPropertyKey === HISTORICAL_NAMED_ID_PROPERTY_PROFILE.identityPropertyKey
+      && !historicalIdentityPresent) return null;
     if (!inspections.has(profile)) inspections.set(profile, inspectWithProfile(raw, profile));
     return inspections.get(profile) ?? null;
   };
@@ -632,7 +664,7 @@ function inspectWithProfile(
     ? stringifyReadableStorageValue(readValueCaseInsensitive(raw, profile.modifiedPropertyKey))
     : '';
   const frontmatter = { ...raw } as TpsNativeRecordEnvelope;
-  setValueCaseInsensitive(frontmatter, 'tpsId', id);
+  setValueCaseInsensitive(frontmatter, 'id', id);
   setValueCaseInsensitive(frontmatter, 'tpsSchemaVersion', schemaVersion);
   if (!canonicalCalendar) setValueCaseInsensitive(frontmatter, 'kind', kind as TpsNativeRecordKind);
   setValueCaseInsensitive(frontmatter, 'title', title);
@@ -707,6 +739,7 @@ function hasInvalidPropertyIdentityEvidence(
   for (const profile of propertyProfiles) {
     if (inspectProfile(profile)) continue;
     const idPresent = findKeyCaseInsensitive(raw, profile.identityPropertyKey) !== null;
+    if (profile.identityPropertyKey === HISTORICAL_NAMED_ID_PROPERTY_PROFILE.identityPropertyKey && !idPresent) continue;
     const schemaPresent = profile.schemaPropertyKey
       ? findKeyCaseInsensitive(raw, profile.schemaPropertyKey) !== null
       : false;
@@ -847,6 +880,12 @@ function inspectNativeRecordMatchSet(
   writeProfile: TpsNativeRecordStorageProfile,
   inspectProfile: NativeRecordProfileInspector = createProfileInspector(raw),
 ): NativeRecordMatchSet | null {
+  if (writeProfile.identityPropertyKey.toLocaleLowerCase() !== 'id') {
+    const configuredId = readValueCaseInsensitive(raw, writeProfile.identityPropertyKey);
+    const canonicalId = readValueCaseInsensitive(raw, 'id');
+    if (configuredId !== undefined && canonicalId !== undefined
+      && stringifyReadableStorageValue(configuredId).trim() !== stringifyReadableStorageValue(canonicalId).trim()) return null;
+  }
   if (profiles.some(profile => profile.classification && 'key' in profile.classification && readValueCaseInsensitive(raw, profile.kindPropertyKey) === profile.classification.value && readValueCaseInsensitive(raw, 'kind') !== profile.classification.parentKind)) return null;
   const applicableProfiles = selectApplicableReadableProfiles(raw, profiles, writeProfile, inspectProfile);
   if (hasInvalidReadableIdentityEvidence(raw, applicableProfiles, writeProfile, inspectProfile)) return null;
@@ -964,10 +1003,10 @@ function applyEnvelopeToRawFrontmatter(
     ) delete next[key];
   }
 
-  next[profile.identityPropertyKey] = envelope.tpsId;
+  next[profile.identityPropertyKey] = envelope.id;
   if (profile.schemaPropertyKey) next[profile.schemaPropertyKey] = envelope.tpsSchemaVersion;
-  if (isCanonicalCalendarRecordId(envelope.tpsId)) {
-    // Structural calendar routing comes only from tpsId. Never materialize it
+  if (isCanonicalCalendarRecordId(envelope.id)) {
+    // Structural calendar routing comes only from id. Never materialize it
     // into the template/user-owned public kind, including during re-identify.
     const publicKindKey = findKeyCaseInsensitive(raw, 'kind');
     if (publicKindKey) next[publicKindKey] = raw[publicKindKey];
@@ -1096,8 +1135,8 @@ export function isNativeRecordEnvelope(value: unknown): value is TpsNativeRecord
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
   return Number(record.tpsSchemaVersion) === TPS_NATIVE_RECORD_SCHEMA_VERSION
-    && typeof record.tpsId === 'string'
-    && record.tpsId.trim().length > 0
+    && typeof record.id === 'string'
+    && record.id.trim().length > 0
     && nativeRecordStructuralKind(record) !== null
     && typeof record.title === 'string'
     && typeof record.createdDate === 'string'
@@ -1110,7 +1149,7 @@ export function isNativeRecordEnvelope(value: unknown): value is TpsNativeRecord
  * legacy companion note.
  */
 export class NativeRecordService {
-  readonly version = 6;
+  readonly version = 7;
   private setupPromise: Promise<boolean> | null = null;
   private initialDiscoveryReady = false;
   private initialDiscovery: {
@@ -1470,7 +1509,18 @@ export class NativeRecordService {
         }
       }
       const current = [write, ...byKind.values(), ...classifiedAliases];
-      const legacy = [...configuration.readAliases, LEGACY_NATIVE_RECORD_PROPERTY_PROFILE, DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE];
+      const legacy = [
+        ...configuration.readAliases,
+        write.identityPropertyKey === LEGACY_NATIVE_RECORD_PROPERTY_PROFILE.identityPropertyKey
+          ? LEGACY_NATIVE_RECORD_PROPERTY_PROFILE
+          : { ...LEGACY_NATIVE_RECORD_PROPERTY_PROFILE, identityPropertyKey: write.identityPropertyKey },
+        DEFAULT_LEGACY_NATIVE_RECORD_TAG_PROFILE,
+        HISTORICAL_NAMED_ID_PROPERTY_PROFILE,
+        LEGACY_SCHEMA_FREE_NATIVE_RECORD_PROPERTY_PROFILE,
+        ...(this.readingMigrationSources ? [
+          ...current.filter(profile => profile.classification).map(profile => ({ ...profile, identityPropertyKey: HISTORICAL_NAMED_ID_PROPERTY_PROFILE.identityPropertyKey })),
+        ] : []),
+      ];
       const seen = new Set<string>();
       // Keep prepared profiles shared with evidence/current checks so the
       // operation-local inspector also reuses their results across read passes.
@@ -1754,12 +1804,12 @@ export class NativeRecordService {
     this.indexFile(directFile, parsed.frontmatter);
     const record = this.recordsByPath.get(path);
     const expectedId = typeof reference === 'object' && !(reference instanceof TFile)
-      ? String(reference?.id || reference?.tpsId || '').trim()
+      ? String(reference?.id || '').trim()
       : '';
     if (
       !record
-      || (expectedId && this.idKey(expectedId) !== this.idKey(record.tpsId))
-      || !this.hasUniquePathOwnership(record.tpsId, path)
+      || (expectedId && this.idKey(expectedId) !== this.idKey(record.id))
+      || !this.hasUniquePathOwnership(record.id, path)
     ) return null;
     return this.toHandle(directFile, record);
   }
@@ -1784,19 +1834,19 @@ export class NativeRecordService {
           reference
           && typeof reference === 'object'
           && !(reference instanceof TFile)
-        ) ? String(reference.id || reference.tpsId || '').trim() : '';
+        ) ? String(reference.id || '').trim() : '';
         const indexedRecord = this.recordsByPath.get(directFile.path);
         if (
           indexedRecord
-          && (!referenceId || this.idKey(referenceId) === this.idKey(indexedRecord.tpsId))
-          && this.hasUniquePathOwnership(indexedRecord.tpsId, directFile.path)
+          && (!referenceId || this.idKey(referenceId) === this.idKey(indexedRecord.id))
+          && this.hasUniquePathOwnership(indexedRecord.id, directFile.path)
         ) resolved = this.toHandle(directFile, indexedRecord);
       } else {
         const id = typeof reference === 'string'
           ? reference.trim()
           : reference instanceof TFile
             ? ''
-            : String(reference?.id || reference?.tpsId || '').trim();
+            : String(reference?.id || '').trim();
         const key = this.idKey(id);
         const candidates = key ? this.pathsById.get(key) : undefined;
         if (key && !this.blockedPathsById.has(key) && candidates?.size === 1) {
@@ -1806,7 +1856,7 @@ export class NativeRecordService {
           if (
             file instanceof TFile
             && indexedRecord
-            && this.hasUniquePathOwnership(indexedRecord.tpsId, path)
+            && this.hasUniquePathOwnership(indexedRecord.id, path)
           ) resolved = this.toHandle(file, indexedRecord);
         }
       }
@@ -2141,7 +2191,7 @@ export class NativeRecordService {
     for (const [path, frontmatter] of (kind ? entries.filter(([, value]) => nativeRecordStructuralKind(value) === kind) : entries).sort(([left], [right]) => (
       left.localeCompare(right)
     ))) {
-      if (!this.hasUniquePathOwnership(frontmatter.tpsId, path)) continue;
+      if (!this.hasUniquePathOwnership(frontmatter.id, path)) continue;
       const file = this.plugin.app.vault.getFileByPath(path);
       if (file instanceof TFile) records.push(this.toHandle(file, frontmatter));
     }
@@ -2467,7 +2517,7 @@ export class NativeRecordService {
       reference
       && typeof reference === 'object'
       && !(reference instanceof TFile)
-    ) ? String(reference.id || reference.tpsId || '').trim() : '';
+    ) ? String(reference.id || '').trim() : '';
     if (
       expectedReferenceId
       && this.idKey(expectedReferenceId) !== this.idKey(record.id)
@@ -2599,7 +2649,7 @@ export class NativeRecordService {
     const inspection = matchSet?.inspection;
     if (!matchSet || !inspection || inspection.id !== record.id || inspection.kind !== record.kind) return null;
     const canonical = { ...inspection.frontmatter };
-    setValueCaseInsensitive(canonical, 'tpsId', nextId);
+    setValueCaseInsensitive(canonical, 'id', nextId);
     setValueCaseInsensitive(canonical, 'modifiedDate', timestamp);
     const desired = applyEnvelopeToRawFrontmatter(
       rawFrontmatter,
@@ -2790,7 +2840,7 @@ export class NativeRecordService {
       reference
       && typeof reference === 'object'
       && !(reference instanceof TFile)
-    ) ? String(reference.id || reference.tpsId || '').trim() : '';
+    ) ? String(reference.id || '').trim() : '';
     if (
       expectedReferenceId
       && this.idKey(expectedReferenceId) !== this.idKey(record.id)
@@ -2874,7 +2924,7 @@ export class NativeRecordService {
           ) return;
 
           const canonical = { ...inspection.frontmatter };
-          setValueCaseInsensitive(canonical, 'tpsId', nextId);
+          setValueCaseInsensitive(canonical, 'id', nextId);
           setValueCaseInsensitive(canonical, 'modifiedDate', new Date().toISOString());
           const desired = applyEnvelopeToRawFrontmatter(
             frontmatter,
@@ -3020,7 +3070,7 @@ export class NativeRecordService {
         continue;
       }
       const indexedRecord = this.recordsByPath.get(path);
-      if (!indexedRecord || !this.hasUniquePathOwnership(indexedRecord.tpsId, path)) {
+      if (!indexedRecord || !this.hasUniquePathOwnership(indexedRecord.id, path)) {
         result.failed += 1;
         logger.flow('NativeRecords', 'storage-profile:migrate-blocked', {
           path,
@@ -3092,7 +3142,7 @@ export class NativeRecordService {
     for (const [path, frontmatter] of records) {
       if (!Object.prototype.hasOwnProperty.call(frontmatter, 'sourceTaskId')) continue;
       const legacyId = String(frontmatter.sourceTaskId || '').trim();
-      if (legacyId && legacyId !== frontmatter.tpsId) {
+      if (legacyId && legacyId !== frontmatter.id) {
         skipped += 1;
         continue;
       }
@@ -3347,7 +3397,7 @@ export class NativeRecordService {
     const userProperties = this.copyUserProperties(properties, calendarTemplateRecord);
     const frontmatter: TpsNativeRecordEnvelope = {
       ...userProperties,
-      tpsId: id,
+      id: id,
       tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
       ...(!calendarTemplateRecord ? { kind } : {}),
       title,
@@ -3445,7 +3495,7 @@ export class NativeRecordService {
         const status = String(parsed.frontmatter.status || '').trim();
         const canonical: TpsNativeRecordEnvelope = {
           ...parsed.frontmatter,
-          tpsId: id,
+          id: id,
           tpsSchemaVersion: TPS_NATIVE_RECORD_SCHEMA_VERSION,
           kind: 'task',
           title,
@@ -3504,7 +3554,7 @@ export class NativeRecordService {
     return {
       file,
       path: file.path,
-      id: projectedFrontmatter.tpsId,
+      id: projectedFrontmatter.id,
       kind,
       frontmatter: projectedFrontmatter,
     };
@@ -3903,7 +3953,7 @@ export class NativeRecordService {
     }
     if (!inspection) return;
     const resolvedEnvelope = inspection.frontmatter;
-    const id = this.idKey(resolvedEnvelope.tpsId);
+    const id = this.idKey(resolvedEnvelope.id);
     this.idsByPath.set(file.path, id);
     this.recordsByPath.set(file.path, { ...resolvedEnvelope });
     const paths = this.pathsById.get(id) || new Set<string>();
@@ -3986,7 +4036,7 @@ export class NativeRecordService {
 
     this.indexFile(file, envelope);
     logger.flow('NativeRecords', 'path:changed', {
-      recordId: envelope.tpsId,
+      recordId: envelope.id,
       recordKind: nativeRecordStructuralKind(envelope),
       oldPath,
       path: file.path,

@@ -395,7 +395,7 @@ export class NotebookNavigatorRuleService {
 
   private getNativeRecordProtectedKeys(inspection: any): Set<string> {
     const protectedKeys = new Set([
-      'tpsid',
+      'id',
       'tpsschemaversion',
       'kind',
       'title',

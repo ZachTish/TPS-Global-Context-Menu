@@ -1374,7 +1374,7 @@ export class TaskApiService {
     const blockLineCount = Array.isArray(allLines)
       ? Math.max(1, extractTaskBlock(allLines, lineNumber).lines.length)
       : 1;
-    const stableId = readInlineFieldValue(rawLine, 'tpsId')
+    const stableId = readInlineFieldValue(rawLine, 'id')
       || readInlineFieldValue(rawLine, 'subitemId')
       || null;
     return {
@@ -1461,7 +1461,7 @@ export class TaskApiService {
       const exactMatches = records.filter((record) => record.rawLine === identity.rawLine);
       if (exactMatches.length > 0) return exactMatches.length === 1 ? exactMatches[0] : null;
 
-      for (const key of ['tpsId', 'subitemId', 'recurrenceTaskId']) {
+      for (const key of ['id', 'subitemId', 'recurrenceTaskId']) {
         const value = readInlineFieldValue(identity.rawLine, key);
         if (!value) continue;
         const identityMatches = records.filter(
@@ -1801,7 +1801,7 @@ export class TaskApiService {
   private moveRefMatchesLine(ref: GcmTaskRef, rawLine: string): boolean {
     const expectedRawLine = String(ref.rawLine || '');
     if (expectedRawLine && rawLine === expectedRawLine) return true;
-    for (const key of ['tpsId', 'subitemId']) {
+    for (const key of ['id', 'subitemId']) {
       const expectedIdentity = readInlineFieldValue(expectedRawLine, key);
       if (expectedIdentity && readInlineFieldValue(rawLine, key) === expectedIdentity) return true;
     }

@@ -1,5 +1,57 @@
 # TPS Global Context Menu
 
+## 9.0.0 — Canonical record identity is id
+
+The native-record API is now version 7. Its envelope exposes `frontmatter.id`
+and references use `{path, id}`; the former canonical `frontmatter.tpsId`
+contract is removed. Stable identity values, record paths and filenames stay
+unchanged. Update consumers that read the envelope or supply computed-field
+callbacks together with this major release. Minimum Obsidian remains 1.10.0.
+
+First-install settings use `id` as the physical note property. Existing sparse
+settings that omitted the former default retain `tpsId`; the loader persists
+that existing setting key without reading or rewriting notes. A saved physical identity
+key, including `tpsId` or a custom key, survives load normalization and remains
+usable. API inspections preserve authored physical fields and add the canonical
+`id` projection. Normal create, update, reidentify, note timers and identity
+protection use the configured key. Note content is not migrated during startup,
+layout readiness or navigation.
+Identity keys cannot reuse another canonical API envelope field (`kind`,
+`title`, `tpsSchemaVersion`, `createdDate` or `modifiedDate`). These collisions
+fail validation before native creation or a confirmed identity migration.
+
+**Advanced → Atomic note properties → Record identity key** changes a draft.
+Apply uses the existing confirmed property migration to rename frontmatter
+keys in notes, archives and templates, plus recognized Base expressions and
+GCM/Navigator configuration references. It preserves the exact stored ID,
+comments, line endings and note body. Occupied destinations, including an equal
+`id`, malformed or duplicate keys, stale previews and unsafe expressions block
+the transaction. Cancel leaves notes and settings unchanged. Existing recovery
+and exact-source checks remain the mutation owner. Inline carriers and prose
+are outside that migration. Historical whole-note identifiers participate only
+as protection evidence or explicit consolidation inputs; no automatic rewrite,
+repair, fallback writer, watcher or navigation work is added.
+
+The five settings destinations and default route remain unchanged. The identity
+control joins the existing native Setting layout without another disclosure;
+its native Apply/preview controls retain keyboard focus, wrapping labels and
+mobile touch targets. `nativeRecordIdentityPropertyKey` remains the persisted
+setting; no new state or schema key is introduced. Session `id` and targetId
+remain distinct: the historical timer target alias is decoded only at session
+normalization, never from a session's own ID.
+
+Focused regressions cover custom and legacy physical keys across native
+creation, mutation and reidentification; canonical API generation; explicit
+schema-free consolidation; occupied destinations; cancelled migrations;
+Base/Navigator references; timer target/session separation; and preserved
+unchanged inspection counts. Required gates are `npm run prepretest`, the full
+`npm test`, and a separate `npm run build`. The final versioned source passed
+326/326 supplemental pre-pretests and 1,730/1,730 full-suite checks. The separate final ordinary stable build deployed only to the test vault, followed
+by targeted manifest-ID reload and actual UI/API integration checks. Installed
+QA boundaries, migration preservation, counts and SHA-256 hashes are in
+[9.0.0 release notes](release-notes/9.0.0.md). Production installation and physical
+iPhone acceptance remain separate.
+
 ## 8.2.0 — Current-day accent and responsive daily navigation
 
 Daily Note Navigation uses Obsidian's `--interactive-accent` and

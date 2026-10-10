@@ -306,7 +306,7 @@ test('native checkbox menu journals the committed user action with an atomic sta
     },
     ensureTaskIdentity(handle, line) {
       history.ensure.push({ handle, line });
-      return `${line} [tpsId:: ${handle.entityId}]`;
+      return `${line} [id:: ${handle.entityId}]`;
     },
     async commitTaskMutation(handle, input) {
       history.commit.push({ handle, input: structuredClone(input) });
@@ -318,13 +318,13 @@ test('native checkbox menu journals the committed user action with an atomic sta
 
   await fixture.handler.setTaskCheckboxState(fixture.context, '[x]');
 
-  assert.match(fixture.getContent(), /\[tpsId:: item_checkbox\]/u);
+  assert.match(fixture.getContent(), /\[id:: item_checkbox\]/u);
   assert.equal(history.begin.length, 1);
   assert.equal(history.begin[0].action, 'task.checkbox');
   assert.equal(history.begin[0].cause.surface, 'checkbox-context-menu');
   assert.equal(history.commit.length, 1);
   assert.equal(history.commit[0].input.outcome, 'committed');
-  assert.match(history.commit[0].input.after.rawLine, /\[tpsId:: item_checkbox\]/u);
+  assert.match(history.commit[0].input.after.rawLine, /\[id:: item_checkbox\]/u);
   assert.equal(history.abort.length, 0);
 });
 

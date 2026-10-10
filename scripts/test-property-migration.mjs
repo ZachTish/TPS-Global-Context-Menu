@@ -161,13 +161,13 @@ test('Rename stored discriminator value carries exact Base and Navigator identit
  assert.equal(navigator.settings.vaultProfiles[0].shortcuts[0].query,'.tpsRecordType=ingredient');
 });
 test('record classification converts exact tag to property and back without changing body, IDs or other tags',()=>{
- const source=fm('tpsId: finance-1\ntags:\n  - kind/finance/transaction\n  - personal\ntitle: Lunch');
+ const source=fm('id: finance-1\ntags:\n  - kind/finance/transaction\n  - personal\ntitle: Lunch');
  const toProperty={kind:'classification',recordKind:'finance-transaction',from:{tag:'kind/finance/transaction'},to:{parentKind:'transaction',key:'transactionKind',value:'financial'}};
  const mapped={'finance-transaction':toProperty.from};
  const property=migrateNoteClassification(source,toProperty,mapped);
  assert.match(property,/kind: transaction/);assert.match(property,/transactionKind: financial/);
  assert.match(property,/personal/);assert.doesNotMatch(property,/kind\/finance\/transaction/);
- assert.match(property,/tpsId: finance-1/);assert.ok(property.endsWith('Body status: todo [status:: todo]\n'));
+ assert.match(property,/id: finance-1/);assert.ok(property.endsWith('Body status: todo [status:: todo]\n'));
  const toTag={...toProperty,from:toProperty.to,to:toProperty.from};
  const restored=migrateNoteClassification(property,toTag,{'finance-transaction':toTag.from});
  assert.match(restored,/kind\/finance\/transaction/);assert.doesNotMatch(restored,/transactionKind:/);
@@ -175,7 +175,7 @@ test('record classification converts exact tag to property and back without chan
 });
 test('record classification moves configured tags and scalar kinds into lists without changing body or manual tags',()=>{
  const tagChange={kind:'classification',recordKind:'food-entry',from:{tag:'kind/food/transaction'},to:{kindList:{key:'kind',value:'transaction/macros'}}};
- const tagged=fm('tpsId: food-1\ntags: [kind/food/transaction, personal]\ncalories: 180');
+ const tagged=fm('id: food-1\ntags: [kind/food/transaction, personal]\ncalories: 180');
  const converted=migrateNoteClassification(tagged,tagChange,{'food-entry':tagChange.from});
  assert.match(converted,/kind:\s*\n\s*- transaction\/macros/u);
  assert.match(converted,/personal/u);assert.doesNotMatch(converted,/kind\/food\/transaction/u);
@@ -235,7 +235,7 @@ test('Finance classification cannot strand generated Bases on an older Finance p
 test('confirmed record classification migration commits configuration after notes and cancellation changes nothing',async()=>{
  const change={kind:'classification',recordKind:'finance-transaction',from:{tag:'kind/finance/transaction'},to:{parentKind:'transaction',key:'transactionKind',value:'financial'}};
  for(const accept of [false,true]){
-  const source=fm('tpsId: finance-1\ntags: [kind/finance/transaction, personal]');
+  const source=fm('id: finance-1\ntags: [kind/finance/transaction, personal]');
   const h=harness({'Inbox/a.md':source});h.plugin.settings.nativeRecordKindPropertyKeys={'finance-transaction':change.from};
   PropertyMigrationModal.confirm=async()=>accept;
   assert.equal(await h.service.requestClassification(change),accept);
@@ -247,7 +247,7 @@ test('confirmed record classification migration commits configuration after note
 });
 test('classification migration includes exact generated Bases in the same reviewed recovery batch',async()=>{
  const change={kind:'classification',recordKind:'finance-transaction',from:{tag:'kind/finance/transaction'},to:{parentKind:'transaction',key:'transactionKind',value:'financial'}};
- const h=harness({'Inbox/a.md':fm('tpsId: finance-1\ntags: [kind/finance/transaction]')});
+ const h=harness({'Inbox/a.md':fm('id: finance-1\ntags: [kind/finance/transaction]')});
  h.plugin.settings.nativeRecordKindPropertyKeys={'finance-transaction':change.from};
  h.files.set('Transactions.base',new TFile('Transactions.base'));h.data.set('Transactions.base','old generated filter');
  h.plugin.app.plugins={plugins:{'tps-finances':{api:{classificationBases:{version:1,settingsSignature:()=> 'unchanged',preview:async()=>h.data.get('Transactions.base')==='old generated filter'?[{path:'Transactions.base',before:'old generated filter',after:'new generated filter'}]:[]}}}}};
@@ -272,7 +272,7 @@ test('changing a classification tag updates its GCM references with the reviewed
 });
 test('confirmed property-to-tag migration recognizes the saved property pair and new tag',async()=>{
  const change={kind:'classification',recordKind:'finance-transaction',from:{parentKind:'transaction',key:'transactionKind',value:'financial'},to:{tag:'kind/finance/transaction'}};
- const h=harness({'Inbox/a.md':fm('tpsId: finance-1\nkind: transaction\ntransactionKind: financial\ntags: [personal]')});
+ const h=harness({'Inbox/a.md':fm('id: finance-1\nkind: transaction\ntransactionKind: financial\ntags: [personal]')});
  h.plugin.settings.nativeRecordKindPropertyKeys={'finance-transaction':change.from};
  PropertyMigrationModal.confirm=async()=>true;
  assert.equal(await h.service.requestClassification(change),true);
@@ -334,9 +334,9 @@ test('reviewed shared identity change updates only the selected record type and 
   'finance-transaction':{primary,aliases:[],discriminator:{key:'type',value:'transaction'}},
   'investment-transaction':{primary,aliases:[],discriminator:{key:'type',value:'investmentTransaction'}},
  };
- const before=fm('tpsId: wallet:one\nkind: [transaction/financial]\ntype: transaction\ntitle: Coffee');
- const second=fm('tpsId: wallet:three\nkind: [transaction/financial]\ntype: transaction\ntitle: Tea');
- const other=fm('tpsId: finance:two\nkind: [transaction/financial]\ntype: investmentTransaction\ntitle: Shares');
+ const before=fm('id: wallet:one\nkind: [transaction/financial]\ntype: transaction\ntitle: Coffee');
+ const second=fm('id: wallet:three\nkind: [transaction/financial]\ntype: transaction\ntitle: Tea');
+ const other=fm('id: finance:two\nkind: [transaction/financial]\ntype: investmentTransaction\ntitle: Shares');
  const change={kind:'discriminator',recordKind:'finance-transaction',primary,from:{key:'type',value:'transaction'},to:{key:'recordType',value:'purchase'}};
  const converted=migrateNoteDiscriminator(before,change,mappings);
  assert.match(converted,/recordType: purchase/u);
@@ -540,14 +540,14 @@ test('shared key changes cannot combine distinct Health nutrient properties even
 
 
 test('Health-only key migration separates records from templates and other TPS notes and can merge them again',async()=>{
- const h=harness({'entry.md':fm('tpsId: food-1\nkind: food-entry'),'template.md':fm('kind: food'),'workout.md':fm('kind: workout-plan'),'task.md':fm('tpsId: task-1\nkind: task')});
+ const h=harness({'entry.md':fm('id: food-1\nkind: food-entry'),'template.md':fm('kind: food'),'workout.md':fm('kind: workout-plan'),'task.md':fm('id: task-1\nkind: task')});
  const health={settings:{nativeRecordKinds:{foodEntry:'food-entry',activityEntry:'activity-entry',workoutSession:'workout-session',workoutExercise:'workout-exercise'},nativeRecordProperties:{calories:'calories'}},nativeRecordService:{refreshConfiguration(){}}};
  h.plugin.app.plugins={plugins:{'tps-health':health}};
  h.plugin.nativeRecordService={getStorageProfile:kind=>({kindPropertyKey:h.plugin.settings.nativeRecordKindPropertyKeys?.[kind]||'kind'}),refreshConfiguration(){}};
  PropertyMigrationModal.confirm=async()=>false;assert.equal(await h.service.requestHealthKindKey('entryKind'),false);assert.equal(h.writes.length,0);
  PropertyMigrationModal.confirm=async()=>true;assert.equal(await h.service.requestHealthKindKey('entryKind'),true);
  assert.match(h.data.get('entry.md'),/"entryKind": food-entry/);
- assert.equal(h.data.get('template.md'),fm('kind: food'));assert.equal(h.data.get('workout.md'),fm('kind: workout-plan'));assert.equal(h.data.get('task.md'),fm('tpsId: task-1\nkind: task'));
+ assert.equal(h.data.get('template.md'),fm('kind: food'));assert.equal(h.data.get('workout.md'),fm('kind: workout-plan'));assert.equal(h.data.get('task.md'),fm('id: task-1\nkind: task'));
  assert.equal(h.plugin.settings.nativeRecordKindPropertyKey,undefined);
  assert.equal(await h.service.requestHealthKindKey('kind'),true);assert.match(h.data.get('entry.md'),/"kind": food-entry/);assert.doesNotMatch(h.data.get('entry.md'),/entryKind/);
 });
@@ -556,14 +556,30 @@ test('Health-only key migration separates records from templates and other TPS n
 test('Health-scoped migration skips malformed unrelated templates but blocks possibly matching broken records',()=>{
  const change={kind:'key',from:'kind',to:'entryKind',recordKinds:['food-entry']};
  const unrelated=fm('kind: project\n- malformed');assert.equal(migrate(unrelated,change),unrelated);
- assert.throws(()=>migrate(fm('tpsId: one\nkind: food-entry\n- malformed'),change),/malformed/);
+ assert.throws(()=>migrate(fm('id: one\nkind: food-entry\n- malformed'),change),/malformed/);
+});
+
+test('Health-scoped migration uses the configured physical identity during staged migration', async () => {
+ for (const identityKey of ['tpsId', 'recordIdentity']) {
+  const original = fm(`${identityKey}: food-1\nkind: food-entry`);
+  const unrelated = fm('id: modern-unrelated\nkind: food-entry');
+  const h = harness({ 'entry.md': original, 'unrelated.md': unrelated });
+  h.plugin.settings.nativeRecordIdentityPropertyKey = identityKey;
+  const plan = await h.service.preview({ kind: 'key', from: 'kind', to: 'entryKind', recordKinds: ['food-entry'] });
+  assert.deepEqual(plan.blocked, []);
+  assert.equal(plan.notes.length, 1);
+  assert.equal(plan.notes[0].path, 'entry.md');
+  assert.equal(plan.notes[0].after, original.replace('kind:', '"entryKind":'));
+  assert.throws(() => migrate(fm(`${identityKey}: one\nkind: food-entry\n- malformed`), { kind: 'key', from: 'kind', to: 'entryKind', recordKinds: ['food-entry'] }, identityKey), /malformed/u);
+  assert.equal(h.writes.length, 0);
+ }
 });
 
 
 test('scoped Health migration cannot silently skip merged or aliased record identities',()=>{
  const change={kind:'key',from:'kind',to:'entryKind',recordKinds:['food-entry']};
- assert.throws(()=>migrate(fm('defaults: &defaults {tpsId: one, kind: food-entry}\n<<: *defaults'),change),/merge keys/);
- assert.throws(()=>migrate(fm('type: &type food-entry\ntpsId: one\nkind: *type'),change),/Aliased kind/);
+ assert.throws(()=>migrate(fm('defaults: &defaults {id: one, kind: food-entry}\n<<: *defaults'),change),/merge keys/);
+ assert.throws(()=>migrate(fm('type: &type food-entry\nid: one\nkind: *type'),change),/Aliased kind/);
 });
 
 test('classification tag renames update GCM mapping, scoped fields and presentation references',()=>{
@@ -571,4 +587,63 @@ test('classification tag renames update GCM mapping, scoped fields and presentat
  references(settings,{kind:'value',key:'tags',from:'old/path',to:'new'});
  assert.equal(settings.nativeRecordKindPropertyKeys.food.tag,'new');assert.deepEqual(settings.properties[0].scopeTags,['new']);assert.equal(settings.templateIdentificationTag,'new');assert.equal(settings.notebookNavigatorRules.rules[0].conditions[0].value,'new');
  assert.doesNotThrow(()=>references(settings,{kind:'key',from:'unrelated',to:'other'}));
+});
+
+
+test('confirmed record identity migration preserves values, templates, archives and recognized references together', async () => {
+  const oldKey = 'tpsId';
+  const body = 'Body [tpsId:: historical-line] and tpsId prose\r\n';
+  const note = '\uFEFF---\r\n# Keep comment\r\nTPSID: "stable:value" # Keep value\r\nkind: task\r\n---\r\n' + body;
+  const base = 'filters:\n  and:\n    - note.tpsId == "stable:value"\nviews:\n  - type: table\n    order:\n      - note.tpsId\n';
+  const h = harness({ 'Inbox/Identity.md': note, '_archive/Identity.md': note, 'Templates/Identity.md': note, 'Identity.base': base });
+  h.plugin.settings.nativeRecordIdentityPropertyKey = oldKey;
+  h.plugin.settings.notebookNavigatorRules = { rules: [{ conditions: [{ source: 'frontmatter', field: oldKey, operator: 'is', value: 'stable:value' }] }] };
+  const navigator = { settings: { propertySortKey: oldKey, vaultProfiles: [{ propertyKeys: [{ key: oldKey, showInList: true }] }] }, async saveSettingsAndUpdate() {} };
+  h.plugin.app.plugins = { plugins: { 'tps-notebook-navigator': navigator } };
+  PropertyMigrationModal.confirm = async () => true;
+  assert.equal(await h.service.request({ kind: 'key', from: oldKey, to: 'id' }, settings => { settings.nativeRecordIdentityPropertyKey = 'id'; }), true);
+  for (const path of ['Inbox/Identity.md', '_archive/Identity.md', 'Templates/Identity.md']) assert.equal(h.data.get(path), note.replace('TPSID:', '"id":'));
+  assert.equal(h.data.get('Identity.base'), base.replaceAll('note.tpsId', 'note.id'));
+  assert.equal(h.plugin.settings.nativeRecordIdentityPropertyKey, 'id');
+  assert.equal(h.plugin.settings.notebookNavigatorRules.rules[0].conditions[0].field, 'id');
+  assert.equal(navigator.settings.propertySortKey, 'id');
+  assert.equal(navigator.settings.vaultProfiles[0].propertyKeys[0].key, 'id');
+  assert.equal(h.storage.size, 0);
+});
+
+for (const destination of ['same', 'different']) test(`identity migration blocks occupied id without overwriting ${destination} values`, async () => {
+  const note = fm(`tpsId: same\nid: ${destination}`);
+  const h = harness({ 'Inbox/Occupied.md': note });
+  h.plugin.settings.nativeRecordIdentityPropertyKey = 'tpsId';
+  PropertyMigrationModal.confirm = async () => true;
+  await assert.rejects(h.service.request({ kind: 'key', from: 'tpsId', to: 'id' }, () => {}), /Resolve the listed migration conflicts/u);
+  assert.equal(h.data.get('Inbox/Occupied.md'), note);
+  assert.equal(h.plugin.settings.nativeRecordIdentityPropertyKey, 'tpsId');
+  assert.equal(h.writes.length, 0);
+});
+
+test('identity migration cancellation and unsafe mapping destinations leave notes and settings unchanged', async () => {
+  const h = harness({ 'Inbox/Identity.md': fm('tpsId: stable') });
+  h.plugin.settings.nativeRecordIdentityPropertyKey = 'tpsId';
+  PropertyMigrationModal.confirm = async () => false;
+  assert.equal(await h.service.request({ kind: 'key', from: 'tpsId', to: 'id' }, () => {}), false);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.plugin.settings.nativeRecordIdentityPropertyKey, 'tpsId');
+  PropertyMigrationModal.confirm = async () => true;
+  await assert.rejects(h.service.request({ kind: 'key', from: 'tpsId', to: 'tags' }, () => {}), /reserved/u);
+  await assert.rejects(h.service.request({ kind: 'key', from: 'status', to: 'id' }, () => {}), /reserved/u);
+  assert.equal(h.writes.length, 0);
+});
+
+test('explicit identity migration rejects canonical envelope destinations before preview or writes', async () => {
+  const h = harness({ 'Inbox/Identity.md': fm('tpsId: stable') });
+  h.plugin.settings.nativeRecordIdentityPropertyKey = 'tpsId';
+  let reads = 0;
+  h.plugin.app.vault.read = async () => { reads++; throw new Error('Unexpected preview'); };
+  for (const to of ['kind', 'title', 'tpsSchemaVersion', 'createdDate', 'modifiedDate']) {
+    await assert.rejects(h.service.request({ kind: 'key', from: 'tpsId', to }, () => {}), /reserved/u);
+  }
+  assert.equal(reads, 0);
+  assert.equal(h.writes.length, 0);
+  assert.equal(h.plugin.settings.nativeRecordIdentityPropertyKey, 'tpsId');
 });

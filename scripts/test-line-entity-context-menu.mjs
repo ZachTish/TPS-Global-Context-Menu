@@ -504,7 +504,7 @@ test('configured semantic tag free text adds a comma-separated entry atomically 
     showInContextMenu: true,
   };
   const file = { path: 'Examples/Bullet Tags.md' };
-  let line = '- Bullet row <!-- [tags:: #one] [tpsId:: bullet-tags] --> [priority:: high] ^bullet-tags';
+  let line = '- Bullet row <!-- [tags:: #one] [id:: bullet-tags] --> [priority:: high] ^bullet-tags';
   const menu = new FakeMenu();
   harness.addLineEntityPropertyMenus({
     app: createOptionApp([]),
@@ -529,7 +529,7 @@ test('configured semantic tag free text adds a comma-separated entry atomically 
 
   assert.deepEqual(harness.readTaskLineTags(line).sort(), ['one', 'two']);
   assert.match(line, /\[priority:: high\]/u);
-  assert.match(line, /\[tpsId:: bullet-tags\]/u);
+  assert.match(line, /\[id:: bullet-tags\]/u);
   assert.match(line, /\^bullet-tags$/u);
 });
 

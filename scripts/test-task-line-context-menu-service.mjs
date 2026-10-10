@@ -323,14 +323,14 @@ test('task line metadata helpers edit task text without destroying inline task p
     '- [ ] main bathroom window [priority:: high] [scheduled:: 2026-05-31 09:00:00] #topic/home',
   );
   const reminderMetadata = '%% tps-inline-props:{"externalId":"reminders:x-apple-reminder://ABC","remindersSyncedTitle":"old title"} %%';
-  const reminderLine = `- [ ] old title [tpsId:: item_abc] [scheduled:: 2026-07-11 09:00:00] #inbox ${reminderMetadata}`;
+  const reminderLine = `- [ ] old title [id:: item_abc] [scheduled:: 2026-07-11 09:00:00] #inbox ${reminderMetadata}`;
   assert.equal(
     setTaskTitle(reminderLine, 'new title'),
-    `- [ ] new title [tpsId:: item_abc] [scheduled:: 2026-07-11 09:00:00] #inbox ${reminderMetadata}`,
+    `- [ ] new title [id:: item_abc] [scheduled:: 2026-07-11 09:00:00] #inbox ${reminderMetadata}`,
   );
   assert.equal(
     setTaskEditableBody(reminderLine, 'new body #inbox'),
-    `- [ ] new body #inbox [tpsId:: item_abc] [scheduled:: 2026-07-11 09:00:00] ${reminderMetadata}`,
+    `- [ ] new body #inbox [id:: item_abc] [scheduled:: 2026-07-11 09:00:00] ${reminderMetadata}`,
   );
   assert.equal(setTaskCheckboxToken(line, '[\\]'), '- [\\] bathroom window [priority:: high] [scheduled:: 2026-05-31 09:00:00] #topic/home');
   assert.equal(
@@ -373,11 +373,11 @@ test('task line metadata helpers edit task text without destroying inline task p
     `${line} #one #two ^task-tags`,
   );
   assert.equal(readInlineFieldValue(addInlineTagsToTaskLine(taskWithBlockId, 'one, two'), 'priority'), 'high');
-  const semanticCarrierLine = '- [ ] semantic tags <!-- [tags:: #one] [tpsId:: semantic-tags] --> ^semantic-tags';
+  const semanticCarrierLine = '- [ ] semantic tags <!-- [tags:: #one] [id:: semantic-tags] --> ^semantic-tags';
   const semanticCarrierUpdated = addInlineTagsToTaskLine(semanticCarrierLine, 'ONE, two, two');
   assert.deepEqual(readTaskLineTags(semanticCarrierUpdated).sort(), ['one', 'two']);
   assert.doesNotMatch(semanticCarrierUpdated, /(?:^|\s)#one(?:$|\s)/u);
-  assert.match(semanticCarrierUpdated, /\[tpsId:: semantic-tags\]/u);
+  assert.match(semanticCarrierUpdated, /\[id:: semantic-tags\]/u);
   assert.match(semanticCarrierUpdated, /\^semantic-tags$/u);
   assert.equal(removeInlineTagFromTaskLine(`${line} #errand`, 'topic/home'), '- [ ] bathroom window [priority:: high] [scheduled:: 2026-05-31 09:00:00] #errand');
   const bulletLine = '- Alpha release [status:: active] #existing';
@@ -489,7 +489,7 @@ test('task note associations use a hidden direct path while keeping the visible 
   assert.equal(normalizeTaskAssociatedNotePath('%68%74%74%70%73%3A%2F%2Fexample.test%2Fnote'), '');
 
   const reminderMetadata = '%% tps-inline-props:{"externalId":"reminders:x-apple-reminder://ABC","remindersSyncedTitle":"Birthday Dinner"} %%';
-  const legacyLine = `- [ ] [[Birthday Dinner#2026-07-13|Birthday Dinner]] [scheduled:: 2026-07-13 18:00:00] [tpsId:: item_abc] #family ${reminderMetadata}`;
+  const legacyLine = `- [ ] [[Birthday Dinner#2026-07-13|Birthday Dinner]] [scheduled:: 2026-07-13 18:00:00] [id:: item_abc] #family ${reminderMetadata}`;
   const associated = setTaskAssociatedNotePath(legacyLine, 'Notes/Birthday Dinner.md');
   assert.equal(readTaskAssociatedNotePath(associated), 'Notes/Birthday Dinner.md');
   assert.match(associated, /"externalId":"reminders:x-apple-reminder:\/\/ABC"/);
@@ -499,7 +499,7 @@ test('task note associations use a hidden direct path while keeping the visible 
   const plainLine = setTaskTitle(associated, getPlainTaskTitle(getTaskDisplayTitle(legacyLine)));
   assert.equal(
     plainLine,
-    '- [ ] Birthday Dinner [scheduled:: 2026-07-13 18:00:00] [tpsId:: item_abc] #family %% tps-inline-props:{"externalId":"reminders:x-apple-reminder://ABC","remindersSyncedTitle":"Birthday Dinner","associatedNotePath":"Notes/Birthday Dinner.md"} %%',
+    '- [ ] Birthday Dinner [scheduled:: 2026-07-13 18:00:00] [id:: item_abc] #family %% tps-inline-props:{"externalId":"reminders:x-apple-reminder://ABC","remindersSyncedTitle":"Birthday Dinner","associatedNotePath":"Notes/Birthday Dinner.md"} %%',
   );
   assert.equal(setTaskAssociatedNotePath(plainLine, 'Notes/Birthday Dinner.md'), plainLine);
 
@@ -573,7 +573,7 @@ test('task quick editor can replace the editable body without changing task stru
     '- [ ] Renamed legacy task [subitemId:: legacy_123]',
   );
   const hiddenPayload = '%% tps-inline-props:{"externalId":"sync-current","remindersNotes":""} %%';
-  const protectedLine = `- [ ] Visible #work [priority:: high] [tpsId:: tps_123] [subitemId:: sub_456] ${hiddenPayload}`;
+  const protectedLine = `- [ ] Visible #work [priority:: high] [id:: tps_123] [subitemId:: sub_456] ${hiddenPayload}`;
   assert.equal(getTaskEditableBody(protectedLine), 'Visible #work');
   const carrierPayload = JSON.stringify({ externalId: 'carrier-current', remindersNotes: '' });
   const carrierLines = [
@@ -587,17 +587,17 @@ test('task quick editor can replace the editable body without changing task stru
   }
   assert.equal(
     setTaskEditableBody(protectedLine, 'Updated #work'),
-    `- [ ] Updated #work [priority:: high] [tpsId:: tps_123] [subitemId:: sub_456] ${hiddenPayload}`,
+    `- [ ] Updated #work [priority:: high] [id:: tps_123] [subitemId:: sub_456] ${hiddenPayload}`,
   );
   assert.equal(
     setTaskEditableBody(protectedLine, 'Updated %% tps-inline-props:{"externalId":"pasted"} %%'),
-    `- [ ] Updated [priority:: high] [tpsId:: tps_123] [subitemId:: sub_456] ${hiddenPayload}`,
+    `- [ ] Updated [priority:: high] [id:: tps_123] [subitemId:: sub_456] ${hiddenPayload}`,
     'pasted hidden metadata must not replace the current source-line identity payload',
   );
   const staleOpeningPayload = '%% tps-inline-props:{"externalId":"sync-opening"} %%';
-  const openingLine = `- [ ] Original [tpsId:: tps_123] ${staleOpeningPayload}`;
+  const openingLine = `- [ ] Original [id:: tps_123] ${staleOpeningPayload}`;
   const currentPayload = '%% tps-inline-props:{"externalId":"sync-current","remindersPriority":2} %%';
-  const currentLine = `- [ ] Original [tpsId:: tps_123] ${currentPayload}`;
+  const currentLine = `- [ ] Original [id:: tps_123] ${currentPayload}`;
   const editedFromOpeningBody = getTaskEditableBody(openingLine).replace('Original', 'Edited');
   const concurrentResult = setTaskEditableBody(currentLine, editedFromOpeningBody);
   assert.match(concurrentResult, /"externalId":"sync-current"/);
@@ -616,10 +616,10 @@ test('task quick editor can replace the editable body without changing task stru
   );
   assert.equal(
     setTaskEditableBody(
-      '- [x] Retro #hca [scheduled:: 2026-08-17 09:30:00] [tpsId:: item_123]',
+      '- [x] Retro #hca [scheduled:: 2026-08-17 09:30:00] [id:: item_123]',
       'Retro #hca\n- test',
     ),
-    '- [x] Retro #hca - test [scheduled:: 2026-08-17 09:30:00] [tpsId:: item_123]',
+    '- [x] Retro #hca - test [scheduled:: 2026-08-17 09:30:00] [id:: item_123]',
     'multiline text beside an inline tag must remain one resolvable task record',
   );
 });
@@ -883,14 +883,14 @@ test('TPS Table property cells resolve through the row task identity and exact o
     getTaskLineIdentity('- [ ] CRLF task'),
     'source-line fingerprints are stable across LF and CRLF splitting',
   );
-  const inlineTagRenderedText = 'Retro GCP Application Support #hca - test [scheduled:: 2026-08-17 09:30:00] [tpsId:: qa-task-editor-1342]';
+  const inlineTagRenderedText = 'Retro GCP Application Support #hca - test [scheduled:: 2026-08-17 09:30:00] [id:: qa-task-editor-1342]';
   assert.ok(
     buildTaskResolutionTextVariants(inlineTagRenderedText).includes('Retro GCP Application Support - test'),
     'rendered hashtag anchors and hidden inline fields must yield the canonical source title',
   );
   assert.equal(
     resolveTaskLineIndex({
-      lines: ['- [ ] Retro GCP Application Support #hca - test [scheduled:: 2026-08-17 09:30:00] [tpsId:: qa-task-editor-1342]'],
+      lines: ['- [ ] Retro GCP Application Support #hca - test [scheduled:: 2026-08-17 09:30:00] [id:: qa-task-editor-1342]'],
       candidateIndexes: [0],
       targetTexts: buildTaskResolutionTextVariants(inlineTagRenderedText),
     }),
@@ -1573,14 +1573,14 @@ test('task time tracking targets task lines and does not fall back to note front
   assert.match(timeTrackingSource, /const type = input\?\.type === 'task' \? 'task' : 'note'/);
   assert.match(timeTrackingSource, /parseTaskLine\(line\)/);
   assert.match(timeTrackingSource, /createTaskTargetId\(file, lineNumber, line\)/);
-  assert.match(timeTrackingSource, /ensureTaskLineTpsId\(file, lineNumber, line, title, tpsId\)/);
+  assert.match(timeTrackingSource, /ensureTaskLineId\(file, lineNumber, line, title, id\)/);
   assert.match(timeTrackingSource, /resolveTargetForRecord\(record, \{ storageFile \}\)/);
   assert.match(timeTrackingSource, /record\.targetType === 'task'/);
   assert.match(timeTrackingSource, /Skipped task schedule sync because the task line could not be resolved/);
   assert.match(timeTrackingSource, /syncTaskLineScheduledMetadata/);
   assert.match(timeTrackingSource, /findTaskLineIndex\(lines, lineNumber, targetId\)/);
-  assert.match(timeTrackingSource, /readInlineFieldValue\(line, TPS_ID_FIELD\) \|\| readInlineFieldValue\(line, 'subitemId'\)/);
-  assert.match(timeTrackingSource, /setInlineFieldValueOnTaskLine\(line, TPS_ID_FIELD, wanted\)/);
+  assert.match(timeTrackingSource, /readInlineFieldValue\(line, IDENTITY_FIELD\) \|\| readInlineFieldValue\(line, 'subitemId'\)/);
+  assert.match(timeTrackingSource, /setInlineFieldValueOnTaskLine\(line, IDENTITY_FIELD, wanted\)/);
   assert.match(timeTrackingSource, /setInlineFieldValueOnTaskLine\(line, 'scheduled', scheduledValue\)/);
   assert.match(timeTrackingSource, /setInlineFieldValueOnTaskLine\(next, 'timeEstimate', String\(durationMinutes\)\)/);
   assert.match(timeTrackingSource, /withResolvedLineNumber\(updated, target\)/);
@@ -1814,9 +1814,10 @@ test('health workout inline properties render only compact set metrics', () => {
 
 test('reserved TPS inline metadata stays hidden in every rendered Markdown host', () => {
   assert.match(inlinePropertyDecorationSource, /const isReservedMetadata = DEFAULT_INLINE_DENY_KEYS\.has\(normalizedKey\)/);
-  assert.match(inlinePropertyDecorationSource, /normalizedKey\.startsWith\('tps'\) \|\| normalizedKey === 'subitemid'/);
+  assert.match(inlinePropertyDecorationSource, /normalizedKey\.startsWith\('tps'\) \|\| normalizedKey === 'id' \|\| normalizedKey === 'subitemid'/);
+  assert.match(inlinePropertyDecorationSource, /normalizedKey === String\(this\.plugin\.settings\.nativeRecordIdentityPropertyKey \|\| 'id'\)/);
   assert.match(inlinePropertyDecorationSource, /const isVisible =\s+!isReservedMetadata &&\s+visibleKeys\.has\(normalizedKey\)/);
-  assert.match(inlinePropertyDecorationSource, /'tpsid'/);
+  assert.match(inlinePropertyDecorationSource, /'id'/);
   assert.match(inlinePropertyDecorationSource, /'subitemid'/);
   assert.match(inlinePropertyDecorationSource, /'tpsinlineprops'/);
   assert.match(inlinePropertyDecorationSource, /'tps-inline-props'/);
@@ -1888,7 +1889,7 @@ test('task recurrence utilities support fixed schedules and after-completion sch
     }),
     '2026-06-02 09:00:00',
   );
-  const completed = '- [x] water plants [workflow:: complete] [recurrence:: GCM-AFTER-COMPLETION:P1D] [completedDate:: 2026-06-01 12:00:00] [tpsId:: old-line] [subitemId:: child-note] [icon:: lucide:leaf] #home';
+  const completed = '- [x] water plants [workflow:: complete] [recurrence:: GCM-AFTER-COMPLETION:P1D] [completedDate:: 2026-06-01 12:00:00] [id:: old-line] [subitemId:: child-note] [icon:: lucide:leaf] #home';
   const template = buildTaskRecurrenceTemplateLine(completed, '[o]', 'workflow');
   assert.equal(template, '- [o] water plants [recurrence:: GCM-AFTER-COMPLETION:P1D] #home');
   assert.equal(

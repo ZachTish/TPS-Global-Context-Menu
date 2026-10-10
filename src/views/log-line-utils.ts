@@ -242,7 +242,7 @@ function removeInlineFields(source: string): string {
 }
 
 export function getLogEntryStableIdentity(entry: Pick<LogLineReference, 'fields'>): { key: string; value: string } | null {
-  for (const key of ['foodid', 'setid', 'tpsid', 'logid', 'workoutid', 'financeid']) {
+  for (const key of ['foodid', 'setid', 'id', 'logid', 'workoutid', 'financeid']) {
     const value = String(entry.fields[key] || '').trim();
     if (value) return { key, value };
   }

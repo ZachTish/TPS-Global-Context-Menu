@@ -83,7 +83,7 @@ test('task-editor descriptors exclude status, hidden/system fields, and configur
     '[parent:: hidden parent]',
     '[parentOf:: hidden child]',
     '[folderPath:: Projects]',
-    '[tpsId:: item_123]',
+    '[id:: item_123]',
     '[subitemId:: child_123]',
     '[tpsInlineProps:: hidden_payload]',
     '[externalEventId:: event_123]',
@@ -247,7 +247,7 @@ test('generic datetime results cannot mutate scheduled companion drafts', async 
 test('no-op saves are byte-identical and explicit edits preserve concurrent task changes', async () => {
   const { applyTaskEditorPropertyChanges } = await propertiesPromise;
   const { getTaskEditableBody, readInlineFieldValue } = await metadataPromise;
-  const current = '- [ ] Renamed concurrently #current [priority:: medium] [status:: working] [newRemoteField:: preserve] [tpsId:: item_123] %% tps-inline-props:{"externalId":"remote_123"} %%';
+  const current = '- [ ] Renamed concurrently #current [priority:: medium] [status:: working] [newRemoteField:: preserve] [id:: item_123] %% tps-inline-props:{"externalId":"remote_123"} %%';
 
   assert.equal(
     applyTaskEditorPropertyChanges(current, []),
@@ -264,7 +264,7 @@ test('no-op saves are byte-identical and explicit edits preserve concurrent task
   assert.equal(readInlineFieldValue(edited, 'due'), '2026-07-23 11:15:00');
   assert.equal(readInlineFieldValue(edited, 'status'), 'working');
   assert.equal(readInlineFieldValue(edited, 'newRemoteField'), 'preserve');
-  assert.equal(readInlineFieldValue(edited, 'tpsId'), 'item_123');
+  assert.equal(readInlineFieldValue(edited, 'id'), 'item_123');
   assert.match(edited, /%% tps-inline-props:\{"externalId":"remote_123"\} %%/u);
 
   const firstIntentWins = applyTaskEditorPropertyChanges(current, [
@@ -281,19 +281,19 @@ test('no-op saves are byte-identical and explicit edits preserve concurrent task
 test('scheduled companion changes apply together while protected metadata cannot be overwritten', async () => {
   const { applyTaskEditorPropertyChanges } = await propertiesPromise;
   const { readInlineFieldValue } = await metadataPromise;
-  const current = '- [ ] Schedule bundle [scheduled:: 2026-07-22 09:30:00] [timeEstimate:: 45] [allDay:: false] [tpsId:: keep_me] [parent:: keep_parent]';
+  const current = '- [ ] Schedule bundle [scheduled:: 2026-07-22 09:30:00] [timeEstimate:: 45] [allDay:: false] [id:: keep_me] [parent:: keep_parent]';
   const edited = applyTaskEditorPropertyChanges(current, [
     { key: 'scheduled', value: '2026-07-24 13:00:00' },
     { key: 'timeEstimate', value: '90' },
     { key: 'allDay', value: 'true' },
-    { key: 'tpsId', value: 'replace_me' },
+    { key: 'id', value: 'replace_me' },
     { key: 'parent', value: 'replace_parent' },
   ]);
 
   assert.equal(readInlineFieldValue(edited, 'scheduled'), '2026-07-24 13:00:00');
   assert.equal(readInlineFieldValue(edited, 'timeEstimate'), '90');
   assert.equal(readInlineFieldValue(edited, 'allDay'), 'true');
-  assert.equal(readInlineFieldValue(edited, 'tpsId'), 'keep_me');
+  assert.equal(readInlineFieldValue(edited, 'id'), 'keep_me');
   assert.equal(readInlineFieldValue(edited, 'parent'), 'keep_parent');
 });
 

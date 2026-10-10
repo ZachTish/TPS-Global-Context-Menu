@@ -15,7 +15,7 @@ export const TASK_RECURRENCE_ID_KEY = 'recurrenceTaskId';
 export const TASK_RECURRENCE_COMPLETED_DATE_KEY = 'completedDate';
 const TASK_RECURRENCE_INSTANCE_ONLY_KEYS = [
   TASK_RECURRENCE_COMPLETED_DATE_KEY,
-  'tpsId',
+  'id',
   'subitemId',
   'child',
   'childOf',

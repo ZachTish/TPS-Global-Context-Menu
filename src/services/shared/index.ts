@@ -122,9 +122,9 @@ export function createSharedServices(plugin: TPSGlobalContextMenuPlugin) {
   };
 
   const identity = Object.assign(plugin.identityService, {
-    getTpsId: (frontmatterRecord: Record<string, unknown> | null | undefined): string | null =>
+    getId: (frontmatterRecord: Record<string, unknown> | null | undefined): string | null =>
       plugin.identityService.getInternalId(frontmatterRecord),
-    setTpsId: (frontmatterRecord: Record<string, unknown>, id: string) =>
+    setId: (frontmatterRecord: Record<string, unknown>, id: string) =>
       plugin.identityService.setInternalId(frontmatterRecord, id),
   });
 

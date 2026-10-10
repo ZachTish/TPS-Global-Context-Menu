@@ -8,7 +8,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   nativeRecordRootPath: '_records',
   nativeRecordLayout: 'kind-folders',
   nativeRecordIdentityMode: 'property',
-  nativeRecordIdentityPropertyKey: 'tpsId',
+  nativeRecordIdentityPropertyKey: 'id',
   nativeRecordSchemaPropertyKey: '',
   nativeRecordIdentityTagPrefix: 'tps/record',
   nativeRecordKindPropertyKey: 'kind',

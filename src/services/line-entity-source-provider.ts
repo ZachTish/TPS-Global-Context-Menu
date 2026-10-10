@@ -33,7 +33,7 @@ export interface LineEntityDescriptor {
 }
 
 export interface LineEntityLegacyIdentity {
-  readonly key: 'tpsId' | 'subitemId';
+  readonly key: 'id' | 'tpsId' | 'subitemId';
   readonly value: string;
 }
 
@@ -193,7 +193,8 @@ export class LineEntitySourceProvider {
         rawLine,
         blockId,
         legacyIdentities: Object.freeze(
-          (['tpsId', 'subitemId'] as const)
+          // Decode historical line carriers without writing or migrating them.
+          (['id', 'tpsId', 'subitemId'] as const)
             .map((key) => Object.freeze({
               key,
               value: semantic.fields.find((field) => normalizeLookupValue(field.key) === normalizeLookupValue(key))?.value.trim() || '',

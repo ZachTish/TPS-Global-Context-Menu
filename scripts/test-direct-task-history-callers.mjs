@@ -78,7 +78,7 @@ function createHistoryRecorder(events) {
     },
     ensureTaskIdentity(_handle, line) {
       events.push({ type: 'ensure', line });
-      return `${line} [tpsId:: history-id]`;
+      return `${line} [id:: history-id]`;
     },
     async commitTaskMutation(_handle, input) {
       events.push({ type: 'commit', input });
@@ -258,9 +258,9 @@ test('task-menu timer duplication adopts and commits its history identity in the
 
   assert.equal(content, [
     '- [ ] Timed source [scheduled:: 2026-08-14 09:00:00]',
-    '- [ ] Timer duplicate [tpsId:: history-id]',
+    '- [ ] Timer duplicate [id:: history-id]',
   ].join('\n'));
-  assert.equal(duplicate?.rawLine, '- [ ] Timer duplicate [tpsId:: history-id]');
+  assert.equal(duplicate?.rawLine, '- [ ] Timer duplicate [id:: history-id]');
   assert.equal(duplicate?.lineIndex, 1);
   assert.deepEqual(events.map((event) => event.type), [
     'begin',
@@ -286,7 +286,7 @@ test('task-menu timer duplication adopts and commits its history identity in the
     after: {
       path: file.path,
       lineNumber: 1,
-      rawLine: '- [ ] Timer duplicate [tpsId:: history-id]',
+      rawLine: '- [ ] Timer duplicate [id:: history-id]',
     },
     outcome: 'committed',
   });
@@ -402,7 +402,7 @@ test('Quick Editor task-to-bullet conversion records a terminal task deletion wi
 
   assert.equal(changed, true);
   assert.equal(content, '- Convert this task');
-  assert.doesNotMatch(content, /tpsId::/u);
+  assert.doesNotMatch(content, /id::/u);
   assert.equal(events.some((event) => event.type === 'ensure'), false);
   assert.deepEqual(events.map((event) => event.type), [
     'begin',
@@ -498,8 +498,8 @@ test('TPS List root creation journals tasks with an atomic identity while leavin
   };
 
   const task = await runCreate('task');
-  assert.equal(task.content, 'Existing line\n- [ ] Created task [tpsId:: history-id]\n');
-  assert.equal(task.filteredLine, '- [ ] Created task [tpsId:: history-id]');
+  assert.equal(task.content, 'Existing line\n- [ ] Created task [id:: history-id]\n');
+  assert.equal(task.filteredLine, '- [ ] Created task [id:: history-id]');
   assert.deepEqual(task.events.map((event) => event.type), [
     'begin',
     'process:start',
@@ -525,7 +525,7 @@ test('TPS List root creation journals tasks with an atomic identity while leavin
     after: {
       path: task.file.path,
       lineNumber: 1,
-      rawLine: '- [ ] Created task [tpsId:: history-id]',
+      rawLine: '- [ ] Created task [id:: history-id]',
     },
     outcome: 'committed',
   });
@@ -628,8 +628,8 @@ test('TPS Table creation journals tasks with an atomic identity while leaving bu
 
   const task = await runCreate('task');
   assert.equal(task.handled, true);
-  assert.equal(task.content, 'Existing line\n- [ ] Created task [tpsId:: history-id]\n');
-  assert.equal(task.filteredLine, '- [ ] Created task [tpsId:: history-id]');
+  assert.equal(task.content, 'Existing line\n- [ ] Created task [id:: history-id]\n');
+  assert.equal(task.filteredLine, '- [ ] Created task [id:: history-id]');
   assert.deepEqual(task.events.map((event) => event.type), [
     'begin',
     'process:start',
@@ -644,7 +644,7 @@ test('TPS Table creation journals tasks with an atomic identity while leaving bu
     after: {
       path: task.file.path,
       lineNumber: 1,
-      rawLine: '- [ ] Created task [tpsId:: history-id]',
+      rawLine: '- [ ] Created task [id:: history-id]',
     },
     outcome: 'committed',
   });
@@ -694,7 +694,7 @@ test('TPS List checkbox writes identity and history in the same successful mutat
     '- [ ] Original task',
   );
 
-  assert.equal(content, '- [x] Original task [tpsId:: history-id]');
+  assert.equal(content, '- [x] Original task [id:: history-id]');
   assert.deepEqual(events.map((event) => event.type), [
     'begin',
     'process:start',
@@ -804,7 +804,7 @@ test('TPS List drop and rendered-property paths record tasks while leaving bulle
     },
   );
   assert.equal(dropped, true);
-  assert.equal(content, '- [ ] Drop task [project:: Alpha] [tpsId:: history-id]');
+  assert.equal(content, '- [ ] Drop task [project:: Alpha] [id:: history-id]');
   assert.deepEqual(events.map((event) => event.type), [
     'begin',
     'process:start',
@@ -825,7 +825,7 @@ test('TPS List drop and rendered-property paths record tasks while leaving bulle
     (line) => `${line} [priority:: high]`,
   );
   assert.equal(propertyChanged, true);
-  assert.equal(content, '- [ ] Property task [priority:: high] [tpsId:: history-id]');
+  assert.equal(content, '- [ ] Property task [priority:: high] [id:: history-id]');
   assert.deepEqual(events.map((event) => event.type), [
     'begin',
     'process:start',
@@ -886,7 +886,7 @@ test('TPS Table records task row updates but leaves bullet rows outside history'
     (line) => `${line} [priority:: high]`,
   );
   assert.equal(changed, true);
-  assert.equal(content, '- [ ] Table task [priority:: high] [tpsId:: history-id]');
+  assert.equal(content, '- [ ] Table task [priority:: high] [id:: history-id]');
   assert.deepEqual(events.map((event) => event.type), [
     'begin',
     'process:start',
@@ -937,7 +937,7 @@ test('inline-property file task edits share the atomic write with identity adopt
     '- [ ] Inline task [priority:: high]',
   );
 
-  assert.equal(content, '- [ ] Inline task [priority:: high] [tpsId:: history-id]');
+  assert.equal(content, '- [ ] Inline task [priority:: high] [id:: history-id]');
   assert.equal(target.lineText, content);
   assert.deepEqual(events.map((event) => event.type), [
     'begin',
@@ -989,7 +989,7 @@ test('inline editor changes remain unjournaled until a durable vault write can b
   assert.equal(state.doc.toString(), nextLine);
   assert.equal(target.lineText, nextLine);
   assert.deepEqual(events, [], 'editor-state dispatch must not claim durable item history');
-  assert.doesNotMatch(nextLine, /tpsId::/u);
+  assert.doesNotMatch(nextLine, /id::/u);
 });
 
 test('line-item deletion commits task history after the atomic delete and ignores bullets', async () => {

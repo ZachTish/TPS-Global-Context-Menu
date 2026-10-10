@@ -105,7 +105,7 @@ function createTaskApiFixture(TaskApiService) {
       'title: Daily',
       '---',
       '',
-      '- [ ] Daily task [scheduled:: 2026-08-10 09:00:00] [tpsId:: task_daily]',
+      '- [ ] Daily task [scheduled:: 2026-08-10 09:00:00] [id:: task_daily]',
       '  - [ ] supporting detail [subitemId:: child_daily]',
       '',
     ].join('\n')],
@@ -274,8 +274,8 @@ function installHistoryRecorder(fixture, overrides = {}) {
     ensureTaskIdentity(handle, line) {
       calls.ensure.push({ handle: { ...handle }, line });
       if (overrides.ensureError) throw overrides.ensureError;
-      if (/\[(?:tpsId|subitemId)::/iu.test(line)) return line;
-      return `${line} [tpsId:: ${handle.entityId}]`;
+      if (/\[(?:id|subitemId)::/iu.test(line)) return line;
+      return `${line} [id:: ${handle.entityId}]`;
     },
     async commitTaskMutation(handle, input) {
       calls.commit.push({ handle: { ...handle }, input: structuredClone(input) });
@@ -368,14 +368,14 @@ test('task API v3 journals only explicit user mutations and injects identity ato
 
   assert.equal(updated.ok, true);
   assert.match(updated.task?.rawLine || '', /\[priority:: high\]/u);
-  assert.match(updated.task?.rawLine || '', /\[tpsId:: history_1\]/u);
+  assert.match(updated.task?.rawLine || '', /\[id:: history_1\]/u);
   assert.equal(history.begin.length, 1);
   assert.equal(history.begin[0].action, 'task.update');
   assert.deepEqual(history.begin[0].cause, cause);
   assert.equal(history.commit.length, 1);
   assert.equal(history.commit[0].input.confirmedBefore.rawLine, openTask.rawLine);
   assert.equal(history.commit[0].input.outcome, 'committed');
-  assert.match(history.commit[0].input.after.rawLine, /\[tpsId:: history_1\]/u);
+  assert.match(history.commit[0].input.after.rawLine, /\[id:: history_1\]/u);
   assert.equal(history.abort.length, 0);
 
   const repeated = await fixture.service.setCompletion(updated.task, false, cause);
@@ -392,7 +392,7 @@ test('task API v3 journals only explicit user mutations and injects identity ato
   });
   const unjournaled = await unjournaledFixture.service.setField(unjournaledTask, 'priority', 'high');
   assert.equal(unjournaled.ok, true);
-  assert.doesNotMatch(unjournaled.task?.rawLine || '', /\[tpsId::/u);
+  assert.doesNotMatch(unjournaled.task?.rawLine || '', /\[id::/u);
   assert.equal(unjournaledHistory.begin.length, 0);
   assert.equal(unjournaledHistory.commit.length, 0);
 });
@@ -404,7 +404,7 @@ test('task API confirms the live pre-mutation snapshot after stable-identity dri
     fixture.taskPath,
     fixture.contents.get(fixture.taskPath).replace(
       '- [ ] Open task',
-      '- [ ] Open task [priority:: low] [tpsId:: item_live_drift]',
+      '- [ ] Open task [priority:: low] [id:: item_live_drift]',
     ),
   );
   const history = installHistoryRecorder(fixture);
@@ -461,7 +461,7 @@ test('task API history attributes create, update, and same-file move to the exac
         fixture.contents.set(
           file.path,
           fixture.contents.get(file.path).replace(
-            /^(.*\[tpsId:: history_1\].*)$/mu,
+            /^(.*\[id:: history_1\].*)$/mu,
             '$1 [priority:: external-refresh]',
           ),
         );
@@ -481,7 +481,7 @@ test('task API history attributes create, update, and same-file move to the exac
   assert.equal(created.ok, true);
   assert.match(created.task?.rawLine || '', /priority:: external-refresh/u);
   assert.doesNotMatch(createHistory.commit[0].input.after.rawLine, /priority:: external-refresh/u);
-  assert.match(createHistory.commit[0].input.after.rawLine, /tpsId:: history_1/u);
+  assert.match(createHistory.commit[0].input.after.rawLine, /id:: history_1/u);
 
   const updateFixture = createTaskApiFixture(TaskApiService);
   const [updateTask] = await updateFixture.service.list({ paths: [updateFixture.taskPath], includeCompleted: true });
@@ -555,7 +555,7 @@ test('task API history failures remain fail-open and clear unusable pending inte
   assert.equal(result.ok, true);
   assert.equal(result.changed, true);
   assert.match(result.task?.rawLine || '', /\[priority:: high\]/u);
-  assert.doesNotMatch(result.task?.rawLine || '', /\[tpsId::/u);
+  assert.doesNotMatch(result.task?.rawLine || '', /\[id::/u);
   assert.equal(history.commit.length, 0);
   assert.equal(history.abort.length, 1);
 
@@ -601,7 +601,7 @@ test('task API records expose only TPS-owned stable task identities', async () =
   const taskIdentity = fixture.service.parseLine(
     fixture.taskPath,
     0,
-    '- [ ] Task identity [subitemId:: child-id] [tpsId:: task-id] [recurrenceTaskId:: series-id]',
+    '- [ ] Task identity [subitemId:: child-id] [id:: task-id] [recurrenceTaskId:: series-id]',
   );
   const subitemIdentity = fixture.service.parseLine(
     fixture.taskPath,
@@ -614,7 +614,7 @@ test('task API records expose only TPS-owned stable task identities', async () =
     '- [ ] Recurring task [recurrenceTaskId:: series-only]',
   );
 
-  assert.equal(taskIdentity?.stableId, 'task-id', 'tpsId takes precedence over subitemId');
+  assert.equal(taskIdentity?.stableId, 'task-id', 'id takes precedence over subitemId');
   assert.equal(subitemIdentity?.stableId, 'child-only');
   assert.equal(recurrenceOnly?.stableId, null, 'recurrence series IDs are not item-history identities');
 });
@@ -701,10 +701,10 @@ test('task API move preserves a Daily Note source as a migrated record', async (
   assert.ok(fixture.contents.get(fixture.dailyTaskPath).includes(
     '- [>] Daily task [scheduled:: 2026-08-10 09:00:00] [migratedTo:: [[Inbox/Upper]]]',
   ));
-  assert.doesNotMatch(fixture.contents.get(fixture.dailyTaskPath), /\btpsId::|\bsubitemId::/u);
+  assert.doesNotMatch(fixture.contents.get(fixture.dailyTaskPath), /\bid::|\bsubitemId::/u);
   assert.doesNotMatch(fixture.contents.get(fixture.dailyTaskPath), /completedDate::/u);
   assert.ok(fixture.contents.get(fixture.canonicalUpperFile.path).includes(
-    '- [ ] Daily task [scheduled:: 2026-08-10 09:00:00] [tpsId:: task_daily]',
+    '- [ ] Daily task [scheduled:: 2026-08-10 09:00:00] [id:: task_daily]',
   ));
   assert.ok(fixture.contents.get(fixture.canonicalUpperFile.path).includes(
     '  - [ ] supporting detail [subitemId:: child_daily]',

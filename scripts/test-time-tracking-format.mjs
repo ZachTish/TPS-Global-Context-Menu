@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  normalizeTimeTrackingRecord,
   normalizeTimeTrackingRecordList,
   resolveTimeTrackingStorageKind,
   timeTrackingSessionOverlapsRange,
@@ -84,4 +85,13 @@ test('treats active sessions as running through the provided active end time for
     ),
     false,
   );
+});
+
+
+test('legacy target identities never alias the timer session id', () => {
+  const legacy = normalizeTimeTrackingRecord({ id: 'session-id', tpsId: 'note-id', start: '2026-10-10T12:00:00Z' });
+  assert.equal(legacy.id, 'session-id');
+  assert.equal(legacy.targetId, 'note-id');
+  assert.equal(normalizeTimeTrackingRecord({ id: 'session-id', start: '2026-10-10T12:00:00Z' }), null);
+  assert.equal(normalizeTimeTrackingRecord({ id: 'session-id', targetId: 'current-note', tpsId: 'old-note', start: '2026-10-10T12:00:00Z' }).targetId, 'current-note');
 });

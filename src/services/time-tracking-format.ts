@@ -42,6 +42,7 @@ export function normalizeTimeTrackingRecord(value: unknown): TimeTrackingSession
   const record = raw as Record<string, unknown>;
   const id = String(record.id || '').trim();
   const start = String(record.start || '').trim();
+  // Historical sessions used tpsId for the target; record.id is the session ID.
   const targetId = String(record.targetId || record.tpsId || '').trim();
   if (!id || !start || !targetId) return null;
 

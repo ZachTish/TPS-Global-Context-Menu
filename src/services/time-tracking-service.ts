@@ -77,7 +77,7 @@ interface ResolvedTimeTrackingTarget {
   type: TimeTrackingTargetType;
   lineNumber?: number;
   title: string;
-  tpsId: string;
+  id: string;
 }
 
 interface TimeTrackingTargetReference {
@@ -107,7 +107,7 @@ interface EnsuredTimeTrackingNotesReference extends TimeTrackingNotesReference {
   created: boolean;
 }
 
-const TPS_ID_FIELD = 'tpsId';
+const IDENTITY_FIELD = 'id';
 const RUNNING_SCHEDULE_AHEAD_MINUTES = 5;
 const RUNNING_SCHEDULE_SYNC_INTERVAL_MS = 60_000;
 
@@ -249,7 +249,7 @@ export class TimeTrackingService {
     const timestamp = this.formatDateTime(now);
     let record: TimeTrackingSessionRecord = {
       id: this.createId('tt'),
-      targetId: target.tpsId,
+      targetId: target.id,
       targetType: target.type,
       sourcePath: target.file.path,
       lineNumber: target.lineNumber,
@@ -352,9 +352,9 @@ export class TimeTrackingService {
     const targetFile = target === 'source-note' && noteFile instanceof TFile
       ? noteFile
       : await this.ensureDailyNoteForDate(now);
-    const tpsId = this.createId('task');
+    const id = this.createId('task');
     const taskTitle = String(title || '').replace(/\s+/g, ' ').trim() || 'Untitled timer';
-    const lineNumber = await this.insertTimerTask(targetFile, tpsId, taskTitle, creationPlan);
+    const lineNumber = await this.insertTimerTask(targetFile, id, taskTitle, creationPlan);
     if (lineNumber == null) {
       logger.warn('[TimeTracking] Task creation blocked because the todo checkbox mapping changed before write.', {
         target,
@@ -580,7 +580,7 @@ export class TimeTrackingService {
     const now = this.formatDateTime(new Date());
     let record = this.withUpdatedTimes({
       id: this.createId('tt'),
-      targetId: target.tpsId,
+      targetId: target.id,
       targetType: target.type,
       sourcePath: target.file.path,
       lineNumber: target.lineNumber,
@@ -1017,13 +1017,13 @@ export class TimeTrackingService {
 
   private async insertTimerTask(
     file: TFile,
-    tpsId: string,
+    id: string,
     title: string,
     creationPlan: LinkedSubitemSemanticCheckboxPlan,
   ): Promise<number | null> {
     if (this.plugin.settings.dataArchitectureMode === 'native-records') return null;
     const safeTitle = String(title || '').replace(/\s+/g, ' ').trim() || 'Untitled timer';
-    const taskLine = updateTaskLineTimestamps(`- ${creationPlan.checkboxState} ${safeTitle} [${TPS_ID_FIELD}:: ${tpsId}]`, {
+    const taskLine = updateTaskLineTimestamps(`- ${creationPlan.checkboxState} ${safeTitle} [${IDENTITY_FIELD}:: ${id}]`, {
       enabled: this.plugin.settings.autoSyncFileTimestamps === true,
       createdKey: this.plugin.settings.dateCreatedFrontmatterKey,
       modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
@@ -1044,13 +1044,13 @@ export class TimeTrackingService {
       }
       const nextContent = insertLineAfterFrontmatter(content, taskLine);
       const lines = nextContent.split(/\r?\n/);
-      insertedLineNumber = lines.findIndex((line) => readInlineFieldValue(line, TPS_ID_FIELD) === tpsId);
+      insertedLineNumber = lines.findIndex((line) => readInlineFieldValue(line, IDENTITY_FIELD) === id);
       return nextContent;
     });
     if (mappingChanged) return null;
     if (insertedLineNumber < 0) {
       const content = await this.plugin.app.vault.cachedRead(file);
-      insertedLineNumber = content.split(/\r?\n/).findIndex((line) => readInlineFieldValue(line, TPS_ID_FIELD) === tpsId);
+      insertedLineNumber = content.split(/\r?\n/).findIndex((line) => readInlineFieldValue(line, IDENTITY_FIELD) === id);
     }
     if (insertedLineNumber < 0) {
       throw new Error(`Failed to create blank timer task in ${file.path}`);
@@ -1091,9 +1091,9 @@ export class TimeTrackingService {
     const type = input?.type === 'task' ? 'task' : 'note';
 
     if (type === 'note') {
-      const tpsId = await this.ensureNoteTpsId(file);
+      const id = await this.ensureNoteId(file);
       const title = input?.title?.trim() || this.getNoteTitle(file);
-      return { file, type, title, tpsId };
+      return { file, type, title, id };
     }
 
     const preferredLineNumber = typeof input?.lineNumber === 'number' ? Math.max(0, Math.floor(input.lineNumber)) : -1;
@@ -1125,9 +1125,9 @@ export class TimeTrackingService {
       return null;
     }
     const title = getTaskDisplayTitle(line) || sourceTitle || parsed.body || file.basename;
-    const existingId = readInlineFieldValue(line, TPS_ID_FIELD) || readInlineFieldValue(line, 'subitemId');
-    const tpsId = existingId || this.createTaskTargetId(file, lineNumber, line);
-    const ensured = await this.ensureTaskLineTpsId(file, lineNumber, line, title, tpsId);
+    const existingId = readInlineFieldValue(line, IDENTITY_FIELD) || readInlineFieldValue(line, 'subitemId');
+    const id = existingId || this.createTaskTargetId(file, lineNumber, line);
+    const ensured = await this.ensureTaskLineId(file, lineNumber, line, title, id);
     if (!ensured) {
       new Notice('Time tracking could not attach a stable id to the task line.');
       return null;
@@ -1143,21 +1143,21 @@ export class TimeTrackingService {
       type,
       lineNumber: ensured.lineNumber,
       title: getTaskDisplayTitle(ensured.rawLine) || title,
-      tpsId: ensured.tpsId,
+      id: ensured.id,
     };
   }
 
-  private async ensureTaskLineTpsId(
+  private async ensureTaskLineId(
     file: TFile,
     preferredLineNumber: number,
     rawLine: string,
     title: string,
-    tpsId: string,
-  ): Promise<{ tpsId: string; lineNumber: number; rawLine: string } | null> {
+    id: string,
+  ): Promise<{ id: string; lineNumber: number; rawLine: string } | null> {
     if (this.plugin.settings.dataArchitectureMode === 'native-records') return null;
-    const wanted = String(tpsId || '').trim();
+    const wanted = String(id || '').trim();
     if (!wanted) return null;
-    let resolved: { tpsId: string; lineNumber: number; rawLine: string } | null = null;
+    let resolved: { id: string; lineNumber: number; rawLine: string } | null = null;
     try {
       await this.plugin.app.vault.process(file, (content) => {
         const newline = content.includes('\r\n') ? '\r\n' : '\n';
@@ -1167,19 +1167,19 @@ export class TimeTrackingService {
         const lineNumber = findCurrentTaskLineIndex(lines, preferredLineNumber, rawLine, title);
         const line = lineNumber >= 0 ? lines[lineNumber] || '' : '';
         if (!parseTaskLine(line)) return content;
-        const existing = readInlineFieldValue(line, TPS_ID_FIELD) || readInlineFieldValue(line, 'subitemId');
+        const existing = readInlineFieldValue(line, IDENTITY_FIELD) || readInlineFieldValue(line, 'subitemId');
         if (existing) {
-          resolved = { tpsId: existing, lineNumber, rawLine: line };
+          resolved = { id: existing, lineNumber, rawLine: line };
           return content;
         }
-        const nextLine = updateTaskLineTimestamps(setInlineFieldValueOnTaskLine(line, TPS_ID_FIELD, wanted), {
+        const nextLine = updateTaskLineTimestamps(setInlineFieldValueOnTaskLine(line, IDENTITY_FIELD, wanted), {
           enabled: this.plugin.settings.autoSyncFileTimestamps === true,
           modifiedKey: this.plugin.settings.dateModifiedFrontmatterKey,
           format: this.plugin.settings.fileTimestampFormat,
           markModified: true,
         });
         lines[lineNumber] = nextLine;
-        resolved = { tpsId: wanted, lineNumber, rawLine: nextLine };
+        resolved = { id: wanted, lineNumber, rawLine: nextLine };
         return `${lines.join(newline)}${endsWithNewline ? newline : ''}`;
       });
     } catch (error) {
@@ -1209,25 +1209,26 @@ export class TimeTrackingService {
     return `task-${Math.abs(hash).toString(36)}`;
   }
 
-  private async ensureNoteTpsId(file: TFile): Promise<string> {
-    let resolved = this.getFrontmatterTpsId(file);
+  private async ensureNoteId(file: TFile): Promise<string> {
+    let resolved = this.getFrontmatterId(file);
     if (resolved) return resolved;
 
     await this.plugin.frontmatterMutationService.process(file, (frontmatter) => {
       // The cache can lag a newly created record. Recheck the current source
       // inside the serialized mutation before allocating an identity.
-      const key = findKeyCaseInsensitive(frontmatter, TPS_ID_FIELD) || findKeyCaseInsensitive(frontmatter, 'subitemId');
+      const identityKey = this.plugin.settings.nativeRecordIdentityPropertyKey || IDENTITY_FIELD;
+      const key = findKeyCaseInsensitive(frontmatter, identityKey) || findKeyCaseInsensitive(frontmatter, 'subitemId');
       resolved = (key ? String(frontmatter[key] ?? '').trim() : '') || this.createId('item');
-      setValueCaseInsensitive(frontmatter, TPS_ID_FIELD, resolved);
+      setValueCaseInsensitive(frontmatter, identityKey, resolved);
     });
     if (!resolved) throw new Error('Could not resolve the note identity.');
     return resolved;
   }
 
-  private getFrontmatterTpsId(file: TFile): string | null {
+  private getFrontmatterId(file: TFile): string | null {
     const frontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter as Record<string, unknown> | undefined;
     if (!frontmatter) return null;
-    const key = findKeyCaseInsensitive(frontmatter, TPS_ID_FIELD) || findKeyCaseInsensitive(frontmatter, 'subitemId');
+    const key = findKeyCaseInsensitive(frontmatter, this.plugin.settings.nativeRecordIdentityPropertyKey || IDENTITY_FIELD) || findKeyCaseInsensitive(frontmatter, 'subitemId');
     const value = key ? String(frontmatter[key] ?? '').trim() : '';
     return value || null;
   }
@@ -1751,10 +1752,10 @@ export class TimeTrackingService {
   ): Promise<TimeTrackingTargetReference | null> {
     if (record.targetType === 'note') {
       const sourceFile = this.resolveFile(record.sourcePath);
-      const sourceId = sourceFile ? this.getFrontmatterTpsId(sourceFile) : null;
+      const sourceId = sourceFile ? this.getFrontmatterId(sourceFile) : null;
       const file = sourceFile && (!sourceId || sourceId === record.targetId || sourceFile.path === stored?.storageFile?.path)
         ? sourceFile
-        : this.findNoteByTpsId(record.targetId) ?? sourceFile ?? stored?.storageFile ?? null;
+        : this.findNoteById(record.targetId) ?? sourceFile ?? stored?.storageFile ?? null;
       if (!(file instanceof TFile)) return null;
       return { file, type: 'note', title: this.getNoteTitle(file) };
     }
@@ -1799,7 +1800,7 @@ export class TimeTrackingService {
     if (preferred >= 0) {
       const line = lines[preferred] || '';
       if (parseTaskLine(line)) {
-        const id = readInlineFieldValue(line, TPS_ID_FIELD) || readInlineFieldValue(line, 'subitemId');
+        const id = readInlineFieldValue(line, IDENTITY_FIELD) || readInlineFieldValue(line, 'subitemId');
         if (!wanted || id === wanted) return preferred;
       }
     }
@@ -1808,7 +1809,7 @@ export class TimeTrackingService {
       if (index === preferred) continue;
       const line = lines[index] || '';
       if (!parseTaskLine(line)) continue;
-      const id = readInlineFieldValue(line, TPS_ID_FIELD) || readInlineFieldValue(line, 'subitemId');
+      const id = readInlineFieldValue(line, IDENTITY_FIELD) || readInlineFieldValue(line, 'subitemId');
       if (id === wanted) return index;
     }
     return -1;
@@ -1891,12 +1892,12 @@ export class TimeTrackingService {
     return true;
   }
 
-  private findNoteByTpsId(tpsId: string): TFile | null {
-    const wanted = String(tpsId || '').trim();
+  private findNoteById(id: string): TFile | null {
+    const wanted = String(id || '').trim();
     if (!wanted) return null;
     for (const file of this.plugin.app.vault.getMarkdownFiles()) {
       if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
-      if (this.getFrontmatterTpsId(file) === wanted) return file;
+      if (this.getFrontmatterId(file) === wanted) return file;
     }
     return null;
   }
