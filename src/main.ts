@@ -122,6 +122,7 @@ import { shouldReuseCustomPropertyPreviewPanel } from './services/custom-propert
 import { ItemHistoryService } from './services/item-history-service';
 import { createLivePreviewBodySelectionExtension } from './services/live-preview-body-selection-service';
 import { normalizeDailyNavDayCount } from './utils/daily-note-nav-days';
+import { normalizeCheckboxMenuStates } from './utils/native-checkbox-marker';
 import { normalizeCreateTaskDefaultParentMode } from './utils/create-task-default-parent';
 
 const NATIVE_PROPERTIES_ALWAYS_HIDDEN = new Set(['allday', 'color', 'folderpath', 'icon', 'sort']);
@@ -1010,6 +1011,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }, { capture: true });
 
     this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
+      if (this.taskCheckboxHandler.handleClick(evt)) return;
       if (this.taskLineContextMenuService.handleClick(evt)) return;
       void this.linkedSubitemCheckboxService.handleClick(evt);
     }, { capture: true });
@@ -1019,17 +1021,17 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         this.taskCheckboxHandler.handleTouchStart(evt);
       }
     }, { capture: true, passive: true });
-    this.registerDomEvent(document, 'touchmove', () => {
+    this.registerDomEvent(document, 'touchmove', (evt: TouchEvent) => {
       this.linkedSubitemCheckboxService.handleTouchCancel();
-      this.taskCheckboxHandler.handleTouchCancel();
+      this.taskCheckboxHandler.handleTouchCancel(evt);
     }, { capture: true, passive: true });
-    this.registerDomEvent(document, 'touchend', () => {
+    this.registerDomEvent(document, 'touchend', (evt: TouchEvent) => {
       this.linkedSubitemCheckboxService.handleTouchCancel();
-      this.taskCheckboxHandler.handleTouchCancel();
+      this.taskCheckboxHandler.handleTouchCancel(evt);
     }, { capture: true, passive: true });
-    this.registerDomEvent(document, 'touchcancel', () => {
+    this.registerDomEvent(document, 'touchcancel', (evt: TouchEvent) => {
       this.linkedSubitemCheckboxService.handleTouchCancel();
-      this.taskCheckboxHandler.handleTouchCancel();
+      this.taskCheckboxHandler.handleTouchCancel(evt);
     }, { capture: true, passive: true });
   }
 
@@ -1676,6 +1678,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     const hadAutomaticViewModeSettings = ['enableViewModeSwitching', 'viewModeFrontmatterKey', 'viewModeIgnoredFolders', 'viewModeRules']
       .some((key) => Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key));
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded ?? {});
+    this.settings.checkboxMenuStates = normalizeCheckboxMenuStates(this.settings.checkboxMenuStates);
     Object.assign(this.settings, await migrateNoteOpeningSettings(this.app, loaded ?? {}));
     const needsNoteOpeningMigration = loaded?.notePostCreateBehavior !== this.settings.notePostCreateBehavior
       || loaded?.noteOpenDestination !== this.settings.noteOpenDestination;
@@ -2412,6 +2415,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
+    this.settings.checkboxMenuStates = normalizeCheckboxMenuStates(this.settings.checkboxMenuStates);
     this.settings.notePostCreateBehavior = ['preview', 'open', 'stay'].includes(this.settings.notePostCreateBehavior)
       ? this.settings.notePostCreateBehavior : 'preview';
     this.settings.enableBasesForcedLinkPreview = this.settings.enableBasesForcedLinkPreview === true;

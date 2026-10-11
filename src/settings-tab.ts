@@ -48,6 +48,7 @@ import {
   OBSIDIAN_BASES_SYNTAX_URL,
 } from './base-query-guide';
 import { normalizeDailyNavDayCount } from './utils/daily-note-nav-days';
+import { normalizeCheckboxMenuStates, parseCheckboxMenuStates } from './utils/native-checkbox-marker';
 import { collectKnownVaultTags } from './utils/known-tags';
 import {
   getAutomaticMutationTagExclusions,
@@ -1790,6 +1791,24 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         );
     new Setting(taskAutomation).setName('Warn before completing with open checkboxes').setDesc('When completing a whole note, warn if unchecked Markdown checkboxes remain in its body.').addToggle(t => t.setValue(this.plugin.settings.checkOpenChecklistItems).onChange(async v => { this.plugin.settings.checkOpenChecklistItems = v; await this.plugin.saveSettings(); }));
     new Setting(taskAutomation).setName('Warn before completing with open child notes').setDesc('When completing a note, warn if linked child notes still have an open status.').addToggle(t => t.setValue(this.plugin.settings.checkParentLinkStatuses).onChange(async v => { this.plugin.settings.checkParentLinkStatuses = v; await this.plugin.saveSettings(); }));
+      let checkboxDraft = normalizeCheckboxMenuStates(this.plugin.settings.checkboxMenuStates).join('\n');
+      const checkboxSetting = new Setting(taskAutomation)
+        .setName('Markdown checkbox menu choices')
+        .setDesc('Right-click or long-press a Markdown checkbox to change its marker. Enter one value per line, such as [ ], [x], [/], [?], or [!]. These do not change note properties. Custom values are always available.')
+        .addTextArea(text => {
+          text.setValue(checkboxDraft).onChange(value => { checkboxDraft = value; });
+          text.inputEl.rows = 5;
+          text.inputEl.setAttribute('aria-label', 'Markdown checkbox menu choices');
+        })
+        .addButton(button => button.setButtonText('Apply').onClick(async () => {
+          const states = parseCheckboxMenuStates(checkboxDraft);
+          if (!states) { new Notice('Use one checkbox character per line, for example [/], [?], or [!].'); return; }
+          if (JSON.stringify(states) === JSON.stringify(this.plugin.settings.checkboxMenuStates)) return;
+          this.plugin.settings.checkboxMenuStates = states;
+          await this.plugin.saveSettings();
+          new Notice('Checkbox menu choices saved.');
+        }));
+      checkboxSetting.settingEl.addClass('tps-gcm-settings-checkbox-menu');
     }
 
     if (this.activeWorkflowPage === 'child-notes') {

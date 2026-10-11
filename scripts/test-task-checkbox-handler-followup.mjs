@@ -24,6 +24,7 @@ async function loadTaskCheckboxHandlerModule() {
             export class App {}
             export class MarkdownView {}
             export class Menu {}
+            export class Setting {}
             export class Notice {}
             export class TFile {}
             export class Modal {

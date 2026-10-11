@@ -2,6 +2,7 @@ import { DEFAULT_NOTEBOOK_NAVIGATOR_RULE_SETTINGS, TPSGlobalContextMenuSettings 
 import { MIGRATED_TASK_STATUS } from './constants/task-migration';
 import { DEFAULT_LINKED_SUBITEM_MAPPINGS } from './utils/linked-subitem-mapping';
 import { DEFAULT_DAILY_NAV_DAY_COUNT } from './utils/daily-note-nav-days';
+import { DEFAULT_CHECKBOX_MENU_STATES } from './utils/native-checkbox-marker';
 
 export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   dataArchitectureMode: 'native-records',
@@ -100,6 +101,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   activityLogMaxEntries: 200,
   folderExclusions: "",
   checkOpenChecklistItems: true,
+  checkboxMenuStates: [...DEFAULT_CHECKBOX_MENU_STATES],
   checkParentLinkStatuses: false,
   parentLinkFrontmatterKey: 'parent',
   enableParentChildIgnoreRule: false,

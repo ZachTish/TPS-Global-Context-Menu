@@ -1,5 +1,58 @@
 # TPS Global Context Menu
 
+## 9.1.0 — Native Markdown checkbox marker menu
+
+Right-click a native Markdown checkbox in Live Preview or Reading View, or
+hold it for 550 ms on mobile, to choose its marker. Defaults are `[ ]`, `[x]`,
+`[/]`, `[?]`, and `[!]`. **Custom checkbox value…** uses the existing accessible
+text modal for any single-character value. Ordinary clicks remain owned by
+Obsidian. A pending hold cancels on movement, release before the deadline,
+multitouch, note switching or unload; after opening, its synthetic click and
+native context-menu duplicate are consumed without toggling the checkbox.
+
+**Workflows → Tasks → Markdown checkbox menu choices** configures the menu's
+order and values, one per line, with an explicit Apply button. The new persisted
+`checkboxMenuStates` array is independent of whole-note status and retired
+linked-checkbox mappings. An empty array keeps only Custom. Invalid drafts do
+not save. No setting migration or note scan is added. The existing five settings
+destinations, default route and disclosure depth remain unchanged. The control
+uses native Setting/textarea/button components and the existing mobile layout;
+its accessible label is explicit.
+
+Only the marker character changes. Live editors use Obsidian's `replaceRange`
+so unsaved text and undo remain intact. Reading View resolves the same section
+and relative source line that core checkbox clicks use, rejects stale cached
+selections before entering the file queue, then rechecks current content in
+`vault.process`. Duplicate titles are not searched or guessed. Source lines in
+frontmatter, fenced/indented code, HTML and comments are protected, and embedded
+or plugin-owned checkboxes are left to their owners. If a renderer cannot expose
+its native source position, GCM does not claim the gesture. Changing the selected
+line while the menu is open requires reopening it.
+
+This does not restore line metadata, checklist status sync, completion dates,
+recurrence, history or task-line action menus. No file-open maintenance,
+background work, cache or watcher is added. Native rendering of special markers
+is theme-dependent; their Markdown values are preserved regardless of theme.
+Minimum Obsidian remains 1.10.0. Physical iPhone verification is separate from
+Mac and simulated touch validation.
+
+Focused tests cover source protection and exact character preservation, source
+positions, current-source conflicts, configured choices, editor ownership, no-op
+operation counts and gesture teardown. The final version passed 37 focused
+marker/gesture checks, 326 supplemental checks and all 1,767 full-suite checks
+with no skips. Validation also requires a separate final `npm run build`,
+test-vault deployment and targeted manifest-ID reload. Installed Obsidian
+1.14.4 QA verified Reading View (including a nested task), Live Preview,
+ordinary core clicks, Custom, native undo and the configurable Tasks control
+with all eight active TPS consumers enabled. The note body changed by exactly
+one marker character per action and its frontmatter stayed intact. Scope-limited
+unit counts are distinct from integrated consumer reads: a Reading View action
+observed 2 raw and 12 cached reads plus 1 process; an editor action observed
+1 raw and 7 cached reads plus 1 replaceRange and no process. Those include
+existing consumer reactions, not solely this handler. No production speed claim
+is made. Test settings were preserved and the synthetic note was archived. See
+[9.1.0 release notes](release-notes/9.1.0.md) for validation and artifact hashes.
+
 ## 9.0.0 — Canonical record identity is id
 
 The native-record API is now version 7. Its envelope exposes `frontmatter.id`

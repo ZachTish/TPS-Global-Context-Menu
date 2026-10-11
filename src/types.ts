@@ -576,6 +576,8 @@ export interface TPSGlobalContextMenuSettings {
   activityLogMaxEntries: number;
   folderExclusions: string;
   checkOpenChecklistItems: boolean;
+  /** Native Markdown marker menu choices; independent of note status mappings. */
+  checkboxMenuStates: string[];
   checkParentLinkStatuses: boolean;
   parentLinkFrontmatterKey: string;
   enableParentChildIgnoreRule: boolean;

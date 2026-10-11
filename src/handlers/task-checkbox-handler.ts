@@ -2,6 +2,8 @@ import { App, MarkdownView, Menu, Notice, TFile } from 'obsidian';
 import * as logger from '../logger';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { StatusChoiceModal } from '../modals/status-choice-modal';
+import { TextInputModal } from '../modals/text-input-modal';
+import { getNativeCheckboxMarker, normalizeCheckboxMenuStates, normalizeNativeCheckboxToken, replaceNativeCheckboxMarker, resolveNativeCheckboxLine } from '../utils/native-checkbox-marker';
 import type { TaskLineContext } from '../services/task-line-context-menu-service';
 import { getCheckboxStateMarker, normalizeCheckboxStateToken } from '../utils/checkbox-state';
 import { findCurrentTaskLineIndex } from '../utils/task-block-move';
@@ -46,12 +48,13 @@ type TaskCheckboxContext = {
     currentToken: string;
 };
 
+type NativeCheckboxContext = TaskCheckboxContext & { view: MarkdownView; checkboxEl: HTMLElement };
+
 /**
  * Handles note-level checklist follow-up behavior.
  *
- * Direct checkbox/line context menus were intentionally removed from GCM. The
- * remaining responsibilities are note-scoped: optional open-checklist
- * property sync and the final note status prompt after external checklist edits.
+ * Whole-note mode exposes only a native Markdown marker menu. Retired line
+ * metadata, status synchronization and recurrence remain behind their gates.
  */
 export class TaskCheckboxHandler {
     private app: App;
@@ -59,12 +62,17 @@ export class TaskCheckboxHandler {
     private recentPropertyWriteUntilByPath: Map<string, number> = new Map();
     private fullVaultSyncToken = 0;
     private checkboxLongPressTimer: number | null = null;
+    private suppressedCheckbox: HTMLElement | null = null;
+    private suppressedCheckboxUntil = 0;
+    private disposed = false;
 
     constructor(private plugin: TPSGlobalContextMenuPlugin) {
         this.app = plugin.app;
     }
 
     dispose(): void {
+        this.disposed = true;
+        this.suppressedCheckbox = null;
         for (const timerId of this.pendingPropertyUpdateTimers.values()) {
             window.clearTimeout(timerId);
         }
@@ -75,7 +83,24 @@ export class TaskCheckboxHandler {
     }
 
     handleContextMenu(evt: MouseEvent): boolean {
-        if (this.plugin.settings.dataArchitectureMode === 'native-records') return false;
+        if (this.disposed) return false;
+        if (this.plugin.settings.dataArchitectureMode === 'native-records') {
+            const target = evt.target instanceof HTMLElement ? evt.target : null;
+            if (this.isSuppressedCheckbox(target)) {
+                this.consumeCheckboxEvent(evt);
+                return true;
+            }
+            const context = this.resolveNativeCheckboxContext(target);
+            if (!context) return false;
+            if (this.checkboxLongPressTimer !== null) {
+                this.suppressedCheckbox = context.checkboxEl;
+                this.suppressedCheckboxUntil = Number.POSITIVE_INFINITY;
+            }
+            this.clearCheckboxLongPressTimer();
+            this.consumeCheckboxEvent(evt);
+            this.showNativeCheckboxMenu(context, evt.clientX, evt.clientY);
+            return true;
+        }
         const targetEl = evt.target instanceof HTMLElement ? evt.target : null;
         const context = this.resolveTaskCheckboxContext(targetEl);
         if (!context) return false;
@@ -89,7 +114,26 @@ export class TaskCheckboxHandler {
     }
 
     handleTouchStart(evt: TouchEvent): boolean {
-        if (this.plugin.settings.dataArchitectureMode === 'native-records') return false;
+        if (this.disposed) return false;
+        if (this.plugin.settings.dataArchitectureMode === 'native-records') {
+            this.clearCheckboxLongPressTimer();
+            if (evt.touches.length !== 1) return false;
+            this.suppressedCheckbox = null;
+            const context = this.resolveNativeCheckboxContext(evt.target instanceof HTMLElement ? evt.target : null);
+            if (!context) return false;
+            const { clientX, clientY } = evt.touches[0];
+            this.checkboxLongPressTimer = window.setTimeout(() => {
+                this.checkboxLongPressTimer = null;
+                if (this.disposed || !context.checkboxEl.isConnected) return;
+                const liveContext = this.resolveNativeCheckboxContext(context.checkboxEl);
+                if (!liveContext || liveContext.file !== context.file || liveContext.lineNumber !== context.lineNumber
+                    || liveContext.rawLine !== context.rawLine) return;
+                this.suppressedCheckbox = context.checkboxEl;
+                this.suppressedCheckboxUntil = Number.POSITIVE_INFINITY;
+                this.showNativeCheckboxMenu(liveContext, clientX, clientY);
+            }, 550);
+            return true;
+        }
         const targetEl = evt.target instanceof HTMLElement ? evt.target : null;
         const context = this.resolveTaskCheckboxContext(targetEl);
         if (!context) return false;
@@ -103,8 +147,125 @@ export class TaskCheckboxHandler {
         return true;
     }
 
-    handleTouchCancel(): void {
+    handleTouchCancel(evt?: TouchEvent): void {
         this.clearCheckboxLongPressTimer();
+        if ((!evt || evt.touches.length === 0) && this.suppressedCheckbox && this.suppressedCheckboxUntil === Number.POSITIVE_INFINITY) {
+            this.suppressedCheckboxUntil = Date.now() + 1500;
+        }
+    }
+
+    /** Leave ordinary clicks to Obsidian; consume only the click following our long press. */
+    handleClick(evt: MouseEvent): boolean {
+        const target = evt.target instanceof HTMLElement ? evt.target : null;
+        if (!this.isSuppressedCheckbox(target)) return false;
+        this.suppressedCheckbox = null;
+        this.consumeCheckboxEvent(evt);
+        return true;
+    }
+
+    private isSuppressedCheckbox(target: HTMLElement | null): boolean {
+        if (Date.now() > this.suppressedCheckboxUntil) this.suppressedCheckbox = null;
+        return !!target && !!this.suppressedCheckbox
+            && (target === this.suppressedCheckbox || this.suppressedCheckbox.contains(target));
+    }
+
+    private consumeCheckboxEvent(evt: MouseEvent): void {
+        evt.preventDefault();
+        evt.stopPropagation();
+        evt.stopImmediatePropagation();
+    }
+
+    private resolveNativeCheckboxContext(target: HTMLElement | null): NativeCheckboxContext | null {
+        const checkboxEl = target?.closest<HTMLElement>('.task-list-item-checkbox');
+        if (!checkboxEl || checkboxEl.closest('.markdown-embed, .internal-embed, .cm-embed-block, .canvas-node-content, .tps-gcm-linked-subitem-task, .tps-gcm-linked-subitem-checkbox, .tps-gcm-checklist-toggle')) return null;
+        const view = this.resolveMarkdownViewForElement(checkboxEl);
+        if (!view || !(view.file instanceof TFile)) return null;
+        let lineNumber: number;
+        let source: string;
+        if (view.getMode() === 'source') {
+            const cmLine = checkboxEl.closest('.cm-line');
+            const cm = (view.editor as any)?.cm;
+            if (!cmLine || !cm?.posAtDOM || !cm?.state?.doc) return null;
+            try {
+                lineNumber = cm.state.doc.lineAt(cm.posAtDOM(cmLine, 0)).number - 1;
+                source = view.editor.getValue();
+            } catch { return null; }
+        } else {
+            // Use the same section-relative source position as Obsidian's own
+            // Reading View checkbox click. Do not fuzzy-match rendered titles.
+            const relativeLine = checkboxEl.getAttribute('data-line');
+            if (relativeLine == null || !/^\d+$/u.test(relativeLine)) return null;
+            const section = (view.previewMode as any)?.renderer?.getSectionInfo?.(checkboxEl);
+            if (!section || !Number.isInteger(section.lineStart) || typeof section.text !== 'string') return null;
+            lineNumber = section.lineStart + Number(relativeLine);
+            source = section.text;
+        }
+        const line = resolveNativeCheckboxLine(source, lineNumber);
+        const marker = line && getNativeCheckboxMarker(line.text);
+        return line && marker ? { view, checkboxEl, file: view.file, lineNumber, rawLine: line.text, currentToken: marker.token } : null;
+    }
+
+    private showNativeCheckboxMenu(context: NativeCheckboxContext, x: number, y: number): void {
+        const menu = new Menu();
+        for (const token of normalizeCheckboxMenuStates(this.plugin.settings.checkboxMenuStates)) {
+            menu.addItem(item => item.setTitle(token).setChecked(token === context.currentToken)
+                .onClick(() => { void this.setNativeCheckboxMarker(context, token); }));
+        }
+        menu.addSeparator();
+        menu.addItem(item => item.setTitle('Custom checkbox value…').setIcon('brackets').onClick(() => {
+            if (this.disposed) return;
+            new TextInputModal(this.app, 'Checkbox value', context.currentToken, async value => {
+                const token = normalizeNativeCheckboxToken(value);
+                if (!token) { new Notice('Use one checkbox character, such as /, ?, !, x, or blank.'); return; }
+                await this.setNativeCheckboxMarker(context, token);
+            }, { selectOnOpen: true }).open();
+        }));
+        menu.showAtPosition({ x, y });
+    }
+
+    private async setNativeCheckboxMarker(context: NativeCheckboxContext, token: string): Promise<void> {
+        const nextToken = normalizeNativeCheckboxToken(token);
+        if (this.disposed || !nextToken || nextToken === context.currentToken) return;
+        if (context.view.file !== context.file || this.app.vault.getAbstractFileByPath(context.file.path) !== context.file) return;
+        let result: 'changed' | 'stale' | 'unchanged' = 'stale';
+        try {
+            // Preserve unsaved changes and native undo whenever an editor owns
+            // this note, including another open leaf of the same file.
+            const editorViews = this.app.workspace.getLeavesOfType('markdown').map(leaf => leaf.view)
+                .filter(view => view instanceof MarkdownView && view.file === context.file && view.getMode() === 'source') as MarkdownView[];
+            const editorView = editorViews.find(view => view === context.view) ?? editorViews[0];
+            if (editorView) {
+                const line = resolveNativeCheckboxLine(editorView.editor.getValue(), context.lineNumber, context.rawLine);
+                if (line) {
+                    const marker = getNativeCheckboxMarker(line.text)!;
+                    editorView.editor.replaceRange(nextToken[1], { line: line.index, ch: marker.markerOffset }, { line: line.index, ch: marker.markerOffset + 1 });
+                    result = 'changed';
+                }
+            } else {
+                // A read-only preflight rejects stale/no-op selections before
+                // entering the serialized queue. Fresh source is checked again
+                // at Obsidian's existing atomic process boundary.
+                const cached = await this.app.vault.cachedRead(context.file);
+                if (this.disposed || context.view.file !== context.file
+                    || this.app.vault.getAbstractFileByPath(context.file.path) !== context.file) return;
+                const preflight = replaceNativeCheckboxMarker(cached, context.lineNumber, context.rawLine, nextToken);
+                if (preflight !== null && preflight !== cached) {
+                    const processPath = context.file.path;
+                    await this.app.vault.process(context.file, source => {
+                        if (this.disposed || context.view.file !== context.file || context.file.path !== processPath
+                            || this.app.vault.getAbstractFileByPath(processPath) !== context.file) return source;
+                        const updated = replaceNativeCheckboxMarker(source, context.lineNumber, context.rawLine, nextToken);
+                        result = updated === null ? 'stale' : updated === source ? 'unchanged' : 'changed';
+                        return updated ?? source;
+                    });
+                } else if (preflight === cached) result = 'unchanged';
+            }
+            logger.flow('MarkdownCheckboxMenu', 'marker:update', { path: context.file.path, line: context.lineNumber + 1, marker: nextToken, result });
+            if (result === 'stale') new Notice('That checkbox changed. Reopen its menu and try again.');
+        } catch (error) {
+            logger.flowError('MarkdownCheckboxMenu', 'marker:failed', error, { path: context.file.path });
+            new Notice('Could not change that checkbox.');
+        }
     }
 
     private clearCheckboxLongPressTimer(): void {
