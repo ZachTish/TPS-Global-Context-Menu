@@ -419,6 +419,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private fileExclusionService: AutoFrontmatterExclusionService;
 
   private settingsPersistence: SettingsPersistenceCoordinator | null = null;
+  private pendingExternalRecordSettings = false;
 
   private isCanvasOrBasesInteractionTarget(target: EventTarget | null): target is HTMLElement {
     if (!(target instanceof HTMLElement)) return false;
@@ -497,6 +498,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }));
 
     await this.loadSettings();
+    if (this.pendingExternalRecordSettings) await this.onExternalSettingsChange();
     if (this.startupOwner !== startupOwner) return;
     logger.setLoggingEnabled(this.settings.enableLogging);
 
@@ -1660,6 +1662,27 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
   usesNativeRecordArchitecture(): boolean {
     return this.settings?.dataArchitectureMode === 'native-records';
+  }
+
+  async onExternalSettingsChange(): Promise<void> {
+    const owner = this.startupOwner;
+    const persistence = this.settingsPersistence;
+    if (!owner) return;
+    if (!persistence) { this.pendingExternalRecordSettings = true; return; }
+    this.pendingExternalRecordSettings = false;
+    try {
+      const changed = await persistence.refreshExternalKeys(
+        this.settings as unknown as SettingsRecord,
+        Object.keys(this.settings).filter(key => key.startsWith('nativeRecord')),
+        () => this.startupOwner === owner && this.settingsPersistence === persistence,
+      );
+      if (!changed || this.startupOwner !== owner) return;
+      this.nativeRecordService?.refreshConfiguration();
+      this.emitGcmApiChanged(true);
+      logger.flow('Settings', 'external-record-configuration:applied', { changed });
+    } catch (error) {
+      logger.flowError('Settings', 'external-record-configuration:failed', error);
+    }
   }
 
   async loadSettings(): Promise<void> {

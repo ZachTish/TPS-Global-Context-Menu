@@ -1166,3 +1166,49 @@ test('sparse old settings retain the old physical identity while first installs 
   assert.match(load, /delete preNormalizationSettings\.nativeRecordIdentityPropertyKey/u);
   assert.doesNotMatch(load, /vault\.(?:read|process|modify)|migrateStorageProfile/u);
 });
+
+test('synced record identity updates live settings without saving and preserves local changes', async () => {
+  const { SettingsPersistenceCoordinator, reconcilePersistedSettingsInPlace } = await importModule('../src/settings-persistence.ts');
+  let disk = { identity: 'id', local: 'remote', timer: 99 }, writes = 0;
+  const live = { identity: 'tpsId', local: 'before', timer: 1 };
+  const c = new SettingsPersistenceCoordinator(async () => disk, async v => { writes++; disk = v; }, (a,b) => reconcilePersistedSettingsInPlace(live,a,b));
+  c.setBaseline(live); live.local = 'edited';
+  assert.equal(await c.refreshExternalKeys(live, ['identity', 'local'], () => true), 1);
+  assert.deepEqual(live, { identity: 'id', local: 'edited', timer: 1 });
+  assert.equal(writes, 0);
+  assert.equal(await c.refreshExternalKeys(live, ['identity'], () => true), 0);
+  await c.request(live);
+  assert.deepEqual(disk, { identity: 'id', local: 'edited', timer: 99 });
+});
+
+test('synced settings reject missing/malformed payloads and unloading', async () => {
+  const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
+  for (const disk of [null, [], {}]) {
+    const live = { identity: 'id' };
+    const c = new SettingsPersistenceCoordinator(async () => disk, async () => assert.fail('No write'));
+    c.setBaseline(live);
+    assert.equal(await c.refreshExternalKeys(live, ['identity'], () => true), 0);
+    assert.equal(live.identity, 'id');
+  }
+  const live = { identity: 'id' }; let active = true;
+  const c = new SettingsPersistenceCoordinator(async () => { active = false; return {identity:'old'}; }, async () => assert.fail('No write'));
+  c.setBaseline(live);
+  assert.equal(await c.refreshExternalKeys(live, ['identity'], () => active), 0);
+  assert.equal(live.identity, 'id');
+});
+
+test('a local save invalidates an older external settings read', async () => {
+  const { SettingsPersistenceCoordinator } = await importModule('../src/settings-persistence.ts');
+  const live = { identity: 'tpsId' }; let disk = {...live}, finishRead, reads = 0;
+  const c = new SettingsPersistenceCoordinator(async () => {
+    if (++reads === 1) return new Promise(resolve => { finishRead = resolve; });
+    return disk;
+  }, async v => { disk = v; });
+  c.setBaseline(live);
+  const refreshing = c.refreshExternalKeys(live, ['identity'], () => true);
+  await new Promise(resolve => setImmediate(resolve));
+  live.identity = 'id'; await c.request(live);
+  finishRead({identity:'old'});
+  assert.equal(await refreshing, 0);
+  assert.equal(live.identity, 'id');
+});

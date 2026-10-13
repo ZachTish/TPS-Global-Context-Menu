@@ -1,5 +1,35 @@
 # TPS Global Context Menu
 
+## 9.1.1 — Adopt synced record configuration
+
+Obsidian’s external-settings notification now updates the running record
+configuration (the existing `nativeRecord*` settings), including the identity
+property, storage layout, and kind mappings. Unchanged notifications perform no
+index refresh; changed configuration refreshes GCM’s index and notifies Health
+and other API consumers. It does not rewrite notes, save settings back, add a
+poller, or hardcode `id` over a configured custom key. Local unsaved edits are
+preserved. Settings reads interrupted by local saves are discarded and reread;
+unload invalidates outstanding work. Missing payloads retain current settings.
+
+This fixes the stale running configuration path; it does not transport settings
+between devices. Obsidian Sync must sync community-plugin settings, and each
+device must install this version. Other GCM settings retain their existing
+reload behavior. Existing notes written with a former identity key still need
+an explicitly reviewed migration; no automatic repair is introduced.
+
+Validation: settings persistence regression coverage includes no-write adoption,
+local edits, unchanged payloads, missing data, unload and save/read races.
+The full versioned suite passed 1,770 tests. The separate production build
+deployed to the test vault, and CLI plugin reload verified version 9.1.1.
+An installed-plugin probe simulated stale in-memory `tpsId` against persisted
+`id`: recognition changed from false to true, with zero settings writes and
+one index refresh across two notifications. Temporary instrumentation was
+restored. The fresh-identity creation API used by Health also created a
+synthetic workout with `id` and no `tpsId`; the fixture was archived. The separate
+caller-supplied-ID create route was blocked by an existing malformed archived
+QA fixture, which was left untouched. Physical iPhone Sync delivery has not
+been tested.
+
 ## 9.1.0 — Native Markdown checkbox marker menu
 
 Right-click a native Markdown checkbox in Live Preview or Reading View, or

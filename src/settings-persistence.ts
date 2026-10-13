@@ -121,6 +121,44 @@ export class SettingsPersistenceCoordinator {
     return this.drainPromise ?? Promise.resolve();
   }
 
+  /** Read-only adoption of synced configuration. Never writes settings or notes. */
+  async refreshExternalKeys(
+    live: SettingsRecord,
+    keys: readonly string[],
+    isCurrent: () => boolean,
+  ): Promise<number> {
+    while (isCurrent()) {
+      await this.waitForIdle();
+      if (!isCurrent()) return 0;
+      const baseline = this.baseline;
+      const latest = await this.loadLatest();
+      if (!isCurrent()) return 0;
+      // A completed or queued local save supersedes this read. Drain that
+      // existing owner before reading again; do not apply stale disk evidence.
+      if (baseline !== this.baseline || this.drainPromise) continue;
+      if (!latest || typeof latest !== 'object' || Array.isArray(latest)) return 0;
+      const selected = keys.filter(key => hasOwn(latest, key));
+      if (selected.some(key => latest[key] === null
+        || typeof latest[key] !== typeof baseline[key]
+        || Array.isArray(latest[key]) !== Array.isArray(baseline[key]))) {
+        throw new Error('Synced record settings have an invalid shape. Existing configuration was retained.');
+      }
+      const nextBaseline = cloneSettings(baseline);
+      let changed = 0;
+      for (const key of selected) {
+        const external = cloneSettings({ value: latest[key] }).value;
+        if (valuesMatch(live[key], baseline[key]) && !valuesMatch(live[key], external)) {
+          live[key] = external;
+          changed += 1;
+        }
+        nextBaseline[key] = external;
+      }
+      this.baseline = nextBaseline;
+      return changed;
+    }
+    return 0;
+  }
+
   private startDrain(): void {
     // Defer entry so the promise is installed before drain() can finish a
     // no-op request. drain() clears the field synchronously before settling,
