@@ -680,7 +680,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     // Obsidian finishes loading plugins before layout readiness. Do not await
     // the layout-owned data job here; register every surface first and publish
-    // the unchanged API only after the owned data/configuration has settled.
+    // the API after configuration; record operations await their own discovery.
     this.app.workspace.onLayoutReady(() => {
       if (this.startupOwner !== startupOwner) return;
       void this.initializeStartupServices(startupOwner, nativeIndexReady, historyReady)
@@ -858,7 +858,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     nativeIndexReady: Promise<boolean>,
     historyReady: Promise<void>,
   ): Promise<void> {
-    if (!await nativeIndexReady || this.startupOwner !== startupOwner) return;
+    // Record operations retain their own index-readiness barriers. Publish
+    // configuration and canonical daily-note lookup without waiting for the
+    // unrelated vault inventory; never present an incomplete indexed snapshot.
     await historyReady;
     if (this.startupOwner !== startupOwner) return;
     await this.fileNamingService.whenDailyNoteConfigurationReady();
@@ -866,10 +868,11 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (this.settings.enableItemHistory !== false) await this.itemHistoryService.whenActivationMaintenanceReady();
     if (this.startupOwner !== startupOwner) return;
     setupPluginApi(this);
+    this.emitGcmApiChanged(true);
+    if (!await nativeIndexReady || this.startupOwner !== startupOwner) return;
     this.nativeBaseNoteOpening.install();
     this.register(() => this.nativeBaseNoteOpening.dispose());
     this.tpsNotebookNavigatorMenuBridge.start();
-    this.emitGcmApiChanged(true);
     this.syncTimeTrackingActivation();
   }
 

@@ -5050,7 +5050,7 @@ test('cold split: the relationship listener waits for layout even with warm meta
   } finally { p.unload(); tasks.restore(); }
 });
 
-test('cold split: API requests remain unavailable until one complete owned post-layout inventory', async () => {
+test('cold split: API requests expose services while indexed evidence remains explicitly unready', async () => {
   const tasks = manualStartupTasks();
   const h = startupLoad();
   const p = coldStartupHarness(h);
@@ -5063,13 +5063,15 @@ test('cold split: API requests remain unavailable until one complete owned post-
     p.layout();
     await flushStartupMicrotasks();
     assertColdStartupContinuationOwners(h, p, tasks);
-    assert.equal(p.plugin.api, undefined);
+    assert.ok(p.plugin.api);
+    assert.deepEqual(p.plugin.api.nativeRecords.indexedSnapshot(), { ready: false, records: [] });
     p.requestApi();
-    assert.equal(p.availability.at(-1)?.available, false);
+    assert.equal(p.availability.at(-1)?.available, true);
     await tasks.drain();
     await flushStartupMicrotasks();
     assert.equal(h.counters.inventories, 1, 'Native retains its single initial inventory');
-    assert.deepEqual(p.publications, [1025]);
+    assert.equal(p.publications.length, 1);
+    assert.ok(p.publications[0] < 1025);
     assert.equal(p.availability.at(-1)?.available, true);
     assert.equal(p.relationshipInventories, 1);
     assert.equal(h.counters.reads + h.counters.writes, 0);
@@ -5344,7 +5346,7 @@ test('cold split: full-source facade reaches all registrations and exact invento
     await tasks.drain();
     await loaded;
     await flushStartupMicrotasks();
-    assert.deepEqual(p.publications, [1025]);
+    assert.equal(p.publications.length, 1);
     assert.equal(p.availability.at(-1)?.available, true);
     assert.equal(p.registrations.commands, 1);
     assert.ok(p.registrations.editors >= 3);
@@ -5360,7 +5362,7 @@ test('cold split: full-source facade reaches all registrations and exact invento
   } finally { p.unload(); await tasks.drain(); tasks.restore(); }
 });
 
-test('cold split: failed owned discovery settles once without publication or an automatic retry', async () => {
+test('cold split: failed discovery blocks record operations without a retry or withdrawing read-only services', async () => {
   const tasks = manualStartupTasks();
   const h = startupLoad();
   const p = coldStartupHarness(h);
@@ -5378,8 +5380,9 @@ test('cold split: failed owned discovery settles once without publication or an 
     await loaded;
     await assert.rejects(h.service.setup(), /synthetic post-layout inventory failure/u);
     assert.equal(h.service.setup(), h.service.setupPromise, 'failed owner cannot silently restart');
-    assert.deepEqual(p.publications, []);
-    assert.equal(p.plugin.api, undefined);
+    assert.equal(p.publications.length, 1);
+    assert.deepEqual(p.plugin.api.nativeRecords.indexedSnapshot(), { ready: false, records: [] });
+    await assert.rejects(p.plugin.api.nativeRecords.createFresh('task', { title: 'Blocked' }), /synthetic post-layout inventory failure/u);
     assert.equal(h.counters.inventories, 1);
     assert.ok(p.relationshipInventories <= 1, 'independent relationship discovery cannot retry on native failure');
     assert.equal(tasks.pending, 0);
@@ -5548,7 +5551,7 @@ test('cold split: pre-layout metadata/create/delete/rename/replacement sources s
     for (const file of [renamed, reusedOldPath, replacement, created]) {
       assert.equal(h.service.newlyCreatedFiles.has(file), false, 'pre-layout discovery does not adopt task drafts');
     }
-    assert.deepEqual(p.publications, [source.length]);
+    assert.equal(p.publications.length, 1);
     assert.equal(h.counters.inventories, 1);
     assert.equal(h.counters.reads + h.counters.writes, 0);
     assert.deepEqual(beforeLayout, { inventories: 0, metadata: 0, reads: 0, writes: 0 });
@@ -5597,23 +5600,52 @@ test('cold split: a global resolved event before layout records proof without ea
   } finally { p.unload(); tasks.restore(); }
 });
 
-test('actual onload publishes the native API only after its initial inventory completes', async () => {
+test('actual onload publishes services during discovery while record creation still waits', async () => {
   const tasks = manualStartupTasks();
-  const h = startupLoad();
+  const h = startupLoad('native-records', 4049);
   const p = startupPublicationHarness(h);
+  let creation;
   try {
     const loaded = p.plugin.onload();
     await flushStartupMicrotasks();
     p.layout();
+    await flushStartupMicrotasks();
     assertColdStartupContinuationOwners(h, p, tasks);
-    assert.equal(p.plugin.api === undefined, true, 'no consumer receives a partly indexed NativeRecords API');
-    assert.deepEqual(p.availability, []);
+    assert.ok(p.plugin.api);
+    assert.deepEqual(p.plugin.api.nativeRecords.indexedSnapshot(), { ready: false, records: [] });
+    assert.equal(p.publications.length, 1);
+    assert.ok(p.publications[0] < 4049);
+    creation = p.plugin.api.nativeRecords.createFresh('task', { title: 'After discovery' });
+    await flushStartupMicrotasks();
+    assert.equal(h.counters.reads + h.counters.writes, 0, 'no record work crosses the discovery barrier');
     await tasks.drain();
     await loaded;
-    assert.deepEqual(p.publications, [1025]);
+    assert.ok(await creation);
     assert.deepEqual(p.availability, [true]);
+    assert.equal(p.publications.length, 1, 'completion does not restart API consumers');
     assert.equal(h.counters.inventories, 1);
+  } finally { p.unload(); await creation?.catch(() => {}); tasks.restore(); }
+});
+
+test('unload after early publication cancels queued creation and never starts deferred owners', async () => {
+  const tasks = manualStartupTasks();
+  const h = startupLoad();
+  const p = startupPublicationHarness(h);
+  let creation;
+  try {
+    await p.plugin.onload();
+    p.layout();
+    await flushStartupMicrotasks();
+    assert.ok(p.plugin.api);
+    creation = assert.rejects(p.plugin.api.nativeRecords.createFresh('task', { title: 'Cancelled' }), /cancelled/u);
+    p.unload();
+    const stopped = { ...h.counters };
+    await tasks.drain();
+    await creation;
+    assert.equal(p.plugin.api, undefined);
+    assert.deepEqual(h.counters, stopped);
     assert.equal(h.counters.reads + h.counters.writes, 0);
+    assert.deepEqual(p.availability, [true, false]);
   } finally { p.unload(); tasks.restore(); }
 });
 

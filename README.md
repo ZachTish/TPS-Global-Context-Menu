@@ -1,5 +1,42 @@
 # TPS Global Context Menu
 
+## 9.1.2 — Daily-note access during record discovery
+
+The API becomes available after configuration and any enabled history recovery
+are ready, without also waiting for the native-record inventory. Existing
+canonical daily notes can be found through the same configured daily-note API
+while that inventory runs. No property mapping, storage key, template, or Sync
+setting changes. This removes a startup dependency; it does not reduce the
+inventory's total work or change Obsidian Sync's transport.
+
+API availability means the services are callable, not that record discovery is
+complete. `nativeRecords.indexedSnapshot()` continues to report `ready: false`
+and no records until ready. Identity-based operations and mutations retain their
+existing awaited discovery barriers; a failed inventory rejects those operations.
+Base-opening hooks and timer recovery still start after discovery. Consumers
+receive one availability notification, avoiding a second discovery/render cascade.
+Unload cancels pending activation. No poller, persistent cache, repair or retry
+is added. Enabled history recovery retains its original publication barrier.
+
+Validation covers actual startup with a paused 4,049-record inventory, zero
+record reads/writes before its barrier, creation after readiness, failed discovery,
+unload, and incoming create/modify/rename/delete events. The lifecycle harness
+uses real discovery with bounded UI facades. Installed test-vault reload and
+foreground timing results are recorded with the release; they do not establish
+cold production or physical iPhone performance.
+
+Installed foreground test-vault comparison (20,680 Markdown files, five plugin
+reloads per version, Health/Controller/Navigator enabled): median API availability
+489 ms → 132 ms; median completion of GCM plus Health discovery 725 ms → 663 ms.
+Both performed two Markdown inventories, zero `process`/`modify` attempts, and
+no observed >50 ms long tasks. Baseline raw reads were 1–2 and updated reads 1,
+all of a development README, not user notes. The new API found the synthetic
+canonical daily note in every sample while `indexedSnapshot` was still unready.
+These are warm plugin-reload samples, not full application launches or a physical
+phone Sync backlog. Existing malformed/duplicate QA identity fixtures remain
+unchanged; the read-only timing probe included conflicts rather than bypassing
+mutation safeguards. No production runtime was deployed.
+
 ## 9.1.1 — Adopt synced record configuration
 
 Obsidian’s external-settings notification now updates the running record
