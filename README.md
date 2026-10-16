@@ -1,5 +1,15 @@
 # TPS Global Context Menu
 
+## 10.1.0 — Discover every vault property in Custom properties
+
+**Properties → Custom fields → Field definitions** now combines saved definitions with every top-level frontmatter key currently found in the vault's cached Markdown metadata. Existing definitions keep their values, order, IDs, scopes and visibility. Unconfigured keys appear afterward in alphabetical cards marked **Not defined**; search and type filtering cover both groups. Blank, list, checkbox, numeric, structured and punctuation-bearing keys are included, with case-insensitive deduplication using GCM's existing key identity. Obsidian's synthetic frontmatter position is excluded. Object members are not flattened into new dotted keys.
+
+Opening the page does not add definitions or change notes. Expand a discovered card and choose **Define property** to save one definition and open the existing editor. Scalars, lists, numbers and booleans provide initial editor-type suggestions; mixed/structured or empty-only values start as Text and can be configured. Lists start as text lists. Newly defined fields start with both GCM note-menu visibility switches off; the user chooses when and where they appear. The pending card also exposes the existing Navigator-owned visibility controls without requiring a GCM definition. Deleting a definition leaves its key discoverable while notes still contain it. Existing key/value migration, type/label/options, scopes, ordering, and visibility actions remain in the defined editor.
+
+The five existing settings destinations, default route, and one-card disclosure model remain. Add field moves before the collection; no action or control is removed. Native buttons and the existing responsive card layout remain in use. Search, selected/open card, and discovered rows are transient UI state. No schema migration, note rewrite, background scan, cache, watcher, provider call or startup hook is added. Discovery makes one public-API cached-metadata inventory only when this settings collection is rendered; collapsing/reopening a card and filtering reuse the current rows. Retired automatic maintenance remains retired.
+
+Regression and installed test-vault validation, known limitations, minimum Obsidian **1.10.0**, and artifact hashes are recorded in [10.1.0 release notes](release-notes/10.1.0.md). This additive minor release is a public BRAT handoff; production and physical iPhone acceptance remain separate.
+
 ## 10.0.0 — Explicit note actions without background maintenance
 
 This major release removes appearance rules and generated metadata, automatic timestamps/folder paths/title/filename repair, Daily Note population/repair, recurrence recovery/successor creation/propagation, relationship reconciliation, deleted-link cleanup, scheduled archive sweeps and attachment-companion source maintenance. Their listeners, timers, writers, unused implementations and retired UI controls are deleted. Existing notes, properties, credentials, databases, recurrence/session files and legacy settings remain untouched; saved old switches are inert. No replacement scheduler, cache, watcher, mailbox or repair loop is added.

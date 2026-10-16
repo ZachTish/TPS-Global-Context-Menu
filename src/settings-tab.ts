@@ -46,6 +46,8 @@ import {
 import { normalizeDailyNavDayCount } from './utils/daily-note-nav-days';
 import { normalizeCheckboxMenuStates, parseCheckboxMenuStates } from './utils/native-checkbox-marker';
 import { collectKnownVaultTags } from './utils/known-tags';
+import { collectUndefinedVaultProperties } from './utils/vault-property-definitions';
+import { normalizePropertyKeyIdentity } from './utils/property-key-identity';
 import {
   getAutomaticMutationTagExclusions,
   updateAutomaticMutationTagExclusion,
@@ -1383,8 +1385,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         cls: 'setting-item-description',
       });
 
-      const propertiesConfigContainer = propertyConfig.createDiv();
-      this.renderProperties(propertiesConfigContainer);
       new Setting(propertyConfig)
         .addButton(btn => btn.setButtonText('Add field').setCta().onClick(async () => {
           const key = createUniquePropertyKey('new_prop', this.plugin.settings.properties);
@@ -1392,6 +1392,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
           this.display();
         }));
+      const propertiesConfigContainer = propertyConfig.createDiv();
+      this.renderProperties(propertiesConfigContainer);
     }
 
     // --- Automation Features (Consolidated) ---
@@ -1915,6 +1917,15 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           });
       });
 
+    const discovered = collectUndefinedVaultProperties(this.app, this.plugin.settings.properties);
+    const propertyRows = [
+      ...this.plugin.settings.properties.map((property, index) => ({ property, index })),
+      ...discovered.map(property => ({ property, index: -1 })),
+    ];
+    container.createEl('p', {
+      text: `${this.plugin.settings.properties.length} defined · ${discovered.length} found in notes, not yet defined. Discovery does not change notes or enable fields.`,
+      cls: 'setting-item-description',
+    });
     const filters = container.createDiv({ cls: 'tps-gcm-property-filters' });
     const cards: Array<{ element: HTMLDetailsElement; property: CustomProperty }> = [];
     const applyFilter = () => {
@@ -1931,11 +1942,11 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       .addDropdown(dropdown => {
         dropdown.selectEl.setAttribute('aria-label', 'Filter properties by type');
         dropdown.addOption('', 'All types');
-        for (const type of [...new Set(this.plugin.settings.properties.map(prop => prop.type))].sort()) dropdown.addOption(type, type);
+        for (const type of [...new Set(propertyRows.map(({ property }) => property.type))].sort()) dropdown.addOption(type, type);
         dropdown.setValue(this.propertyTypeFilter).onChange(value => { this.propertyTypeFilter = value; applyFilter(); });
       });
 
-    this.plugin.settings.properties.forEach((prop, index) => {
+    propertyRows.forEach(({ property: prop, index }) => {
       const stateKey = `Custom Property::${prop.id || prop.key || index}`;
       const details = container.createEl('details', { cls: 'tps-gcm-setting-item tps-collapsible-section tps-gcm-property-card' });
       cards.push({ element: details, property: prop });
@@ -1943,10 +1954,14 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       details.style.borderRadius = '6px';
       details.style.border = '1px solid var(--background-modifier-border)';
       if (this.sectionState.get(stateKey) ?? false) details.setAttr('open', 'true');
+      const renderEditor = () => {
+        if (index < 0) this.renderUndefinedPropertyEditor(details, prop);
+        else this.renderCustomPropertyEditor(details, prop, index);
+      };
       details.addEventListener('toggle', () => {
         this.sectionState.set(stateKey, details.open);
         if (details.open) {
-          this.renderCustomPropertyEditor(details, prop, index);
+          renderEditor();
           for (const card of cards) if (card.element !== details) card.element.open = false;
         }
       });
@@ -1958,11 +1973,40 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       summary.style.gap = '12px';
       const summaryTitle = summary.createSpan({ cls: 'tps-collapsible-section-title' });
       summaryTitle.createEl('strong', { text: prop.label || 'Unnamed Property' });
-      summaryTitle.createSpan({ text: `  ${prop.key || '(no key)'} · ${prop.type || 'text'}` });
+      summaryTitle.createSpan({ text: `  ${prop.key || '(no key)'} · ${prop.type || 'text'}${index < 0 ? ' · Not defined' : ''}` });
 
-      if (details.open) this.renderCustomPropertyEditor(details, prop, index);
+      if (details.open) renderEditor();
     });
     applyFilter();
+  }
+
+  private renderUndefinedPropertyEditor(details: HTMLDetailsElement, property: CustomProperty): void {
+    if (details.querySelector('.tps-collapsible-section-content')) return;
+    const container = details.createDiv({ cls: 'tps-collapsible-section-content tps-gcm-settings-property-editor' });
+    new Setting(container).setName('Define this property')
+      .setDesc('Add its definition to choose the label, editor type and visibility. Note menus stay off until you enable them. Existing note values are not changed.')
+      .addButton(button => button.setButtonText('Define property').setCta().onClick(async () => {
+        button.setDisabled(true);
+        const properties = this.plugin.settings.properties;
+        const existing = properties.find(entry => normalizePropertyKeyIdentity(entry.key) === normalizePropertyKeyIdentity(property.key));
+        const definition = existing ?? {
+          ...property,
+          id: createUniquePropertyKey(property.id, properties.map(entry => ({ key: entry.id }))),
+        };
+        if (!existing) properties.push(definition);
+        try {
+          if (!existing) await this.plugin.saveSettings();
+          this.sectionState.set(`Custom Property::${definition.id}`, true);
+          this.display();
+        } catch (error) {
+          const current = this.plugin.settings.properties;
+          const index = current.indexOf(definition);
+          if (index >= 0 && !existing) current.splice(index, 1);
+          logger.flowError('Settings', 'custom-property:define-failed', error);
+          new Notice('Could not save the property definition. Your notes were not changed.');
+        } finally { button.setDisabled(false); }
+      }));
+    renderNavigatorPropertyVisibility(container, this.app, () => property.key);
   }
 
   private renderCustomPropertyEditor(details: HTMLDetailsElement, prop: CustomProperty, index: number): void {
