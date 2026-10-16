@@ -8,7 +8,7 @@ export interface KindDiscriminator { key: string; value: string }
 export interface KindMappingWithAliases { primary: KindClassification; aliases: KindClassification[]; discriminator?: KindDiscriminator; writeDisabled?: boolean }
 export type KindMappings = Record<string, string | KindClassification | KindMappingWithAliases>;
 const keyPattern = /^[a-zA-Z_][a-zA-Z0-9_-]*$/u;
-const pathPattern = /^[\p{L}\p{M}\p{N}_-]+(?:\/[\p{L}\p{M}\p{N}_-]+)+$/u;
+const pathPattern = /^[\p{L}\p{M}\p{N}_-]+(?:\/[\p{L}\p{M}\p{N}_-]+)*$/u;
 const reservedRecordKeys = new Set(['tags', 'id', 'tpsschemaversion', 'title', 'createddate', 'modifieddate']);
 
 export function normalizeClassificationTag(value: string): string {

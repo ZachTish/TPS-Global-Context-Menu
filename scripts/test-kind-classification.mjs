@@ -59,7 +59,7 @@ test('kind-list paths and property keys come from mappings, not built-in taxonom
  const mapped={arbitrary:{kindList:{key:'myKinds',value:'alpha/beta/gamma'}}};
  assert.deepEqual(encodeKind(mapped,{kind:'arbitrary',title:'Entry'}),{myKinds:['alpha/beta/gamma'],title:'Entry'});
  assert.equal(decodeKind(mapped,{myKinds:['alpha/beta/gamma']}).kind,'arbitrary');
- for(const invalid of ['', 'alpha', 'alpha//beta', 'alpha/beta space'])
+ for(const invalid of ['', 'alpha//beta', 'alpha/beta space'])
   assert.throws(()=>encodeKind({arbitrary:{kindList:{key:'myKinds',value:invalid}}},{kind:'arbitrary'}),/Invalid kind list/u);
  for(const reserved of ['id','tpsSchemaVersion','title','createdDate','modifiedDate','tags']) {
   assert.throws(()=>encodeKind({arbitrary:{kindList:{key:reserved,value:'alpha/beta'}}},{kind:'arbitrary'}),/Invalid kind list/u);
@@ -160,4 +160,23 @@ test('the planned shared-path configuration encodes and decodes every record typ
   assert.equal(matchesKind(configured,raw,kind),true);
   for(const other of Object.keys(kinds).filter(candidate=>candidate!==kind))assert.equal(matchesKind(configured,raw,other),false);
  }
+});
+
+// Flat public kinds reuse the existing discriminator contract; the root remains multi-valued.
+test('flat root kinds and independently configured subtype fields round-trip without hardcoded taxonomy',()=>{
+ const mapped={
+  purchase:{primary:{kindList:{key:'kind',value:'transaction'}},aliases:[],discriminator:{key:'transactionKind',value:'financial'}},
+  investment:{primary:{kindList:{key:'kind',value:'transaction'}},aliases:[],discriminator:{key:'transactionKind',value:'investment'}},
+  recipe:{primary:{kindList:{key:'kind',value:'entity'}},aliases:[],discriminator:{key:'entityKind',value:'recipe'}},
+ };
+ for(const [name,root,key,value] of [['purchase','transaction','transactionKind','financial'],['investment','transaction','transactionKind','investment'],['recipe','entity','entityKind','recipe']]) {
+  const raw={kind:[root,'personal'],[key]:value,title:'Keep title',id:'stable-id'};
+  assert.equal(decodeKind(mapped,raw).kind,name);
+  assert.deepEqual(encodeKind(mapped,decodeKind(mapped,raw),raw),raw);
+  assert.deepEqual(encodeKind(mapped,{kind:name,title:'New'}),{kind:[root],title:'New',[key]:value});
+ }
+ const custom={arbitrary:{primary:{kindList:{key:'category',value:'custom'}},aliases:[],discriminator:{key:'categoryDetail',value:'custom-detail'}}};
+ assert.deepEqual(encodeKind(custom,{kind:'arbitrary'}),{category:['custom'],categoryDetail:'custom-detail'});
+ assert.deepEqual(decodeKind(mapped,{kind:['transaction']}),{kind:['transaction']},'a parent alone never selects a subtype');
+ assert.throws(()=>encodeKind(mapped,{kind:'purchase',transactionKind:'investment'}),/conflicts/);
 });

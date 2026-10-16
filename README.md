@@ -1,5 +1,24 @@
 # TPS Global Context Menu
 
+## 10.2.0 — Flat kind lists with configurable subtype properties
+
+Native-record Kind list mappings now accept a single-segment value, as well as
+nested paths. The existing shared-path identity fields can separate types using
+`kind: [entity]` with `entityKind: recipe`, or `kind: [transaction]` with
+`transactionKind: investment`. Every key and value remains configurable. The
+existing discriminator, identity checks and atomic writers remain the owners;
+this introduces no new classification model, background work or note migration.
+Extra authored root values survive the existing kind-list update path. A root
+alone never chooses a shared subtype; ambiguous or conflicting fields still stop
+mutations. Existing slash/tag/property mappings and defaults remain compatible.
+
+Configure this under Properties → native record classification: choose Kind list,
+set its property/value, then configure the shared-path identity property/value.
+No setting/action is removed. The existing native controls, route and mobile
+layout remain. See [release validation](release-notes/10.2.0.md). This release
+only enables the format; TishOS importers must independently support and adopt
+the same configuration before an existing vault is migrated.
+
 ## 10.1.0 — Discover every vault property in Custom properties
 
 **Properties → Custom fields → Field definitions** now combines saved definitions with every top-level frontmatter key currently found in the vault's cached Markdown metadata. Existing definitions keep their values, order, IDs, scopes and visibility. Unconfigured keys appear afterward in alphabetical cards marked **Not defined**; search and type filtering cover both groups. Blank, list, checkbox, numeric, structured and punctuation-bearing keys are included, with case-insensitive deduplication using GCM's existing key identity. Obsidian's synthetic frontmatter position is excluded. Object members are not flattened into new dotted keys.

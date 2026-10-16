@@ -1095,7 +1095,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           listKeyInput = text; text.setValue(draftListKey).onChange(value => { draftListKey = value.trim(); });
           text.inputEl.setAttribute('aria-label', 'Kind list property key');
         });
-        listValueSetting = new Setting(propertyConfig).setName('Kind list value').setDesc('Nested path for this record type, such as category/subtype.').addText(text => {
+        listValueSetting = new Setting(propertyConfig).setName('Kind list value').setDesc('List value for this record type, such as entity or category/subtype. A shared value can use the separate identity property below.').addText(text => {
           listValueInput = text; text.setValue(draftListValue).onChange(value => { draftListValue = value.trim(); });
           text.inputEl.setAttribute('aria-label', 'Kind list path');
         });

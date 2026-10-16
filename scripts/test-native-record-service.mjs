@@ -6992,3 +6992,26 @@ test('configured physical identity cannot overwrite canonical API envelope proje
     assert.deepEqual([...h.entries], before);
   }
 });
+
+test('flat public kinds distinguish all native subtypes through configured fields after cold discovery',async()=>{
+ const {service,plugin,contents}=createHarness();
+ const groups={
+  entity:{account:['entityKind','account'],holding:['entityKind','holding'],food:['entityKind','food'],recipe:['entityKind','recipe'],meal:['entityKind','meal']},
+  transaction:{'finance-transaction':['transactionKind','financial'],'investment-transaction':['transactionKind','investment'],'food-entry':['transactionKind','food-entry'],'activity-entry':['transactionKind','activity'],'workout-session':['transactionKind','workout-session']},
+  task:{task:['taskKind','todo'],project:['taskKind','project'],collection:['taskKind','collection']},
+ };
+ plugin.settings.nativeRecordKindPropertyKeys=Object.fromEntries(Object.entries(groups).flatMap(([root,kinds])=>Object.entries(kinds).map(([kind,[key,value]])=>[
+  kind,{primary:{kindList:{key:'kind',value:root}},aliases:[],discriminator:{key,value}},
+ ])));
+ const records=[];
+ for(const [root,kinds]of Object.entries(groups))for(const [kind,[key,value]]of Object.entries(kinds)){
+  const record=await service.create(kind,{title:`Flat ${kind}`},{id:`flat:${kind}`});
+  const raw=parseNativeRecordDocument(contents.get(record.file)).frontmatter;
+  assert.deepEqual(raw.kind,[root]);assert.equal(raw[key],value);assert.equal(service.inspect(raw)?.kind,kind);
+  assert.equal(raw.tpsRecordType,undefined);assert.equal(raw.type,undefined);
+  records.push(record);
+ }
+ service.refreshConfiguration();
+ for(const record of records){assert.equal((await service.resolve(record.id))?.kind,record.kind);}
+ assert.equal((await service.snapshot()).records.length,records.length);
+});
