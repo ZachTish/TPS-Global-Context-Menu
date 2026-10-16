@@ -2,12 +2,11 @@ import { App, TFile, Notice, FuzzySuggestModal, Modal, parseYaml, stringifyYaml,
 import type TPSGlobalContextMenuPlugin from "../main";
 import * as logger from "../logger";
 import { mergeNormalizedTags, normalizeTagValue } from "../utils/tag-utils";
-import { getDailyNoteScheduledPropertyKey, getDailyNoteScheduledValueForIsoDate, getIsoDateFromScheduledValue, hasAuthoritativeNonDailyNoteIdentity, normalizeExpectedDailyNotePath, parseDailyNoteFileDate, reconcileExistingDailyNoteForIsoDate } from "../utils/daily-note-task-schedule";
+import { getDailyNoteScheduledPropertyKey, getDailyNoteScheduledValueForIsoDate, getIsoDateFromScheduledValue, hasAuthoritativeNonDailyNoteIdentity, normalizeExpectedDailyNotePath, reconcileExistingDailyNoteForIsoDate } from "../utils/daily-note-task-schedule";
 import type { CustomProperty } from "../types";
 import { propertyUsesEntityOptions } from "../utils/property-option-source";
 import { applyCoreDailyNoteTemplateVariables, ensureDailyNoteTitleFallback } from "../utils/daily-note-creation";
 import {
-    canAutomaticallyMutateTemplateFile,
     inspectTemplateProtectionSource,
     stripTemplateProtectionTagFromSource,
 } from "../utils/template-protection";
@@ -78,71 +77,6 @@ export class NoteOperationService {
     constructor(plugin: TPSGlobalContextMenuPlugin) {
         this.plugin = plugin;
         this.app = plugin.app;
-    }
-
-    public async populateDailyNoteWithScheduledItems(dailyNote: TFile): Promise<void> {
-        if (this.plugin.settings.dataArchitectureMode === 'native-records') return;
-        await this.plugin.fileNamingService.whenDailyNoteConfigurationReady();
-        if (!this.plugin.fileNamingService.getDailyNoteConfigurationSnapshot()) return;
-        if (!(await canAutomaticallyMutateTemplateFile(this.app.vault, dailyNote, this.plugin.settings))) return;
-        const dailyNoteDateStr = parseDailyNoteFileDate(this.app, this.plugin.settings, dailyNote);
-        if (!dailyNoteDateStr) return;
-
-        // Check if the note already has content - don't auto-populate if it does
-        // This prevents repeated expensive scans and modifications
-        const content = await this.plugin.subitemRelationshipSyncService.readMarkdownText(dailyNote);
-        const lines = content.split('\n').filter(line => line.trim() && !line.trim().startsWith('---'));
-        if (lines.length > 5) {
-            // Note already has substantial content, skip auto-populate
-            return;
-        }
-
-        const scheduledFiles: TFile[] = [];
-        for (const file of this.app.vault.getMarkdownFiles()) {
-            if (file.path === dailyNote.path) continue;
-            if (this.plugin.filePropertiesService?.isCompanionFile(file)) continue;
-            const cache = this.app.metadataCache.getFileCache(file);
-            const fm = cache?.frontmatter;
-            if (!fm) continue;
-
-            const scheduled = String(fm.scheduled ?? '').trim();
-            if (!scheduled) continue;
-
-            const scheduledMillis = this.plugin.sharedServices?.schedule?.parseDateMillis(scheduled) ?? null;
-            const scheduledDate = scheduledMillis == null ? null : (window as any).moment(scheduledMillis);
-            if (scheduledDate?.isValid() && scheduledDate.format('YYYY-MM-DD') === dailyNoteDateStr) {
-                // Ignore files that are themselves Daily Notes using the same
-                // strict identity contract as every other task surface.
-                if (parseDailyNoteFileDate(this.app, this.plugin.settings, file)) continue;
-                scheduledFiles.push(file);
-            }
-        }
-
-        if (scheduledFiles.length === 0) return;
-
-        let modified = false;
-
-        for (const childFile of scheduledFiles) {
-            if (!(await canAutomaticallyMutateTemplateFile(this.app.vault, dailyNote, this.plugin.settings))) return;
-            const result = await this.plugin.subitemRelationshipSyncService.insertBodyLinkForChildWorkflow(
-                dailyNote,
-                childFile,
-            );
-            if (result.blockedReason) {
-                logger.warn('[TPS GCM] Skipped scheduled child body link because its workflow status is not safely mapped.', {
-                    dailyNotePath: dailyNote.path,
-                    childPath: childFile.path,
-                    blockedReason: result.blockedReason,
-                });
-            }
-            if (result.changed) {
-                modified = true;
-            }
-        }
-
-        if (modified) {
-            logger.log(`[TPS GCM] Populated daily note ${dailyNote.basename} with scheduled item(s).`);
-        }
     }
 
     async addNotesToAnotherNote(files: TFile[]) {
@@ -1277,7 +1211,6 @@ export class NoteOperationService {
     }
 
     private async normalizeCreatedDailyNote(file: TFile, titleValue: string, folder: string, isoDate: string | null = getIsoDateFromScheduledValue(titleValue)): Promise<void> {
-        const targetFolder = String(folder || file.parent?.path || '/').trim() || '/';
         const scheduledValue = isoDate ? getDailyNoteScheduledValueForIsoDate(isoDate) : `${titleValue} 00:00:00`;
         const scheduledKey = getDailyNoteScheduledPropertyKey(this.plugin.settings);
 
@@ -1291,32 +1224,11 @@ export class NoteOperationService {
                 if (!scheduled || /<%[\s\S]*%>/.test(scheduled) || /\{\{[\s\S]*\}\}/.test(scheduled)) {
                     fm[authoredKey] = scheduledValue;
                 }
-                if (this.plugin.settings.autoSaveFolderPath) {
-                    fm.folderPath = targetFolder;
-                }
             });
         } catch (error) {
             logger.warn('Failed normalizing created daily note frontmatter', { file: file.path, error });
         }
 
-        try {
-            await this.plugin.fileNamingService.processFileOnOpen(file, {
-                bypassCreationGrace: true,
-                preserveDailyNoteIdentity: true,
-            });
-        } catch (error) {
-            logger.warn('Failed running file naming normalization for created daily note', { file: file.path, error });
-        }
-
-        try {
-            await this.plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
-                reason: 'gcm-created-daily-note',
-                force: true,
-                bypassCreationGrace: true,
-            });
-        } catch (error) {
-            logger.warn('Failed applying NN rules to created daily note', { file: file.path, error });
-        }
     }
 
     private async getDailyNoteCreationSettings(): Promise<DailyNoteCreationSettings> {
@@ -1886,25 +1798,6 @@ export class NoteOperationService {
         }
     }
 
-    private getUniqueArchiveTargetPath(file: TFile, archiveFolder: string): string {
-        const targetBase = normalizePath(`${archiveFolder}/${file.name}`);
-        let targetPath = targetBase;
-        let counter = 1;
-        while (this.app.vault.getAbstractFileByPath(targetPath)) {
-            targetPath = normalizePath(`${archiveFolder}/${file.basename} ${counter}.${file.extension}`);
-            counter += 1;
-        }
-        return targetPath;
-    }
-
-    private getEffectiveArchiveFolder(baseArchiveFolder: string): string {
-        if (!this.plugin.settings.archiveUseDailyFolder) {
-            return baseArchiveFolder;
-        }
-        const today = window.moment().format("YYYY-MM-DD");
-        return normalizePath(`${baseArchiveFolder}/${today}`);
-    }
-
     private flattenTagValues(value: unknown): string[] {
         if (typeof value === "string") {
             return value.split(",").map((entry) => entry.trim()).filter(Boolean);
@@ -1913,75 +1806,6 @@ export class NoteOperationService {
             return value.flatMap((entry) => this.flattenTagValues(entry));
         }
         return [];
-    }
-
-    private fileHasArchiveTag(file: TFile, archiveTag: string): boolean {
-        const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-        const tags = this.flattenTagValues(frontmatter?.tags);
-        return tags.some((tag) => {
-            const normalized = normalizeTagValue(tag);
-            return normalized === archiveTag || normalized.startsWith(`${archiveTag}/`);
-        });
-    }
-
-    async sweepArchiveTaggedFiles(reason: "startup-catchup" | "scheduled" | "manual" = "manual"): Promise<{ archived: number; scanned: number }> {
-        const archiveTag = normalizeTagValue(this.plugin.settings.archiveTag || "archive");
-        const archiveRoot = this.plugin.getArchiveFolderPath();
-        if (!archiveTag || !archiveRoot) {
-            logger.warn("[TPS GCM] Archive sweep skipped: archive tag/folder settings are not configured");
-            return { archived: 0, scanned: 0 };
-        }
-
-        const filesToArchive = this.app.vault.getMarkdownFiles().filter((file) => {
-            if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
-            if (file.path.startsWith(`${archiveRoot}/`)) return false;
-            return this.fileHasArchiveTag(file, archiveTag);
-        });
-
-        if (filesToArchive.length === 0) {
-            logger.log(`[TPS GCM] Archive sweep (${reason}) found no tagged files`);
-            return { archived: 0, scanned: 0 };
-        }
-
-        const targetArchiveFolder = this.getEffectiveArchiveFolder(archiveRoot);
-        await this.ensureFolderPath(targetArchiveFolder);
-
-        let archived = 0;
-        await this.plugin.runQueuedMove(filesToArchive, async () => {
-            for (const file of filesToArchive) {
-                const existing = this.app.vault.getAbstractFileByPath(file.path);
-                const liveFile = existing instanceof TFile ? existing : file;
-                if (liveFile.path.startsWith(`${archiveRoot}/`)) {
-                    continue;
-                }
-
-                try {
-                    // The scheduled/startup sweep is background automation. Read
-                    // the live bytes immediately before the rename so a template
-                    // marker added after candidate collection still protects the
-                    // source. An explicitly invoked manual sweep keeps its prior
-                    // user-directed semantics.
-                    if (
-                        reason !== "manual"
-                        && !(await canAutomaticallyMutateTemplateFile(
-                            this.app.vault,
-                            liveFile,
-                            this.plugin.settings,
-                        ))
-                    ) {
-                        continue;
-                    }
-                    const targetPath = this.getUniqueArchiveTargetPath(liveFile, targetArchiveFolder);
-                    await this.app.fileManager.renameFile(liveFile, targetPath);
-                    archived += 1;
-                } catch (err) {
-                    logger.error("[TPS GCM] Failed moving archive-tagged file during sweep", liveFile.path, err);
-                }
-            }
-        });
-
-        logger.log(`[TPS GCM] Archive sweep (${reason}) moved ${archived}/${filesToArchive.length} file(s) to "${targetArchiveFolder}"`);
-        return { archived, scanned: filesToArchive.length };
     }
 
     private async archiveSourceNotes(files: TFile[], excludePaths: Set<string> = new Set()): Promise<{ archived: number }> {

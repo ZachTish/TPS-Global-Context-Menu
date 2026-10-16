@@ -140,7 +140,7 @@ function fixture(source = initial) {
   };
 }
 
-test('queued automatic rename cannot recreate the old note or announce a failed completion', { timeout: 3000 }, async () => {
+test('queued native rename cannot recreate the old note or announce a failed completion', { timeout: 3000 }, async () => {
   const f = fixture();
   const oldPath = f.file.path;
   const entered = deferred(), release = deferred(), renameEntered = deferred(), renameRelease = deferred(), captured = deferred();
@@ -153,7 +153,7 @@ test('queued automatic rename cannot recreate the old note or announce a failed 
   // Observe rejection immediately so a missing target cannot be unhandled.
   const outcome = edit.then(value => ({ value }), error => ({ error }));
   await entered.promise;
-  const rename = f.naming.updateFilenameIfNeeded(f.file, { bypassCreationGrace: true });
+  const rename = f.plugin.app.fileManager.renameFile(f.file, 'Inbox/2026-10-05 Synthetic task.md');
   await renameEntered.promise;
   release.resolve();
   assert.equal(await captured.promise, oldPath, 'the write was queued while TFile still had its old path');
@@ -170,14 +170,14 @@ test('queued automatic rename cannot recreate the old note or announce a failed 
   assert.equal(f.stats.writes, 0);
 });
 
-test('successful completion followed by automatic rename retains one completed note', async () => {
+test('successful completion followed by native rename retains one completed note', async () => {
   const f = fixture();
   const oldPath = f.file.path;
   assert.equal(await f.service.process(f.file, fm => {
     f.stats.mutators++;
     fm.status = 'complete'; fm.completedDate = '2026-10-05 17:30:00';
   }), true);
-  await f.naming.updateFilenameIfNeeded(f.file, { bypassCreationGrace: true });
+  await f.plugin.app.fileManager.renameFile(f.file, 'Inbox/2026-10-05 Synthetic task.md');
   assert.equal(f.disk.size, 1);
   assert.equal(f.disk.has(oldPath), false);
   assert.equal(f.file.path, 'Inbox/2026-10-05 Synthetic task.md');
@@ -190,7 +190,7 @@ test('successful completion followed by automatic rename retains one completed n
   assert.equal(f.stats.events, 1);
 });
 
-test('a completed automatic rename before write capture applies once to the same current TFile', async () => {
+test('a completed native rename before write capture applies once to the same current TFile', async () => {
   const f = fixture();
   const oldPath = f.file.path;
   const entered = deferred(), release = deferred(), captured = deferred();
@@ -200,7 +200,7 @@ test('a completed automatic rename before write capture applies once to the same
     fm.status = 'complete'; fm.completedDate = '2026-10-05 17:30:00';
   });
   await entered.promise;
-  await f.naming.updateFilenameIfNeeded(f.file, { bypassCreationGrace: true });
+  await f.plugin.app.fileManager.renameFile(f.file, 'Inbox/2026-10-05 Synthetic task.md');
   assert.equal(f.files.get(f.file.path), f.file);
   release.resolve();
   assert.equal(await captured.promise, f.file.path);

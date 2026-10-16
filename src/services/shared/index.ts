@@ -105,8 +105,6 @@ export function createSharedServices(plugin: TPSGlobalContextMenuPlugin) {
       plugin.parentLinkResolutionService.ensureSelfLinkForParent(parentFile),
     removeParentFromChild: (childFile: TFile, parentFile: TFile) =>
       plugin.parentLinkResolutionService.removeParentFromChild(childFile, parentFile),
-    reconcileMarkdownParent: (file: TFile) =>
-      plugin.subitemRelationshipSyncService.reconcileMarkdownParent(file),
   };
 
   const recurrence = {
@@ -118,7 +116,6 @@ export function createSharedServices(plugin: TPSGlobalContextMenuPlugin) {
         deleteValueCaseInsensitive(frontmatterRecord, key);
       }
     },
-    checkMissingRecurrences: (paths?: readonly string[]) => plugin.bulkEditService.checkMissingRecurrences(paths),
   };
 
   const identity = Object.assign(plugin.identityService, {

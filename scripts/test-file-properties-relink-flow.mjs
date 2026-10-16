@@ -52,6 +52,6 @@ test('command and non-Markdown context menu route through the shared relink flow
   assert.match(menu, /item\.setTitle\('Relink file properties…'\)/u);
   assert.match(menu, /promptFilePropertiesRelink\(this\.plugin, file\)/u);
   assert.doesNotMatch(menu, /relinkCompanion\(relinkCandidate, file\)/u);
-  assert.match(events, /filePropertiesService\.handleSourceCreate\(file\)/u);
-  assert.match(events, /A pending Markdown target was recorded; automatic merge is disabled\./u);
+  assert.doesNotMatch(events, /filePropertiesService\.handleSourceCreate\(file\)/u);
+  assert.doesNotMatch(events, /handleSourceRename|handlePendingMarkdownTargetRename/u);
 });

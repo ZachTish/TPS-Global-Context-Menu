@@ -164,7 +164,7 @@ test('metadata refreshes batch every changed file and parent without a second de
   assert.deepEqual(refreshed, [['A.md', true], ['Parent.md', true], ['B.md', true]]);
   assert.equal(timers.size, 0, 'there must be no second 350 ms debounce render');
   service.onunload();
-  const openHandler = sourceText.slice(sourceText.indexOf("plugin.app.workspace.on('file-open'"), sourceText.indexOf('// ── Debounced frontmatter/filename sync'));
+  const openHandler = sourceText.slice(sourceText.indexOf("plugin.app.workspace.on('file-open'"), sourceText.indexOf('// ── Read-only metadata menu refresh'));
   assert.match(openHandler, /scheduleMenus\('file-open', 0\)/);
   assert.doesNotMatch(openHandler, /scheduleResponsiveMenuRefresh/);
 });
@@ -283,16 +283,12 @@ test('opening an already aligned daily note skips scheduled-field mutation work'
 });
 
 
-test('retired parent maintenance emits no false change or render event', async () => {
-  const output = ts.transpileModule(`export class Maintenance { ${method('../src/services/bulk-edit-service.ts', 'reconcileParentChildLinksForParent')} }`,
-    { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 } }).outputText;
-  const module = {};
-  new Function('exports', 'setTimeout', output)(module, () => assert.fail('unchanged maintenance must not queue a render'));
-  const fail = () => assert.fail('unchanged maintenance must not notify consumers');
-  const service = Object.assign(new module.Maintenance(), {
-    plugin: { subitemRelationshipSyncService: { reconcileMarkdownParent: async () => ({addedParents: 0, removedParents: 0, touchedChildren: []}) },
-      viewModeManager: {handlePotentialFrontmatterChange: fail} },
-    parentLinkHandler: {normalizeParentKey: fail}, notifyFilesChanged: fail,
-  });
-  for (let i = 0; i < 100; i++) assert.equal(await service.reconcileParentChildLinksForParent({path: `Parent${i}.md`}), 0);
+test('retired parent reconciliation has no panel caller, cooldown or API wrapper', () => {
+  for (const file of ['src/menu/panel-builder.ts', 'src/services/bulk-edit-service.ts', 'src/services/subitem-relationship-sync-service.ts', 'src/services/shared/index.ts', 'src/plugin-api.ts']) {
+    const source = readFileSync(new URL('../' + file, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /reconcileMarkdownParent|reconcileParentChildLinksForParent|subitemLinkReconcileAt|SUBITEM_LINK_RECONCILE_INTERVAL_MS|logRetiredAutoRepair|repairBrokenBodyLinksForParent|ensureBodyLinksForChild/);
+  }
+  const source = readFileSync(new URL('../src/services/subitem-relationship-sync-service.ts', import.meta.url), 'utf8');
+  assert.match(source, /async linkExistingChildToParent/);
+  assert.match(source, /async unlinkChildFromParent/);
 });

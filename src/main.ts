@@ -4,13 +4,7 @@ import { NativeBaseNoteOpening } from './services/native-base-note-opening';
 import { BasesView, Plugin, QueryController, TFile, WorkspaceLeaf, Menu, Notice, normalizePath, Platform, type BasesViewConfig, type ViewOption } from 'obsidian';
 import {
   BuildPanelOptions,
-  HideRule,
-  IconColorRule,
   TPSGlobalContextMenuSettings,
-  createDefaultHideRule,
-  createDefaultRule,
-  createDefaultSortBucket,
-  createDefaultSortSegment,
 } from './types';
 import { DEFAULT_SETTINGS } from './constants';
 import { PLUGIN_STYLES } from './plugin-styles';
@@ -19,7 +13,6 @@ import { PersistentMenuManager } from './menu/persistent-menu-manager';
 import { setupMenuPatch } from './menu/menu-patcher';
 import { removeLegacyNotebookNavigatorRuleSettingsStyle, TPSGlobalContextMenuSettingTab } from './settings-tab';
 import { BulkEditService } from './services/bulk-edit-service';
-import { RecurrenceService } from './services/recurrence-service';
 import { FileNamingService } from './services/file-naming-service';
 import { AutoFrontmatterExclusionService } from './services/file-exclusion-service';
 import { DailyNoteNavManager } from './handlers/daily-note-nav-manager';
@@ -42,12 +35,10 @@ import { SubitemRelationshipSyncService } from './services/subitem-relationship-
 import { SubitemReferenceIndexService } from './services/subitem-reference-index-service';
 import { TimeTrackingService } from './services/time-tracking-service';
 import { TimeTrackingStatusBarService } from './services/time-tracking-status-bar-service';
-import { NotebookNavigatorRuleService } from './services/notebook-navigator-rule-service';
 import { OverlayRenderingService } from './services/overlay-rendering-service';
 import { HideCompletedCheckboxesService } from './services/hide-completed-checkboxes-service';
 import { InlinePropertyDecorationService } from './services/inline-property-decoration-service';
 import { InlinePropertySuggest } from './services/inline-property-suggest';
-import { TaskStatusCheckboxReconcileService } from './services/task-status-checkbox-reconcile-service';
 import { TaskLineContextMenuService } from './services/task-line-context-menu-service';
 import { DailyInboxLineService } from './services/daily-inbox-line-service';
 import { TaskLineDragService } from './services/task-line-drag-service';
@@ -83,7 +74,7 @@ import {
   getTpsBaseNativeCreateEventTarget,
   isTpsBaseNativeCreateTarget,
 } from './views/native-base-create-owner';
-import { sanitizeNotebookNavigatorRuleSettings } from './services/notebook-navigator-rule-settings';
+import { normalizeStoredNavigatorFields } from './services/notebook-navigator-rule-settings';
 import { registerGcmEvents } from './events/register-events';
 import { registerGcmCommands } from './commands/register-commands';
 import { setupPluginApi } from './plugin-api';
@@ -336,7 +327,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   menuController: MenuController;
   persistentMenuManager: PersistentMenuManager;
   bulkEditService: BulkEditService;
-  recurrenceService: RecurrenceService;
   fileNamingService: FileNamingService;
   dailyNoteNavManager: DailyNoteNavManager;
   contextTargetService: ContextTargetService;
@@ -357,11 +347,9 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   subitemReferenceIndexService: SubitemReferenceIndexService;
   timeTrackingService: TimeTrackingService;
   timeTrackingStatusBarService: TimeTrackingStatusBarService;
-  notebookNavigatorRuleService: NotebookNavigatorRuleService;
   overlayRenderingService: OverlayRenderingService;
   hideCompletedCheckboxesService: HideCompletedCheckboxesService;
   inlinePropertyDecorationService: InlinePropertyDecorationService;
-  taskStatusCheckboxReconcileService: TaskStatusCheckboxReconcileService;
   taskLineContextMenuService: TaskLineContextMenuService;
   dailyInboxLineService: DailyInboxLineService;
   taskLineDragService: TaskLineDragService;
@@ -391,7 +379,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   styleEl: HTMLStyleElement | null = null;
   ignoreNextContext = false;
   keyboardVisible = false;
-  private archiveSweepTimerId: number | null = null;
   private restoreMenuPatch: (() => void) | null = null;
   private restoreCanvasOpenGuard: (() => void) | null = null;
   private basesPreviewPropertiesObserver: MutationObserver | null = null;
@@ -523,7 +510,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
 
     this.contextTargetService = new ContextTargetService(this);
     this.bulkEditService = new BulkEditService(this);
-    this.recurrenceService = new RecurrenceService(this);
     this.fileNamingService = new FileNamingService(this, this.startupMetadataResolved);
     this.noteOperationService = new NoteOperationService(this);
     this.fieldInitializationService = new FieldInitializationService(this);
@@ -542,13 +528,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.subitemReferenceIndexService = new SubitemReferenceIndexService(this);
     this.timeTrackingService = new TimeTrackingService(this);
     this.timeTrackingStatusBarService = new TimeTrackingStatusBarService(this);
-    this.notebookNavigatorRuleService = new NotebookNavigatorRuleService(this);
     this.overlayRenderingService = new OverlayRenderingService(this);
     this.addChild(this.overlayRenderingService);
     this.hideCompletedCheckboxesService = new HideCompletedCheckboxesService(this);
     this.inlinePropertyDecorationService = new InlinePropertyDecorationService(this);
-    this.taskStatusCheckboxReconcileService = new TaskStatusCheckboxReconcileService(this);
-    if (!this.usesNativeRecordArchitecture()) this.addChild(this.taskStatusCheckboxReconcileService);
     this.taskLineContextMenuService = new TaskLineContextMenuService(this);
     this.dailyInboxLineService = new DailyInboxLineService(this);
     this.taskLineDragService = new TaskLineDragService(this);
@@ -607,7 +590,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       ? Promise.resolve() : this.itemHistoryService.setup(nativeIndexReady);
     this.templateIdentityService = new TemplateIdentityService(this);
     this.sharedServices = createSharedServices(this);
-    this.notebookNavigatorRuleService.setupPresentationProjection();
     this.registerEditorExtension(createLivePreviewBodySelectionExtension());
     this.registerEditorExtension(this.linkedSubitemCheckboxService.getEditorExtension());
     this.registerEditorExtension(this.hideCompletedCheckboxesService.getEditorExtension());
@@ -642,9 +624,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       () => this.settings.frontmatterAutoWriteExclusions,
     );
 
-    // Initialize recurrence listener
-    this.recurrenceService.setup();
-
     this.restoreMenuPatch = setupMenuPatch(this);
     this.restoreCanvasOpenGuard = this.shouldInstallWorkspaceOpenPatch()
       ? this.installCanvasOpenGuard()
@@ -674,9 +653,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       metadataResolved: () => this.startupMetadataResolved,
     });
     registerGcmEvents(this);
-    if (this.canRunBackgroundAutomation()) {
-      this.startArchiveTagAutomation();
-    }
 
     // Obsidian finishes loading plugins before layout readiness. Do not await
     // the layout-owned data job here; register every surface first and publish
@@ -709,43 +685,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         }
       });
     }
+
     this.app.workspace.onLayoutReady(() => {
       if (this.startupOwner !== startupOwner) return;
-      if (!this.canRunBackgroundAutomation()) return;
-      if (!this.notebookNavigatorRuleService.shouldApplyOnStartup()) return;
-      const timer = window.setTimeout(() => {
-        if (this.startupOwner !== startupOwner) return;
-        if (!this.canRunBackgroundAutomation()) return;
-        void this.notebookNavigatorRuleService.applyRulesToAllFiles({
-          reason: 'gcm-startup-auto',
-          force: true,
-          bypassCreationGrace: true,
-        });
-      }, 1000);
-      this.register(() => window.clearTimeout(timer));
-    });
-    // Check for missing recurrences on startup; build workspace ribbon buttons
-    this.app.workspace.onLayoutReady(async () => {
-      if (this.startupOwner !== startupOwner) return;
       this.workspaceRibbonService.setup();
-      // Wait for metadataCache to finish initial indexing before scanning for
-      // missing recurrences. 'resolved' fires once indexing completes; the
-      // 6-second fallback handles edge cases where the event fires before we
-      // register (already-resolved vaults).
-      let startupCheckDone = false;
-      const runStartupCheck = async () => {
-        if (this.startupOwner !== startupOwner) return;
-        if (!this.canRunBackgroundAutomation()) return;
-        if (startupCheckDone) return;
-        startupCheckDone = true;
-        logger.log('[TPS GCM] Checking for missing recurrences on startup...');
-        await this.bulkEditService.checkMissingRecurrences();
-      };
-      this.registerEvent(
-        this.app.metadataCache.on('resolved', () => void runStartupCheck())
-      );
-      const startupCheckTimer = window.setTimeout(() => void runStartupCheck(), 6000);
-      this.register(() => window.clearTimeout(startupCheckTimer));
     });
 
     // Capture right-click targets early so file-menu/files-menu can expand accurately.
@@ -1616,7 +1559,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.removeStyles();
     this.removeLegacyNotebookNavigatorRuleSettingsStyles();
     this.persistentMenuManager?.detach();
-    this.recurrenceService?.cleanup();
     this.timeTrackingStatusBarService?.detach();
     this.timeTrackingService?.detach();
     this.taskLineDragService?.dispose();
@@ -1625,8 +1567,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.itemHistoryService?.dispose();
     this.linkedSubitemCheckboxService?.detach();
     this.hideCompletedCheckboxesService?.detach();
-    this.notebookNavigatorRuleService?.dispose();
-    this.stopArchiveTagAutomation();
     document.body?.classList?.remove('tps-context-hidden-for-keyboard');
   }
 
@@ -1693,12 +1633,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       enableShiftClickCancel?: boolean;
       archiveFolder?: string;
     } | null;
-    let notebookNavigatorRulePayload = this.resolveNotebookNavigatorRuleSettingsPayload(loaded);
-    if (!notebookNavigatorRulePayload) {
-      notebookNavigatorRulePayload = this.resolveNotebookNavigatorRuleSettingsPayload(
-        await this.loadLegacyNotebookNavigatorCompanionSettings(),
-      );
-    }
+    const notebookNavigatorRulePayload = this.resolveNotebookNavigatorRuleSettingsPayload(loaded);
     const loadedSettingsRecord = (loaded ?? {}) as SettingsRecord;
     const hadRetiredHomeSettings = RETIRED_HOME_SETTING_KEYS.some((key) => Object.prototype.hasOwnProperty.call(loadedSettingsRecord, key));
     const hadAutomaticViewModeSettings = ['enableViewModeSwitching', 'viewModeFrontmatterKey', 'viewModeIgnoredFolders', 'viewModeRules']
@@ -1813,15 +1748,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     const removedRetiredPropertyCount = normalizedProperties.length - this.settings.properties.length;
     this.settings.enableVirtualBaseEmbeds = this.settings.enableVirtualBaseEmbeds !== false;
     this.settings.virtualBaseEmbedProperties = this.normalizeVirtualBaseEmbedProperties(this.settings.virtualBaseEmbedProperties);
-    if (
-      typeof loaded?.applyNotebookNavigatorRulesOnSubitemCreate !== 'boolean' &&
-      typeof (loaded as Record<string, unknown> | null | undefined)?.applyCompanionRulesOnSubitemCreate === 'boolean'
-    ) {
-      this.settings.applyNotebookNavigatorRulesOnSubitemCreate = Boolean(
-        (loaded as Record<string, unknown>).applyCompanionRulesOnSubitemCreate,
-      );
-    }
-    this.settings.notebookNavigatorRules = sanitizeNotebookNavigatorRuleSettings(
+    this.settings.notebookNavigatorRules = normalizeStoredNavigatorFields(
       notebookNavigatorRulePayload ?? DEFAULT_SETTINGS.notebookNavigatorRules,
     );
     if (!this.settings.workspaceRibbonIcons || typeof this.settings.workspaceRibbonIcons !== 'object') {
@@ -1848,8 +1775,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.enableItemHistory = false;
     const needsLinkedSubitemCheckboxMigration = this.settings.enableLinkedSubitemCheckboxes !== false;
     this.settings.enableLinkedSubitemCheckboxes = false;
-    const needsAutoPopulateDailyNotesMigration = this.settings.enableAutoPopulateDailyNotes !== false;
-    this.settings.enableAutoPopulateDailyNotes = false;
     const itemHistoryRetentionDays = Number(this.settings.itemHistoryRetentionDays);
     this.settings.itemHistoryRetentionDays = Number.isFinite(itemHistoryRetentionDays)
       ? Math.min(365, Math.max(1, Math.floor(itemHistoryRetentionDays)))
@@ -1895,8 +1820,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       loadedSettingsRecord,
       'createTaskDefaultParentMode',
     ) && persistedCreateTaskDefaultParentMode !== this.settings.createTaskDefaultParentMode;
-    const needsTaskLineReconcileMigration = this.settings.reconcileTaskStatusToCheckbox !== false;
-    this.settings.reconcileTaskStatusToCheckbox = false;
     this.settings.tpsBaseWriteFallbackMode = normalizeTpsBaseWriteFallbackMode(this.settings.tpsBaseWriteFallbackMode);
     this.settings.tpsBaseWriteFallbackPath = normalizeTpsBaseWriteNotePath(this.settings.tpsBaseWriteFallbackPath) || '';
     this.settings.defaultStackedPropertiesClosed = this.settings.defaultStackedPropertiesClosed === true;
@@ -2014,10 +1937,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
       needsCheckboxMappingMigration ||
       needsNativeRecordIdentityMigration ||
       needsCreateTaskDefaultParentMigration ||
-      needsTaskLineReconcileMigration ||
       needsItemHistoryMigration ||
       needsLinkedSubitemCheckboxMigration ||
-      needsAutoPopulateDailyNotesMigration ||
       needsTaskVisibilityMigration ||
       removedRetiredPropertyCount > 0;
     this.settingsPersistence = null;
@@ -2143,33 +2064,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     });
   }
 
-  private async loadLegacyNotebookNavigatorCompanionSettings(): Promise<unknown | null> {
-    const adapter = this.app.vault.adapter;
-    const candidatePaths = [
-      '.obsidian/plugins/TPS-Notebook-Navigator-Companion (Dev)/data.json',
-      '.obsidian/plugins/tps-notebook-navigator-companion/data.json',
-    ];
-
-    for (const path of candidatePaths) {
-      try {
-        if (!(await adapter.exists(path))) continue;
-        const raw = await adapter.read(path);
-        const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object') return parsed;
-      } catch (error) {
-        logger.warn('[TPS GCM] Failed reading legacy Notebook Navigator Companion rule settings', { path, error });
-      }
-    }
-
-    const pluginsRegistry = (this.app as any)?.plugins;
-    const companion =
-      pluginsRegistry?.getPlugin?.('tps-notebook-navigator-companion') ||
-      pluginsRegistry?.plugins?.['tps-notebook-navigator-companion'] ||
-      pluginsRegistry?.getPlugin?.('TPS-Notebook-Navigator-Companion (Dev)') ||
-      pluginsRegistry?.plugins?.['TPS-Notebook-Navigator-Companion (Dev)'];
-    return companion?.settings ?? null;
-  }
-
   private resolveNotebookNavigatorRuleSettingsPayload(raw: unknown): unknown | null {
     const record = raw && typeof raw === 'object' && !Array.isArray(raw)
       ? raw as Record<string, unknown>
@@ -2274,66 +2168,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     for (const key of RETIRED_HOME_SETTING_KEYS) delete record[key];
   }
 
-  createDefaultRule(): IconColorRule {
-    return createDefaultRule();
-  }
-
-  createDefaultSortBucket() {
-    return createDefaultSortBucket();
-  }
-
-  createDefaultSortSegment() {
-    return createDefaultSortSegment();
-  }
-
-  createDefaultHideRule(): HideRule {
-    return createDefaultHideRule();
-  }
-
-  async applyRulesToActiveFile(showNotice = false): Promise<boolean> {
-    const file = this.app.workspace.getActiveFile();
-    if (!this.notebookNavigatorRuleService.canApplyToFile(file)) {
-      if (showNotice) new Notice('No active markdown or canvas file.');
-      return false;
-    }
-    const noteChanged = await this.notebookNavigatorRuleService.applyRulesToFile(file, {
-      reason: 'gcm-manual-active',
-      force: true,
-      bypassCreationGrace: true,
-    });
-    if (showNotice) {
-      new Notice(noteChanged ? 'Semantic tag rules applied.' : 'No semantic tag changes.');
-    }
-    return noteChanged;
-  }
-
-  async applyRulesToAllFiles(silent = false): Promise<number> {
-    const changed = await this.notebookNavigatorRuleService.applyRulesToAllFiles({
-      reason: 'gcm-manual-all',
-      force: true,
-      bypassCreationGrace: true,
-    });
-    if (!silent) {
-      new Notice(`GCM processed semantic tag rules, updated ${changed} files.`);
-    }
-    return changed;
-  }
-
-  getSmartSortPreviewForActiveFile(): string | null {
-    const file = this.app.workspace.getActiveFile();
-    return file instanceof TFile ? this.notebookNavigatorRuleService.getSmartSortPreviewForFile(file) : null;
-  }
-
-  getRulePreviewForActiveFile(): Record<string, unknown> | null {
-    const file = this.app.workspace.getActiveFile();
-    return file instanceof TFile ? this.notebookNavigatorRuleService.getRulePreviewForFile(file) : null;
-  }
-
-  getRuleMatchForActiveFile(rule: IconColorRule | HideRule): boolean | null {
-    const file = this.app.workspace.getActiveFile();
-    return file instanceof TFile ? this.notebookNavigatorRuleService.getRuleMatchForFile(file, rule) : null;
-  }
-
   private getControllerArchiveFolderPath(): string {
     const plugin = getPluginById(this.app, 'tps-controller') as any;
     const settings = typeof plugin?.api?.getSettings === 'function'
@@ -2347,53 +2181,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     }
     const raw = typeof settings?.archiveFolder === 'string' ? settings.archiveFolder : '';
     return raw.trim();
-  }
-
-  getControllerDeviceRole(): 'controller' | 'user' | null {
-    const plugin = getPluginById(this.app, 'tps-controller') as any;
-    const localRole = this.getStoredControllerDeviceRole();
-    if (!plugin) return localRole;
-    const apiRole = typeof plugin?.api?.getRole === 'function' ? plugin.api.getRole() : null;
-    if (apiRole === 'controller' || apiRole === 'user') return apiRole;
-    const managerRole = plugin?.deviceRoleManager?.role;
-    if (managerRole === 'controller' || managerRole === 'user') return managerRole;
-    const isController = typeof plugin?.api?.isController === 'function'
-      ? plugin.api.isController()
-      : typeof plugin?.deviceRoleManager?.isController === 'function'
-        ? plugin.deviceRoleManager.isController()
-        : null;
-    if (isController === true) return 'controller';
-    if (isController === false) return 'user';
-    return localRole;
-  }
-
-  canRunBackgroundAutomation(): boolean {
-    if (Platform.isMobile) return false;
-    const role = this.getControllerDeviceRole() ?? this.getStoredControllerDeviceRole();
-    if (role) return role === 'controller';
-    if (this.isControllerPluginEnabled()) return false;
-    return !Platform.isMobile;
-  }
-
-  private getStoredControllerDeviceRole(): 'controller' | 'user' | null {
-    try {
-      const stored = window.localStorage.getItem(`tps-device-role-${this.app.vault.getName()}`);
-      return stored === 'controller' || stored === 'user' ? stored : null;
-    } catch {
-      return null;
-    }
-  }
-
-  private isControllerPluginEnabled(): boolean {
-    const plugins = (this.app as any)?.plugins;
-    try {
-      if (typeof plugins?.enabledPlugins?.has === 'function' && plugins.enabledPlugins.has('tps-controller')) return true;
-      if (Array.isArray(plugins?.enabledPlugins) && plugins.enabledPlugins.includes('tps-controller')) return true;
-      if (plugins?.plugins?.['tps-controller']) return true;
-    } catch {
-      return false;
-    }
-    return false;
   }
 
   getArchiveFolderPath(): string {
@@ -2447,10 +2234,8 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.settings.enableBasesForcedLinkPreview = this.settings.enableBasesForcedLinkPreview === true;
     this.settings.dataArchitectureMode = 'native-records';
     this.settings.createTaskDefaultParentMode = 'standalone';
-    this.settings.reconcileTaskStatusToCheckbox = false;
     this.settings.enableItemHistory = false;
     this.settings.enableLinkedSubitemCheckboxes = false;
-    this.settings.enableAutoPopulateDailyNotes = false;
     this.settings.hideCompletedCheckboxes = false;
     this.settings.hideAllTaskLinesInReadingMode = false;
     this.settings.persistTaskVisibilityStateToFrontmatter = false;
@@ -2469,22 +2254,13 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     this.stripLegacySettingsFields(this.settings as unknown as Record<string, unknown>);
     this.configureEntityIndexDimensions();
     logger.setLoggingEnabled(this.settings.enableLogging);
-    if (this.settings.enableChecklistCompletionProperty !== true) {
-      this.taskCheckboxHandler?.cancelChecklistPropertyUpdates();
-    }
     this.workspaceRibbonService?.refresh();
     this.syncTimeTrackingActivation();
     this.hideCompletedCheckboxesService?.applyBodyClass();
     this.hideCompletedCheckboxesService?.refreshAllEditors();
-    if (this.canRunBackgroundAutomation()) {
-      this.startArchiveTagAutomation();
-    } else {
-      this.stopArchiveTagAutomation();
-    }
     await this.persistSettingsSnapshot();
     await this.parentLinkResolutionService?.onRelationshipSettingsChanged();
     this.emitGcmApiChanged(true);
-    this.notebookNavigatorRuleService?.invalidateNotebookNavigatorPresentation();
     this.tpsNotebookNavigatorMenuBridge?.refresh();
     this.overlayRenderingService?.invalidate({
       reason: 'settings-save',
@@ -2813,77 +2589,6 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
         restoreWorkspaceMethod('openLinkText', originalOpenLinkText);
       }
     };
-  }
-
-  private stopArchiveTagAutomation(): void {
-    if (this.archiveSweepTimerId !== null) {
-      window.clearTimeout(this.archiveSweepTimerId);
-      this.archiveSweepTimerId = null;
-    }
-  }
-
-  private startArchiveTagAutomation(): void {
-    this.stopArchiveTagAutomation();
-    if (!this.canRunBackgroundAutomation()) {
-      return;
-    }
-    if (!this.settings.enableArchiveTagMove) {
-      return;
-    }
-    void this.runArchiveTagSweepIfDue('startup-catchup');
-    this.scheduleNextArchiveTagSweep();
-  }
-
-  private getArchiveSweepTodayKey(): string {
-    return window.moment().format('YYYY-MM-DD');
-  }
-
-  private isPastArchiveSweepTime(): boolean {
-    const now = window.moment();
-    const sweepTime = now.clone().startOf('day').hour(0).minute(5).second(0).millisecond(0);
-    return !now.isBefore(sweepTime);
-  }
-
-  private scheduleNextArchiveTagSweep(): void {
-    if (!this.canRunBackgroundAutomation()) {
-      return;
-    }
-    if (!this.settings.enableArchiveTagMove) {
-      return;
-    }
-    const now = window.moment();
-    const nextSweep = now.clone().startOf('day').hour(0).minute(5).second(0).millisecond(0);
-    if (!nextSweep.isAfter(now)) {
-      nextSweep.add(1, 'day');
-    }
-    const delayMs = Math.max(1000, nextSweep.diff(now));
-    this.archiveSweepTimerId = window.setTimeout(() => {
-      this.archiveSweepTimerId = null;
-      void this.runArchiveTagSweepIfDue('scheduled').finally(() => {
-        this.scheduleNextArchiveTagSweep();
-      });
-    }, delayMs);
-  }
-
-  private async runArchiveTagSweepIfDue(reason: 'startup-catchup' | 'scheduled'): Promise<void> {
-    if (!this.canRunBackgroundAutomation()) {
-      return;
-    }
-    if (!this.settings.enableArchiveTagMove) {
-      return;
-    }
-    const todayKey = this.getArchiveSweepTodayKey();
-    if (this.settings.lastArchiveTagSweepDate === todayKey) {
-      return;
-    }
-    if (!this.isPastArchiveSweepTime()) {
-      return;
-    }
-
-    const result = await this.noteOperationService.sweepArchiveTaggedFiles(reason);
-    this.settings.lastArchiveTagSweepDate = todayKey;
-    await this.persistSettingsSnapshot();
-    logger.log(`[TPS GCM] Archive tag sweep complete (${reason})`, result);
   }
 
   injectStyles(): void {

@@ -598,183 +598,6 @@ function createHarness(mode = 'native-records', options = {}) {
   return { service, plugin, vault, entries, contents, metadata, events, indexed, addFile };
 }
 
-async function committedTitleRenameHarness(options = {}) {
-  const h = createHarness('native-records', { root: 'Inbox', layout: 'flat-root', ...options });
-  h.plugin.nativeRecordService = h.service;
-  Object.assign(h.plugin.settings, {
-    autoSyncTitleFromFilename: true, enableAutoRename: true, dailyNoteDateFormat: 'YYYY-MM-DD',
-    properties: [], folderExclusions: '',
-  });
-  h.plugin.shouldIgnoreAutoFrontmatterWrite = () => false;
-  h.plugin.matchesAutoFrontmatterExclusionPattern = matchesAutomaticMutationPathExclusion;
-  h.plugin.bulkEditService = { shouldSkipNoteLevelRecurrence: async () => false };
-  h.naming = h.plugin.fileNamingService = new FileNamingService(h.plugin);
-  await h.naming.whenDailyNoteConfigurationReady();
-  h.syncRename = (file, oldPath) => h.naming.syncTitleFromFilename(file, {
-    bypassCreationGrace: true, renamedFromPath: oldPath,
-  });
-  h.counts = { inventories: 0, rawReads: 0, cachedReads: 0, processes: 0, writes: 0, renames: 0 };
-  for (const [method, counter] of [['getMarkdownFiles', 'inventories'], ['read', 'rawReads'], ['cachedRead', 'cachedReads'], ['rename', 'renames']]) {
-    const original = h.vault[method];
-    h.vault[method] = (...args) => { h.counts[counter]++; return original(...args); };
-  }
-  const process = h.vault.process;
-  h.vault.process = async (file, mutate) => {
-    h.counts.processes++;
-    return process(file, source => {
-      const next = mutate(source);
-      if (next !== source) h.counts.writes++;
-      return next;
-    });
-  };
-  return h;
-}
-
-test('committed native filename edits propagate the configured title once without another rename or vault inventory', async () => {
-  const h = await committedTitleRenameHarness({ titlePropertyKey: 'name', kindPropertyKey: 'recordType' });
-  const record = await h.service.create('task', { title: 'Untitled', status: 'todo' }, { id: 'title-one', fileName: 'Untitled' });
-  const before = h.contents.get(record.file).replace('\n---\n', '\n# Keep this comment\nother: preserved\n---\n') + 'Keep body\r\n- [ ] Keep checklist\n';
-  h.contents.set(record.file, before);
-  h.metadata.set(record.file, parseNativeRecordDocument(before).frontmatter);
-  const oldPath = record.file.path;
-  await h.vault.rename(record.file, 'Inbox/My task.md');
-  for (const key of Object.keys(h.counts)) h.counts[key] = 0;
-  await h.syncRename(record.file, oldPath);
-  assert.equal(record.file.path, 'Inbox/My task.md');
-  const after = h.contents.get(record.file);
-  assert.equal(parseNativeRecordDocument(after).frontmatter.name, 'My task');
-  assert.equal(parseNativeRecordDocument(after).frontmatter.title, undefined);
-  assert.equal(after, before.replace('name: Untitled', 'name: My task'));
-  assert.deepEqual(h.counts, { inventories: 0, rawReads: 1, cachedReads: 0, processes: 1, writes: 1, renames: 0 });
-  const stableCounts = { ...h.counts };
-  for (let i = 0; i < 100; i++) await h.syncRename(record.file, oldPath);
-  assert.deepEqual(h.counts, stableCounts, 'unchanged duplicate observations do not enter the writer or read sources');
-});
-
-test('committed native rename can inspect a cold metadata title through the existing selected-source owner', async () => {
-  const h = await committedTitleRenameHarness();
-  const record = await h.service.create('task', { title: 'Before' }, { id: 'cold-rename' });
-  const oldPath = record.file.path;
-  await h.vault.rename(record.file, 'Inbox/After.md');
-  h.metadata.delete(record.file);
-  for (const key of Object.keys(h.counts)) h.counts[key] = 0;
-  await h.syncRename(record.file, oldPath);
-  assert.equal(parseNativeRecordDocument(h.contents.get(record.file)).frontmatter.title, 'After');
-  assert.equal(h.counts.writes, 1);
-  assert.equal(h.counts.inventories, 0);
-});
-
-test('internal native import filename maintenance is captured synchronously and never changes the authored title', async () => {
-  const h = await committedTitleRenameHarness();
-  const record = await h.service.create('task', { title: 'Authored: title?' }, { id: 'internal-rename' });
-  const before = h.contents.get(record.file);
-  const pending = [];
-  h.vault.on('rename', (file, oldPath) => {
-    assert.equal(h.service.isInternalIdentityWrite(oldPath), true);
-    assert.equal(h.service.isInternalIdentityWrite(file.path), true);
-    pending.push(h.syncRename(file, oldPath));
-  });
-  await h.service.rename(record.file, 'Import owned name', { kind: 'automation' });
-  await Promise.all(pending);
-  assert.equal(h.contents.get(record.file), before);
-  assert.equal(h.counts.processes, 0);
-  assert.equal(h.service.isInternalIdentityWrite(record.file.path), false);
-});
-
-for (const condition of ['title', 'filename', 'replacement', 'identity', 'daily', 'process', 'tag', 'path', 'folder', 'setting']) {
-  test(`committed native title propagation preserves a newer ${condition} at the atomic writer`, async () => {
-    const h = await committedTitleRenameHarness();
-    const record = await h.service.create('task', { title: 'Before' }, { id: `race-${condition}` });
-    const oldPath = record.file.path;
-    await h.vault.rename(record.file, 'Inbox/After.md');
-    for (const key of Object.keys(h.counts)) h.counts[key] = 0;
-    const before = h.contents.get(record.file);
-    let expected = before;
-    const process = h.vault.process;
-    h.vault.process = async (file, mutate) => {
-      if (condition === 'title') expected = before.replace('title: Before', 'title: Newer title');
-      if (condition === 'identity') expected = before.replace(`id: race-${condition}`, 'id: new-identity');
-      if (condition === 'daily') expected = before.replace('kind: task', 'kind: dailynote');
-      if (condition === 'process') expected = before.replace('\n---\n', '\nrunType: active\n---\n');
-      if (condition === 'tag') {
-        h.plugin.settings.frontmatterAutoWriteExclusions = 'tag:keep';
-        expected = before.replace('\n---\n', '\ntags:\n  - keep\n---\n');
-      }
-      if (condition === 'path') h.plugin.settings.frontmatterAutoWriteExclusions = file.path;
-      if (condition === 'folder') h.plugin.settings.folderExclusions = 'Inbox/';
-      if (condition === 'setting') h.plugin.settings.autoSyncTitleFromFilename = false;
-      if (condition === 'filename') await h.vault.rename(file, 'Inbox/Latest name.md');
-      if (condition === 'replacement') h.addFile(file.path, before.replace('title: Before', 'title: Replacement'));
-      h.contents.set(file, expected);
-      return process(file, mutate);
-    };
-    await h.syncRename(record.file, oldPath);
-    assert.equal(h.contents.get(record.file), expected);
-    assert.equal(h.counts.writes, 0);
-    assert.equal(h.counts.inventories, 0);
-  });
-}
-
-test('committed native title propagation preserves current duplicate identity conflicts', async () => {
-  const h = await committedTitleRenameHarness();
-  const record = await h.service.create('task', { title: 'Before' }, { id: 'duplicate-rename' });
-  const oldPath = record.file.path;
-  await h.vault.rename(record.file, 'Inbox/After.md');
-  const before = h.contents.get(record.file);
-  const duplicate = h.addFile('Inbox/Duplicate.md', before);
-  h.vault.emit('create', duplicate);
-  await h.syncRename(record.file, oldPath);
-  assert.equal(h.contents.get(record.file), before);
-  assert.equal(h.counts.writes, 0);
-});
-
-for (const field of ['id', 'kind', 'title']) {
-  test(`committed native propagation rejects changed ${field} before the selected source read`, async () => {
-    const h = await committedTitleRenameHarness();
-    const record = await h.service.create('task', { title: 'Before' }, { id: 'source-before-read' });
-    const oldPath = record.file.path;
-    await h.vault.rename(record.file, 'Inbox/After.md');
-    const before = h.contents.get(record.file);
-    const expected = field === 'id' ? before.replace('id: source-before-read', 'id: new-owner')
-      : field === 'kind' ? before.replace('kind: task', 'kind: food-entry')
-        : before.replace('title: Before', 'title: Current title');
-    const update = h.service.updateFromSource.bind(h.service);
-    h.service.updateFromSource = (...args) => { h.contents.set(record.file, expected); return update(...args); };
-    await h.syncRename(record.file, oldPath);
-    assert.equal(h.contents.get(record.file), expected);
-    assert.equal(h.counts.writes, 0);
-  });
-}
-
-test('committed native propagation fails closed on a malformed current source and leaves the renamed file in place', async () => {
-  const h = await committedTitleRenameHarness();
-  const record = await h.service.create('task', { title: 'Before' }, { id: 'malformed-title' });
-  const oldPath = record.file.path;
-  await h.vault.rename(record.file, 'Inbox/After.md');
-  const malformed = '---\n!tps-test-invalid-yaml!\n---\nCurrent body\n';
-  h.contents.set(record.file, malformed);
-  await h.syncRename(record.file, oldPath);
-  assert.equal(h.contents.get(record.file), malformed);
-  assert.equal(record.file.path, 'Inbox/After.md');
-  assert.equal(h.counts.writes, 0);
-});
-
-test('committed native rename keeps generic create/open synchronization and disabled settings inactive', async () => {
-  const h = await committedTitleRenameHarness();
-  const record = await h.service.create('task', { title: 'Authored title' }, { id: 'no-generic-rename' });
-  const before = h.contents.get(record.file);
-  for (let i = 0; i < 100; i++) await h.naming.syncTitleFromFilename(record.file, { force: true, bypassCreationGrace: true });
-  assert.equal(h.contents.get(record.file), before);
-  assert.equal(h.counts.rawReads, 0);
-  assert.equal(h.counts.cachedReads, 0);
-  h.plugin.settings.autoSyncTitleFromFilename = false;
-  const oldPath = record.file.path;
-  await h.vault.rename(record.file, 'Inbox/User name.md');
-  await h.syncRename(record.file, oldPath);
-  assert.equal(h.contents.get(record.file), before);
-  assert.equal(h.counts.writes, 0);
-});
-
 async function planCurrent(service, entries) {
   return service.planIdentityChanges(entries, await service.snapshot());
 }
@@ -3835,12 +3658,12 @@ test('only task lines with an authored scheduled or due value cross the native-r
   assert.equal(taskLineNeedsNativeRecord('- Plain bullet [scheduled:: 2026-08-26 09:00:00]'), false);
 });
 
-test('ordinary note auto-naming never overrides workflow-owned native record filenames', () => {
+test('explicit title maintenance retains native-record ownership guards', () => {
   assert.match(fileNamingSource, /nativeRecordService\?\.isRecordFile\(file\)/u);
   assert.equal(
     (fileNamingSource.match(/hasWorkflowOwnedFilenameEvidence\(currentFile(?:, true)?\)/gu) || []).length,
-    2,
-    'title-to-filename and filename-to-title synchronization both recheck authoritative identity evidence',
+    1,
+    'retained explicit title maintenance rechecks authoritative identity evidence',
   );
   assert.match(
     fileNamingSource,

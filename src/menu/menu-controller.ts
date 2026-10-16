@@ -847,20 +847,7 @@ export class MenuController {
     return value;
   }
 
-  private async applyNotebookNavigatorRulesToFile(file: TFile): Promise<void> {
-    try {
-      await this.plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
-        reason: 'whole-note-inline-property-edit',
-        force: true,
-        bypassCreationGrace: true,
-      });
-    } catch (error) {
-      logger.warn('[TPS GCM] Failed applying Notebook Navigator rules after property update:', file.path, error);
-    }
-  }
-
   private async afterWholeNotePropertyEdit(files: TFile[]): Promise<void> {
-    await Promise.all(files.map((file) => this.applyNotebookNavigatorRulesToFile(file)));
     for (const file of files) {
       this.plugin.persistentMenuManager?.refreshMenusForFile(file, true);
     }

@@ -109,7 +109,6 @@ interface EnsuredTimeTrackingNotesReference extends TimeTrackingNotesReference {
 
 const IDENTITY_FIELD = 'id';
 const RUNNING_SCHEDULE_AHEAD_MINUTES = 5;
-const RUNNING_SCHEDULE_SYNC_INTERVAL_MS = 60_000;
 
 export class TimeTrackingService {
   private activeTimerCountsByPath = new Map<string, number>();
@@ -170,21 +169,11 @@ export class TimeTrackingService {
       completeMetadata(false);
     });
     this.sessionIndexReady = true;
-    const timerWindow = window;
-    const syncInterval = timerWindow.setInterval(() => {
-      if (this.activationOwner === owner) void this.syncRunningScheduledMetadata().catch(error => {
-        logger.warn('[TimeTracking] Current session source is unavailable; existing timer display is retained.', { error });
-      });
-    }, RUNNING_SCHEDULE_SYNC_INTERVAL_MS);
-    this.cleanups.push(() => timerWindow.clearInterval(syncInterval));
     workspace.onLayoutReady(() => {
       if (this.activationOwner !== owner || !this.isEnabled()) return;
-      const startupTimeout = timerWindow.setTimeout(() => {
-        if (this.activationOwner === owner) void this.syncRunningScheduledMetadata().catch(error => {
-          logger.warn('[TimeTracking] Current session source is unavailable; existing timer display is retained.', { error });
-        });
-      }, 2000);
-      this.cleanups.push(() => timerWindow.clearTimeout(startupTimeout));
+      void this.refreshActiveTimerCache().catch(error => {
+        logger.warn('[TimeTracking] Current session source is unavailable; existing timer display is retained.', { error });
+      });
     });
   }
 
@@ -897,29 +886,6 @@ export class TimeTrackingService {
     const endRaw = window.prompt('End time', this.formatDateTime(now));
     if (endRaw == null) return null;
     return this.addManualSession(input, startRaw, endRaw);
-  }
-
-  async syncRunningScheduledMetadata(): Promise<void> {
-    if (!this.isEnabled()) return;
-    const owner = this.activationOwner;
-    const active = (await this.scanStoredSessions()).filter((session) => !session.record.end);
-    if (!this.isEnabled() || this.activationOwner !== owner) return;
-    await this.refreshActiveTimerCache(active);
-    if (!this.isEnabled() || this.activationOwner !== owner) return;
-    if (this.plugin.settings.dataArchitectureMode === 'native-records') return;
-    const syncedFiles = new Set<string>();
-    for (const stored of active) {
-      if (await this.shouldIgnoreStoredSession(stored)) continue;
-      const target = await this.resolveTargetForRecord(stored.record, stored);
-      if (!(target?.file instanceof TFile)) continue;
-      await this.syncTargetScheduledMetadata(target, stored.record, { mode: 'running' });
-      syncedFiles.add(target.file.path);
-    }
-    for (const path of syncedFiles) {
-      const file = this.resolveFile(path);
-      if (file) this.refreshFileUi(file);
-    }
-    if (syncedFiles.size > 0) this.refreshStatusBar();
   }
 
   private ensureEnabled(): boolean {

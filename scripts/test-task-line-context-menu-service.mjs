@@ -20,7 +20,6 @@ const taskRecurrenceServiceSource = readFileSync(new URL('../src/services/task-r
 const recurrenceModalSource = readFileSync(new URL('../src/modals/recurrence-modal.ts', import.meta.url), 'utf8');
 const inlinePropertySuggestSource = readFileSync(new URL('../src/services/inline-property-suggest.ts', import.meta.url), 'utf8');
 const inlinePropertyDecorationSource = readFileSync(new URL('../src/services/inline-property-decoration-service.ts', import.meta.url), 'utf8');
-const ruleEngineSource = readFileSync(new URL('../src/services/notebook-navigator-rule-engine.ts', import.meta.url), 'utf8');
 const noteOperationSource = readFileSync(new URL('../src/services/note-operation-service.ts', import.meta.url), 'utf8');
 const fileNamingSource = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
 const dailyNavSource = readFileSync(new URL('../src/handlers/daily-note-nav-manager.ts', import.meta.url), 'utf8');
@@ -175,7 +174,6 @@ test('GCM task and bullet line flows can create a linked child note without drop
   assert.match(subitemCreationSource, /create:race-recovered/);
   assert.match(dailyInboxLineSource, /parts\.suffix/);
 });
-const notebookRuleServiceSource = readFileSync(new URL('../src/services/notebook-navigator-rule-service.ts', import.meta.url), 'utf8');
 const taskApiSource = readFileSync(new URL('../src/services/task-api-service.ts', import.meta.url), 'utf8');
 const linkedSubitemCheckboxSource = readFileSync(new URL('../src/services/linked-subitem-checkbox-service.ts', import.meta.url), 'utf8');
 const logBaseViewSource = readFileSync(new URL('../src/views/log-base-view.ts', import.meta.url), 'utf8');
@@ -674,7 +672,7 @@ test('task clicks keep exact-line editing outside Reading View and Reading View 
   assert.match(serviceSource, /private addSelectedTaskMenuItems\([\s\S]{0,1700}setTitle\('Bullet — No status'\)[\s\S]{0,450}historyTerminalDelete: true/);
   assert.match(serviceSource, /private constrainTaskMenu<[\s\S]{0,1400}tps-gcm-task-line-menu/);
   assert.match(pluginStylesSource, /\.tps-gcm-task-line-menu \.menu-item-title\s*\{[\s\S]{0,180}max-inline-size: 25ch;[\s\S]{0,180}text-overflow: ellipsis;/);
-  assert.match(serviceSource, /nextMarker = nextParsed\?\.marker \?\? null/);
+  assert.doesNotMatch(serviceSource, /handleExternalChecklistStateMutation/);
   assert.match(serviceSource, /event\.key === 'Enter' && \(event\.metaKey \|\| event\.ctrlKey\)/);
   assert.match(pluginStylesSource, /\.tps-gcm-task-editor-card\s*\{/);
   assert.match(pluginStylesSource, /\.tps-gcm-task-editor-row\s*\{/);
@@ -1285,7 +1283,6 @@ test('obsolete settings are removed from active GCM settings and writes', () => 
   assert.match(subitemCreationSource, /return parentFile\.parent\?\.path \|\| '\/'/);
   assert.doesNotMatch(subitemCreationSource, /seedVisualMetadata|resolveNewSubitemIconDefaults|frontmatterLines\.push\(`(?:icon|iconColor|color):/u);
   assert.doesNotMatch(notebookRuleSettingsSource, /writeBasesIconFields|basesIconMarkdownField|basesIconUriField/);
-  assert.doesNotMatch(notebookRuleServiceSource, /iconDisplay|iconDisplayUri/);
 });
 
 test('GCM task-line writes use configured timestamp keys', () => {
@@ -1626,9 +1623,6 @@ test('daily note calendar popover includes scheduled task lines and note task ju
 test('daily note task scheduled inheritance is configurable and shared across task surfaces', () => {
   assert.match(constantsSource, /inheritUnscheduledTasksFromDailyNotes:\s*true/);
   assert.doesNotMatch(settingsTabSource, /Inherit Daily Note date for unscheduled tasks/);
-  assert.match(ruleEngineSource, /getInheritedDailyNoteTaskScheduledValue/);
-  assert.match(ruleEngineSource, /context\.lineType !== "task"/);
-  assert.match(ruleEngineSource, /hasInheritedDailyNoteTaskScheduledValue\(field, context\)/);
   assert.match(persistentMenuSource, /resolveTaskScheduledValue\(this\.plugin\.app, this\.plugin\.settings, file, rawLine\)/);
   assert.match(serviceSource, /resolveTaskScheduledValue\(this\.plugin\.app, this\.plugin\.settings, context\.file, context\.rawLine\)/);
   assert.match(serviceSource, /maybePromptMoveScheduledDailyNoteTask\(context, result\.date\)/);
@@ -1649,32 +1643,13 @@ test('daily note creation reconciles strict legacy paths before creating duplica
   assert.match(noteOperationSource, /existingDailyNote instanceof TFile[\s\S]{0,180}settleExistingDailyNoteIfPending/);
   assert.match(noteOperationSource, /getDailyNoteScheduledValueForIsoDate\(isoDate\)/);
   assert.match(dailyNavSource, /dailyNotes\.ensureForIsoDate\(isoDate, \{ expectedPath: targetPath \}\)/);
-  assert.match(bulkEditSource, /reconcileExistingDailyNoteForIsoDate\([\s\S]{0,120}nextIsoDate/);
-  assert.match(bulkEditSource, /existingResolution\.status === 'blocked'[\s\S]{0,220}return false/);
 });
 
-test('note-level recurrence skips configured daily notes instead of creating daily note instances', () => {
-  assert.match(bulkEditSource, /async shouldSkipNoteLevelRecurrence\(file: TFile, scheduled\?: string\): Promise<boolean>/);
-  assert.match(bulkEditSource, /private readonly dailyRecurrenceRule = 'FREQ=DAILY';/);
-  assert.match(bulkEditSource, /normalizeRecurrenceRuleValue\(recurrenceRule: unknown\): string/);
-  assert.match(bulkEditSource, /value\.toLowerCase\(\) === 'dailynote' \? this\.dailyRecurrenceRule : value/);
-  assert.match(bulkEditSource, /return this\.plugin\.fileNamingService\.isDailyNoteFile\(file\)/);
-  assert.doesNotMatch(bulkEditSource, /parseDateFromFilename/);
-  assert.match(fileNamingSource, /parseDailyNoteFileDate\(this\.plugin\.app, this\.plugin\.settings, file\) !== null/);
-  assert.match(bulkEditSource, /if \(await this\.shouldSkipNoteLevelRecurrence\(file, fm\.scheduled\)\) continue;/);
-  assert.match(bulkEditSource, /if \(await this\.shouldSkipNoteLevelRecurrence\(file, currentScheduled\)\) \{[\s\S]{0,520}applyRecurrenceDirectly\(file, this\.dailyRecurrenceRule, null\)[\s\S]{0,140}return false;/);
-  assert.ok(
-    bulkEditSource.indexOf('if (await this.shouldSkipNoteLevelRecurrence(file, currentScheduled))') <
-    bulkEditSource.indexOf('const isTrackerRecurrence = this.isTrackerRecurrenceRule(recurrenceRule);'),
-    'daily-note skip must happen before RRULE parsing',
-  );
-  assert.match(
-    bulkEditSource,
-    /const workflowStatus = this\.normalizeStatusValue\(this\.getWorkflowStatusValue\(fm\)\);[\s\S]{0,120}recurrenceStatuses\.includes\(workflowStatus\) && !\(await this\.shouldSkipNoteLevelRecurrence\(file, fm\.scheduled\)\)/,
-  );
-  assert.doesNotMatch(bulkEditSource, /return await this\.createNextDailyNoteRecurrenceInstance\(file, frontmatter, nextDate, recurrenceRule\)/);
-  assert.match(readFileSync(new URL('../src/services/recurrence-service.ts', import.meta.url), 'utf8'), /isNoteLevelRecurrenceSkipped\(file, fm\)/);
+test('daily-note naming protection remains without recurrence generators', () => {
+  assert.match(bulkEditSource, /async shouldSkipNoteLevelRecurrence/);
+  assert.match(fileNamingSource, /parseDailyNoteFileDate/);
   assert.match(fileNamingSource, /shouldSkipNoteLevelRecurrence\(liveFile, scheduled\)\) return "skipped"/);
+  assert.doesNotMatch(bulkEditSource, /createNextRecurrenceInstance|createNextDailyNoteRecurrenceInstance|bootstrapTemplateInstanceFromToday/);
 });
 
 test('daily-note-marked files are not renamed or title-synced by scheduled note naming', () => {
@@ -1687,19 +1662,13 @@ test('daily-note-marked files are not renamed or title-synced by scheduled note 
   );
   assert.match(dailyNoteScheduleSource, /marker === 'dailynote' \|\| marker === 'typenotedaily'/);
   assert.match(fileNamingSource, /if \(await this\.isDailyNoteFile\(liveFile\)\) return "skipped"/);
-  assert.match(fileNamingSource, /if \(await this\.isDailyNoteFile\(liveFile\)\) return;/);
+  assert.doesNotMatch(fileNamingSource, /updateFilenameIfNeeded/);
   assert.doesNotMatch(fileNamingSource, /isConfiguredDailyNotePath/);
   assert.doesNotMatch(bulkEditSource, /hasDailyNoteMarker/);
 });
 
-test('recurrence template marker writes and detection are migrated', () => {
-  assert.match(bulkEditSource, /isRecurrenceTemplateFrontmatter\(frontmatter: unknown\): boolean/);
-  assert.match(bulkEditSource, /markRecurrenceTemplate\(frontmatter: Record<string, any>\): void/);
-  assert.match(bulkEditSource, /setFrontmatterValueCaseInsensitive\(frontmatter, 'recurrenceTemplate', true\);/);
-  assert.match(bulkEditSource, /clearLegacyRecurrenceTemplateMarker\(frontmatter\);/);
-  assert.doesNotMatch(bulkEditSource, /setFrontmatterValueCaseInsensitive\(fmw, 'isRecurrenceTemplate', true\);/);
-  assert.match(readFileSync(new URL('../src/services/recurrence-service.ts', import.meta.url), 'utf8'), /isRecurrenceTemplateFrontmatter\(cache\?\.frontmatter\)/);
-  assert.match(readFileSync(new URL('../src/services/recurrence-service.ts', import.meta.url), 'utf8'), /isRecurrenceTemplateFrontmatter\(fm\)/);
+test('retired recurrence template writers are absent', () => {
+  assert.doesNotMatch(bulkEditSource, /markRecurrenceTemplate|clearLegacyRecurrenceTemplateMarker|createOrUpdateRecurrenceTemplateFromInstance|ensureRecurrenceTemplate/);
 });
 
 test('date marker stripping handles configured pretty daily note dates', async () => {
@@ -1719,10 +1688,7 @@ test('date marker stripping handles configured pretty daily note dates', async (
   });
 });
 
-test('scheduled note filenames use sortable date prefixes without changing canonical titles', () => {
-  assert.match(fileNamingSource, /const dateStr = scheduledDate\.format\('YYYY-MM-DD'\)/);
-  assert.match(fileNamingSource, /return this\.sanitizeFilename\(`\$\{dateStr\} \$\{canonicalTitle\}`\)/);
-  assert.match(fileNamingSource, /stripDatePrefix\(stripDateSuffix\(normalizedTitle\)\)/);
+test('explicit title maintenance retains date stripping and current-source checks', () => {
   assert.match(fileNamingSource, /extractDatePrefix\(nextTitle\)/);
   assert.match(fileNamingSource, /stripKnownDateMarker\(rawBasename, scheduledDate\)/);
   assert.match(fileNamingSource, /hasPersistedFrontmatterBlock\(liveFile\)/);
@@ -1899,7 +1865,7 @@ test('task recurrence utilities support fixed schedules and after-completion sch
   assert.equal(findTaskBlockEndIndex(['- [x] parent', '  - child', '', '- [ ] next'], 0), 3);
 });
 
-test('task recurrence is wired into checkbox mutation, context menus, and modal quick options', () => {
+test('explicit recurrence template editing remains without an automatic completion writer', () => {
   assert.match(mainSource, /import \{ TaskRecurrenceService \} from '\.\/services\/task-recurrence-service'/);
   assert.match(mainSource, /taskRecurrenceService: TaskRecurrenceService/);
   assert.match(mainSource, /new TaskRecurrenceService\(this\)/);
@@ -1908,10 +1874,7 @@ test('task recurrence is wired into checkbox mutation, context menus, and modal 
   assert.doesNotMatch(commandsSource, /id: 'edit-task-recurrence-templates'/);
   assert.doesNotMatch(commandsSource, /taskRecurrenceService\.openTemplatesCommand/);
   assert.match(taskRecurrenceServiceSource, /task-recurrence-templates\.json/);
-  assert.match(taskRecurrenceServiceSource, /handleTaskCompletion/);
-  assert.match(taskRecurrenceServiceSource, /findTaskBlockEndIndex\(lines, lineIndex\)/);
-  assert.match(taskRecurrenceServiceSource, /TASK_RECURRENCE_COMPLETED_DATE_KEY/);
-  assert.match(taskRecurrenceServiceSource, /buildNextTaskRecurrenceLine\([\s\S]{0,180}creationMapping\.checkboxState[\s\S]{0,180}recurrenceTaskId/);
+  assert.doesNotMatch(taskRecurrenceServiceSource, /handleTaskCompletion/);
   assert.match(taskRecurrenceServiceSource, /ensureTaskRecurrenceIdOnLine\(value, recurrenceTaskId\)/);
   assert.match(recurrenceModalSource, /GCM-AFTER-COMPLETION:P1D/);
   assert.match(recurrenceModalSource, /Next Occurrences From Completion Time/);

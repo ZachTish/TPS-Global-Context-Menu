@@ -1,6 +1,6 @@
 import { MarkdownView, Notice, TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
-import type { BodySubitemLink, ReconcileResult } from './subitem-types';
+import type { BodySubitemLink } from './subitem-types';
 import { resolveLinkTargetToFile } from './link-target-service';
 import { getCompatibleMarkdownViewFromLeaf, pickBestMarkdownLeaf } from './leaf-resolver';
 import {
@@ -37,101 +37,6 @@ export class SubitemRelationshipSyncService {
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
 
-  async reconcileMarkdownParent(parentFile: TFile): Promise<ReconcileResult> {
-    this.logRetiredAutoRepair('reconcileMarkdownParent', parentFile);
-    return { addedParents: 0, removedParents: 0, touchedChildren: [] };
-  }
-
-  async reconcileMarkdownParentText(parentFile: TFile, raw: string): Promise<ReconcileResult> {
-    this.logRetiredAutoRepair('reconcileMarkdownParentText', parentFile, { rawLength: raw.length });
-    return { addedParents: 0, removedParents: 0, touchedChildren: [] };
-  }
-
-  async repairBrokenBodyLinksForParent(parentFile: TFile): Promise<number> {
-    this.logRetiredAutoRepair('repairBrokenBodyLinksForParent', parentFile);
-    return 0;
-  }
-
-  private async repairBrokenBodyLinksForParentLegacy(parentFile: TFile): Promise<number> {
-    if (!(parentFile instanceof TFile) || parentFile.extension?.toLowerCase() !== 'md') return 0;
-
-    let repairedCount = 0;
-    await this.mutateMarkdownBody(parentFile, async (lines, raw) => {
-      const brokenIndexes = this.getSuspiciousBrokenSubitemLineIndexes(lines);
-      if (brokenIndexes.length === 0) return false;
-
-      const existingLinks = this.plugin.bodySubitemLinkService.scanText(parentFile, raw);
-      const existingChildPaths = new Set(existingLinks.map((entry) => entry.childPath));
-      const missingChildren = this.getMarkdownChildrenForParent(parentFile)
-        .filter((childFile) => !existingChildPaths.has(childFile.path));
-
-      if (missingChildren.length === 0) return false;
-
-      let changed = false;
-      let insertedCount = 0;
-
-      for (const index of brokenIndexes) {
-        const nextChild = missingChildren.shift();
-        if (!nextChild) break;
-        const placeholderState =
-          this.getBrokenSubitemPlaceholderCheckboxState(lines[index] || '') ??
-          this.resolveCheckboxStateForChild(nextChild);
-        lines[index] = this.buildBodyLinkLine(parentFile, nextChild, placeholderState);
-        repairedCount += 1;
-        changed = true;
-      }
-
-      if (missingChildren.length > 0) {
-        let nextRaw = lines.join('\n');
-        let nextLinks = this.plugin.bodySubitemLinkService.scanText(parentFile, nextRaw);
-        for (const childFile of missingChildren) {
-          nextRaw = this.insertLineAfterSubitemBlock(
-            nextRaw,
-            this.buildBodyLinkLine(parentFile, childFile, this.resolveCheckboxStateForChild(childFile)),
-            nextLinks,
-          );
-          nextLinks = this.plugin.bodySubitemLinkService.scanText(parentFile, nextRaw);
-          insertedCount += 1;
-        }
-        if (insertedCount > 0) {
-          lines.splice(0, lines.length, ...nextRaw.split('\n'));
-          repairedCount += insertedCount;
-          changed = true;
-        }
-      }
-
-      return changed;
-    });
-
-    return repairedCount;
-  }
-
-  async ensureBodyLinksForChild(childFile: TFile): Promise<number> {
-    this.logRetiredAutoRepair('ensureBodyLinksForChild', childFile);
-    return 0;
-  }
-
-  private async ensureBodyLinksForChildLegacy(childFile: TFile): Promise<number> {
-    if (!(childFile instanceof TFile) || childFile.extension?.toLowerCase() !== 'md') return 0;
-
-    // Check if child file should be ignored based on folder or tag
-    if (this.shouldIgnoreForAutoEmbed(childFile)) return 0;
-
-    let inserted = 0;
-    const parents = this.plugin.parentLinkResolutionService.getParentsForChild(childFile);
-    const checkboxState = this.resolveCheckboxStateForChild(childFile);
-
-    for (const entry of parents) {
-      const parentFile = entry.file;
-      if (!(parentFile instanceof TFile) || parentFile.path === childFile.path) continue;
-      if (entry.kind !== 'markdown-parent') continue;
-      const changed = await this.insertBodyLink(parentFile, childFile, checkboxState);
-      if (changed) inserted += 1;
-    }
-
-    return inserted;
-  }
-
   async readMarkdownText(file: TFile, options: { cached?: boolean } = {}): Promise<string> {
     if (!(file instanceof TFile) || file.extension?.toLowerCase() !== 'md') return '';
     const openView = this.getOpenMarkdownViewForFile(file);
@@ -142,63 +47,6 @@ export class SubitemRelationshipSyncService {
     return options.cached
       ? await this.plugin.app.vault.cachedRead(file)
       : await this.plugin.app.vault.read(file);
-  }
-
-  private async reconcileMarkdownParentLinks(
-    parentFile: TFile,
-    bodyLinks: BodySubitemLink[],
-    options: { removeStaleParents: boolean },
-  ): Promise<ReconcileResult> {
-    const desiredChildren = new Map(bodyLinks.map((entry) => [entry.childPath, entry.childFile]));
-    const touchedChildren = new Map<string, TFile>();
-    let addedParents = 0;
-    let removedParents = 0;
-
-    for (const childFile of desiredChildren.values()) {
-      if (!(await this.plugin.bulkEditService.canMutateFrontmatterSafely(childFile))) continue;
-      const changed = await this.plugin.parentLinkResolutionService.addParentToChild(childFile, parentFile);
-      if (changed) {
-        addedParents += 1;
-        touchedChildren.set(childFile.path, childFile);
-      }
-    }
-
-    if (options.removeStaleParents) {
-      for (const file of this.plugin.app.vault.getMarkdownFiles()) {
-        if (file.path === parentFile.path) continue;
-        if (!this.plugin.parentLinkResolutionService.hasParent(file, parentFile)) continue;
-        if (desiredChildren.has(file.path)) continue;
-        if (!(await this.plugin.bulkEditService.canMutateFrontmatterSafely(file))) continue;
-        const changed = await this.plugin.parentLinkResolutionService.removeParentFromChild(file, parentFile);
-        if (changed) {
-          removedParents += 1;
-          touchedChildren.set(file.path, file);
-        }
-      }
-    }
-
-    const statusSyncCandidates = new Map<string, TFile>();
-    for (const childFile of desiredChildren.values()) {
-      statusSyncCandidates.set(childFile.path, childFile);
-    }
-    for (const childFile of touchedChildren.values()) {
-      statusSyncCandidates.set(childFile.path, childFile);
-    }
-    for (const childFile of statusSyncCandidates.values()) {
-      const currentParentReferences = bodyLinks.filter((entry) => entry.childPath === childFile.path);
-      const savedReferences = await this.plugin.subitemReferenceIndexService.getReferencesForChild(childFile);
-      const mergedReferences = [
-        ...savedReferences.filter((entry) => entry.parentPath !== parentFile.path),
-        ...currentParentReferences,
-      ];
-      await this.plugin.linkedSubitemCheckboxService.syncDerivedStatusForChildFromReferences(childFile, mergedReferences);
-    }
-
-    return {
-      addedParents,
-      removedParents,
-      touchedChildren: Array.from(touchedChildren.values()),
-    };
   }
 
   async linkExistingChildToParent(childFile: TFile, parentFile: TFile, options?: { insertBodyLink?: boolean; checkboxState?: string | null }): Promise<boolean> {
@@ -600,47 +448,6 @@ export class SubitemRelationshipSyncService {
     return changed;
   }
 
-  private shouldIgnoreForAutoEmbed(file: TFile): boolean {
-    // Check if file is in an ignored folder
-    const ignoreFolders = this.plugin.settings.autoEmbedIgnoreFolders || [];
-    const filePath = file.path.toLowerCase();
-    for (const folder of ignoreFolders) {
-      const normalizedFolder = folder.trim().toLowerCase();
-      if (!normalizedFolder) continue;
-      if (filePath.startsWith(normalizedFolder + '/') || filePath.startsWith(normalizedFolder)) {
-        return true;
-      }
-    }
-
-    // Check if file has an ignored tag
-    const ignoreTags = this.plugin.settings.autoEmbedIgnoreTags || [];
-    const cache = this.plugin.app.metadataCache.getFileCache(file);
-    const fm = (cache?.frontmatter || {}) as Record<string, unknown>;
-    const tagsKey = Object.keys(fm).find((k) => k.toLowerCase() === 'tags');
-    const fileTags = Array.isArray(fm[tagsKey || 'tags']) ? fm[tagsKey || 'tags'] as string[] : [];
-    
-    for (const ignoreTag of ignoreTags) {
-      const normalizedTag = ignoreTag.trim().toLowerCase().replace(/^#/, '');
-      if (!normalizedTag) continue;
-      for (const fileTag of fileTags) {
-        if (String(fileTag).trim().toLowerCase().replace(/^#/, '') === normalizedTag) {
-          return true;
-        }
-      }
-    }
-
-    return false;
-  }
-
-  private logRetiredAutoRepair(method: string, file: TFile, details?: Record<string, unknown>): void {
-    if (!this.plugin.settings.enableLogging) return;
-    logger.flow('SubitemRelationship', 'retired-auto-repair-skipped', {
-      method,
-      file: file instanceof TFile ? file.path : null,
-      ...(details ?? {}),
-    });
-  }
-
   private async runSerializedBodyMutation(file: TFile, action: () => Promise<void>): Promise<void> {
     const key = file.path;
     const previous = this.bodyWriteChains.get(key) ?? Promise.resolve();
@@ -671,23 +478,8 @@ export class SubitemRelationshipSyncService {
     return String(text || '').split('\n').some((line) => this.isSuspiciousBrokenSubitemLine(line));
   }
 
-  private getSuspiciousBrokenSubitemLineIndexes(lines: string[]): number[] {
-    const output: number[] = [];
-    for (let index = 0; index < lines.length; index += 1) {
-      if (this.isSuspiciousBrokenSubitemLine(lines[index] || '')) {
-        output.push(index);
-      }
-    }
-    return output;
-  }
-
   private isSuspiciousBrokenSubitemLine(line: string): boolean {
     return /^[ \t]*(?:[-*+]|\d+\.)\s+(?:\[[^\]]+]\s+)?\[\[$/.test(String(line || '').trimEnd());
-  }
-
-  private getBrokenSubitemPlaceholderCheckboxState(line: string): string | null {
-    const match = String(line || '').trimEnd().match(/^[ \t]*(?:[-*+]|\d+\.)\s+(\[[^\]]+])\s+\[\[$/);
-    return match?.[1] ? String(match[1]).trim() : null;
   }
 
   private replaceBrokenPlaceholderWithLine(content: string, replacementLine: string): string {
@@ -698,17 +490,6 @@ export class SubitemRelationshipSyncService {
     let result = lines.join('\n');
     if (!result.endsWith('\n')) result += '\n';
     return result;
-  }
-
-  private getMarkdownChildrenForParent(parentFile: TFile): TFile[] {
-    return this.plugin.app.vault
-      .getMarkdownFiles()
-      .filter((file) =>
-        this.plugin.parentLinkResolutionService
-          .getParentsForChild(file)
-          .some((entry) => entry.kind === 'markdown-parent' && entry.file.path === parentFile.path),
-      )
-      .sort((a, b) => a.path.localeCompare(b.path));
   }
 
   private getOpenMarkdownViewsForFile(file: TFile): MarkdownView[] {

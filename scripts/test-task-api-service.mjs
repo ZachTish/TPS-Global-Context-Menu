@@ -5,6 +5,9 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 
+const scannerBuild = await build({ entryPoints: [fileURLToPath(new URL('../src/utils/markdown-document-lines.ts', import.meta.url))], bundle: true, write: false, platform: 'node', format: 'esm' });
+const { scanMarkdownDocumentLines } = await import('data:text/javascript;base64,' + Buffer.from(scannerBuild.outputFiles[0].text).toString('base64'));
+
 const taskApiSource = readFileSync(new URL('../src/services/task-api-service.ts', import.meta.url), 'utf8');
 const pluginApiSource = readFileSync(new URL('../src/plugin-api.ts', import.meta.url), 'utf8');
 const mainSource = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
@@ -261,6 +264,15 @@ function createTaskApiFixture(TaskApiService) {
   };
 }
 
+// Mutation fixtures target authored lines directly; no product collection API is needed.
+function fixtureTasks(fixture, { paths }) {
+  assert.equal(paths.length, 1);
+  const path = paths[0];
+  const documentLines = scanMarkdownDocumentLines(fixture.contents.get(path));
+  const lines = documentLines.map(line => line.text);
+  return documentLines.filter(line => line.isContent).map(line => fixture.service.recordFromLine(path, line.index, line.text, lines)).filter(Boolean);
+}
+
 function installHistoryRecorder(fixture, overrides = {}) {
   const calls = { begin: [], ensure: [], commit: [], abort: [] };
   let sequence = 0;
@@ -312,8 +324,7 @@ test('GCM exposes a strategic task API for external agents', () => {
   assert.match(pluginApiSource, /history: \{/);
   assert.match(pluginApiSource, /plugin\.itemHistoryService\.query\(reference, options\)/);
 
-  assert.match(taskApiSource, /readonly version = 4/);
-  assert.match(taskApiSource, /async list\(filter: GcmTaskListFilter = \{\}\)/);
+  assert.match(taskApiSource, /readonly version = 5/);
   assert.match(taskApiSource, /async get\(ref: GcmTaskRef\)/);
   assert.match(taskApiSource, /async create\(input: GcmTaskCreateInput, cause\?: ItemHistoryUserCause\)/);
   assert.match(taskApiSource, /async update\([\s\S]{0,160}cause\?: ItemHistoryUserCause/);
@@ -323,7 +334,6 @@ test('GCM exposes a strategic task API for external agents', () => {
   assert.match(taskApiSource, /setScheduled\(ref: GcmTaskRef, scheduled: string \| null, cause\?: ItemHistoryUserCause\)/);
   assert.match(taskApiSource, /setField\([\s\S]{0,220}cause\?: ItemHistoryUserCause/);
   assert.match(taskApiSource, /setFields\([\s\S]{0,220}cause\?: ItemHistoryUserCause/);
-  assert.match(taskApiSource, /findByField\(key: string, value: string \| string\[\] \| null, filter: GcmTaskListFilter = \{\}\)/);
   assert.match(taskApiSource, /async move\(/);
   assert.match(taskApiSource, /async delete\(ref: GcmTaskRef, cause\?: ItemHistoryUserCause\)/);
   assert.match(taskApiSource, /async focus\(ref: GcmTaskRef\)/);
@@ -357,7 +367,7 @@ test('task API v3 journals only explicit user mutations and injects identity ato
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
   const history = installHistoryRecorder(fixture);
-  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [openTask] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   const cause = {
     kind: 'user',
     sourcePluginId: 'tps-controller',
@@ -386,7 +396,7 @@ test('task API v3 journals only explicit user mutations and injects identity ato
 
   const unjournaledFixture = createTaskApiFixture(TaskApiService);
   const unjournaledHistory = installHistoryRecorder(unjournaledFixture);
-  const [unjournaledTask] = await unjournaledFixture.service.list({
+  const [unjournaledTask] = await fixtureTasks(unjournaledFixture, {
     paths: [unjournaledFixture.taskPath],
     includeCompleted: true,
   });
@@ -408,7 +418,7 @@ test('task API confirms the live pre-mutation snapshot after stable-identity dri
     ),
   );
   const history = installHistoryRecorder(fixture);
-  const [task] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [task] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   const process = fixture.plugin.app.vault.process.bind(fixture.plugin.app.vault);
   let drifted = false;
   fixture.plugin.app.vault.process = async (file, updater) => {
@@ -484,7 +494,7 @@ test('task API history attributes create, update, and same-file move to the exac
   assert.match(createHistory.commit[0].input.after.rawLine, /id:: history_1/u);
 
   const updateFixture = createTaskApiFixture(TaskApiService);
-  const [updateTask] = await updateFixture.service.list({ paths: [updateFixture.taskPath], includeCompleted: true });
+  const [updateTask] = await fixtureTasks(updateFixture, { paths: [updateFixture.taskPath], includeCompleted: true });
   const updateHistory = installHistoryRecorder(updateFixture);
   armExternalRefreshMutation(updateFixture);
   const updated = await updateFixture.service.setStatus(updateTask, 'working', cause);
@@ -494,7 +504,7 @@ test('task API history attributes create, update, and same-file move to the exac
   assert.match(updateHistory.commit[0].input.after.rawLine, /^- \[\/\] Open task/u);
 
   const moveFixture = createTaskApiFixture(TaskApiService);
-  const moveTasks = await moveFixture.service.list({ paths: [moveFixture.taskPath], includeCompleted: true });
+  const moveTasks = await fixtureTasks(moveFixture, { paths: [moveFixture.taskPath], includeCompleted: true });
   const moveTask = moveTasks.find((task) => task.title === 'Working task');
   const moveHistory = installHistoryRecorder(moveFixture);
   armExternalRefreshMutation(moveFixture);
@@ -508,43 +518,11 @@ test('task API history attributes create, update, and same-file move to the exac
   assert.equal(moveHistory.commit[0].input.after.lineNumber, 3);
 });
 
-test('task API history uses the exact confirmed post-checklist-follow-up task state', async () => {
-  const { TaskApiService } = await loadTaskApiModule();
-  const fixture = createTaskApiFixture(TaskApiService);
-  const history = installHistoryRecorder(fixture);
-  fixture.plugin.settings.linkedSubitemCheckboxMappings = [
-    { checkboxState: '[*]', statuses: ['complete'], toggleTargetStatus: 'todo' },
-    { checkboxState: '[?]', statuses: ['todo'], toggleTargetStatus: 'complete' },
-  ];
-  fixture.contents.set(
-    fixture.taskPath,
-    fixture.contents.get(fixture.taskPath).replace('- [ ] Open task', '- [?] Open task'),
-  );
-  fixture.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation = async () => {
-    const lines = fixture.contents.get(fixture.taskPath).split('\n');
-    lines.splice(2, 0, 'followupConfirmed: true');
-    lines[5] = `${lines[5]} [priority:: followup-confirmed]`;
-    fixture.contents.set(fixture.taskPath, lines.join('\n'));
-  };
-  const [task] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
-
-  const result = await fixture.service.setCompletion(task, true, {
-    kind: 'user',
-    sourcePluginId: 'tps-global-context-menu',
-    surface: 'linked-context-checkbox',
-  });
-
-  assert.equal(result.ok, true);
-  assert.match(result.task?.rawLine || '', /priority:: followup-confirmed/u);
-  assert.match(history.commit[0].input.after.rawLine, /priority:: followup-confirmed/u);
-  assert.equal(history.commit[0].input.after.lineNumber, 5);
-});
-
 test('task API history failures remain fail-open and clear unusable pending intents', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
   const history = installHistoryRecorder(fixture, { ensureError: new Error('history identity unavailable') });
-  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [openTask] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
 
   const result = await fixture.service.setField(openTask, 'priority', 'high', {
     kind: 'user',
@@ -561,7 +539,7 @@ test('task API history failures remain fail-open and clear unusable pending inte
 
   const commitFixture = createTaskApiFixture(TaskApiService);
   const commitHistory = installHistoryRecorder(commitFixture, { commitError: new Error('history commit unavailable') });
-  const [commitTask] = await commitFixture.service.list({
+  const [commitTask] = await fixtureTasks(commitFixture, {
     paths: [commitFixture.taskPath],
     includeCompleted: true,
   });
@@ -591,7 +569,6 @@ test('task API uses task-line semantics instead of note semantics', () => {
   assert.match(taskApiSource, /extractTaskBlock\(allLines, lineNumber\)/);
   assert.match(taskApiSource, /\[cleanKey\]: value/);
   assert.match(taskApiSource, /return this\.update\(ref, \{ fields: \{ \[cleanKey\]: value \} \}, cause\)/);
-  assert.match(taskApiSource, /return this\.list\(\{\s+\.\.\.filter,\s+fields: \{/);
 });
 
 test('task API records expose only TPS-owned stable task identities', async () => {
@@ -634,56 +611,38 @@ test('task API canonicalizes public file inputs without constructor identity che
   assert.match(taskApiSource, /const targetFile = this\.resolveMarkdownFile\(target\.targetFile\)/);
   assert.match(taskApiSource, /\?\? this\.resolveMarkdownFile\(target\.targetPath\)/);
   assert.match(taskApiSource, /const file = this\.resolveMarkdownFile\(ref\.path\)/);
-  assert.match(taskApiSource, /\.map\(\(entry\) => this\.resolveMarkdownFile\(entry\)\)/);
-  assert.match(taskApiSource, /const rawPrefix = String\(filter\.pathPrefix \|\| ''\)\.trim\(\)/);
-  assert.match(taskApiSource, /if \(!rawPrefix\) return ordinaryFiles/);
-  assert.doesNotMatch(taskApiSource, /normalizePath\(String\(filter\.pathPrefix \|\| ''\)\.trim\(\)\)/);
   assert.match(taskApiSource, /const file = this\.resolveMarkdownFile\(task\.path\)/);
 
   assert.match(taskApiSource, /hasExplicitTarget \? null : this\.resolveMarkdownFile\(await this\.ensureTodayDailyNote\(\)\)/);
   assert.match(taskApiSource, /hasExplicitTarget \? null : resolved\.file/);
 });
 
-test('compiled task API accepts foreign file-like values and keeps empty prefixes unfiltered', async () => {
+test('task API exposes no inline collection or field-search entry point', async () => {
+  const { TaskApiService } = await loadTaskApiModule();
+  let accesses = 0;
+  const service = new TaskApiService(new Proxy({}, { get() { accesses++; throw new Error('Unexpected plugin access'); } }));
+  assert.equal(service.version, 5);
+  assert.equal(service.list, undefined);
+  assert.equal(service.findByField, undefined);
+  assert.equal(accesses, 0);
+  assert.doesNotMatch(taskApiSource, /getMarkdownFiles|GcmTaskListFilter|resolveListFiles|matchesFilter/);
+});
+
+test('direct task lookup and focus retain canonical vault file resolution', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-
-  const open = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: false });
-  assert.deepEqual(open.map(task => task.title), ['Open task', 'Working task']);
-
-  const all = await fixture.service.list({ files: [{ path: fixture.taskPath }], includeCompleted: true });
-  assert.deepEqual(all.map(task => task.title), ['Open task', 'Working task', 'Complete task']);
-  assert.equal(fixture.reads.at(-1), fixture.canonicalTaskFile, 'reads must use the canonical vault object');
-
-  const withoutPrefix = await fixture.service.list({ includeCompleted: true });
-  assert.deepEqual(
-    withoutPrefix.map(task => task.title),
-    ['Open task', 'Working task', 'Complete task', 'Uppercase extension task'],
-    'an omitted prefix must not become a root-only filter',
-  );
-  const inboxPrefix = await fixture.service.list({ pathPrefix: 'Inbox/Upper', includeCompleted: true });
-  assert.deepEqual(inboxPrefix.map(task => task.title), ['Uppercase extension task']);
-
-  assert.deepEqual(await fixture.service.list({ paths: ['Inbox/Rows.base'] }), []);
-  assert.deepEqual(await fixture.service.list({ paths: ['Inbox'] }), []);
-  assert.deepEqual(await fixture.service.list({ paths: ['Inbox/Missing.md'] }), []);
-
-  const exact = await fixture.service.get({
-    path: fixture.taskPath,
-    lineNumber: all[0].lineNumber,
-    rawLine: all[0].rawLine,
-    title: all[0].title,
-  });
+  const [task] = fixtureTasks(fixture, { paths: [fixture.taskPath] });
+  const exact = await fixture.service.get(task);
   assert.equal(exact?.title, 'Open task');
-
+  assert.equal(fixture.reads.at(-1), fixture.canonicalTaskFile);
   assert.equal(await fixture.service.focus(exact), true);
-  assert.equal(fixture.opened.at(-1), fixture.canonicalTaskFile, 'focus must open the canonical vault object');
+  assert.equal(fixture.opened.at(-1), fixture.canonicalTaskFile);
 });
 
 test('task API move preserves a Daily Note source as a migrated record', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -694,7 +653,7 @@ test('task API move preserves a Daily Note source as a migrated record', async (
     resolution: 'exact-or-identity',
   });
 
-  assert.equal(fixture.service.version, 4);
+  assert.equal(fixture.service.version, 5);
   assert.equal(result.ok, true);
   assert.equal(result.changed, true);
   assert.equal(result.task?.path, fixture.canonicalUpperFile.path);
@@ -716,7 +675,7 @@ test('configured Daily Note move policy follows the setting without changing exp
 
   const removedFixture = createTaskApiFixture(TaskApiService);
   removedFixture.plugin.settings.dailyNoteTaskMoveSourceBehavior = 'remove';
-  const [removedTask] = await removedFixture.service.list({
+  const [removedTask] = await fixtureTasks(removedFixture, {
     paths: [removedFixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -732,7 +691,7 @@ test('configured Daily Note move policy follows the setting without changing exp
 
   const explicitFixture = createTaskApiFixture(TaskApiService);
   explicitFixture.plugin.settings.dailyNoteTaskMoveSourceBehavior = 'remove';
-  const [explicitTask] = await explicitFixture.service.list({
+  const [explicitTask] = await fixtureTasks(explicitFixture, {
     paths: [explicitFixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -748,7 +707,7 @@ test('configured Daily Note move policy follows the setting without changing exp
 test('task API rejects an unknown runtime source policy before changing either note', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -771,7 +730,7 @@ test('task API rejects an unknown runtime source policy before changing either n
 test('task API move rolls back a Daily Note target copy when the source cannot be marked migrated', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -793,7 +752,7 @@ test('task API move rolls back a Daily Note target copy when the source cannot b
 test('task API reconciles a rejected target write that left identical preexisting content unchanged', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -832,7 +791,7 @@ test('task API reconciles a rejected target write that left identical preexistin
 test('task API continues a move when a rejected target write committed the exact expected content', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -863,7 +822,7 @@ test('task API reports a partial outcome when a rejected target write leaves con
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
   const history = installHistoryRecorder(fixture);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -903,7 +862,7 @@ test('task API reports a partial outcome when a rejected target write leaves con
 test('task API v2 keeps destructive Daily Note moves opt-in compatible', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -921,7 +880,7 @@ test('task API v2 keeps destructive Daily Note moves opt-in compatible', async (
 test('task API same-file moves report an unchanged in-block target as a no-op', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [task] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [task] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   const before = fixture.contents.get(fixture.taskPath);
 
   const result = await fixture.service.move(task, {
@@ -949,7 +908,7 @@ test('task API move placement keeps the append default and honors explicit after
 
   const appendFixture = createTaskApiFixture(TaskApiService);
   appendFixture.contents.set(appendFixture.canonicalUpperFile.path, targetContent);
-  const [appendTask] = await appendFixture.service.list({
+  const [appendTask] = await fixtureTasks(appendFixture, {
     paths: [appendFixture.taskPath],
     includeCompleted: true,
   });
@@ -965,7 +924,7 @@ test('task API move placement keeps the append default and honors explicit after
 
   const topFixture = createTaskApiFixture(TaskApiService);
   topFixture.contents.set(topFixture.canonicalUpperFile.path, targetContent);
-  const [topTask] = await topFixture.service.list({
+  const [topTask] = await fixtureTasks(topFixture, {
     paths: [topFixture.taskPath],
     includeCompleted: true,
   });
@@ -984,7 +943,7 @@ test('task API move placement keeps the append default and honors explicit after
 test('task API same-file after-frontmatter placement moves the complete block to the YAML boundary', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const tasks = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const tasks = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   const workingTask = tasks.find((task) => task.title === 'Working task');
 
   const result = await fixture.service.move(workingTask, {
@@ -1004,7 +963,7 @@ test('task API same-file after-frontmatter placement moves the complete block to
 test('task API captures the latest nested block before inserting the target copy', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -1027,7 +986,7 @@ test('task API captures the latest nested block before inserting the target copy
 test('task API rolls back when nested source content changes after target insertion', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -1061,7 +1020,7 @@ test('task API rolls back when nested source content changes after target insert
 test('task API rolls back a target copy when the source write throws', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -1091,7 +1050,7 @@ test('task API rolls back a target copy when the source write throws', async () 
 test('task API rolls back when the source updater ran but its rejected write did not commit', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -1122,7 +1081,7 @@ test('task API rolls back when the source updater ran but its rejected write did
 test('task API accepts a source write that committed exact expected content before rejecting', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -1152,7 +1111,7 @@ test('task API preserves the target copy when a rejected source write leaves con
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
   const history = installHistoryRecorder(fixture);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -1200,7 +1159,7 @@ test('task API does not invent a source disposition when a conflicted source no 
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
   const history = installHistoryRecorder(fixture);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -1240,7 +1199,7 @@ test('task API reports a partial target copy when source write and rollback both
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
   const history = installHistoryRecorder(fixture);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -1286,7 +1245,7 @@ test('task API aborts partial move history when failed rollback leaves no confir
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
   const history = installHistoryRecorder(fixture);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -1329,7 +1288,7 @@ test('task API aborts partial move history when the preserved target task itself
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
   const history = installHistoryRecorder(fixture);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -1374,7 +1333,7 @@ test('task API reports a committed move when post-commit task refresh fails', as
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
   const history = installHistoryRecorder(fixture);
-  const [dailyTask] = await fixture.service.list({
+  const [dailyTask] = await fixtureTasks(fixture, {
     paths: [fixture.dailyTaskPath],
     includeCompleted: true,
   });
@@ -1432,7 +1391,7 @@ test('compiled task API excludes frontmatter, fenced, and indented code tasks', 
     '- [ ] Visible task',
   ].join('\n'));
 
-  const tasks = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const tasks = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   assert.deepEqual(tasks.map(({ title, line }) => ({ title, line })), [
     { title: 'Visible task', line: 11 },
   ]);
@@ -1447,7 +1406,7 @@ test('task API mutations revalidate Markdown protection inside each write callba
   const { TaskApiService } = await loadTaskApiModule();
 
   const updateFixture = createTaskApiFixture(TaskApiService);
-  const [updateTask] = await updateFixture.service.list({ paths: [updateFixture.taskPath], includeCompleted: true });
+  const [updateTask] = await fixtureTasks(updateFixture, { paths: [updateFixture.taskPath], includeCompleted: true });
   const protectedUpdate = moveTaskIntoFenceBeforeNextSourceProcess(updateFixture, updateTask);
   const updated = await updateFixture.service.update(updateTask, { title: 'Must not edit code' });
   assert.equal(updated.ok, false);
@@ -1455,7 +1414,7 @@ test('task API mutations revalidate Markdown protection inside each write callba
   assert.equal(updateFixture.contents.get(updateFixture.taskPath), protectedUpdate);
 
   const deleteFixture = createTaskApiFixture(TaskApiService);
-  const [deleteTask] = await deleteFixture.service.list({ paths: [deleteFixture.taskPath], includeCompleted: true });
+  const [deleteTask] = await fixtureTasks(deleteFixture, { paths: [deleteFixture.taskPath], includeCompleted: true });
   const protectedDelete = moveTaskIntoFenceBeforeNextSourceProcess(deleteFixture, deleteTask);
   const deleted = await deleteFixture.service.delete(deleteTask);
   assert.equal(deleted.ok, false);
@@ -1463,7 +1422,7 @@ test('task API mutations revalidate Markdown protection inside each write callba
   assert.equal(deleteFixture.contents.get(deleteFixture.taskPath), protectedDelete);
 
   const sameFileFixture = createTaskApiFixture(TaskApiService);
-  const [sameFileTask] = await sameFileFixture.service.list({ paths: [sameFileFixture.taskPath], includeCompleted: true });
+  const [sameFileTask] = await fixtureTasks(sameFileFixture, { paths: [sameFileFixture.taskPath], includeCompleted: true });
   const protectedSameFileMove = moveTaskIntoFenceBeforeNextSourceProcess(sameFileFixture, sameFileTask);
   const sameFileMove = await sameFileFixture.service.move(sameFileTask, {
     targetPath: sameFileFixture.taskPath,
@@ -1475,7 +1434,7 @@ test('task API mutations revalidate Markdown protection inside each write callba
   assert.equal(sameFileFixture.contents.get(sameFileFixture.taskPath), protectedSameFileMove);
 
   const crossFileFixture = createTaskApiFixture(TaskApiService);
-  const [crossFileTask] = await crossFileFixture.service.list({ paths: [crossFileFixture.taskPath], includeCompleted: true });
+  const [crossFileTask] = await fixtureTasks(crossFileFixture, { paths: [crossFileFixture.taskPath], includeCompleted: true });
   const originalTarget = crossFileFixture.contents.get(crossFileFixture.canonicalUpperFile.path);
   const protectedCrossFileMove = moveTaskIntoFenceBeforeNextSourceProcess(crossFileFixture, crossFileTask);
   const crossFileMove = await crossFileFixture.service.move(crossFileTask, {
@@ -1502,7 +1461,7 @@ test('task API writes preserve actionable CR-only task coordinates', async () =>
     '',
   ].join('\r'));
 
-  const [task] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [task] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   assert.deepEqual({ title: task.title, line: task.line, lineNumber: task.lineNumber }, {
     title: 'CR task',
     line: 4,
@@ -1532,7 +1491,7 @@ test('compiled task API fails explicit invalid targets closed and writes valid f
   assert.equal(fixture.processes.at(-1), fixture.canonicalTaskFile);
   assert.match(fixture.contents.get(fixture.taskPath), /- \[ \] Created exactly/);
 
-  const source = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const source = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   const move = await fixture.service.move(source[0], { targetFile: { path: 'Inbox/Rows.base' } });
   assert.equal(move.ok, false);
   assert.match(move.error, /Target markdown file/);
@@ -1626,7 +1585,7 @@ test('task creation accepts and canonicalizes a configured custom raw-line marke
   assert.equal(created.task?.status, 'complete');
 });
 
-test('setCompletion uses configured mappings and runs the canonical checklist follow-up before invalidation', async () => {
+test('setCompletion uses configured mappings without automatic completion follow-up', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
   fixture.plugin.settings.linkedSubitemCheckboxMappings = [
@@ -1638,7 +1597,7 @@ test('setCompletion uses configured mappings and runs the canonical checklist fo
     fixture.contents.get(fixture.taskPath).replace('- [ ] Open task', '- [?] Open task'),
   );
 
-  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [openTask] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   const completed = await fixture.service.setCompletion(openTask, true);
 
   assert.equal(completed.ok, true);
@@ -1647,14 +1606,8 @@ test('setCompletion uses configured mappings and runs the canonical checklist fo
   assert.equal(completed.task?.status, 'complete');
   assert.equal(completed.task?.isComplete, true);
   assert.match(completed.task?.rawLine || '', /\[completedDate:: \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]/);
-  assert.equal(fixture.checklistMutations.length, 1);
-  assert.equal(fixture.checklistMutations[0].file, fixture.canonicalTaskFile);
-  assert.equal(fixture.checklistMutations[0].previousState, '?');
-  assert.equal(fixture.checklistMutations[0].nextState, '*');
-  assert.equal(fixture.checklistMutations[0].lineIndex, 4);
-  assert.match(fixture.checklistMutations[0].updatedLines[4], /^- \[\*\] Open task/);
+  assert.equal(fixture.checklistMutations.length, 0);
   assert.deepEqual(fixture.mutationTimeline, [
-    'checklist-followup',
     'files-updated',
     'calendar-refresh',
     'overlay-invalidated',
@@ -1668,7 +1621,7 @@ test('setCompletion uses configured mappings and runs the canonical checklist fo
   assert.equal(unchanged.ok, true);
   assert.equal(unchanged.changed, false);
   assert.equal(unchanged.task?.isComplete, true);
-  assert.equal(fixture.checklistMutations.length, 1);
+  assert.equal(fixture.checklistMutations.length, 0);
   assert.deepEqual(fixture.mutationTimeline, []);
 
   fixture.mutationTimeline.length = 0;
@@ -1679,11 +1632,8 @@ test('setCompletion uses configured mappings and runs the canonical checklist fo
   assert.equal(reopened.task?.status, 'todo');
   assert.equal(reopened.task?.isComplete, false);
   assert.doesNotMatch(reopened.task?.rawLine || '', /\[completedDate::/);
-  assert.equal(fixture.checklistMutations.length, 2);
-  assert.equal(fixture.checklistMutations[1].previousState, '*');
-  assert.equal(fixture.checklistMutations[1].nextState, '?');
+  assert.equal(fixture.checklistMutations.length, 0);
   assert.deepEqual(fixture.mutationTimeline, [
-    'checklist-followup',
     'files-updated',
     'calendar-refresh',
     'overlay-invalidated',
@@ -1705,7 +1655,7 @@ test('setCompletion preserves matching custom states and only canonicalizes expl
     `${fixture.contents.get(fixture.taskPath).trimEnd()}\n- [-] Wont-do task\n- [>] Migrated task\n`,
   );
 
-  const tasks = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const tasks = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   const byTitle = new Map(tasks.map((task) => [task.title, task]));
   const working = byTitle.get('Working task');
   const wontDo = byTitle.get('Wont-do task');
@@ -1748,7 +1698,7 @@ test('setCompletion preserves matching custom states and only canonicalizes expl
   );
   assert.deepEqual(
     fixture.checklistMutations.map(({ previousState, nextState }) => [previousState, nextState]),
-    [['/', '*'], ['-', '?'], ['>', '*']],
+    [],
   );
 });
 
@@ -1802,135 +1752,7 @@ test('configured task-state classification keeps custom open states open and mig
   );
 });
 
-test('setCompletion returns the exact post-follow-up task and fails an ambiguous recurrence reopen closed', async () => {
-  const { TaskApiService } = await loadTaskApiModule();
-  const fixture = createTaskApiFixture(TaskApiService);
-  fixture.plugin.settings.linkedSubitemCheckboxMappings = [
-    { checkboxState: '[*]', statuses: ['complete'], toggleTargetStatus: 'todo' },
-    { checkboxState: '[?]', statuses: ['todo'], toggleTargetStatus: 'complete' },
-  ];
-  fixture.contents.set(
-    fixture.taskPath,
-    fixture.contents.get(fixture.taskPath).replace('- [ ] Open task', '- [?] Open task'),
-  );
-  fixture.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation = async (
-    file,
-    previousState,
-    nextState,
-    updatedLines,
-  ) => {
-    fixture.mutationTimeline.push('checklist-followup');
-    fixture.checklistMutations.push({ file, previousState, nextState, updatedLines: [...updatedLines] });
-    if (nextState !== '*') return;
-    const lines = fixture.contents.get(fixture.taskPath).split('\n');
-    lines[4] = `${lines[4]} [recurrenceTaskId:: qa-series]`;
-    lines.splice(5, 0, '- [?] Open task [recurrenceTaskId:: qa-series]');
-    fixture.contents.set(fixture.taskPath, lines.join('\n'));
-  };
-
-  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
-  const completed = await fixture.service.setCompletion(openTask, true);
-
-  assert.equal(completed.ok, true);
-  assert.match(completed.task?.rawLine || '', /\[recurrenceTaskId:: qa-series\]/u);
-  assert.equal(completed.task?.lineNumber, 4);
-  assert.equal(completed.task?.status, 'complete');
-
-  const reopened = await fixture.service.setCompletion(completed.task, false);
-  assert.equal(reopened.ok, true);
-  assert.equal(reopened.changed, true);
-  assert.equal(
-    reopened.task,
-    null,
-    'reopening creates two identical recurrence rows, so the API must not trust the old absolute line',
-  );
-  const reopenedLines = fixture.contents.get(fixture.taskPath).split('\n').filter(
-    (line) => /^- \[\?\] Open task \[recurrenceTaskId:: qa-series\]$/u.test(line),
-  );
-  assert.equal(reopenedLines.length, 2);
-});
-
-test('setCompletion reports a committed write when follow-up fails and refreshes across frontmatter shifts', async () => {
-  const { TaskApiService } = await loadTaskApiModule();
-  const fixture = createTaskApiFixture(TaskApiService);
-  fixture.plugin.settings.linkedSubitemCheckboxMappings = [
-    { checkboxState: '[*]', statuses: ['complete'], toggleTargetStatus: 'todo' },
-    { checkboxState: '[?]', statuses: ['todo'], toggleTargetStatus: 'complete' },
-  ];
-  fixture.contents.set(
-    fixture.taskPath,
-    fixture.contents.get(fixture.taskPath).replace('- [ ] Open task', '- [?] Open task'),
-  );
-  fixture.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation = async () => {
-    fixture.mutationTimeline.push('checklist-followup');
-    const lines = fixture.contents.get(fixture.taskPath).split('\n');
-    lines.splice(2, 0, 'followupAttempted: true');
-    fixture.contents.set(fixture.taskPath, lines.join('\n'));
-    throw new Error('synthetic follow-up failure');
-  };
-
-  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
-  const completed = await fixture.service.setCompletion(openTask, true);
-
-  assert.equal(completed.ok, false);
-  assert.equal(completed.changed, true);
-  assert.match(completed.error || '', /synthetic follow-up failure/u);
-  assert.equal(completed.task?.marker, '*');
-  assert.equal(completed.task?.lineNumber, 5, 'frontmatter growth must not leave the result on the old absolute line');
-  assert.match(fixture.contents.get(fixture.taskPath).split('\n')[5], /^- \[\*\] Open task/u);
-  assert.deepEqual(fixture.mutationTimeline, [
-    'checklist-followup',
-    'files-updated',
-    'calendar-refresh',
-    'overlay-invalidated',
-  ]);
-  assert.deepEqual(fixture.filesUpdated, [[fixture.taskPath]]);
-  assert.deepEqual(fixture.calendarUpdated, [[fixture.taskPath]]);
-  assert.equal(fixture.overlayInvalidations.length, 1);
-});
-
-test('setCompletion fails the refreshed task identity closed when follow-up creates an exact duplicate', async () => {
-  const { TaskApiService } = await loadTaskApiModule();
-  const fixture = createTaskApiFixture(TaskApiService);
-  const history = installHistoryRecorder(fixture);
-  const cause = {
-    kind: 'user',
-    sourcePluginId: 'tps-global-context-menu',
-    surface: 'linked-context-checkbox',
-  };
-  fixture.plugin.settings.linkedSubitemCheckboxMappings = [
-    { checkboxState: '[*]', statuses: ['complete'], toggleTargetStatus: 'todo' },
-    { checkboxState: '[?]', statuses: ['todo'], toggleTargetStatus: 'complete' },
-  ];
-  fixture.contents.set(
-    fixture.taskPath,
-    fixture.contents.get(fixture.taskPath).replace('- [ ] Open task', '- [?] Open task'),
-  );
-  fixture.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation = async () => {
-    fixture.mutationTimeline.push('checklist-followup');
-    const lines = fixture.contents.get(fixture.taskPath).split('\n');
-    lines.splice(5, 0, lines[4]);
-    fixture.contents.set(fixture.taskPath, lines.join('\n'));
-  };
-
-  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
-  const completed = await fixture.service.setCompletion(openTask, true, cause);
-
-  assert.equal(completed.ok, true);
-  assert.equal(completed.changed, true);
-  assert.equal(completed.task, null, 'duplicate post-follow-up identities must not select by stale line number');
-  assert.equal(history.begin.length, 1);
-  assert.equal(history.commit.length, 0, 'ambiguous post-follow-up state cannot become successful history');
-  assert.equal(history.abort.length, 1);
-  assert.deepEqual(fixture.mutationTimeline, [
-    'checklist-followup',
-    'files-updated',
-    'calendar-refresh',
-    'overlay-invalidated',
-  ]);
-});
-
-test('setCompletion never returns a stale task when follow-up removes the exact task line', async () => {
+test('setCompletion never invokes a legacy follow-up that would replace the task', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
   const history = installHistoryRecorder(fixture);
@@ -1946,17 +1768,17 @@ test('setCompletion never returns a stale task when follow-up removes the exact 
     fixture.contents.set(fixture.taskPath, lines.join('\n'));
   };
 
-  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [openTask] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   const completed = await fixture.service.setCompletion(openTask, true, cause);
 
   assert.equal(completed.ok, true);
   assert.equal(completed.changed, true);
-  assert.equal(completed.task, null);
+  assert.equal(completed.task?.isComplete, true);
   assert.equal(history.begin.length, 1);
-  assert.equal(history.commit.length, 0, 'a removed post-follow-up task cannot retain a fabricated locator');
-  assert.equal(history.abort.length, 1);
+  assert.equal(history.commit.length, 1);
+  assert.equal(history.abort.length, 0);
+  assert.equal(history.commit[0].input.after.rawLine, completed.task.rawLine);
   assert.deepEqual(fixture.mutationTimeline, [
-    'checklist-followup',
     'files-updated',
     'calendar-refresh',
     'overlay-invalidated',
@@ -1966,7 +1788,7 @@ test('setCompletion never returns a stale task when follow-up removes the exact 
 test('raw setCheckbox remains backward-compatible and does not opt into completion follow-ups', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [openTask] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
 
   const result = await fixture.service.setCheckbox(openTask, 'x');
 
@@ -1979,7 +1801,7 @@ test('raw setCheckbox remains backward-compatible and does not opt into completi
 test('setCheckbox rejects malformed and configured-unowned states before resolving or writing the task', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [openTask] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   const readsBefore = fixture.reads.length;
   const processesBefore = fixture.processes.length;
 
@@ -1997,7 +1819,7 @@ test('setCheckbox rejects malformed and configured-unowned states before resolvi
 test('task status mutations fail closed when no configured mapping owns the requested status', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [openTask] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   const processCount = fixture.processes.length;
 
   const update = await fixture.service.setStatus(openTask, 'reviewing');
@@ -2031,7 +1853,7 @@ test('task status mutations apply aliases through the configured marker and comp
     fixture.taskPath,
     fixture.contents.get(fixture.taskPath).replace('- [ ] Open task', '- [?] Open task'),
   );
-  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [openTask] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
 
   const completed = await fixture.service.setStatus(openTask, 'completed');
 
@@ -2061,7 +1883,7 @@ test('task API checkbox workflow writes clear only owned status carriers and pre
     + ' [status:: [[Statuses/Blocked]]]'
     + ' [task.status:: todo] [task.checkboxStatus:: todo] [checkboxStatus:: todo]'
     + ' [priority:: high] `[task.status:: example]`\n');
-  const [task] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [task] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
 
   const result = await fixture.service.setField(task, 'task.status', 'working');
 
@@ -2079,7 +1901,7 @@ test('task API create and update refuse mapping revisions inside their atomic up
   const { TaskApiService } = await loadTaskApiModule();
 
   const updateFixture = createTaskApiFixture(TaskApiService);
-  const [openTask] = await updateFixture.service.list({ paths: [updateFixture.taskPath], includeCompleted: true });
+  const [openTask] = await fixtureTasks(updateFixture, { paths: [updateFixture.taskPath], includeCompleted: true });
   const updateBefore = updateFixture.contents.get(updateFixture.taskPath);
   const updateProcess = updateFixture.plugin.app.vault.process.bind(updateFixture.plugin.app.vault);
   updateFixture.plugin.app.vault.process = async (file, updater) => {
@@ -2121,7 +1943,7 @@ test('task API create and update refuse mapping revisions inside their atomic up
 test('task API checkbox updates refuse a relocated same-title task whose workflow token changed', async () => {
   const { TaskApiService } = await loadTaskApiModule();
   const fixture = createTaskApiFixture(TaskApiService);
-  const [openTask] = await fixture.service.list({ paths: [fixture.taskPath], includeCompleted: true });
+  const [openTask] = await fixtureTasks(fixture, { paths: [fixture.taskPath], includeCompleted: true });
   const originalProcess = fixture.plugin.app.vault.process.bind(fixture.plugin.app.vault);
   const concurrentLine = '- [x] Open task';
   fixture.plugin.app.vault.process = async (file, updater) => {
@@ -2159,7 +1981,7 @@ test('task API mutations preserve safe task-specific behavior', () => {
   assert.match(taskApiSource, /mappingPlanIsCurrent/);
   assert.match(taskApiSource, /private preflightTaskInputMappings\(/);
   assert.match(taskApiSource, /linkedSubitemCheckboxMappings/);
-  assert.match(taskApiSource, /handleExternalChecklistStateMutation\(/);
+  assert.doesNotMatch(taskApiSource, /handleExternalChecklistStateMutation\(/);
   assert.match(taskApiSource, /emitFilesUpdated/);
   assert.match(taskApiSource, /emitCalendarRefresh/);
   assert.match(taskApiSource, /refreshLivePreviewEditors: true/);

@@ -80,21 +80,6 @@ export interface GcmTaskRecord {
   blockLineCount: number;
 }
 
-export interface GcmTaskListFilter {
-  files?: Array<TFile | string>;
-  paths?: string[];
-  pathPrefix?: string;
-  query?: string;
-  text?: string;
-  tags?: string[];
-  anyTags?: string[];
-  checkbox?: string;
-  status?: string;
-  includeCompleted?: boolean;
-  fields?: Record<string, string | string[] | null>;
-  maxResults?: number;
-}
-
 export interface GcmTaskCreateInput {
   title: string;
   targetFile?: TFile;
@@ -142,7 +127,6 @@ export interface GcmTaskMutationResult {
 }
 
 interface TaskUpdateExecutionOptions {
-  checklistFollowup?: boolean;
   completionTarget?: boolean;
   historyAction?: 'task.update' | 'task.checkbox';
 }
@@ -180,7 +164,7 @@ type TaskHistoryCommit = {
 };
 
 export class TaskApiService {
-  readonly version = 4;
+  readonly version = 5;
   private readonly historyIdentityFailures = new WeakSet<object>();
 
   constructor(private readonly plugin: TPSGlobalContextMenuPlugin) {}
@@ -197,30 +181,6 @@ export class TaskApiService {
 
   parseLine(path: string, lineNumber: number, rawLine: string): GcmTaskRecord | null {
     return this.recordFromLine(path, lineNumber, rawLine);
-  }
-
-  async list(filter: GcmTaskListFilter = {}): Promise<GcmTaskRecord[]> {
-    const results: GcmTaskRecord[] = [];
-    const maxResults = Number.isFinite(Number(filter.maxResults))
-      ? Math.max(1, Math.floor(Number(filter.maxResults)))
-      : 1000;
-    const files = this.resolveListFiles(filter);
-
-    for (const file of files) {
-      const content = await this.plugin.app.vault.cachedRead(file);
-      const documentLines = scanMarkdownDocumentLines(content);
-      const lines = documentLines.map((line) => line.text);
-      for (const line of documentLines) {
-        if (!line.isContent) continue;
-        const record = this.recordFromLine(file.path, line.index, line.text, lines);
-        if (!record) continue;
-        if (!this.matchesFilter(record, filter)) continue;
-        results.push(record);
-        if (results.length >= maxResults) return results;
-      }
-    }
-
-    return results;
   }
 
   async get(ref: GcmTaskRef): Promise<GcmTaskRecord | null> {
@@ -409,7 +369,6 @@ export class TaskApiService {
    */
   setCompletion(ref: GcmTaskRef, completed: boolean, cause?: ItemHistoryUserCause): Promise<GcmTaskMutationResult> {
     return this.updateTask(ref, { status: completed ? 'complete' : 'todo' }, {
-      checklistFollowup: true,
       completionTarget: completed,
       historyAction: 'task.checkbox',
     }, cause);
@@ -488,9 +447,6 @@ export class TaskApiService {
     let resolvedLineNumber = before.lineNumber;
     let nextRawLine = before.rawLine;
     let confirmedHistoryBefore: TaskHistoryLocator | undefined;
-    let previousMarker: string | null = null;
-    let nextMarker: string | null = null;
-    let updatedLines: string[] | null = null;
     let resolvedCurrentTask: GcmTaskRecord = before;
     let mappingGuardBlocked = false;
     const context = {
@@ -536,8 +492,7 @@ export class TaskApiService {
         nextRawLine = current;
         const currentRecord = this.recordFromLine(resolved.file.path, index, current, parts.lines);
         if (currentRecord) resolvedCurrentTask = currentRecord;
-        const currentParsed = options.checklistFollowup
-          || options.completionTarget !== undefined
+        const currentParsed = options.completionTarget !== undefined
           || mappingPreflight.plan.mutatesCheckboxWorkflow
           ? parseTaskLine(current)
           : null;
@@ -583,11 +538,6 @@ export class TaskApiService {
         next = this.ensureHistoryIdentity(historyHandle, next);
         parts.lines[index] = next;
         nextRawLine = next;
-        if (options.checklistFollowup) {
-          previousMarker = currentParsed?.marker ?? null;
-          nextMarker = parseTaskLine(next)?.marker ?? null;
-          updatedLines = [...parts.lines];
-        }
         changed = true;
         updateBeforeContent = content;
         updateExpectedContent = joinContent(parts.lines, parts.newline, parts.endsWithNewline);
@@ -622,62 +572,16 @@ export class TaskApiService {
       let task = changed
         ? await this.get({ path: resolved.file.path, lineNumber: resolvedLineNumber, rawLine: nextRawLine, title: getTaskDisplayTitle(nextRawLine) })
         : resolvedCurrentTask;
-      let followupError: unknown = null;
-      if (changed && options.checklistFollowup && updatedLines) {
-        try {
-          await this.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation(
-            resolved.file,
-            previousMarker,
-            nextMarker,
-            updatedLines,
-            resolvedLineNumber,
-          );
-        } catch (error) {
-          followupError = error;
-          logger.flowError('TaskApi', 'update:checkbox-followup-failed', error, {
-            path: resolved.file.path,
-            lineNumber: resolvedLineNumber,
-          });
-        }
-        task = await this.readTaskAfterFollowup(resolved.file, {
-          rawLine: nextRawLine,
-          title: getTaskDisplayTitle(nextRawLine),
-          marker: nextMarker,
-        });
-      }
-      if (changed) this.notifyChanged([resolved.file.path], 'task-api-update');
-      if (changed && options.checklistFollowup && !task) {
-        await this.abortHistoryMutation(historyHandle);
-      } else if (changed) {
-        const confirmedHistoryAfter = options.checklistFollowup && task
-          ? { lineNumber: task.lineNumber, rawLine: task.rawLine }
-          : { lineNumber: resolvedLineNumber, rawLine: nextRawLine };
+      if (changed) {
+        this.notifyChanged([resolved.file.path], 'task-api-update');
         await this.commitHistoryMutation(historyHandle, {
           ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
-          after: {
-            path: resolved.file.path,
-            lineNumber: confirmedHistoryAfter.lineNumber,
-            rawLine: confirmedHistoryAfter.rawLine,
-          },
+          after: { path: resolved.file.path, lineNumber: resolvedLineNumber, rawLine: nextRawLine },
           sourceDisposition: 'retained',
-          outcome: followupError ? 'partial' : 'committed',
+          outcome: 'committed',
         });
       } else {
         await this.abortHistoryMutation(historyHandle);
-      }
-      if (followupError) {
-        logger.flowWarn('TaskApi', 'update:checkbox-followup-incomplete', {
-          ...context,
-          changed,
-          resolved: !!task,
-        });
-        return {
-          ok: false,
-          changed: true,
-          task,
-          before,
-          error: `Task checkbox changed, but its completion follow-up failed: ${getErrorMessage(followupError)}`,
-        };
       }
       logger.flow('TaskApi', 'update:done', { ...context, changed, resolved: !!task });
       return { ok: true, changed, task, before };
@@ -710,18 +614,6 @@ export class TaskApiService {
         error: getErrorMessage(error),
       };
     }
-  }
-
-  findByField(key: string, value: string | string[] | null, filter: GcmTaskListFilter = {}): Promise<GcmTaskRecord[]> {
-    const cleanKey = String(key || '').trim();
-    if (!cleanKey) return Promise.resolve([]);
-    return this.list({
-      ...filter,
-      fields: {
-        ...filter.fields,
-        [cleanKey]: value,
-      },
-    });
   }
 
   async move(
@@ -1443,48 +1335,6 @@ export class TaskApiService {
     return record ? { file, record } : null;
   }
 
-  private async readTaskAfterFollowup(
-    file: TFile,
-    identity: PostFollowupTaskIdentity,
-  ): Promise<GcmTaskRecord | null> {
-    try {
-      const content = await this.plugin.app.vault.read(file);
-      const parts = splitContent(content);
-      const documentLines = scanMarkdownDocumentLines(content);
-      const records = documentLines.reduce<GcmTaskRecord[]>((result, line) => {
-        if (!line.isContent) return result;
-        const record = this.recordFromLine(file.path, line.index, line.text, parts.lines);
-        if (record) result.push(record);
-        return result;
-      }, []);
-
-      const exactMatches = records.filter((record) => record.rawLine === identity.rawLine);
-      if (exactMatches.length > 0) return exactMatches.length === 1 ? exactMatches[0] : null;
-
-      for (const key of ['id', 'subitemId', 'recurrenceTaskId']) {
-        const value = readInlineFieldValue(identity.rawLine, key);
-        if (!value) continue;
-        const identityMatches = records.filter(
-          (record) => readInlineFieldValue(record.rawLine, key) === value,
-        );
-        if (identityMatches.length > 0) return identityMatches.length === 1 ? identityMatches[0] : null;
-      }
-
-      const normalizedTitle = normalizeTaskIdentityTitle(identity.title);
-      if (!normalizedTitle || identity.marker == null) return null;
-      const titleAndMarkerMatches = records.filter(
-        (record) => normalizeTaskIdentityTitle(record.title) === normalizedTitle
-          && record.marker === identity.marker,
-      );
-      return titleAndMarkerMatches.length === 1 ? titleAndMarkerMatches[0] : null;
-    } catch (error) {
-      logger.flowError('TaskApi', 'update:post-followup-read-failed', error, {
-        path: file.path,
-      });
-      return null;
-    }
-  }
-
   private applyTaskInputToLine(
     line: string,
     input: GcmTaskUpdateInput | GcmTaskCreateInput,
@@ -1566,46 +1416,6 @@ export class TaskApiService {
     }
 
     return next.trimEnd();
-  }
-
-  private resolveListFiles(filter: GcmTaskListFilter): TFile[] {
-    const explicit = [...(filter.files || []), ...(filter.paths || [])];
-    const files = explicit.length
-      ? explicit
-          .map((entry) => this.resolveMarkdownFile(entry))
-          .filter((file): file is TFile => file !== null)
-      : this.plugin.app.vault.getMarkdownFiles()
-          .filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file));
-    const ordinaryFiles = files.filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file));
-    const rawPrefix = String(filter.pathPrefix || '').trim();
-    if (!rawPrefix) return ordinaryFiles;
-    const prefix = normalizePath(rawPrefix);
-    return ordinaryFiles.filter((file) => file.path.startsWith(prefix));
-  }
-
-  private matchesFilter(record: GcmTaskRecord, filter: GcmTaskListFilter): boolean {
-    if (filter.includeCompleted === false && record.isComplete) return false;
-    const query = String(filter.query || filter.text || '').trim().toLowerCase();
-    if (query && !record.title.toLowerCase().includes(query) && !record.rawLine.toLowerCase().includes(query)) return false;
-    if (filter.checkbox && this.normalizeMarker(record.checkbox) !== this.normalizeMarker(filter.checkbox)) return false;
-    if (filter.status && this.plugin.sharedServices.status.normalize(record.status) !== this.plugin.sharedServices.status.normalize(filter.status)) return false;
-    const tags = record.tags.map((tag) => tag.toLowerCase());
-    const requiredTags = (filter.tags || []).map(normalizeTagForCompare).filter(Boolean);
-    if (requiredTags.some((tag) => !tags.includes(tag))) return false;
-    const anyTags = (filter.anyTags || []).map(normalizeTagForCompare).filter(Boolean);
-    if (anyTags.length && !anyTags.some((tag) => tags.includes(tag))) return false;
-    if (filter.fields && typeof filter.fields === 'object') {
-      for (const [key, expected] of Object.entries(filter.fields)) {
-        const actual = readInlineFieldValue(record.rawLine, key);
-        if (expected == null) {
-          if (actual) return false;
-          continue;
-        }
-        const values = Array.isArray(expected) ? expected : [expected];
-        if (!values.map((value) => String(value).trim()).includes(actual)) return false;
-      }
-    }
-    return true;
   }
 
   private normalizeMarker(value: unknown): string {
@@ -2032,10 +1842,6 @@ function readInlineFields(line: string): Record<string, string> {
   }
   INLINE_FIELD_GLOBAL_RE.lastIndex = 0;
   return fields;
-}
-
-function normalizeTagForCompare(tag: string): string {
-  return String(tag || '').trim().replace(/^#/, '').toLowerCase();
 }
 
 function normalizeTaskIdentityTitle(value: string): string {

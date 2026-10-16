@@ -146,7 +146,7 @@ export async function createSubitemForParentWithTitle(
   } else if (options?.inheritParentTemporalMetadata !== false && isDailyNoteParent && dailyNoteDateStr) {
     frontmatterLines.push(`scheduled: ${dailyNoteDateStr}`);
   }
-  if (options?.saveFolderPath === true || (options?.saveFolderPath !== false && plugin.settings.autoSaveFolderPath)) {
+  if (options?.saveFolderPath === true) {
     frontmatterLines.push(`folderPath: "${(folderPath || '/').replace(/"/g, '\\"')}"`);
   }
   const parentFrontmatter = plugin.parentLinkResolutionService.getLogicalFrontmatter(parentFile);
@@ -224,10 +224,6 @@ export async function createSubitemForParentWithTitle(
     new Notice('Created subitem, but failed to link to parent.');
   }
 
-  if (plugin.settings.applyNotebookNavigatorRulesOnSubitemCreate) {
-    await applyNotebookNavigatorRulesToFile(plugin, created);
-  }
-
   if (seedParentTags && parentTags.length > 0) {
     await mergeParentTagsIntoSubitem(plugin, created, parentTags);
   }
@@ -303,18 +299,6 @@ async function ensureFolderPath(app: App, path: string): Promise<void> {
     if (!app.vault.getAbstractFileByPath(current)) {
       await app.vault.createFolder(current);
     }
-  }
-}
-
-export async function applyNotebookNavigatorRulesToFile(plugin: TPSGlobalContextMenuPlugin, file: TFile): Promise<void> {
-  try {
-    await plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
-      reason: 'gcm-subitem-create',
-      force: true,
-      bypassCreationGrace: true,
-    });
-  } catch (error) {
-    logger.warn('[TPS GCM] Failed applying Notebook Navigator rules after subitem create:', file.path, error);
   }
 }
 

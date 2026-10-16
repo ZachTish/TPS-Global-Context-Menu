@@ -12,13 +12,10 @@ test('scheduled modal converts datetime-local values to space-separated frontmat
   assert.doesNotMatch(source, /dateValue \+= 'T00:00:00'/);
 });
 
-test('recurrence writes scheduled values with space separator', () => {
+test('explicit scheduling retains shared normalization after recurrence writers retire', () => {
   const source = read('src/services/bulk-edit-service.ts');
-
-  assert.match(source, /const scheduled = window\.moment\(firstOccurrence\)\.format\('YYYY-MM-DD HH:mm:ss'\)/);
-  assert.match(source, /const newScheduled = window\.moment\(nextDate\)\.format\('YYYY-MM-DD HH:mm:ss'\)/);
-  assert.doesNotMatch(source, /const scheduled = window\.moment\(firstOccurrence\)\.format\('YYYY-MM-DDTHH:mm:ss'\)/);
-  assert.doesNotMatch(source, /const newScheduled = window\.moment\(nextDate\)\.format\('YYYY-MM-DDTHH:mm:ss'\)/);
+  assert.match(source, /async setScheduled[\s\S]{0,200}normalizeObsidianDateTimeValue\(date\)/);
+  assert.doesNotMatch(source, /firstOccurrence|createNextRecurrenceInstance|bootstrapTemplateInstanceFromToday/);
 });
 
 test('shared date normalization formats only complete local values and preserves zoned instants', async () => {

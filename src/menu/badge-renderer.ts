@@ -108,13 +108,6 @@ export class BadgeRenderer {
 
   private async afterWholeNotePropertyEdit(files: TFile[]): Promise<void> {
     if (files.length === 0) return;
-    await Promise.all(files.map((file) =>
-      this.plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
-        reason: 'whole-note-inline-property-edit',
-        force: true,
-        bypassCreationGrace: true,
-      }),
-    ));
     for (const file of files) {
       this.plugin.persistentMenuManager?.refreshMenusForFile(file, true);
     }

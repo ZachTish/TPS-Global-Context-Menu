@@ -289,10 +289,6 @@ export class SubitemMetadataService {
       if (configuredValue) return configuredValue;
     }
 
-    const visual = this.plugin.notebookNavigatorRuleService.getVisualOutputsForFile(file, frontmatter);
-    const ruleIcon = pickString(visual?.icon?.value);
-    if (ruleIcon) return ruleIcon;
-
     return '';
   }
 
@@ -315,11 +311,6 @@ export class SubitemMetadataService {
         return value;
       }
     }
-
-    if (file) {
-      const ruleColor = this.resolveNotebookNavigatorRuleColor(file, frontmatter);
-      if (ruleColor) return ruleColor;
-    }
     return '';
   }
 
@@ -331,16 +322,5 @@ export class SubitemMetadataService {
       return true;
     }
     return /^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/.test(normalized);
-  }
-
-  private resolveNotebookNavigatorRuleColor(file: TFile, frontmatter: Record<string, any>): string {
-    try {
-      const visual = this.plugin.notebookNavigatorRuleService.getVisualOutputsForFile(file, frontmatter);
-      const color = String(visual?.color?.value || '').trim();
-      return this.isValidCssColor(color) ? color : '';
-    } catch (error) {
-      logger.warn('[TPS GCM] Failed resolving Notebook Navigator rule color for subitem:', file.path, error);
-      return '';
-    }
   }
 }

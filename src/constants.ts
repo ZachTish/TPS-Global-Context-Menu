@@ -77,13 +77,9 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   timeTrackingPausedSession: null,
 
   // Recurrence settings
-  enableRecurrence: true,
-  promptOnRecurrenceEdit: true,
-  recurrencePromptTimeout: 30, // 30 minutes (syncs across devices)
   activeStatusValues: ['todo', 'working', 'holding'],
   recurrenceCompletionStatuses: ['complete', 'wont-do'],
   recurrenceDefaultStatus: 'todo', // Default status for new recurrence instances
-  recurringTemplateFolder: 'Recurring Templates', // Folder to store recurring event templates
 
   // File naming settings
   enableAutoRename: true,
@@ -93,7 +89,6 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   dateCreatedFrontmatterKey: 'datecreated',
   dateModifiedFrontmatterKey: 'datemodified',
   fileTimestampFormat: 'YYYY-MM-DD HH:mm:ss',
-  applyNotebookNavigatorRulesOnSubitemCreate: false,
   frontmatterAutoWriteExclusions: "",
   enableActivityLog: false,
   activityLogPropertyKey: 'activity',
@@ -116,7 +111,6 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   enableChecklistCompletionProperty: false,
   checklistCompletionPropertyKey: 'hasOpenChecklist',
   checklistFinalPromptStatuses: ['complete', 'wont-do'],
-  reconcileTaskStatusToCheckbox: true,
   enableLinkedSubitemCheckboxes: false,
   linkedSubitemCheckboxStyle: 'soft-link',
   linkedSubitemCheckboxMappings: DEFAULT_LINKED_SUBITEM_MAPPINGS.map((mapping) => ({
@@ -164,7 +158,6 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   autoEmbedIgnoreTags: ['archive'],
 
   // Auto-insert blank line on note open
-  enableAutoInsertBlankLineOnOpen: true,
 
   // Default paths for new items
   defaultAttachmentsPath: '',

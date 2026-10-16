@@ -4,13 +4,9 @@ import { renderNavigatorPropertyVisibility } from './integrations/notebook-navig
 import { MIGRATABLE_KEY_SETTINGS, PropertyMigration } from './utils/property-migration';
 import { PropertyMigrationModal } from './modals/property-migration-modal';
 import { MANAGED_NOTE_FIELDS, managedNoteFieldKey, configureManagedNoteField } from './utils/managed-note-fields';
-import { App, Notice, PluginSettingTab, Setting, TextComponent, TFile } from 'obsidian';
+import { App, Notice, PluginSettingTab, Setting, TFile } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from './main';
 import type { AppearanceSettingKey, CustomProperty } from './types';
-import { BucketSectionRenderer } from './notebook-navigator-settings/bucket-section';
-import { HideSectionRenderer } from './notebook-navigator-settings/hide-section';
-import { RulesSectionRenderer } from './notebook-navigator-settings/rules-section';
-import type { BindCommittedText, SettingsSectionContext } from './notebook-navigator-settings/ui-common';
 import { collectVaultPropertyOptions, getEffectivePropertyOptions, normalizeManualPropertyOptions } from './utils/property-options';
 import {
   decodePropertyOptionSources,
@@ -55,7 +51,6 @@ import {
   updateAutomaticMutationTagExclusion,
 } from './utils/template-protection';
 
-const NN_TEXT_COMMIT_DEBOUNCE_MS = 300;
 export const LEGACY_GCM_NOTEBOOK_NAVIGATOR_RULE_SETTINGS_STYLE_ID = 'tps-gcm-notebook-navigator-rule-settings-style';
 
 export function removeLegacyNotebookNavigatorRuleSettingsStyle(ownerDocument: Document = document): void {
@@ -72,7 +67,6 @@ function formatAcceptedKindConstraint(value: unknown): string {
 
 type SettingsPageId = 'rules-fields' | 'menus-surfaces' | 'workflows' | 'appearance' | 'advanced';
 type RulesFieldsPageId = 'frontmatter' | 'custom-fields';
-type FrontmatterEditorId = 'sort' | 'tags' | 'icon-color';
 type WorkflowPageId = 'daily-notes' | 'tasks' | 'child-notes' | 'recurrence' | 'time-tracking';
 
 interface SettingsRouteOption<T extends string> {
@@ -116,13 +110,11 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   private propertySearch = '';
   private propertyTypeFilter = '';
   private activeSettingsPage: SettingsPageId = 'rules-fields';
-  private activeRulesFieldsPage: RulesFieldsPageId = 'frontmatter';
-  private activeFrontmatterEditor: FrontmatterEditorId = 'sort';
+  private activeRulesFieldsPage: RulesFieldsPageId = 'custom-fields';
   private activeWorkflowPage: WorkflowPageId = 'daily-notes';
   private activeClassificationType = '';
   private activeBaseCreateRouteIndex = -1;
   private activeBaseQuerySection = BASE_QUERY_GUIDE_SECTIONS[0]?.title || '';
-  private readonly nnTextCommitTimers = new Map<string, number>();
 
   constructor(app: App, plugin: TPSGlobalContextMenuPlugin) {
     super(app, plugin);
@@ -232,15 +224,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
   private renderSettingsHub(container: HTMLElement): void {
     const settings = this.plugin.settings;
-    const frontmatterRules = settings.notebookNavigatorRules;
-    const ruleCount = frontmatterRules.smartSort.buckets.length
-      + frontmatterRules.hideRules.length
-      + frontmatterRules.rules.length;
     const enabledWorkflowCount = [
       settings.enableDailyNoteNav,
-      settings.reconcileTaskStatusToCheckbox,
       settings.enableLinkedSubitemCheckboxes,
-      settings.enableRecurrence,
       settings.enableTimeTracking,
     ].filter(Boolean).length;
 
@@ -251,9 +237,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       [
         {
           id: 'rules-fields',
-          label: 'Rules & fields',
-          summary: `${ruleCount} rules · ${(settings.properties || []).length} fields`,
-          description: 'Navigator presentation, semantic tags, custom fields.',
+          label: 'Properties',
+          summary: `${(settings.properties || []).length} fields`,
+          description: 'Custom fields and note-maintenance settings.',
         },
         {
           id: 'menus-surfaces',
@@ -289,14 +275,12 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   }
 
   private renderRulesFieldsNavigation(container: HTMLElement): void {
-    const rules = this.plugin.settings.notebookNavigatorRules;
     this.renderRouteButtons<RulesFieldsPageId>(
       container,
       [
         {
           id: 'frontmatter',
-          label: 'Navigator rules',
-          summary: `${rules.smartSort.buckets.length + rules.hideRules.length + rules.rules.length} configured`,
+          label: 'Note maintenance',
         },
         {
           id: 'custom-fields',
@@ -321,7 +305,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         { id: 'daily-notes', label: 'Daily notes' },
         { id: 'tasks', label: 'Tasks' },
         { id: 'child-notes', label: 'Child notes' },
-        { id: 'recurrence', label: 'Recurrence' },
+        { id: 'recurrence', label: 'Status values' },
         { id: 'time-tracking', label: 'Time tracking' },
       ],
       this.activeWorkflowPage,
@@ -397,75 +381,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     }
   }
 
-  private bindNotebookNavigatorCommittedText: BindCommittedText = (
-    text: TextComponent,
-    initialValue: string,
-    commit: (value: string) => Promise<void>,
-    refreshOnCommit = false,
-    applyToActiveFileOnCommit = false
-  ) => {
-    let committedValue = initialValue ?? '';
-    let draftValue = committedValue;
-    const commitKey = `nn-text:${Math.random().toString(36).slice(2, 9)}`;
-
-    const cancelTimer = () => {
-      const existing = this.nnTextCommitTimers.get(commitKey);
-      if (existing !== undefined) {
-        window.clearTimeout(existing);
-        this.nnTextCommitTimers.delete(commitKey);
-      }
-    };
-
-    const commitNow = async () => {
-      if (draftValue === committedValue) return;
-      await commit(draftValue);
-      committedValue = draftValue;
-      await this.plugin.saveSettings();
-      if (applyToActiveFileOnCommit) {
-        await this.plugin.applyRulesToActiveFile(false);
-      }
-      if (refreshOnCommit) {
-        this.display();
-      }
-    };
-
-    text.setValue(committedValue);
-    text.onChange((value) => {
-      draftValue = value;
-      cancelTimer();
-      const timer = window.setTimeout(() => {
-        this.nnTextCommitTimers.delete(commitKey);
-        void commitNow();
-      }, NN_TEXT_COMMIT_DEBOUNCE_MS);
-      this.nnTextCommitTimers.set(commitKey, timer);
-    });
-    text.inputEl.addEventListener('blur', () => {
-      cancelTimer();
-      void commitNow();
-    });
-    text.inputEl.addEventListener('keydown', (event) => {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        text.inputEl.blur();
-        return;
-      }
-      if (event.key === 'Escape') {
-        event.preventDefault();
-        cancelTimer();
-        draftValue = committedValue;
-        text.setValue(committedValue);
-        text.inputEl.blur();
-      }
-    });
-  };
-
-  private async persistNotebookNavigatorRuleChange(applyActive = false): Promise<void> {
-    await this.plugin.saveSettings();
-    if (applyActive) {
-      await this.plugin.applyRulesToActiveFile(false);
-    }
-  }
-
   private async migrateProperty(change: PropertyMigration, configure: (settings: typeof this.plugin.settings) => void): Promise<boolean> {
     try { return await this.plugin.propertyMigrationService.request(change, configure); }
     catch (error) { logger.warn('[property-migration] stopped', { reason: error instanceof Error ? error.message : String(error) }); new Notice(error instanceof Error ? error.message : String(error), 10000); return false; }
@@ -516,164 +431,10 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     }
   }
 
-  private renderNotebookNavigatorRules(container: HTMLElement): void {
-    const settings = this.plugin.settings.notebookNavigatorRules;
+  private renderNoteMaintenance(container: HTMLElement): void {
     const root = container.createDiv({ cls: 'tps-gcm-settings-editor-page' });
-    root.dataset.tpsSettingsRoute = 'frontmatter-rules';
+    const advanced = this.createTrackedSection(root, 'Automation and safeguards', undefined, false);
 
-    new Setting(root)
-      .setName('Enable Navigator rules')
-      .setDesc('Apply icon and color rules to opened notes and provide virtual values for display and sorting. Semantic tags keep their separate automation controls.')
-      .addToggle((toggle) => toggle.setValue(settings.enabled).onChange(async (value) => {
-        settings.enabled = value;
-        await this.plugin.saveSettings();
-        this.display();
-      }));
-
-    if (!settings.enabled) {
-      root.createEl('p', {
-        cls: 'tps-gcm-settings-callout',
-        text: 'Navigator rules are off. You can still build and review them below; generated presentation values and semantic tag automation remain inactive until this is enabled.',
-      });
-    }
-
-    const overview = root.createDiv({ cls: 'tps-gcm-settings-frontmatter-rules-overview-grid' });
-    this.renderRuleOverviewCard(overview, 'Sort', `${settings.smartSort.buckets.length} buckets`, settings.smartSort.enabled ? 'Virtual sort is enabled.' : 'Disabled');
-    this.renderRuleOverviewCard(overview, 'Tags', `${settings.hideRules.length} rules`, settings.autoRemoveHiddenWhenNoMatch ? 'Semantic YAML tags auto-clean.' : 'Unmatched YAML tags are preserved.');
-    this.renderRuleOverviewCard(overview, 'Icon + Color', `${settings.rules.length} rules`, 'Opened notes keep their saved icon and color in sync.');
-
-    this.renderRouteButtons<FrontmatterEditorId>(
-      root,
-      [
-        { id: 'sort', label: 'Virtual sort', summary: `${settings.smartSort.buckets.length}` },
-        { id: 'tags', label: 'Semantic tags', summary: `${settings.hideRules.length}` },
-        { id: 'icon-color', label: 'Icon + color', summary: `${settings.rules.length}` },
-      ],
-      this.activeFrontmatterEditor,
-      (id) => {
-        this.activeFrontmatterEditor = id;
-        this.redisplayPreservingRouteFocus(id);
-      },
-      'tps-gcm-settings-subnav tps-gcm-settings-subnav--rule-kind',
-      'Navigator presentation and tag rule editor',
-    );
-
-    const sectionContext: SettingsSectionContext = {
-      plugin: this.plugin,
-      bindCommittedText: this.bindNotebookNavigatorCommittedText,
-      refresh: () => this.display(),
-      persistRuleChange: (applyActive = false) => this.persistNotebookNavigatorRuleChange(applyActive),
-    };
-
-    if (this.activeFrontmatterEditor === 'sort') {
-      new BucketSectionRenderer(sectionContext).render(root);
-    } else if (this.activeFrontmatterEditor === 'tags') {
-      new HideSectionRenderer(sectionContext).render(root);
-    } else {
-      new RulesSectionRenderer(sectionContext).render(root);
-    }
-
-    const advanced = this.createTrackedSection(
-      root,
-      'Automation and safeguards',
-      'Control semantic tag automation, rule exclusions, and separate general note-maintenance workflows.',
-      false,
-    );
-
-    new Setting(advanced)
-      .setName('Apply semantic tags after metadata changes')
-      .setDesc('Re-evaluate enabled tag rules after note metadata changes. Opened-note icon and color values refresh separately; sort remains virtual.')
-      .addToggle((toggle) => toggle.setValue(settings.autoApplyOnMetadataChange).onChange(async (value) => {
-        settings.autoApplyOnMetadataChange = value;
-        await this.plugin.saveSettings();
-      }));
-
-    new Setting(advanced)
-      .setName('Apply semantic tags at startup')
-      .setDesc('Scan eligible Markdown notes once after startup when at least one semantic tag rule is enabled.')
-      .addToggle((toggle) => toggle.setValue(settings.applyOnStartup).onChange(async (value) => {
-        settings.applyOnStartup = value;
-        await this.plugin.saveSettings();
-      }));
-
-    new Setting(advanced)
-      .setName('Semantic tag debounce (ms)')
-      .setDesc('Delay before applying semantic tag rules after a metadata change.')
-      .addText((text) => {
-        text.setPlaceholder('350');
-        this.bindNotebookNavigatorCommittedText(text, String(settings.metadataDebounceMs), async (value) => {
-          const parsed = Number.parseInt(value, 10);
-          settings.metadataDebounceMs = Number.isFinite(parsed) ? Math.max(0, Math.min(parsed, 5000)) : 350;
-        });
-      });
-
-    new Setting(advanced)
-      .setName('Apply semantic tag rules')
-      .setDesc('Deliberately add or remove only the YAML tags configured in Tag rules.')
-      .addButton((button) => button.setButtonText('Active note').onClick(async () => {
-        await this.plugin.applyRulesToActiveFile(true);
-      }))
-      .addButton((button) => button.setButtonText('All Markdown notes').onClick(async () => {
-        await this.plugin.applyRulesToAllFiles(false);
-      }));
-
-    const preview = this.plugin.getRulePreviewForActiveFile?.();
-    const previewText = preview
-      ? [
-        `Active file: ${String(preview.filePath || '')}`,
-        `Virtual icon: ${preview.icon ? `${String(preview.iconField)} = ${String(preview.icon)}` : '(no matching icon rule)'}`,
-        `Virtual color: ${preview.color ? `${String(preview.colorField)} = ${String(preview.color)}` : '(no matching color rule)'}`,
-        `Virtual sort: ${preview.sortKey ? `${String(preview.sortField)} = ${String(preview.sortKey)}${preview.sortMatched === false ? ' (no bucket matched)' : ''}` : '(no generated sort value)'}`,
-        `YAML tags: +${(preview.tagsAdded as string[] | undefined)?.join(', ') || 'none'} / -${(preview.tagsRemoved as string[] | undefined)?.join(', ') || 'none'}`,
-      ].join('\n')
-      : 'Active file preview unavailable. Open a Markdown note to inspect virtual presentation and semantic tag results.';
-    const previewBox = advanced.createEl('pre', {
-      cls: 'tps-gcm-settings-frontmatter-rules-preview',
-      text: previewText,
-    });
-    previewBox.setAttr('aria-label', 'Active file virtual presentation and semantic tag preview');
-
-    new Setting(advanced)
-      .setName('Rule exclusions')
-      .setDesc('Skip virtual presentation and semantic tag automation for matching files. One pattern per line; supports exact paths, folder prefixes, wildcards (*), name:<basename>, re:<regex>, and exact YAML tags with tag:<tag> (or #<tag>).')
-      .addTextArea((text) => {
-        text
-          .setValue(settings.frontmatterWriteExclusions || '')
-          .setPlaceholder('System/Templates/\ntag:template\nname:daily-template\nre:^System/')
-          .onChange(async (value) => {
-            settings.frontmatterWriteExclusions = value;
-            await this.plugin.saveSettings();
-          });
-      });
-
-    new Setting(advanced)
-      .setName('Auto-sync title from filename')
-      .setDesc('Keep titles aligned when ordinary notes are initialized or filenames change. Committed renames also update TPS-managed note titles on mobile and in the User role. Daily Notes keep their template or user title and retain the canonical Daily Notes filename.')
-      .addToggle(t => t.setValue(this.plugin.settings.autoSyncTitleFromFilename).onChange(async v => { this.plugin.settings.autoSyncTitleFromFilename = v; await this.plugin.saveSettings(); }));
-    new Setting(advanced)
-      .setName('Sync folderPath frontmatter')
-      .setDesc('Write the note\'s current folder to `folderPath` during create/open/move flows.')
-      .addToggle(t => t.setValue(this.plugin.settings.autoSaveFolderPath).onChange(async v => { this.plugin.settings.autoSaveFolderPath = v; await this.plugin.saveSettings(); }));
-    new Setting(advanced)
-      .setName('Auto-sync file timestamps')
-      .setDesc('Keep created/modified timestamps on note frontmatter.')
-      .addToggle(t => t.setValue(this.plugin.settings.autoSyncFileTimestamps).onChange(async v => { this.plugin.settings.autoSyncFileTimestamps = v; await this.plugin.saveSettings(); }));
-    this.renderMigratingKeySetting(advanced, 'Created timestamp key', 'Frontmatter key used for the file creation timestamp.', 'dateCreatedFrontmatterKey');
-    this.renderMigratingKeySetting(advanced, 'Modified timestamp key', 'Frontmatter key used for the file modified timestamp.', 'dateModifiedFrontmatterKey');
-    new Setting(advanced)
-      .setName('Timestamp format')
-      .setDesc('Moment.js format used for created/modified timestamp values.')
-      .addText(t => t
-        .setValue(this.plugin.settings.fileTimestampFormat || 'YYYY-MM-DD HH:mm:ss')
-        .setPlaceholder('YYYY-MM-DD HH:mm:ss')
-        .onChange(async v => {
-          this.plugin.settings.fileTimestampFormat = String(v || '').trim() || 'YYYY-MM-DD HH:mm:ss';
-          await this.plugin.saveSettings();
-        }));
-    new Setting(advanced)
-      .setName('Apply semantic tags on subitem create')
-      .setDesc('Immediately run enabled semantic tag rules after GCM creates a subitem. Virtual presentation does not require this setting.')
-      .addToggle(t => t.setValue(this.plugin.settings.applyNotebookNavigatorRulesOnSubitemCreate).onChange(async v => { this.plugin.settings.applyNotebookNavigatorRulesOnSubitemCreate = v; await this.plugin.saveSettings(); }));
     new Setting(advanced)
       .setName('Excluded tags')
       .setDesc('Choose an exact top-level YAML tag whose notes should not be changed by automatic TPS maintenance. Choosing an already selected tag removes it; paths and advanced patterns remain editable below.')
@@ -703,7 +464,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         }));
     new Setting(advanced)
       .setName('Global auto-write exclusions')
-      .setDesc('Skip automatic TPS note mutations such as title, folderPath, timestamps, recurrence maintenance, status reconciliation, and daily-note repairs. The tag chooser writes exact tag:<tag> entries here. You can also enter paths, folder prefixes, wildcards (*), name:<basename>, re:<regex>, or #<tag>. Manual Navigator rule application remains available.')
+      .setDesc('Skip automatic TPS note mutations such as title, folderPath, timestamps, recurrence maintenance, status reconciliation, and daily-note repairs. The tag chooser writes exact tag:<tag> entries here. You can also enter paths, folder prefixes, wildcards (*), name:<basename>, re:<regex>, or #<tag>.')
       .addTextArea(t => t
         .setValue(this.plugin.settings.frontmatterAutoWriteExclusions || '')
         .setPlaceholder('Templates/\nTemplates/*.md\ntag:template\nname:daily-template')
@@ -711,14 +472,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           this.plugin.settings.frontmatterAutoWriteExclusions = v;
           await this.plugin.saveSettings();
         }));
-  }
-
-  private renderRuleOverviewCard(container: HTMLElement, title: string, count: string, description: string): void {
-    const card = container.createDiv({ cls: 'tps-gcm-settings-frontmatter-rules-overview-card' });
-    const titleRow = card.createDiv({ cls: 'tps-gcm-settings-frontmatter-rules-overview-title' });
-    titleRow.createSpan({ text: title });
-    titleRow.createSpan({ cls: 'tps-gcm-settings-frontmatter-rules-overview-count', text: count });
-    card.createDiv({ cls: 'tps-gcm-settings-frontmatter-rules-overview-desc', text: description });
   }
 
   private getWorkspaceNames(): string[] {
@@ -777,7 +530,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     this.renderSettingsHub(containerEl);
 
     const activePage = this.activeSettingsPage === 'rules-fields'
-      ? this.createSettingsPage(containerEl, 'rules-fields', 'Rules & fields', 'Configure virtual Navigator presentation, semantic tag automation, reusable custom fields.')
+      ? this.createSettingsPage(containerEl, 'rules-fields', 'Properties', 'Configure reusable custom fields and note-maintenance settings.')
       : this.activeSettingsPage === 'menus-surfaces'
         ? this.createSettingsPage(containerEl, 'menus-surfaces', 'Menus & surfaces', 'Choose where GCM appears and how note links and inline controls behave.')
         : this.activeSettingsPage === 'workflows'
@@ -789,7 +542,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     if (this.activeSettingsPage === 'rules-fields') {
       this.renderRulesFieldsNavigation(activePage);
       if (this.activeRulesFieldsPage === 'frontmatter') {
-        this.renderNotebookNavigatorRules(activePage);
+        this.renderNoteMaintenance(activePage);
       }
     }
 
@@ -1913,37 +1666,13 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     if (this.activeWorkflowPage === 'recurrence') {
       const advancedAutomation = automation.createDiv({ cls: 'tps-gcm-settings-editor-page' });
       advancedAutomation.dataset.tpsSettingsRoute = 'recurrence';
-      advancedAutomation.createEl('h4', { text: 'Recurrence' });
+      advancedAutomation.createEl('h4', { text: 'Status values' });
       advancedAutomation.createEl('p', {
-        text: hasController
-          ? 'GCM owns note-level recurrence behavior; prefer TPS Controller for orchestration and archive scheduling.'
-          : 'Configure how GCM creates the next recurring note instance.',
+        text: 'Configure active and completed statuses. Obsidian no longer generates recurring notes. Completing a note does not create another note. Existing recurrence properties remain editable.',
         cls: 'setting-item-description',
       });
-    new Setting(advancedAutomation).setName('Note Recurrence').setDesc('Auto-create the next note instance when a recurring note is completed.').addToggle(t => t.setValue(this.plugin.settings.enableRecurrence).onChange(async v => { this.plugin.settings.enableRecurrence = v; await this.plugin.saveSettings(); this.display(); }));
-
-
-    new Setting(advancedAutomation)
-      .setName('Auto-rename files')
-      .setDesc('Keep filenames aligned with title and scheduled values when GCM updates note metadata.')
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.enableAutoRename)
-          .onChange(async (value) => {
-            this.plugin.settings.enableAutoRename = value;
-            await this.plugin.saveSettings();
-          })
-      );
-
-    if (this.plugin.settings.enableRecurrence) {
-      const sub = advancedAutomation.createDiv({ cls: 'tps-gcm-sub-settings' });
-      sub.style.paddingLeft = '15px';
-      sub.style.borderLeft = '2px solid var(--background-modifier-border)';
-      new Setting(sub).setName('Active Status Values').setDesc('Statuses treated as still active/open by integrations. Any configured status not listed here is considered non-active for rendering like Calendar dimming.').addText(t => t.setValue((this.plugin.settings.activeStatusValues || ['todo', 'working', 'holding']).join(', ')).onChange(async v => { this.plugin.settings.activeStatusValues = v.split(',').map(s => s.trim()).filter(Boolean); await this.plugin.saveSettings(); }));
-      new Setting(sub).setName('Completion Triggers').setDesc('Statuses that trigger recurrence').addText(t => t.setValue((this.plugin.settings.recurrenceCompletionStatuses || []).join(', ')).onChange(async v => { this.plugin.settings.recurrenceCompletionStatuses = v.split(',').map(s => s.trim()).filter(Boolean); await this.plugin.saveSettings(); }));
-      new Setting(sub).setName('Prompt on Edit').setDesc('Ask to update future instances').addToggle(t => t.setValue(this.plugin.settings.promptOnRecurrenceEdit).onChange(async v => { this.plugin.settings.promptOnRecurrenceEdit = v; await this.plugin.saveSettings(); }));
-      new Setting(sub).setName('Template Folder').setDesc('Folder for recurring event templates (copied when recurrence first set). Leave blank to disable.').addText(t => t.setPlaceholder('e.g. Recurring Templates').setValue(this.plugin.settings.recurringTemplateFolder || '').onChange(async v => { this.plugin.settings.recurringTemplateFolder = v.trim(); await this.plugin.saveSettings(); }));
-    }
+      new Setting(advancedAutomation).setName('Active Status Values').setDesc('Statuses treated as active/open by integrations, including Calendar dimming.').addText(t => t.setValue((this.plugin.settings.activeStatusValues || ['todo', 'working', 'holding']).join(', ')).onChange(async v => { this.plugin.settings.activeStatusValues = v.split(',').map(s => s.trim()).filter(Boolean); await this.plugin.saveSettings(); }));
+      new Setting(advancedAutomation).setName('Completed Status Values').setDesc('Statuses treated as completed by note actions. Changing status does not create a recurrence.').addText(t => t.setValue((this.plugin.settings.recurrenceCompletionStatuses || []).join(', ')).onChange(async v => { this.plugin.settings.recurrenceCompletionStatuses = v.split(',').map(s => s.trim()).filter(Boolean); await this.plugin.saveSettings(); }));
     }
 
     if (this.activeWorkflowPage === 'daily-notes') {

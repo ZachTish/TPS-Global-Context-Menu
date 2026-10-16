@@ -527,7 +527,6 @@ export class PropertyMigrationService {
       this.plugin.nativeRecordService?.refreshConfiguration();
       this.consumer('tps-health')?.nativeRecordService?.refreshConfiguration?.();
       this.plugin.eventService.emitFilesUpdated(notes.filter(note => note.path.endsWith('.md')).map(note => note.path), { sourcePluginId: this.plugin.manifest.id });
-      this.plugin.notebookNavigatorRuleService?.invalidateNotebookNavigatorPresentation();
     } catch { logger.warn('[property-migration] refresh deferred until next open'); }
   }
 }

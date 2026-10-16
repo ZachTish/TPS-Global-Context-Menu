@@ -788,31 +788,18 @@ test('all active GCM Daily Note creation routes use the canonical creator', () =
   assert.doesNotMatch(createTaskSource, /getTodayDailyNoteIfExists/u);
 });
 
-test('native mode skips scheduled-item population before a Daily Note lookup or vault scan', async () => {
-  const { NoteOperationService } = await loadNoteOperationService();
-  const fileNamingSource = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
-  assert.match(fileNamingSource, /dataArchitectureMode !== 'native-records'\s*&& this\.plugin\.settings\.enableAutoPopulateDailyNotes/u);
-  const counts = { configuration: 0, inventory: 0, writes: 0 };
-  const plugin = {
-    settings: { dataArchitectureMode: 'native-records', enableAutoPopulateDailyNotes: true },
-    app: { vault: {
-      getMarkdownFiles: () => { counts.inventory += 1; return []; },
-      modify: async () => { counts.writes += 1; },
-    } },
-    fileNamingService: {
-      whenDailyNoteConfigurationReady: async () => { counts.configuration += 1; },
-    },
-  };
-  const service = new NoteOperationService(plugin);
-  await service.populateDailyNoteWithScheduledItems({ path: 'Daily/2026-10-03.md', extension: 'md' });
-  assert.deepEqual(counts, { configuration: 0, inventory: 0, writes: 0 });
+test('daily-note population scan and writer are removed rather than gated by legacy settings', () => {
+  for (const path of ['../src/services/file-naming-service.ts', '../src/services/note-operation-service.ts']) {
+    const source = readFileSync(new URL(path, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /populateDailyNoteWithScheduledItems|enableAutoPopulateDailyNotes/u);
+  }
 });
 
 test('GCM-owned Daily Note creation fills the configured Scheduled key', async () => {
   const { NoteOperationService } = await loadNoteOperationService();
   const fields = { kind: ['journal/day'], startsAt: '{{date}} 00:00:00' };
   const plugin = {
-    settings: { properties: [{ id: 'scheduled', key: 'startsAt' }], autoSaveFolderPath: false },
+    settings: { properties: [{ id: 'scheduled', key: 'startsAt' }], autoSaveFolderPath: true },
     app: { vault: { getAbstractFileByPath: () => null } },
     frontmatterMutationService: { async process(_file, mutate) { mutate(fields); } },
     fileNamingService: { async processFileOnOpen() {} },
@@ -821,6 +808,7 @@ test('GCM-owned Daily Note creation fills the configured Scheduled key', async (
   const file = { path: 'Daily/2026-10-10.md', basename: '2026-10-10', parent: { path: 'Daily' } };
   await new NoteOperationService(plugin).normalizeCreatedDailyNote(file, '2026-10-10', 'Daily', '2026-10-10');
   assert.equal(fields.startsAt, '2026-10-10 00:00:00');
+  assert.equal(Object.hasOwn(fields, 'folderPath'), false, 'retired saved option does not add a folder property');
   assert.equal(Object.hasOwn(fields, 'scheduled'), false);
 });
 
@@ -872,9 +860,9 @@ test('Daily Note kind identity receives the title and filename sync exception', 
   assert.match(fileNamingSource, /public async isDailyNoteFile\(file: TFile\): Promise<boolean>/u);
   assert.match(fileNamingSource, /knownDailyNoteConfigurations/u);
   assert.match(noteOperationSource, /registerDailyNoteConfiguration\(settings\.folder, settings\.format\)/u);
-  assert.match(fileNamingSource, /preserveDailyNoteIdentity/u);
+  assert.doesNotMatch(noteOperationSource, /processFileOnOpen/u);
   assert.match(bulkEditSource, /return this\.plugin\.fileNamingService\.isDailyNoteFile\(file\)/u);
-  assert.match(settingsSource, /Daily Notes keep their template or user title and retain the canonical Daily Notes filename\./u);
+  assert.doesNotMatch(settingsSource, /Auto-sync title from filename/u);
 });
 
 test('Daily Note move classification awaits persisted settings and honors Periodic Notes when Core is disabled', async () => {
@@ -3385,14 +3373,8 @@ test('generic title synchronization checks workflow ownership only at a real mut
     };
     let source = '---\ntitle: Already matching\nkind: note\n---\n';
     let cachedFrontmatter = { title: 'Already matching', kind: 'note' };
-    let cachedReads = 0;
     let authoritativeReads = 0;
-    let identityChecks = 0;
-    let renamed = 0;
     let titleMutations = 0;
-    let authoritativeReadGate = null;
-    let signalAuthoritativeRead = null;
-    let releaseAuthoritativeRead = null;
 
     const refreshFileIdentity = (path) => {
       file.path = path;
@@ -3414,7 +3396,6 @@ test('generic title synchronization checks workflow ownership only at a real mut
       nativeRecordService: {
         isRecordFile: () => false,
         async hasRecordIdentityEvidence(_file, authoritativeSource) {
-          identityChecks += 1;
           return /(?:^|\n)id\s*:/u.test(String(authoritativeSource || ''));
         },
       },
@@ -3440,13 +3421,10 @@ test('generic title synchronization checks workflow ownership only at a real mut
           getAbstractFileByPath: (path) => path === file.path ? file : null,
           getFileByPath: (path) => path === file.path ? file : null,
           cachedRead: async () => {
-            cachedReads += 1;
             return source;
           },
           read: async () => {
             authoritativeReads += 1;
-            signalAuthoritativeRead?.();
-            if (authoritativeReadGate) await authoritativeReadGate;
             return source;
           },
           on: () => ({}),
@@ -3458,8 +3436,7 @@ test('generic title synchronization checks workflow ownership only at a real mut
         },
         fileManager: {
           async renameFile(_file, nextPath) {
-            renamed += 1;
-            refreshFileIdentity(nextPath);
+            throw Error('Explicit title repair must not rename files');
           },
         },
       },
@@ -3467,35 +3444,6 @@ test('generic title synchronization checks workflow ownership only at a real mut
     const service = new FileNamingService(plugin);
     await service.whenDailyNoteConfigurationReady();
 
-    await service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
-    assert.equal(identityChecks, 0, 'an already-canonical filename needs no authoritative identity read');
-    assert.equal(authoritativeReads, 0);
-
-    refreshFileIdentity('Inbox/Old path.md');
-    source = '---\ntitle: New path\nkind: note\n---\n';
-    cachedFrontmatter = { title: 'New path', kind: 'note' };
-    authoritativeReadGate = new Promise((resolve) => { releaseAuthoritativeRead = resolve; });
-    const authoritativeReadStarted = new Promise((resolve) => { signalAuthoritativeRead = resolve; });
-    const racingRename = service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
-    await authoritativeReadStarted;
-    assert.ok(cachedReads > 0, 'identity is rechecked after the candidate rename has been derived');
-    assert.equal(renamed, 0);
-    source = [
-      '---',
-      'id: workout-became-native',
-      'tpsSchemaVersion: 1',
-      'kind: workout-session',
-      'title: New path',
-      '---',
-      '',
-    ].join('\n');
-    releaseAuthoritativeRead();
-    await racingRename;
-    assert.equal(renamed, 0, 'identity acquired before the mutation boundary prevents the rename');
-
-    authoritativeReadGate = null;
-    signalAuthoritativeRead = null;
-    releaseAuthoritativeRead = null;
     refreshFileIdentity('Inbox/2026-08-31 - Workout 07.04.md');
     source = [
       '---',
@@ -3506,271 +3454,42 @@ test('generic title synchronization checks workflow ownership only at a real mut
       '',
     ].join('\n');
     cachedFrontmatter = { kind: 'workout', workoutId: 'workout-legacy', title: 'Workout 2026-08-31 07.04' };
-    const workoutReadBaseline = authoritativeReads;
-    await service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
-    assert.ok(authoritativeReads > workoutReadBaseline, 'Legacy workflow ownership is read from current bytes');
-    assert.equal(renamed, 0, 'a date-first Legacy workout keeps its workflow-owned filename');
-
     const titleReadBaseline = authoritativeReads;
-    const titleResult = await service.syncTitleFromFilename(file, {
+    const titleResult = await service.syncTitleFromFilenameWithOptions(file, {
       force: true,
       bypassCreationGrace: true,
     });
-    assert.equal(titleResult, undefined, 'the public title-sync method keeps its void contract');
+    assert.equal(titleResult, 'skipped', 'explicit maintenance respects workflow ownership');
     assert.ok(authoritativeReads > titleReadBaseline, 'title writes use the same current-byte ownership boundary');
     assert.equal(titleMutations, 0, 'Legacy workout identity also blocks filename-derived title writes');
-
-    refreshFileIdentity('Inbox/Ordinary old name.md');
-    source = '---\ntitle: Ordinary new name\nkind: note\n---\n';
-    cachedFrontmatter = { title: 'Ordinary new name', kind: 'note' };
-    await service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
-    assert.equal(renamed, 1, 'ordinary notes retain title-derived renaming');
-    assert.equal(file.path, 'Inbox/Ordinary new name.md');
-
-    refreshFileIdentity('Inbox/Blueprint old name.md');
-    source = '---\ntitle: Blueprint Template new name\ntags: [template]\nkind: note\n---\n';
-    cachedFrontmatter = { title: 'Blueprint Template new name', kind: 'note' };
-    await service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
-    assert.equal(renamed, 2, 'neither template identity nor the English word template is an implicit filename exclusion');
-    assert.equal(file.path, 'Inbox/Blueprint Template new name.md');
 
     const templateTitleMutations = titleMutations;
     refreshFileIdentity('Inbox/Ordinary Template Draft.md');
     source = '---\ntitle: Stale title\ntags: [template]\nkind: note\n---\n';
     cachedFrontmatter = { title: 'Stale title', kind: 'note' };
-    await service.syncTitleFromFilename(file, { force: true, bypassCreationGrace: true });
+    await service.syncTitleFromFilenameWithOptions(file, { force: true, bypassCreationGrace: true });
     assert.ok(titleMutations > templateTitleMutations, 'a basename containing template can still drive title synchronization');
 
-    plugin.settings.frontmatterAutoWriteExclusions = 'tag:template';
-    refreshFileIdentity('Inbox/Explicitly excluded old name.md');
-    source = '---\ntitle: Explicitly excluded new name\ntags: [template]\nkind: note\n---\n';
-    cachedFrontmatter = { title: 'Explicitly excluded new name', kind: 'note' };
-    await service.updateFilenameIfNeeded(file, { bypassCreationGrace: true });
-    assert.equal(renamed, 2, 'an explicit exact tag exclusion blocks the automatic rename');
-    assert.equal(file.path, 'Inbox/Explicitly excluded old name.md');
   } finally {
     globalThis.window = priorWindow;
   }
 });
 
-test('timestamp sync rejects native identity evidence acquired at the source-preserving mutation boundary', async () => {
-  const priorWindow = globalThis.window;
-  const timestampMoment = () => ({
-    isValid: () => true,
-    format: () => '2026-08-31 12:34:56',
-    valueOf: () => Date.now(),
-  });
-  timestampMoment.ISO_8601 = Symbol('ISO_8601');
-  globalThis.window = { ...priorWindow, moment: timestampMoment };
-
-  try {
-    const { FileNamingService } = await loadFileNamingService();
-    const cases = [
-      {
-        label: 'valid native record',
-        boundaryFrontmatter: { id: 'task-valid-race', kind: 'task', title: 'Timestamp race' },
-        expectedWrites: 0,
-      },
-      {
-        label: 'incomplete native identity',
-        boundaryFrontmatter: { id: '', title: 'Timestamp race' },
-        expectedWrites: 0,
-      },
-      {
-        label: 'ordinary note',
-        boundaryFrontmatter: { title: 'Timestamp race' },
-        expectedWrites: 1,
-      },
-    ];
-
-    for (const testCase of cases) {
-      const file = {
-        __isTestTFile: true,
-        path: `Inbox/${testCase.label}.md`,
-        name: `${testCase.label}.md`,
-        basename: testCase.label,
-        extension: 'md',
-        parent: { path: 'Inbox' },
-        stat: { ctime: 1_777_777_777_000, mtime: 1_777_777_888_000 },
-      };
-      const initialSource = '---\ntitle: Timestamp race\n---\n';
-      let boundaryFrontmatter = { title: 'Timestamp race' };
-      let ownedKeys = [];
-      let cause = null;
-      let writes = 0;
-      let legacyProcessCalls = 0;
-      const plugin = {
-        manifest: { id: 'tps-global-context-menu' },
-        settings: {
-          autoSyncFileTimestamps: true,
-          dateCreatedFrontmatterKey: 'createdDate',
-          dateModifiedFrontmatterKey: 'modifiedDate',
-          fileTimestampFormat: 'YYYY-MM-DD HH:mm:ss',
-          dailyNoteDateFormat: 'YYYY-MM-DD',
-        },
-        registerEvent() {},
-        shouldIgnoreAutoFrontmatterWrite: () => false,
-        nativeRecordService: {
-          hasRecordIdentityEvidenceInFrontmatter(frontmatter) {
-            return Object.keys(frontmatter || {}).some((key) => (
-              ['id', 'tpsschemaversion'].includes(key.toLowerCase())
-            ));
-          },
-        },
-        bulkEditService: {
-          canMutateFrontmatterSafely: async () => true,
-          async runSerializedFrontmatterWrite(_file, action) {
-            // Identity appears after every cache/source preflight. The callback
-            // below is the current-byte mutation boundary and must recheck it.
-            boundaryFrontmatter = { ...testCase.boundaryFrontmatter };
-            await action();
-          },
-        },
-        frontmatterMutationService: {
-          async processOwnedKeysPreservingSource(_file, keys, mutator, mutationCause) {
-            ownedKeys = [...keys];
-            cause = mutationCause;
-            const before = JSON.stringify(boundaryFrontmatter);
-            mutator(boundaryFrontmatter);
-            const changed = JSON.stringify(boundaryFrontmatter) !== before;
-            if (changed) writes += 1;
-            return changed;
-          },
-          async process() {
-            legacyProcessCalls += 1;
-            throw new Error('timestamp automation must use the atomic source-preserving writer');
-          },
-        },
-        app: {
-          internalPlugins: { getPluginById: () => null, plugins: {} },
-          plugins: { getPlugin: () => null, plugins: {} },
-          vault: {
-            configDir: '.obsidian',
-            adapter: { async read() { throw new Error('missing Daily Notes settings'); } },
-            getFiles: () => [file],
-            getMarkdownFiles: () => [file],
-            getAbstractFileByPath: (path) => path === file.path ? file : null,
-            cachedRead: async () => initialSource,
-            on: () => ({}),
-          },
-          metadataCache: {
-            initialized: true,
-            getFileCache: () => ({ frontmatter: { title: 'Timestamp race' } }),
-            on: () => ({}),
-          },
-        },
-      };
-
-      const service = new FileNamingService(plugin);
-      await service.whenDailyNoteConfigurationReady();
-      await service.syncFileTimestamps(file, { reason: 'modify', force: true });
-
-      assert.deepEqual(ownedKeys, ['createdDate', 'modifiedDate'], testCase.label);
-      assert.equal(cause?.surface, 'file-timestamp-sync', testCase.label);
-      assert.equal(legacyProcessCalls, 0, testCase.label);
-      assert.equal(writes, testCase.expectedWrites, testCase.label);
-      assert.equal(Object.hasOwn(boundaryFrontmatter, 'createdDate'), testCase.expectedWrites === 1, testCase.label);
-      assert.equal(Object.hasOwn(boundaryFrontmatter, 'modifiedDate'), testCase.expectedWrites === 1, testCase.label);
-    }
-  } finally {
-    globalThis.window = priorWindow;
-  }
+test('timestamp maintenance writer, state and settings are retired', () => {
+  const source = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
+  const settings = readFileSync(new URL('../src/settings-tab.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /syncFileTimestamps|recentTimestampWrites|timestampWriteStateByPath|getTimestampContentFingerprint|stripTimestampFrontmatterLines|file-timestamp-sync/);
+  assert.doesNotMatch(settings, /Auto-sync file timestamps|Created timestamp key|Modified timestamp key|Timestamp format/);
 });
 
-test('calendar records follow their title without allowing reverse title writes or renaming other records', async () => {
-  const priorWindow=globalThis.window;
-  globalThis.window={...priorWindow,moment:()=>({isValid:()=>false,format:()=>''})};
-  globalThis.filenameTestParseYaml=source=>{if(source.includes('bad: ['))throw Error('bad YAML');return Object.fromEntries(source.split('\n').filter(l=>l.includes(':')).map(l=>{const i=l.indexOf(':');return [l.slice(0,i),l.slice(i+1).trim()]}));};
-  try {
-    const {FileNamingService}=await loadFileNamingService();
-    const file={__isTestTFile:true,path:'Inbox/calendar-event-id.md',name:'calendar-event-id.md',basename:'calendar-event-id',extension:'md',parent:{path:'Inbox'},stat:{ctime:0,mtime:0}};
-    let fields={id:'calendar-event-id',kind:'calendar-event',title:'Planning'},source='',collision=false,renames=0,writes=0;
-    const refresh=()=>source='---\n'+Object.entries(fields).map(([k,v])=>`${k}: ${v}`).join('\n')+'\n---\nBody stays here';refresh();
-    const inspect=fm=>fm?.id&&fm?.kind?{id:fm.id,kind:fm.kind}:null;
-    const plugin={settings:{enableAutoRename:true,autoSyncTitleFromFilename:true,folderExclusions:'',frontmatterAutoWriteExclusions:'',dailyNoteDateFormat:'YYYY-MM-DD'},registerEvent(){},shouldIgnoreAutoFrontmatterWrite:()=>false,
-      nativeRecordService:{isRecordFile:()=>!!inspect(fields),inspect,hasRecordIdentityEvidence:async()=>true},
-      bulkEditService:{shouldSkipNoteLevelRecurrence:async()=>false,canMutateFrontmatterSafely:async()=>true,runSerializedFrontmatterWrite:async(f,action)=>action()},
-      frontmatterMutationService:{process:async()=>{writes++;return true}},
-      app:{internalPlugins:{getPluginById:()=>null,plugins:{}},plugins:{getPlugin:()=>null,plugins:{}},
-        vault:{configDir:'.obsidian',adapter:{read:async()=>{throw Error('missing')}},getFiles:()=>[file],getMarkdownFiles:()=>[file],getAbstractFileByPath:path=>path===file.path?file:collision?{}:null,getFileByPath:path=>path===file.path?file:null,read:async()=>source,cachedRead:async()=>source,on:()=>({})},
-        metadataCache:{initialized:true,getFileCache:()=>({frontmatter:fields}),on:()=>({})},
-        fileManager:{renameFile:async(f,path)=>{renames++;f.path=path;f.name=path.split('/').at(-1);f.basename=f.name.slice(0,-3)}}}};
-    const service=new FileNamingService(plugin);await service.whenDailyNoteConfigurationReady();
-    assert.equal(service.shouldProcess(file),false,'generic mutations remain blocked');
-    assert.equal(service.shouldProcess(file,{allowCalendarEventFilename:true}),true);
-    const before=source;await service.updateFilenameIfNeeded(file);assert.equal(file.path,'Inbox/Planning.md');assert.equal(source,before);
-    await service.updateFilenameIfNeeded(file);assert.equal(renames,1,'idempotent');
-    fields.title='Revised planning';refresh();await service.processFileOnOpen(file);assert.equal(file.path,'Inbox/Revised planning.md');assert.equal(writes,0,'no reverse title/timestamp writes');
-    await service.syncTitleFromFilename(file,{force:true});assert.equal(writes,0);
-    fields.title='Collision';refresh();collision=true;await service.updateFilenameIfNeeded(file);assert.equal(renames,2);collision=false;
-    source+='\nbad: [';source=source.replace('title: Collision','title: Collision\nbad: [');await service.updateFilenameIfNeeded(file);assert.equal(renames,2,'malformed current bytes retain filename');
-    fields.kind='workout-session';refresh();await service.updateFilenameIfNeeded(file);assert.equal(renames,2,'other workflows remain protected');
-    fields.kind='calendar-event';refresh();plugin.settings.frontmatterAutoWriteExclusions='Inbox';plugin.shouldIgnoreAutoFrontmatterWrite=()=>true;await service.updateFilenameIfNeeded(file);assert.equal(renames,2,'exclusions remain authoritative');
-  } finally {globalThis.window=priorWindow;delete globalThis.filenameTestParseYaml;}
+test('automatic filename writer and calendar exception are absent', () => {
+  const source = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /updateFilenameIfNeeded|allowCalendarEventFilename|isCalendarEventFile/);
 });
 
-test('title sync applies case-only renames, remains idempotent, and never overwrites a sibling', async () => {
-  const priorWindow = globalThis.window;
-  globalThis.window = { ...priorWindow, moment: () => ({ isValid: () => false, format: () => '' }) };
-  globalThis.filenameTestParseYaml = source => Object.fromEntries(source.split('\n').filter(line => line.includes(':')).map(line => {
-    const split = line.indexOf(':');
-    return [line.slice(0, split), line.slice(split + 1).trim()];
-  }));
-  try {
-    const { FileNamingService } = await loadFileNamingService();
-    const parent = { path: 'Inbox', children: [] };
-    const file = { __isTestTFile: true, path: 'Inbox/TishOS V0.2.md', name: 'TishOS V0.2.md', basename: 'TishOS V0.2', extension: 'md', parent, stat: { ctime: 0, mtime: 0 } };
-    parent.children.push(file);
-    let title = 'TishOS v0.2';
-    let renames = 0;
-    let excluded = false;
-    let caseInsensitiveLookup = true;
-    const source = () => `---\ntitle: ${title}\nkind: note\n---\nKeep the body`;
-    const plugin = {
-      settings: { enableAutoRename: true, folderExclusions: '', frontmatterAutoWriteExclusions: '', dailyNoteDateFormat: 'YYYY-MM-DD' },
-      registerEvent() {},
-      shouldIgnoreAutoFrontmatterWrite: () => excluded,
-      nativeRecordService: { isRecordFile: () => false, hasRecordIdentityEvidence: async () => false },
-      bulkEditService: { shouldSkipNoteLevelRecurrence: async () => false, canMutateFrontmatterSafely: async () => true },
-      app: {
-        internalPlugins: { getPluginById: () => null, plugins: {} }, plugins: { getPlugin: () => null, plugins: {} },
-        vault: {
-          configDir: '.obsidian', adapter: { read: async () => { throw Error('missing'); } },
-          getFiles: () => [file], getMarkdownFiles: () => [file],
-          getAbstractFileByPath: path => parent.children.find(child => caseInsensitiveLookup ? child.path.toLowerCase() === path.toLowerCase() : child.path === path) ?? null,
-          getFileByPath: path => path === file.path ? file : null,
-          read: async () => source(), cachedRead: async () => source(), on: () => ({})
-        },
-        metadataCache: { initialized: true, getFileCache: () => ({ frontmatter: { title, kind: 'note' } }), on: () => ({}) },
-        fileManager: { renameFile: async (target, path) => {
-          renames++;
-          target.path = path; target.name = path.split('/').at(-1); target.basename = target.name.slice(0, -3);
-        } }
-      }
-    };
-    const service = new FileNamingService(plugin);
-    await service.whenDailyNoteConfigurationReady();
-    const before = source();
-    await service.updateFilenameIfNeeded(file, { titleOverride: title });
-    assert.equal(file.path, 'Inbox/TishOS v0.2.md');
-    assert.equal(source(), before, 'case-only rename never changes note content');
-    await service.updateFilenameIfNeeded(file);
-    assert.equal(renames, 1, 'an exact match does not rename again');
-    // A case-sensitive vault also catches portable case-folded collisions.
-    caseInsensitiveLookup = false;
-    title = 'Occupied';
-    parent.children.push({ path: 'Inbox/OCCUPIED.md' });
-    await service.updateFilenameIfNeeded(file);
-    assert.equal(renames, 1);
-    parent.children.pop();
-    title = 'TishOS V0.2'; excluded = true;
-    await service.updateFilenameIfNeeded(file);
-    assert.equal(renames, 1, 'auto-write exclusions still win');
-    excluded = false;
-    await service.updateFilenameIfNeeded(file);
-    assert.equal(file.path, 'Inbox/TishOS V0.2.md', 'metadata-triggered sync also preserves authored case');
-  } finally {
-    globalThis.window = priorWindow;
-    delete globalThis.filenameTestParseYaml;
-  }
+test('orphan relationship repair scans are deleted while explicit actions remain', () => {
+  const source = readFileSync(new URL('../src/services/subitem-relationship-sync-service.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /repairBrokenBodyLinksForParentLegacy|ensureBodyLinksForChildLegacy|reconcileMarkdownParentLinks|getMarkdownChildrenForParent|getMarkdownFiles/);
+  assert.match(source, /async linkExistingChildToParent/);
+  assert.match(source, /async unlinkChildFromParent/);
 });

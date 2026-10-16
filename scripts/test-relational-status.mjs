@@ -1229,14 +1229,6 @@ test('note workflow and recurrence services never treat relational status as che
     new URL('../src/services/subitem-line-model.ts', import.meta.url),
     'utf8',
   );
-  const reconcileSource = readFileSync(
-    new URL('../src/services/task-status-checkbox-reconcile-service.ts', import.meta.url),
-    'utf8',
-  );
-  const recurrenceSource = readFileSync(
-    new URL('../src/services/recurrence-service.ts', import.meta.url),
-    'utf8',
-  );
   const eventSource = readFileSync(
     new URL('../src/events/register-events.ts', import.meta.url),
     'utf8',
@@ -1267,37 +1259,16 @@ test('note workflow and recurrence services never treat relational status as che
     bulkEditSource,
     /const workflowStatusUpdate = Object\.entries\(updates \|\| \{\}\)\.find\([\s\S]*?workflowStatusKey\.toLowerCase\(\)/u,
   );
-  assert.match(
-    bulkEditSource,
-    /SKIP_KEYS\.add\(this\.getWorkflowStatusKey\(\)\.toLowerCase\(\)\)/u,
-    'recurrence propagation must skip only the workflow field, not a relational field named status',
-  );
+  assert.doesNotMatch(bulkEditSource, /applyTemplateToOpenInstances/);
   assert.doesNotMatch(
     bulkEditSource,
     /(?:delete|set)FrontmatterValueCaseInsensitive\([^\n]*['"]status['"]/u,
     'recurrence mutations must not delete or overwrite a relational status field',
   );
-  assert.match(
-    noteOperationSource,
-    /subitemRelationshipSyncService\.insertBodyLinkForChildWorkflow\(\s*dailyNote,\s*childFile,/u,
-    'scheduled-note population must delegate workflow-key and checkbox mapping resolution to the shared relationship service',
-  );
+  assert.doesNotMatch(noteOperationSource, /populateDailyNoteWithScheduledItems/);
   assert.match(
     subitemLineSource,
     /sharedServices\?\.status\?\.getStatusPropertyKey\?\.\(\) \|\| 'status'/u,
-  );
-  assert.match(
-    reconcileSource,
-    /sharedServices\?\.status\?\.getStatusPropertyKey\?\.\(\) \|\| 'status'/u,
-  );
-  assert.doesNotMatch(
-    recurrenceSource,
-    /\bfm\.status\b/u,
-    'recurrence reads must use the workflow status key rather than a relational status field',
-  );
-  assert.match(
-    recurrenceSource,
-    /private readWorkflowStatus\([\s\S]*?getStatusPropertyKey\?\.\(\)/u,
   );
   assert.doesNotMatch(eventSource, /scheduleCompletedDateSync|reconcileCompletedDate/u);
   assert.doesNotMatch(

@@ -377,7 +377,7 @@ test("note-open refresh attaches late hosts without forcing stable navigation re
   const fileOpenSource = sourceBetween(
     eventsSource,
     "plugin.app.workspace.on('file-open'",
-    "// ── Debounced frontmatter/filename sync",
+    "// ── Read-only metadata menu refresh",
   );
   assert.match(fileOpenSource, /scheduleMenus\('file-open', 0\)/);
   assert.doesNotMatch(fileOpenSource, /scheduleResponsiveMenuRefresh/);

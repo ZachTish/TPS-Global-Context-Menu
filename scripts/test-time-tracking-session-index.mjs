@@ -71,20 +71,20 @@ test('native mode refuses task-line timers and task metadata writes', async () =
   assert.equal(writes, 0);
 });
 
-test('disabled startup leaves the timer source index unread, including disable before scheduled work',async()=>{
+test('disabled startup leaves the timer source index unread, including disable before layout readiness',async()=>{
  for(const initiallyEnabled of [false,true]){
   const h=harness({enabled:initiallyEnabled});
   for(let i=0;i<1000;i++)h.add(`Ordinary ${i}.md`);
   let scans=0;const original=h.plugin.app.vault.getMarkdownFiles;
   h.plugin.app.vault.getMarkdownFiles=()=>{scans++;return original();};
-  await h.runStartup(()=>{h.activate(false);});
+  h.activate(false); await h.runStartup();
   assert.equal(h.reads(),0,'disabled time tracking must not read every note after layout');
   assert.equal(scans,0,'disabled startup must not enumerate the vault');
   assert.equal(h.service.sessionSources.size,0);
  }
 });
 
-test('enabled startup prepares the timer index once through the existing synchronization owner',async()=>{
+test('enabled startup prepares the read-only timer index without scheduling periodic work',async()=>{
  const h=harness({enabled:false});
  for(let i=0;i<1000;i++)h.add(`Ordinary ${i}.md`);
  let refreshes=0;const refresh=h.service.refreshActiveTimerCache.bind(h.service);
@@ -92,7 +92,7 @@ test('enabled startup prepares the timer index once through the existing synchro
  h.activate(true);
  await h.runStartup();
  assert.equal(h.reads(),1000,'enabling before the delayed callback still discovers stored sessions');
- assert.equal(refreshes,1,'startup synchronization already refreshes timer counts');
+ assert.equal(refreshes,1,'read-only startup refreshes timer counts');
  assert.equal(h.service.sessionSources.size,1000);
 });
 
@@ -105,7 +105,7 @@ test('enabled startup still restores active note timer counts without modifying 
  const before=h.bodies.get(target);
  await h.runStartup();
  assert.equal(h.service.getActiveTimerCountForFileSync(target),1);
- assert.deepEqual(updates,['Target.md']);
+ assert.deepEqual(updates,[]);
  assert.equal(h.bodies.get(target),before);
  assert.equal(h.reads(),2);
 });
@@ -171,7 +171,7 @@ test('failed unknown recovery preserves known timer counts and blocks target pre
   let targetPreparations=0,writes=0;
   h.service.resolveAndEnsureTarget=async()=>{targetPreparations++;return {file:target,type:'note',id:'target',title:'Target'};};
   h.service.writeNewSession=async()=>{writes++;};
-  await assert.rejects(h.service.syncRunningScheduledMetadata(),/time-tracking-source-(?:unavailable|invalid)/u);
+  await assert.rejects(h.service.refreshActiveTimerCache(),/time-tracking-source-(?:unavailable|invalid)/u);
   assert.equal(h.service.getActiveTimerCountForFileSync(target),1,'failed recovery never publishes zero known timers');
   await assert.rejects(h.service.startTimer({file:target,type:'note'}),/time-tracking-source-(?:unavailable|invalid)/u);
   assert.equal(targetPreparations,0,'no identity preparation uses an incomplete discovery');assert.equal(writes,0);
@@ -209,7 +209,6 @@ test('disabled activation owns no timers, listeners, inventory, body read or UI 
   for(const event of ['modify','rename','delete','metadata:changed'])h.emit(event,f);
  }
  await h.runStartup();
- await h.service.syncRunningScheduledMetadata();
  assert.deepEqual(await h.service.getRuntimeStatus(),{active:null,paused:null});
  assert.equal(h.events.size,0);
  assert.equal(h.intervals.size,0);
@@ -226,8 +225,8 @@ test('enabling, disabling and enabling again owns one listener set and cancels p
  h.plugin.eventService={emitFilesUpdated(){}};
  h.activate(true);h.activate(true);
  assert.equal([...h.events.values()].reduce((n,refs)=>n+refs.length,0),6);
- assert.equal(h.intervals.size,1);
- const staleInterval=[...h.intervals.values()][0];
+ assert.equal(h.intervals.size,0);
+
  await h.runStartup();
  assert.equal(h.service.getActiveTimerCountForFileSync(target),1);
  assert.equal(h.reads(),2);
@@ -239,12 +238,12 @@ test('enabling, disabling and enabling again owns one listener set and cancels p
  assert.equal(h.service.activeTimerCountsByPath.size,0);
  const stoppedRevision=h.service.sessionSourceRevision;
  for(let i=0;i<100;i++)h.emit('metadata:changed',target);
- staleInterval();await h.runStartup();
+ await h.runStartup();
  assert.equal(h.reads(),2);
  assert.equal(h.service.sessionSourceRevision,stoppedRevision);
  h.activate(true);
  assert.equal([...h.events.values()].flat().length,6);
- assert.equal(h.intervals.size,1);
+ assert.equal(h.intervals.size,0);
  await h.runStartup();
  assert.equal(h.reads(),4,'reactivation discovers changes made while listeners were stopped');
  assert.equal(h.service.getActiveTimerCountForFileSync(target),1);
@@ -449,4 +448,34 @@ test('unchanged metadata bursts during bootstrap preserve unvisited non-candidat
  h.setReadHook(async file=>{if(!burst){burst=true;for(let i=0;i<3;i++)for(const f of h.files)h.emit('metadata:changed',f);}return h.bodies.get(file);});
  const revision=h.service.sessionSourceRevision;assert.equal((await h.service.scanStoredSessions()).length,8);
  assert.equal(h.service.sessionSourceRevision,revision);assert.equal(h.reads(),8);
+});
+
+
+test('timer startup and Sync bursts never schedule maintenance or enter writers', async () => {
+ const h=harness();
+ let inventories=0,writes=0;
+ h.plugin.app.vault.getMarkdownFiles=()=>{inventories++;return h.files;};
+ h.plugin.app.vault.process=async()=>{writes++;};
+ h.plugin.frontmatterMutationService.process=async()=>{writes++;};
+ const target=h.add('Target.md',{id:'target',title:'Target'});
+ h.add('Session.md',{timeTracking:[record('active')]});
+ h.plugin.app.vault.getAbstractFileByPath=path=>h.files.find(f=>f.path===path)??null;
+ await h.runStartup();
+ assert.equal(inventories,1);
+ assert.equal(h.service.getActiveTimerCountForFileSync(target),1);
+ const reads=h.reads();
+ for(let i=0;i<100;i++){
+   const f=h.add(`Arrived ${i}.md`);
+   for(const event of ['modify','rename','metadata:changed','file-open'])h.emit(event,f);
+ }
+ assert.equal(h.reads(),reads);
+ assert.equal(inventories,1);
+ assert.equal(writes,0);
+ assert.equal(h.intervals.size,0);
+ assert.equal(h.timeouts.size,0);
+ assert.equal(h.service.syncRunningScheduledMetadata,undefined);
+ h.service.detach();
+ await h.runStartup();
+ assert.equal(h.reads(),reads);
+ assert.equal(writes,0);
 });

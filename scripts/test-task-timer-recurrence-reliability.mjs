@@ -143,204 +143,9 @@ test('recurrence clones use the captured mapped status while dropping stale work
   assert.equal(isCompletedTaskMarker('[XX]', ['x']), false);
 });
 
-test('recurrence mapping failure performs zero markdown or template-store writes', async () => {
-  const { Notice, TaskRecurrenceService, TFile } = await importMappedTaskCreationServices();
-  Notice.messages.length = 0;
-  let markdownMutations = 0;
-  let templateWrites = 0;
-  const plugin = {
-    settings: {
-      enableRecurrence: true,
-      recurrenceDefaultStatus: 'todo',
-      linkedSubitemCheckboxMappings: [
-        { checkboxState: '[bad]', statuses: ['todo'] },
-        { checkboxState: '[x]', statuses: ['complete'] },
-      ],
-    },
-    sharedServices: {
-      status: {
-        normalize: normalizeStatus,
-        getDoneStatuses: () => ['complete'],
-        getStatusPropertyKey: () => 'workflow',
-      },
-    },
-    subitemRelationshipSyncService: {
-      async mutateMarkdownBody() { markdownMutations += 1; },
-    },
-    app: {
-      vault: {
-        adapter: {
-          exists: async () => false,
-          read: async () => '',
-          write: async () => { templateWrites += 1; },
-        },
-      },
-    },
-    manifest: { dir: '.obsidian/plugins/tps-global-context-menu' },
-  };
-  const service = new TaskRecurrenceService(plugin);
-  await service.handleTaskCompletion({
-    file: new TFile('Inbox/Recurring.md'),
-    lineIndex: 0,
-    previousState: ' ',
-    nextState: 'x',
-    updatedLines: ['- [x] Repeat [recurrence:: GCM-AFTER-COMPLETION:P1D]'],
-  });
-
-  assert.equal(markdownMutations, 0);
-  assert.equal(templateWrites, 0);
-  assert.match(Notice.messages.at(-1) || '', /default status has no checkbox mapping/u);
-});
-
-test('ordinary task completion skips recurrence mapping validation even when the note contains another recurring task', async () => {
-  const { Notice, TaskRecurrenceService, TFile } = await importMappedTaskCreationServices();
-  Notice.messages.length = 0;
-  let markdownMutations = 0;
-  const plugin = {
-    settings: {
-      enableRecurrence: true,
-      recurrenceDefaultStatus: 'todo',
-      linkedSubitemCheckboxMappings: [
-        { checkboxState: '[bad]', statuses: ['todo'] },
-        { checkboxState: '[x]', statuses: ['complete'] },
-      ],
-    },
-    sharedServices: {
-      status: {
-        normalize: normalizeStatus,
-        getDoneStatuses: () => ['complete'],
-        getStatusPropertyKey: () => 'workflow',
-      },
-    },
-    subitemRelationshipSyncService: {
-      async mutateMarkdownBody() { markdownMutations += 1; },
-    },
-  };
-  const service = new TaskRecurrenceService(plugin);
-  await service.handleTaskCompletion({
-    file: new TFile('Inbox/Mixed.md'),
-    lineIndex: 0,
-    previousState: ' ',
-    nextState: 'x',
-    updatedLines: [
-      '- [x] Ordinary task',
-      '- [ ] Different recurring task [recurrence:: GCM-AFTER-COMPLETION:P1D]',
-    ],
-  });
-
-  assert.equal(markdownMutations, 0);
-  assert.deepEqual(Notice.messages, []);
-});
-
-test('recurrence uses a custom primary marker and removes stale relational status', async () => {
-  const { TaskRecurrenceService, TFile } = await importMappedTaskCreationServices();
-  const file = new TFile('Inbox/Recurring.md');
-  const lines = [
-    '- [X] Repeat [workflow:: complete] [recurrence:: GCM-AFTER-COMPLETION:P1D] [recurrenceTaskId:: rec-1]',
-  ];
-  const plugin = {
-    settings: {
-      enableRecurrence: true,
-      recurrenceDefaultStatus: 'todo',
-      linkedSubitemCheckboxMappings: [
-        { checkboxState: '[o]', statuses: ['todo'] },
-        { checkboxState: '[X]', statuses: ['complete'] },
-      ],
-    },
-    sharedServices: {
-      status: {
-        normalize: normalizeStatus,
-        getDoneStatuses: () => ['complete'],
-        getStatusPropertyKey: () => 'workflow',
-      },
-    },
-    subitemRelationshipSyncService: {
-      async mutateMarkdownBody(_file, mutate) { await mutate(lines); },
-    },
-    app: {
-      vault: {
-        adapter: {
-          exists: async () => false,
-          read: async () => '',
-          write: async () => undefined,
-        },
-      },
-    },
-    manifest: { dir: '.obsidian/plugins/tps-global-context-menu' },
-    eventService: { emitFilesUpdated() {} },
-    overlayRenderingService: { invalidate() {} },
-  };
-  const service = new TaskRecurrenceService(plugin);
-  await service.handleTaskCompletion({
-    file,
-    lineIndex: 0,
-    previousState: ' ',
-    nextState: 'X',
-    updatedLines: [...lines],
-  });
-
-  assert.equal(lines.length, 2);
-  assert.match(lines[1], /^- \[o\] Repeat/u);
-  assert.doesNotMatch(lines[1], /\[workflow::/u);
-});
-
-test('recurrence completion performs zero markdown or template writes when its creation mapping changes at the mutation boundary', async () => {
-  const { TaskRecurrenceService, TFile } = await importMappedTaskCreationServices();
-  const file = new TFile('Inbox/Recurring.md');
-  const originalLine = '- [X] Repeat [workflow:: complete] [recurrence:: GCM-AFTER-COMPLETION:P1D] [recurrenceTaskId:: rec-1]';
-  const lines = [originalLine];
-  let markdownWrites = 0;
-  let templateWrites = 0;
-  const plugin = {
-    settings: {
-      enableRecurrence: true,
-      recurrenceDefaultStatus: 'todo',
-      linkedSubitemCheckboxMappings: [
-        { checkboxState: '[o]', statuses: ['todo'] },
-        { checkboxState: '[X]', statuses: ['complete'] },
-      ],
-    },
-    sharedServices: {
-      status: {
-        normalize: normalizeStatus,
-        getDoneStatuses: () => ['complete'],
-        getStatusPropertyKey: () => 'workflow',
-      },
-    },
-    subitemRelationshipSyncService: {
-      async mutateMarkdownBody(_file, mutate) {
-        plugin.settings.linkedSubitemCheckboxMappings = [
-          { checkboxState: '[q]', statuses: ['todo'] },
-          { checkboxState: '[X]', statuses: ['complete'] },
-        ];
-        if (await mutate(lines)) markdownWrites += 1;
-      },
-    },
-    app: {
-      vault: {
-        adapter: {
-          exists: async () => false,
-          read: async () => '',
-          write: async () => { templateWrites += 1; },
-        },
-      },
-    },
-    manifest: { dir: '.obsidian/plugins/tps-global-context-menu' },
-    eventService: { emitFilesUpdated() {} },
-    overlayRenderingService: { invalidate() {} },
-  };
-  const service = new TaskRecurrenceService(plugin);
-  await service.handleTaskCompletion({
-    file,
-    lineIndex: 0,
-    previousState: ' ',
-    nextState: 'X',
-    updatedLines: [...lines],
-  });
-
-  assert.equal(markdownWrites, 0);
-  assert.equal(templateWrites, 0);
-  assert.deepEqual(lines, [originalLine]);
+test('automatic inline completion has no recurrence writer', async () => {
+  const { TaskRecurrenceService } = await importMappedTaskCreationServices();
+  assert.equal(TaskRecurrenceService.prototype.handleTaskCompletion, undefined);
 });
 
 test('both recurrence template modal callbacks perform zero saves after their semantic mapping changes', async () => {
@@ -718,7 +523,7 @@ test('external task timers can reuse their target without creating notes and sto
   assert.equal(stored.find((record) => record.id === ordinary.id).end, undefined, 'the unrelated active timer remains running');
 });
 
-test('authored note timing survives running, manual, stopped, and periodic session synchronization', async () => {
+test('authored note timing survives running, manual, and stopped timer actions', async () => {
   const {
     dailyFile,
     frontmatter,
@@ -736,7 +541,7 @@ test('authored note timing survives running, manual, stopped, and periodic sessi
   assert.ok(running);
   assert.deepEqual(readTimingMetadata(frontmatter, scheduledFile), authoredTiming);
 
-  await service.syncRunningScheduledMetadata();
+  assert.equal(service.syncRunningScheduledMetadata, undefined);
   assert.deepEqual(readTimingMetadata(frontmatter, scheduledFile), authoredTiming);
 
   const manual = await service.addManualSession(
@@ -782,7 +587,7 @@ test('tracking the Daily Note itself preserves its canonical schedule while addi
   assert.match(bodies.get(dailyFile.path), /^---\ntitle: Today\nscheduled: 2026-08-03 00:00:00\n---\n## Time Tracking\n\n### /u);
   assert.equal((bodies.get(dailyFile.path).match(/^## Time Tracking$/gmu) || []).length, 1);
 
-  await service.syncRunningScheduledMetadata();
+  assert.equal(service.syncRunningScheduledMetadata, undefined);
   assert.deepEqual(readTimingMetadata(frontmatter, dailyFile), {
     scheduled: canonicalSchedule,
     timeEstimate: undefined,

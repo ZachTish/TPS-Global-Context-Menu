@@ -526,7 +526,7 @@ test('source links safely escape special characters and orphaning removes the ba
   const generatedBeforeOrphan = harness.generatedLinks.length;
 
   harness.remove(source);
-  await service.handleSourceDelete(source);
+  await service.reconcileCompanions();
   const orphaned = harness.readRaw(companion);
   assert.equal(orphaned[FILE_PROPERTY_KEYS.sourceMissing], true);
   assert.equal(orphaned[FILE_PROPERTY_KEYS.source], undefined, 'orphaning cannot backlink to a same-path replacement');
@@ -589,7 +589,7 @@ test('concurrent operations create exactly one companion for every non-Markdown 
   assert.equal(service.getCompanionFile(longSource), fallback, 'fallback resolution remains stable and idempotent');
   assert.equal(harness.readContent(longSource), 'long-path source bytes');
   harness.remove(longSource);
-  await service.handleSourceDelete(longSource);
+  await service.reconcileCompanions();
   await service.reconcileCompanions();
   assert.ok(harness.vault.getAbstractFileByPath(fallback.path) === fallback, 'orphan reconcile retains safe fallback path');
 });
@@ -821,38 +821,7 @@ test('direct source-path edits invalidate old and new sources while malformed mo
   assert.deepEqual(service.read(second), {});
 });
 
-test('renaming a moved companion away from Markdown restores its extension without treating it as a source', async () => {
-  const harness = createHarness();
-  const source = harness.addFile('Files/Extension.pdf', 'source bytes');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(source, (frontmatter) => { frontmatter.status = 'preserved'; });
-  const companion = service.getCompanionFile(source);
-  const canonicalPath = companion.path;
-  await harness.rename(companion, 'Moved/Extension properties.md');
-  await service.handleCompanionRename(companion, canonicalPath);
-  const movedMarkdownPath = companion.path;
-  const genericBefore = harness.workspaceEvents
-    .filter((event) => event.name === 'tps:gcm-file-properties-updated').length;
-  const createCount = harness.createTargets.length;
-
-  await harness.rename(companion, 'Moved/Extension properties.txt');
-  assert.equal(service.isCompanionRename(companion, movedMarkdownPath), true, 'prior indexed identity classifies the rename');
-  assert.equal(await service.handleCompanionRename(companion, movedMarkdownPath), true);
-  assert.equal(companion.path, movedMarkdownPath);
-  assert.equal(companion.extension, 'md');
-  assert.equal(service.isCompanionFile(companion), true);
-  assert.equal(service.getCompanionFile(source), companion);
-  assert.deepEqual(service.read(source), { status: 'preserved' });
-  assert.equal(harness.readContent(source), 'source bytes');
-  assert.equal(harness.createTargets.length, createCount, 'extension restoration does not create companion-of-companion storage');
-  assert.equal(
-    harness.workspaceEvents.filter((event) => event.name === 'tps:gcm-file-properties-updated').length,
-    genericBefore,
-    'a successful restoration leaves the active logical mapping unchanged',
-  );
-});
-
-test('a failed companion extension restoration removes stale routing and invalidates the source', async () => {
+test('companion extension changes invalidate routing without restoring the filename', async () => {
   const harness = createHarness();
   const source = harness.addFile('Files/Extension failure.pdf', 'source bytes');
   const service = new FilePropertiesService(harness.plugin);
@@ -862,10 +831,7 @@ test('a failed companion extension restoration removes stale routing and invalid
   await harness.rename(companion, markdownPath.replace(/\.md$/u, '.txt'));
   harness.failNextRename('Synthetic extension restore failure');
 
-  await assert.rejects(
-    service.handleCompanionRename(companion, markdownPath),
-    /must remain Markdown files.*restoring.*failed/u,
-  );
+  await service.handleCompanionRename(companion, markdownPath);
   assert.equal(companion.extension, 'txt');
   assert.equal(service.getCompanionFile(source), null);
   assert.deepEqual(service.read(source), {});
@@ -922,17 +888,13 @@ test('deleting a moved companion emits one redacted removal invalidation without
 test('vault deletion wiring delegates companion invalidation to the service', () => {
   const source = readFileSync(new URL('../src/events/register-events.ts', import.meta.url), 'utf8');
   assert.match(source, /isCompanionRename\(file, oldPath\)/u);
-  assert.match(source, /file-property companions must remain Markdown files\. The \.md extension was restored/u);
+  assert.doesNotMatch(source, /extension was restored/);
   assert.match(source, /deletedCompanion[\s\S]{0,300}handleCompanionDelete\(file\)/u);
   assert.doesNotMatch(source, /deletedCompanion[\s\S]{0,200}forgetCompanion/u);
   // Canvas invalidation dispatch in both modes is exercised by the real
   // registered callbacks in test-completed-date-event-batching.mjs.
-  assert.match(
-    source,
-    /handleCompanionMetadataChanged\(file\)[\s\S]{0,700}getSourceFileForCompanion\(file\)[\s\S]{0,500}scheduleApply\(logicalSource,[\s\S]{0,180}reason: 'metadata-change'/u,
-  );
-  assert.match(source, /oldPath\.toLocaleLowerCase\(\)\.endsWith\('\.md'\)[\s\S]{0,850}handlePendingMarkdownTargetRename/u);
-  assert.match(source, /vault\.on\('delete',[\s\S]{0,1800}invalidatePendingMarkdownTarget\(file\)/u);
+  assert.doesNotMatch(source, /notebookNavigatorRuleService\.scheduleApply/u);  assert.doesNotMatch(source, /handlePendingMarkdownTargetRename|handleSourceCreate|handleSourceRename|handleSourceDelete|handleSourceFolder/);
+  assert.doesNotMatch(source, /invalidatePendingMarkdownTarget/);
 });
 
 test('three-way companion writes preserve unrelated direct Base edits and fail closed on same-key conflicts', async () => {
@@ -990,83 +952,6 @@ test('three-way companion writes preserve unrelated direct Base edits and fail c
   assert.equal(harness.readContent(source), 'source bytes');
 });
 
-test('source rename and delete preserve history while path reuse requires an explicit relink', async () => {
-  const harness = createHarness();
-  const source = harness.addFile('Assets/Diagram.svg', '<svg>original</svg>');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(source, (frontmatter) => {
-    frontmatter.status = 'approved';
-    frontmatter.tags = ['Design'];
-  });
-  const oldPath = source.path;
-  const oldCompanionPath = service.getCompanionPath(source);
-  const companion = harness.vault.getAbstractFileByPath(oldCompanionPath);
-  const originalId = harness.readRaw(companion)[FILE_PROPERTY_KEYS.id];
-
-  await harness.rename(source, 'Assets/Renamed Diagram.svg');
-  await service.handleSourceRename(source, oldPath);
-  assert.equal(companion.path, service.getCompanionPath(source));
-  assert.equal(harness.readRaw(companion)[FILE_PROPERTY_KEYS.sourcePath], source.path);
-  assert.equal(harness.readRaw(companion)[FILE_PROPERTY_KEYS.id], originalId);
-  assert.equal(harness.readContent(source), '<svg>original</svg>');
-
-  harness.remove(source);
-  await service.handleSourceDelete(source);
-  assert.equal(harness.readRaw(companion)[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.equal(service.hasRelinkCandidates(), true);
-  assert.ok(harness.vault.getAbstractFileByPath(companion.path), 'delete preserves property history');
-  assert.deepEqual(
-    service.listRelinkCandidates().map((candidate) => ({
-      companion: candidate.companionFile,
-      sourcePath: candidate.sourcePath,
-      propertyNames: candidate.propertyNames,
-      propertyCount: candidate.propertyCount,
-    })),
-    [{
-      companion,
-      sourcePath: source.path,
-      propertyNames: ['status', 'tags'],
-      propertyCount: 2,
-    }],
-    'only the unique missing record is exposed with property names, never values',
-  );
-
-  const replacement = harness.addFile(source.path, '<svg>replacement</svg>');
-  await service.handleSourceCreate(replacement);
-  const stillMissing = harness.readRaw(companion);
-  assert.equal(stillMissing[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.equal(stillMissing[FILE_PROPERTY_KEYS.id], originalId);
-  assert.equal(service.getCompanionFile(replacement), null);
-  assert.equal(service.getSourceFileForCompanion(companion), null);
-  assert.equal(service.getRelinkCandidate(replacement), companion);
-  assert.equal(service.hasRelinkCandidates(replacement), true);
-  assert.deepEqual(service.listRelinkCandidates(), [], 'a live path replacement is not a global relink candidate');
-  assert.deepEqual(
-    service.listRelinkCandidates(replacement).map((candidate) => candidate.companionFile),
-    [companion],
-    'the exact live replacement can still use the guarded quick-relink route',
-  );
-  assert.deepEqual(service.read(replacement), {});
-  assert.deepEqual(await service.getFrontmatterAsync(replacement), {});
-  await assert.rejects(
-    service.process(replacement, (frontmatter) => { frontmatter.status = 'unsafe'; }),
-    /relink them explicitly/u,
-  );
-  const reconcileBeforeRelink = await service.reconcileCompanions();
-  assert.equal(reconcileBeforeRelink.restored, 0, 'maintenance never adopts a path replacement');
-  assert.equal(service.hasCompanion(replacement), false, 'background rules cannot treat an orphan as active storage');
-  assert.equal(harness.readRaw(companion)[FILE_PROPERTY_KEYS.sourceMissing], true);
-
-  await service.relinkCompanion(companion, replacement);
-  const restored = harness.readRaw(companion);
-  assert.equal(restored[FILE_PROPERTY_KEYS.sourceMissing], undefined);
-  assert.equal(restored[FILE_PROPERTY_KEYS.id], originalId);
-  assert.deepEqual(service.read(replacement), { status: 'approved', tags: ['design'] });
-  assert.deepEqual(service.listRelinkCandidates(replacement), []);
-  assert.equal(service.hasRelinkCandidates(replacement), false);
-  assert.equal(harness.readContent(replacement), '<svg>replacement</svg>');
-});
-
 test('starting fresh preserves exact-path history under a tombstone and creates an independent identity', async () => {
   const harness = createHarness();
   const source = harness.addFile('Assets/Reused.pdf', 'first source');
@@ -1081,9 +966,8 @@ test('starting fresh preserves exact-path history under a tombstone and creates 
   const retainedPath = retained.path;
 
   harness.remove(source);
-  await service.handleSourceDelete(source);
+  await service.reconcileCompanions();
   const replacement = harness.addFile(source.path, 'second source');
-  await service.handleSourceCreate(replacement);
   assert.equal(service.getRelinkCandidate(replacement), retained);
 
   const fresh = await service.startFreshCompanion(replacement);
@@ -1131,9 +1015,8 @@ test('starting fresh restores retained history when the independent companion ca
   const retainedId = harness.readRaw(retained)[FILE_PROPERTY_KEYS.id];
 
   harness.remove(original);
-  await service.handleSourceDelete(original);
+  await service.reconcileCompanions();
   const replacement = harness.addFile(original.path, 'replacement');
-  await service.handleSourceCreate(replacement);
   const retainedBefore = harness.readRaw(retained);
   harness.failNextCreate('Synthetic independent companion create failure');
 
@@ -1148,301 +1031,6 @@ test('starting fresh restores retained history when the independent companion ca
   assert.equal(harness.readRaw(retained)[FILE_PROPERTY_KEYS.source], undefined);
   assert.equal(service.getRelinkCandidate(replacement), retained);
   assert.deepEqual(service.read(replacement), {});
-});
-
-test('replacement creation updates global relink availability without adopting retained properties', async () => {
-  const harness = createHarness();
-  const original = harness.addFile('Assets/Occupied.pdf', 'original');
-  const unrelated = harness.addFile('Assets/Unrelated.pdf', 'unrelated');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(original, (frontmatter) => { frontmatter.status = 'retained'; });
-  const retained = service.getCompanionFile(original);
-
-  harness.remove(original);
-  await service.handleSourceDelete(original);
-  assert.equal(service.hasRelinkCandidates(unrelated), true);
-
-  const replacement = harness.addFile(original.path, 'replacement');
-  await service.handleSourceCreate(replacement);
-  assert.equal(service.getRelinkCandidate(replacement), retained);
-  assert.equal(service.hasRelinkCandidates(replacement), true);
-  assert.equal(service.hasRelinkCandidates(unrelated), false);
-  assert.deepEqual(service.listRelinkCandidates(unrelated), []);
-  assert.deepEqual(service.read(replacement), {});
-
-  harness.remove(replacement);
-  await service.handleSourceDelete(replacement);
-  assert.equal(service.hasRelinkCandidates(unrelated), true);
-});
-
-test('non-Markdown to Markdown rename retains properties with a persisted pending merge diagnostic', async () => {
-  const harness = createHarness();
-  const source = harness.addFile('Assets/Convertible.pdf', 'unchanged source bytes');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(source, (frontmatter) => {
-    frontmatter.status = 'review';
-    frontmatter.priority = 'medium';
-  });
-  const companion = service.getCompanionFile(source);
-  const oldPath = source.path;
-
-  await harness.rename(source, 'Notes/Converted.md');
-  await service.handleSourceRename(source, oldPath);
-  const retained = harness.readRaw(companion);
-  assert.equal(retained[FILE_PROPERTY_KEYS.sourcePath], oldPath);
-  assert.equal(retained[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.equal(retained[FILE_PROPERTY_KEYS.pendingTargetPath], source.path);
-  assert.equal(retained[FILE_PROPERTY_KEYS.needsMerge], true);
-  assert.equal(retained.status, 'review');
-  assert.equal(retained.priority, 'medium');
-  assert.equal(harness.readContent(source), 'unchanged source bytes');
-
-  const [candidate] = service.listRelinkCandidates();
-  assert.equal(candidate.companionFile, companion);
-  assert.equal(candidate.pendingTargetPath, source.path);
-  const report = await service.reconcileCompanions();
-  assert.equal(report.collisions.length, 0);
-  assert.equal(harness.readRaw(companion)[FILE_PROPERTY_KEYS.pendingTargetPath], source.path);
-  assert.equal(harness.readRaw(companion)[FILE_PROPERTY_KEYS.needsMerge], true);
-});
-
-test('source mapping is updated before best-effort relocation so rename failures never strand properties', async () => {
-  const harness = createHarness();
-  const source = harness.addFile('Assets/Before.pdf', 'source bytes');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(source, (frontmatter) => { frontmatter.status = 'active'; });
-  const companion = service.getCompanionFile(source);
-  const retainedPath = companion.path;
-
-  const oldSourcePath = source.path;
-  await harness.rename(source, 'Assets/After.pdf');
-  harness.failNextRename('Synthetic iCloud companion move failure');
-  await service.handleSourceRename(source, oldSourcePath);
-
-  assert.equal(companion.path, retainedPath, 'failed relocation keeps the current companion file');
-  assert.equal(harness.readRaw(companion)[FILE_PROPERTY_KEYS.sourcePath], source.path);
-  assert.deepEqual(service.read(source), { status: 'active' });
-  assert.equal(service.getSourceFileForCompanion(companion), source);
-
-  const movedSource = harness.addFile('Assets/Moved.pdf', 'moved source');
-  const movedCompanion = harness.addCompanion(
-    'Custom/Valid moved companion.md',
-    reservedRecord(movedSource.path, 'file_move_failure', { status: 'kept' }),
-  );
-  await service.handleCompanionMetadataChanged(movedCompanion);
-  harness.failNextRename('Synthetic canonical relocation failure');
-  await service.process(movedSource, (frontmatter) => { frontmatter.priority = 'high'; });
-  assert.equal(movedCompanion.path, 'Custom/Valid moved companion.md');
-  assert.deepEqual(service.read(movedSource), { status: 'kept', priority: 'high' });
-});
-
-test('file rename archives a unique retained destination history without creating mapping ambiguity', async () => {
-  const harness = createHarness();
-  const moving = harness.addFile('Assets/Moving.pdf', 'moving');
-  const priorDestination = harness.addFile('Assets/Destination.pdf', 'prior destination');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(moving, (frontmatter) => { frontmatter.identity = 'moving'; });
-  await service.process(priorDestination, (frontmatter) => { frontmatter.identity = 'destination-history'; });
-  const retainedDestination = service.getCompanionFile(priorDestination);
-  const retainedId = harness.readRaw(retainedDestination)[FILE_PROPERTY_KEYS.id];
-  harness.remove(priorDestination);
-  await service.handleSourceDelete(priorDestination);
-
-  await harness.rename(moving, 'Assets/Destination.pdf');
-  await service.handleSourceRename(moving, 'Assets/Moving.pdf', moving.path);
-
-  assert.deepEqual(service.read(moving), { identity: 'moving' });
-  const retainedRaw = harness.readRaw(retainedDestination);
-  assert.equal(retainedRaw.identity, 'destination-history');
-  assert.equal(retainedRaw[FILE_PROPERTY_KEYS.id], retainedId);
-  assert.equal(retainedRaw[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.match(retainedRaw[FILE_PROPERTY_KEYS.tombstonedAt], /^\d{4}-\d{2}-\d{2}T/u);
-  assert.equal(retainedRaw[FILE_PROPERTY_KEYS.source], undefined);
-  assert.equal(service.getCompanionFile(moving) === retainedDestination, false);
-});
-
-test('active destination collisions persist both missing identities before notifying listeners', async () => {
-  const harness = createHarness();
-  const moving = harness.addFile('Assets/Collision source.pdf', 'moving');
-  const staleDestinationSource = harness.addFile('Assets/Collision destination.pdf', 'destination');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(moving, (frontmatter) => { frontmatter.identity = 'moving-history'; });
-  await service.process(staleDestinationSource, (frontmatter) => { frontmatter.identity = 'destination-history'; });
-  const movingCompanion = service.getCompanionFile(moving);
-  const destinationCompanion = service.getCompanionFile(staleDestinationSource);
-
-  harness.remove(staleDestinationSource);
-  await harness.rename(moving, 'Assets/Collision destination.pdf');
-  harness.failNextWorkspaceEvent('Synthetic collision notification failure');
-  await assert.rejects(
-    service.handleSourceRename(moving, 'Assets/Collision source.pdf', moving.path),
-    /Synthetic collision notification failure/u,
-  );
-
-  const movingRaw = harness.readRaw(movingCompanion);
-  const destinationRaw = harness.readRaw(destinationCompanion);
-  assert.equal(movingRaw[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.equal(destinationRaw[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.equal(movingRaw.identity, 'moving-history');
-  assert.equal(destinationRaw.identity, 'destination-history');
-  assert.equal(movingRaw[FILE_PROPERTY_KEYS.source], undefined);
-  assert.equal(destinationRaw[FILE_PROPERTY_KEYS.source], undefined);
-  assert.deepEqual(service.read(moving), {});
-
-  const oldPathReplacement = harness.addFile('Assets/Collision source.pdf', 'unrelated replacement');
-  assert.deepEqual(
-    service.read(oldPathReplacement),
-    {},
-    'a notification failure cannot leave the obsolete moving identity active for path reuse',
-  );
-});
-
-test('active destination collision restores its first write when the second identity write fails', async () => {
-  const harness = createHarness();
-  const moving = harness.addFile('Assets/Collision rollback source.pdf', 'moving');
-  const staleDestinationSource = harness.addFile('Assets/Collision rollback destination.pdf', 'destination');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(moving, (frontmatter) => { frontmatter.identity = 'moving-history'; });
-  await service.process(staleDestinationSource, (frontmatter) => { frontmatter.identity = 'destination-history'; });
-  const movingCompanion = service.getCompanionFile(moving);
-  const destinationCompanion = service.getCompanionFile(staleDestinationSource);
-  const destinationBefore = harness.readRaw(destinationCompanion);
-  harness.remove(staleDestinationSource);
-  await harness.rename(moving, 'Assets/Collision rollback destination.pdf');
-  harness.injectAfterFrontmatterWrite(() => {
-    harness.injectConcurrentFrontmatterEdit(() => {
-      throw new Error('Synthetic second collision write failure');
-    });
-  });
-
-  await assert.rejects(
-    service.handleSourceRename(moving, 'Assets/Collision rollback source.pdf', moving.path),
-    /Synthetic second collision write failure/u,
-  );
-  assert.deepEqual(
-    harness.readRaw(destinationCompanion),
-    destinationBefore,
-    'the first destination write is compensated when the moving write cannot commit',
-  );
-  assert.equal(harness.readRaw(movingCompanion)[FILE_PROPERTY_KEYS.sourceMissing], undefined);
-});
-
-test('folder rename and delete reconcile descendant mappings without merging collisions', async () => {
-  const harness = createHarness();
-  const first = harness.addFile('Projects/Alpha/Board.canvas', JSON.stringify({ nodes: [], edges: [] }));
-  const second = harness.addFile('Projects/Alpha/Reference.pdf', 'PDF reference');
-  const blocked = harness.addFile('Projects/Alpha/Blocked.png', 'PNG blocked');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.updateValues([first, second, blocked], { status: 'active' });
-  const blockedCompanion = service.getCompanionFile(blocked);
-  const blockedRawBefore = harness.readRaw(blockedCompanion);
-
-  await harness.rename(first, 'Projects/Beta/Board.canvas');
-  await harness.rename(second, 'Projects/Beta/Reference.pdf');
-  await harness.rename(blocked, 'Projects/Beta/Blocked.png');
-  const blockedTargetPath = service.getCompanionPath(blocked);
-  const collision = harness.addFile(blockedTargetPath, 'user-owned collision');
-
-  const renamed = await service.handleSourceFolderRename('Projects/Beta', 'Projects/Alpha');
-  assert.equal(renamed.matched, 3);
-  assert.equal(renamed.updated, 3);
-  assert.equal(renamed.moved, 2);
-  assert.equal(renamed.conflicts.length, 1);
-  assert.deepEqual(service.read(first), { status: 'active' });
-  assert.deepEqual(service.read(second), { status: 'active' });
-  assert.deepEqual(service.read(blocked), { status: 'active' }, 'collision retains the current companion path');
-  assert.equal(harness.readRaw(blockedCompanion)[FILE_PROPERTY_KEYS.id], blockedRawBefore[FILE_PROPERTY_KEYS.id]);
-  assert.equal(harness.readRaw(blockedCompanion)[FILE_PROPERTY_KEYS.sourcePath], blocked.path);
-  assert.equal(harness.readContent(collision), 'user-owned collision');
-
-  harness.remove(first);
-  harness.remove(second);
-  harness.remove(blocked);
-  const deleted = await service.handleSourceFolderDelete('Projects/Beta');
-  assert.equal(deleted.matched, 3);
-  assert.equal(deleted.orphaned, 3);
-  for (const sourcePath of ['Projects/Beta/Board.canvas', 'Projects/Beta/Reference.pdf']) {
-    const companion = harness.vault.getAbstractFileByPath(`${FILE_PROPERTIES_ROOT}/${sourcePath}.md`);
-    assert.equal(harness.readRaw(companion)[FILE_PROPERTY_KEYS.sourceMissing], true);
-  }
-  assert.equal(harness.readRaw(blockedCompanion)[FILE_PROPERTY_KEYS.sourceMissing], true);
-});
-
-test('case-only folder renames still refresh source links and mirrored paths', async () => {
-  const harness = createHarness();
-  const source = harness.addFile('Cases/Asset.pdf', 'case source');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(source, (frontmatter) => { frontmatter.status = 'active'; });
-  await harness.rename(source, 'cases/Asset.pdf');
-
-  const report = await service.handleSourceFolderRename('cases', 'Cases');
-  assert.equal(report.updated, 1);
-  assert.equal(report.conflicts.length, 0);
-  const companion = service.getCompanionFile(source);
-  assert.equal(harness.readRaw(companion)[FILE_PROPERTY_KEYS.sourcePath], 'cases/Asset.pdf');
-  assert.equal(companion.path, `${FILE_PROPERTIES_ROOT}/cases/Asset.pdf.md`);
-  assert.deepEqual(service.read(source), { status: 'active' });
-});
-
-test('folder rename follows a moving TFolder for every record and archives retained destination histories', async () => {
-  const harness = createHarness();
-  const first = harness.addFile('Projects/A/First.pdf', 'first');
-  const second = harness.addFile('Projects/A/Second.pdf', 'second');
-  const priorDestination = harness.addFile('Projects/B/First.pdf', 'prior');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(first, (frontmatter) => { frontmatter.identity = 'first'; });
-  await service.process(second, (frontmatter) => { frontmatter.identity = 'second'; });
-  await service.process(priorDestination, (frontmatter) => { frontmatter.identity = 'destination-history'; });
-  const retainedDestination = service.getCompanionFile(priorDestination);
-  harness.remove(priorDestination);
-  await service.handleSourceDelete(priorDestination);
-  const destinationFolder = harness.vault.getAbstractFileByPath('Projects/B');
-  harness.remove(destinationFolder);
-
-  const folder = harness.vault.getAbstractFileByPath('Projects/A');
-  await harness.renameFolder(folder, 'Projects/B');
-  harness.injectAfterFrontmatterWrite(async () => {
-    await harness.renameFolder(folder, 'Projects/C');
-  });
-  const report = await service.handleSourceFolderRename(folder, 'Projects/A', 'Projects/B');
-
-  assert.equal(report.matched, 2);
-  assert.equal(report.updated, 2);
-  assert.equal(report.orphaned, 0);
-  assert.deepEqual(service.read(first), { identity: 'first' });
-  assert.deepEqual(service.read(second), { identity: 'second' });
-  assert.equal(first.path, 'Projects/C/First.pdf');
-  assert.equal(second.path, 'Projects/C/Second.pdf');
-  assert.equal(harness.readRaw(service.getCompanionFile(first))[FILE_PROPERTY_KEYS.sourcePath], first.path);
-  assert.equal(harness.readRaw(service.getCompanionFile(second))[FILE_PROPERTY_KEYS.sourcePath], second.path);
-  const retainedRaw = harness.readRaw(retainedDestination);
-  assert.equal(retainedRaw.identity, 'destination-history');
-  assert.equal(retainedRaw[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.equal(retainedRaw[FILE_PROPERTY_KEYS.tombstonedAt], undefined, 'intermediate B history is restored after the folder advances to C');
-});
-
-test('folder rename archives retained history at its final destination', async () => {
-  const harness = createHarness();
-  const moving = harness.addFile('Collections/A/Item.pdf', 'moving');
-  const priorDestination = harness.addFile('Collections/B/Item.pdf', 'prior');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(moving, (frontmatter) => { frontmatter.identity = 'moving'; });
-  await service.process(priorDestination, (frontmatter) => { frontmatter.identity = 'destination-history'; });
-  const retainedDestination = service.getCompanionFile(priorDestination);
-  harness.remove(priorDestination);
-  await service.handleSourceDelete(priorDestination);
-  harness.remove(harness.vault.getAbstractFileByPath('Collections/B'));
-  const folder = harness.vault.getAbstractFileByPath('Collections/A');
-  await harness.renameFolder(folder, 'Collections/B');
-
-  const report = await service.handleSourceFolderRename(folder, 'Collections/A', 'Collections/B');
-  assert.equal(report.orphaned, 0);
-  assert.deepEqual(service.read(moving), { identity: 'moving' });
-  const retainedRaw = harness.readRaw(retainedDestination);
-  assert.equal(retainedRaw.identity, 'destination-history');
-  assert.equal(retainedRaw[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.match(retainedRaw[FILE_PROPERTY_KEYS.tombstonedAt], /^\d{4}-\d{2}-\d{2}T/u);
-  assert.equal(retainedRaw[FILE_PROPERTY_KEYS.source], undefined);
 });
 
 test('a deterministic-path collision falls back by ID without overwriting either file', async () => {
@@ -1633,249 +1221,6 @@ test('reconciliation uses authoritative markers and continues after a per-record
   assert.deepEqual(service.read(second), { status: 'second' });
 });
 
-test('source create and delete lifecycle events await the authoritative moved-companion index', async () => {
-  const deleteHarness = createHarness();
-  const deletedSource = deleteHarness.addFile('Files/Lifecycle Delete.pdf', 'source');
-  const deletedCompanion = deleteHarness.addCompanion(
-    'Moved/Lifecycle Delete properties.md',
-    reservedRecord(deletedSource.path, 'file_lifecycle_delete', { status: 'retained' }),
-  );
-  deleteHarness.suppressMetadata(deletedCompanion);
-  deleteHarness.setStaleCachedRead(deletedCompanion, '# stale display cache');
-  const deleteService = new FilePropertiesService(deleteHarness.plugin);
-  await deleteService.setup();
-  assert.equal(deleteService.getCompanionFile(deletedSource), null);
-  deleteHarness.remove(deletedSource);
-  assert.equal(await deleteService.handleSourceDelete(deletedSource), deletedCompanion);
-  assert.equal(deleteHarness.readRaw(deletedCompanion)[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.equal(deleteHarness.readRaw(deletedCompanion)[FILE_PROPERTY_KEYS.source], undefined);
-  const replacement = deleteHarness.addFile(deletedSource.path, 'replacement');
-  assert.deepEqual(deleteService.read(replacement), {});
-
-  const createHarnessFixture = createHarness();
-  const createdSource = createHarnessFixture.addFile('Files/Lifecycle Create.pdf', 'source');
-  const createdCompanion = createHarnessFixture.addCompanion(
-    'Moved/Lifecycle Create properties.md',
-    reservedRecord(createdSource.path, 'file_lifecycle_create', { status: 'existing' }),
-  );
-  createHarnessFixture.suppressMetadata(createdCompanion);
-  createHarnessFixture.setStaleCachedRead(createdCompanion, '# stale display cache');
-  const createService = new FilePropertiesService(createHarnessFixture.plugin);
-  await createService.setup();
-  assert.equal(await createService.handleSourceCreate(createdSource), createdCompanion);
-  assert.deepEqual(createService.read(createdSource), { status: 'existing' });
-  assert.equal(createHarnessFixture.createTargets.length, 0);
-});
-
-test('folder lifecycle events await the authoritative moved-companion index', async () => {
-  const renameHarness = createHarness();
-  const renamedSource = renameHarness.addFile('Projects/Before/Asset.pdf', 'asset');
-  const renamedCompanion = renameHarness.addCompanion(
-    'Moved/Folder Rename properties.md',
-    reservedRecord(renamedSource.path, 'file_folder_rename_gate', { status: 'existing' }),
-  );
-  renameHarness.suppressMetadata(renamedCompanion);
-  renameHarness.setStaleCachedRead(renamedCompanion, '# stale display cache');
-  const renameService = new FilePropertiesService(renameHarness.plugin);
-  await renameService.setup();
-  const renamedFolder = renameHarness.vault.getAbstractFileByPath('Projects/Before');
-  await renameHarness.renameFolder(renamedFolder, 'Projects/After');
-  const renamedReport = await renameService.handleSourceFolderRename(
-    renamedFolder,
-    'Projects/Before',
-    'Projects/After',
-  );
-  assert.equal(renamedReport.updated, 1);
-  assert.deepEqual(renameService.read(renamedSource), { status: 'existing' });
-
-  const deleteHarness = createHarness();
-  const deletedSource = deleteHarness.addFile('Projects/Deleted/Asset.pdf', 'asset');
-  const deletedCompanion = deleteHarness.addCompanion(
-    'Moved/Folder Delete properties.md',
-    reservedRecord(deletedSource.path, 'file_folder_delete_gate', { status: 'retained' }),
-  );
-  deleteHarness.suppressMetadata(deletedCompanion);
-  deleteHarness.setStaleCachedRead(deletedCompanion, '# stale display cache');
-  const deleteService = new FilePropertiesService(deleteHarness.plugin);
-  await deleteService.setup();
-  const deletedFolder = deleteHarness.vault.getAbstractFileByPath('Projects/Deleted');
-  deleteHarness.remove(deletedSource);
-  deleteHarness.remove(deletedFolder);
-  const deletedReport = await deleteService.handleSourceFolderDelete('Projects/Deleted');
-  assert.equal(deletedReport.orphaned, 1);
-  assert.equal(deleteHarness.readRaw(deletedCompanion)[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.equal(deleteHarness.readRaw(deletedCompanion)[FILE_PROPERTY_KEYS.source], undefined);
-});
-
-test('queued source mutations revalidate identity before committing', async () => {
-  const harness = createHarness();
-  const original = harness.addFile('Files/Raced.pdf', 'original');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(original, (frontmatter) => { frontmatter.status = 'original'; });
-  const companion = service.getCompanionFile(original);
-  let release;
-  let signalEntered;
-  const entered = new Promise((resolve) => { signalEntered = resolve; });
-  const hold = new Promise((resolve) => { release = resolve; });
-  const pending = service.process(original, async (frontmatter) => {
-    signalEntered();
-    await hold;
-    frontmatter.status = 'stale-write';
-  });
-  await entered;
-  harness.remove(original);
-  await service.handleSourceDelete(original);
-  const replacement = harness.addFile(original.path, 'replacement');
-  release();
-  await assert.rejects(pending, /source identity changed/u);
-  assert.deepEqual(service.read(replacement), {});
-  assert.equal(harness.readRaw(companion)[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.equal(harness.readRaw(companion)[FILE_PROPERTY_KEYS.source], undefined);
-});
-
-test('rapid and uninterrupted extension-changing renames preserve the original identity', async () => {
-  const rapidHarness = createHarness();
-  const rapid = rapidHarness.addFile('Files/Rapid.pdf', 'rapid');
-  const rapidService = new FilePropertiesService(rapidHarness.plugin);
-  await rapidService.process(rapid, (frontmatter) => { frontmatter.status = 'rapid'; });
-  await rapidHarness.rename(rapid, 'Files/Intermediate.md');
-  await rapidHarness.rename(rapid, 'Files/Final.png');
-  await rapidService.handleSourceRename(rapid, 'Files/Rapid.pdf', 'Files/Intermediate.md');
-  await rapidService.handleSourceRename(rapid, 'Files/Intermediate.md', 'Files/Final.png');
-  assert.deepEqual(rapidService.read(rapid), { status: 'rapid' });
-  const rapidRaw = rapidHarness.readRaw(rapidService.getCompanionFile(rapid));
-  assert.equal(rapidRaw[FILE_PROPERTY_KEYS.sourcePath], 'Files/Final.png');
-  assert.equal(rapidRaw[FILE_PROPERTY_KEYS.pendingTargetPath], undefined);
-
-  const swapHarness = createHarness();
-  const first = swapHarness.addFile('Files/A.pdf', 'a');
-  const second = swapHarness.addFile('Files/B.pdf', 'b');
-  const swapService = new FilePropertiesService(swapHarness.plugin);
-  await swapService.process(first, (frontmatter) => { frontmatter.identity = 'a'; });
-  await swapService.process(second, (frontmatter) => { frontmatter.identity = 'b'; });
-  await swapHarness.rename(first, 'Files/tmp.pdf');
-  const firstCaptured = swapService.captureSourceRenameCompanion('Files/A.pdf');
-  await swapHarness.rename(second, 'Files/A.pdf');
-  const secondCaptured = swapService.captureSourceRenameCompanion('Files/B.pdf');
-  await swapHarness.rename(first, 'Files/B.pdf');
-  await swapService.handleSourceRename(first, 'Files/A.pdf', 'Files/tmp.pdf', firstCaptured);
-  await swapService.handleSourceRename(second, 'Files/B.pdf', 'Files/A.pdf', secondCaptured);
-  await swapService.handleSourceRename(first, 'Files/tmp.pdf', 'Files/B.pdf', null);
-  assert.deepEqual(swapService.read(first), {}, 'an active destination collision never cross-attaches B history to A');
-  assert.deepEqual(swapService.read(second), {}, 'an active destination collision never cross-attaches A history to B');
-  const swapRecords = swapHarness.vault.getMarkdownFiles()
-    .map((file) => swapHarness.readRaw(file))
-    .filter((raw) => raw?.identity);
-  assert.deepEqual(
-    swapRecords.map((raw) => raw.identity).sort(),
-    ['a', 'b'],
-    'both histories remain intact for explicit recovery',
-  );
-  assert.ok(swapRecords.every((raw) => raw[FILE_PROPERTY_KEYS.sourceMissing] === true));
-
-  const roundTripHarness = createHarness();
-  const roundTrip = roundTripHarness.addFile('Files/Round Trip.pdf', 'round-trip');
-  const firstService = new FilePropertiesService(roundTripHarness.plugin);
-  await firstService.process(roundTrip, (frontmatter) => { frontmatter.status = 'round-trip'; });
-  await roundTripHarness.rename(roundTrip, 'Files/Round Trip.md');
-  await firstService.handleSourceRename(roundTrip, 'Files/Round Trip.pdf', 'Files/Round Trip.md');
-  const retained = roundTripHarness.vault.getFiles().find((file) => (
-    file.extension === 'md' && roundTripHarness.readRaw(file)?.[FILE_PROPERTY_KEYS.pendingTargetPath] === 'Files/Round Trip.md'
-  ));
-  assert.ok(retained instanceof TFile);
-  assert.equal(roundTripHarness.readRaw(retained)[FILE_PROPERTY_KEYS.source], undefined);
-
-  await roundTripHarness.rename(roundTrip, 'Files/Round Trip intermediate.md');
-  await firstService.handlePendingMarkdownTargetRename(
-    roundTrip,
-    'Files/Round Trip.md',
-    'Files/Round Trip intermediate.md',
-  );
-  assert.equal(
-    roundTripHarness.readRaw(retained)[FILE_PROPERTY_KEYS.pendingTargetPath],
-    'Files/Round Trip intermediate.md',
-  );
-  await roundTripHarness.rename(roundTrip, 'Files/Round Trip.png');
-  await firstService.handleSourceRename(
-    roundTrip,
-    'Files/Round Trip intermediate.md',
-    'Files/Round Trip.png',
-  );
-  assert.deepEqual(firstService.read(roundTrip), { status: 'round-trip' });
-  const restoredRaw = roundTripHarness.readRaw(firstService.getCompanionFile(roundTrip));
-  assert.equal(restoredRaw[FILE_PROPERTY_KEYS.pendingTargetPath], undefined);
-  assert.equal(restoredRaw[FILE_PROPERTY_KEYS.sourceMissing], undefined);
-});
-
-test('pending Markdown restoration fails closed after restart or delete-and-recreate identity loss', async () => {
-  const restartHarness = createHarness();
-  const restartSource = restartHarness.addFile('Files/Restart guard.pdf', 'original');
-  const beforeRestart = new FilePropertiesService(restartHarness.plugin);
-  await beforeRestart.process(restartSource, (frontmatter) => { frontmatter.status = 'retained'; });
-  const restartCompanion = beforeRestart.getCompanionFile(restartSource);
-  await restartHarness.rename(restartSource, 'Files/Restart guard.md');
-  await beforeRestart.handleSourceRename(restartSource, 'Files/Restart guard.pdf', 'Files/Restart guard.md');
-
-  const afterRestart = new FilePropertiesService(restartHarness.plugin);
-  await afterRestart.setup();
-  await restartHarness.rename(restartSource, 'Files/Restart guard.png');
-  assert.equal(
-    await afterRestart.handleSourceRename(restartSource, 'Files/Restart guard.md', 'Files/Restart guard.png'),
-    null,
-  );
-  assert.deepEqual(afterRestart.read(restartSource), {});
-  assert.equal(restartHarness.readRaw(restartCompanion)[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.equal(restartHarness.readRaw(restartCompanion).status, 'retained');
-
-  const attackHarness = createHarness();
-  const original = attackHarness.addFile('Files/Attack source.pdf', 'original');
-  const service = new FilePropertiesService(attackHarness.plugin);
-  await service.process(original, (frontmatter) => { frontmatter.status = 'private-history'; });
-  const retained = service.getCompanionFile(original);
-  await attackHarness.rename(original, 'Files/Pending target.md');
-  await service.handleSourceRename(original, 'Files/Attack source.pdf', 'Files/Pending target.md');
-  attackHarness.remove(original);
-  service.invalidatePendingMarkdownTarget(original);
-  const unrelated = attackHarness.addFile('Files/Pending target.md', 'unrelated Markdown');
-  await attackHarness.rename(unrelated, 'Files/Unrelated replacement.pdf');
-  assert.equal(
-    await service.handleSourceRename(unrelated, 'Files/Pending target.md', 'Files/Unrelated replacement.pdf'),
-    null,
-  );
-  assert.deepEqual(service.read(unrelated), {}, 'a same-path replacement cannot inherit retained properties');
-  const retainedRaw = attackHarness.readRaw(retained);
-  assert.equal(retainedRaw[FILE_PROPERTY_KEYS.sourceMissing], true);
-  assert.equal(retainedRaw[FILE_PROPERTY_KEYS.pendingTargetPath], 'Files/Pending target.md');
-  assert.equal(retainedRaw.status, 'private-history');
-});
-
-test('rapid folder renames follow the live folder identity and missing targets orphan safely', async () => {
-  const harness = createHarness();
-  const source = harness.addFile('Projects/A/Asset.pdf', 'asset');
-  const service = new FilePropertiesService(harness.plugin);
-  await service.process(source, (frontmatter) => { frontmatter.status = 'folder-history'; });
-  const folder = harness.vault.getAbstractFileByPath('Projects/A');
-  assert.ok(folder instanceof TFolder);
-
-  await harness.renameFolder(folder, 'Projects/B');
-  await harness.renameFolder(folder, 'Projects/C');
-  await service.handleSourceFolderRename(folder, 'Projects/A', 'Projects/B');
-  await service.handleSourceFolderRename(folder, 'Projects/B', 'Projects/C');
-  assert.equal(source.path, 'Projects/C/Asset.pdf');
-  assert.deepEqual(service.read(source), { status: 'folder-history' });
-
-  const disappearing = harness.addFile('Projects/Old/Gone.pdf', 'gone');
-  await service.process(disappearing, (frontmatter) => { frontmatter.owner = 'old'; });
-  const disappearingFolder = harness.vault.getAbstractFileByPath('Projects/Old');
-  await harness.renameFolder(disappearingFolder, 'Projects/New');
-  harness.remove(disappearing);
-  harness.remove(disappearingFolder);
-  const report = await service.handleSourceFolderRename(disappearingFolder, 'Projects/Old', 'Projects/New');
-  assert.equal(report.orphaned, 1);
-  const replacement = harness.addFile('Projects/Old/Gone.pdf', 'replacement');
-  assert.deepEqual(service.read(replacement), {});
-});
-
 test('Canvas compatibility reads legacy cache only without an active, retained, or ambiguous mapping', async () => {
   const harness = createHarness();
   const active = harness.addFile('Boards/Active.canvas', '{}');
@@ -1936,82 +1281,8 @@ function countFolderDiscovery(harness) {
   return () => scans;
 }
 
-test('folder lifecycle discovers companions once per operation in an unrelated large vault', async () => {
-  const h = createHarness();
-  for (let i = 0; i < 1000; i++) h.addFile(`Notes/Plain ${i}.md`, 'plain body');
-  const service = new FilePropertiesService(h.plugin);
-  await service.handleMetadataResolved();
-  const scans = countFolderDiscovery(h);
-  const renamed = await service.handleSourceFolderRename('Elsewhere/New', 'Elsewhere/Old');
-  assert.equal(renamed.matched, 0);
-  assert.equal(scans(), 1);
-  const deleted = await service.handleSourceFolderDelete('Elsewhere/New');
-  assert.equal(deleted.matched, 0);
-  assert.equal(scans(), 2);
-  assert.deepEqual(h.writeTargets, []);
-});
 
-test('unchanged folder lifecycle bursts keep one discovery pass per request', async () => {
-  const h = createHarness();
-  const service = new FilePropertiesService(h.plugin);
-  await service.handleMetadataResolved();
-  const scans = countFolderDiscovery(h);
-  for (let i = 0; i < 10; i++) {
-    assert.equal((await service.handleSourceFolderRename('New', 'Old')).matched, 0);
-    assert.equal((await service.handleSourceFolderDelete('New')).matched, 0);
-  }
-  assert.equal(scans(), 20);
-  assert.deepEqual(h.writeTargets, []);
-});
-
-test('single-pass folder discovery finishes global duplicate checks before changing a record', async () => {
-  const h = createHarness();
-  const first = h.addFile('Old/First.pdf', 'first bytes');
-  const other = h.addFile('Other/Second.pdf', 'second bytes');
-  const companion = h.addCompanion(`${FILE_PROPERTIES_ROOT}/First.md`, reservedRecord(first.path, 'shared-folder-id', { rating: 1 }));
-  h.addCompanion(`${FILE_PROPERTIES_ROOT}/Second.md`, reservedRecord(other.path, 'shared-folder-id', { rating: 2 }));
-  const service = new FilePropertiesService(h.plugin);
-  await service.handleMetadataResolved();
-  await h.rename(first, 'New/First.pdf');
-  const scans = countFolderDiscovery(h);
-  const report = await service.handleSourceFolderRename('New', 'Old');
-  assert.equal(report.matched, 1);
-  assert.equal(report.updated, 0);
-  assert.equal(report.conflicts.length, 1);
-  assert.equal(h.readRaw(companion)[FILE_PROPERTY_KEYS.sourcePath], 'Old/First.pdf');
-  assert.deepEqual(h.writeTargets, []);
-  assert.equal(scans(), 1);
-});
-
-test('folder discovery drops removed identity evidence and preserves concurrent user edits at the writer', async () => {
-  const h = createHarness();
-  const source = h.addFile('Old/Asset.pdf', 'asset bytes');
-  const companion = h.addCompanion(`${FILE_PROPERTIES_ROOT}/Asset.md`, reservedRecord(source.path, 'folder-asset', { rating: 1 }));
-  const removed = h.addCompanion(`${FILE_PROPERTIES_ROOT}/Removed.md`, reservedRecord('Other/Old.pdf', 'folder-asset'));
-  const service = new FilePropertiesService(h.plugin);
-  await service.handleMetadataResolved();
-  h.remove(removed);
-  await h.rename(source, 'New/Asset.pdf');
-  h.injectConcurrentFrontmatterEdit(file => h.directEditCompanion(file, { ...h.readRaw(file), rating: 9 }));
-  const scans = countFolderDiscovery(h);
-  const report = await service.handleSourceFolderRename('New', 'Old');
-  assert.equal(report.updated, 1);
-  assert.deepEqual(report.conflicts, []);
-  assert.equal(h.readRaw(companion).rating, 9);
-  assert.equal(h.readRaw(companion)[FILE_PROPERTY_KEYS.sourcePath], source.path);
-  assert.equal(h.readContent(source), 'asset bytes');
-  assert.equal(scans(), 1);
-});
-
-test('single-pass folder discovery still reports malformed managed companions', async () => {
-  const h = createHarness();
-  h.addCompanion(`${FILE_PROPERTIES_ROOT}/Invalid.md`, { bad: true });
-  const service = new FilePropertiesService(h.plugin);
-  await service.handleMetadataResolved();
-  const scans = countFolderDiscovery(h);
-  const report = await service.handleSourceFolderDelete('Old');
-  assert.equal(report.matched, 0);
-  assert.equal(report.conflicts.length, 1);
-  assert.deepEqual(h.writeTargets, []);
-  assert.equal(scans(), 1);
+test('automatic companion maintenance implementations and transient rename state are deleted', () => {
+  const source = readFileSync(new URL('../src/services/file-properties-service.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /handleSourceCreate|handleSourceRename|handleSourceDelete|handleSourceFolderRename|handleSourceFolderDelete|handlePendingMarkdownTargetRename|captureSourceRenameCompanion|collectCompanionRecordsUnderFolder|pendingMarkdownTargetsByPath/);
 });

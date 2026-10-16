@@ -1,5 +1,23 @@
 # TPS Global Context Menu
 
+## 10.0.0 — Explicit note actions without background maintenance
+
+This major release removes appearance rules and generated metadata, automatic timestamps/folder paths/title/filename repair, Daily Note population/repair, recurrence recovery/successor creation/propagation, relationship reconciliation, deleted-link cleanup, scheduled archive sweeps and attachment-companion source maintenance. Their listeners, timers, writers, unused implementations and retired UI controls are deleted. Existing notes, properties, credentials, databases, recurrence/session files and legacy settings remain untouched; saved old switches are inert. No replacement scheduler, cache, watcher, mailbox or repair loop is added.
+
+Native creation still prepares its initial template and identity before presentation. Explicit property/appearance edits, native rename, parent/child link/unlink, manual archive/cleanup, timer start/stop/manual sessions and read-only elapsed time remain. Read-only native discovery and timer recovery remain. Necessary mutation identity/exclusion/current-source checks are preserved; display consumers use indexed evidence. The retired history database no longer initializes at startup.
+
+Completing a note does not create its next occurrence. The orphaned successor/template writers and operation-state store are deleted; no next-instance command was registered to preserve. Status values replaces the former recurrence settings label using the same transient route ID, with active/completed status fields still editable. The unused recurring-template folder control is removed. Recurrence properties and explicit template-text editing remain.
+
+Task API version 5 removes `tasks.list` and `tasks.findByField`, including their whole-vault inline collection/filter helpers. The retired relationship repair adapters and panel caller are removed. Navigator 9.0.0 deletes its unused callers and generated-property overlay. Update both cleanup releases together; no compatibility shim masks a missing method. Whole-note native record operations and direct explicit task lookup remain.
+
+Existing icon/color properties are displayed as stored. Property edits no longer trigger another rename or appearance projection. Explicit native rename and initial creation naming retain their source-preservation tests. After moving an attachment, use explicit Relink file properties if its old companion path no longer resolves; generic source events no longer rewrite that mapping. Deleting a note preserves authored references in surviving notes.
+
+The inherited suite and final TypeScript/production build are required against the versioned artifact. Operation-count coverage includes 100 incoming deletions with zero cleanup calls/reads/writes, 100 metadata events with no old title/timestamp/relationship maintenance, stable timer event bursts, inert legacy settings and unload races. Runtime source reductions and final test totals are recorded in [release validation](release-notes/10.0.0.md). Minimum Obsidian remains 1.10.0.
+
+Integrated foreground warm-reload medians before/after cleanup were 6066.2/6084.7 ms; 20-note navigation medians were 897.2/838.9 ms. These combined test-vault samples pass the stated no-regression gate and do not prove production cold-start improvement or parity with plugins disabled. Idle, typing, Sync-burst, settings and Finance checks observed zero TPS maintenance writes. Final installed workflow checks are documented with their limits. Physical iPhone acceptance remains unverified.
+
+Downgrading can reactivate saved automation and process preserved state. Stop owners and review changes before rollback; notes are never overwritten automatically. Test-vault validation and a public BRAT release do not install production.
+
 ## 9.1.2 — Daily-note access during record discovery
 
 The API becomes available after configuration and any enabled history recovery
@@ -1593,7 +1611,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [7.3.15](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/7.3.15) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [10.0.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/10.0.0) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -1888,3 +1906,29 @@ Installed test-vault validation on 2026-09-26: 1,242 declared-suite tests and 17
 Installed foreground interaction QA also clicked Navigator New note in a unique Inbox scope, opened the created item through normal Navigator selection, typed with the native keyboard and saved. Exactly one note was created; the visible body and saved source contained the typed marker. The trace counted 16 raw reads, 31 cached reads, one inventory, two process attempts and one modify across setup/creation/navigation/input inspection. The original leaf/query were restored and the owned fixture was archived byte-identically. This is a correctness check, not first-input latency or a controlled navigation benchmark.
 
 Final post-documentation verification: the separate ordinary production build passed, reported `target=test` with unchanged runtime bytes, and retained the already-loaded and QA-verified numeric version. Public release artifacts must match the SHA-256 receipt above. Production installation, full quit/reopen and vault-close/reopen comparisons, single-versus-two-window production profiling, first-use input latency and physical mobile acceptance remain rollout verification gates.
+
+The retired checklist/status reconciliation service and its line-rewrite helper are now deleted (313 runtime lines), along with construction, conditional registration, startup settings migration and settings-hub counting. Existing saved legacy values remain inert. Explicit checkbox actions are retained. This removes unreachable machinery; it is not presented as the cause of the inconclusive typing stress test.
+
+Checklist retirement validation: 43 focused tests and all 1,654 inherited tests pass, with no skips. The removed service tests are replaced by retirement assertions; explicit relational-status and template-protection coverage remains. The test vault recovered after the earlier inconclusive native-input stress test, its temporary in-memory flags reverted to the saved values, and its typing fixture was archived. No production changes or new public release are included in this checkpoint.
+
+Cleanup settings audit: the retired automatic recurrence toggle and completion-trigger wording are removed. Active/completed status lists and the template folder remain editable for retained explicit actions and Calendar rendering. The redundant template call after the no-folder recurrence path is removed (the configured-folder path already returns earlier). Saved legacy `enableRecurrence` is inert; explicit creation retains its template and identity guards. Health and GCM route inspection observed zero writes or fetch/XHR requests; native requestUrl was not intercepted. These are unreleased cleanup changes, with full acceptance still pending.
+
+### Installed explicit timer preservation — 2026-10-15
+
+The installed test-vault timer API started a whole-note timer, exposed it as running, explicitly stopped it at two minutes, removed it from the active list, and preserved the note body. Storage was temporarily set to source-note and restored afterward, with no persisted settings change. The first attempt correctly refused a malformed archived QA source; the successful check temporarily aligned Controller's archive source with the fixture's `_archive` directory. This is a configured-fixture service integration check, not proof that malformed sources are safely ignored or that every timer UI flow is accepted. Diagnostic evidence: `/tmp/tps-timer-cleanup-installed-result.txt`.
+
+### Final event-owner audit
+
+Removed the orphaned blank-line-on-open helper and its unused type/default after confirming no callers remained. Its fresh read, modify and cursor timeout are deleted rather than left as dormant maintenance code; this does not claim a reduction in active work because it was already uncalled. Metadata events retain read-only menu refresh. Stored legacy values remain inert.
+
+### Retired inline task collection
+
+Task API version 5 removes `tasks.list` and `tasks.findByField`, their filter schema and whole-vault body collection helpers. GCM's own runtime has no callers of those methods. The final cross-plugin audit identified Navigator's older inline task hydration/checkbox branches in an unused Types store. That store, adapter, private body index and task transport contracts are removed in Navigator's paired cleanup; no caller of the collection API remains in retained TPS source. No compatibility shim or replacement collection is registered. Direct explicit target lookup and native mutation identity protection remain. Legacy mutation tests now build their authored-line fixtures directly, preserving their concurrency/conflict assertions without relying on a product vault scan. This is a breaking API removal for the next major release.
+
+The subitems-panel audit also removed its automatic reconciliation caller, three-second cooldown map/constant, bulk wrapper and unused shared/public repair adapters. Four retired no-op methods and their logger/type are deleted. No retained TPS consumer called those adapters. Explicit link/unlink remains; the regression checks that no retired repair registration or caller survives.
+
+### Final recurrence owner audit
+
+The removed completion/recovery owners left no caller for BulkEditService successor creation, Daily Note recurrence cloning, template bootstrapping or recurrence operation-state storage. Those writers and their exclusive helper/parent-maintenance chain are deleted, not retained behind guards. The unused series-template folder control/type/default is removed while stored legacy values remain inert. The existing workflow destination now reads Status values (same transient route ID), retaining active/completed status controls. Recurrence properties and explicit template-text editing remain; completing a note never creates another note. No next-instance command existed to preserve. Retired generator tests are replaced by source/API absence checks; retained status, template-protection, explicit creation and conflict tests remain.
+
+Final 10.0.0 validation: the complete declared suite passes 1,655 tests with zero failures/skips. Runtime source totals 331 additions and 13,636 deletions, net -13,305 lines. The final recurrence-generator removal alone is dormant-code deletion, not an active performance claim; its former automatic owners were removed earlier. Remaining property, status, template, identity, timer and native creation tests retain their safety assertions.

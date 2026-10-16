@@ -551,13 +551,9 @@ export interface TPSGlobalContextMenuSettings {
   timeTrackingPausedSession?: TimeTrackingPausedSessionState | null;
 
   // Recurrence settings
-  enableRecurrence: boolean;
-  promptOnRecurrenceEdit: boolean;
-  recurrencePromptTimeout: number; // Minutes
   activeStatusValues: string[];
   recurrenceCompletionStatuses: string[];
   recurrenceDefaultStatus: string; // Default status for new recurrence instances
-  recurringTemplateFolder: string; // Folder to store recurring event templates
 
   // File naming settings
 
@@ -568,7 +564,6 @@ export interface TPSGlobalContextMenuSettings {
   dateCreatedFrontmatterKey: string;
   dateModifiedFrontmatterKey: string;
   fileTimestampFormat: string;
-  applyNotebookNavigatorRulesOnSubitemCreate: boolean;
   frontmatterAutoWriteExclusions: string;
   enableActivityLog: boolean;
   activityLogPropertyKey: string;
@@ -598,7 +593,6 @@ export interface TPSGlobalContextMenuSettings {
   enableChecklistCompletionProperty: boolean;
   checklistCompletionPropertyKey: string;
   checklistFinalPromptStatuses: string[];
-  reconcileTaskStatusToCheckbox: boolean;
   enableLinkedSubitemCheckboxes: boolean;
   linkedSubitemCheckboxStyle: LinkedSubitemCheckboxStyle;
   linkedSubitemCheckboxMappings: LinkedSubitemCheckboxMapping[];
@@ -654,7 +648,6 @@ export interface TPSGlobalContextMenuSettings {
   autoEmbedIgnoreTags: string[];
 
   // Auto-insert blank line on note open
-  enableAutoInsertBlankLineOnOpen: boolean;
 
   // Default paths for new items
   defaultAttachmentsPath: string;

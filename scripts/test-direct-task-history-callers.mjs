@@ -408,7 +408,6 @@ test('Quick Editor task-to-bullet conversion records a terminal task deletion wi
     'begin',
     'process:start',
     'process:end',
-    'followup',
     'commit',
   ]);
   assert.equal(events[0].input.action, 'task.delete');

@@ -149,13 +149,6 @@ export class PropertyRowService {
 
   private async afterWholeNotePropertyEdit(files: TFile[], changedKeys: string[]): Promise<void> {
     if (files.length === 0) return;
-    await Promise.all(files.map((file) =>
-      this.plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
-        reason: 'whole-note-inline-property-edit',
-        force: true,
-        bypassCreationGrace: true,
-      }),
-    ));
     logger.flow('PropertySelector', 'refresh:await-metadata-cache', {
       files: files.length,
       changedKeys,

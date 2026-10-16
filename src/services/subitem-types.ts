@@ -20,9 +20,3 @@ export interface ResolvedParentLink {
   kind: ParentLinkKind;
   source: 'body-derived' | 'child-frontmatter';
 }
-
-export interface ReconcileResult {
-  addedParents: number;
-  removedParents: number;
-  touchedChildren: TFile[];
-}

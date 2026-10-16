@@ -1,7 +1,6 @@
 import { App, MarkdownView, Menu, Notice, TFile } from 'obsidian';
 import * as logger from '../logger';
 import type TPSGlobalContextMenuPlugin from '../main';
-import { StatusChoiceModal } from '../modals/status-choice-modal';
 import { TextInputModal } from '../modals/text-input-modal';
 import { getNativeCheckboxMarker, normalizeCheckboxMenuStates, normalizeNativeCheckboxToken, replaceNativeCheckboxMarker, resolveNativeCheckboxLine } from '../utils/native-checkbox-marker';
 import type { TaskLineContext } from '../services/task-line-context-menu-service';
@@ -25,10 +24,6 @@ import {
     normalizeLinkedSubitemMappings,
 } from '../utils/linked-subitem-mapping';
 import {
-    classifyMappedTaskCheckboxState,
-    hasOpenMappedTaskLines,
-} from '../utils/task-checkbox-classification';
-import {
     abortDirectTaskHistory,
     beginDirectTaskHistory,
     commitDirectTaskHistory,
@@ -36,10 +31,6 @@ import {
     type DirectTaskHistoryLocation,
     type DirectTaskHistoryLogContext,
 } from '../utils/direct-task-history';
-import {
-    canAutomaticallyMutateTemplateFile,
-    canAutomaticallyMutateTemplateFrontmatter,
-} from '../utils/template-protection';
 
 type TaskCheckboxContext = {
     file: TFile;
@@ -58,9 +49,6 @@ type NativeCheckboxContext = TaskCheckboxContext & { view: MarkdownView; checkbo
  */
 export class TaskCheckboxHandler {
     private app: App;
-    private pendingPropertyUpdateTimers: Map<string, number> = new Map();
-    private recentPropertyWriteUntilByPath: Map<string, number> = new Map();
-    private fullVaultSyncToken = 0;
     private checkboxLongPressTimer: number | null = null;
     private suppressedCheckbox: HTMLElement | null = null;
     private suppressedCheckboxUntil = 0;
@@ -73,12 +61,6 @@ export class TaskCheckboxHandler {
     dispose(): void {
         this.disposed = true;
         this.suppressedCheckbox = null;
-        for (const timerId of this.pendingPropertyUpdateTimers.values()) {
-            window.clearTimeout(timerId);
-        }
-        this.pendingPropertyUpdateTimers.clear();
-        this.recentPropertyWriteUntilByPath.clear();
-        this.fullVaultSyncToken += 1;
         this.clearCheckboxLongPressTimer();
     }
 
@@ -364,9 +346,7 @@ export class TaskCheckboxHandler {
                 rawLine: context.rawLine,
             },
         });
-        let previousMarker = getCheckboxStateMarker(context.currentToken);
         const nextMarker = getCheckboxStateMarker(token);
-        let updatedLines: string[] | null = null;
         let updatedLineIndex = -1;
         let didWrite = false;
         let unresolvedWrite = false;
@@ -403,7 +383,6 @@ export class TaskCheckboxHandler {
                     mappingGuardBlocked = true;
                     return false;
                 }
-                previousMarker = currentParsed.marker;
                 let updatedLine = this.withTaskCheckboxToken(currentLine, token);
                 updatedLine = updateTaskCompletedDateForCheckboxState(updatedLine, nextMarker, {
                     completeMarkers: this.getCompleteMarkers(liveMappings),
@@ -425,7 +404,6 @@ export class TaskCheckboxHandler {
                 historyReady = historyReady && historyIdentity.ready;
 
                 lines[lineIndex] = updatedLine;
-                updatedLines = [...lines];
                 updatedLineIndex = lineIndex;
                 updatedRawLine = updatedLine;
                 didWrite = true;
@@ -456,36 +434,9 @@ export class TaskCheckboxHandler {
             new Notice('That task changed before its checkbox could be updated. Refresh and try again.');
             return;
         }
-        if (!didWrite || !updatedLines) {
+        if (!didWrite) {
             await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
             return;
-        }
-        let historyOutcome: 'committed' | 'partial' = 'committed';
-        try {
-            await this.handleExternalChecklistStateMutation(
-                context.file,
-                previousMarker,
-                nextMarker,
-                updatedLines,
-                updatedLineIndex,
-            );
-        } catch (error) {
-            historyOutcome = 'partial';
-            if (historyReady) {
-                await commitDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, {
-                    ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
-                    after: {
-                        path: context.file.path,
-                        lineNumber: updatedLineIndex,
-                        rawLine: updatedRawLine,
-                    },
-                    sourceDisposition: 'retained',
-                    outcome: historyOutcome,
-                }, historyContext);
-            } else {
-                await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
-            }
-            throw error;
         }
         if (historyReady) {
             await commitDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, {
@@ -496,7 +447,7 @@ export class TaskCheckboxHandler {
                     rawLine: updatedRawLine,
                 },
                 sourceDisposition: 'retained',
-                outcome: historyOutcome,
+                outcome: 'committed',
             }, historyContext);
         } else {
             await abortDirectTaskHistory(this.plugin.itemHistoryService, historyHandle, historyContext);
@@ -548,6 +499,14 @@ export class TaskCheckboxHandler {
         return normalizeLinkedSubitemMappings(this.plugin.settings.linkedSubitemCheckboxMappings || [], {
             enforceStrictDefaults: false,
         });
+    }
+
+    private getClassificationOptions() {
+        const statusService = this.plugin.sharedServices.status;
+        return {
+            completionStatuses: statusService.getDoneStatuses(),
+            normalizeStatus: (value: unknown) => statusService.normalize(value),
+        };
     }
 
     private getCompleteMarkers(mappings = this.getCheckboxMappings()): string[] {
@@ -674,215 +633,4 @@ export class TaskCheckboxHandler {
             .toLowerCase();
     }
 
-    async handleExternalChecklistStateMutation(
-        file: TFile,
-        previousState: string | null,
-        nextState: string | null,
-        updatedLines: string[],
-        lineIndex: number,
-    ): Promise<void> {
-        const failures: Array<{ stage: string; error: unknown }> = [];
-        try {
-            await this.plugin.taskRecurrenceService?.handleTaskCompletion({
-                file,
-                previousState,
-                nextState,
-                updatedLines,
-                lineIndex,
-            });
-        } catch (error) {
-            failures.push({ stage: 'recurrence', error });
-        }
-
-        try {
-            await this.maybePromptToCompleteNote(file, previousState, nextState);
-        } catch (error) {
-            failures.push({ stage: 'final-note-status', error });
-        }
-
-        try {
-            this.scheduleChecklistPropertyUpdate(file);
-        } catch (error) {
-            failures.push({ stage: 'checklist-property', error });
-        }
-
-        if (failures.length > 0) {
-            const firstFailure = failures[0];
-            logger.flowError('TaskCheckboxFollowup', 'run:failed', firstFailure.error, {
-                path: file.path,
-                failedStages: failures.map((failure) => failure.stage),
-            });
-            throw firstFailure.error;
-        }
-    }
-
-    private async maybePromptToCompleteNote(
-        file: TFile,
-        previousState: string | null,
-        nextState: string | null,
-    ): Promise<void> {
-        const mappings = this.getCheckboxMappings();
-        const previous = classifyMappedTaskCheckboxState(mappings, previousState, this.getClassificationOptions());
-        const next = classifyMappedTaskCheckboxState(mappings, nextState, this.getClassificationOptions());
-        if (!previous.isOpen || !next.isComplete) return;
-        const currentContent = await this.app.vault.read(file);
-        if (this.hasOpenChecklistItems(currentContent.split(/\r?\n/u))) return;
-        const cache = this.app.metadataCache.getFileCache(file);
-        const statusService = this.plugin.sharedServices.status;
-        const workflowStatusKey = statusService.getStatusPropertyKey();
-        const status = statusService.getStatuses(cache?.frontmatter, workflowStatusKey)[0] || '';
-        if (!status || statusService.isDoneStatus(status)) return;
-        const statusChoices = this.getChecklistFinalPromptStatuses();
-        if (statusChoices.length === 0) return;
-        const chosenStatus = await this.promptForFinalChecklistStatus(statusChoices);
-        if (!chosenStatus) return;
-        await this.plugin.bulkEditService.setStatus([file], chosenStatus);
-    }
-
-    private hasOpenChecklistItems(lines: string[]): boolean {
-        return hasOpenMappedTaskLines(lines, this.getCheckboxMappings(), this.getClassificationOptions());
-    }
-
-    private getClassificationOptions() {
-        const statusService = this.plugin.sharedServices.status;
-        return {
-            completionStatuses: statusService.getDoneStatuses(),
-            normalizeStatus: (value: unknown) => statusService.normalize(value),
-        };
-    }
-
-    private getChecklistFinalPromptStatuses(): string[] {
-        const configured = Array.isArray(this.plugin.settings.checklistFinalPromptStatuses)
-            ? this.plugin.settings.checklistFinalPromptStatuses
-            : [];
-        const normalized = configured
-            .map((value) => String(value || '').trim())
-            .filter(Boolean);
-        if (normalized.length > 0) return normalized;
-        return ['complete', 'wont-do'];
-    }
-
-    private async promptForFinalChecklistStatus(statuses: string[]): Promise<string | null> {
-        return await new Promise<string | null>((resolve) => {
-            new StatusChoiceModal(this.app, statuses, (status) => resolve(status)).open();
-        });
-    }
-
-    scheduleChecklistPropertyUpdate(file: TFile): void {
-        if (this.plugin.filePropertiesService?.isCompanionFile(file)) {
-            this.clearPendingChecklistPropertyUpdate(file.path);
-            return;
-        }
-        if (!this.plugin.canRunBackgroundAutomation()) {
-            this.clearPendingChecklistPropertyUpdate(file.path);
-            return;
-        }
-        if (!this.isChecklistCompletionPropertyEnabled()) {
-            this.clearPendingChecklistPropertyUpdate(file.path);
-            return;
-        }
-        if (this.isRecentChecklistPropertySelfWrite(file.path)) return;
-        const key = file.path;
-        const existing = this.pendingPropertyUpdateTimers.get(key);
-        if (typeof existing === 'number') window.clearTimeout(existing);
-        const timerId = window.setTimeout(() => {
-            this.pendingPropertyUpdateTimers.delete(key);
-            void this.runChecklistPropertyUpdate(key);
-        }, 300);
-        this.pendingPropertyUpdateTimers.set(key, timerId);
-    }
-
-    private async runChecklistPropertyUpdate(filePath: string): Promise<void> {
-        if (!this.isChecklistCompletionPropertyEnabled()) {
-            this.clearPendingChecklistPropertyUpdate(filePath);
-            return;
-        }
-        const af = this.plugin.app.vault.getAbstractFileByPath(filePath);
-        if (!(af instanceof TFile) || af.extension !== 'md') return;
-        if (this.plugin.filePropertiesService?.isCompanionFile(af)) return;
-        await this.updateChecklistPropertyForFile(af, filePath);
-    }
-
-    async synchronizeChecklistPropertyForAllMarkdownFiles(): Promise<void> {
-        if (!this.plugin.canRunBackgroundAutomation()) return;
-        if (!this.isChecklistCompletionPropertyEnabled()) return;
-        const syncToken = ++this.fullVaultSyncToken;
-        const files = this.plugin.app.vault.getMarkdownFiles()
-            .filter((file) => !this.plugin.filePropertiesService?.isCompanionFile(file));
-        for (let index = 0; index < files.length; index += 1) {
-            if (syncToken !== this.fullVaultSyncToken) return;
-            if (!this.isChecklistCompletionPropertyEnabled()) return;
-            await this.updateChecklistPropertyForFile(files[index], files[index].path);
-            if ((index + 1) % 25 === 0) {
-                await new Promise((resolve) => window.setTimeout(resolve, 25));
-            }
-        }
-    }
-
-    private async updateChecklistPropertyForFile(file: TFile, filePath = file.path): Promise<void> {
-        if (this.plugin.filePropertiesService?.isCompanionFile(file)) return;
-        const propKey = this.plugin.settings.checklistCompletionPropertyKey?.trim();
-        if (!propKey) return;
-
-        let content: string;
-        try {
-            content = await this.plugin.app.vault.cachedRead(file);
-        } catch (error) {
-            logger.warn('[TPS GCM] Failed to read file for checklist property update', { filePath, error });
-            return;
-        }
-
-        const hasOpenChecklistItem = this.hasOpenChecklistItems(content.split(/\r?\n/u));
-
-        const cache = this.plugin.app.metadataCache.getFileCache(file);
-        if (cache?.frontmatter?.[propKey] === hasOpenChecklistItem) return;
-        if (!(await canAutomaticallyMutateTemplateFile(this.plugin.app.vault, file, this.plugin.settings))) return;
-        if (!(await this.plugin.bulkEditService.canMutateFrontmatterSafely(file))) {
-            logger.warn('[TPS GCM] Skipping checklist property update due to malformed frontmatter', { filePath });
-            return;
-        }
-
-        try {
-            await this.plugin.bulkEditService.runSerializedFrontmatterWrite(file, async () => {
-                await this.plugin.frontmatterMutationService.process(file, (fm) => {
-                    if (!canAutomaticallyMutateTemplateFrontmatter(fm, this.plugin.settings)) return;
-                    fm[propKey] = hasOpenChecklistItem;
-                });
-            });
-            this.rememberChecklistPropertySelfWrite(file.path);
-        } catch (error) {
-            logger.warn('[TPS GCM] Failed to write checklist open-item property', { filePath, error });
-        }
-    }
-
-    cancelChecklistPropertyUpdates(): void {
-        for (const timerId of this.pendingPropertyUpdateTimers.values()) {
-            window.clearTimeout(timerId);
-        }
-        this.pendingPropertyUpdateTimers.clear();
-        this.fullVaultSyncToken += 1;
-    }
-
-    private clearPendingChecklistPropertyUpdate(filePath: string): void {
-        const existing = this.pendingPropertyUpdateTimers.get(filePath);
-        if (typeof existing === 'number') window.clearTimeout(existing);
-        this.pendingPropertyUpdateTimers.delete(filePath);
-    }
-
-    private isChecklistCompletionPropertyEnabled(): boolean {
-        return this.plugin.settings.enableChecklistCompletionProperty === true;
-    }
-
-    private rememberChecklistPropertySelfWrite(filePath: string): void {
-        this.recentPropertyWriteUntilByPath.set(filePath, Date.now() + 3000);
-    }
-
-    private isRecentChecklistPropertySelfWrite(filePath: string): boolean {
-        const until = this.recentPropertyWriteUntilByPath.get(filePath) || 0;
-        if (until <= Date.now()) {
-            this.recentPropertyWriteUntilByPath.delete(filePath);
-            return false;
-        }
-        return true;
-    }
 }

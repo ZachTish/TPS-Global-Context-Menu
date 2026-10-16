@@ -2080,27 +2080,6 @@ export class PersistentMenuManager {
       const cssColor = this.normalizeCssColorValue(value);
       if (cssColor) return cssColor;
     }
-
-    if (file) {
-      const ruleColor = this.resolveNotebookNavigatorRuleColor(file, frontmatter);
-      if (ruleColor) {
-        return ruleColor;
-      }
-    }
-    return '';
-  }
-
-  private resolveNotebookNavigatorRuleColor(file: TFile, frontmatter: Record<string, any>): string {
-    try {
-      const visual = this.plugin.notebookNavigatorRuleService.getVisualOutputsForFile(file, frontmatter);
-      const colorValue = String(visual?.color?.value || '').trim();
-      if (colorValue) {
-        const cssColor = this.normalizeCssColorValue(colorValue);
-        if (cssColor) return cssColor;
-      }
-    } catch (error) {
-      logger.warn('[TPS GCM] Failed resolving Notebook Navigator rule color for inline title:', file.path, error);
-    }
     return '';
   }
 
@@ -2127,19 +2106,11 @@ export class PersistentMenuManager {
     const fromIconField = pickString(frontmatter?.icon);
     if (fromIconField) return fromIconField;
 
-    // Then, check Notebook Navigator configured icon field and GCM-owned rules.
+    // Then, check the configured stored icon field.
     const configuredIconField = pickString(this.plugin.settings.notebookNavigatorRules?.frontmatterIconField);
     if (configuredIconField) {
       const configuredValue = pickString(this.getFrontmatterValueCaseInsensitive(frontmatter, configuredIconField));
       if (configuredValue) return configuredValue;
-    }
-
-    try {
-      const visual = this.plugin.notebookNavigatorRuleService.getVisualOutputsForFile(file, frontmatter);
-      const ruleIcon = pickString(visual?.icon?.value);
-      if (ruleIcon) return ruleIcon;
-    } catch (error) {
-      logger.warn('[TPS GCM] Failed resolving Notebook Navigator rule icon for inline title:', file.path, error);
     }
 
     return '';

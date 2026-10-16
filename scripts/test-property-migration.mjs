@@ -452,7 +452,7 @@ test('concurrent note edit is preserved and recovery survives a restart',async()
 });
 test('all owning key controls use explicit migration actions and options are drafts',()=>{
  const source=readFileSync('src/settings-tab.ts','utf8');
- for(const key of ['dateCreatedFrontmatterKey','dateModifiedFrontmatterKey','timeTrackingPropertyKey','parentLinkFrontmatterKey']) assert.match(source,new RegExp(`renderMigratingKeySetting\\([^\\n]+ '${key}'\\)`));
+ for(const key of ['timeTrackingPropertyKey','parentLinkFrontmatterKey']) assert.match(source,new RegExp(`renderMigratingKeySetting\\([^\\n]+ '${key}'\\)`));
  assert.doesNotMatch(source, /renderMigratingKeySetting\([^\n]+ 'taskVisibilityStateFrontmatterKey'\)/u);
  assert.match(source,/Rename stored value/);assert.match(source,/draftOptions = value/);assert.match(source,/configureManagedNoteField\(settings, field, next\)/);assert.match(source,/this\.migrateProperty\(\{ kind: 'key', from: prop.key/);
 });

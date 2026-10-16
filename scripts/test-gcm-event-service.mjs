@@ -20,7 +20,6 @@ test('GCM internal callers delegate shared events through the event service', ()
     'src/services/bulk-edit-service.ts',
     'src/services/frontmatter-mutation-service.ts',
     'src/services/shared/status-service.ts',
-    'src/services/notebook-navigator-rule-service.ts',
     'src/services/time-tracking-service.ts',
     'src/menu/menu-builder.ts',
     'src/events/register-events.ts',

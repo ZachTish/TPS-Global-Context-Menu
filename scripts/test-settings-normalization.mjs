@@ -15,14 +15,6 @@ const registerEventsSource = readFileSync(new URL('../src/events/register-events
 const panelBuilderSource = readFileSync(new URL('../src/menu/panel-builder.ts', import.meta.url), 'utf8');
 const menuBuilderSource = readFileSync(new URL('../src/menu/menu-builder.ts', import.meta.url), 'utf8');
 const archiveFileServiceSource = readFileSync(new URL('../src/services/archive-file-service.ts', import.meta.url), 'utf8');
-const notebookRuleServiceSource = readFileSync(new URL('../src/services/notebook-navigator-rule-service.ts', import.meta.url), 'utf8');
-const notebookRuleEngineSource = readFileSync(new URL('../src/services/notebook-navigator-rule-engine.ts', import.meta.url), 'utf8');
-const notebookRuleSettingsSource = readFileSync(new URL('../src/services/notebook-navigator-rule-settings.ts', import.meta.url), 'utf8');
-const notebookUiCommonSource = readFileSync(new URL('../src/notebook-navigator-settings/ui-common.ts', import.meta.url), 'utf8');
-const notebookOperatorsSource = readFileSync(new URL('../src/notebook-navigator-settings/operators.ts', import.meta.url), 'utf8');
-const notebookRulesSectionSource = readFileSync(new URL('../src/notebook-navigator-settings/rules-section.ts', import.meta.url), 'utf8');
-const notebookBucketSectionSource = readFileSync(new URL('../src/notebook-navigator-settings/bucket-section.ts', import.meta.url), 'utf8');
-const notebookHideSectionSource = readFileSync(new URL('../src/notebook-navigator-settings/hide-section.ts', import.meta.url), 'utf8');
 const fileNamingServiceSource = readFileSync(new URL('../src/services/file-naming-service.ts', import.meta.url), 'utf8');
 const settingsPersistenceSource = readFileSync(new URL('../src/settings-persistence.ts', import.meta.url), 'utf8');
 const timeTrackingSource = readFileSync(new URL('../src/services/time-tracking-service.ts', import.meta.url), 'utf8');
@@ -309,7 +301,7 @@ test('linked checkbox and Daily Note line-population settings are absent in whol
   assert.doesNotMatch(settingsTabSource, /renderLinkedSubitemCheckboxSettings|Render child-note links as checkboxes|Child status to checkbox mappings/u);
   assert.doesNotMatch(settingsTabSource, /Auto-Populate Scheduled Items|Completion prompt status options/u);
   assert.match(mainSource, /this\.settings\.enableLinkedSubitemCheckboxes = false/u);
-  assert.match(mainSource, /this\.settings\.enableAutoPopulateDailyNotes = false/u);
+  assert.doesNotMatch(mainSource, /enableAutoPopulateDailyNotes/u);
 });
 
 test('checkbox mapping load migration uses legacy statuses and persists one canonical snapshot', () => {
@@ -767,46 +759,10 @@ test('Create task forces a standalone note even when a saved parent choice exist
   assert.doesNotMatch(settingsTabSource, /setName\('Create task default parent'\)/);
 });
 
-test('parent link format and notebook navigator smart sort sanitize to one canonical shape', async () => {
-  const { sanitizeNotebookNavigatorRuleSettings } = await importModule('../src/services/notebook-navigator-rule-settings.ts');
-
+test('parent link format retains its canonical shape', () => {
   assert.match(parentLinkFormatSource, /return value === 'markdown-title' \? 'markdown-title' : 'wikilink';/);
   assert.match(mainSource, /this\.settings\.parentLinkFormat = normalizeParentLinkFormat\(this\.settings\.parentLinkFormat\);/);
   assert.match(settingsTabSource, /\.setValue\(normalizeParentLinkFormat\(this\.plugin\.settings\.parentLinkFormat\)\)/);
-
-  const sanitizedFromLegacyArray = sanitizeNotebookNavigatorRuleSettings({
-    smartSort: [
-      {
-        id: 'bucket-a',
-        enabled: true,
-        name: 'By priority',
-        match: 'all',
-        conditions: [],
-        sortCriteria: [{ source: 'frontmatter', field: 'priority', type: 'priority', direction: 'asc', mappings: [] }],
-      },
-    ],
-  });
-  assert.deepEqual(sanitizedFromLegacyArray.smartSort.buckets.map((bucket) => bucket.id), ['bucket-a']);
-
-  const sanitizedFromLegacySegments = sanitizeNotebookNavigatorRuleSettings({
-    smartSort: {
-      segments: [
-        {
-          id: 'seg-1',
-          enabled: true,
-          source: 'frontmatter',
-          field: 'status',
-          fallback: '',
-          mappings: [],
-          match: 'all',
-          conditions: [],
-        },
-      ],
-    },
-  });
-  assert.equal(sanitizedFromLegacySegments.smartSort.buckets.length, 1);
-  assert.equal(sanitizedFromLegacySegments.smartSort.buckets[0].id, 'seg-1');
-  assert.equal(sanitizedFromLegacySegments.smartSort.buckets[0].sortCriteria[0].field, 'status');
 });
 
 test('obsolete type-profile settings are stripped without removing record or folder contracts', () => {
@@ -870,88 +826,44 @@ test('time tracking normalizes a clean Daily Note workspace default', () => {
   );
 });
 
-test('icon and color rule filter matches exact case-insensitive working values deterministically', async () => {
-  const { matchesRuleFilter, collectRuleFilterTerms } = await importModule('../src/notebook-navigator-settings/rule-filter.ts');
-
-  const advancedRule = {
-    id: 'rule-working',
-    name: 'Status working',
-    enabled: true,
-    property: '',
-    operator: 'is',
-    value: '',
-    pathPrefix: '',
-    icon: 'lucide:clipboard-list',
-    color: '#4caf50',
-    match: 'all',
-    conditions: [
-      { source: 'frontmatter', field: 'status', operator: 'is', value: 'working' },
-    ],
-  };
-
-  const terms = collectRuleFilterTerms(advancedRule, 1).map((term) => term.toLowerCase());
-  assert.ok(terms.includes('working'));
-  assert.equal(matchesRuleFilter(advancedRule, 1, 'working'), true);
-  assert.equal(matchesRuleFilter(advancedRule, 1, 'Working'), true);
-  assert.equal(matchesRuleFilter(advancedRule, 1, 'lucide:clipboard-list'), true);
-  assert.equal(matchesRuleFilter(advancedRule, 1, 'nonexistent'), false);
+test('stored Navigator mappings normalize without traversing or rewriting retired rules', async () => {
+  const { normalizeStoredNavigatorFields } = await importModule('../src/services/notebook-navigator-rule-settings.ts');
+  let inspections = 0;
+  const rules = new Proxy([{ enabled: true }], { get(target, key) { inspections++; return Reflect.get(target, key); } });
+  const raw = { enabled: true, rules, hideRules: rules, frontmatterIconField: ' display Icon ', frontmatterColorField: 'displayColor', smartSort: { field: 'manual Order', buckets: rules, segments: rules } };
+  for (let i = 0; i < 1000; i++) {
+    const result = normalizeStoredNavigatorFields(raw);
+    assert.equal(result.frontmatterIconField, 'displayIcon');
+    assert.equal(result.frontmatterColorField, 'displayColor');
+    assert.equal(result.smartSort.field, 'manualOrder');
+    assert.equal(result.rules, rules);
+    assert.equal(result.hideRules, rules);
+    assert.equal(result.smartSort.buckets, rules);
+    assert.equal(result.smartSort.segments, rules);
+    assert.equal(result.enabled, true, 'legacy values preserved, not executed');
+  }
+  const legacySort = normalizeStoredNavigatorFields({ smartSort: rules });
+  assert.equal(legacySort.smartSort, rules, 'old array-shaped sort settings stay opaque');
+  assert.equal(inspections, 0);
+  assert.equal(raw.frontmatterIconField, ' display Icon ');
+  for (const raw of [null, undefined, [], 42]) {
+    const result = normalizeStoredNavigatorFields(raw);
+    assert.equal(result.frontmatterIconField, 'icon');
+    assert.equal(result.frontmatterColorField, 'color');
+    assert.equal(result.smartSort.field, 'sort');
+  }
+  const protectedFields = normalizeStoredNavigatorFields({ frontmatterIconField: 'externalEventId', frontmatterColorField: 'tpsCalendarUid', smartSort: { field: 'externalEventId' } });
+  assert.equal(protectedFields.frontmatterIconField, 'icon');
+  assert.equal(protectedFields.frontmatterColorField, 'color');
+  assert.equal(protectedFields.smartSort.field, 'sort');
 });
 
-test('Notebook Navigator rules expose checkbox state as a first-class source', async () => {
-  const { sanitizeNotebookNavigatorRuleSettings } = await importModule('../src/services/notebook-navigator-rule-settings.ts');
-
-  const sanitized = sanitizeNotebookNavigatorRuleSettings({
-    rules: [{
-      id: 'checkbox-rule',
-      enabled: true,
-      match: 'all',
-      conditions: [{ source: 'checkbox-state', field: 'status', operator: 'is', value: 'open' }],
-    }],
-    hideRules: [{
-      id: 'hide-open-checkbox',
-      enabled: true,
-      mode: 'add',
-      tagName: 'hide',
-      match: 'all',
-      conditions: [{ source: 'checkbox-state', field: 'status', operator: '!is', value: 'x' }],
-    }],
-    smartSort: {
-      buckets: [{
-        id: 'bucket-checkbox',
-        enabled: true,
-        name: 'Checkboxes',
-        match: 'all',
-        conditions: [{ source: 'checkbox-state', field: 'status', operator: 'contains', value: '-' }],
-        sortCriteria: [{ source: 'checkbox-state', field: 'status', type: 'status', direction: 'asc', mappings: [{ input: 'open', output: '001' }] }],
-      }],
-    },
-  });
-
-  assert.equal(sanitized.rules[0].conditions[0].source, 'checkbox-state');
-  assert.equal(sanitized.rules[0].conditions[0].field, 'status');
-  assert.equal(sanitized.hideRules[0].conditions[0].source, 'checkbox-state');
-  assert.equal(sanitized.smartSort.buckets[0].conditions[0].source, 'checkbox-state');
-  assert.equal(sanitized.smartSort.buckets[0].sortCriteria[0].source, 'checkbox-state');
-
-  assert.match(notebookRuleServiceSource, /checkboxStates: this\.collectCheckboxStates\(body\)/);
-  assert.match(notebookRuleServiceSource, /states\.add\(marker \|\| 'open'\)/);
-  assert.match(notebookRuleEngineSource, /if \(source === "checkbox-state"\)/);
-  assert.match(notebookRuleEngineSource, /context\.checkboxStates/);
-  assert.match(notebookRuleEngineSource, /states\.add\(marker \|\| "open"\)/);
-  assert.match(notebookRuleSettingsSource, /value === 'checkbox-state'/);
-  assert.match(notebookUiCommonSource, /\{ value: "checkbox-state", label: "Checkbox state" \}/);
-  assert.match(notebookUiCommonSource, /conditionSourceHasField/);
-  assert.match(notebookUiCommonSource, /smartOperatorNeedsValue/);
-  assert.match(notebookUiCommonSource, /open, x, -, \//);
-  assert.match(notebookOperatorsSource, /source === "checkbox-state"[\s\S]*"is", "!is"[\s\S]*"exists", "!exists"/);
-  assert.match(notebookRulesSectionSource, /conditionSourceHasField\(liveCondition\.source\)/);
-  assert.match(notebookHideSectionSource, /conditionSourceHasField\(liveCondition\.source\)/);
-  assert.match(notebookBucketSectionSource, /criterion\.source === "checkbox-state"/);
-  assert.doesNotMatch(notebookRuleEngineSource, /checkbox-state[\s\S]{0,800}linkedSubitem|checkbox-state[\s\S]{0,800}mapping/i);
-});
-
-test('recurrence and daily note child settings are hidden immediately when parent toggles turn off', () => {
-  assert.match(settingsTabSource, /enableRecurrence = v; await this\.plugin\.saveSettings\(\); this\.display\(\);/);
+test('status values remain configurable without retired recurrence generation controls', () => {
+  assert.doesNotMatch(settingsTabSource, /enableRecurrence|Completion Triggers|Auto-create the next note/);
+  assert.match(settingsTabSource, /Completed Status Values/);
+  assert.match(settingsTabSource, /label: 'Status values'/);
+  assert.doesNotMatch(settingsTabSource, /setName\('Template Folder'\)/);
+  assert.match(settingsTabSource, /Completing a note does not create another note/);
   assert.match(settingsTabSource, /if \(this\.plugin\.settings\.enableDailyNoteNav\) \{/);
   assert.match(settingsTabSource, /enableDailyNoteNav = v;\s*await this\.plugin\.saveSettings\(\);\s*this\.display\(\);/);
 });
@@ -967,8 +879,7 @@ test('settings use shallow routed pages with responsive, accessible selectors', 
   assert.match(hubSource, /Right-click placement, linked context, note navigation, and inline UI\./);
   assert.equal((hubSource.match(/\bid: '/g) || []).length, 5);
   assert.match(settingsTabSource, /private activeSettingsPage: SettingsPageId = 'rules-fields';/);
-  assert.match(settingsTabSource, /private activeRulesFieldsPage: RulesFieldsPageId = 'frontmatter';/);
-  assert.match(settingsTabSource, /private activeFrontmatterEditor: FrontmatterEditorId = 'sort';/);
+  assert.match(settingsTabSource, /private activeRulesFieldsPage: RulesFieldsPageId = 'custom-fields';/);
   for (const transientKey of [
     'activeSettingsPage',
     'activeRulesFieldsPage',
@@ -1002,13 +913,11 @@ test('settings use shallow routed pages with responsive, accessible selectors', 
   assert.doesNotMatch(displaySource, /createTrackedSection\(containerEl/);
   assert.doesNotMatch(displaySource, /containerEl\.createEl\('details'/);
 
-  const frontmatterStart = settingsTabSource.indexOf('private renderNotebookNavigatorRules');
-  const frontmatterEnd = settingsTabSource.indexOf('private renderRuleOverviewCard', frontmatterStart);
+  const frontmatterStart = settingsTabSource.indexOf('private renderNoteMaintenance');
+  const frontmatterEnd = settingsTabSource.indexOf('display(): void', frontmatterStart);
   const frontmatterSource = settingsTabSource.slice(frontmatterStart, frontmatterEnd);
-  assert.match(frontmatterSource, /id: 'sort', label: 'Virtual sort'/);
-  assert.match(frontmatterSource, /id: 'tags', label: 'Semantic tags'/);
-  assert.match(frontmatterSource, /id: 'icon-color', label: 'Icon \+ color'/);
-  assert.match(frontmatterSource, /if \(this\.activeFrontmatterEditor === 'sort'\)/);
+  assert.doesNotMatch(settingsTabSource, /Virtual sort|Icon \+ color|Enable Navigator rules/);
+  assert.doesNotMatch(frontmatterSource, /id: 'tags', label: 'Semantic tags'/);
   assert.equal((frontmatterSource.match(/this\.createTrackedSection\(/g) || []).length, 1);
   assert.match(frontmatterSource, /'Automation and safeguards'/);
   assert.match(frontmatterSource, /setName\('Excluded tags'\)/);
@@ -1062,26 +971,19 @@ test('archive action uses Controller two-stage source folder and moves files imm
   );
 });
 
-test('create-time title sync does not inject titles into blank new notes', () => {
-  assert.match(registerEventsSource, /onlyIfMissing: true,/);
-  assert.match(registerEventsSource, /onlyIfHasFrontmatter: true,/);
-  assert.match(registerEventsSource, /scheduleApply\(file, \{\s*reason: 'create',\s*force: true,/);
+test('create-time title sync is removed and explicit filename guards remain', () => {
+  assert.doesNotMatch(registerEventsSource, /syncTitleFromFilename|scheduleCreatedFileAutomation/);
+  assert.doesNotMatch(registerEventsSource, /notebookNavigatorRuleService\.scheduleApply/);
   assert.doesNotMatch(registerEventsSource, /\}, 3800\);/);
   assert.doesNotMatch(registerEventsSource, /scheduleActiveFilenameReconcile/);
-  assert.match(notebookRuleServiceSource, /removeGeneratedBlankNoteTitle\(file, frontmatter, body, options\)/);
-  assert.match(notebookRuleServiceSource, /if \(options\.reason !== 'create'\) return;/);
-  assert.match(notebookRuleServiceSource, /deleteValueCaseInsensitive\(frontmatter, 'title'\);/);
   assert.match(fileNamingServiceSource, /isBlankGeneratedUntitledNote\(liveFile, rawBasename\)/);
   assert.match(fileNamingServiceSource, /\^Untitled/);
   assert.match(fileNamingServiceSource, /body\.trim\(\)\.length === 0/);
 });
 
-test('frontmatter-rule settings CSS stays GCM-owned and cannot style Notebook Navigator', () => {
+test('retained settings CSS stays GCM-owned and retired rule styles are absent', () => {
   const frontmatterRuleSources = [
     settingsTabSource,
-    notebookRulesSectionSource,
-    notebookBucketSectionSource,
-    notebookHideSectionSource,
   ];
 
   for (const source of frontmatterRuleSources) {
@@ -1091,22 +993,11 @@ test('frontmatter-rule settings CSS stays GCM-owned and cannot style Notebook Na
   assert.doesNotMatch(stylesSource, /tps-nn-|tps-base-query-/u);
   assert.doesNotMatch(settingsTabSource, /ensureNotebookNavigatorSettingsStyles|document\.head\.appendChild\(style\)/u);
 
-  assert.match(settingsTabSource, /tps-gcm-settings-frontmatter-rules-overview-grid/u);
-  assert.match(notebookRulesSectionSource, /tps-gcm-settings-frontmatter-rules-list-pane/u);
-  assert.match(notebookBucketSectionSource, /tps-gcm-settings-frontmatter-rules-sort-buckets/u);
-  assert.match(notebookHideSectionSource, /tps-gcm-settings-frontmatter-rules-tag-rules/u);
   assert.match(settingsTabSource, /tps-gcm-settings-base-query-reference/u);
   assert.match(settingsTabSource, /dataset\.tpsGcmSettingsBaseQueryCategory = 'true'/u);
   assert.match(settingsTabSource, /\[data-tps-gcm-settings-base-query-category="true"\]/u);
 
-  assert.match(
-    stylesSource,
-    /\.tps-gcm-settings-editor-page \.tps-gcm-settings-frontmatter-rules-list-pane\s*\{/u,
-  );
-  assert.match(
-    stylesSource,
-    /@media \(max-width: 900px\)[\s\S]*\.tps-gcm-settings-editor-page \.tps-gcm-settings-frontmatter-rules-list-pane/u,
-  );
+  assert.doesNotMatch(stylesSource, /tps-gcm-settings-frontmatter-rules-/u);
   assert.match(
     stylesSource,
     /\.tps-gcm-settings-page \.tps-gcm-settings-base-query-reference/u,

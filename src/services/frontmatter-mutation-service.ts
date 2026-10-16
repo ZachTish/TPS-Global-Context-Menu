@@ -78,7 +78,6 @@ export class FrontmatterMutationService {
     }
 
     let changed = false;
-    let nextTitle: string | null = null;
     let indexedFrontmatter: FrontmatterRecord | null = null;
     const started = performance.now();
     await this.runSerialized(file, async () => {
@@ -99,17 +98,12 @@ export class FrontmatterMutationService {
 
       const frontmatter = parsed.frontmatter;
       const originalFrontmatter = { ...frontmatter };
-      const originalTitle = readFrontmatterString(originalFrontmatter, 'title').trim();
       const before = stringifyYaml(this.sortFrontmatter(frontmatter)).trimEnd();
       await mutator(frontmatter);
       this.normalizeTagValues(frontmatter);
       this.normalizeDateTimeValues(frontmatter, originalFrontmatter);
       this.removeEmptyValuesChangedByMutation(frontmatter, originalFrontmatter);
       this.appendActivityEntryIfNeeded(frontmatter, originalFrontmatter);
-      const mutatedTitle = readFrontmatterString(frontmatter, 'title').trim();
-      if (mutatedTitle && mutatedTitle !== originalTitle) {
-        nextTitle = mutatedTitle;
-      }
       const sorted = this.sortFrontmatter(frontmatter);
       const after = stringifyYaml(sorted).trimEnd();
 
@@ -153,18 +147,8 @@ export class FrontmatterMutationService {
       if (changed && indexedFrontmatter) {
         this.plugin.entityIndexService?.upsertFile(file, indexedFrontmatter);
       }
-      if (changed && nextTitle && this.plugin.settings.enableAutoRename) {
-        const liveFile = this.plugin.app.vault.getFileByPath(file.path);
-        if (liveFile instanceof TFile) {
-          await this.plugin.fileNamingService.updateFilenameIfNeeded(liveFile, {
-            bypassCreationGrace: true,
-            titleOverride: nextTitle,
-          });
-        }
-      }
     } finally {
-      // This writer owns the completed mutation event, including a committed
-      // title write whose subsequent filename update failed.
+      // Announce the committed write even if index notification failed.
       if (changed) {
         const sourcePluginId = String(cause.sourcePluginId || this.plugin.manifest.id);
         this.plugin.eventService.emitFilesUpdated([file.path], { sourcePluginId });
@@ -1583,14 +1567,6 @@ function stableActivityString(value: unknown): string {
     return JSON.stringify(entries);
   }
   return String(value);
-}
-
-function readFrontmatterString(frontmatter: FrontmatterRecord, key: string): string {
-  const normalized = key.trim().toLowerCase();
-  const existingKey = Object.keys(frontmatter || {}).find((candidate) => candidate.trim().toLowerCase() === normalized);
-  if (!existingKey) return '';
-  const value = frontmatter[existingKey];
-  return typeof value === 'string' ? value : String(value ?? '');
 }
 
 function compactStack(stack: string | undefined): string[] | undefined {

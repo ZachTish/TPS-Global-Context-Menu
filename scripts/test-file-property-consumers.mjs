@@ -139,17 +139,15 @@ test('property consumers route generic files through the native store and guard 
   const badges = read('src/menu/badge-renderer.ts');
   const rows = read('src/services/property-row-service.ts');
   const contextTargets = read('src/services/context-target-service.ts');
-  const rules = read('src/services/notebook-navigator-rule-service.ts');
   const query = read('src/services/vault-query-service.ts');
   const api = read('src/plugin-api.ts');
 
-  for (const source of [mutation, bulkEdit, controller, builder, badges, rows, contextTargets, rules, query]) {
+  for (const source of [mutation, bulkEdit, controller, builder, badges, rows, contextTargets, query]) {
     assert.doesNotMatch(source, /canvasPropertiesService/u);
   }
   assert.match(mutation, /filePropertiesService\.process\(file, mutator, cause\)/u);
   assert.match(mutation, /filePropertiesService\?\.setListValues\(nonMarkdownFiles, key, values, cause\)/u);
   assert.match(mutation, /filePropertiesService\?\.deleteKeys\(nonMarkdownFiles, normalizedKeys, cause\)/u);
-  assert.match(rules, /kind:\s*'automation'[\s\S]{0,160}surface:\s*'notebook-navigator-rules'/u);
   assert.match(mutation, /emitFilesUpdated\(\[file\.path\], \{ sourcePluginId \}\)/u);
   assert.match(mutation, /if \(cause\.kind !== 'automation'\) \{[\s\S]{0,180}emitExplicitAction/u);
   assert.match(api, /const publicMutationCause[\s\S]{0,300}kind:\s*'automation'[\s\S]{0,120}surface:\s*'plugin-api'/u);
@@ -166,8 +164,7 @@ test('property consumers route generic files through the native store and guard 
   assert.equal((contextTargets.match(/filePropertiesService\?\.isCompanionFile\(file\)/gu) || []).length >= 3, true);
   assert.doesNotMatch(controller, /extensions:\s*\['md', 'canvas'\]/u);
   assert.match(controller, /filter: \(file\) => !this\.plugin\.filePropertiesService\?\.isCompanionFile\(file\)/u);
-  assert.match(rules, /filePropertiesService\?\.hasCompanion\(file\) === true/u);
-  assert.match(rules, /if \(file\.extension\?\.toLowerCase\(\) !== 'md'\) return '';/u);
+
   assert.match(query, /includeNonMarkdownFiles\?: boolean/u);
   assert.match(query, /includeCanvasFiles\?: boolean/u);
 });
@@ -185,19 +182,16 @@ test('managed companions stay out of note, task, recurrence, and picker workflow
   const tpsList = read('src/tps-list/views/TpsListView.ts');
   const tpsTable = read('src/views/log-base-view.ts');
 
-  assert.match(taskCheckbox, /synchronizeChecklistPropertyForAllMarkdownFiles[\s\S]{0,500}isCompanionFile/u);
-  assert.match(taskCheckbox, /updateChecklistPropertyForFile[\s\S]{0,250}isCompanionFile/u);
-  assert.match(bulkEdit, /runMissingRecurrenceCheck\(paths\?: readonly string\[\]\)[\s\S]{0,180}getMarkdownFiles\(\)[\s\S]{0,350}isCompanionFile/u);
-  assert.match(bulkEdit, /createNextRecurrenceInstance[\s\S]{0,250}isCompanionFile/u);
-  assert.match(bulkEdit, /applyTemplateToOpenInstances[\s\S]{0,250}isCompanionFile/u);
-  assert.match(bulkEdit, /runDeletedLinkCleanup[\s\S]{0,800}getRelationshipCandidates\(\{ includeIgnored: true \}\)[\s\S]{0,200}isCompanionFile/u);
-  assert.match(bulkEdit, /getLogicalFrontmatter\(file\)/u);
-  assert.match(bulkEdit, /if \(file\.extension\?\.toLowerCase\(\) !== 'md'\)/u);
+  assert.doesNotMatch(bulkEdit, /runMissingRecurrenceCheck/u);
+  assert.doesNotMatch(bulkEdit, /createNextRecurrenceInstance/);
+  assert.doesNotMatch(bulkEdit, /applyTemplateToOpenInstances/u);
+  assert.doesNotMatch(bulkEdit, /runDeletedLinkCleanup/);
   for (const picker of [filePicker, multiPicker]) {
     assert.match(picker, /isFilePropertiesCompanionPath/u);
     assert.match(picker, /isFilePropertiesCompanionRecord/u);
   }
-  for (const source of [timeTracking, taskApi, dailyInbox, persistentMenus, panelBuilder, tpsList, tpsTable]) {
+  assert.doesNotMatch(taskApi, /getMarkdownFiles|GcmTaskListFilter|resolveListFiles/);
+  for (const source of [timeTracking, dailyInbox, persistentMenus, panelBuilder, tpsList, tpsTable]) {
     assert.match(source, /filePropertiesService\?\.isCompanionFile/u);
   }
 });

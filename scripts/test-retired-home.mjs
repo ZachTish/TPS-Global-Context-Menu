@@ -1,3 +1,4 @@
+import ts from 'typescript';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync } from 'node:fs';
@@ -94,7 +95,14 @@ test('user navigation while another legacy tab restores is respected', async () 
 
 test('settings retirement removes only known legacy keys and keeps concurrent unrelated values', async () => {
   const main = read('src/main.ts');
-  const method = main.slice(main.indexOf('  private stripLegacySettingsFields('), main.indexOf('  createDefaultRule()'));
+  const parsed = ts.createSourceFile('main.ts', main, ts.ScriptTarget.Latest, true);
+  let method = '';
+  const visit = node => {
+    if (ts.isMethodDeclaration(node) && node.name.getText(parsed) === 'stripLegacySettingsFields') method = node.getText(parsed);
+    ts.forEachChild(node, visit);
+  };
+  visit(parsed);
+  assert.ok(method, 'settings retirement method remains available');
   const body = method.slice(method.indexOf('{') + 1, method.lastIndexOf('}'));
   const strip = new Function('record', 'RETIRED_HOME_SETTING_KEYS', body);
   const initial = { other: 'old', future: { enabled: true }, ...Object.fromEntries(migration.RETIRED_HOME_SETTING_KEYS.map(k => [k, true])) };

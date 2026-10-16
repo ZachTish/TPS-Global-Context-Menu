@@ -80,58 +80,6 @@ async function importBulkEditService() {
   return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
 }
 
-async function importArchiveSweepHarness() {
-  const sourcePath = fileURLToPath(new URL('../src/services/note-operation-service.ts', import.meta.url));
-  const source = readFileSync(sourcePath, 'utf8');
-  const sourceFile = ts.createSourceFile(sourcePath, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS);
-  let sweepMethod = null;
-  const visit = (node) => {
-    if (ts.isMethodDeclaration(node) && node.name?.getText(sourceFile) === 'sweepArchiveTaggedFiles') {
-      sweepMethod = node.getText(sourceFile);
-    }
-    ts.forEachChild(node, visit);
-  };
-  visit(sourceFile);
-  assert.ok(sweepMethod, 'missing sweepArchiveTaggedFiles');
-
-  const virtualSource = `
-    import { canAutomaticallyMutateTemplateFile } from './src/utils/template-protection.ts';
-    export class TFile {
-      constructor(path) {
-        this.path = path;
-        this.name = path.split('/').pop();
-        this.basename = this.name.replace(/\\.md$/u, '');
-        this.extension = 'md';
-      }
-    }
-    const normalizePath = (value) => String(value || '').replace(/\\\\/gu, '/');
-    const normalizeTagValue = (value) => String(value || '').replace(/^#/u, '').trim().toLowerCase();
-    const logger = { warn: () => undefined, log: () => undefined, error: () => undefined };
-    export class ArchiveSweepHarness {
-      constructor(plugin) { this.plugin = plugin; this.app = plugin.app; }
-      fileHasArchiveTag() { return true; }
-      getEffectiveArchiveFolder(value) { return value; }
-      async ensureFolderPath() {}
-      getUniqueArchiveTargetPath(file, folder) { return folder + '/' + file.name; }
-      ${sweepMethod}
-    }
-  `;
-  const result = await build({
-    stdin: {
-      contents: virtualSource,
-      resolveDir: repoRoot,
-      sourcefile: 'archive-sweep-template-protection-harness.ts',
-      loader: 'ts',
-    },
-    bundle: true,
-    write: false,
-    platform: 'node',
-    format: 'esm',
-    logLevel: 'silent',
-  });
-  return import(`data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString('base64')}`);
-}
-
 function makeFile(TFile, path) {
   const file = new TFile();
   const name = path.split('/').pop();
@@ -280,77 +228,14 @@ test('automatic-write exclusions preserve path rules and add exact authoritative
   assert.equal(await canAutomaticallyMutateTemplateFile({}, file, explicitTagRule), false);
 });
 
-test('background archive sweeps honor explicit tag exclusions while a manual sweep remains explicit', async () => {
-  const { ArchiveSweepHarness, TFile } = await importArchiveSweepHarness();
-  const run = async (reason) => {
-    const protectedFile = new TFile('Templates/Daily.md');
-    const ordinaryFile = new TFile('Inbox/Ordinary.md');
-    const files = [protectedFile, ordinaryFile];
-    const sources = new Map([
-      [protectedFile.path, '---\ntags: [template, archive]\n---\n'],
-      [ordinaryFile.path, '---\ntags: [archive]\n---\n'],
-    ]);
-    const renamed = [];
-    const plugin = {
-      settings: {
-        archiveTag: 'archive',
-        templateIdentificationTag: 'template',
-        frontmatterAutoWriteExclusions: 'tag:template',
-      },
-      getArchiveFolderPath: () => '_archive',
-      filePropertiesService: { isCompanionFile: () => false },
-      runQueuedMove: async (_files, callback) => callback(),
-      app: {
-        vault: {
-          getMarkdownFiles: () => files,
-          getAbstractFileByPath: (path) => files.find((file) => file.path === path) || null,
-          read: async (file) => sources.get(file.path),
-        },
-        fileManager: {
-          renameFile: async (file, targetPath) => renamed.push([file.path, targetPath]),
-        },
-      },
-    };
-    const service = new ArchiveSweepHarness(plugin);
-    const result = await service.sweepArchiveTaggedFiles(reason);
-    return { renamed, result };
-  };
-
-  const scheduled = await run('scheduled');
-  assert.deepEqual(scheduled.renamed, [['Inbox/Ordinary.md', '_archive/Ordinary.md']]);
-  assert.equal(scheduled.result.archived, 1);
-
-  const manual = await run('manual');
-  assert.deepEqual(manual.renamed, [
-    ['Templates/Daily.md', '_archive/Daily.md'],
-    ['Inbox/Ordinary.md', '_archive/Ordinary.md'],
-  ]);
-  assert.equal(manual.result.archived, 2);
-});
-
 test('automatic background writers recheck explicit exclusions at their mutation boundaries', () => {
   const read = (path) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
-  const navigatorRules = read('src/services/notebook-navigator-rule-service.ts');
   const checkboxHandler = read('src/handlers/task-checkbox-handler.ts');
-  const checkboxReconcile = read('src/services/task-status-checkbox-reconcile-service.ts');
   const events = read('src/events/register-events.ts');
   const nativeRecords = read('src/services/native-record-service.ts');
   const noteOperations = read('src/services/note-operation-service.ts');
   const bulkEdit = read('src/services/bulk-edit-service.ts');
-
-  assert.match(
-    navigatorRules,
-    /const applyDesiredValues[\s\S]{0,400}canAutomaticallyMutateTemplateFrontmatter[\s\S]*passesRuleExclusionPreflight\([\s\S]{0,300}frontmatterAutoWriteExclusions[\s\S]{0,300}processOwnedKeysPreservingSource\(file, ownedKeys, applyDesiredValues/u,
-  );
-  assert.match(navigatorRules, /reason === 'gcm-startup-auto'/u);
-  assert.match(
-    checkboxHandler,
-    /updateChecklistPropertyForFile[\s\S]{0,1300}canAutomaticallyMutateTemplateFile[\s\S]{0,1200}canAutomaticallyMutateTemplateFrontmatter/u,
-  );
-  assert.match(
-    checkboxReconcile,
-    /reconcileFileNow[\s\S]{0,350}canAutomaticallyMutatePathWithExclusions[\s\S]{0,1000}canAutomaticallyMutateTemplateSource/u,
-  );
+  assert.doesNotMatch(checkboxHandler, /scheduleChecklistPropertyUpdate|updateChecklistPropertyForFile|synchronizeChecklistPropertyForAllMarkdownFiles|pendingPropertyUpdateTimers|recentPropertyWriteUntilByPath|fullVaultSyncToken/);
   assert.doesNotMatch(
     events,
     /writeConfiguredStatus|scheduleExternalChecklistCompletionGuard|checklistCompletionGuardTimers/u,
@@ -360,91 +245,11 @@ test('automatic background writers recheck explicit exclusions at their mutation
     nativeRecords,
     /adoptNewTaskDraftInternal[\s\S]{0,650}canAutomaticallyMutateTemplateSource[\s\S]{0,1300}vault\.process[\s\S]{0,220}canAutomaticallyMutateTemplateSource/u,
   );
-  assert.match(
-    noteOperations,
-    /sweepArchiveTaggedFiles[\s\S]{0,2200}reason !== "manual"[\s\S]{0,260}canAutomaticallyMutateTemplateFile[\s\S]{0,500}renameFile/u,
-    'background archive sweeps recheck current exclusion evidence while manual sweeps remain explicit',
-  );
-  const deletedCleanup = bulkEdit.slice(bulkEdit.indexOf('private async runDeletedLinkCleanup('));
-  assert.match(
-    deletedCleanup,
-    /inspectedSource = await this\.plugin\.app\.vault\.cachedRead\(file\);[\s\S]{0,320}canAutomaticallyMutateTemplateSource\(inspectedSource,/u,
-    'automatic deleted-link inspection uses cached bytes to reject work',
-  );
-  assert.match(
-    deletedCleanup,
-    /frontmatterMutationService\.process\(file, \(frontmatter\) =>[\s\S]{0,250}canAutomaticallyMutatePathWithExclusions[\s\S]{0,180}canAutomaticallyMutateTemplateFrontmatter/u,
-    'automatic deleted-link frontmatter cleanup rechecks current path/settings and mutation-boundary frontmatter',
-  );
-  assert.match(
-    deletedCleanup,
-    /vault\.process\(file, \(current\) =>[\s\S]{0,180}canAutomaticallyMutatePathWithExclusions[\s\S]{0,180}canAutomaticallyMutateTemplateSource\(current,/u,
-    'automatic deleted-link body cleanup rechecks current path/settings and exact bytes inside Vault.process',
-  );
+  assert.doesNotMatch(noteOperations, /sweepArchiveTaggedFiles/);
+  assert.doesNotMatch(bulkEdit, /runDeletedLinkCleanup|cleanupLinksForDeletedFile/);
 });
 
-test('recurrence instances and propagation remove only the configured source-template marker', () => {
-  const bulkEdit = readFileSync(new URL('../src/services/bulk-edit-service.ts', import.meta.url), 'utf8');
-  const methodSource = (start, end) => {
-    const startIndex = bulkEdit.indexOf(start);
-    const endIndex = bulkEdit.indexOf(end, startIndex + start.length);
-    assert.notEqual(startIndex, -1, `missing method start: ${start}`);
-    assert.notEqual(endIndex, -1, `missing method end: ${end}`);
-    return bulkEdit.slice(startIndex, endIndex);
-  };
-  const dailyRecurrence = methodSource(
-    'private async createNextDailyNoteRecurrenceInstance',
-    'private getRecurrenceStatePath',
-  );
-  const noteRecurrence = methodSource(
-    'async createNextRecurrenceInstance',
-    'async applyTemplateToOpenInstances',
-  );
-  const propagation = methodSource(
-    'async applyTemplateToOpenInstances',
-    'async checkMissingRecurrences',
-  );
-  const startupHealing = methodSource(
-    'async checkMissingRecurrences',
-    'async clearRecurrenceRule',
-  );
-
-  assert.match(
-    bulkEdit,
-    /buildDailyNoteContent[\s\S]{0,1100}sanitizeRecurrenceInstanceSource/u,
-  );
-  assert.ok(
-    dailyRecurrence.indexOf('await this.buildDailyNoteContent')
-      < dailyRecurrence.indexOf('await this.beginRecurrenceOp'),
-    'Daily Note template validation must precede durable recurrence operation state',
-  );
-  assert.match(dailyRecurrence, /isVerifiedRecurrenceInstance\(newFile, 'daily-note recurrence creation'\)/u);
-  assert.match(dailyRecurrence, /isVerifiedRecurrenceInstancePath\(newFilePath, 'existing daily-note recurrence'\)/u);
-  const bootstrap = methodSource(
-    'private async bootstrapTemplateInstanceFromToday',
-    'private advanceOccurrenceToFuture',
-  );
-  assert.match(bootstrap, /readRecurrenceInstanceSource\([\s\S]{0,180}'recurrence-template bootstrap'/u);
-  assert.match(bootstrap, /removeTemplateProtectionTagFromFrontmatter\(fmw, this\.plugin\.settings\)/u);
-  assert.match(
-    dailyRecurrence,
-    /removeTemplateProtectionTagFromFrontmatter\(fm, this\.plugin\.settings\)/u,
-  );
-  assert.match(
-    noteRecurrence,
-    /removeTemplateProtectionTagFromFrontmatter\(fm, this\.plugin\.settings\)/u,
-  );
-  assert.match(
-    propagation,
-    /propagatableFrontmatter[\s\S]{0,220}removeTemplateProtectionTagFromFrontmatter/u,
-  );
-  assert.match(startupHealing, /inspectTemplateProtectionSource\(source, this\.plugin\.settings\)/u);
-  assert.match(startupHealing, /templateProtectionState === 'protected'[\s\S]{0,700}bootstrapTemplateInstanceFromToday/u);
-  assert.match(startupHealing, /canAutomaticallyMutateTemplateFile[\s\S]{0,450}canMutateFrontmatterSafely/u);
-  assert.match(startupHealing, /canAutomaticallyMutateTemplateFrontmatter\(fmw, this\.plugin\.settings\)/u);
-});
-
-test('startup recurrence healing does not treat template identity as a global ignore outside the template folder', async () => {
+test('retired startup recovery cannot inspect or change recurring notes', async () => {
   const { BulkEditService } = await importBulkEditService();
   const TFile = globalThis.__TpsTemplateProtectionTFile;
   const protectedFile = makeFile(TFile, 'Inbox/Protected recurrence.md');
@@ -496,351 +301,56 @@ test('startup recurrence healing does not treat template identity as a global ig
     return true;
   };
 
-  await service.checkMissingRecurrences();
+  assert.equal(service.checkMissingRecurrences, undefined);
 
-  assert.equal(rawReads, 2);
-  assert.equal(createNextCalls, 1, 'safe template identity is not an implicit exclusion, while ambiguous YAML remains fail-closed');
+  assert.equal(rawReads, 0);
+  assert.equal(createNextCalls, 0);
   assert.equal(frontmatterWrites, 0);
   assert.equal(recurrenceStateWrites, 0);
   assert.equal(sources.get(protectedFile.path).includes('tags: [template]'), true);
 });
 
-test('recurrence-template bootstrap reads a protected blueprint and creates a verified untagged instance', async () => {
+
+
+test('note completion edits status without recurrence scans or successor creation', async () => {
   const { BulkEditService } = await importBulkEditService();
   const TFile = globalThis.__TpsTemplateProtectionTFile;
-  const templateFile = makeFile(TFile, 'Recurring Templates/Standup.md');
-  const templateSource = [
-    '---\n',
-    'tags: [template, keep]\n',
-    'recurrenceRule: FREQ=DAILY\n',
-    '---\n',
-    '#template remains body content\n',
-  ].join('');
-  const sources = new Map([[templateFile.path, templateSource]]);
-  const files = new Map([[templateFile.path, templateFile]]);
-  const processedPaths = [];
-  const createdInputs = [];
+  const file = makeFile(TFile, 'Inbox/Repeat.md');
+  const fm = { status: 'todo', recurrenceRule: 'FREQ=DAILY', scheduled: '2026-10-15', id: 'original' };
+  let inventories = 0, metadata = 0, successors = 0, edits = 0;
   const plugin = {
-    settings: { templateIdentificationTag: 'template' },
-    app: {
-      vault: {
-        getMarkdownFiles: () => [...files.values()],
-        getAbstractFileByPath: (path) => files.get(path) || null,
-        read: async (file) => sources.get(file.path),
-        create: async (path, content) => {
-          const created = makeFile(TFile, path);
-          files.set(path, created);
-          sources.set(path, content);
-          createdInputs.push({ path, content });
-          return created;
-        },
-      },
-      metadataCache: {
-        getFileCache: () => null,
-        fileToLinktext: (file) => file.basename,
-      },
-    },
-    filePropertiesService: { isCompanionFile: () => false },
-    frontmatterMutationService: {
-      process: async (file, mutate) => {
-        processedPaths.push(file.path);
-        const fm = { tags: ['keep'], Icon: 'star', Color: '#123456', Sort: 4, Hidden: false };
-          mutate(fm);
-          assert.deepEqual([fm.Icon, fm.Color, fm.Sort, fm.Hidden], ['star', '#123456', 4, false]);
-      },
-    },
+    settings: { enableRecurrence: true, promptOnRecurrenceEdit: true, recurrencePromptTimeout: 30, properties: [], recurrenceCompletionStatuses: ['complete', 'wont-do'] },
+    app: { vault: { getMarkdownFiles() { inventories++; return [file]; } }, metadataCache: {
+      getFileCache() { metadata++; return { frontmatter: fm }; },
+    } },
   };
   const service = new BulkEditService(plugin);
-  service.getFirstOccurrenceFromToday = () => new Date(2026, 8, 3, 9, 0, 0);
-  const originalWindow = globalThis.window;
-  globalThis.window = {
-    moment: () => ({
-      format: (format) => format === 'YYYY-MM-DD HH:mm:ss'
-        ? '2026-09-03 09:00:00'
-        : '2026-09-03',
-    }),
-  };
-
-  try {
-    const result = await service.bootstrapTemplateInstanceFromToday(templateFile, {
-      recurrenceRule: 'FREQ=DAILY',
-      recurrenceTemplate: true,
-    });
-
-    assert.equal(result, true, JSON.stringify({ createdInputs, processedPaths, sources: [...sources] }));
-    assert.equal(createdInputs.length, 1);
-    assert.equal(createdInputs[0].content.includes('template, keep'), false);
-    assert.match(createdInputs[0].content, /tags:\s*\[\s*keep\s*\]/u);
-    assert.equal(createdInputs[0].content.includes('#template remains body content'), true);
-    assert.deepEqual(processedPaths, [createdInputs[0].path], 'the protected blueprint itself stays read-only');
-    assert.equal(sources.get(templateFile.path), templateSource);
-  } finally {
-    globalThis.window = originalWindow;
+  service.createNextRecurrenceInstance = async () => { successors++; return true; };
+  service.applyToFiles = async (files, mutate) => { assert.deepEqual(files, [file]); edits++; mutate(fm); return 1; };
+  for (const status of ['complete', 'todo', 'wont-do']) {
+    assert.equal(await service.updateFrontmatter([file], { status }), 1);
+    assert.equal(fm.status, status);
+    assert.equal(fm.recurrenceRule, 'FREQ=DAILY');
+    assert.equal(fm.id, 'original');
   }
-});
-
-test('generic recurrence cloning strips the source marker before create and fails closed on unsafe templates', async () => {
-  const { BulkEditService } = await importBulkEditService();
-  const TFile = globalThis.__TpsTemplateProtectionTFile;
-
-  const runClone = async (templateSource, options = {}) => {
-    const instance = makeFile(TFile, 'Inbox/Standup 2026-09-01.md');
-    const template = makeFile(TFile, 'Recurring Templates/Standup.md');
-    const sources = new Map([
-      [instance.path, '---\ntags: [work]\nrecurrenceRule: GCM-TRACKER\n---\nCompleted body\n'],
-      [template.path, templateSource],
-    ]);
-    const files = new Map([[instance.path, instance], [template.path, template]]);
-    const createdInputs = [];
-    let stateWrites = 0;
-    let generatedMarks = 0;
-    const plugin = {
-      manifest: { dir: '.obsidian/plugins/tps-global-context-menu' },
-      settings: {
-        templateIdentificationTag: 'template',
-        recurringTemplateFolder: 'Recurring Templates',
-        recurrenceDefaultStatus: '',
-      },
-      app: {
-        vault: {
-          getAbstractFileByPath: (path) => files.get(path) || null,
-          read: async (file) => sources.get(file.path),
-          create: async (path, content) => {
-            const created = makeFile(TFile, path);
-            files.set(path, created);
-            sources.set(path, content);
-            createdInputs.push({ path, content });
-            return created;
-          },
-          adapter: {
-            exists: async (path) => sources.has(path),
-            read: async () => '',
-            write: async () => { stateWrites += 1; },
-          },
-        },
-        metadataCache: {
-          fileToLinktext: (file) => file.basename,
-        },
-      },
-      filePropertiesService: { isCompanionFile: () => false },
-      frontmatterMutationService: {
-        process: async (file, mutate) => {
-          const fm = { tags: ['keep'], Icon: 'star', Color: '#123456', Sort: 4, Hidden: false };
-          mutate(fm);
-          assert.deepEqual([fm.Icon, fm.Color, fm.Sort, fm.Hidden], ['star', '#123456', 4, false]);
-          if (options.outputAfterMutation) {
-            sources.set(file.path, options.outputAfterMutation);
-          }
-        },
-      },
-    };
-    const service = new BulkEditService(plugin);
-    service.resolveRecurrenceInfo = () => ({
-      rule: 'GCM-TRACKER',
-      templateFile: template,
-      seriesBaseName: 'Standup',
-    });
-    service.shouldSkipNoteLevelRecurrence = async () => false;
-    service.markRecurrenceGenerated = async () => { generatedMarks += 1; };
-
-    const result = await service.createNextRecurrenceInstance(instance, {
-      recurrenceRule: 'GCM-TRACKER',
-      status: 'complete',
-    });
-    return { result, createdInputs, stateWrites, generatedMarks };
-  };
-
-  const protectedClone = await runClone([
-    '---\n',
-    'tags: [template, keep]\n',
-    'recurrenceRule: GCM-TRACKER\n',
-    '---\n',
-    '#template remains body content\n',
-  ].join(''));
-  assert.equal(protectedClone.result, true, JSON.stringify(protectedClone));
-  assert.equal(protectedClone.createdInputs.length, 1);
-  assert.match(protectedClone.createdInputs[0].content, /tags:\s*\[\s*keep\s*\]/u);
-  assert.equal(protectedClone.createdInputs[0].content.includes('#template remains body content'), true);
-  assert.equal(protectedClone.generatedMarks, 1);
-
-  const contaminatedOutput = await runClone(
-    '---\ntags: [template, keep]\nrecurrenceRule: GCM-TRACKER\n---\n',
-    { outputAfterMutation: '---\ntags: [template, keep]\n---\n' },
-  );
-  assert.equal(contaminatedOutput.result, false);
-  assert.equal(contaminatedOutput.createdInputs.length, 1, 'the pre-stripped clone was created before the simulated writer reintroduced the marker');
-  assert.equal(contaminatedOutput.generatedMarks, 0, 'unverified output must not mark the source recurrence as generated');
-
-  const unsafeClone = await runClone('---\ntags: [template\nrecurrenceRule: GCM-TRACKER\n');
-  assert.equal(unsafeClone.result, false);
-  assert.equal(unsafeClone.createdInputs.length, 0);
-  assert.equal(unsafeClone.stateWrites, 0, 'unsafe input must fail before durable generation state is written');
-});
-
-test('Daily Note recurrence validates templates before locking and verifies new and existing outputs', async () => {
-  const { BulkEditService } = await importBulkEditService();
-  const TFile = globalThis.__TpsTemplateProtectionTFile;
-  const originalWindow = globalThis.window;
-  const originalReconcile = globalThis.__TpsReconcileDailyNoteForTemplateTest;
-  globalThis.window = {
-    moment: () => ({
-      format: (format) => format === 'YYYY-MM-DD HH:mm:ss'
-        ? '2026-09-04 09:00:00'
-        : format === 'YYYY-MM-DD 00:00:00'
-          ? '2026-09-04 00:00:00'
-          : '2026-09-04',
-    }),
-  };
-
-  const runDailyRecurrence = async ({
-    templateSource,
-    outputAfterMutation = null,
-    existingSource = null,
-  }) => {
-    const sourceFile = makeFile(TFile, 'Daily Notes/2026-09-03.md');
-    const templateFile = makeFile(TFile, 'Templates/Daily.md');
-    const outputPath = 'Daily Notes/2026-09-04.md';
-    const sources = new Map([
-      [sourceFile.path, '---\ntags: [daily]\nrecurrenceRule: FREQ=DAILY\n---\n'],
-      [templateFile.path, templateSource],
-    ]);
-    const files = new Map([
-      [sourceFile.path, sourceFile],
-      [templateFile.path, templateFile],
-    ]);
-    if (existingSource !== null) {
-      const existingFile = makeFile(TFile, outputPath);
-      files.set(outputPath, existingFile);
-      sources.set(outputPath, existingSource);
-    }
-    globalThis.__TpsReconcileDailyNoteForTemplateTest = async () => {
-      const existingFile = files.get(outputPath);
-      return existingFile ? { status: 'found', file: existingFile } : { status: 'missing' };
-    };
-
-    const createdInputs = [];
-    let stateWrites = 0;
-    let generatedMarks = 0;
-    const dailyConfig = {
-      format: 'YYYY-MM-DD',
-      folder: 'Daily Notes',
-      template: 'Templates/Daily',
-    };
-    const plugin = {
-      manifest: { dir: '.obsidian/plugins/tps-global-context-menu' },
-      settings: { templateIdentificationTag: 'template' },
-      app: {
-        internalPlugins: {
-          getPluginById: () => ({ instance: { options: dailyConfig } }),
-        },
-        vault: {
-          configDir: '.obsidian',
-          getAbstractFileByPath: (path) => files.get(path) || null,
-          read: async (file) => sources.get(file.path),
-          create: async (path, content) => {
-            const created = makeFile(TFile, path);
-            files.set(path, created);
-            sources.set(path, content);
-            createdInputs.push({ path, content });
-            return created;
-          },
-          createFolder: async () => {},
-          adapter: {
-            exists: async (path) => path === 'Daily Notes' || sources.has(path),
-            read: async (path) => path.endsWith('daily-notes.json')
-              ? JSON.stringify(dailyConfig)
-              : '',
-            write: async () => { stateWrites += 1; },
-          },
-        },
-      },
-      frontmatterMutationService: {
-        process: async (file, mutate) => {
-          const fm = { tags: ['keep'], Icon: 'star', Color: '#123456', Sort: 4, Hidden: false };
-          mutate(fm);
-          assert.deepEqual([fm.Icon, fm.Color, fm.Sort, fm.Hidden], ['star', '#123456', 4, false]);
-          if (outputAfterMutation !== null) sources.set(file.path, outputAfterMutation);
-        },
-      },
-    };
-    const service = new BulkEditService(plugin);
-    service.markRecurrenceGenerated = async () => { generatedMarks += 1; };
-    const existingGeneratedValue = existingSource === null
-      ? undefined
-      : '2026-09-04 00:00:00';
-    const result = await service.createNextDailyNoteRecurrenceInstance(
-      sourceFile,
-      {
-        recurrenceRule: 'FREQ=DAILY',
-        recurrenceLastGenerated: existingGeneratedValue,
-      },
-      new Date(2026, 8, 4, 9, 0, 0),
-      'FREQ=DAILY',
-    );
-    return { result, createdInputs, stateWrites, generatedMarks };
-  };
-
-  try {
-    const unsafeTemplate = await runDailyRecurrence({
-      templateSource: '---\ntags: [template\n',
-    });
-    assert.equal(unsafeTemplate.result, false);
-    assert.equal(unsafeTemplate.createdInputs.length, 0);
-    assert.equal(unsafeTemplate.stateWrites, 0, 'unsafe templates fail before recurrence operation state');
-    assert.equal(unsafeTemplate.generatedMarks, 0);
-
-    const created = await runDailyRecurrence({
-      templateSource: '---\ntags: [template, keep]\n---\n#template remains body content\n',
-    });
-    assert.equal(created.result, true);
-    assert.equal(created.createdInputs.length, 1);
-    assert.match(created.createdInputs[0].content, /tags:\s*\[\s*keep\s*\]/u);
-    assert.equal(created.createdInputs[0].content.includes('#template remains body content'), true);
-    assert.equal(created.generatedMarks, 1);
-
-    const contaminated = await runDailyRecurrence({
-      templateSource: '---\ntags: [template, keep]\n---\n',
-      outputAfterMutation: '---\ntags: [template, keep]\n---\n',
-    });
-    assert.equal(contaminated.result, false);
-    assert.equal(contaminated.createdInputs.length, 1);
-    assert.equal(contaminated.generatedMarks, 0);
-
-    const protectedExisting = await runDailyRecurrence({
-      templateSource: '---\ntags: [template, keep]\n---\n',
-      existingSource: '---\ntags: [template]\n---\n',
-    });
-    assert.equal(protectedExisting.result, false);
-    assert.equal(protectedExisting.createdInputs.length, 0);
-    assert.equal(protectedExisting.stateWrites, 0);
-    assert.equal(protectedExisting.generatedMarks, 0);
-  } finally {
-    globalThis.window = originalWindow;
-    globalThis.__TpsReconcileDailyNoteForTemplateTest = originalReconcile;
-  }
+  assert.equal(await service.updateFrontmatter([file], { title: 'Edited title' }), 1);
+  assert.equal(fm.title, 'Edited title');
+  assert.deepEqual({ inventories, metadata, successors, edits }, { inventories: 0, metadata: 0, successors: 0, edits: 4 });
 });
 
 
-test('recurrence template updates preserve and propagate user presentation fields', async () => {
-  const { BulkEditService } = await importBulkEditService();
-  const TFile = globalThis.__TpsTemplateProtectionTFile;
-  const template = makeFile(TFile, 'Templates/Series.md');
-  const instance = makeFile(TFile, 'Inbox/Instance.md');
-  const fields = {Icon: 'star', Color: '#123456', Sort: 4, Hidden: false};
-  const instanceFm = {recurrenceTemplate: '[[Series]]', scheduled: '2026-09-16', status: 'todo'};
-  const plugin = {
-    settings: {properties: [], recurrenceCompletionStatuses: ['complete']},
-    app: {vault: {getMarkdownFiles: () => [template, instance]}, metadataCache: {
-      getFileCache: file => ({frontmatter: file === template ? {...fields, scheduled: '2020-01-01'} : instanceFm}),
-    }},
-  };
-  const service = new BulkEditService(plugin);
-  service.frontmatterReferencesSeriesTemplate = () => true;
-  service.applyToFiles = async (files, mutate) => { assert.deepEqual(files, [instance]); mutate(instanceFm); return files.length; };
-  assert.equal(await service.applyTemplateToOpenInstances(template), 1);
-  for (const [key, value] of Object.entries(fields)) assert.equal(instanceFm[key], value);
-  assert.equal(instanceFm.scheduled, '2026-09-16');
-  assert.equal(instanceFm.status, 'todo');
-  const source = readFileSync(new URL('../src/services/bulk-edit-service.ts', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /\['sort', 'hidden', 'icon', 'color'\]/);
+test('automatic archive scheduler, sweep and last-run writes are deleted', () => {
+  const main = readFileSync(new URL('../src/main.ts', import.meta.url), 'utf8');
+  const operations = readFileSync(new URL('../src/services/note-operation-service.ts', import.meta.url), 'utf8');
+  assert.doesNotMatch(main, /archiveSweepTimerId|startArchiveTagAutomation|stopArchiveTagAutomation|runArchiveTagSweepIfDue|scheduleNextArchiveTagSweep|lastArchiveTagSweepDate|enableArchiveTagMove/);
+  assert.doesNotMatch(operations, /sweepArchiveTaggedFiles|fileHasArchiveTag|getEffectiveArchiveFolder|getUniqueArchiveTargetPath/);
+  assert.match(operations, /archiveSourceNotes/);
+});
+
+
+test('retired recurrence generators and durable state helpers are absent', async () => {
+ const { BulkEditService } = await importBulkEditService();
+ for (const name of ['createNextRecurrenceInstance','createNextDailyNoteRecurrenceInstance','ensureRecurrenceTemplate','setRecurrence','bootstrapTemplateInstanceFromToday','saveRecurrenceOpState','tagParentsForLinkedChildren']) assert.equal(BulkEditService.prototype[name], undefined);
+ const source = readFileSync(new URL('../src/services/bulk-edit-service.ts', import.meta.url), 'utf8');
+ assert.doesNotMatch(source, /recurrenceCreationInProgress|recurrenceOpState|recurrenceLastGeneratedKey|beginRecurrenceOp|markRecurrenceGenerated/);
 });

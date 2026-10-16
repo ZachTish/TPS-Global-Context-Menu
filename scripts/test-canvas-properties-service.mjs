@@ -56,11 +56,8 @@ test('note-to-Canvas conversion stores copied properties in a companion, not Can
 test('all non-Markdown file types can use native property menus while note-only actions stay scoped', () => {
   const menu = read('src/menu/menu-builder.ts');
   const context = read('src/services/context-target-service.ts');
-  const rules = read('src/services/notebook-navigator-rule-service.ts');
 
   assert.match(menu, /filePropertiesService\?\.isPropertyTarget\(file\)/u);
   assert.match(menu, /Create file properties note/u);
   assert.match(context, /getSourceFileForCompanion/u);
-  assert.match(rules, /canUseExistingPropertyStorage/u);
-  assert.match(rules, /file\.extension\?\.toLowerCase\(\) !== 'md'\) return ''/u);
 });

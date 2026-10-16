@@ -3161,10 +3161,6 @@ export class TaskLineContextMenuService {
     let resolved = false;
     let changed = false;
     let historyReady = true;
-    let historyOutcome: 'committed' | 'partial' = 'committed';
-    let previousMarker: string | null = null;
-    let nextMarker: string | null = null;
-    let updatedLines: string[] | null = null;
     let mappingGuardBlocked = false;
     let confirmedHistoryBefore: DirectTaskHistoryLocation | undefined;
     const expectedMappingSignature = options.checkboxMutation === true
@@ -3247,9 +3243,6 @@ export class TaskLineContextMenuService {
         context.rawLine = nextLine;
         context.title = getTaskDisplayTitle(nextLine);
         context.checkboxToken = nextParsed?.token || currentParsed.token;
-        previousMarker = currentParsed.marker;
-        nextMarker = nextParsed?.marker ?? null;
-        updatedLines = [...lines];
         changed = true;
         return `${lines.join(newline)}${endsWithNewline ? newline : ''}`;
       });
@@ -3288,24 +3281,6 @@ export class TaskLineContextMenuService {
       return true;
     }
 
-    if (options.checkboxMutation === true && updatedLines) {
-      try {
-        await this.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation(
-          context.file,
-          previousMarker,
-          nextMarker,
-          updatedLines,
-          context.lineIndex,
-        );
-      } catch (error) {
-        historyOutcome = 'partial';
-        logger.flowError('TaskLineContextMenu', 'write:checkbox-followup-failed', error, {
-          path: context.file.path,
-          lineNumber: context.lineNumber,
-        });
-        new Notice('Task updated, but its follow-up status sync did not finish.');
-      }
-    }
     if (historyReady) {
       await commitDirectTaskHistory(
         this.plugin.itemHistoryService,
@@ -3314,7 +3289,7 @@ export class TaskLineContextMenuService {
           ? {
               ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
               sourceDisposition: 'removed',
-              outcome: historyOutcome,
+              outcome: 'committed',
             }
           : {
               ...(confirmedHistoryBefore ? { confirmedBefore: confirmedHistoryBefore } : {}),
@@ -3324,7 +3299,7 @@ export class TaskLineContextMenuService {
                 rawLine: context.rawLine,
               },
               sourceDisposition: 'retained',
-              outcome: historyOutcome,
+              outcome: 'committed',
             },
         historyContext,
       );

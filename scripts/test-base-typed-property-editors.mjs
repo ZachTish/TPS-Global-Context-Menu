@@ -202,7 +202,7 @@ test('TPS Table property cells own their click intent and configured selectors o
   assert.match(taskWorkflowMutation, /normalized === relationalStatusKey/);
   assert.match(taskLineContext, /status-picker:change/);
   assert.match(taskLineContext, /checkboxMutation:\s*true/);
-  assert.match(taskLineContext, /handleExternalChecklistStateMutation\(/);
+  assert.doesNotMatch(taskLineContext, /handleExternalChecklistStateMutation\(/);
 });
 
 test('TPS Table combined picker choices execute clear, scalar replacement, and additive list storage', async () => {

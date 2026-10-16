@@ -162,15 +162,7 @@ export class MenuBuilder {
       return;
     }
 
-    await Promise.all(files.map((file: TFile) =>
-      this.plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
-        reason,
-        force: true,
-        bypassCreationGrace: true,
-      }),
-    ));
-
-    // Property and rule writers announce their own committed changes. Markdown
+    // Property writers announce their own committed changes. Markdown
     // displays consume those events; BulkEditService owns attachment refreshes.
     // Re-announcing this selection also marks failed/unchanged files as changed.
   }

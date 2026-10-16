@@ -627,7 +627,7 @@ for (const lifecycle of ['rename', 'replacement', 'unload']) {
   });
 }
 
-test('switching notes never schedules checklist writes or retired link repairs', async () => {
+test('switching notes and incoming changes never schedule checklist writes or retired link repairs', async () => {
   const h = createHarness();
   let checklist = 0, retired = 0;
   h.plugin.taskCheckboxHandler.scheduleChecklistPropertyUpdate = () => checklist++;
@@ -643,9 +643,16 @@ test('switching notes never schedules checklist writes or retired link repairs',
   assert.equal(checklist, 0);
   assert.equal(retired, 0);
   assert.equal(h.mutations.length, 0);
-  h.emit('vault', 'modify', files[0]);
-  assert.equal(checklist, 1, 'actual edits still own checklist maintenance');
+  for (let i = 0; i < 100; i++) {
+    const file = h.addFile(`Inbox/incoming-${i}.md`);
+    h.emit('vault', 'modify', file);
+    h.metadataChanged(file);
+  }
   await settleDebounces();
+  assert.equal(checklist, 0, 'incoming changes do not trigger retired checklist maintenance');
+  assert.equal(retired, 0);
+  assert.equal(h.mutations.length, 0);
+  assert.equal(h.rawBodyReads(), 0);
   h.cleanup();
 });
 
@@ -661,7 +668,7 @@ test('irrelevant metadata changes skip raw template-protection reads', async () 
   h.cleanup();
 });
 
-test('startup create announcements schedule no creation writers while post-layout creation keeps its owner', async () => {
+test('startup and post-layout create announcements schedule no title or timestamp writers', async () => {
   const h = createHarness();
   const calls = { templateGate: 0, rules: 0, title: 0, timestamps: 0, fileProperties: 0 };
   h.plugin.app.workspace.layoutReady = false;
@@ -680,14 +687,16 @@ test('startup create announcements schedule no creation writers while post-layou
   assert.equal(h.mutations.length, 0);
 
   h.plugin.app.workspace.layoutReady = true;
-  h.emit('vault', 'create', h.addFile('Inbox/Actual new note.md'));
+  for (let i = 0; i < 100; i++) h.emit('vault', 'create', h.addFile(`Inbox/Actual new note ${i}.md`, { tags: ['template'], title: 'Authored' }));
   h.emit('vault', 'create', h.addFile('Inbox/Actual new attachment.png'));
   await settleDebounces();
-  assert.deepEqual(calls, { templateGate: 1, rules: 2, title: 1, timestamps: 1, fileProperties: 1 });
+  assert.deepEqual(calls, { templateGate: 0, rules: 0, title: 0, timestamps: 0, fileProperties: 0 });
+  assert.equal(h.mutations.length, 0);
+  assert.equal(h.rawBodyReads(), 0);
   h.cleanup();
 });
 
-test('ordinary Markdown rename reaches title synchronization immediately alongside companion bookkeeping', () => {
+test('ordinary Markdown rename performs no companion bookkeeping or title synchronization', () => {
   const h = createHarness();
   const calls = [];
   h.plugin.settings.autoSyncTitleFromFilename = true;
@@ -696,9 +705,8 @@ test('ordinary Markdown rename reaches title synchronization immediately alongsi
   h.plugin.fileNamingService.syncFileTimestamps = async () => { throw Error('Unrelated writer'); };
   const f = h.addFile('Inbox/Untitled.md', { title: 'Untitled' });
   h.renameFile(f, f.path, 'Inbox/Named.md');
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0][0], 'companion');
-  assert.deepEqual(calls[1], ['title', f, { bypassCreationGrace: true, renamedFromPath: 'Inbox/Untitled.md' }]);
+  assert.deepEqual(calls, []);
+  assert.equal(f.frontmatter.title, 'Untitled');
   h.cleanup();
 });
 
@@ -714,7 +722,7 @@ for (const disabled of ['setting', 'workflow']) {
   });
 }
 
-test('committed filename title propagation runs without background automation authority', () => {
+test('committed filename changes preserve stored titles without background authority', () => {
   const h = createHarness();
   const calls = [];
   h.plugin.settings.autoSyncTitleFromFilename = true;
@@ -722,7 +730,8 @@ test('committed filename title propagation runs without background automation au
   h.plugin.fileNamingService.syncTitleFromFilename = async (...args) => calls.push(args);
   const f = h.addFile('Inbox/Untitled.md', { title: 'Untitled' });
   h.renameFile(f, f.path, 'Inbox/Named.md');
-  assert.deepEqual(calls, [[f, { bypassCreationGrace: true, renamedFromPath: 'Inbox/Untitled.md' }]]);
+  assert.deepEqual(calls, []);
+  assert.equal(f.frontmatter.title, 'Untitled');
   h.cleanup();
 });
 
@@ -802,7 +811,7 @@ test('native-record folder and attachment event bursts never dispatch legacy ind
       h.metadataChanged(canvas);
     }
     assert.deepEqual(calls, []);
-    assert.equal(cleaned.length, 20, 'ordinary link cleanup remains owned by the delete event');
+    assert.equal(cleaned.length, 0, 'deletion must not enter retired link cleanup');
   } finally { h.cleanup(); }
 });
 
@@ -830,7 +839,7 @@ test('inactive companions stay excluded without reading, repairing or notifying 
   } finally { h.cleanup(); }
 });
 
-test('native-record Markdown renames retain title refresh and configured sync without a legacy queue', async () => {
+test('native-record Markdown renames retain title display without writes or a legacy queue', async () => {
   const h = createHarness();
   h.plugin.settings.dataArchitectureMode = 'native-records';
   h.plugin.settings.autoSyncTitleFromFilename = true;
@@ -846,15 +855,15 @@ test('native-record Markdown renames retain title refresh and configured sync wi
   try {
     h.renameFile(file, file.path, 'Inbox/After.md');
     await Promise.resolve();
-    assert.deepEqual(titles, [['sync', 'Inbox/After.md'], ['render', 'Inbox/After.md']]);
+    assert.deepEqual(titles, [['render', 'Inbox/After.md']]);
     h.deleteFile(file);
     assert.deepEqual(calls, []);
-    assert.deepEqual(cleaned, ['Inbox/After.md']);
+    assert.deepEqual(cleaned, []);
     assert.deepEqual(invalidated, [['Inbox/After.md']]);
   } finally { h.cleanup(); }
 });
 
-test('legacy mode retains folder, source, companion and pending-target event routing', async () => {
+test('legacy events retain read-only invalidation without source maintenance', async () => {
   const h = createHarness();
   h.plugin.settings.dataArchitectureMode = 'legacy';
   h.plugin.canRunBackgroundAutomation = () => false;
@@ -879,12 +888,9 @@ test('legacy mode retains folder, source, companion and pending-target event rou
     h.deleteFile(companion);
     await Promise.resolve();
     assert.deepEqual(calls, [
-      'handleSourceFolderRename', 'handleSourceFolderDelete',
-      'captureSourceRenameCompanion', 'handleSourceRename',
-      'invalidatePendingMarkdownTarget', 'handleSourceDelete',
-      'handlePendingMarkdownTargetRename', 'invalidateLegacyCanvas', 'invalidateLegacyCanvas',
+      'invalidateLegacyCanvas', 'invalidateLegacyCanvas',
       'handleCompanionMetadataChanged', 'handleCompanionRename',
-      'invalidatePendingMarkdownTarget', 'handleCompanionDelete',
+      'handleCompanionDelete',
     ]);
   } finally { h.cleanup(); }
 });
@@ -900,7 +906,7 @@ test('lifecycle dispatch reads the current architecture setting at each event', 
     h.emit('vault', 'rename', folder, 'Inbox/Old');
     h.plugin.settings.dataArchitectureMode = 'native-records';
     h.emit('vault', 'delete', folder);
-    assert.deepEqual(calls, ['handleSourceFolderRename']);
+    assert.deepEqual(calls, []);
   } finally { h.cleanup(); }
 });
 
@@ -1087,3 +1093,52 @@ test('retired automatic mode rules cannot mutate a view during metadata, opening
  assert.ok(titleRefreshes>0,'the ordinary display callbacks still execute');
  h.cleanup();
 });
+
+
+test('100 incoming deletions perform no relationship scan, body read or maintenance write', async () => {
+  const h = createHarness();
+  h.plugin.settings.dataArchitectureMode = 'native-records';
+  let scans = 0, cleanupCalls = 0;
+  h.plugin.parentLinkResolutionService.getRelationshipCandidates = () => { scans++; return []; };
+  h.plugin.bulkEditService.cleanupLinksForDeletedFile = async () => { cleanupCalls++; };
+  const survivor = h.addFile('Inbox/Survivor.md', { parents: ['[[Deleted 0]]'] }, '[[Deleted 0]]');
+  const before = JSON.stringify(survivor.frontmatter);
+  try {
+    for (let i = 0; i < 100; i++) h.deleteFile(h.addFile(`Inbox/Deleted ${i}.md`));
+    await settleDebounces();
+    assert.equal(scans, 0);
+    assert.equal(cleanupCalls, 0);
+    assert.equal(h.mutations.length, 0);
+    assert.equal(h.rawBodyReads(), 0);
+    assert.equal(h.navigationCounts().selectedBodyReads, 0);
+    assert.equal(JSON.stringify(survivor.frontmatter), before);
+    assert.equal(survivor.body, '[[Deleted 0]]');
+  } finally { h.cleanup(); }
+});
+
+for (const mode of ['legacy', 'native-records']) {
+  test(`${mode} attachment create/rename/delete bursts never enter source maintenance`, async () => {
+    const h = createHarness();
+    h.plugin.settings.dataArchitectureMode = mode;
+    let writes = 0;
+    for (const name of ['handleSourceCreate', 'handleSourceRename', 'handleSourceDelete', 'handleSourceFolderRename', 'handleSourceFolderDelete', 'handlePendingMarkdownTargetRename']) {
+      h.plugin.filePropertiesService[name] = async () => { writes++; };
+    }
+    try {
+      for (let i = 0; i < 100; i++) {
+        const file = h.addFile(`Inbox/Asset ${i}.png`);
+        h.emit('vault', 'create', file);
+        h.renameFile(file, file.path, `Inbox/Renamed ${i}.png`);
+        h.deleteFile(file);
+        const folder = new TFolder(`Inbox/Folder ${i}`);
+        h.emit('vault', 'rename', folder, `Inbox/Old folder ${i}`);
+        h.emit('vault', 'delete', folder);
+      }
+      await settleDebounces();
+      assert.equal(writes, 0);
+      assert.equal(h.mutations.length, 0);
+      assert.equal(h.rawBodyReads(), 0);
+      assert.equal(h.navigationCounts().selectedBodyReads, 0);
+    } finally { h.cleanup(); }
+  });
+}

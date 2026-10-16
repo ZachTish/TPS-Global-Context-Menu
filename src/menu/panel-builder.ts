@@ -16,7 +16,7 @@ import {
 } from '../services/custom-property-visibility';
 import { ViewModeService } from '../services/view-mode-service';
 import { parseLinksFromFrontmatterValue, resolveLinkTargetToFile } from '../services/link-target-service';
-import { applyNotebookNavigatorRulesToFile, promptAndCreateSubitemForParent } from '../services/subitem-creation-service';
+import { promptAndCreateSubitemForParent } from '../services/subitem-creation-service';
 import { promoteChecklistItemToChild as promoteChecklistItemToChildFromApi } from '../plugin-api';
 import { resolveLinkValueToFile } from '../handlers/parent-link-format';
 import { PanelActionService } from './panel-action-service';
@@ -132,7 +132,6 @@ interface TPSHealthApiLike {
 const ATTACHMENTS_FRONTMATTER_KEY = 'attachments';
 const MAX_SUBITEM_DEPTH = 8;
 const SUBITEM_PANEL_REFRESH_DEBOUNCE_MS = 200;
-const SUBITEM_LINK_RECONCILE_INTERVAL_MS = 3000;
 
 type CreatablePropertyType = CustomProperty['type'];
 
@@ -438,7 +437,6 @@ export class PanelBuilder {
     formatDatetimeDisplay: (value: string | null | undefined) => string;
   };
   private subitemPanelRefreshTimers: Map<string, number> = new Map();
-  private subitemLinkReconcileAt: Map<string, number> = new Map();
   private fileTitleCache: Map<string, string> = new Map();
   private stackedPropertiesCollapsedByPath: Map<string, boolean> = new Map();
 
@@ -1023,9 +1021,7 @@ export class PanelBuilder {
     if (propId === 'status' || propKeyLower === 'status') {
       this.propertyRowService.openStatusSubmenu(anchor, entries, () => {
         this.refreshStackedPropertyValue(anchor, entries, prop);
-      }, prop?.options, async (files) => {
-        for (const file of files) await applyNotebookNavigatorRulesToFile(this.plugin, file);
-      });
+      }, prop?.options);
       return;
     }
     if (propId === 'priority' || propKeyLower === 'priority') {
@@ -1381,11 +1377,6 @@ export class PanelBuilder {
   }
 
   private async afterStackedPropertyEdit(files: TFile[], changedKeys: string[], refreshMenus = true): Promise<void> {
-    await Promise.all(files.map((file) => this.plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
-      reason: 'whole-note-inline-property-edit',
-      force: true,
-      bypassCreationGrace: true,
-    })));
     if (refreshMenus) {
       for (const file of files) this.plugin.persistentMenuManager?.refreshMenusForFile(file, true);
     } else {
@@ -1898,12 +1889,7 @@ export class PanelBuilder {
         const normalized = this.normalizeStatusDisplayValue(newVal);
         label.textContent = normalized ? this.formatStatusLabel(normalized) : 'No Status';
         setIcon(icon, normalized ? this.getStatusIcon(normalized) : 'circle');
-      }, options, async (files) => {
-        // Re-evaluate GCM-owned semantic tag rules after the authored status changes.
-        for (const file of files) {
-          await applyNotebookNavigatorRulesToFile(this.plugin, file);
-        }
-      });
+      }, options);
     });
 
     return chip;
@@ -3017,20 +3003,6 @@ export class PanelBuilder {
     childrenBody: HTMLElement,
     attachmentBody: HTMLElement
   ): Promise<void> {
-    const now = Date.now();
-    const lastReconcileAt = this.subitemLinkReconcileAt.get(rootFile.path) ?? 0;
-    if (now - lastReconcileAt >= SUBITEM_LINK_RECONCILE_INTERVAL_MS) {
-      this.subitemLinkReconcileAt.set(rootFile.path, now);
-      try {
-        const repaired = await this.plugin.bulkEditService.reconcileParentChildLinksForParent(rootFile);
-        if (repaired > 0) {
-          logger.log(`[TPS GCM] Reconciled ${repaired} parent/child link update(s) for ${rootFile.path}`);
-        }
-      } catch (error) {
-        logger.warn('[TPS GCM] Failed reconciling parent/child links for subitems panel:', rootFile.path, error);
-      }
-    }
-
     // Refresh the parent nav button alongside children/attachments so it stays in sync
     // after operations like linkToParent that change the parent frontmatter key.
     const panel = childrenBody.closest('.tps-gcm-subitems-panel');
@@ -3536,13 +3508,6 @@ export class PanelBuilder {
       if (updatedContent === content) return;
 
       await this.app.vault.modify(rootFile, updatedContent);
-      await this.plugin.taskCheckboxHandler.handleExternalChecklistStateMutation(
-        rootFile,
-        previousState,
-        newState,
-        lines,
-        lineIndex,
-      );
       // x / X / - are filtered out of the panel — fade and remove the row
       if (newState === 'x' || newState === 'X' || newState === '-') {
         rowEl.style.opacity = '0';
@@ -4796,7 +4761,7 @@ export class PanelBuilder {
   }
 
   private getSortField(): string {
-    return this.plugin.notebookNavigatorRuleService.getSortField();
+    return String(this.plugin.settings.notebookNavigatorRules?.smartSort?.field || 'sort').trim() || 'sort';
   }
 
   private isArchived(file: TFile): boolean {

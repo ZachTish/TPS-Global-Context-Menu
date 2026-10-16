@@ -85,17 +85,14 @@ test('reading/live preview mode switches do not repeatedly tear down properties'
   assert.doesNotMatch(activeModePollSource, /refreshLivePreviewEditors: true/);
 });
 
-test('manual file renames force settled title sync from the new basename', () => {
+test('manual file renames refresh displays without post-rename writes or settlement polling', () => {
   const renameHandlerSource = eventSource.slice(
     eventSource.indexOf("plugin.app.vault.on('rename'"),
     eventSource.indexOf("plugin.register(() => plugin.persistentMenuManager.detach())"),
   );
-
-  assert.match(renameHandlerSource, /runAfterNavigationRenameSettles\(\(\) => \{/);
-  assert.match(renameHandlerSource, /syncTitleFromFilename\(liveFile,\s*\{\s*force: true,\s*bypassCreationGrace: true,\s*\}\)/);
-  assert.doesNotMatch(renameHandlerSource, /if \(plugin\.settings\.autoSyncTitleFromFilename\)[\s\S]*?syncTitleFromFilename/);
-  assert.match(renameHandlerSource, /syncFileTimestamps\(liveFile,\s*\{\s*reason: 'rename',\s*force: true,\s*\}\)/);
-  assert.match(eventSource, /isNavigationTextInputActive/);
+  assert.doesNotMatch(renameHandlerSource, /syncTitleFromFilename|syncFileTimestamps|runAfterNavigationRenameSettles/);
+  assert.match(renameHandlerSource, /noteTitleRenderService\?\.handleMetadataChanged/);
+  assert.doesNotMatch(eventSource, /isNavigationTextInputActive|runAfterNavigationRenameSettles/);
 });
 
 test('plugin-owned file opens reuse existing tabs or the current unpinned tab without hijacking native opens', () => {

@@ -825,18 +825,6 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         ) => plugin.nativeRecordService.archive(reference, publicMutationCause(cause)),
         migrateStorageProfile: () => plugin.nativeRecordService.migrateStorageProfile(),
     };
-    const notebookNavigatorPresentationApi = {
-        version: 1,
-        ensure: (files: readonly (TFile | string)[] | TFile | string) =>
-            plugin.notebookNavigatorRuleService.ensureNotebookNavigatorPresentation(files),
-        get: (file: TFile | string) =>
-            plugin.notebookNavigatorRuleService.getNotebookNavigatorPresentation(file),
-        getRevision: () =>
-            plugin.notebookNavigatorRuleService.getNotebookNavigatorPresentationRevision(),
-        onChanged: (
-            listener: Parameters<typeof plugin.notebookNavigatorRuleService.onNotebookNavigatorPresentationChanged>[0],
-        ) => plugin.notebookNavigatorRuleService.onNotebookNavigatorPresentationChanged(listener),
-    };
     const taskRecordsApi = {
         version: 2,
         supportsPromotion: false,
@@ -1190,7 +1178,6 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         taskCheckboxes: taskCheckboxesApi,
         tasks: plugin.taskApiService,
         nativeRecords: nativeRecordsApi,
-        notebookNavigatorPresentation: notebookNavigatorPresentationApi,
         taskRecords: taskRecordsApi,
         templates: templatesApi,
         propertyMappings: {
@@ -1316,9 +1303,10 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
         /** True if a value represents an all-day (date-only) event. */
         isAllDayValue: (value: unknown, fm?: Record<string, unknown>) =>
             services.schedule.isAllDayValue(value, fm),
-        /** Cycle status, invalidate virtual Navigator presentation, and re-evaluate semantic tag rules. */
+        /** Cycle the authored status value. */
         cycleFileStatus: async (file: TFile) => {
-            if (!plugin.notebookNavigatorRuleService.canApplyToFile(file)) return false;
+            if (!(file instanceof TFile) || plugin.filePropertiesService?.isCompanionFile(file)) return false;
+            if (file.extension?.toLowerCase() !== 'md' && !plugin.filePropertiesService?.isPropertyTarget(file)) return false;
             const statusKey = services.status.getStatusPropertyKey();
             const fm = file.extension?.toLowerCase() === 'md'
                 ? (plugin.app.metadataCache.getFileCache(file)?.frontmatter || {}) as Record<string, unknown>
@@ -1333,11 +1321,6 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             const index = normalizedOptions.indexOf(current);
             const next = options[index >= 0 ? (index + 1) % options.length : 0];
             const changed = await services.status.setFileStatus(file, next);
-            await plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
-                reason: 'gcm-status-cycle',
-                force: true,
-                bypassCreationGrace: true,
-            });
             return changed;
         },
 
@@ -1375,8 +1358,6 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             plugin.noteOperationService.createCanvasFromNote(file, options),
         scanBodySubitemLinks: (file: TFile): Promise<BodySubitemLink[]> =>
             plugin.bodySubitemLinkService.scanFile(file),
-        reconcileMarkdownParentSubitems: (file: TFile) =>
-            plugin.subitemRelationshipSyncService.reconcileMarkdownParent(file),
         addParentToChild: (child: TFile, parent: TFile) =>
             plugin.parentLinkResolutionService.addParentToChild(child, parent),
         removeParentFromChild: (child: TFile, parent: TFile) =>
@@ -1391,19 +1372,5 @@ export function setupPluginApi(plugin: TPSGlobalContextMenuPlugin): void {
             promoteChecklistItemToChild(plugin, rootFile, input),
         promoteChecklistItem: (rootFile: TFile, input: ChecklistPromotionInput) =>
             promoteChecklistItemToChild(plugin, rootFile, input),
-        /** Compatibility mutation helper: invalidates presentation and applies semantic tags only. */
-        applyNotebookNavigatorRulesToFile: (file: TFile, options?: Record<string, unknown>) =>
-            plugin.notebookNavigatorRuleService.applyRulesToFile(file, {
-                reason: String(options?.reason || 'gcm-api-file'),
-                force: options?.force === true,
-                bypassCreationGrace: options?.bypassCreationGrace === true,
-            }),
-        /** Compatibility bulk helper: invalidates presentation and applies semantic tags only. */
-        applyNotebookNavigatorRulesToAllFiles: (options?: Record<string, unknown>) =>
-            plugin.notebookNavigatorRuleService.applyRulesToAllFiles({
-                reason: String(options?.reason || 'gcm-api-all'),
-                force: options?.force !== false,
-                bypassCreationGrace: options?.bypassCreationGrace !== false,
-            }),
     };
 }
