@@ -17,8 +17,14 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     // ── Native context menu injection ────────────────────────────────────────
 
     plugin.registerEvent(
-        plugin.app.workspace.on('file-menu', (menu, file) => {
+        plugin.app.workspace.on('file-menu', (menu, file, source) => {
             if (plugin.settings.inlineMenuOnly) return;
+            // Core Bases rows and native file links (including Kanban cards)
+            // supply their exact target; no ambient DOM selection is needed.
+            if (source === 'bases-context-menu' || source === 'link-context-menu') {
+                if (file instanceof TFile) plugin.menuController.addToExactFileMenu(menu, [file], { nativeMenu: true });
+                return;
+            }
             const targetEl = plugin.contextTargetService.peekRecentContextTarget(1200);
             // Upstream Notebook Navigator owns its native menus. GCM integrates
             // only with the co-installable TPS fork through its public API.
@@ -36,8 +42,12 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
     );
 
     plugin.registerEvent(
-        plugin.app.workspace.on('files-menu', (menu, files) => {
+        plugin.app.workspace.on('files-menu', (menu, files, source) => {
             if (plugin.settings.inlineMenuOnly) return;
+            if (source === 'bases-context-menu') {
+                plugin.menuController.addToExactFileMenu(menu, files.filter((file) => file instanceof TFile) as TFile[], { nativeMenu: true });
+                return;
+            }
             const targetEl = plugin.contextTargetService.peekRecentContextTarget(1200);
             if (plugin.contextTargetService.isNotebookNavigatorContextTarget(targetEl)) return;
             const fileList = files.filter((f: any) => f && f.path && typeof f.path === 'string') as TFile[];

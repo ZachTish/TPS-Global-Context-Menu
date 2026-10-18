@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## 10.2.1 — Core Bases card and selection menus
+
+Core Bases emits authoritative `bases-context-menu` file/selection events, while native Kanban card links emit `link-context-menu`. GCM now adds its existing actions to that exact file set through the current menu builder, before consulting the older DOM allowlist. Cards without link/data-path elements and stale explorer/Navigator selections no longer omit or redirect GCM actions. Single-card and multiple-file events both retain Core’s selected targets; inline-menu-only configuration still disables native augmentation. Existing Navigator ownership and other menu sources retain their guards. No DOM handler, observer, scan, note read/write, setting or persisted state is added. The retired TPS Kanban plugin remains retired.
+
+The event source and payload were verified against installed Obsidian 1.14.4 and its public `file-menu` signature. Five focused actual-callback tests cover single/multiple selections, stale ambient state, folders, inline-only mode, other-source ownership and 2,000 repeated events with no vault work or DOM discovery. The full versioned suite passed (1,970 test executions), followed by a separate final build, test-vault deployment/reload and native Kanban menu verification. All 98 synthetic notes and GCM settings stayed byte-identical; fixtures were archived. Native multi-selection has callback/builder regression coverage; physical iPhone and native bulk-selection UI acceptance remain unverified. See [release validation](release-notes/10.2.1.md). Settings navigation and minimum Obsidian 1.10.0 are unchanged; native Kanban availability depends on the installed Obsidian version. This menu fix does not establish a Calendar performance improvement.
+
 ## 10.2.0 — Flat kind lists with configurable subtype properties
 
 Native-record Kind list mappings now accept a single-segment value, as well as

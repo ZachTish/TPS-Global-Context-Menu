@@ -703,3 +703,21 @@ test("the real context-menu text editor delegates its exact value once without r
     delete globalThis.__tpsLatestTextInputSubmit;
   }
 });
+
+
+test("native exact-target menus retain native ownership marking and suppress repeated augmentation", async () => {
+  const { MenuBuilder, TFile } = await loadMenuBuilderModule();
+  const { builder, addFile, plugin } = createBuilderHarness(MenuBuilder, TFile);
+  const file = addFile("Inbox/Card.md", 1);
+  plugin.contextTargetService = new Proxy({}, { get() { throw new Error("No ambient selection lookup"); } });
+  const menu = buildMenu(builder, [file], { nativeMenu: true });
+  assert.equal(menu._tpsHandled, true);
+  assert.ok(menu.items.some(item => item.title === "Title: Card"));
+  assert.ok(menu.items.filter(item => item.title).every(item => item._isTpsItem === true));
+  const count = menu.items.length;
+  builder.addToExactFileMenu(menu, [file], { nativeMenu: true });
+  assert.equal(menu.items.length, count);
+  const foreign = buildMenu(builder, [file]);
+  assert.equal(foreign._tpsHandled, undefined);
+  assert.ok(foreign.items.every(item => !item._isTpsItem));
+});

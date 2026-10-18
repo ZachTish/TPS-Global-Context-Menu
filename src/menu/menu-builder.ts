@@ -27,6 +27,8 @@ import { createCustomPropertyMenuExclusionPredicate } from '../services/custom-p
 import { constrainGcmMenu } from './menu-presentation';
 
 export interface NativeMenuLabelOptions {
+  /** Apply the existing native-menu de-duplication/ownership contract. */
+  nativeMenu?: boolean;
   archiveLabel?: string;
   deleteLabel?: string;
   includeTitle?: boolean;
@@ -475,6 +477,11 @@ export class MenuBuilder {
    * cannot inherit an unrelated active editor or explorer selection.
    */
   addToExactFileMenu(menu: GcmMenuSink, files: readonly TFile[], options: NativeMenuLabelOptions = {}): void {
+    const markTpsItems = options.nativeMenu === true;
+    if (markTpsItems) {
+      if ((menu as any)._tpsHandled) return;
+      (menu as any)._tpsHandled = true;
+    }
     const exactFiles = new Map<string, TFile>();
     for (const candidate of files) {
       if (!(candidate instanceof TFile)) continue;
@@ -487,7 +494,7 @@ export class MenuBuilder {
       if (!(current instanceof TFile) || current !== candidate) continue;
       exactFiles.set(path, candidate);
     }
-    this.addResolvedFilesToMenu(menu, [...exactFiles.values()], options, false);
+    this.addResolvedFilesToMenu(menu, [...exactFiles.values()], options, markTpsItems);
   }
 
   private addResolvedFilesToMenu(
