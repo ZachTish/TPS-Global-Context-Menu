@@ -99,15 +99,15 @@ test('GCM keeps Health properties out of its core catalog and retires only manag
 test('lean optional-property defaults stay off and the inline master toggle is authoritative', () => {
   for (const key of [
     'enableInlinePersistentMenus',
-    'enableInLivePreview',
-    'enableInPreview',
-    'enableInSidePanels',
     'showCustomPropertiesInInlineUi',
     'showCustomPropertiesInContextMenu',
     'inheritNotebookNavigatorTagColors',
     'enableTimeTracking',
   ]) {
     assert.match(constants, new RegExp(`${key}: false`));
+  }
+  for (const key of ['enableInLivePreview', 'enableInPreview', 'enableInSidePanels']) {
+    assert.doesNotMatch(constants, new RegExp(`${key}:`));
   }
   assert.match(types, /DEFAULT_NOTEBOOK_NAVIGATOR_RULE_SETTINGS[\s\S]{0,120}enabled: false,[\s\S]{0,80}autoApplyOnFileOpen: false/);
   assert.match(inlineDecoration, /private getInlinePropertyKeys\(\): Set<string> \{[\s\S]{0,160}showCustomPropertiesInInlineUi === false\) return keys/);

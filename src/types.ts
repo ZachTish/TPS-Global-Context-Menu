@@ -142,21 +142,7 @@ export interface LinkedSubitemCheckboxMapping {
   icon?: string;
   label?: string;
 }
-export type AppearanceSyncMode = 'synced' | 'local';
-export type AppearanceSettingKey =
-  | 'menuTextScale'
-  | 'buttonScale'
-  | 'controlScale'
-  | 'menuDensity'
-  | 'menuRadiusScale'
-  | 'liveMenuPosition'
-  | 'liveMenuOffsetX'
-  | 'liveMenuOffsetY'
-  | 'modalWidth'
-  | 'modalMaxHeightVh'
-  | 'subitemsMarginBottom'
-  | 'dailyNavScale'
-  | 'dailyNavRestOpacity';
+export type AppearanceSettingKey = 'liveMenuPosition' | 'liveMenuOffsetX' | 'liveMenuOffsetY' | 'dailyNavRestOpacity';
 
 export type ViewModeRuleMatch = 'all' | 'any';
 export type ViewModeConditionType = 'frontmatter' | 'path' | 'scheduled' | 'daily-note';
@@ -512,11 +498,7 @@ export interface TPSGlobalContextMenuSettings {
   enableLogging: boolean;
   logOpenerDecisions: boolean;
   enableInlinePersistentMenus: boolean;
-  enableInLivePreview: boolean;
-  enableInPreview: boolean;
-  enableInSidePanels: boolean;
   inlineMenuOnly: boolean;
-  nativeMenuPlacement: 'tps-first' | 'tps-last';
   suppressMobileKeyboard: boolean;
   enableCanvasOpenGuard: boolean;
   notePostCreateBehavior: 'preview' | 'open' | 'stay';
@@ -557,9 +539,6 @@ export interface TPSGlobalContextMenuSettings {
 
   // File naming settings
 
-  enableAutoRename: boolean;
-  autoSyncTitleFromFilename: boolean;
-  autoSaveFolderPath: boolean;
   autoSyncFileTimestamps: boolean;
   dateCreatedFrontmatterKey: string;
   dateModifiedFrontmatterKey: string;
@@ -590,9 +569,6 @@ export interface TPSGlobalContextMenuSettings {
   // Manual editor mode actions
   enableInlineManualViewMode: boolean;
 
-  enableChecklistCompletionProperty: boolean;
-  checklistCompletionPropertyKey: string;
-  checklistFinalPromptStatuses: string[];
   enableLinkedSubitemCheckboxes: boolean;
   linkedSubitemCheckboxStyle: LinkedSubitemCheckboxStyle;
   linkedSubitemCheckboxMappings: LinkedSubitemCheckboxMapping[];
@@ -609,12 +585,10 @@ export interface TPSGlobalContextMenuSettings {
   linkedSubitemToggleUncheckedStatus?: string;
 
   // Archive tag automation
-  enableArchiveTagMove: boolean;
   managedNoteFieldKeys?: Partial<Record<"externalId" | "sourcePath" | "location" | "url" | "tpsCalendarOrphanCandidateAt" | "tpsCalendarCancelledAt", string>>;
   managedNoteFieldAliases?: Partial<Record<"externalId" | "sourcePath" | "location" | "url" | "tpsCalendarOrphanCandidateAt" | "tpsCalendarCancelledAt", string[]>>;
   archiveTag: string;
   archiveFolderPath: string;
-  archiveUseDailyFolder: boolean;
   lastArchiveTagSweepDate?: string;
 
   // Workspace Ribbon Buttons
@@ -636,7 +610,6 @@ export interface TPSGlobalContextMenuSettings {
   linkedContextOpenBehavior: 'same-tab' | 'new-tab' | 'hover-preview';
   linkedContextSortOrder: LinkedContextSortOrder;
   dailyNavShowToday: boolean;
-  enableAutoPopulateDailyNotes: boolean;
   inheritUnscheduledTasksFromDailyNotes: boolean;
 
   // Overlay ignore rules
@@ -644,8 +617,6 @@ export interface TPSGlobalContextMenuSettings {
   inlineMenu_IgnoreRules: ViewModeRule[];
 
   // Auto-embed ignore settings
-  autoEmbedIgnoreFolders: string[];
-  autoEmbedIgnoreTags: string[];
 
   // Auto-insert blank line on note open
 
@@ -661,21 +632,10 @@ export interface TPSGlobalContextMenuSettings {
   tpsBaseWriteFallbackPath: string;
 
   // Appearance (Navigator-style controls)
-  menuTextScale: number;
-  buttonScale: number;
-  controlScale: number;
-  menuDensity: number;
-  menuRadiusScale: number;
-  inlinePanelMaxWidth: number;
   liveMenuPosition: GcmLiveMenuPosition;
   liveMenuOffsetX: number;
   liveMenuOffsetY: number;
-  modalWidth: number;
-  modalMaxHeightVh: number;
-  subitemsMarginBottom: number;
-  dailyNavScale: number;
   dailyNavRestOpacity: number;
-  appearanceSyncModes: Partial<Record<AppearanceSettingKey, AppearanceSyncMode>>;
 }
 
 /**

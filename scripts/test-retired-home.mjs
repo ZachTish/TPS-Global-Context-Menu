@@ -104,10 +104,11 @@ test('settings retirement removes only known legacy keys and keeps concurrent un
   visit(parsed);
   assert.ok(method, 'settings retirement method remains available');
   const body = method.slice(method.indexOf('{') + 1, method.lastIndexOf('}'));
-  const strip = new Function('record', 'RETIRED_HOME_SETTING_KEYS', body);
+  const { RETIRED_INERT_SETTING_KEYS } = await load('src/settings-persistence.ts');
+  const strip = new Function('record', 'RETIRED_HOME_SETTING_KEYS', 'RETIRED_INERT_SETTING_KEYS', body);
   const initial = { other: 'old', future: { enabled: true }, ...Object.fromEntries(migration.RETIRED_HOME_SETTING_KEYS.map(k => [k, true])) };
   const next = structuredClone(initial);
-  strip(next, migration.RETIRED_HOME_SETTING_KEYS);
+  strip(next, migration.RETIRED_HOME_SETTING_KEYS, RETIRED_INERT_SETTING_KEYS);
   assert.deepEqual(next, { other: 'old', future: { enabled: true } });
   assert.match(main, /hadRetiredHomeSettings \|\|/);
   assert.match(main, /for \(const key of RETIRED_HOME_SETTING_KEYS\) delete record\[key\]/);

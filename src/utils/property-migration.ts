@@ -195,7 +195,7 @@ export function updateMigrationReferences(settings: any, change: PropertyMigrati
     for (const [field, fallback] of Object.entries(MIGRATABLE_KEY_SETTINGS)) {
       if (fold(settings[field] || fallback) === fold(key)) settings[field] = change.to;
     }
-    for (const field of ['activityLogPropertyKey', 'checklistCompletionPropertyKey', 'childLinkFrontmatterKey', 'parentChildIgnoreFrontmatterKey', 'templateIdentificationPropertyKey']) {
+    for (const field of ['activityLogPropertyKey', 'childLinkFrontmatterKey', 'parentChildIgnoreFrontmatterKey', 'templateIdentificationPropertyKey']) {
       if (typeof settings[field] === 'string') settings[field] = renameKey(settings[field]);
     }
     if (Array.isArray(settings.ignoredBacklinksFrontmatterKeys)) settings.ignoredBacklinksFrontmatterKeys = settings.ignoredBacklinksFrontmatterKeys.map(renameKey);
@@ -227,7 +227,7 @@ export function updateMigrationReferences(settings: any, change: PropertyMigrati
       && (keyField !== 'templateIdentificationPropertyKey' || settings.templateIdentificationPropertyMatch !== 'contains')) settings[valueField] = renameValue(settings[valueField]);
   }
   if (change.kind === 'value' && (settings.properties || []).some((p: any) => p.id === 'status' && fold(p.key) === fold(key))) {
-    for (const field of ['activeStatusValues', 'recurrenceCompletionStatuses', 'parentCompletionStatuses', 'checklistFinalPromptStatuses']) {
+    for (const field of ['activeStatusValues', 'recurrenceCompletionStatuses', 'parentCompletionStatuses']) {
       if (Array.isArray(settings[field])) settings[field] = settings[field].map(renameValue);
     }
     settings.recurrenceDefaultStatus = renameValue(settings.recurrenceDefaultStatus);

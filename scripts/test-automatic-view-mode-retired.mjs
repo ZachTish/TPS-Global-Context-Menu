@@ -14,7 +14,7 @@ function loadMethods(source){
  const exports={};new Function('exports',output)(exports);return exports;
 }
 const {Manual,Activation,Settings}=loadMethods(`
-const RETIRED_HOME_SETTING_KEYS=[];
+const RETIRED_HOME_SETTING_KEYS=[]; const RETIRED_INERT_SETTING_KEYS=[];
 export class Manual { ${method('src/menu/panel-action-service.ts','setViewModeForFile')} }
 export class Activation { ${method('src/main.ts','syncTimeTrackingActivation')} }
 export class Settings { ${method('src/main.ts','stripLegacySettingsFields')} }

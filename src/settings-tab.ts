@@ -497,14 +497,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       await this.plugin.saveSettings();
     };
 
-    const setAppearanceSettingValue = async (key: AppearanceSettingKey, value: unknown) => {
+    const setAppearanceSettingValue = (key: AppearanceSettingKey, value: unknown) => {
       (this.plugin.settings as unknown as Record<string, unknown>)[key] = value;
-      await this.plugin.saveSettings();
     };
-
-    // Appearance sync mode is handled by TPS-Controller.
-    const getAppearanceModeText = (_key: AppearanceSettingKey): string => 'Sync handled by TPS-Controller.';
-    const attachAppearanceSyncToggle = (_setting: Setting, _key: AppearanceSettingKey) => { };
 
     const pluginsRegistry = (this.app as any)?.plugins;
     const hasController = Boolean(
@@ -540,7 +535,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         : this.activeSettingsPage === 'workflows'
           ? this.createSettingsPage(containerEl, 'workflows', 'Workflows', 'Configure one note-interaction workflow at a time.')
           : this.activeSettingsPage === 'appearance'
-            ? this.createSettingsPage(containerEl, 'appearance', 'Appearance', 'Tune menu, navigation, and modal sizing without changing behavior.')
+            ? this.createSettingsPage(containerEl, 'appearance', 'Appearance', 'Tune the floating menu position and daily navigation.')
             : this.createSettingsPage(containerEl, 'advanced', 'Advanced', 'Configure integration property names, troubleshoot, and review Base queries.');
 
     if (this.activeSettingsPage === 'rules-fields') {
@@ -594,35 +589,6 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             this.plugin.settings.enableBasesForcedLinkPreview = value;
             await this.plugin.saveSettings();
           }));
-      new Setting(activePage)
-        .setName('Right-click menu placement')
-        .setDesc('Choose whether TPS items appear before or after native/core menu items.')
-        .addDropdown((dropdown) =>
-          dropdown
-            .addOption('tps-last', 'TPS after native')
-            .addOption('tps-first', 'TPS before native')
-            .setValue(this.plugin.settings.nativeMenuPlacement || 'tps-last')
-            .onChange(async (value: 'tps-first' | 'tps-last') => {
-              this.plugin.settings.nativeMenuPlacement = value;
-              await this.plugin.saveSettings();
-            })
-        );
-
-      new Setting(activePage)
-        .setName('Enable in specific views')
-        .setDesc('Live Preview/editor, Reading View/popovers, and side panels, in that order.')
-        .addToggle(toggle => toggle
-          .setTooltip('Live Preview & Editor')
-          .setValue(this.plugin.settings.enableInLivePreview)
-          .onChange(async v => { this.plugin.settings.enableInLivePreview = v; await this.plugin.saveSettings(); }))
-        .addToggle(toggle => toggle
-          .setTooltip('Reading View & Popovers')
-          .setValue(this.plugin.settings.enableInPreview)
-          .onChange(async v => { this.plugin.settings.enableInPreview = v; await this.plugin.saveSettings(); }))
-        .addToggle(toggle => toggle
-          .setTooltip('Side Panels (Explorer, etc)')
-          .setValue(this.plugin.settings.enableInSidePanels)
-          .onChange(async v => { this.plugin.settings.enableInSidePanels = v; await this.plugin.saveSettings(); }));
 
       new Setting(activePage)
         .setName('Show inline context menu')
@@ -718,89 +684,10 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     // --- Appearance Settings ---
     if (this.activeSettingsPage === 'appearance') {
       const appearance = activePage;
-      appearance.createEl('p', {
-        text: 'Appearance values sync through TPS Controller when it is available.',
-        cls: 'setting-item-description',
-      });
 
-    const menuTextScaleSetting = new Setting(appearance)
-      .setName('Menu text scale')
-      .setDesc(`Scale for inline menu and panel text. ${getAppearanceModeText('menuTextScale')}`)
-      .addSlider((slider) =>
-        slider
-          .setLimits(70, 180, 5)
-          .setDynamicTooltip()
-          .setValue(Math.round((this.plugin.settings.menuTextScale || 1) * 100))
-          .onChange(async (value) => {
-            setAppearanceSettingValue('menuTextScale', value / 100);
-            await saveAppearance();
-          }),
-      );
-    attachAppearanceSyncToggle(menuTextScaleSetting, 'menuTextScale');
-
-    const buttonScaleSetting = new Setting(appearance)
-      .setName('Button size scale')
-      .setDesc(`Scale action buttons, collapse buttons, and nav buttons. ${getAppearanceModeText('buttonScale')}`)
-      .addSlider((slider) =>
-        slider
-          .setLimits(70, 180, 5)
-          .setDynamicTooltip()
-          .setValue(Math.round((this.plugin.settings.buttonScale || 1) * 100))
-          .onChange(async (value) => {
-            setAppearanceSettingValue('buttonScale', value / 100);
-            await saveAppearance();
-          }),
-      );
-    attachAppearanceSyncToggle(buttonScaleSetting, 'buttonScale');
-
-    const controlScaleSetting = new Setting(appearance)
-      .setName('Selector/input size scale')
-      .setDesc(`Scale selector/input controls (dropdowns, text/date inputs, quick inputs). ${getAppearanceModeText('controlScale')}`)
-      .addSlider((slider) =>
-        slider
-          .setLimits(70, 180, 5)
-          .setDynamicTooltip()
-          .setValue(Math.round((this.plugin.settings.controlScale || 1) * 100))
-          .onChange(async (value) => {
-            setAppearanceSettingValue('controlScale', value / 100);
-            await saveAppearance();
-          }),
-      );
-    attachAppearanceSyncToggle(controlScaleSetting, 'controlScale');
-
-    const densitySetting = new Setting(appearance)
-      .setName('Menu density')
-      .setDesc(`Adjust spacing/padding density across chips, rows, and action buttons. ${getAppearanceModeText('menuDensity')}`)
-      .addSlider((slider) =>
-        slider
-          .setLimits(75, 135, 5)
-          .setDynamicTooltip()
-          .setValue(Math.round((this.plugin.settings.menuDensity || 1) * 100))
-          .onChange(async (value) => {
-            setAppearanceSettingValue('menuDensity', value / 100);
-            await saveAppearance();
-          }),
-      );
-    attachAppearanceSyncToggle(densitySetting, 'menuDensity');
-
-    const radiusSetting = new Setting(appearance)
-      .setName('Corner roundness')
-      .setDesc(`Scale corner radius for chips, icon buttons, and collapsed controls. ${getAppearanceModeText('menuRadiusScale')}`)
-      .addSlider((slider) =>
-        slider
-          .setLimits(60, 180, 5)
-          .setDynamicTooltip()
-          .setValue(Math.round((this.plugin.settings.menuRadiusScale || 1) * 100))
-          .onChange(async (value) => {
-            setAppearanceSettingValue('menuRadiusScale', value / 100);
-            await saveAppearance();
-          }),
-      );
-    attachAppearanceSyncToggle(radiusSetting, 'menuRadiusScale');
-
-    const livePositionSetting = new Setting(appearance)
+    new Setting(appearance)
       .setName('Live menu position')
-      .setDesc(`Horizontal anchor for the floating Live Preview bar. ${getAppearanceModeText('liveMenuPosition')}`)
+      .setDesc(`Horizontal anchor for the floating Live Preview bar.`)
       .addDropdown((dropdown) =>
         dropdown
           .addOption('center', 'Center')
@@ -812,11 +699,10 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             await saveAppearance();
           }),
       );
-    attachAppearanceSyncToggle(livePositionSetting, 'liveMenuPosition');
 
-    const liveOffsetXSetting = new Setting(appearance)
+    new Setting(appearance)
       .setName('Live menu horizontal offset')
-      .setDesc(`X offset (px) applied after positioning. Negative = left, positive = right. ${getAppearanceModeText('liveMenuOffsetX')}`)
+      .setDesc(`X offset (px) applied after positioning. Negative = left, positive = right.`)
       .addSlider((slider) =>
         slider
           .setLimits(-300, 300, 5)
@@ -827,11 +713,10 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             await saveAppearance();
           }),
       );
-    attachAppearanceSyncToggle(liveOffsetXSetting, 'liveMenuOffsetX');
 
-    const liveOffsetYSetting = new Setting(appearance)
+    new Setting(appearance)
       .setName('Live menu vertical offset')
-      .setDesc(`Y offset (px) applied after positioning. Negative = up, positive = down. ${getAppearanceModeText('liveMenuOffsetY')}`)
+      .setDesc(`Y offset (px) applied after positioning. Negative = up, positive = down.`)
       .addSlider((slider) =>
         slider
           .setLimits(-240, 240, 4)
@@ -842,39 +727,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             await saveAppearance();
           }),
       );
-    attachAppearanceSyncToggle(liveOffsetYSetting, 'liveMenuOffsetY');
-
-    const subitemsMarginSetting = new Setting(appearance)
-      .setName('Subitems panel margin bottom')
-      .setDesc(`Vertical spacing (px) between the subitems panel and the context menu. ${getAppearanceModeText('subitemsMarginBottom')}`)
-      .addSlider((slider) =>
-        slider
-          .setLimits(-20, 40, 1)
-          .setDynamicTooltip()
-          .setValue(Math.round(this.plugin.settings.subitemsMarginBottom ?? 0)) // Default 0
-          .onChange(async (value) => {
-            setAppearanceSettingValue('subitemsMarginBottom', value);
-            await saveAppearance();
-          }),
-      );
-    attachAppearanceSyncToggle(subitemsMarginSetting, 'subitemsMarginBottom');
 
     appearance.createEl('h4', { text: 'Daily Note Navigation', attr: { style: 'margin-top: 1.2em;' } });
-
-    const dailyNavScaleSetting = new Setting(appearance)
-      .setName('Nav button size scale')
-      .setDesc(`Scale the daily note navigation controls independently of the rest of the UI. ${getAppearanceModeText('dailyNavScale')}`)
-      .addSlider((slider) =>
-        slider
-          .setLimits(50, 250, 5)
-          .setDynamicTooltip()
-          .setValue(Math.round((this.plugin.settings.dailyNavScale ?? 1) * 100))
-          .onChange(async (value) => {
-            setAppearanceSettingValue('dailyNavScale', value / 100);
-            await saveAppearance();
-          }),
-      );
-    attachAppearanceSyncToggle(dailyNavScaleSetting, 'dailyNavScale');
 
     new Setting(appearance)
       .setName('Visible day buttons')
@@ -892,9 +746,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           });
       });
 
-    const dailyNavOpacitySetting = new Setting(appearance)
+    new Setting(appearance)
       .setName('Nav resting opacity')
-      .setDesc(`Opacity of the floating nav when not hovered (0 = hidden until hover, 100 = always fully visible). ${getAppearanceModeText('dailyNavRestOpacity')}`)
+      .setDesc(`Opacity of the floating nav when not hovered (0 = hidden until hover, 100 = always fully visible).`)
       .addSlider((slider) =>
         slider
           .setLimits(0, 100, 5)
@@ -914,56 +768,17 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             }
           }),
       );
-    attachAppearanceSyncToggle(dailyNavOpacitySetting, 'dailyNavRestOpacity');
-
-    const modalWidthSetting = new Setting(appearance)
-      .setName('Modal width')
-      .setDesc(`Width of TPS modal dialogs (Add Tag, Schedule, Recurrence, etc). ${getAppearanceModeText('modalWidth')}`)
-      .addSlider((slider) =>
-        slider
-          .setLimits(320, 960, 20)
-          .setDynamicTooltip()
-          .setValue(Math.round(this.plugin.settings.modalWidth || 520))
-          .onChange(async (value) => {
-            setAppearanceSettingValue('modalWidth', value);
-            await saveAppearance();
-          }),
-      );
-    attachAppearanceSyncToggle(modalWidthSetting, 'modalWidth');
-
-    const modalHeightSetting = new Setting(appearance)
-      .setName('Modal max height (vh)')
-      .setDesc(`Maximum modal height as viewport percentage. ${getAppearanceModeText('modalMaxHeightVh')}`)
-      .addSlider((slider) =>
-        slider
-          .setLimits(50, 95, 1)
-          .setDynamicTooltip()
-          .setValue(Math.round(this.plugin.settings.modalMaxHeightVh || 80))
-          .onChange(async (value) => {
-            setAppearanceSettingValue('modalMaxHeightVh', value);
-            await saveAppearance();
-          }),
-      );
-    attachAppearanceSyncToggle(modalHeightSetting, 'modalMaxHeightVh');
 
       new Setting(appearance)
         .setName('Reset appearance')
-        .setDesc('Restore all appearance controls to default values.')
+        .setDesc('Restore the floating menu position and offsets.')
         .addButton((button) =>
           button
             .setButtonText('Reset')
             .onClick(async () => {
-              setAppearanceSettingValue('menuTextScale', 1);
-              setAppearanceSettingValue('buttonScale', 1);
-              setAppearanceSettingValue('controlScale', 1);
-              setAppearanceSettingValue('menuDensity', 1);
-              setAppearanceSettingValue('menuRadiusScale', 1);
               setAppearanceSettingValue('liveMenuPosition', 'center');
               setAppearanceSettingValue('liveMenuOffsetX', 0);
               setAppearanceSettingValue('liveMenuOffsetY', 0);
-              setAppearanceSettingValue('subitemsMarginBottom', 0);
-              setAppearanceSettingValue('modalWidth', 520);
-              setAppearanceSettingValue('modalMaxHeightVh', 80);
               await saveAppearance();
               this.display();
             }),

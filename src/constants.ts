@@ -27,11 +27,7 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   enableLogging: false,
   logOpenerDecisions: false,
   enableInlinePersistentMenus: false,
-  enableInLivePreview: false,
-  enableInPreview: false,
-  enableInSidePanels: false,
   inlineMenuOnly: false,
-  nativeMenuPlacement: 'tps-last',
   suppressMobileKeyboard: true,
   enableCanvasOpenGuard: false,
   notePostCreateBehavior: 'preview',
@@ -82,9 +78,6 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   recurrenceDefaultStatus: 'todo', // Default status for new recurrence instances
 
   // File naming settings
-  enableAutoRename: true,
-  autoSyncTitleFromFilename: true,
-  autoSaveFolderPath: false,
   autoSyncFileTimestamps: false,
   dateCreatedFrontmatterKey: 'datecreated',
   dateModifiedFrontmatterKey: 'datemodified',
@@ -108,9 +101,6 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   parentTagOnChildLink: 'project',
   parentCompletionStatuses: ['complete', 'wont-do'],
   enableInlineManualViewMode: true,
-  enableChecklistCompletionProperty: false,
-  checklistCompletionPropertyKey: 'hasOpenChecklist',
-  checklistFinalPromptStatuses: ['complete', 'wont-do'],
   enableLinkedSubitemCheckboxes: false,
   linkedSubitemCheckboxStyle: 'soft-link',
   linkedSubitemCheckboxMappings: DEFAULT_LINKED_SUBITEM_MAPPINGS.map((mapping) => ({
@@ -123,10 +113,8 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   linkedSubitemCanceledStatuses: ['wont-do'],
   linkedSubitemToggleCheckedStatus: 'complete',
   linkedSubitemToggleUncheckedStatus: 'todo',
-  enableArchiveTagMove: false,
   archiveTag: 'archive',
   archiveFolderPath: 'System/Archive',
-  archiveUseDailyFolder: false,
   lastArchiveTagSweepDate: '',
 
   workspaceRibbonButtons: false,
@@ -144,7 +132,6 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   linkedContextOpenBehavior: 'same-tab',
   linkedContextSortOrder: 'source-asc',
   dailyNavShowToday: true,
-  enableAutoPopulateDailyNotes: false,
   inheritUnscheduledTasksFromDailyNotes: true,
 
   // Overlay ignore rules
@@ -154,8 +141,6 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   inlineMenu_IgnoreRules: [],
 
   // Auto-embed ignore settings
-  autoEmbedIgnoreFolders: ['Archive'],
-  autoEmbedIgnoreTags: ['archive'],
 
   // Auto-insert blank line on note open
 
@@ -170,21 +155,10 @@ export const DEFAULT_SETTINGS: TPSGlobalContextMenuSettings = {
   tpsBaseWriteFallbackMode: 'today-daily-note',
   tpsBaseWriteFallbackPath: '',
 
-  menuTextScale: 1,
-  buttonScale: 1,
-  controlScale: 1,
-  menuDensity: 1,
-  menuRadiusScale: 1,
-  inlinePanelMaxWidth: 700,
   liveMenuPosition: 'center',
   liveMenuOffsetX: 0,
   liveMenuOffsetY: 0,
-  modalWidth: 520,
-  modalMaxHeightVh: 80,
-  subitemsMarginBottom: 0,
-  dailyNavScale: 1,
   dailyNavRestOpacity: 0,
-  appearanceSyncModes: {},
 };
 
 export const SYSTEM_COMMANDS = [

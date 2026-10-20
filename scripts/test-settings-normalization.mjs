@@ -1,4 +1,5 @@
 import test from 'node:test';
+import ts from 'typescript';
 import assert from 'node:assert/strict';
 import { Buffer } from 'node:buffer';
 import { readFileSync } from 'node:fs';
@@ -301,7 +302,7 @@ test('linked checkbox and Daily Note line-population settings are absent in whol
   assert.doesNotMatch(settingsTabSource, /renderLinkedSubitemCheckboxSettings|Render child-note links as checkboxes|Child status to checkbox mappings/u);
   assert.doesNotMatch(settingsTabSource, /Auto-Populate Scheduled Items|Completion prompt status options/u);
   assert.match(mainSource, /this\.settings\.enableLinkedSubitemCheckboxes = false/u);
-  assert.doesNotMatch(mainSource, /enableAutoPopulateDailyNotes/u);
+  assert.doesNotMatch(mainSource, /this\.settings\.enableAutoPopulateDailyNotes/u);
 });
 
 test('checkbox mapping load migration uses legacy statuses and persists one canonical snapshot', () => {
@@ -802,9 +803,6 @@ test('retired bundled properties migrate once', () => {
 test('optional inline and context surfaces default to the lean off state', () => {
   for (const key of [
     'enableInlinePersistentMenus',
-    'enableInLivePreview',
-    'enableInPreview',
-    'enableInSidePanels',
     'showCustomPropertiesInInlineUi',
     'showCustomPropertiesInContextMenu',
     'inheritNotebookNavigatorTagColors',
@@ -1102,4 +1100,29 @@ test('a local save invalidates an older external settings read', async () => {
   finishRead({identity:'old'});
   assert.equal(await refreshing, 0);
   assert.equal(live.identity, 'id');
+});
+
+
+test('inert legacy controls and configuration are absent while current record and appearance settings remain',()=>{
+ const retired=["enableInLivePreview", "enableInPreview", "enableInSidePanels", "nativeMenuPlacement", "enableAutoRename", "autoSyncTitleFromFilename", "autoSaveFolderPath", "enableChecklistCompletionProperty", "checklistCompletionPropertyKey", "checklistFinalPromptStatuses", "enableArchiveTagMove", "archiveUseDailyFolder", "enableAutoPopulateDailyNotes", "autoEmbedIgnoreFolders", "autoEmbedIgnoreTags", "menuTextScale", "buttonScale", "controlScale", "menuDensity", "menuRadiusScale", "inlinePanelMaxWidth", "modalWidth", "modalMaxHeightVh", "subitemsMarginBottom", "dailyNavScale", "appearanceSyncModes"];
+ for(const key of retired){assert.doesNotMatch(typesSource,new RegExp('\\b'+key+'\\b'));assert.doesNotMatch(constantsSource,new RegExp('\\b'+key+'\\b'));assert.doesNotMatch(settingsTabSource,new RegExp('\\b'+key+'\\b'));}
+ for(const name of ['Live menu position','Visible day buttons','Nav resting opacity'])assert.ok(settingsTabSource.includes(name),name);
+});
+
+test('ordinary GCM persistence omits retired options against fresh state without startup writes or private-state loss',async()=>{
+ const {SettingsPersistenceCoordinator,reconcilePersistedSettingsInPlace,RETIRED_INERT_SETTING_KEYS}=await importModule('../src/settings-persistence.ts');
+ const ast=ts.createSourceFile('main.ts',mainSource,ts.ScriptTarget.Latest,true);const cls=ast.statements.find(node=>ts.isClassDeclaration(node)&&node.name?.text==='TPSGlobalContextMenuPlugin');
+ assert.ok(cls,'actual plugin class');const wanted=['stripLegacySettingsFields','ensureSettingsPersistence','persistSettingsSnapshot'];
+ const methods=wanted.map(name=>{const method=cls.members.find(node=>node.name?.getText(ast)===name);assert.ok(method,name);return method.getText(ast);});
+ const compiled=ts.transpileModule('class Owner {'+methods.join('\n')+'}',{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText;
+ const Owner=new Function('SettingsPersistenceCoordinator','RETIRED_HOME_SETTING_KEYS','RETIRED_INERT_SETTING_KEYS',compiled+';return Owner;')(SettingsPersistenceCoordinator,[],RETIRED_INERT_SETTING_KEYS);
+ const retired=Object.fromEntries(["enableInLivePreview", "enableInPreview", "enableInSidePanels", "nativeMenuPlacement", "enableAutoRename", "autoSyncTitleFromFilename", "autoSaveFolderPath", "enableChecklistCompletionProperty", "checklistCompletionPropertyKey", "checklistFinalPromptStatuses", "enableArchiveTagMove", "archiveUseDailyFolder", "enableAutoPopulateDailyNotes", "autoEmbedIgnoreFolders", "autoEmbedIgnoreTags", "menuTextScale", "buttonScale", "controlScale", "menuDensity", "menuRadiusScale", "inlinePanelMaxWidth", "modalWidth", "modalMaxHeightVh", "subitemsMarginBottom", "dailyNavScale", "appearanceSyncModes"].map(key=>[key,'unused']));
+ let disk={...retired,enableLogging:false,nativeRecordStorageAliases:[{identityPropertyKey:'customId'}],lastArchiveTagSweepDate:'2026-10-01',rules:{opaque:true},privateState:{keep:true}};
+ const original=structuredClone(disk);let writes=0,reads=0;
+ const host=Object.assign(new Owner(),{settings:structuredClone(disk),settingsPersistence:null,async loadData(){reads++;return structuredClone(disk);},async saveData(value){writes++;disk=structuredClone(value);}});
+ host.reconcilePersistedSettings=(requested,persisted)=>reconcilePersistedSettingsInPlace(host.settings,requested,persisted);
+ host.stripLegacySettingsFields(host.settings);await host.persistSettingsSnapshot();assert.equal(writes,0);assert.equal(reads,0);assert.deepEqual(disk,original);
+ disk.privateState.concurrent=true;host.settings.enableLogging=true;await host.persistSettingsSnapshot();
+ assert.equal(writes,1);assert.equal(reads,1);for(const key of Object.keys(retired))assert.equal(Object.hasOwn(disk,key),false,key);
+ assert.equal(disk.enableLogging,true);assert.deepEqual(disk.nativeRecordStorageAliases,original.nativeRecordStorageAliases);assert.equal(disk.lastArchiveTagSweepDate,original.lastArchiveTagSweepDate);assert.deepEqual(disk.rules,original.rules);assert.deepEqual(disk.privateState,{keep:true,concurrent:true});
 });

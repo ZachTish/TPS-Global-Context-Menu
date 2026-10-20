@@ -92,6 +92,7 @@ import {
 import {
   reconcilePersistedSettingsInPlace,
   SettingsPersistenceCoordinator,
+  RETIRED_INERT_SETTING_KEYS,
   type SettingsRecord,
 } from './settings-persistence';
 import {
@@ -1585,7 +1586,10 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
     if (!this.settingsPersistence) {
       this.settingsPersistence = new SettingsPersistenceCoordinator(
         async () => (await this.loadData()) as SettingsRecord | null,
-        async (settings) => this.saveData(settings),
+        async (settings) => {
+          for (const key of RETIRED_INERT_SETTING_KEYS) delete settings[key];
+          await this.saveData(settings);
+        },
         (requested, persisted) => this.reconcilePersistedSettings(requested, persisted),
       );
       this.settingsPersistence.setBaseline(
@@ -2129,6 +2133,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   }
 
   private stripLegacySettingsFields(record: Record<string, unknown>): void {
+    for (const key of RETIRED_INERT_SETTING_KEYS) delete record[key];
     delete record.enableShiftClickCancel;
     delete record.enableViewModeSwitching;
     delete record.viewModeFrontmatterKey;

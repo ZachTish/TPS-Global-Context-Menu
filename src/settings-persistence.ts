@@ -1,3 +1,5 @@
+export const RETIRED_INERT_SETTING_KEYS = ["enableInLivePreview", "enableInPreview", "enableInSidePanels", "nativeMenuPlacement", "enableAutoRename", "autoSyncTitleFromFilename", "autoSaveFolderPath", "enableChecklistCompletionProperty", "checklistCompletionPropertyKey", "checklistFinalPromptStatuses", "enableArchiveTagMove", "archiveUseDailyFolder", "enableAutoPopulateDailyNotes", "autoEmbedIgnoreFolders", "autoEmbedIgnoreTags", "menuTextScale", "buttonScale", "controlScale", "menuDensity", "menuRadiusScale", "inlinePanelMaxWidth", "modalWidth", "modalMaxHeightVh", "subitemsMarginBottom", "dailyNavScale", "appearanceSyncModes"] as const;
+
 export type SettingsRecord = Record<string, unknown>;
 
 type PendingSettingsWrite = {
