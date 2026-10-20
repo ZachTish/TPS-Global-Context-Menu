@@ -3354,6 +3354,29 @@ test('canonical GCM creation creates every parent introduced by a nested date fo
   assert.equal(harness.stats.createCount, 1);
 });
 
+test('daily-note creation accepts a date filename with general multi-kind template properties', async () => {
+  installDailyNoteMoment();
+  const { NoteOperationService } = await loadNoteOperationService();
+  class FakeFile {
+    constructor(path) {
+      this.path = path;
+      this.extension = path.split('.').pop();
+      this.basename = path.split('/').pop().replace(/\.[^.]+$/, '');
+      this.parent = { path: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '/' };
+    }
+  }
+  const h = createDailyNoteServiceHarness(FakeFile, {
+    runtimeDailyNotes: { folder: 'Inbox/Daily', format: 'YYYY-MM-DD', template: 'Templates/Daily' },
+  });
+  h.files.set('Templates/Daily.md', '---\nkind: ["note", "entity"]\nentityKind: day\n---\nKeep this authored body.');
+  const file = await new NoteOperationService(h.plugin).ensureDailyNote('2026-10-20 00:00:00');
+  assert.equal(file?.path, 'Inbox/Daily/2026-10-20.md');
+  assert.match(h.files.get(file.path), /kind: \["note",\s*"entity"\]/);
+  assert.match(h.files.get(file.path), /entityKind: "?day"?/);
+  assert.match(h.files.get(file.path), /Keep this authored body\./);
+  assert.equal(h.stats.createCount, 1);
+});
+
 test('generic title synchronization checks workflow ownership only at a real mutation boundary', async () => {
   const priorWindow = globalThis.window;
   const invalidMoment = () => ({ isValid: () => false, format: () => '' });

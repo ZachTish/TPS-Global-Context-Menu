@@ -261,6 +261,42 @@ test('flat-root readable records are never classified as Daily Notes', () => {
   assert.equal(identity.findExistingDailyNoteForIsoDate(harness.app, {}, '2026-08-25'), null);
 });
 
+test('Daily Notes filenames recognize plain and multi-kind notes without requiring a classification', () => {
+  const settings = {
+    nativeRecordKindPropertyKeys: {
+      dailynote: { primary: { kindList: { key: 'kind', value: 'entity' } }, aliases: [], discriminator: { key: 'entityKind', value: 'day' } },
+      task: { primary: { kindList: { key: 'kind', value: 'task' } }, aliases: [] },
+    },
+  };
+  for (const frontmatter of [{}, { kind: 'note' }, { kind: ['note', 'entity'], entityKind: 'day' }, { kind: ['journal'], title: 'My day' }]) {
+    const h = createHarness([{ path: 'Daily/2026-10-20.md', frontmatter }], { folder: 'Daily', format: 'YYYY-MM-DD' });
+    const file = h.files.get('Daily/2026-10-20.md');
+    for (let repeat = 0; repeat < 100; repeat++) {
+      assert.equal(identity.parseDailyNoteFileDate(h.app, settings, file), '2026-10-20', JSON.stringify(frontmatter));
+      assert.equal(identity.findCanonicalDailyNoteForIsoDate(h.app, settings, '2026-10-20'), file);
+    }
+    assert.equal(h.vaultReadCount, 0);
+    assert.equal(h.markdownScanCount, 0);
+    assert.deepEqual(h.renames, []);
+    assert.deepEqual(h.frontmatter.get(file.path), frontmatter);
+  }
+});
+
+test('filename recognition still excludes other record types, date-prefixed records and files outside Daily Notes', () => {
+  for (const frontmatter of [
+    { kind: 'task' }, { kind: ['note', 'task'] }, { kind: 'calendar-event' },
+    { kind: 'food-entry' }, { kind: 'workout-session' }, { runKind: 'run' },
+    { kind: 'note', type: 'project' },
+  ]) {
+    const h = createHarness([{ path: 'Daily/2026-10-20.md', frontmatter }], { folder: 'Daily', format: 'YYYY-MM-DD' });
+    assert.equal(identity.parseDailyNoteFileDate(h.app, {}, h.files.get('Daily/2026-10-20.md')), null, JSON.stringify(frontmatter));
+  }
+  for (const path of ['Other/2026-10-20.md', 'Daily/2026-10-20 meeting.md']) {
+    const h = createHarness([{ path, frontmatter: { kind: 'note' } }], { folder: 'Daily', format: 'YYYY-MM-DD' });
+    assert.equal(identity.parseDailyNoteFileDate(h.app, {}, h.files.get(path)), null);
+  }
+});
+
 test('strict whole-name legacy formats and authoritative metadata remain supported', () => {
   const harness = createHarness([
     { path: '2026-08-25.md' },
@@ -399,7 +435,7 @@ test('incomplete two-level identity and conflicting record kinds remain excluded
     assert.equal(identity.parseDailyNoteFileDate(harness.app, settings, harness.files.get('Journal.md')), null, JSON.stringify(frontmatter));
   }
   const plainNote = createHarness([{ path: '2026-09-20.md', frontmatter: { kind: 'note' } }], { format: 'YYYY-MM-DD' });
-  assert.equal(identity.findCanonicalDailyNoteForIsoDate(plainNote.app, {}, '2026-09-20'), null);
+  assert.equal(identity.findCanonicalDailyNoteForIsoDate(plainNote.app, {}, '2026-09-20'), plainNote.files.get('2026-09-20.md'));
 });
 
 test('two-level identity retains conflicting-date and live-source guards', async () => {
@@ -428,8 +464,11 @@ test('an authoritative non-Daily kind wins over stale Daily Note tags and blocks
   assert.deepEqual(harness.renames, []);
 });
 
-test('custom authored kind values veto canonical and strict-path Daily identity', async () => {
-  const settings = { nativeRecordKindPropertyKey: 'recordKind' };
+test('configured custom record identities veto canonical and strict-path Daily identity', async () => {
+  const settings = { nativeRecordKindPropertyKey: 'recordKind', nativeRecordKindPropertyKeys: {
+    meeting: { scalar: { key: 'recordKind', value: 'meeting' } },
+    'meeting-list': { kindList: { key: 'kinds', value: 'meeting' } },
+  } };
   const canonicalPath = 'Tue, Aug 25 2026.md';
   const harness = createHarness([
     { path: canonicalPath, frontmatter: { recordKind: 'meeting' } },

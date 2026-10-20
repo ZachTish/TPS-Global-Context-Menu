@@ -2,7 +2,7 @@ import { App, TFile, Notice, FuzzySuggestModal, Modal, parseYaml, stringifyYaml,
 import type TPSGlobalContextMenuPlugin from "../main";
 import * as logger from "../logger";
 import { mergeNormalizedTags, normalizeTagValue } from "../utils/tag-utils";
-import { getDailyNoteScheduledPropertyKey, getDailyNoteScheduledValueForIsoDate, getIsoDateFromScheduledValue, hasAuthoritativeNonDailyNoteIdentity, normalizeExpectedDailyNotePath, reconcileExistingDailyNoteForIsoDate } from "../utils/daily-note-task-schedule";
+import { getDailyNotePathForIsoDate, getDailyNoteScheduledPropertyKey, getDailyNoteScheduledValueForIsoDate, getIsoDateFromScheduledValue, hasAuthoritativeNonDailyNoteIdentity, normalizeExpectedDailyNotePath, reconcileExistingDailyNoteForIsoDate } from "../utils/daily-note-task-schedule";
 import type { CustomProperty } from "../types";
 import { propertyUsesEntityOptions } from "../utils/property-option-source";
 import { applyCoreDailyNoteTemplateVariables, ensureDailyNoteTitleFallback } from "../utils/daily-note-creation";
@@ -1516,7 +1516,9 @@ export class NoteOperationService {
         }
 
         const isCompanionOutput = isFilePropertiesCompanionRecord(document.frontmatter);
-        if (isCompanionOutput || hasAuthoritativeNonDailyNoteIdentity(document.frontmatter, this.plugin.settings)) {
+        const filenameMatches = !!options.date
+            && normalizePath(file.path) === getDailyNotePathForIsoDate(this.app, this.plugin.settings, options.date);
+        if (isCompanionOutput || hasAuthoritativeNonDailyNoteIdentity(document.frontmatter, this.plugin.settings, filenameMatches)) {
             logger.flowWarn('DailyNote', 'ensure:live-output-identity-blocked', {
                 stage: options.stage,
                 date: options.date ?? null,

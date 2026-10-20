@@ -1,5 +1,17 @@
 # TPS Global Context Menu
 
+## 10.3.0 — Simpler Records settings and daily-note filename recognition
+
+**Properties → Records** now keeps record configuration separate from **Custom fields**. Daily note recognition is first: it displays the effective Daily notes folder/date format and links directly to its owning Core Daily notes (or Periodic Notes) settings. Date-named daily notes need no Kind property or tag. General/unmapped Kind values, including multi-kind notes such as `kind: [note, entity]`, no longer veto an otherwise matching daily filename. The folder and complete date stem still matter; a date prefix in a transaction title does not opt it in. Configured other record types, known task/event/Health identities, companions, process records, ambiguous mappings, conflicting explicit daily dates and current-source creation guards remain protected. Legacy explicit daily-note classifications remain readable.
+
+Records has one selected record type with a readable property summary. Its **Edit record properties** disclosure contains the existing matching, subtype, writer, alias, migration and removal controls. **Add type** reveals the new-type form only when requested. Labels now say **Subtype**, **Save for new notes**, and **Update existing notes**. Base new-note routes stay on Records. Every previous setting key, default, migration action and creation route is preserved. Opening settings never converts notes or changes mappings.
+
+The destination map remains five top-level destinations: **Properties** (default), **Menus & surfaces**, **Workflows**, **Appearance**, and **Advanced**. Properties defaults to **Custom fields**, with **Records** and **Note maintenance** one click away. Workflows retains Daily notes, Tasks, Child notes, Status values and Time tracking. Advanced retains storage, identity keys, template safeguards and diagnostics. Records has one disclosure level; Add type and route-editor state are transient. The existing native controls and GCM-scoped responsive navigation keep wrapping labels, automatic button heights, keyboard focus and narrow-screen scroll strips. No persisted UI schema or recognition setting is added: Daily notes remains the configuration owner.
+
+Recognition uses the shared daily-note classifier and the existing source-checked creation owner. No note rewrite, file-open maintenance, extra inventory, watcher, cache, polling or repair system is added. A known other record type still wins over a matching date filename. A frontmatter `title` alone does not turn an arbitrary filename into a daily note; configure the actual filename format through Daily notes.
+
+Regression coverage includes the former installed failure, 100 repeated filename/lookup operations per metadata shape with zero body reads/scans/renames, multi-kind and untyped records, other-record exclusions, unchanged conflict/race guards, template-owned creation, and actual settings-handler tests for disclosure depth, mapping controls, cancellation/focus, ownership handoff and no save/vault work on opening Records. All **1,977** declared test executions passed. In the reloaded 10.3.0 test vault, native Previous/Next navigation recognized both a multi-kind daily note and a note with no properties. Four hundred installed recognition/lookup API calls made zero reads, scans or mutation attempts. All settings destinations, the closed record editor, type switching, Add/Cancel and the Core settings handoff were inspected; temporary in-memory mappings were restored, all nine saved plugin settings files and both fixture bodies stayed byte-identical, and fixtures went directly to `_archive`. The separate final build and artifact hashes are recorded in [release validation](release-notes/10.3.0.md). Minimum Obsidian remains **1.10.0**. Production and physical iPhone acceptance are separate.
+
 ## 10.2.1 — Core Bases card and selection menus
 
 Core Bases emits authoritative `bases-context-menu` file/selection events, while native Kanban card links emit `link-context-menu`. GCM now adds its existing actions to that exact file set through the current menu builder, before consulting the older DOM allowlist. Cards without link/data-path elements and stale explorer/Navigator selections no longer omit or redirect GCM actions. Single-card and multiple-file events both retain Core’s selected targets; inline-menu-only configuration still disables native augmentation. Existing Navigator ownership and other menu sources retain their guards. No DOM handler, observer, scan, note read/write, setting or persisted state is added. The retired TPS Kanban plugin remains retired.
@@ -1646,7 +1658,7 @@ Validation on 2026-09-25: 41 focused checks, all 1,232 full-suite checks and 160
 
 Shared properties, entity and task contracts, context menus, note interactions, and TPS Table/List Base views.
 
-Current release: [10.0.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/10.0.0) · Obsidian 1.10.0+ · Desktop and mobile.
+Current release: [10.3.0](https://github.com/ZachTish/TPS-Global-Context-Menu/releases/tag/10.3.0) · Obsidian 1.10.0+ · Desktop and mobile.
 
 ## Install with BRAT
 
@@ -1664,9 +1676,11 @@ Validation on 2026-09-23: GCM passed 101 focused native-record checks, 1,228 ful
 
 ## Configure fields and workflows
 
-The settings hub opens on **Rules & fields**. Other destinations are **Menus & surfaces**, **Workflows**, **Appearance**, and **Advanced**.
+The settings hub opens on **Properties → Custom fields**. Other destinations are **Menus & surfaces**, **Workflows**, **Appearance**, and **Advanced**.
 
 - **Custom fields** defines keys, labels, types, value sources, and visibility. Search by name/key or filter by type; only one property editor stays expanded. Search and disclosure state are transient.
+- **Records** shows daily-note filename recognition and its Core/Periodic settings handoff, followed by one selected record mapping with an optional editor and Base new-note routes. Property mappings and migrations remain explicit; daily-note filename recognition needs neither a Kind field nor a tag.
+- **Note maintenance** contains the existing automatic-write exclusions. Opening any settings destination does not migrate or normalize notes.
 - TPS Notebook Navigator 6.1.0+ imports defined keys through `api.propertyCatalog` version 1. Existing Navigator ordering and visibility win; removing a GCM definition does not delete note data or Navigator configuration.
 - Whole notes are the supported record model. GCM owns shared identity, configured field mappings and status choices consumed by other TPS plugins; inline records are retired.
 - Navigator presentation rules provide virtual sorting/icon/color values. User-authored icon, color, sort, and hidden properties are preserved during recurrence cleanup.

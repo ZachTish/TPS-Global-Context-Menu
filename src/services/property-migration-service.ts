@@ -152,7 +152,7 @@ export class PropertyMigrationService {
     if (!kinds.length) throw new Error('Enable Health before changing its record key.');
     to = to.trim();
     if (!/^[A-Za-z_][A-Za-z0-9_-]*$/.test(to)) throw new Error('Enter a valid frontmatter key.');
-    if (kinds.some(kind => { const mapping = kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, kind); return mapping && !('key' in mapping); })) throw new Error('These records use a configured classification. Change it in GCM → Rules & fields → Custom fields.');
+    if (kinds.some(kind => { const mapping = kindClassification(this.plugin.settings.nativeRecordKindPropertyKeys, kind); return mapping && !('key' in mapping); })) throw new Error('These records use a configured classification. Change it in GCM → Properties → Records.');
     const fromKeys = [...new Set(kinds.map(kind => this.plugin.nativeRecordService.getStorageProfile(kind).kindPropertyKey))];
     if (fromKeys.length !== 1) throw new Error('Health records have inconsistent key mappings. Repair these before migrating.');
     if (fromKeys[0] === to) return false;

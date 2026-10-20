@@ -284,18 +284,24 @@ function analyzeDailyNoteFile(
   // An authored record kind is stronger than a stale Daily Note tag/type. A
   // calendar, food, task, or workout record must never be renamed merely
   // because it retained old Daily Note metadata.
-  if (frontmatter && hasAuthoritativeNonDailyNoteIdentity(frontmatter, settings)) {
+  // Reject actual record identities before doing date parsing. General Kind
+  // values remain neutral until the configured filename can establish a day.
+  if (frontmatter && hasAuthoritativeNonDailyNoteIdentity(frontmatter, settings, true)) {
     return { identity: null, conflictingDates: [] };
   }
 
-  const signals: DailyNoteIdentity[] = [];
   const canonicalDate = getCanonicalDailyNotePathDate(app, settings, file.path);
-  if (canonicalDate) signals.push({ isoDate: canonicalDate, source: 'canonical-path' });
-
   const candidate = getDailyNotePathDateCandidate(file.path, getDailyNoteFolder(app));
   const strictDate = candidate
     ? parseStrictDailyNoteDate(candidate, getDailyNoteDateFormat(app, settings))
     : null;
+  if (explicitDailyNoteIdentity && !canonicalDate && !strictDate
+    && hasAuthoritativeNonDailyNoteIdentity(frontmatter!, settings)) {
+    return { identity: null, conflictingDates: [] };
+  }
+
+  const signals: DailyNoteIdentity[] = [];
+  if (canonicalDate) signals.push({ isoDate: canonicalDate, source: 'canonical-path' });
   if (strictDate) signals.push({ isoDate: strictDate, source: 'strict-path' });
 
   if (explicitDailyNoteIdentity) {
@@ -802,6 +808,7 @@ function normalizeFrontmatterList(value: unknown): string[] {
 export function hasAuthoritativeNonDailyNoteIdentity(
   frontmatter: Record<string, unknown>,
   settings: unknown,
+  allowUnmappedKinds = false,
 ): boolean {
   if (isProcessRunFrontmatter(frontmatter)) return true;
   let configuredDaily = false;
@@ -834,15 +841,22 @@ export function hasAuthoritativeNonDailyNoteIdentity(
     (settings as { nativeRecordKindPropertyKey?: string } | null | undefined)?.nativeRecordKindPropertyKey || '',
   ).trim();
   const authoredKindKeys = Array.from(new Set(['kind', 'kinds', configuredKindKey, ...configuredDailyMarkers.keys()].filter(Boolean)));
-  // `kind`, `kinds`, and the configured native kind key are record identity,
-  // not an extensible allowlist. The note/daily pair permits only the broad
-  // "note" marker; other mixed Daily/non-Daily values still fail closed.
+  const nonDailyKinds = new Set([
+    'activityentry', 'area', 'asset', 'calendarevent', 'exercise', 'food', 'foodentry',
+    'project', 'recipe', 'task', 'transaction', 'workflow', 'workoutplan', 'timeentry',
+    'workoutexercise', 'workoutsession',
+  ]);
+  // A matching Daily Notes filename needs no metadata opt-in. Unmapped broad
+  // kinds (including multi-kind notes) do not veto it; actual record identities
+  // and ambiguous configured mappings still do. Outside that filename scope,
+  // retain the existing explicit-classification requirement.
   const twoLevelDaily = hasTwoLevelDailyNoteIdentity(frontmatter);
   if (authoredKindKeys.some((key) => normalizeFrontmatterList(getFrontmatterValue(frontmatter, key))
     .map(normalizeDailyNoteMarker)
     .some((marker) => !isAcceptedDailyNoteMarker(marker)
       && !(twoLevelDaily && key.toLowerCase() === 'kind' && marker === 'note')
-      && !(configuredDaily && configuredDailyMarkers.get(key.toLowerCase())?.has(marker))))) return true;
+      && !(configuredDaily && configuredDailyMarkers.get(key.toLowerCase())?.has(marker))
+      && !(allowUnmappedKinds && !nonDailyKinds.has(marker))))) return true;
 
   // `type`/`types` predate the native record contract and remain a deliberate
   // compatibility surface: accepted Daily aliases opt in, while only known
@@ -850,20 +864,6 @@ export function hasAuthoritativeNonDailyNoteIdentity(
   const typeMarkers = ['type', 'types']
     .flatMap((key) => normalizeFrontmatterList(getFrontmatterValue(frontmatter, key)))
     .map(normalizeDailyNoteMarker);
-  const nonDailyKinds = new Set([
-    'activityentry',
-    'area',
-    'asset',
-    'calendarevent',
-    'exercise',
-    'food',
-    'foodentry',
-    'project',
-    'recipe',
-    'task',
-    'workoutexercise',
-    'workoutsession',
-  ]);
   return typeMarkers.some((marker) => nonDailyKinds.has(marker));
 }
 
