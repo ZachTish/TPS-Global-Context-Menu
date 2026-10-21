@@ -40,21 +40,46 @@ test('remaining task popup card uses the shared keyboard-aware overlay', () => {
   assert.match(mobileOverlay, /this\.targetWindow\.visualViewport\?\.removeEventListener\('resize'/);
 });
 
-test('existing TPS plugin modal files opt into the shared mobile contract', () => {
-  const pluginRoots = [
-    '../../TPS-Calendar-Base (Dev)/src',
-    '../../TPS-Controller (Dev)/src',
-    '../../TPS-Finances (Dev)/src',
-    '../../TPS-health (Dev)/src',
-    '../../tps-messager/src',
-  ].map((path) => fileURLToPath(new URL(path, import.meta.url)));
-  const missing = pluginRoots.flatMap(sourceFiles)
-    .filter((path) => /extends Modal|new Modal\(/.test(readFileSync(path, 'utf8')))
-    .filter((path) => !readFileSync(path, 'utf8').includes('tps-keyboard-aware-modal'));
-  assert.deepEqual(missing, []);
-  const healthSource = readFileSync(fileURLToPath(new URL('../../TPS-health (Dev)/src/main.ts', import.meta.url)), 'utf8');
-  assert.doesNotMatch(healthSource, /setupKeyboardAwareHealthModal/);
-  assert.match(readFileSync(`${srcRoot}/utils/mobile-overlay.ts`, 'utf8'), /target\.scrollIntoView/);
+test('shared focus handling scrolls only opted-in connected surfaces and releases listeners', () => {
+  const source = ts.transpileModule(readFileSync(`${srcRoot}/utils/mobile-overlay.ts`, 'utf8'), {
+    compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2020 },
+  }).outputText;
+  const timers = new Map(), windowEvents = new Map(), documentEvents = new Map();
+  const properties = new Map();
+  let nextTimer = 0;
+  const listen = events => ({
+    addEventListener(name, handler) { events.set(name, handler); },
+    removeEventListener(name, handler) { assert.equal(events.get(name), handler); events.delete(name); },
+  });
+  const window = { ...listen(windowEvents), innerHeight: 800, innerWidth: 400,
+    setTimeout(callback) { const id = ++nextTimer; timers.set(id, callback); return id; },
+    clearTimeout(id) { timers.delete(id); },
+  };
+  const document = { ...listen(documentEvents), documentElement: { style: {
+    setProperty(name, value) { properties.set(name, value); },
+    removeProperty(name) { properties.delete(name); },
+  } } };
+  class Element {
+    constructor(optedIn, connected = true) { this.optedIn = optedIn; this.isConnected = connected; this.scrolls = 0; }
+    closest(selector) {
+      assert.equal(selector, '.modal:is(.mod-tps-gcm, .tps-keyboard-aware-modal), .tps-keyboard-aware-overlay');
+      return this.optedIn ? { contains: target => target === this } : null;
+    }
+    scrollIntoView() { this.scrolls++; }
+  }
+  const module = {};
+  new Function('exports', 'window', 'document', 'HTMLElement', source)(module, window, document, Element);
+  const dispose = module.installVisibleViewportContract();
+  const flush = () => { const pending = [...timers.values()]; timers.clear(); pending.forEach(callback => callback()); };
+  for (const [optedIn, connected, expected] of [[false, true, 0], [true, true, 3], [true, false, 0]]) {
+    const target = new Element(optedIn, connected);
+    documentEvents.get('focusin')({ target }); flush();
+    assert.equal(target.scrolls, expected);
+  }
+  const closing = new Element(true);
+  documentEvents.get('focusin')({ target: closing }); dispose(); flush();
+  assert.equal(closing.scrolls, 0);
+  assert.equal(timers.size + windowEvents.size + documentEvents.size + properties.size, 0);
 });
 
 // Compile unchanged production methods; mock only the host/DOM boundaries.

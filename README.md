@@ -2,6 +2,8 @@
 
 ## Development workflow
 
+GCM tests its own opt-in keyboard contract: opted-in connected inputs scroll, unrelated and detached surfaces do not, and disposal clears timers/listeners. The obsolete traversal of other plugins’ archived `Dev` modal files is removed; each consumer owns its UI acceptance. Relocation changes tooling/tests only, with no runtime or version change.
+
 Run `npm test`, then `npm run build` for the separate final production-mode build. Both commands stay inside this checkout and never deploy or reload a vault. The build needs only this repository and its declared dependencies; no parent workspace helper is imported. Deployment is an explicit test-vault operation owned by the workspace release checklist. Runtime artifacts and private settings are never copied back into source. This tooling-only change does not alter the plugin version or runtime behavior.
 
 ## 11.0.0 — Remove inert menu and legacy options
