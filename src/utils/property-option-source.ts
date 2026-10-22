@@ -1,6 +1,6 @@
 import type { CustomProperty, PropertyOptionSource } from '../types';
 
-const SOURCE_ORDER: readonly PropertyOptionSource[] = ['manual', 'vault', 'entity'];
+const SOURCE_ORDER: readonly PropertyOptionSource[] = ['manual', 'vault', 'entity', 'linked'];
 
 type PropertySourceShape = Pick<
   CustomProperty,

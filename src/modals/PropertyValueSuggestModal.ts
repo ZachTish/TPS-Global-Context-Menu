@@ -1,4 +1,7 @@
-import { App, FuzzySuggestModal, Notice } from 'obsidian';
+import { linkedChoiceInput, readLinkedChoices, linkedChoiceMatches, usesLinkedOptions, type LinkedChoiceState } from '../utils/linked-property-options';
+import { setLinkedPropertyChoice } from '../services/linked-property-edit';
+import type TPSGlobalContextMenuPlugin from '../main';
+import { App, FuzzySuggestModal, Notice, type TFile, type EventRef } from 'obsidian';
 import type { FuzzyMatch } from 'obsidian';
 import type { CustomProperty } from '../types';
 import type {
@@ -33,6 +36,8 @@ import { TextInputModal } from './text-input-modal';
 import * as logger from '../logger';
 
 export type PropertyValueChoice =
+  | { kind: 'info'; value: ''; label: string; detail: string }
+  | { kind: 'open-source'; value: string; label: string; detail: string }
   | { kind: 'clear'; value: ''; label: string; detail: string }
   | { kind: 'literal'; value: string; label: string; detail: string }
   | { kind: 'entity'; value: string; label: string; detail: string; entity: EntityReferenceChoice }
@@ -40,6 +45,10 @@ export type PropertyValueChoice =
 
 export class PropertyValueSuggestModal extends FuzzySuggestModal<PropertyValueChoice> {
   private items: PropertyValueChoice[] = [];
+  linkedStates: LinkedChoiceState[] = [];
+  private linkedRefs: Array<{offref(ref: EventRef): void; ref: EventRef}> = [];
+  private linkedFingerprints = '';
+  private closed = false;
   private readonly entityIndex: EntityIndexQueryable | null;
   private readonly acceptedKinds: string[];
 
@@ -49,6 +58,7 @@ export class PropertyValueSuggestModal extends FuzzySuggestModal<PropertyValueCh
     private readonly property: CustomProperty,
     private readonly currentValue: string,
     private readonly onChoose: (choice: PropertyValueChoice) => void | Promise<void>,
+    private readonly linkedFiles: TFile[] = [],
   ) {
     super(app);
     this.entityIndex = resolveEntityIndexQueryable(source);
@@ -57,6 +67,33 @@ export class PropertyValueSuggestModal extends FuzzySuggestModal<PropertyValueCh
     this.emptyStateText = 'Loading property choices…';
     this.limit = 500;
     void this.loadItems();
+  }
+
+  onOpen(): void {
+    super.onOpen();
+    if (!usesLinkedOptions(this.property)) return;
+    const refresh = (file?: TFile) => {
+      if (this.closed || (file && !this.linkedFiles.includes(file) && !this.linkedStates.some(s => s.source === file) && this.linkedStates.every(s => !!s.source))) return;
+      const signature = JSON.stringify(this.linkedFiles.map(f => linkedChoiceInput(this.app, this.property, f).fingerprint));
+      if (signature === this.linkedFingerprints) return;
+      this.linkedFingerprints = signature;
+      void this.loadItems();
+    };
+    const cache = this.app.metadataCache, vault = this.app.vault;
+    this.linkedRefs = [
+      {offref: ref => cache.offref(ref), ref: cache.on('changed', refresh)},
+      {offref: ref => cache.offref(ref), ref: cache.on('resolved', () => refresh())},
+      {offref: ref => vault.offref(ref), ref: vault.on('rename', file => refresh(file as TFile))},
+      {offref: ref => vault.offref(ref), ref: vault.on('delete', file => refresh(file as TFile))},
+    ];
+    refresh();
+  }
+
+  onClose(): void {
+    this.closed = true;
+    this.linkedRefs.forEach(({offref, ref}) => offref(ref));
+    this.linkedRefs = [];
+    super.onClose();
   }
 
   getItems(): PropertyValueChoice[] {
@@ -111,6 +148,8 @@ export class PropertyValueSuggestModal extends FuzzySuggestModal<PropertyValueCh
   }
 
   onChooseItem(item: PropertyValueChoice, _evt: MouseEvent | KeyboardEvent): void {
+    if (item.kind === 'info') return;
+    if (item.kind === 'open-source') { void this.app.workspace.openLinkText(item.value, '', false); return; }
     if (item.kind === 'custom') {
       const isList = this.property.type === 'list';
       new TextInputModal(
@@ -165,6 +204,25 @@ export class PropertyValueSuggestModal extends FuzzySuggestModal<PropertyValueCh
   }
 
   private async loadItems(): Promise<void> {
+    if (usesLinkedOptions(this.property)) {
+      this.linkedStates = this.linkedFiles.map(file => readLinkedChoices(this.app, this.property, file));
+      this.linkedFingerprints = JSON.stringify(this.linkedStates.map(state => state.fingerprint));
+      const first = this.linkedStates[0];
+      const choices = (first?.choices || []).filter(c => this.linkedStates.every(s => s.choices.some(v => v.value === c.value)));
+      const items: PropertyValueChoice[] = choices.map(c => ({kind: 'literal', value: c.value, label: c.label, detail: 'From linked note'}));
+      const message = this.linkedStates.find(s => s.message)?.message || (!choices.length ? 'No shared choices. Edit one note at a time.' : '');
+      if (message) items.unshift({kind: 'info', value: '', label: message, detail: ''});
+      const invalid = this.linkedFiles.some((file, index) => {
+        const value = this.app.metadataCache.getFileCache(file)?.frontmatter?.[this.property.key];
+        return value != null && value !== '' && !this.linkedStates[index].choices.some(c => linkedChoiceMatches(c, value));
+      });
+      if (invalid) items.unshift({kind: 'info', value: '', label: 'Current value is unavailable for the linked note', detail: 'It is preserved until you choose a replacement.'});
+      if (first?.source) items.push({kind: 'open-source', value: first.source.path, label: 'Open linked note', detail: first.source.basename});
+      this.items = items;
+      this.emptyStateText = 'No matching choices.';
+      this.inputEl?.dispatchEvent(new Event('input', {bubbles: true}));
+      return;
+    }
     const items: PropertyValueChoice[] = [{
       kind: 'clear',
       value: '',
@@ -226,6 +284,16 @@ export function openPropertyValueSuggestModal(
   onChoose: (choice: PropertyValueChoice) => void | Promise<void>,
 ): PropertyValueSuggestModal {
   const modal = new PropertyValueSuggestModal(app, source, property, currentValue, onChoose);
+  modal.open();
+  return modal;
+}
+
+/** Reuses GCM's ordinary selector and whole-note write owner. */
+export function openLinkedPropertyEditor(plugin: TPSGlobalContextMenuPlugin, property: CustomProperty, files: TFile[]): PropertyValueSuggestModal {
+  const modal = new PropertyValueSuggestModal(plugin.app, plugin, property, '', async choice => {
+    if (choice.kind !== 'literal') return;
+    await setLinkedPropertyChoice(plugin, property, files, choice.value, modal.linkedStates);
+  }, files);
   modal.open();
   return modal;
 }

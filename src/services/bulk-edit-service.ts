@@ -397,7 +397,7 @@ export class BulkEditService {
 
     async applyToFiles(
         files: TFile[],
-        callback: (fm: any, file: TFile) => void,
+        callback: (fm: any, file: TFile) => void | Promise<void>,
         options: { writeGuard?: (file: TFile) => boolean } = {},
     ): Promise<number> {
         let count = 0;
@@ -424,8 +424,8 @@ export class BulkEditService {
                 }
                 const changed = await this.plugin.frontmatterMutationService.process(file, (fm) => {
                     if (options.writeGuard?.(file) === false) return;
-                    callback(fm, file);
-                });
+                    return callback(fm, file);
+                }, { kind: 'user' }, options.writeGuard ? () => options.writeGuard?.(file) !== false : undefined);
                 if (!changed) return;
                 if (extension !== 'md') updatedPropertyTargets.push(file);
                 count++;

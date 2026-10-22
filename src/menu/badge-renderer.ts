@@ -1,3 +1,5 @@
+import { usesLinkedOptions } from '../utils/linked-property-options';
+import { openLinkedPropertyEditor } from '../modals/PropertyValueSuggestModal';
 import { App, Menu, TFile, WorkspaceLeaf, setIcon } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
 import { addSafeClickListener } from './menu-controller';
@@ -221,6 +223,7 @@ export class BadgeRenderer {
         if (value) {
           const badge = createBadge(value, `${prop.key} tps-gcm-badge-${value}`, null, (e) => {
             e.stopPropagation();
+            if (usesLinkedOptions(prop)) { openLinkedPropertyEditor(this.plugin, prop, this.filesFromEntries(entries)); return; }
             const menu = new Menu();
             const files = this.filesFromEntries(entries);
             const allWithoutKey = entries.every((entry: any) => {

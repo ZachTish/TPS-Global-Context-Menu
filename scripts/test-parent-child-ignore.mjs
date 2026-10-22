@@ -120,7 +120,7 @@ async function importPropertyRowService() {
   const stubs = new Map([
     ['../main', 'export default class TPSGlobalContextMenuPlugin {}'],
     ['../modals/text-input-modal', 'export class TextInputModal { open() {} }'],
-    ['../modals/PropertyValueSuggestModal', 'export const openPropertyValueSuggestModal = () => {};'],
+    ['../modals/PropertyValueSuggestModal', 'export const openPropertyValueSuggestModal = () => {}; export const openLinkedPropertyEditor = () => {};'],
     ['../logger', 'export const flow = () => {}; export const warn = () => {};'],
   ]);
   const result = await build({

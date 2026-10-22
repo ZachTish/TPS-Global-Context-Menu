@@ -1,3 +1,4 @@
+import { usesLinkedOptions, linkedChoiceProviders } from './utils/linked-property-options';
 import { kindClassification, kindDiscriminator, kindReadClassifications, kindWriterEnabled, normalizeClassificationTag, normalizeKindClassification, type KindClassification } from './utils/kind-classification';
 import { validateNativeBaseCreateRoute } from './utils/native-base-create-routes';
 import { renderNavigatorPropertyVisibility } from './integrations/notebook-navigator-property-visibility';
@@ -2507,6 +2508,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
       ['vault', 'Vault values only'],
       ['manual+vault', 'Manual + vault'],
     ];
+    if (prop.type === 'selector') choices.push(['linked', 'Choices from linked note']);
     if (prop.type !== 'kind' && normalizeAcceptsKind(prop.acceptsKind).length > 0) {
       choices.push(
         ['entity', 'Entities only'],
@@ -2564,6 +2566,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             .addOption('vault+entity', 'Vault + entities')
             .addOption('manual+vault+entity', 'Manual + vault + entities');
         }
+        if (prop.type === 'selector') drop.addOption('linked', 'Choices from linked note');
         drop.setValue(sourceValue).onChange(async (value) => {
           prop.optionSources = decodePropertyOptionSources(value);
           prop.optionsSource = prop.optionSources.includes('vault') ? 'vault' : 'manual';
@@ -2572,6 +2575,33 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           refresh(document.activeElement === drop.selectEl);
         });
       });
+
+    if (usesLinkedOptions(prop)) {
+      const config = prop.linkedOptions ||= {linkProperty: ''};
+      new Setting(optionsDiv).setName('Link property')
+        .setDesc('The property on this note that links to one source note, such as food.')
+        .addText(text => text.setValue(config.linkProperty).setPlaceholder('food').onChange(async value => {
+          config.linkProperty = value.trim(); await this.plugin.saveSettings();
+        }));
+      new Setting(optionsDiv).setName('Read choices from')
+        .setDesc('Use a property on the linked note, or choices supplied by its plugin.')
+        .addDropdown(drop => {
+          drop.addOption('', 'A property on the linked note');
+          const providers = linkedChoiceProviders(this.app);
+          providers.forEach(({id, provider}) => drop.addOption(id, provider.label));
+          if (config.provider && !providers.some(p => p.id === config.provider)) drop.addOption(config.provider, 'Provider unavailable — enable or update its plugin');
+          drop.setValue(config.provider || '').onChange(async value => {
+            config.provider = value || undefined; await this.plugin.saveSettings(); refresh(true);
+          });
+        });
+      if (!config.provider) new Setting(optionsDiv).setName('Choices property')
+        .setDesc('A text or list property on the linked note. Its values become the choices.')
+        .addText(text => text.setValue(config.sourceProperty || '').setPlaceholder('sizes').onChange(async value => {
+          config.sourceProperty = value.trim(); await this.plugin.saveSettings();
+        }));
+      optionsDiv.createDiv({cls: 'setting-item-description', text: 'Choices use indexed properties only. Missing or incompatible values stay visible until you explicitly replace them. Open the linked note from the selector to edit its choices.'});
+      return;
+    }
 
     if (propertyUsesManualOptions(prop)) {
       let draftOptions = manualOptions.join(', ');

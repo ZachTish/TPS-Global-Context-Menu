@@ -1,3 +1,5 @@
+import { usesLinkedOptions } from '../utils/linked-property-options';
+import { openLinkedPropertyEditor } from '../modals/PropertyValueSuggestModal';
 import { summarizePropertySelection, selectionCountLabel } from '../utils/property-selection';
 import { App, Menu, TFile } from "obsidian";
 import TPSGlobalContextMenuPlugin from "../main";
@@ -201,6 +203,7 @@ export class PropertyRowService {
     updateDisplay();
 
     this.d.addSafeClickListener(valueEl, async (e) => {
+      if (usesLinkedOptions(prop)) { openLinkedPropertyEditor(this.plugin, prop, this.filesFromEntries(entries)); return; }
       const allValues = entries.map((e: any) => this.getValueCaseInsensitive(e.frontmatter, prop.key) || "");
       const uniqueValues = new Set(allValues);
       const current = uniqueValues.size === 1 ? allValues[0] : "Mixed";

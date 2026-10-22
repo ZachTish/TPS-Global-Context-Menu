@@ -1,3 +1,5 @@
+import { usesLinkedOptions } from '../utils/linked-property-options';
+import { openLinkedPropertyEditor } from '../modals/PropertyValueSuggestModal';
 import { summarizePropertySelection, selectionCountLabel } from '../utils/property-selection';
 ﻿import { App, TFile, Notice, Setting, setIcon, WorkspaceLeaf, normalizePath, Menu, MarkdownView, getAllTags, Modal } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
@@ -996,6 +998,7 @@ export class PanelBuilder {
   }
 
   private openStackedPropertyEditor(anchor: HTMLElement, entries: any[], prop: any): void {
+    if (usesLinkedOptions(prop)) { openLinkedPropertyEditor(this.plugin, prop, this.filesFromEntries(entries)); return; }
     const propId = String(prop?.id || '').toLowerCase();
     const propKey = String(prop?.key || '').trim();
     const propKeyLower = propKey.toLowerCase();

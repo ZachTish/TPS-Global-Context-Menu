@@ -13,7 +13,7 @@ const wanted = new Set(['renderProperties', 'renderCustomPropertyEditor', 'rende
   ts.forEachChild(node, visit);
 })(ast);
 const bundled = await build({
-  stdin: { contents: `export * from './src/utils/property-options'; export * from './src/utils/property-option-source'; export * from './src/utils/vault-property-definitions'; export * from './src/utils/property-key-identity';`, resolveDir: process.cwd(), loader: 'ts' },
+  stdin: { contents: `export * from './src/utils/linked-property-options'; export * from './src/utils/property-options'; export * from './src/utils/property-option-source'; export * from './src/utils/vault-property-definitions'; export * from './src/utils/property-key-identity';`, resolveDir: process.cwd(), loader: 'ts' },
   bundle: true, platform: 'node', format: 'esm', write: false,
   plugins: [{ name: 'obsidian', setup(b) {
     b.onResolve({ filter: /^obsidian$/ }, () => ({ path: 'obsidian', namespace: 'stub' }));
@@ -204,4 +204,19 @@ test('a failed definition save removes its provisional config and reports the fa
   await cards[0].querySelector('.tps-collapsible-section-content').rows[0].control.click();
   assert.equal(h.tab.plugin.settings.properties.length, 0);
   assert.match(h.notices[0], /Could not save/);
+});
+
+
+test('linked choice settings do not discover vault values and hide unused source fields', () => {
+  for (const provider of [undefined, 'tps-health:food-servings']) {
+    const property = prop('unit', {type:'selector', optionSources:['linked'], linkedOptions:{linkProperty:'food', sourceProperty:'sizes', provider}});
+    const h = harness([property]);
+    const container = new Element();
+    h.tab.renderPropertyOptionSettings(container, property, () => {});
+    assert.equal(h.counts.scans, 0);
+    assert.equal(h.counts.metadata, 0);
+    const names = container.all().flatMap(el => el.rows.map(row => row.name));
+    assert.ok(names.includes('Link property'));
+    assert.equal(names.includes('Choices property'), !provider);
+  }
 });

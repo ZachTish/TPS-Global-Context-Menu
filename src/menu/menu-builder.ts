@@ -1,3 +1,5 @@
+import { usesLinkedOptions } from '../utils/linked-property-options';
+import { openLinkedPropertyEditor } from '../modals/PropertyValueSuggestModal';
 import { summarizePropertySelection, selectionCountLabel } from '../utils/property-selection';
 import { App, Menu, MenuItem, TFile, Notice, normalizePath } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
@@ -962,6 +964,11 @@ export class MenuBuilder {
       if (prop.disabled) {
         item.setDisabled(true);
         (item as any).setTitle(`${title} (Mixed Profiles)`);
+        return;
+      }
+
+      if (usesLinkedOptions(prop)) {
+        item.onClick(() => { openLinkedPropertyEditor(this.plugin, prop, this.getPropertyFiles(entries)); });
         return;
       }
 

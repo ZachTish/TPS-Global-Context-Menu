@@ -8,7 +8,7 @@ async function loadMenuBuilderModule() {
   const stubs = new Map([
     ["../main", "export default class TPSGlobalContextMenuPlugin {}"],
     ["../modals/text-input-modal", "export class TextInputModal { constructor(_app, _label, _value, submit) { globalThis.__tpsLatestTextInputSubmit = submit; } open() {} }"],
-    ["../modals/PropertyValueSuggestModal", "export const openPropertyValueSuggestModal = () => {};"],
+    ["../modals/PropertyValueSuggestModal", "export const openPropertyValueSuggestModal = () => {}; export const openLinkedPropertyEditor = () => {};"],
     ["../modals/FileSuggestModal", "export class FileSuggestModal { constructor(_app, choose, options) { globalThis.__tpsLatestFileSuggestChoose = choose; globalThis.__tpsLatestFileSuggestOptions = options; } open() {} }"],
     ["../modals/MultiFileSelectModal", "export class MultiFileSelectModal { constructor(_app, _choose, options) { globalThis.__tpsLatestMultiFileOptions = options; } open() {} }"],
     ["../modals/file-properties-relink-modal", "export const promptFilePropertiesRelink = () => {};"],

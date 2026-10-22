@@ -68,6 +68,7 @@ export class FrontmatterMutationService {
     file: TFile,
     mutator: FrontmatterMutator,
     cause: FilePropertiesMutationCause = { kind: 'user' },
+    writeGuard?: () => boolean,
   ): Promise<boolean> {
     if (!(file instanceof TFile)) return false;
     if (this.plugin.filePropertiesService?.isCompanionFile(file)) return false;
@@ -81,6 +82,7 @@ export class FrontmatterMutationService {
     let indexedFrontmatter: FrontmatterRecord | null = null;
     const started = performance.now();
     await this.runSerialized(file, async () => {
+      if (writeGuard?.() === false) return;
       const editorView = this.getOpenMarkdownViewForFile(file);
       const editorSource = editorView ? this.readViewSource(editorView) : null;
       const normalizedEditor = editorSource === null ? null : this.normalizeSource(editorSource);
@@ -131,7 +133,7 @@ export class FrontmatterMutationService {
           });
           return;
         }
-        await this.writeContent(file, nextContent, normalized.fullContent, editorView, normalized.originalContent);
+        await this.writeContent(file, nextContent, normalized.fullContent, editorView, normalized.originalContent, writeGuard);
         indexedFrontmatter = { ...sorted };
         changed = true;
       }
@@ -961,7 +963,10 @@ export class FrontmatterMutationService {
     expectedContent: string,
     originalView: MarkdownView | null,
     expectedRawContent: string,
+    writeGuard?: () => boolean,
   ): Promise<void> {
+    const assertGuard = () => { if (writeGuard?.() === false) throw new Error('The linked choices changed. Open the selector again.'); };
+    assertGuard();
     const started = performance.now();
     const view = this.getOpenMarkdownViewForFile(file);
     if (originalView && view !== originalView) {
@@ -978,12 +983,14 @@ export class FrontmatterMutationService {
       await this.saveEditorPropertyChange(file, view, nextSource, () => {
         // clear=false uses Obsidian's incremental programmatic edit, preserving
         // body/selection/undo and synchronizing its native Properties editor.
+        assertGuard();
         view.setViewData(nextSource, false);
       });
     } else {
       const vault = this.plugin.app.vault;
       const targetPath = file.path;
       await vault.process(file, current => {
+        assertGuard();
         // modify() captures its path before the adapter queue. If a pending
         // rename wins that queue, its write can recreate the old note. process()
         // reads at the atomic boundary instead; a missing source rejects.

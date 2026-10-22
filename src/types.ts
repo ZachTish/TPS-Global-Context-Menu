@@ -18,6 +18,8 @@ export interface CustomProperty {
    * backwards compatibility with releases where `vault` meant manual + vault.
    */
   optionSources?: PropertyOptionSource[];
+  /** Choices from the single linked note, optionally interpreted by its domain owner. */
+  linkedOptions?: { linkProperty: string; sourceProperty?: string; provider?: string };
   optionsSource?: 'manual' | 'vault';
   listItemType?: 'tag' | 'text' | 'link'; // For list
   /**
@@ -51,7 +53,7 @@ export interface CustomProperty {
   contextMenuShowWhen?: 'always' | 'populated' | 'exists' | 'empty' | 'blank' | 'missing' | 'never'; // Optional right-click menu visibility override
 }
 
-export type PropertyOptionSource = 'manual' | 'vault' | 'entity';
+export type PropertyOptionSource = 'manual' | 'vault' | 'entity' | 'linked';
 
 export type VirtualBaseEmbedPlacement = 'top' | 'bottom' | 'hover';
 

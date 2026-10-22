@@ -19,6 +19,8 @@ interface HealthPropertyCatalogEntry {
   type: HealthPropertyType;
   icon?: string;
   options?: string[];
+  acceptsKind?: string;
+  linkedOptions?: { linkProperty: string; sourceProperty?: string; provider?: string };
   listItemType?: 'text' | 'link' | 'tag';
   scope: HealthPropertyScope;
 }
@@ -36,7 +38,9 @@ export interface ImportedHealthProperty {
   key: string;
   type: HealthPropertyType;
   options?: string[];
-  optionSources?: Array<'manual'>;
+  acceptsKind?: string;
+  linkedOptions?: { linkProperty: string; sourceProperty?: string; provider?: string };
+  optionSources?: Array<'manual' | 'linked' | 'entity'>;
   optionsSource?: 'manual';
   listItemType?: 'text' | 'link' | 'tag';
   icon?: string;
@@ -115,6 +119,11 @@ function importedProperty(section: 'food' | 'rollup' | 'native', entry: HealthPr
     property.options = [...entry.options];
     property.optionSources = ['manual'];
     property.optionsSource = 'manual';
+  }
+  if (entry.acceptsKind) { property.acceptsKind = entry.acceptsKind; property.optionSources = ['entity']; }
+  if (entry.linkedOptions) {
+    property.linkedOptions = {...entry.linkedOptions};
+    property.optionSources = ['linked'];
   }
   if (entry.listItemType) property.listItemType = entry.listItemType;
   return property;
