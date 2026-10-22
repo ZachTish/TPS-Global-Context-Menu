@@ -1,3 +1,4 @@
+import { summarizePropertySelection, selectionCountLabel } from '../utils/property-selection';
 import { App, Menu, MenuItem, TFile, Notice, normalizePath } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import { TextInputModal } from '../modals/text-input-modal';
@@ -946,7 +947,8 @@ export class MenuBuilder {
 
   addSelectorToMenu(menu: GcmMenuSink, entries: any[], prop: any, sectionId: string) {
     menu.addItem((item) => {
-      const allValues = entries.map((e: any) => this.getValueCaseInsensitive(e.frontmatter, prop.key) || '');
+      const selection = summarizePropertySelection(entries, prop);
+      const allValues = entries.map((e: any) => this.getValueCaseInsensitive(e.frontmatter, prop.key) ?? '');
       const uniqueValues = new Set(allValues);
       const current = uniqueValues.size === 1 ? allValues[0] : 'Mixed';
       const allWithoutKey = entries.every((e: any) => !this.hasKeyCaseInsensitive(e.frontmatter, prop.key));
@@ -970,6 +972,7 @@ export class MenuBuilder {
         menu: subMenu,
         property: prop,
         currentValue: current === 'Mixed' ? '' : String(current || ''),
+        selection,
         onClear: () => this.removeContextProperty(entries, prop.key, 'context-selector-clear'),
         onChooseLiteral: (value) => this.setContextPropertyValue(
           entries,
@@ -993,11 +996,8 @@ export class MenuBuilder {
       const allValues = entries.map((entry: any) => this.getValueCaseInsensitive(entry.frontmatter, prop.key) || '');
       const uniqueValues = new Set(allValues);
       const current = uniqueValues.size === 1 ? String(allValues[0] || '') : 'Mixed';
-      const currentItems = isList
-        ? isLinkListProperty(prop)
-          ? parseLinkListInput(allValues[0])
-          : parseMixedListInput(allValues[0])
-        : [];
+      const selection = summarizePropertySelection(entries, prop);
+      const currentItems = isList ? selection.values.map(item => item.value) : [];
       const title = isList
         ? `${prop.label}${currentItems.length > 0 ? ` (${currentItems.length})` : ' (create field)'}`
         : current && current !== 'Mixed'
@@ -1020,6 +1020,7 @@ export class MenuBuilder {
         menu: subMenu,
         property: prop,
         currentValue: isList ? currentItems : current === 'Mixed' ? '' : current,
+        selection,
         onClear: () => this.removeContextProperty(entries, prop.key, 'context-entity-clear'),
         onChooseLiteral: (value) => isList
           ? this.addContextListValue(entries, prop, value, false, 'context-list-literal-option')
@@ -1036,9 +1037,9 @@ export class MenuBuilder {
       });
       if (isList && currentItems.length > 0) {
         subMenu.addSeparator();
-        currentItems.forEach((value) => {
+        selection.values.forEach(({ value, count }) => {
           subMenu.addItem((sub) => sub
-            .setTitle(`Remove ${/^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value}`)
+            .setTitle(selectionCountLabel(`Remove ${/^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value}`, count, selection.total))
             .setIcon('x')
             .onClick(() => {
               void this.removeContextListValue(entries, prop, value, 'context-list-remove');
@@ -1050,14 +1051,10 @@ export class MenuBuilder {
 
   addListToMenu(menu: GcmMenuSink, entries: any[], prop: any, sectionId: string) {
     menu.addItem((item) => {
-      const listValues = this.getValueCaseInsensitive(entries[0].frontmatter, prop.key) || [];
-      const items = isTextListProperty(prop)
-        ? parseStringListInput(listValues)
-        : isLinkListProperty(prop)
-          ? parseLinkListInput(listValues)
-          : normalizeTagList(listValues);
+      const selection = summarizePropertySelection(entries, prop);
+      const items = selection.values.map(item => item.value);
       const count = items.length;
-      const isUndefined = !this.plugin.fieldInitializationService.isFieldDefinedForEntries(entries, prop.key);
+      const isUndefined = selection.empty === selection.total;
       const title = isUndefined ? `${prop.label} (create field)` : `${prop.label} (${count})`;
 
       item.setTitle(title)
@@ -1076,6 +1073,7 @@ export class MenuBuilder {
   }
 
   populateListSubmenu(menu: Menu, entries: any[], prop: any, items: string[]) {
+    const selection = summarizePropertySelection(entries, prop);
     const isTags = !isTextListProperty(prop) && !isLinkListProperty(prop);
     const addLiteral = (value: string): Promise<number> => isTags
       ? this.addContextTagValue(entries, prop, value, 'context-list-tag-option')
@@ -1085,7 +1083,8 @@ export class MenuBuilder {
       source: this.plugin,
       menu,
       property: prop,
-      currentValue: items.length > 0 ? items.join(', ') : '',
+      currentValue: items,
+      selection,
       onClear: () => this.removeContextProperty(entries, prop.key, 'context-list-clear'),
       onChooseLiteral: addLiteral,
       onChooseEntity: (choice) => this.addContextListValue(
@@ -1097,10 +1096,10 @@ export class MenuBuilder {
       ),
     });
     if (items.length > 0) menu.addSeparator();
-    items.forEach((value) => {
+    selection.values.forEach(({ value, count }) => {
       menu.addItem((sub: any) => {
         sub
-          .setTitle(`Remove ${String(value)}`)
+          .setTitle(selectionCountLabel(`Remove ${String(value)}`, count, selection.total))
           .setIcon('x')
           .onClick(() => {
             void (isTags

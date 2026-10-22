@@ -901,3 +901,36 @@ test('a Live Preview hidden-header selection permits the property edit and retai
   assert.match(f.editor.getValue(), /title: Before/);
   assert.ok(f.editor.getValue().endsWith(body));
 });
+
+test('bulk removal changes only matching notes, retaining other kinds, duplicates and body content',async t=>{
+  const f=fixture(t),b=f.add('Second'),c=f.add('Scalar'),d=f.add('Absent');
+  f.plugin.settings.properties=[{key:'kind',type:'list',listItemType:'text'}];
+  f.sources.set(f.file,'---\nkind: [note, entity, task, task]\ncustom: preserve\n---\nKeep body marker\n');
+  f.sources.set(b,'---\nKind: entity\n---\nSecond body\n');
+  f.sources.set(c,'---\nkind: note\n---\nThird body\n');
+  const scalar=f.sources.get(c),absent=f.sources.get(d);
+  const processed=[];const process=f.plugin.frontmatterMutationService.process.bind(f.plugin.frontmatterMutationService);
+  f.plugin.frontmatterMutationService.process=async(file,...args)=>{processed.push(file.path);return process(file,...args);};
+  assert.equal(await f.plugin.bulkEditService.removeListValues([f.file,b,c,d],'entity','kind'),2);
+  assert.deepEqual(parse(f.sources.get(f.file).split('---')[1]).kind,['note','task','task']);
+  assert.equal(parse(f.sources.get(f.file).split('---')[1]).custom,'preserve');
+  assert.equal(f.sources.get(b).includes('Kind:'),false);
+  assert.equal(f.sources.get(c),scalar);assert.equal(f.sources.get(d),absent);
+  assert.deepEqual(processed,[f.file.path,b.path]);
+  assert.ok(f.sources.get(f.file).endsWith('Keep body marker\n'));
+  assert.equal(await f.plugin.bulkEditService.removeListValues([f.file,b,c,d],'entity','kind'),0);
+  assert.equal(processed.length,2,'repeated removal does not enter serialized writes');
+});
+
+test('bulk removal recomputes against current source and preserves a concurrent added kind',async t=>{
+  const f=fixture(t);f.plugin.settings.properties=[{key:'kind',type:'list',listItemType:'text'}];
+  f.sources.set(f.file,'---\nkind: [note, entity]\n---\nBody\n');
+  const process=f.plugin.frontmatterMutationService.process.bind(f.plugin.frontmatterMutationService);
+  f.plugin.frontmatterMutationService.process=async(file,...args)=>{
+    f.sources.set(file,'---\nkind: [note, entity, task]\ncustom: concurrent\n---\nNew body\n');
+    return process(file,...args);
+  };
+  assert.equal(await f.plugin.bulkEditService.removeListValues([f.file],'entity','kind'),1);
+  const fm=parse(f.sources.get(f.file).split('---')[1]);assert.deepEqual(fm.kind,['note','task']);assert.equal(fm.custom,'concurrent');
+  assert.ok(f.sources.get(f.file).endsWith('New body\n'));
+});

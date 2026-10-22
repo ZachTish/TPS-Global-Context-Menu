@@ -721,3 +721,25 @@ test("native exact-target menus retain native ownership marking and suppress rep
   assert.equal(foreign._tpsHandled, undefined);
   assert.ok(foreign.items.every(item => !item._isTpsItem));
 });
+
+test('bulk list menu exposes values from every selected note with unique note counts', async () => {
+  const { MenuBuilder, TFile } = await loadMenuBuilderModule();
+  const { builder, addFile, frontmatter, plugin } = createBuilderHarness(MenuBuilder, TFile);
+  const prop = {id:'kind', key:'kind', label:'Kind', type:'list', listItemType:'text'};
+  plugin.settings.properties = [prop];
+  const a = addFile('A.md'), b = addFile('B.md'), c = addFile('C.md');
+  frontmatter.set(a.path,{kind:['note']});
+  frontmatter.set(b.path,{Kind:['note','entity','entity']});
+  frontmatter.set(c.path,{kind:['entity','task']});
+  const menu = buildMenu(builder,[a,b,c],bridgeOptions([a,b,c]));
+  const kind = menu.items.find(item=>item.title.startsWith('Kind'));
+  assert.equal(kind.title,'Kind (3)');
+  assert.deepEqual(kind.submenu.items.map(item=>item.title),[
+    'Remove note — 2/3 notes','Remove entity — 2/3 notes','Remove task — 1/3 notes'
+  ]);
+  const calls=[];
+  plugin.bulkEditService.removeListValues=async(files,value,key)=>{calls.push({files,value,key});return 2;};
+  kind.submenu.items[1].click();
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(calls,[{files:[a,b,c],value:'entity',key:'kind'}]);
+});

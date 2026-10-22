@@ -1,5 +1,14 @@
 # TPS Global Context Menu
 
+## Bulk property editing — 11.1.0
+
+Select notes in TPS Notebook Navigator or a GCM-supported file selection and open the property menu. List fields show every value present across the selected notes. Each choice and removal action shows its note count, such as **entity — 2/3 notes**; duplicate values within a note count once. A checkmark means every selected note has the value. Choosing a value adds it to the selection; **Remove entity** removes only that value from matching notes, retaining `note` and all other values. **Clear all values** explicitly removes the whole field from the selection. Missing fields count toward the denominator.
+
+The floating GCM property controls use the same union and counts, with a separate accessible × button for each list value. Bulk controls wrap values within each property and scroll vertically on narrow screens, keeping counts and removal buttons together. Text, tag, link and entity-enabled lists retain their existing storage semantics. Scalar choice menus also show current values absent from the configured suggestions and their coverage; choosing a scalar still replaces it across the selection. Counts describe the selected notes when the menu opens, not the entire vault. Reopen a native menu after an edit to see fresh counts.
+
+Navigator supplies the exact selected file set to GCM's existing bridge; this fix requires only the GCM update. Navigator's separately owned built-in tag actions are unchanged. No settings, persisted schema, new listener, cache, background scan or automatic note cleanup is introduced. List removal skips known nonmatching notes before the existing serialized writer, then recomputes against current source at that writer. Remaining scalar/list representations and unrelated duplicate list members are preserved. Existing exclusions, malformed-source and editor-conflict guards remain authoritative. Minimum Obsidian remains **1.10.0**. Exact validation and limitations are recorded in [11.1.0 release notes](release-notes/11.1.0.md).
+
+
 ## Development workflow
 
 GCM tests its own opt-in keyboard contract: opted-in connected inputs scroll, unrelated and detached surfaces do not, and disposal clears timers/listeners. The obsolete traversal of other plugins’ archived `Dev` modal files is removed; each consumer owns its UI acceptance. Relocation changes tooling/tests only, with no runtime or version change.

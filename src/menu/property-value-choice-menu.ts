@@ -1,3 +1,4 @@
+import { propertySelectionIdentity, selectionCountLabel, type PropertySelection } from '../utils/property-selection';
 import { App, Menu, Notice } from 'obsidian';
 import type { CustomProperty } from '../types';
 import { openEntitySuggestModal } from '../modals/EntitySuggestModal';
@@ -31,6 +32,7 @@ export interface PropertyValueChoiceMenuOptions {
   menu: Menu;
   property: CustomProperty;
   currentValue?: unknown;
+  selection?: PropertySelection;
   onClear: () => unknown | Promise<unknown>;
   onChooseLiteral: (value: string) => unknown | Promise<unknown>;
   onChooseEntity: (choice: EntityReferenceChoice) => unknown | Promise<unknown>;
@@ -50,12 +52,19 @@ export function addPropertyValueChoiceMenuItems(
     menu,
     property,
     currentValue = '',
+    selection,
     onClear,
     onChooseLiteral,
     onChooseEntity,
   } = options;
   const current = String(currentValue || '').trim();
   const literals = getEffectivePropertyOptions(app, property);
+  const countFor = (value: string) => selection?.values.find(item => propertySelectionIdentity(property, item.value) === propertySelectionIdentity(property, value))?.count || 0;
+  if (selection) {
+    for (const { value } of selection.values) {
+      if (!literals.includes(value)) literals.push(value);
+    }
+  }
   const allowManual = propertyUsesManualOptions(property);
   const allowEntities = propertyUsesEntityOptions(property);
   const isList = property.type === 'list';
@@ -70,8 +79,8 @@ export function addPropertyValueChoiceMenuItems(
 
   menu.addItem((item) => {
     item
-      .setTitle('(none)')
-      .setChecked(isList ? selectedListValues.length === 0 : !current)
+      .setTitle(selection && selection.total > 1 ? `Clear all values (${selection.total} notes)` : '(none)')
+      .setChecked(selection ? selection.empty === selection.total : isList ? selectedListValues.length === 0 : !current)
       .onClick(() => { void onClear(); });
   });
 
@@ -104,8 +113,8 @@ export function addPropertyValueChoiceMenuItems(
   for (const literal of literals) {
     menu.addItem((item) => {
       item
-        .setTitle(literal)
-        .setChecked(isList
+        .setTitle(selection ? selectionCountLabel(literal, countFor(literal), selection.total) : literal)
+        .setChecked(selection ? countFor(literal) === selection.total : isList
           ? selectedListIdentities.has(getListValueIdentity(property, literal))
           : current === literal)
         .onClick(() => { void onChooseLiteral(literal); });

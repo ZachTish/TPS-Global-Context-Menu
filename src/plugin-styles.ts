@@ -3197,6 +3197,49 @@ export const PLUGIN_STYLES = `
         scroll-snap-align: start;
       }
 
+      /* Bulk controls wrap each property's complete value set, including remove buttons. */
+      div.tps-gcm-context-strip.tps-gcm-context-strip--bulk,
+      .tps-global-context-menu--persistent div.tps-gcm-context-strip.tps-gcm-context-strip--bulk {
+        flex-direction: column;
+        align-items: stretch;
+        white-space: normal;
+        overflow-x: hidden;
+        overflow-y: auto;
+        max-height: min(50vh, 360px);
+        touch-action: pan-y !important;
+        scroll-snap-type: none;
+        gap: 10px;
+      }
+      .tps-gcm-context-strip--bulk > .tps-gcm-row {
+        flex: 0 0 auto;
+        min-width: 0;
+        width: 100%;
+      }
+      .tps-gcm-context-strip--bulk .tps-gcm-tags-inline {
+        min-width: 0;
+        flex-wrap: wrap;
+      }
+      .tps-gcm-context-strip--bulk .tps-gcm-tag {
+        max-width: 100%;
+        font-size: 12px;
+        text-transform: none;
+      }
+      .tps-gcm-context-strip--bulk .tps-gcm-tag-text {
+        min-width: 0;
+        overflow-wrap: anywhere;
+      }
+      .tps-gcm-context-strip--bulk .tps-gcm-tag-remove,
+      .tps-gcm-context-strip--bulk .tps-gcm-tag-add {
+        flex: 0 0 auto;
+        min-width: 28px;
+        min-height: 28px;
+        height: auto;
+      }
+      .tps-gcm-context-strip--bulk button:focus-visible {
+        outline: 2px solid var(--interactive-accent);
+        outline-offset: 2px;
+      }
+
       .tps-gcm-native-properties-expanded .tps-global-context-menu--persistent .tps-gcm-context-strip {
         display: none;
       }

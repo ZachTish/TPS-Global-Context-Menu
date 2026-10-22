@@ -1,3 +1,4 @@
+import { summarizePropertySelection, selectionCountLabel } from '../utils/property-selection';
 import { App, Menu, TFile } from "obsidian";
 import TPSGlobalContextMenuPlugin from "../main";
 import { normalizeTagValue, parseTagInput } from '../utils/tag-utils';
@@ -307,34 +308,20 @@ export class PropertyRowService {
 
     const refreshTags = () => {
       container.innerHTML = "";
-      const entryFile = this.resolveEntryFile(entries[0]?.file ?? entries[0]);
-      const freshFm = entryFile?.extension?.toLowerCase() !== 'md' && entryFile && this.plugin.filePropertiesService?.isPropertyTarget(entryFile)
-        ? this.plugin.filePropertiesService.read(entryFile)
-        : this.app.metadataCache.getFileCache(entryFile ?? entries[0].file)?.frontmatter || {};
+      const freshEntries = entries.map(entry => {
+        const file = this.resolveEntryFile(entry?.file ?? entry);
+        const frontmatter = file?.extension?.toLowerCase() !== 'md' && file && this.plugin.filePropertiesService?.isPropertyTarget(file)
+          ? this.plugin.filePropertiesService.read(file)
+          : file ? this.app.metadataCache.getFileCache(file)?.frontmatter : undefined;
+        return { ...entry, frontmatter: frontmatter ?? entry.frontmatter ?? {} };
+      });
+      const selection = summarizePropertySelection(freshEntries, prop);
       const isTextList = isTextListProperty(prop);
       const isLinkList = isLinkListProperty(prop);
       const isEntityList = isEntityReferenceProperty(prop);
-      const rawListValue = this.getValueCaseInsensitive(freshFm, prop.key);
-      const tagList = isLinkList
-        ? parseLinkListInput(rawListValue)
-        : isEntityList
-        ? parseMixedListInput(rawListValue)
-        : isTextList
-        ? parseStringListInput(rawListValue)
-        : parseTagInput([
-          rawListValue,
-          prop.key === 'tags' ? this.getValueCaseInsensitive(freshFm, 'tag') : undefined,
-        ]);
-      const isUndefined = entries.every((e: any) => !this.plugin.fieldInitializationService.isFieldDefinedForEntries([e], prop.key));
-
-      const normalizedMap = new Map<string, string>();
-      for (const tag of tagList) {
-        const normalized = isTextList || isLinkList || isEntityList ? String(tag).trim() : normalizeTagValue(tag);
-        if (!normalized) continue;
-        if (!normalizedMap.has(normalized)) normalizedMap.set(normalized, isTextList || isLinkList || isEntityList ? String(tag).trim() : `#${normalized}`);
-      }
-
-      Array.from(normalizedMap.values()).forEach((tag: string) => {
+      const isUndefined = selection.empty === selection.total;
+      selection.values.forEach(({ value, count }) => {
+        const tag = isTextList || isLinkList || isEntityList ? value : `#${normalizeTagValue(value)}`;
         const tagEl = document.createElement("span");
         tagEl.className = "tps-gcm-tag tps-gcm-tag-removable";
 
@@ -343,7 +330,8 @@ export class PropertyRowService {
         const webLink = extractWebLink(tag);
         tagText.href = webLink?.url || "#";
         const entityLink = isEntityList && /^\[\[/u.test(tag);
-        tagText.textContent = webLink?.label || (isLinkList || entityLink ? this.getLinkListDisplayText(tag) : tag);
+        const display = webLink?.label || (isLinkList || entityLink ? this.getLinkListDisplayText(tag) : tag);
+        tagText.textContent = selection.total > 1 ? `${display} (${count}/${selection.total})` : display;
         if (webLink) {
           tagText.classList.add('tps-gcm-external-link');
           tagText.setAttribute('target', '_blank');
@@ -370,7 +358,9 @@ export class PropertyRowService {
         const removeBtn = document.createElement("button");
         removeBtn.className = "tps-gcm-tag-remove";
         removeBtn.innerHTML = "×";
-        removeBtn.title = `Remove ${tag}`;
+        removeBtn.type = 'button';
+        removeBtn.title = selectionCountLabel(`Remove ${tag}`, count, selection.total);
+        removeBtn.setAttribute('aria-label', removeBtn.title);
         this.d.addSafeClickListener(removeBtn, async (e) => {
           e.stopPropagation();
           tagEl.remove();
@@ -389,7 +379,8 @@ export class PropertyRowService {
             );
           }
           await this.afterWholeNotePropertyEdit(files, [prop.key, 'tags']);
-          refreshTags();
+          // The existing mutation/metadata owner refreshes managed panels. Reading
+          // metadata immediately here can reinsert a value before indexing catches up.
         });
         tagEl.appendChild(removeBtn);
 
@@ -402,6 +393,8 @@ export class PropertyRowService {
       const addBtn = document.createElement("button");
       addBtn.innerHTML = "+";
       addBtn.className = "tps-gcm-tag-add";
+      addBtn.type = "button";
+      addBtn.setAttribute("aria-label", `Add ${prop.label || prop.key} value`);
       if (isUndefined) {
         addBtn.style.fontStyle = "italic";
         addBtn.title = isEntityList ? "Create field and choose value" : isLinkList ? "Create field and add link" : isTextList ? "Create field and add value" : "Create field and add tag";

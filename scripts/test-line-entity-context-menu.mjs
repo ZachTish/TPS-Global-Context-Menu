@@ -50,6 +50,7 @@ async function loadHarness() {
     entryPoints: [
       fileURLToPath(new URL('../src/menu/line-entity-property-menu.ts', import.meta.url)),
       fileURLToPath(new URL('../src/menu/property-value-choice-menu.ts', import.meta.url)),
+      fileURLToPath(new URL('../src/utils/property-selection.ts', import.meta.url)),
       fileURLToPath(new URL('../src/utils/task-line-metadata.ts', import.meta.url)),
       fileURLToPath(new URL('../src/views/log-line-utils.ts', import.meta.url)),
     ],
@@ -768,4 +769,28 @@ test('whole-note selector and list menus enforce configured value sources', () =
   assert.match(list, /this\.removeContextTagValue/);
   assert.match(list, /this\.removeContextListValue/);
   assert.doesNotMatch(list, /openAddListValueModal|openAddTagModal|TextInputModal/);
+});
+
+test('bulk choices show partial counts, include uncatalogued values and add without implying replacement', async()=>{
+ const {summarizePropertySelection,addPropertyValueChoiceMenuItems}=await loadHarness();
+ const prop={key:'kind',label:'Kind',type:'list',listItemType:'text',optionSources:['manual'],options:['note','task']};
+ const entries=[{file:{path:'A'},frontmatter:{kind:['note']}},{file:{path:'B'},frontmatter:{Kind:['note','entity','entity']}},{file:{path:'C'},frontmatter:{}}];
+ const selection=summarizePropertySelection([...entries,entries[1]],prop);
+ assert.deepEqual(selection,{total:3,empty:1,values:[{value:'note',count:2},{value:'entity',count:1}]});
+ const menu=new FakeMenu(),calls=[];
+ addPropertyValueChoiceMenuItems({app:{},source:null,menu,property:prop,selection,currentValue:['note','entity'],onClear:()=>calls.push('clear'),onChooseLiteral:value=>calls.push(value),onChooseEntity:()=>{}});
+ const note=menu.items.find(item=>item.title==='note — 2/3 notes');assert.equal(note.checked,false);
+ assert.ok(menu.items.some(item=>item.title==='entity — 1/3 notes'));
+ assert.ok(menu.items.some(item=>item.title==='Clear all values (3 notes)'));
+ note.click();assert.deepEqual(calls,['note']);
+ const single=new FakeMenu();addPropertyValueChoiceMenuItems({app:{},source:null,menu:single,property:prop,currentValue:['note'],onClear:()=>{},onChooseLiteral:()=>{},onChooseEntity:()=>{}});
+ assert.equal(single.items.find(item=>item.title==='note').checked,true);
+});
+
+test('bulk counts handle tag aliases, entity aliases, case and empty first notes without scanning',async()=>{
+ const {summarizePropertySelection}=await loadHarness();
+ const entries=[{file:{path:'A'},frontmatter:{}},{file:{path:'B'},frontmatter:{tags:['#daily','daily'],tag:'other',people:['[[People/A|Alpha]]','ready'],kind:['Note','note']}},{file:{path:'C'},frontmatter:{tags:'daily',people:['[[People/A|Changed alias]]']}}];
+ assert.deepEqual(summarizePropertySelection(entries,{key:'tags',type:'list',listItemType:'tag'}).values,[{value:'daily',count:2},{value:'other',count:1}]);
+ assert.deepEqual(summarizePropertySelection(entries,{key:'people',type:'list',listItemType:'text',acceptsKind:'person',optionSources:['manual','entity']}).values,[{value:'[[People/A|Alpha]]',count:2},{value:'ready',count:1}]);
+ assert.deepEqual(summarizePropertySelection(entries,{key:'kind',type:'list',listItemType:'text'}).values,[{value:'Note',count:1},{value:'note',count:1}]);
 });

@@ -673,19 +673,31 @@ export class BulkEditService {
                 : parseStringListInput(value);
         if (!values.length) return 0;
 
-        return this.applyToFiles(files, (fm) => {
+        const parse = (raw: unknown) => property?.listItemType === 'link' ? parseLinkListInput(raw)
+            : propertyUsesEntityOptions(property) ? parseMixedListInput(raw) : parseStringListInput(raw);
+        const remove = (raw: unknown) => property?.listItemType === 'link'
+            ? propertyUsesEntityOptions(property) ? removeEntityReferenceListValues(raw, values) : removeLinkListValues(raw, values)
+            : propertyUsesEntityOptions(property) ? removeMixedEntityReferenceListValues(raw, values) : removeStringListValues(raw, values);
+        const openPaths = new Set(this.plugin.app.workspace?.getLeavesOfType?.('markdown').map(leaf => (leaf.view as any)?.file?.path) || []);
+        const affected = files.filter(file => {
+            if (file.extension?.toLowerCase() !== 'md' || openPaths.has(file.path)) return true;
+            const fm = this.plugin.app.metadataCache?.getFileCache(file)?.frontmatter;
+            if (!fm) return true;
+            const raw = this.getFrontmatterValueCaseInsensitive(fm, key);
+            return parse(raw).length !== remove(raw).length;
+        });
+        return this.applyToFiles(affected, (fm) => {
             const targetKey = this.findFrontmatterKeyCaseInsensitive(fm, key) || key;
-            const nextValues = property?.listItemType === 'link'
-                ? propertyUsesEntityOptions(property)
-                    ? removeEntityReferenceListValues(fm[targetKey], values)
-                    : removeLinkListValues(fm[targetKey], values)
-                : propertyUsesEntityOptions(property)
-                    ? removeMixedEntityReferenceListValues(fm[targetKey], values)
-                    : removeStringListValues(fm[targetKey], values);
+            const original = fm[targetKey];
+            const nextValues = remove(original);
+            if (nextValues.length === parse(original).length) return;
             if (nextValues.length === 0) {
                 delete fm[targetKey];
             } else {
-                fm[targetKey] = nextValues;
+                // Preserve authored representations and duplicate unrelated members.
+                fm[targetKey] = Array.isArray(original)
+                    ? original.flatMap(item => parse(item).length === remove(item).length ? [item] : remove(item))
+                    : nextValues;
             }
             if (targetKey !== key && key in fm) {
                 delete fm[key];

@@ -333,11 +333,11 @@ test('TPS Health food notes can show stacked properties despite asset ignore rul
   );
 });
 
-test('custom Kind list controls use the authored entry on stacked and context surfaces', () => {
+test('custom Kind list controls use authored entries on stacked and context surfaces', () => {
   assert.match(menuControllerSource, /createCustomPropertyEntry\(f, storedFrontmatter, inspection\?\.kind\)/);
   assert.match(panelBuilderSource, /this\.populateStackedPropertyValue\(value, entries, prop, frontmatter\)/);
   assert.match(panelBuilderSource, /const frontmatter = \(entry\?\.frontmatter \|\| \{\}\)/);
-  assert.match(menuBuilderSource, /const listValues = this\.getValueCaseInsensitive\(entries\[0\]\.frontmatter, prop\.key\)/);
+  assert.match(menuBuilderSource, /const selection = summarizePropertySelection\(entries, prop\)/);
 });
 
 test('custom property renderers recognize external web links', () => {

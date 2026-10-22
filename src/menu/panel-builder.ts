@@ -1,3 +1,4 @@
+import { summarizePropertySelection, selectionCountLabel } from '../utils/property-selection';
 ﻿import { App, TFile, Notice, Setting, setIcon, WorkspaceLeaf, normalizePath, Menu, MarkdownView, getAllTags, Modal } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
 import { BuildPanelOptions, CustomProperty } from '../types';
@@ -527,6 +528,7 @@ export class PanelBuilder {
   createContextStrip(entries: any[]): HTMLElement {
     const strip = document.createElement('div');
     strip.className = 'tps-gcm-context-strip';
+    if (entries.length > 1) strip.classList.add('tps-gcm-context-strip--bulk');
 
     let wheelScrollFrame: number | null = null;
     let pendingWheelDelta = 0;
@@ -589,15 +591,19 @@ export class PanelBuilder {
     // Tags (if enabled)
     const tagsProp = properties.find(p => p.id === 'tags' || p.key === 'tags');
     if (showInlineProperties && tagsProp && tagsProp.showInCollapsed !== false && !isEntityReferenceProperty(tagsProp)) {
-      // Add the "+" button first
-      strip.appendChild(this.createTagsChip(entries, tagsProp));
+      if (entries.length > 1) {
+        strip.appendChild(this.propertyRowService.createListRow(entries, tagsProp));
+      } else {
+        // Add the "+" button first
+        strip.appendChild(this.createTagsChip(entries, tagsProp));
 
-      // Then add the tags
-      const tags = this.extractNormalizedTags(entries);
-      if (tags.length > 0) {
-        tags.forEach((tag) => {
-          strip.appendChild(this.createTagValueChip(tag, entries));
-        });
+        // Then add the tags
+        const tags = this.extractNormalizedTags(entries);
+        if (tags.length > 0) {
+          tags.forEach((tag) => {
+            strip.appendChild(this.createTagValueChip(tag, entries));
+          });
+        }
       }
       markRendered(tagsProp);
     }
@@ -1064,10 +1070,8 @@ export class PanelBuilder {
   private openStackedEntityListEditor(anchor: HTMLElement, entries: any[], prop: CustomProperty): void {
     const key = String(prop.key || '').trim();
     if (!key) return;
-    const raw = this.getFrontmatterValueCaseInsensitive(entries[0]?.frontmatter || {}, key);
-    const current = isLinkListProperty(prop)
-      ? parseLinkListInput(raw)
-      : parseMixedListInput(raw);
+    const selection = summarizePropertySelection(entries, prop);
+    const current = selection.values.map(item => item.value);
     const menu = new Menu();
     addPropertyValueChoiceMenuItems({
       app: this.app,
@@ -1075,6 +1079,7 @@ export class PanelBuilder {
       menu,
       property: prop,
       currentValue: current,
+      selection,
       onClear: () => this.clearStackedEntityList(anchor, entries, prop),
       onChooseLiteral: (value) => this.addStackedEntityListValue(
         anchor,
@@ -1093,9 +1098,9 @@ export class PanelBuilder {
     });
     if (current.length > 0) {
       menu.addSeparator();
-      current.forEach((value) => {
+      selection.values.forEach(({ value, count }) => {
         menu.addItem((item) => item
-          .setTitle(`Remove ${/^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value}`)
+          .setTitle(selectionCountLabel(`Remove ${/^\[\[/u.test(value) ? getWikilinkDisplayText(value) : value}`, count, selection.total))
           .setIcon('x')
           .onClick(() => {
             void this.removeStackedEntityListValue(anchor, entries, prop, value);
@@ -1183,6 +1188,7 @@ export class PanelBuilder {
     const key = String(prop?.key || '').trim();
     if (!key) return;
     const current = String(this.getFrontmatterValueCaseInsensitive(entries[0]?.frontmatter || {}, key) ?? '').trim();
+    const selection = summarizePropertySelection(entries, prop);
     const files = this.filesFromEntries(entries);
     const menu = new Menu();
     const checkedItems: Array<{ item: any; value: string }> = [];
@@ -1192,7 +1198,7 @@ export class PanelBuilder {
     };
     menu.addItem((item) => {
       checkedItems.push({ item, value: '' });
-      item.setTitle('(none)').setChecked(!current).onClick(async () => {
+      item.setTitle(selection.total > 1 ? `Clear all values (${selection.total} notes)` : '(none)').setChecked(selection.empty === selection.total).onClick(async () => {
         setCheckedValue('');
         this.removeEntryFrontmatterValue(entries, key);
         this.refreshStackedPropertyValue(anchor, entries, prop);
@@ -1201,12 +1207,12 @@ export class PanelBuilder {
       });
     });
     menu.addItem((item) => item.setTitle('Set custom value...').setIcon('pencil').onClick(() => this.openStackedTextEditor(entries, prop)));
-    const options = getEffectivePropertyOptions(this.app, prop);
+    const options = [...new Set([...getEffectivePropertyOptions(this.app, prop), ...selection.values.map(item => item.value)])];
     if (options.length) menu.addSeparator();
     for (const option of options) {
       menu.addItem((item) => {
         checkedItems.push({ item, value: option });
-        item.setTitle(option).setChecked(current === option).onClick(async () => {
+        item.setTitle(selectionCountLabel(option, selection.values.find(item => item.value === option)?.count || 0, selection.total)).setChecked(selection.values.find(item => item.value === option)?.count === selection.total).onClick(async () => {
           setCheckedValue(option);
           this.setEntryFrontmatterValue(entries, key, option);
           this.refreshStackedPropertyValue(anchor, entries, prop);
@@ -1385,6 +1391,20 @@ export class PanelBuilder {
   }
 
   private populateStackedPropertyValue(target: HTMLElement, entries: any[], prop: any, frontmatter: Record<string, any>): void {
+    if (entries.length > 1 && prop.type === 'list') {
+      const row = this.propertyRowService.createListRow(entries, prop);
+      target.appendChild(row.lastElementChild!);
+      return;
+    }
+
+    if (entries.length > 1 && ['selector', 'kind', 'text'].includes(prop.type)) {
+      const selection = summarizePropertySelection(entries, prop);
+      const value = document.createElement('span');
+      value.className = 'tps-gcm-top-property-text';
+      value.textContent = selection.values.map(item => selectionCountLabel(item.value, item.count, selection.total)).join(', ') || 'Empty';
+      target.appendChild(value);
+      return;
+    }
     const propId = String(prop?.id || '').toLowerCase();
     const propKey = String(prop?.key || '').trim();
     const propKeyLower = propKey.toLowerCase();
@@ -1660,6 +1680,8 @@ export class PanelBuilder {
   }
 
   private createGenericContextPropertyChip(entries: any[], prop: any, frontmatter: Record<string, any>): HTMLElement | null {
+    if (entries.length > 1 && prop.type === 'list') return this.propertyRowService.createListRow(entries, prop);
+
     const key = String(prop?.key || '').trim();
     if (!key) return null;
 

@@ -408,7 +408,7 @@ test('every entity-enabled list editor uses storage-aware mixed-list mutation', 
   );
   assert.match(bulkEdit, /mergeMixedEntityReferenceList\(fm\[targetKey\], values\)/);
   assert.match(bulkEdit, /mergeMixedList\(fm\[targetKey\], values\)/);
-  assert.match(bulkEdit, /removeMixedEntityReferenceListValues\(fm\[targetKey\], values\)/);
+  assert.match(bulkEdit, /removeMixedEntityReferenceListValues\(raw, values\)/);
 });
 
 test('mixed-source option discovery preserves relational links and literal suggestions', async () => {
@@ -572,4 +572,14 @@ test('Accepted kinds commits and source rerenders preserve focus without a delay
   assert.match(sourceSettingsBlock, /document\.activeElement === drop\.selectEl/);
   assert.match(sourceSettingsBlock, /Task checkbox workflow remains separate as task\.status/);
   assert.doesNotMatch(sourceSettingsBlock.split('if (propertyUsesManualOptions(prop))')[0], /this\.display\(\)/, 'Changing value sources preserves focus; explicit migration confirmation may rebuild updated definitions');
+});
+
+test('bulk entity removal preserves literals and removes every alias of the selected target',async()=>{
+ const {BulkEditService}=await importBulkEditService();
+ const property={key:'people',type:'list',listItemType:'text',acceptsKind:'person',optionSources:['manual','entity']};
+ const service=new BulkEditService({app:{},settings:{properties:[property]}});
+ const fm={people:['waiting','waiting','[[People/A|Alpha]]','[[People/A|Other alias]]','[[People/B]]']};
+ service.applyToFiles=async(files,mutate)=>{mutate(fm,files[0]);return 1;};
+ await service.removeListValues([{}],'[[People/A|Selected alias]]','people');
+ assert.deepEqual(fm.people,['waiting','waiting','[[People/B]]']);
 });
