@@ -29,6 +29,7 @@ export function resolveCustomProperties(
     }));
     return properties.filter((property) => {
         if (property.hidden) return false;
+        if (entryContexts.some(({entry}) => (entry.calculatedPropertyKeys || []).some((key: string) => key.toLowerCase() === property.key.toLowerCase()))) return false;
         if (entryContexts.length === 0) return true;
 
         const excluded = normalizeScopeTags(property.excludeTags || []);

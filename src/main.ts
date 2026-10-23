@@ -1,3 +1,4 @@
+import { calculatedFoodLogProperties } from './integrations/health-food-logs';
 import { PropertyMigrationService } from './services/property-migration-service';
 import { NoteOpeningService, migrateNoteOpeningSettings } from './services/note-opening-service';
 import { NativeBaseNoteOpening } from './services/native-base-note-opening';
@@ -1354,7 +1355,7 @@ export default class TPSGlobalContextMenuPlugin extends Plugin {
   private applyNativePreviewPropertyVisibility(root: HTMLElement, file: TFile, isNativeHoverPopover: boolean): void {
     const storedFrontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter || {};
     const frontmatter = storedFrontmatter;
-    const entries = [createCustomPropertyEntry(file, frontmatter, this.nativeRecordService.inspect(storedFrontmatter)?.kind)];
+    const entries = [createCustomPropertyEntry(file, frontmatter, this.nativeRecordService.inspect(storedFrontmatter)?.kind, calculatedFoodLogProperties(this, storedFrontmatter))];
     const configuredKeys = new Set<string>();
     for (const property of this.settings.properties || []) {
       const key = String(property?.key || '').trim().toLowerCase();

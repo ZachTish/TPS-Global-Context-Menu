@@ -1,3 +1,4 @@
+import { calculatedFoodLogProperties } from '../integrations/health-food-logs';
 import { App, Menu, TFile, TFolder, Notice, Platform, WorkspaceLeaf } from 'obsidian';
 import TPSGlobalContextMenuPlugin from '../main';
 import { AddTagModal } from '../modals/add-tag-modal';
@@ -193,7 +194,7 @@ export class MenuController {
         ? this.plugin.filePropertiesService.read(f)
         : this.app.metadataCache.getFileCache(f)?.frontmatter || {};
       const inspection = this.plugin.nativeRecordService.inspect(storedFrontmatter);
-      return [createCustomPropertyEntry(f, storedFrontmatter, inspection?.kind)];
+      return [createCustomPropertyEntry(f, storedFrontmatter, inspection?.kind, calculatedFoodLogProperties(this.plugin, storedFrontmatter))];
     });
   }
 

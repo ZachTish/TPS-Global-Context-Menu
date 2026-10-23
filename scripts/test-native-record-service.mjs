@@ -683,8 +683,10 @@ test('calendar template authority requires the exact canonical ID grammar', asyn
   await assert.rejects(service.create('calendar-event', { title: 'Copied ID', id: 'template-id' }, { id: calendarId() }), /collides with system storage/u);
   await assert.rejects(service.create('calendar-event', { title: 'Invalid body' }, { id: calendarId(), body: null }), /canonical calendar record ID/u);
   await assert.rejects(service.create('calendar-event', { title: 'Invalid kind', kind: [42] }, { id: calendarId() }), /kind must be text or a list of text/u);
-  await assert.rejects(service.create('task', { title: 'Unchanged task contract' }, { id: 'task-body', body: 'Body' }), /canonical calendar record ID/u);
-  assert.equal([...entries.values()].filter((entry) => entry instanceof TFile).length, 0);
+  const task = await service.create('task', { title: 'Initial body' }, { id: 'task-body', body: 'Body' });
+  assert.ok(task);
+  await assert.rejects(service.create('task', {title:'Invalid body'}, {id:'invalid-body',body:{}}), /must be text/);
+  assert.equal([...entries.values()].filter((entry) => entry instanceof TFile).length, 1);
 });
 
 test('canonical calendar creation stores no inferred public kind and writes the template body atomically', async () => {
@@ -3834,8 +3836,8 @@ test('native profile is mandatory and legacy active paths remain gated', () => {
 });
 
 test('public GCM API exposes versioned generic and task record contracts', () => {
-  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true, freshIdentityCreates: true, selectedFileAuthority: true, indexedSnapshot: true, updateFromSource: true, identityApplyCancellation: true \}\)/u);
-  assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,1800}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
+  assert.match(apiSource, /capabilities: Object\.freeze\(\{ customKinds: true, initialBodies: true, calendarTemplateRecords: true, kindPropertyKeys: true, conflictAwareSnapshots: true, freshIdentityCreates: true, selectedFileAuthority: true, indexedSnapshot: true, updateFromSource: true, identityApplyCancellation: true \}\)/u);
+  assert.match(apiSource, /const nativeRecordsApi = \{[\s\S]{0,300}version: plugin\.nativeRecordService\.version[\s\S]{0,2000}createAsset:[\s\S]{0,1800}resolve:[\s\S]{0,300}list:[\s\S]{0,300}snapshot:[\s\S]{0,1800}canCreateIdentity:[\s\S]{0,800}canApplyIdentityPlan:[\s\S]{0,800}planIdentityChanges:[\s\S]{0,800}applyIdentityChanges:[\s\S]{0,800}canReidentify:[\s\S]{0,800}reidentify:[\s\S]{0,800}rename:[\s\S]{0,800}archive:/u);
   assert.match(readFileSync(new URL('../src/services/native-record-service.ts', import.meta.url), 'utf8'), /readonly version = 7;/u);
   assert.match(apiSource, /ensureAsset:[\s\S]{0,700}resolveAsset:/u);
   assert.match(apiSource, /const taskRecordsApi = \{[\s\S]{0,200}version: 2,\s*supportsPromotion: false[\s\S]{0,500}promote:[\s\S]{0,900}resolve:/u);
@@ -7014,4 +7016,19 @@ test('flat public kinds distinguish all native subtypes through configured field
  service.refreshConfiguration();
  for(const record of records){assert.equal((await service.resolve(record.id))?.kind,record.kind);}
  assert.equal((await service.snapshot()).records.length,records.length);
+});
+
+
+test('food-log preparation belongs to the single native creation write', async()=>{
+ const {service,plugin,vault,contents}=createHarness();let prepared=0,created=0;
+ plugin.app.plugins={getPlugin: id=>id==='tps-health'?{api:{foodLogs:{version:1,prepareCreation(kind,properties){prepared++;if(kind!=='food-entry')return null;const {calories,...lean}=properties;return {properties:lean,body:'\n```base\n{}\n```\n'};}}}}:undefined};
+ const create=vault.create;vault.create=async(...args)=>{created++;return create(...args);};
+ const record=await service.createFresh('food-entry',{title:'Lunch',food:'[[Food]]',quantity:2,unit:'can',calories:190});
+ const parsed=parseNativeRecordDocument(contents.get(record.file));
+ assert.equal(parsed.frontmatter.calories,undefined);assert.equal(parsed.frontmatter.quantity,2);assert.match(parsed.body,/```base/);
+ assert.equal(created,1);assert.equal(prepared,1);
+ const explicit=await service.createFresh('food-entry',{title:'Custom body'},{body:'Authored template'});
+ assert.equal(parseNativeRecordDocument(contents.get(explicit.file)).body,'Authored template');
+ plugin.app.plugins.getPlugin=()=>({api:{foodLogs:{version:1,prepareCreation(){throw Error('Not ready');}}}});
+ await assert.rejects(service.createFresh('food-entry',{title:'Do not create'}),/Not ready/);assert.equal(created,2);
 });

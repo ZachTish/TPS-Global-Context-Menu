@@ -598,3 +598,17 @@ test('an already-built preview arriving inside a wrapper is discovered without a
   h.drain();
   assert.ok(h.panel);
 });
+
+
+test('Health-calculated nutrients cannot appear as editable log fields, including mixed selections', async()=>{
+ const {resolveCustomProperties,createCustomPropertyEntry}=await loadVisibilityModule();
+ const props=[{id:'energy',key:'calories',label:'Calories',type:'number',showWhen:'always'},{id:'amount',key:'quantity',label:'Amount',type:'number',showWhen:'always'}];
+ const log=createCustomPropertyEntry({path:'Log.md'},{kind:'food-entry',calories:10,quantity:2},null,['CALORIES']);
+ const food=createCustomPropertyEntry({path:'Food.md'},{kind:'food',calories:95},null,[]);
+ for(const surface of ['inline','context','any']) {
+  assert.deepEqual(resolveCustomProperties(props,[log],{},surface).map(p=>p.key),['quantity']);
+  assert.deepEqual(resolveCustomProperties(props,[food],{},surface).map(p=>p.key),['calories','quantity']);
+  assert.deepEqual(resolveCustomProperties(props,[log,food],{},surface).map(p=>p.key),['quantity']);
+ }
+ assert.equal(props.length,2);assert.equal(log.frontmatter.calories,10,'visibility never rewrites source');
+});

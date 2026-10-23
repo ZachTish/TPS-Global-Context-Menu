@@ -1,3 +1,4 @@
+import { calculatedFoodLogProperties } from '../integrations/health-food-logs';
 ﻿import { Component, MarkdownRenderer, MarkdownView, TFile, WorkspaceLeaf, Platform, debounce, setIcon, Menu, normalizePath, Notice } from 'obsidian';
 import type TPSGlobalContextMenuPlugin from '../main';
 import type { GcmExternalActionContext, GcmExternalActionRegistration } from '../main';
@@ -4086,7 +4087,7 @@ export class PersistentMenuManager {
 
     const storedFrontmatter = this.plugin.app.metadataCache.getFileCache(file)?.frontmatter || {};
     const frontmatter = storedFrontmatter;
-    const entries = [createCustomPropertyEntry(file, frontmatter, this.plugin.nativeRecordService.inspect(storedFrontmatter)?.kind)];
+    const entries = [createCustomPropertyEntry(file, frontmatter, this.plugin.nativeRecordService.inspect(storedFrontmatter)?.kind, calculatedFoodLogProperties(this.plugin, storedFrontmatter))];
     const applicableProperties = resolveCustomProperties(
       this.plugin.settings.properties || [],
       entries,

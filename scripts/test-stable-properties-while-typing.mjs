@@ -334,7 +334,7 @@ test('TPS Health food notes can show stacked properties despite asset ignore rul
 });
 
 test('custom Kind list controls use authored entries on stacked and context surfaces', () => {
-  assert.match(menuControllerSource, /createCustomPropertyEntry\(f, storedFrontmatter, inspection\?\.kind\)/);
+  assert.match(menuControllerSource, /createCustomPropertyEntry\(f, storedFrontmatter, inspection\?\.kind, calculatedFoodLogProperties\(this\.plugin, storedFrontmatter\)\)/);
   assert.match(panelBuilderSource, /this\.populateStackedPropertyValue\(value, entries, prop, frontmatter\)/);
   assert.match(panelBuilderSource, /const frontmatter = \(entry\?\.frontmatter \|\| \{\}\)/);
   assert.match(menuBuilderSource, /const selection = summarizePropertySelection\(entries, prop\)/);

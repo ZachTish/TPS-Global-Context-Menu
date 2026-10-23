@@ -1,3 +1,4 @@
+import { prepareHealthFoodLog } from '../integrations/health-food-logs';
 import { parseNativeRecordDocument, type ParsedNativeRecordDocument } from '../utils/native-record-document';
 export { parseNativeRecordDocument } from '../utils/native-record-document';
 import { kindClassification, kindDiscriminator, kindReadClassifications, kindWriterEnabled, matchesKindClassification, classificationTags, hasClassificationTag } from '../utils/kind-classification';
@@ -132,7 +133,7 @@ export interface TpsNativeRecordCreateOptions {
   expectedPath?: string;
   planToken?: number;
   cause?: FilePropertiesMutationCause;
-  /** Exact template body; supported only for canonical Controller calendar IDs. */
+  /** Initial body, committed atomically with the new record. */
   body?: string;
 }
 
@@ -1639,7 +1640,8 @@ export class NativeRecordService {
         throw new Error(`TPS native record ID already exists: ${id}`);
       }
 
-      const prepared = this.prepareCreateCandidate(kind, properties, id, timestamp, options.body);
+      const health = prepareHealthFoodLog(this.plugin, kind, properties);
+      const prepared = this.prepareCreateCandidate(kind, health?.properties ?? properties, id, timestamp, options.body !== undefined ? options.body : health?.body);
       const { persistedFrontmatter, persistedInspection, body } = prepared;
       const path = this.availableRecordPath(kind, id, options.fileName);
       if (
@@ -3357,8 +3359,8 @@ export class NativeRecordService {
     if (calendarTemplateRecord && kind !== 'calendar-event') {
       throw new Error('Canonical calendar IDs require the calendar-event structural route.');
     }
-    if (templateBody !== undefined && (!calendarTemplateRecord || typeof templateBody !== 'string')) {
-      throw new Error('Native record template bodies require a canonical calendar record ID.');
+    if (templateBody !== undefined && (typeof templateBody !== 'string' || (kind === 'calendar-event' && !calendarTemplateRecord))) {
+      throw new Error('Native record bodies must be text; calendar bodies require a canonical calendar record ID.');
     }
     const title = String(properties.title || '').replace(/\s+/gu, ' ').trim();
     if (!title) throw new Error('TPS native records require a title.');
