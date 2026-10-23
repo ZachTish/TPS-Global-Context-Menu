@@ -1,3 +1,5 @@
+import { nativeSettingsSearch, focusSettingsSearchResult, type SettingsSearchEntry } from "./native-settings-search";
+import { SETTINGS_SEARCH_ENTRIES, SETTINGS_SEARCH_ROUTES } from "./settings-search-catalog";
 import { usesLinkedOptions, linkedChoiceProviders } from './utils/linked-property-options';
 import { kindClassification, kindDiscriminator, kindReadClassifications, kindWriterEnabled, normalizeClassificationTag, normalizeKindClassification, type KindClassification } from './utils/kind-classification';
 import { validateNativeBaseCreateRoute } from './utils/native-base-create-routes';
@@ -107,6 +109,47 @@ const createCollapsibleSection = (
  * Settings tab for the plugin
  */
 export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
+  private searchContentEl: HTMLElement | null = null;
+  private get settingsContentEl(): HTMLElement {
+    return this.searchContentEl?.isConnected ? this.searchContentEl : this.containerEl;
+  }
+
+  getSettingDefinitions() {
+    return nativeSettingsSearch(SETTINGS_SEARCH_ENTRIES, SETTINGS_SEARCH_ROUTES,
+      container => {
+        this.searchContentEl = container;
+        this.display();
+        return () => { this.hide(); if (this.searchContentEl === container) this.searchContentEl = null; };
+      }, entry => this.openSearchResult(entry));
+  }
+
+  private openSearchResult(entry: SettingsSearchEntry): void {
+    const route = entry.route;
+    if (['custom-fields', 'records', 'frontmatter'].includes(route)) {
+      this.activeSettingsPage = 'rules-fields'; this.activeRulesFieldsPage = route as RulesFieldsPageId;
+      this.propertySearch = ''; this.propertyTypeFilter = '';
+      if (route === 'custom-fields' && this.plugin.settings.properties.length) {
+        const property = this.plugin.settings.properties.find(property => (property.id || property.key) === entry.key) || this.plugin.settings.properties[0];
+        if (entry.key) this.propertySearch = property.key;
+        this.sectionState.set(`Custom Property::${property.id || property.key || 0}`, true);
+      }
+    } else if (['daily-notes', 'tasks', 'child-notes', 'recurrence', 'time-tracking'].includes(route)) {
+      this.activeSettingsPage = 'workflows'; this.activeWorkflowPage = route as WorkflowPageId;
+    } else this.activeSettingsPage = route as SettingsPageId;
+    const manager = (this.app as App & { setting?: { openTabById?: (id: string) => void } }).setting;
+    manager?.openTabById?.(this.plugin.manifest.id);
+    this.display();
+    if (!focusSettingsSearchResult(this.settingsContentEl, entry.name)) {
+      const message = this.settingsContentEl.createDiv({
+        text: `“${entry.name}” is in this area. Its control appears when the relevant feature or saved item is selected.`,
+        attr: { role: 'status', tabindex: '-1' },
+      });
+      this.settingsContentEl.prepend(message);
+      message.focus();
+      message.scrollIntoView({ block: 'start' });
+    }
+  }
+
   plugin: TPSGlobalContextMenuPlugin;
   private static readonly SETTINGS_BUILD_STAMP = '2026-03-11 18:12';
   private readonly sectionState = new Map<string, boolean>();
@@ -131,7 +174,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
     this.propertySearch = '';
     this.propertyTypeFilter = '';
     this.display();
-    this.containerEl.querySelector<HTMLInputElement>('[aria-label="Find custom properties"]')?.focus();
+    this.settingsContentEl.querySelector<HTMLInputElement>('[aria-label="Find custom properties"]')?.focus();
   }
 
   private getSectionStateKey(parent: HTMLElement, title: string): string {
@@ -178,7 +221,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
 
   private focusRouteButton(route: string): void {
     const button = Array.from(
-      this.containerEl.querySelectorAll<HTMLButtonElement>('.tps-gcm-settings-route-button'),
+      this.settingsContentEl.querySelectorAll<HTMLButtonElement>('.tps-gcm-settings-route-button'),
     ).find((candidate) => candidate.dataset.tpsSettingsRoute === route);
     button?.focus({ preventScroll: true });
   }
@@ -186,7 +229,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   private navigateToSettingsPage(route: SettingsPageId): void {
     this.activeSettingsPage = route;
     this.display();
-    this.containerEl
+    this.settingsContentEl
       .querySelector<HTMLElement>('.tps-gcm-settings-page > h3')
       ?.focus({ preventScroll: false });
   }
@@ -491,7 +534,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
   }
 
   display(): void {
-    const { containerEl } = this;
+    const containerEl = this.settingsContentEl;
     containerEl.empty();
 
     const saveAppearance = async () => {
@@ -1369,9 +1412,9 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             this.addingRecordType = !this.addingRecordType;
             this.display();
             const target = this.addingRecordType
-              ? this.containerEl.querySelector<HTMLElement>('[aria-label="New record type name"]')
-              : this.containerEl.querySelector<HTMLElement>('[aria-label="Record type classification"]')
-                || this.containerEl.querySelector<HTMLElement>('[aria-label="Add a record type"]');
+              ? this.settingsContentEl.querySelector<HTMLElement>('[aria-label="New record type name"]')
+              : this.settingsContentEl.querySelector<HTMLElement>('[aria-label="Record type classification"]')
+                || this.settingsContentEl.querySelector<HTMLElement>('[aria-label="Add a record type"]');
             target?.focus();
           });
         });
@@ -1400,7 +1443,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             this.activeClassificationType = newRecordType;
             this.addingRecordType = false;
             this.display();
-            this.containerEl.querySelector<HTMLElement>('[aria-label="Record type classification"]')?.focus();
+            this.settingsContentEl.querySelector<HTMLElement>('[aria-label="Record type classification"]')?.focus();
           } catch (error) { new Notice(error instanceof Error ? error.message : String(error)); }
           finally { button.setDisabled(false); }
         }));
@@ -1656,7 +1699,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         .addButton(button => button.setButtonText('Add route').onClick(() => {
           this.activeBaseCreateRouteIndex = baseRoutes.length;
           this.display();
-          this.containerEl.querySelector<HTMLInputElement>('[aria-label="Base file path"]')?.focus();
+          this.settingsContentEl.querySelector<HTMLInputElement>('[aria-label="Base file path"]')?.focus();
         }));
       if (!baseRoutes.length) propertyConfig.createEl('p', {
         cls: 'setting-item-description', text: 'No Base new-note routes. Obsidian handles every Base New action.',
@@ -1668,7 +1711,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           .addButton(button => button.setButtonText('Edit').onClick(() => {
             this.activeBaseCreateRouteIndex = index;
             this.display();
-            this.containerEl.querySelector<HTMLInputElement>('[aria-label="Base file path"]')?.focus();
+            this.settingsContentEl.querySelector<HTMLInputElement>('[aria-label="Base file path"]')?.focus();
           }));
       }
       const routeIndex = this.activeBaseCreateRouteIndex;
@@ -2366,7 +2409,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             this.activeBaseQuerySection = value;
             this.display();
             this.containerEl.scrollTop = scrollTop;
-            this.containerEl
+            this.settingsContentEl
               .querySelector<HTMLSelectElement>('[data-tps-gcm-settings-base-query-category="true"]')
               ?.focus({ preventScroll: true });
           });

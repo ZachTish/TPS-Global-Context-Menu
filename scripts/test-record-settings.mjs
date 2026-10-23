@@ -10,7 +10,7 @@ const methods = [];
 const wanted = new Set(['renderRecordSettings', 'renderDailyNoteRecognition', 'createTrackedSection', 'getSectionStateKey']);
 let collapsible;
 (function visit(node) {
-  if (ts.isMethodDeclaration(node) && wanted.has(node.name?.getText(ast))) methods.push(node.getText(ast));
+  if ((ts.isMethodDeclaration(node) && wanted.has(node.name?.getText(ast))) || (ts.isGetAccessor(node) && node.name?.getText(ast) === 'settingsContentEl')) methods.push(node.getText(ast));
   if (ts.isVariableDeclaration(node) && node.name?.getText(ast) === 'createCollapsibleSection') collapsible = node.getText(ast);
   ts.forEachChild(node, visit);
 })(ast);
