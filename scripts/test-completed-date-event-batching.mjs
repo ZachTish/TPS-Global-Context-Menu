@@ -341,6 +341,7 @@ function createHarness({
     persistentMenuManager: {
       detach: noop,
       invalidateLinkedContextSourcePaths: noop,
+      refreshOpenPropertiesForFile: noop,
     },
     notebookNavigatorRuleService: {
       shouldAutoApplyOnMetadataChange: () => false,
@@ -1142,3 +1143,18 @@ for (const mode of ['legacy', 'native-records']) {
     } finally { h.cleanup(); }
   });
 }
+
+test('the indexed property block refresh runs synchronously and respects migration ownership', () => {
+  const h = createHarness();
+  const file = h.addFile('Inbox/Open property.md', {kind:['task'],status:'complete'});
+  const calls = [];
+  h.plugin.persistentMenuManager.refreshOpenPropertiesForFile = target => calls.push(target);
+  h.metadataChanged(file);
+  assert.deepEqual(calls, [file], 'no quiet-window timer or editor blur is required');
+  h.plugin.propertyMigrationService = {active:true};
+  h.metadataChanged(file);
+  assert.deepEqual(calls, [file]);
+  assert.equal(h.rawBodyReads(), 0);
+  assert.equal(h.mutations.length, 0);
+  h.cleanup();
+});

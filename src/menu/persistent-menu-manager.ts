@@ -6582,6 +6582,15 @@ export class PersistentMenuManager {
     this.releaseSwipeGestureTracking(view);
   }
 
+  /** Indexed property changes must not wait for the body editor to lose focus. */
+  refreshOpenPropertiesForFile(file: TFile): void {
+    for (const [view, container] of this.topParentNavs) {
+      if (view.file !== file || !container.isConnected) continue;
+      const panel = container.querySelector<HTMLElement>('.tps-gcm-top-properties-panel');
+      if (panel) this.plugin.menuController.getPanelBuilder().refreshStackedPropertiesPanel(panel, file);
+    }
+  }
+
   /**
    * Refresh menus for views showing a specific file.
    * Called when frontmatter changes to update stale inline menus.

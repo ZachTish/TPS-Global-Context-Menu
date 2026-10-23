@@ -1,4 +1,5 @@
 import { usesLinkedOptions } from '../utils/linked-property-options';
+import { propertyPanelSignature } from '../utils/custom-property-entry';
 import { openLinkedPropertyEditor } from '../modals/PropertyValueSuggestModal';
 import { summarizePropertySelection, selectionCountLabel } from '../utils/property-selection';
 ﻿import { App, TFile, Notice, Setting, setIcon, WorkspaceLeaf, normalizePath, Menu, MarkdownView, getAllTags, Modal } from 'obsidian';
@@ -647,6 +648,7 @@ export class PanelBuilder {
 
     const panel = document.createElement('section');
     panel.className = 'tps-gcm-top-properties-panel';
+    panel.dataset.frontmatterSignature = propertyPanelSignature(frontmatter);
     const collapsed = this.isStackedPropertiesCollapsed(file);
     panel.classList.toggle('tps-gcm-top-properties-panel--collapsed', collapsed);
 
@@ -731,6 +733,31 @@ export class PanelBuilder {
     panel.appendChild(pageBreak);
 
     return panel;
+  }
+
+  /** Refresh only this mounted property block; the editor and navigation stay intact. */
+  refreshStackedPropertiesPanel(panel: HTMLElement, file: TFile): void {
+    const cache = this.plugin.app.metadataCache.getFileCache(file);
+    // Missing metadata is not evidence that the note's properties were removed.
+    if (!cache) return;
+    if (panel.dataset.frontmatterSignature === propertyPanelSignature(cache.frontmatter || {})) return;
+
+    const active = panel.ownerDocument.activeElement as HTMLElement | null;
+    const hadFocus = !!active && panel.contains(active);
+    const row = hadFocus ? active?.closest<HTMLElement>('.tps-gcm-top-property-row') : null;
+    const next = this.createStackedPropertiesPanel(file);
+    if (!next) return;
+    panel.replaceWith(next);
+    if (hadFocus) {
+      const nextRow = row ? Array.from(next.querySelectorAll<HTMLElement>('.tps-gcm-top-property-row'))
+        .find(candidate => candidate.dataset.tpsGcmPropertyKey === row.dataset.tpsGcmPropertyKey
+          && candidate.dataset.tpsGcmPropertyId === row.dataset.tpsGcmPropertyId) : null;
+      const target = nextRow?.querySelector<HTMLElement>('.tps-gcm-top-property-value[tabindex]')
+        || (active?.classList.contains('tps-gcm-top-properties-add-button')
+          ? next.querySelector<HTMLElement>('.tps-gcm-top-properties-add-button') : null)
+        || next.querySelector<HTMLElement>('.tps-gcm-top-properties-heading');
+      target?.focus({ preventScroll: true });
+    }
   }
 
   private openStackedPropertyRowMenu(event: MouseEvent, file: TFile, prop: any): void {

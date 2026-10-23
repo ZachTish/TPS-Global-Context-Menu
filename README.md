@@ -1,5 +1,12 @@
 # TPS Global Context Menu
 
+## Open-note property refresh (11.2.1)
+
+The GCM Properties block updates as soon as Obsidian indexes a changed value, including edits made through GCM while the note remains open. Value changes, additions, removals and classification-dependent fields no longer wait for the body editor or a property button to lose focus. Only the mounted property block is replaced; the editor, selection, undo history and navigation are untouched. A focused property button keeps focus without scrolling, and the expanded/collapsed choice is retained.
+
+The existing metadata event is the only trigger. Each mounted panel compares its rendered property values with that note's indexed metadata; unchanged values and body-position changes do not render. Missing metadata retains the current panel, unrelated and unmounted notes do no additional work, and migration guards still apply. No setting, schema, writer, listener, timer, vault scan or persistent cache is added. General menu geometry and other structural refreshes retain their typing safeguards. Native YAML/Properties remain Obsidian-owned through the existing guarded property writer. Physical mobile acceptance is separate.
+
+
 ## Bulk property editing — 11.1.0
 
 Select notes in TPS Notebook Navigator or a GCM-supported file selection and open the property menu. List fields show every value present across the selected notes. Each choice and removal action shows its note count, such as **entity — 2/3 notes**; duplicate values within a note count once. A checkmark means every selected note has the value. Choosing a value adds it to the selection; **Remove entity** removes only that value from matching notes, retaining `note` and all other values. **Clear all values** explicitly removes the whole field from the selection. Missing fields count toward the denominator.

@@ -298,6 +298,7 @@ export function registerGcmEvents(plugin: TPSGlobalContextMenuPlugin): void {
             if (file instanceof TFile) {
                 plugin.menuController.panelBuilder?.clearFileTitleCache(file.path);
                 plugin.noteTitleRenderService?.handleMetadataChanged(file);
+                plugin.persistentMenuManager?.refreshOpenPropertiesForFile(file);
             }
             // Queue each file in the shared batch; a single-argument debounce
             // both lost earlier files and caused a second delayed forced render.
