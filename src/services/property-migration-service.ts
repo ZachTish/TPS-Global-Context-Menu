@@ -224,7 +224,7 @@ export class PropertyMigrationService {
       if (!discriminator) continue;
       const listKey = `${definition.kindList.key.toLowerCase()}\u0000${definition.kindList.value.toLowerCase()}`;
       const identities = sharedLists.get(listKey) || new Map<string, string>();
-      const identity = `${discriminator.key.toLowerCase()}\u0000${discriminator.value}`;
+      const identity = `${discriminator.key.toLowerCase()}\u0000${discriminator.key.toLowerCase() === 'tags' ? discriminator.value.toLowerCase() : discriminator.value}`;
       const priorKind = identities.get(identity);
       if (priorKind && priorKind !== kind) {
         throw new Error(`Shared kind-list path needs distinct identity values; check ${priorKind} and ${kind}.`);

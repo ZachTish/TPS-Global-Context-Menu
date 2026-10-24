@@ -95,6 +95,7 @@ export const SETTINGS_SEARCH_ENTRIES = [
   {"name":"Kind list value","desc":"A value identifying this type, such as entity. Use a subtype below when several types share it.","aliases":["Kind list value"],"route":"records"},
   {"name":"Single-value property","desc":"","aliases":["Single-value property"],"route":"records"},
   {"name":"Single-value match","desc":"","aliases":["Single-value match"],"route":"records"},
+  {"name":"Identify subtype by","desc":"Keep a broad Kind, then identify the specific record with a tag or property.","aliases":["Identify subtype by","Property","Tag","Kind only"],"route":"records"},
   {"name":"Save subtype","desc":"Review affected notes, Base filters, and dependent rules before updating this identity. Ambiguous references block the change.","aliases":["Save subtype"],"route":"records"},
   {"name":"Use for new records","desc":"Save this writer without editing existing notes. Previous classifications remain readable until you migrate them.","aliases":["Use for new records","Save for new notes"],"route":"records"},
   {"name":"Update existing notes","desc":"Review notes, exact Base filters, and dependent settings before converting the old classification. Record IDs and note bodies stay unchanged.","aliases":["Update existing notes","Apply"],"route":"records"},

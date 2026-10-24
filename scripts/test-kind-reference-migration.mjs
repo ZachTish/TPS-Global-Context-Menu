@@ -140,3 +140,15 @@ test('calendar custom-field keys use the same configured reference migration', (
     assert.match(base.after, new RegExp(`${next} ==`), field);
   }
 });
+
+test('subtype tags use exact Base membership and block lossy property-rule rewrites',()=>{
+ const primary={kindList:{key:'kind',value:'transaction'}};
+ const mappings={food:{primary,aliases:[],discriminator:{key:'transactionKind',value:'food-entry'}},money:{primary,aliases:[],discriminator:{key:'transactionKind',value:'financial'}}};
+ const change={kind:'discriminator',recordKind:'food',primary,from:{key:'transactionKind',value:'food-entry'},to:{key:'tags',value:'food-entry'}};
+ const source='filters:\n  and:\n    - list(kind).contains("transaction") && transactionKind == "food-entry"\n';
+ const result=planKindBaseReferences(source,change,mappings);
+ assert.deepEqual(result.blocked,[]);assert.match(result.after,/list\(tags\)\.contains\("food-entry"\)/);
+ assert.doesNotMatch(result.after,/tags ==/);
+ const gcm={properties:[{id:'amount',scopeKinds:['transaction'],scopeProperties:[{key:'transactionKind',operator:'equals',value:'food-entry'}]}]};
+ assert.equal(planKindReferenceSettings(gcm,null,change,mappings).blocked.length,1);
+});

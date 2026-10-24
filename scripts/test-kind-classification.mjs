@@ -180,3 +180,21 @@ test('flat root kinds and independently configured subtype fields round-trip wit
  assert.deepEqual(decodeKind(mapped,{kind:['transaction']}),{kind:['transaction']},'a parent alone never selects a subtype');
  assert.throws(()=>encodeKind(mapped,{kind:'purchase',transactionKind:'investment'}),/conflicts/);
 });
+
+test('top-level kind and subtype tag round-trip without extra properties or lost tags',()=>{
+ const map={food:{primary:{kindList:{key:'kind',value:'entity'}},aliases:[],discriminator:{key:'tags',value:'food'}},
+  'food-entry':{primary:{kindList:{key:'kind',value:'transaction'}},aliases:[],discriminator:{key:'tags',value:'food-entry'}},
+  financial:{primary:{kindList:{key:'kind',value:'transaction'}},aliases:[],discriminator:{key:'tags',value:'financial'}}};
+ const encoded=encodeKind(map,{kind:'food-entry',title:'Lunch',tags:['personal'],amount:2});
+ assert.deepEqual(encoded,{kind:['transaction'],title:'Lunch',tags:['personal','food-entry'],amount:2});
+ assert.equal(decodeKind(map,encoded).kind,'food-entry');
+ assert.equal(matchesKind(map,encoded,'food-entry'),true);
+ assert.equal(matchesKind(map,{...encoded,kind:['entity']},'food-entry'),false);
+ assert.equal(matchesKind(map,{kind:['transaction'],tags:['food-entry/child']},'food-entry'),false);
+ assert.equal(decodeKind(map,{kind:['transaction'],tags:['#FOOD-ENTRY','work']}).kind,'food-entry');
+ assert.deepEqual(encodeKind(map,decodeKind(map,encoded),encoded),encoded);
+ assert.throws(()=>decodeKind(map,{kind:['transaction'],tags:['food-entry','financial']}),/Ambiguous/);
+ assert.throws(()=>encodeKind(map,{kind:'food-entry',tags:['financial']}),/Ambiguous/);
+ assert.throws(()=>encodeKind(map,{kind:'food-entry',tags:[{bad:1}]}),/Tags must/);
+ assert.throws(()=>kindDiscriminator({food:{...map.food,discriminator:{key:'tags',value:'bad tag'}}},'food'),/valid tag/);
+});

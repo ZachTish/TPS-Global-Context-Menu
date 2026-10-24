@@ -1,7 +1,7 @@
 import { prepareHealthFoodLog } from '../integrations/health-food-logs';
 import { parseNativeRecordDocument, type ParsedNativeRecordDocument } from '../utils/native-record-document';
 export { parseNativeRecordDocument } from '../utils/native-record-document';
-import { kindClassification, kindDiscriminator, kindReadClassifications, kindWriterEnabled, matchesKindClassification, classificationTags, hasClassificationTag } from '../utils/kind-classification';
+import { kindClassification, kindDiscriminator, kindReadClassifications, kindWriterEnabled, matchesKindClassification, classificationTags, hasClassificationTag, isTagDiscriminator, matchesKindDiscriminator, writeKindDiscriminator } from '../utils/kind-classification';
 import { PropertyMigrationModal } from '../modals/property-migration-modal';
 import { readManagedNoteField, writeManagedNoteField } from '../utils/managed-note-fields';
 import {
@@ -359,7 +359,7 @@ function validateReadableNativeRecordStorageProfile(profileValue: TpsNativeRecor
     ...(profile.classification && 'key' in profile.classification ? ['kind'] : []),
     ...(profile.classification && 'kindList' in profile.classification ? [profile.classification.kindList.key] : []),
     ...(profile.classification && 'scalar' in profile.classification ? [profile.classification.scalar.key] : []),
-    ...(profile.classification?.discriminator ? [profile.classification.discriminator.key] : []),
+    ...(profile.classification?.discriminator && !isTagDiscriminator(profile.classification.discriminator) ? [profile.classification.discriminator.key] : []),
     profile.titlePropertyKey,
     profile.createdPropertyKey,
     profile.modifiedPropertyKey,
@@ -388,7 +388,7 @@ export function validateNativeRecordStorageProfile(profileValue: TpsNativeRecord
     ...(profile.classification && 'key' in profile.classification ? ['kind'] : []),
     ...(profile.classification && 'kindList' in profile.classification ? [profile.classification.kindList.key] : []),
     ...(profile.classification && 'scalar' in profile.classification ? [profile.classification.scalar.key] : []),
-    ...(profile.classification?.discriminator ? [profile.classification.discriminator.key] : []),
+    ...(profile.classification?.discriminator && !isTagDiscriminator(profile.classification.discriminator) ? [profile.classification.discriminator.key] : []),
     profile.titlePropertyKey,
     profile.createdPropertyKey,
     profile.modifiedPropertyKey,
@@ -642,7 +642,7 @@ function inspectWithProfile(
   } else if (profile.classification) {
     if (!matchesKindClassification(profile.classification, raw)) return null;
     if (profile.classification.discriminator
-      && readValueCaseInsensitive(raw, profile.classification.discriminator.key) !== profile.classification.discriminator.value) return null;
+      && !matchesKindDiscriminator(raw, profile.classification.discriminator)) return null;
     if ('key' in profile.classification && kind && kind !== profile.classification.value) return null;
     if ('scalar' in profile.classification && kind && kind !== profile.classification.scalar.value) return null;
     kind = profile.classification.recordKind;
@@ -689,7 +689,7 @@ function storagePropertyKeys(profile: TpsNativeRecordStorageProfile): string[] {
     ...(profile.classification && 'key' in profile.classification ? ['kind'] : []),
     ...(profile.classification && 'kindList' in profile.classification ? [profile.classification.kindList.key] : []),
     ...(profile.classification && 'scalar' in profile.classification ? [profile.classification.scalar.key] : []),
-    ...(profile.classification?.discriminator ? [profile.classification.discriminator.key] : []),
+    ...(profile.classification?.discriminator && !isTagDiscriminator(profile.classification.discriminator) ? [profile.classification.discriminator.key] : []),
     profile.titlePropertyKey,
     profile.createdPropertyKey,
     profile.modifiedPropertyKey,
@@ -1037,7 +1037,7 @@ function applyEnvelopeToRawFrontmatter(
       next[profile.kindPropertyKey] = profile.classification.value;
     }
     if (profile.classification.discriminator) {
-      next[profile.classification.discriminator.key] = profile.classification.discriminator.value;
+      writeKindDiscriminator(next, profile.classification.discriminator);
     }
   } else if (profile.kindPropertyKey) next[profile.kindPropertyKey] = envelope.kind;
   next[profile.titlePropertyKey] = envelope.title;
@@ -3371,7 +3371,7 @@ export class NativeRecordService {
       [
         ...storageKeys(this.getStorageProfile()),
         ...(calendarTemplateRecord ? [] : Object.values(this.getKindPropertyKeys())),
-        ...(discriminator ? [discriminator.key] : []),
+        ...(discriminator && !isTagDiscriminator(discriminator) ? [discriminator.key] : []),
       ].map((key) => key.toLocaleLowerCase()),
     );
     const seenPayloadKeys = new Set<string>();
@@ -3390,7 +3390,7 @@ export class NativeRecordService {
         continue;
       }
       if (discriminator && folded === discriminator.key.toLocaleLowerCase()
-        && properties[key] === discriminator.value) continue;
+        && matchesKindDiscriminator(properties, discriminator)) continue;
       if (CANONICAL_ENVELOPE_KEYS.has(folded) || protectedKeys.has(folded)) {
         throw new Error(`TPS native record property collides with system storage: ${key}`);
       }

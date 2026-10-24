@@ -647,3 +647,16 @@ test('explicit identity migration rejects canonical envelope destinations before
   assert.equal(h.writes.length, 0);
   assert.equal(h.plugin.settings.nativeRecordIdentityPropertyKey, 'tpsId');
 });
+
+test('subtype-to-tag migration preserves unrelated tags, IDs, fields and exact body',()=>{
+ const primary={kindList:{key:'kind',value:'transaction'}};
+ const mappings={food:{primary,aliases:[],discriminator:{key:'transactionKind',value:'food-entry'}},money:{primary,aliases:[],discriminator:{key:'transactionKind',value:'financial'}}};
+ const change={kind:'discriminator',recordKind:'food',primary,from:{key:'transactionKind',value:'food-entry'},to:{key:'tags',value:'food-entry'}};
+ const source='---\nid: stable\nkind: [transaction]\ntransactionKind: food-entry\ntags: [personal, lunch]\namount: 2\n---\nAuthored body\n';
+ const after=migrateNoteDiscriminator(source,change,mappings);
+ assert.match(after,/food-entry/);assert.doesNotMatch(after,/transactionKind/);assert.match(after,/personal/);assert.match(after,/lunch/);assert.ok(after.endsWith('\nAuthored body\n'));
+ const future={...mappings,food:{...mappings.food,discriminator:change.to}};
+ assert.equal(migrateNoteDiscriminator(after,change,mappings),after);
+ const reverse=migrateNoteDiscriminator(after,{...change,from:change.to,to:change.from},future);
+ assert.match(reverse,/transactionKind: food-entry/);assert.match(reverse,/personal/);assert.match(reverse,/lunch/);assert.ok(reverse.endsWith('\nAuthored body\n'));
+});

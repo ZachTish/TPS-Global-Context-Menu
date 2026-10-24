@@ -127,3 +127,19 @@ test('Records has a separate reachable route and preserves the Custom fields ent
   assert.match(styles, /\.tps-gcm-settings-route-button\s*\{[\s\S]*height: auto/);
   assert.match(styles, /@media \(max-width: 700px\)[\s\S]*\.tps-gcm-settings-subnav/);
 });
+
+test('subtype tag selection exposes one tag field, preserves drafts, and saves through reviewed migration',async()=>{
+ const h=harness();let request;
+ h.tab.plugin.propertyMigrationService.configureClassificationDiscriminator=async(...args)=>{request=args;};
+ h.render();h.row('Record type').control.change('food');
+ const selector=h.row('Identify subtype by').control;
+ selector.change('tag');
+ assert.equal(h.row('Subtype property').settingEl.style.display,'none');
+ assert.equal(h.row('Subtype tag').settingEl.style.display,'');
+ assert.equal(selector.selectEl.focused,true);
+ assert.equal(h.calls.saves,0);assert.equal(h.calls.vault,0);
+ await h.row('Save subtype').control.click();
+ assert.deepEqual(request,['food',{key:'tags',value:'food'},{kindList:{key:'kind',value:'entity'}}]);
+ for(let i=0;i<20;i++)h.render();
+ assert.equal(h.calls.saves,0);assert.equal(h.calls.vault,0);
+});

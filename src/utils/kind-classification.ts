@@ -94,12 +94,32 @@ export function kindDiscriminator(mappings: KindMappings | undefined, kind: stri
   const primary = kindClassification(mappings, kind);
   const { key, value } = entry.discriminator;
   if (!primary || !('kindList' in primary) || !keyPattern.test(key)
-    || reservedRecordKeys.has(key.toLowerCase()) || key.toLowerCase() === 'kind'
+    || (reservedRecordKeys.has(key.toLowerCase()) && key.toLowerCase() !== 'tags') || key.toLowerCase() === 'kind'
     || key.toLowerCase() === primary.kindList.key.toLowerCase()
     || typeof value !== 'string' || !value.trim()) {
     throw new Error(`Invalid shared kind discriminator for ${kind}.`);
   }
-  return { key, value: value.trim() };
+  return { key, value: key.toLowerCase() === 'tags' ? normalizeClassificationTag(value) : value.trim() };
+}
+
+export function isTagDiscriminator(discriminator: KindDiscriminator): boolean {
+  return discriminator.key.toLowerCase() === 'tags';
+}
+
+export function matchesKindDiscriminator(fields: Record<string, unknown>, discriminator: KindDiscriminator): boolean {
+  return isTagDiscriminator(discriminator)
+    ? hasClassificationTag(fields, discriminator.value)
+    : readClassificationProperty(fields, discriminator.key) === discriminator.value;
+}
+
+export function writeKindDiscriminator(fields: Record<string, unknown>, discriminator: KindDiscriminator): void {
+  const key = Object.keys(fields).find(key => key.toLowerCase() === discriminator.key.toLowerCase()) || discriminator.key;
+  if (isTagDiscriminator(discriminator)) {
+    const tags = classificationTags(readClassificationProperty(fields, key));
+    const value = normalizeClassificationTag(discriminator.value);
+    if (!tags.some(tag => tag.toLowerCase() === value.toLowerCase())) tags.push(value);
+    fields[key] = tags;
+  } else fields[key] = discriminator.value;
 }
 
 export function matchesKindClassification(definition: KindClassification, fields: Record<string, unknown>): boolean {
@@ -118,9 +138,9 @@ export function matchesKind(mappings: KindMappings | undefined, fields: Record<s
   const discriminator = kindDiscriminator(mappings, kind);
   if (!discriminator) return definitions.some(definition => matchesKindClassification(definition, fields));
   const value = readClassificationProperty(fields, discriminator.key);
-  if (value !== undefined && value !== discriminator.value) return false;
+  if (!isTagDiscriminator(discriminator) && value !== undefined && value !== discriminator.value) return false;
   const primary = kindClassification(mappings, kind);
-  if (primary && matchesKindClassification(primary, fields)) return value === discriminator.value;
+  if (primary && matchesKindClassification(primary, fields)) return matchesKindDiscriminator(fields, discriminator);
   return definitions.slice(1).some(definition => matchesKindClassification(definition, fields));
 }
 
@@ -194,11 +214,10 @@ export function encodeKind(mappings: KindMappings | undefined, fields: Record<st
   if (discriminator) {
     const current = readClassificationProperty(next, discriminator.key);
     const original = existingRaw ? readClassificationProperty(existingRaw, discriminator.key) : undefined;
-    if ([current, original].some(value => value !== undefined && value !== discriminator.value)) {
+    if (!isTagDiscriminator(discriminator) && [current, original].some(value => value !== undefined && value !== discriminator.value)) {
       throw new Error(`Record discriminator property “${discriminator.key}” conflicts with an existing field.`);
     }
-    const authoredKey = Object.keys(next).find(key => key.toLowerCase() === discriminator.key.toLowerCase());
-    next[authoredKey || discriminator.key] = discriminator.value;
+    writeKindDiscriminator(next, discriminator);
   }
   if (decodeKind(mappings, next, kind).kind !== kind) throw new Error('Record classification is ambiguous.');
   return next;
@@ -216,7 +235,7 @@ export function decodeKind(mappings: KindMappings | undefined, fields: Record<st
     : undefined;
   const discriminated = sharedList ? matches.filter(match => {
     const discriminator = kindDiscriminator(mappings, match.kind);
-    return discriminator && readClassificationProperty(fields, discriminator.key) === discriminator.value;
+    return discriminator && matchesKindDiscriminator(fields, discriminator);
   }) : [];
   if (discriminated.length > 1) throw new Error('Ambiguous frontmatter kind classification.');
   if (discriminated.length === 1) {
@@ -238,8 +257,8 @@ export function decodeKind(mappings: KindMappings | undefined, fields: Record<st
   if (discriminator) {
     const value = readClassificationProperty(fields, discriminator.key);
     const primary = kindClassification(mappings, selected.kind);
-    if ((value !== undefined && value !== discriminator.value)
-      || (primary && matchesKindClassification(primary, fields) && value !== discriminator.value)) {
+    if ((!isTagDiscriminator(discriminator) && value !== undefined && value !== discriminator.value)
+      || (primary && matchesKindClassification(primary, fields) && !matchesKindDiscriminator(fields, discriminator))) {
       throw new Error('Record discriminator conflicts with its kind classification.');
     }
   }

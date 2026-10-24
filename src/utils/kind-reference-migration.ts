@@ -23,6 +23,7 @@ function isSharedPath(mappings: KindMappings, recordKind: string, path: { key: s
 export function planKindReferenceSettings(gcm: any, navigator: any, change: Change, mappings: KindMappings):
   { gcm: any; navigator: any; blocked: string[]; changed: string[] } {
   const next = copy(gcm), nextNavigator = navigator ? copy(navigator) : null;
+  const tagIdentityChange = change.kind === 'discriminator' && [change.from, change.to].some(identity => identity?.key.toLowerCase() === 'tags');
   const blocked: string[] = [], changed: string[] = [];
   const path = listPath(change);
   if (change.kind === 'classification' && 'kindList' in change.from && 'kindList' in change.to
@@ -77,6 +78,7 @@ export function planKindReferenceSettings(gcm: any, navigator: any, change: Chan
           const paired = primaryPath && conditions.some((condition: Condition) => source(condition) &&
             same(condition.field, primaryPath.key) && same(condition.value, primaryPath.value) && condition.operator === 'is');
           if (!paired || rule.match !== 'all' || identityMatches.length !== 1) blocked.push(`${label}: identity condition is not paired with its kind path.`);
+          else if (tagIdentityChange) blocked.push(`${label}: a tag identity requires review of this rule's tag condition.`);
           else if (change.to) {
             identityMatches[0].field = change.to.key;
             identityMatches[0].value = change.to.value;
@@ -154,7 +156,7 @@ export function planKindReferenceSettings(gcm: any, navigator: any, change: Chan
         for (const [position, condition] of (property[field] || []).entries()) {
           if (!same(condition.key, oldDiscriminator.key) || !same(condition.value, oldDiscriminator.value)) continue;
           const label = `GCM custom property ${property.id || index}.${field}[${position}]`;
-          if (!change.to || identityShared || !['equals', 'not-equals', undefined].includes(condition.operator) ||
+          if (tagIdentityChange || !change.to || identityShared || !['equals', 'not-equals', undefined].includes(condition.operator) ||
             (shared && !property.scopeKinds?.some((value: string) => same(value, primaryPath?.value))))
             blocked.push(`${label}: identity scope requires manual review.`);
           else { condition.key = change.to.key; condition.value = change.to.value; changed.push(label); }
@@ -167,21 +169,21 @@ export function planKindReferenceSettings(gcm: any, navigator: any, change: Chan
       for (const [index, profile] of (nextNavigator.vaultProfiles || []).entries()) {
         for (const [position, value] of (profile.hiddenFileProperties || []).entries()) if (value === from) {
           const label = `TPS Notebook Navigator vaultProfiles[${index}].hiddenFileProperties[${position}]`;
-          if (!to || identityShared) blocked.push(`${label}: identity reference requires manual review.`);
+          if (tagIdentityChange || !to || identityShared) blocked.push(`${label}: identity reference requires manual review.`);
           else { profile.hiddenFileProperties[position] = to; changed.push(label); }
         }
         for (const [position, shortcut] of (profile.shortcuts || []).entries()) if (shortcut.type === 'search' &&
           typeof shortcut.query === 'string' && shortcut.query.includes(oldDiscriminator.value) &&
           shortcut.query.includes(oldDiscriminator.key)) {
           const label = `TPS Notebook Navigator vaultProfiles[${index}].shortcuts[${position}]`;
-          if (!to || identityShared || shortcut.query !== `.${from}`) blocked.push(`${label}: identity search requires manual review.`);
+          if (tagIdentityChange || !to || identityShared || shortcut.query !== `.${from}`) blocked.push(`${label}: identity search requires manual review.`);
           else { shortcut.query = `.${to}`; changed.push(label); }
         }
       }
       const appearances = nextNavigator.propertyAppearances || {};
       for (const key of Object.keys(appearances)) if (key === `key:${from}`) {
         const destination = `key:${to}`;
-        if (!to || identityShared || Object.prototype.hasOwnProperty.call(appearances, destination))
+        if (tagIdentityChange || !to || identityShared || Object.prototype.hasOwnProperty.call(appearances, destination))
           blocked.push(`TPS Notebook Navigator propertyAppearances.${key}: identity destination requires review.`);
         else { appearances[destination] = appearances[key]; delete appearances[key]; changed.push(`TPS Notebook Navigator propertyAppearances.${key}`); }
       }
@@ -192,6 +194,9 @@ export function planKindReferenceSettings(gcm: any, navigator: any, change: Chan
 
 /** Change only exact literal Base filter predicates. Any other use of the old value is reported. */
 export function planKindBaseReferences(source: string, change: Change, mappings: KindMappings): { after: string; blocked: string[] } {
+  if (change.kind === 'discriminator' && change.from?.key.toLowerCase() === 'tags' && source.includes(change.from.value)) {
+    return { after: source, blocked: ['A subtype tag reference requires explicit Base filter review.'] };
+  }
   const path = listPath(change);
   const primary = change.kind === 'discriminator' ? change.primary : change.from;
   const primaryPath = 'kindList' in primary ? primary.kindList : null;
@@ -245,7 +250,9 @@ export function planKindBaseReferences(source: string, change: Change, mappings:
         }
         if (!change.to) { blocked.push(`${label}: removing an identity requires manual Base filter review.`); return; }
         const oldExpression = identity[0];
-        const replacement = oldExpression.replace(discriminator.key, change.to.key).replace(discriminator.value, change.to.value);
+        const replacement = change.to.key.toLowerCase() === 'tags'
+          ? `list(tags).contains(${identity[1]}${change.to.value}${identity[1]})`
+          : oldExpression.replace(discriminator.key, change.to.key).replace(discriminator.value, change.to.value);
         edits.push({ start: node.range[0] + identity.index, end: node.range[0] + identity.index + oldExpression.length, text: replacement });
       }
     }

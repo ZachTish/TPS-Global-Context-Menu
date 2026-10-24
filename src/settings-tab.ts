@@ -1467,6 +1467,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         let draftScalarValue = 'scalar' in current ? current.scalar.value : '';
         let draftDiscriminatorKey = kindDiscriminator(this.plugin.settings.nativeRecordKindPropertyKeys, selected)?.key || '';
         let draftDiscriminatorValue = kindDiscriminator(this.plugin.settings.nativeRecordKindPropertyKeys, selected)?.value || '';
+        let subtypeMode = draftDiscriminatorKey.toLowerCase() === 'tags' ? 'tag' : draftDiscriminatorKey ? 'property' : 'none';
+        let subtypeModeInput: import('obsidian').DropdownComponent;
         let modeInput: import('obsidian').DropdownComponent;
         let tagInput: import('obsidian').TextComponent;
         let parentInput: import('obsidian').TextComponent;
@@ -1479,13 +1481,16 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
         let discriminatorKeyInput: import('obsidian').TextComponent;
         let discriminatorValueInput: import('obsidian').TextComponent;
         let writerToggle: import('obsidian').ToggleComponent;
-        let tagSetting: Setting, parentSetting: Setting, keySetting: Setting, valueSetting: Setting, listKeySetting: Setting, listValueSetting: Setting, scalarKeySetting: Setting, scalarValueSetting: Setting, discriminatorKeySetting: Setting, discriminatorValueSetting: Setting, discriminatorSaveSetting: Setting;
+        let tagSetting: Setting, parentSetting: Setting, keySetting: Setting, valueSetting: Setting, listKeySetting: Setting, listValueSetting: Setting, scalarKeySetting: Setting, scalarValueSetting: Setting, discriminatorModeSetting: Setting, discriminatorKeySetting: Setting, discriminatorValueSetting: Setting, discriminatorSaveSetting: Setting;
         let renderAliases = () => {};
         const showMode = () => {
           tagSetting.settingEl.style.display = mode === 'tag' ? '' : 'none';
           for (const setting of [parentSetting, keySetting, valueSetting]) setting.settingEl.style.display = mode === 'property' ? '' : 'none';
-          for (const setting of [listKeySetting, listValueSetting, discriminatorKeySetting, discriminatorValueSetting, discriminatorSaveSetting]) setting.settingEl.style.display = mode === 'kind-list' ? '' : 'none';
+          for (const setting of [listKeySetting, listValueSetting, discriminatorModeSetting, discriminatorSaveSetting]) setting.settingEl.style.display = mode === 'kind-list' ? '' : 'none';
           for (const setting of [scalarKeySetting, scalarValueSetting]) setting.settingEl.style.display = mode === 'scalar' ? '' : 'none';
+          discriminatorKeySetting.settingEl.style.display = mode === 'kind-list' && subtypeMode === 'property' ? '' : 'none';
+          discriminatorValueSetting.settingEl.style.display = mode === 'kind-list' && subtypeMode !== 'none' ? '' : 'none';
+          discriminatorValueSetting.setName(subtypeMode === 'tag' ? 'Subtype tag' : 'Subtype value');
         };
         const describeCurrent = () => {
           const base = 'tag' in current ? `Tag: #${current.tag}` : 'kindList' in current
@@ -1493,7 +1498,7 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
               ? `${current.scalar.key} = ${current.scalar.value}`
               : `kind = ${current.parentKind}, ${current.key} = ${current.value}`;
           const subtype = kindDiscriminator(this.plugin.settings.nativeRecordKindPropertyKeys, selected);
-          return subtype ? `${base} · ${subtype.key} = ${subtype.value}` : base;
+          return subtype ? `${base} · ${subtype.key.toLowerCase() === 'tags' ? '#' + subtype.value : subtype.key + ' = ' + subtype.value}` : base;
         };
         const mappingSummary = propertyConfig.createEl('p', { cls: 'tps-gcm-settings-record-summary', text: describeCurrent() });
         new Setting(propertyConfig).setName('Record type').addDropdown(dropdown => {
@@ -1514,6 +1519,8 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
             draftScalarValue = 'scalar' in current ? current.scalar.value : '';
             draftDiscriminatorKey = kindDiscriminator(this.plugin.settings.nativeRecordKindPropertyKeys, selected)?.key || '';
             draftDiscriminatorValue = kindDiscriminator(this.plugin.settings.nativeRecordKindPropertyKeys, selected)?.value || '';
+            subtypeMode = draftDiscriminatorKey.toLowerCase() === 'tags' ? 'tag' : draftDiscriminatorKey ? 'property' : 'none';
+            subtypeModeInput.setValue(subtypeMode);
             modeInput.setValue(mode); tagInput.setValue(draftTag); parentInput.setValue(draftParent);
             keyInput.setValue(draftKey); valueInput.setValue(draftValue); listKeyInput.setValue(draftListKey);
             listValueInput.setValue(draftListValue); scalarKeyInput.setValue(draftScalarKey); scalarValueInput.setValue(draftScalarValue);
@@ -1563,6 +1570,21 @@ export class TPSGlobalContextMenuSettingTab extends PluginSettingTab {
           scalarValueInput = text; text.setValue(draftScalarValue).onChange(value => { draftScalarValue = value.trim(); });
           text.inputEl.setAttribute('aria-label', 'Single-value property value');
         });
+        discriminatorModeSetting = new Setting(mappingConfig).setName('Identify subtype by')
+          .setDesc('Keep a broad Kind, then identify the specific record with a tag or property.')
+          .addDropdown(dropdown => {
+            subtypeModeInput = dropdown;
+            dropdown.addOption('none', 'Kind only').addOption('tag', 'Tag').addOption('property', 'Property')
+              .setValue(subtypeMode).onChange(value => {
+                subtypeMode = value;
+                draftDiscriminatorKey = value === 'tag' ? 'tags' : value === 'none' || draftDiscriminatorKey.toLowerCase() === 'tags' ? '' : draftDiscriminatorKey;
+                if (value === 'none') draftDiscriminatorValue = '';
+                discriminatorKeyInput.setValue(draftDiscriminatorKey);
+                discriminatorValueInput.setValue(draftDiscriminatorValue);
+                showMode(); dropdown.selectEl.focus();
+              });
+            dropdown.selectEl.setAttribute('aria-label', 'Subtype identification');
+          });
         discriminatorKeySetting = new Setting(mappingConfig).setName('Subtype property')
           .setDesc('Optional: distinguish types sharing a Kind value, for example entityKind = food.')
           .addText(text => {

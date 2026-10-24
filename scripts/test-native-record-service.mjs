@@ -7032,3 +7032,21 @@ test('food-log preparation belongs to the single native creation write', async()
  plugin.app.plugins.getPlugin=()=>({api:{foodLogs:{version:1,prepareCreation(){throw Error('Not ready');}}}});
  await assert.rejects(service.createFresh('food-entry',{title:'Do not create'}),/Not ready/);assert.equal(created,2);
 });
+
+test('native records read create and update top-level kinds with subtype tags',async()=>{
+ const {service,plugin,contents}=createHarness();
+ plugin.settings.nativeRecordKindPropertyKeys={
+  'food-entry':{primary:{kindList:{key:'kind',value:'transaction'}},aliases:[],discriminator:{key:'tags',value:'food-entry'}},
+  'finance-transaction':{primary:{kindList:{key:'kind',value:'transaction'}},aliases:[],discriminator:{key:'tags',value:'financial'}},
+ };
+ assert.equal(service.inspect({id:'one',title:'Lunch',kind:['transaction'],tags:['personal','food-entry']})?.kind,'food-entry');
+ assert.equal(service.inspect({id:'two',title:'Coffee',kind:['transaction'],tags:['financial']})?.kind,'finance-transaction');
+ assert.equal(service.inspect({id:'bad',title:'Ambiguous',kind:['transaction'],tags:['financial','food-entry']}),null);
+ const created=await service.create('food-entry',{title:'Lunch',tags:['personal'],amount:2},{id:'tag-food-one'});
+ const fm=parseNativeRecordDocument(contents.get(created.file)).frontmatter;
+ assert.deepEqual(fm.kind,['transaction']);assert.deepEqual(fm.tags,['personal','food-entry']);assert.equal(fm.transactionKind,undefined);
+ assert.equal((await service.update(created.path,{amount:3}))?.kind,'food-entry');
+ const after=parseNativeRecordDocument(contents.get(created.file)).frontmatter;
+ assert.deepEqual(after.tags,['personal','food-entry']);assert.equal(after.amount,3);
+ await assert.rejects(service.create('food-entry',{title:'Bad',tags:['financial']},{id:'tag-bad'}),/ambiguous|conflict|identity|classif|valid/i);
+});

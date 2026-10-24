@@ -1,7 +1,7 @@
 import { isMap, parseDocument, visit } from 'yaml';
 import {
   classificationTags, decodeKind, kindClassification, kindReadClassifications,
-  matchesKindClassification, normalizeKindClassification, readClassificationProperty,
+  matchesKindClassification, normalizeKindClassification, readClassificationProperty, isTagDiscriminator, matchesKindDiscriminator, writeKindDiscriminator,
   type KindClassification, type KindDiscriminator, type KindMappings,
 } from './kind-classification';
 
@@ -45,8 +45,8 @@ export function migrateNoteDiscriminator(source: string, change: KindDiscriminat
     return source;
   }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return source;
-  if (change.from && readClassificationProperty(raw, change.from.key) !== change.from.value) return source;
-  if (!change.from && change.to && readClassificationProperty(raw, change.to.key) === change.to.value) return source;
+  if (change.from && !matchesKindDiscriminator(raw, change.from)) return source;
+  if (!change.from && change.to && matchesKindDiscriminator(raw, change.to)) return source;
   const matches = kindReadClassifications(mappings, change.recordKind)
     .some(definition => matchesKindClassification(definition, raw));
   if (!matches) return source;
@@ -67,14 +67,22 @@ export function migrateNoteDiscriminator(source: string, change: KindDiscriminat
   if (special) throw new Error('YAML anchors and explicit tags require manual record identity migration.');
   const destination = change.to && readClassificationProperty(raw, change.to.key);
   const sameField = change.from && change.to && change.from.key.toLowerCase() === change.to.key.toLowerCase();
-  if (change.to && destination !== undefined && (!sameField || destination !== change.from?.value)) {
+  if (change.to && !isTagDiscriminator(change.to) && destination !== undefined && (!sameField || destination !== change.from?.value)) {
     throw new Error(`Destination identity property “${change.to.key}” already exists.`);
   }
   if (change.from) {
     const oldKey = Object.keys(raw).find(key => key.toLowerCase() === change.from!.key.toLowerCase());
-    if (oldKey) doc.delete(oldKey);
+    if (oldKey && isTagDiscriminator(change.from)) {
+      const kept = classificationTags(raw[oldKey]).filter(tag => tag.toLowerCase() !== change.from!.value.toLowerCase());
+      if (kept.length) doc.set(oldKey, kept); else doc.delete(oldKey);
+    } else if (oldKey) doc.delete(oldKey);
   }
-  if (change.to) doc.set(change.to.key, change.to.value);
+  if (change.to) {
+    const fields = doc.toJS() as Record<string, unknown>;
+    writeKindDiscriminator(fields, change.to);
+    const key = Object.keys(fields).find(key => key.toLowerCase() === change.to!.key.toLowerCase())!;
+    doc.set(key, fields[key]);
+  }
   let nextYaml = doc.toString({ lineWidth: 0 });
   if (yaml.includes('\r\n')) nextYaml = nextYaml.replace(/\n/gu, '\r\n');
   const nextRaw = parseDocument(nextYaml).toJS() as Record<string, unknown>;
