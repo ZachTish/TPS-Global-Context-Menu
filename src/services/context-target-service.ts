@@ -212,6 +212,9 @@ export class ContextTargetService {
 
     isManualContextInterceptTarget(target: HTMLElement | null): boolean {
         if (!target) return false;
+        // Core owns table cells and supplies authoritative row files through
+        // bases-context-menu. An enclosing embed/link is never the row target.
+        if (target.closest('.bases-view[data-view-type="table"]')) return false;
         if (target.closest('[data-tps-calendar-context-owner="true"]')) return false;
         if (target.closest('[data-tps-task-context="true"], [data-tps-line-context="true"]')) return false;
         if (this.isNativeMenuManagedTarget(target)) return false;
@@ -435,6 +438,12 @@ export class ContextTargetService {
             });
             return logicalFiles;
         };
+
+        // Native table rows have no file attributes. Only their owner's explicit
+        // payload is authoritative, even inside a Canvas or linked Base embed.
+        if (contextEl?.closest('.bases-view[data-view-type="table"]')) {
+            return finish('native-base-table', hasUnresolvedExplicitCompanion ? [] : normalizedExplicitFiles);
+        }
 
         // 0. Canvas Node Selection (Priority over explicit file if clicking a node)
         if (evt) {

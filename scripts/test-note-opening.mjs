@@ -15,6 +15,7 @@ function load(path, extra = {}) {
     if (id === 'obsidian') return { TFile, Platform: platform, Notice: class { constructor(message) { notices.push(message); } }, QueryController: class {} };
     if (id === '../logger') return logger;
     if (id === '../utils/native-base-create-routes') return routeExports;
+    if (id === './native-base-row-menu') return rowMenuExports;
     if (id === 'monkey-around') return extra;
     throw new Error(id);
   }, module, module.exports);
@@ -23,6 +24,7 @@ function load(path, extra = {}) {
 const { NoteOpeningService, migrateNoteOpeningSettings, normalizeNoteOpeningSettings } = load('../src/services/note-opening-service.ts');
 const routeExports = load('../src/utils/native-base-create-routes.ts');
 const { findNativeBaseCreateRoute, validateNativeBaseCreateRoute } = routeExports;
+const rowMenuExports = load('../src/services/native-base-row-menu.ts');
 const { runNativeCreateWithoutOpening, supportsNativeCreateBoundary, NativeBaseNoteOpening } = load('../src/services/native-base-note-opening.ts', {
   around(prototype, wrappers) {
     const old = {};

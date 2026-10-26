@@ -3,6 +3,7 @@ import { around } from 'monkey-around';
 import type TPSGlobalContextMenuPlugin from '../main';
 import * as logger from '../logger';
 import { findNativeBaseCreateRoute } from '../utils/native-base-create-routes';
+import { bindNativeBaseRowMenu } from './native-base-row-menu';
 
 /** The 1.14 native menu writes frontmatter immediately before its platform-specific UI. */
 export function supportsNativeCreateBoundary(open: Function): boolean {
@@ -58,6 +59,8 @@ export async function runNativeCreateWithoutOpening(
 export class NativeBaseNoteOpening {
   private cleanups: (() => void)[] = [];
   private prototypes = new WeakSet<object>();
+  private tableViews = new WeakSet<object>();
+  private tableCleanups = new Set<() => void>();
   private active = true;
   private warned = false;
   private inFlight = new WeakSet<object>();
@@ -69,12 +72,14 @@ export class NativeBaseNoteOpening {
     if (!prototype) return;
     this.cleanups.push(around(prototype, {
       onload: original => function(this: any, ...args: any[]) {
+        const result = original.apply(this, args);
         owner.attach(this);
-        return original.apply(this, args);
+        return result;
       },
       update: original => function(this: any, ...args: any[]) {
+        const result = original.apply(this, args);
         owner.attach(this);
-        return original.apply(this, args);
+        return result;
       },
     }));
     // Existing embedded and standalone controllers live in Obsidian's component tree.
@@ -91,6 +96,7 @@ export class NativeBaseNoteOpening {
   }
 
   attach(controller: any): boolean {
+    this.attachTableMenu(controller?.view);
     const menu = controller?.newItemMenu;
     if (!menu || typeof menu.open !== 'function') return false;
     const prototype = Object.getPrototypeOf(menu);
@@ -155,8 +161,20 @@ export class NativeBaseNoteOpening {
     return true;
   }
 
+  private attachTableMenu(view: any): void {
+    if (!this.active || view?.type !== 'table' || typeof view.onTableCellContextmenu !== 'function'
+      || typeof view.getCellFromDom !== 'function' || typeof view.getCellIndex !== 'function') return;
+    if (view.app !== this.plugin.app || this.tableViews.has(view)) return;
+    const cleanup = bindNativeBaseRowMenu(view, () => this.tableCleanups.delete(cleanup));
+    if (!cleanup) return;
+    this.tableViews.add(view);
+    this.tableCleanups.add(cleanup);
+  }
+
   dispose(): void {
     this.active = false;
+    for (const cleanup of this.tableCleanups) cleanup();
+    this.tableCleanups.clear();
     for (const cleanup of this.cleanups.reverse()) cleanup();
     this.cleanups = [];
   }

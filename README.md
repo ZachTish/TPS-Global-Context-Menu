@@ -1,5 +1,11 @@
 # TPS Global Context Menu
 
+## Native Base row menus (11.5.1)
+
+Right-clicking or long-pressing an unselected native table cell now selects that row for Core's existing menu. A press inside an existing selection keeps its exact rows; a press outside it targets only the pressed row. This applies to standalone tables, note embeds and Canvas embeds, including formula/name cells with no file link. Core retains its Copy, Clear and Delete actions and supplies the selected files to GCM's existing exact-target menu integration.
+
+The target comes from the current native cell and grouped query result, never its displayed text, DOM position, enclosing Base/Canvas or active note. Deleted/replaced/unresolved rows stop the event without exposing the enclosing file's menu. Generic GCM interception leaves native tables to that owner and cannot fall back to an enclosing file. The existing controller lifecycle installs and disposes the adapter; no new observer, polling, vault scan, body read, persisted setting or note migration is added. Ordinary file/header menus remain unchanged. Physical iPhone acceptance is separate from desktop native-event testing.
+
 ## Built-in settings search
 
 On Obsidian **1.13.0 or newer**, the global **Search settings** field finds controls across all this plugin's destinations, including sections that are not open. It searches the published control names, descriptions, option labels and help text. **All settings** is a native settings directory; activate a result there to open the existing destination and focus the matching control. Choosing a search result never runs its named action, saves preferences, enables a feature, or changes notes. Conditional controls remain conditional; when unavailable, the destination explains that a relevant feature or saved item must be selected first.
